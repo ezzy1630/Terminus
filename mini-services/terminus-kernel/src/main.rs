@@ -56,10 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // transport is required. Failing closed here prevents a misconfigured
     // deployment from silently exposing the effect kernel over TCP.
     if require_uds {
-        let socket = grpc_socket.ok_or(
-            "TERMINUS_KERNEL_REQUIRE_UDS=1 requires TERMINUS_KERNEL_GRPC_SOCKET",
-        )?;
-        grpc::serve_grpc(std::path::PathBuf::from(socket), state.kernel.info.clone()).await?;
+        let socket = grpc_socket
+            .ok_or("TERMINUS_KERNEL_REQUIRE_UDS=1 requires TERMINUS_KERNEL_GRPC_SOCKET")?;
+        grpc::serve_grpc(std::path::PathBuf::from(socket), state.kernel.clone()).await?;
         return Ok(());
     }
 
@@ -82,10 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // bootstrap. The gRPC path is the canonical transport; the HTTP path
     // remains until the control plane migrates method-by-method (M3).
     if let Some(sock) = grpc_socket {
-        let info = state.kernel.info.clone();
+        let kernel = state.kernel.clone();
         let sock_path = std::path::PathBuf::from(sock);
         tokio::spawn(async move {
-            if let Err(e) = grpc::serve_grpc(sock_path, info).await {
+            if let Err(e) = grpc::serve_grpc(sock_path, kernel).await {
                 tracing::error!(error = %e, "terminus-kernel gRPC server exited with error");
             }
         });

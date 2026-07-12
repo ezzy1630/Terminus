@@ -1262,6 +1262,18 @@ impl SecretService {
         uri: &str,
         requested_by: &str,
     ) -> KernelResult<()> {
+        self.request_metadata(ctx, uri, requested_by).map(|_| ())
+    }
+
+    /// Request a secret and return metadata only. The raw value is dropped
+    /// before this method returns, so transport adapters can mint an opaque
+    /// handle without ever serializing secret material.
+    pub fn request_metadata(
+        &self,
+        ctx: &RequestContext,
+        uri: &str,
+        requested_by: &str,
+    ) -> KernelResult<terminus_secrets::SecretMetadata> {
         // §31.3 step 3: capability-token validation. Secret access requires
         // the `Secret` operation class. The requested scope is the URI
         // itself.
@@ -1290,7 +1302,7 @@ impl SecretService {
         );
         self.broker
             .request(uri, requested_by)
-            .map(|_| ())
+            .map(|handle| handle.metadata.clone())
             .map_err(|e| {
                 KernelError::new(
                     terminus_kernel_protocol::ErrorCode::PermissionDenied,
