@@ -16,6 +16,7 @@ import { render, screen, fireEvent, cleanup, act } from "@testing-library/react"
 import type { ReactNode } from "react";
 
 import { Layout } from "../src/components/Layout";
+import { ResizableReviewLayout } from "../src/components/ResizableReviewLayout";
 
 // ────────────────────────── Helpers ─────────────────────────────────────────
 
@@ -59,6 +60,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
 });
 
 // ────────────────────────── 1. Three-region render ──────────────────────────
@@ -182,5 +184,46 @@ describe("Layout — ⌘` keyboard shortcut", () => {
     renderLayout();
     fireEvent.keyDown(window, { key: "`" });
     expect(screen.queryByRole("region", { name: "Terminal drawer" })).toBeNull();
+  });
+});
+
+describe("Layout — terminal expansion", () => {
+  test("expands into the working area and collapses without losing the drawer", () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole("button", { name: "Show terminal" }));
+    fireEvent.click(screen.getByRole("button", { name: "Expand" }));
+    expect(screen.getByRole("button", { name: "Collapse" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Terminal drawer" })).toHaveStyle({ height: "856px" });
+    fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+    expect(screen.getByRole("button", { name: "Expand" })).toBeInTheDocument();
+  });
+});
+
+describe("ResizableReviewLayout", () => {
+  test("supports keyboard resizing and persists the preferred split", () => {
+    render(
+      <ResizableReviewLayout
+        conversation={<div>Conversation</div>}
+        review={<div>Review</div>}
+      />,
+    );
+    const separator = screen.getByRole("separator", { name: "Resize conversation and review panes" });
+    expect(separator).toHaveAttribute("aria-valuenow", "47");
+    fireEvent.keyDown(separator, { key: "ArrowRight" });
+    expect(separator).toHaveAttribute("aria-valuenow", "49");
+    expect(window.localStorage.getItem("terminus-desktop.review-split.v1")).toBe("49");
+  });
+
+  test("clamps keyboard resizing so both panes remain usable", () => {
+    window.localStorage.setItem("terminus-desktop.review-split.v1", "68");
+    render(
+      <ResizableReviewLayout
+        conversation={<div>Conversation</div>}
+        review={<div>Review</div>}
+      />,
+    );
+    const separator = screen.getByRole("separator", { name: "Resize conversation and review panes" });
+    fireEvent.keyDown(separator, { key: "ArrowRight", shiftKey: true });
+    expect(separator).toHaveAttribute("aria-valuenow", "68");
   });
 });

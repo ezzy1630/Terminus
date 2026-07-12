@@ -23,6 +23,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { Command, Monitor, Moon, PanelRight, Rows3, Sun } from "lucide-react";
 import { Layout } from "./components/Layout";
+import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
 import { Sidebar } from "./components/Sidebar";
 import { Inspector } from "./components/Inspector";
 import { Conversation } from "./components/Conversation";
@@ -250,17 +251,17 @@ export function App(): JSX.Element {
           showNewTask ? (
             <NewTaskScreen />
           ) : changesOpen ? (
-            <div className="flex h-full min-w-0">
-              <div className="flex min-w-[360px] flex-[0.9] flex-col border-r border-default">
+            <ResizableReviewLayout
+              conversation={<div className="flex h-full min-w-0 flex-col">
                 <div className="min-h-0 flex-1"><Conversation /></div>
                 <div className="border-t border-subtle" style={{ background: "var(--bg-canvas)", padding: "10px 20px 14px" }}>
                   <Composer />
                 </div>
-              </div>
-              <Suspense fallback={<div className="flex min-w-[360px] flex-1 items-center justify-center bg-diff text-tertiary" style={{ fontSize: "var(--font-size-sm)" }}>Loading review…</div>}>
+              </div>}
+              review={<Suspense fallback={<div className="flex h-full items-center justify-center bg-diff text-tertiary" style={{ fontSize: "var(--font-size-sm)" }}>Loading review…</div>}>
                 <ReviewPane events={selectedTaskEvents} onClose={() => setChangesOpen(false)} onDraftRevision={draftReviewRevision} />
-              </Suspense>
-            </div>
+              </Suspense>}
+            />
           ) : (
             <div className="flex h-full flex-col">
               <div className="min-h-0 flex-1">

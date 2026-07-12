@@ -128,6 +128,7 @@ const LayoutTerminalDrawer = memo(function LayoutTerminalDrawer({
 }: LayoutTerminalDrawerProps): JSX.Element {
   const dragRef = useRef<HTMLDivElement | null>(null);
   const startRef = useRef<{ y: number; h: number } | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -156,7 +157,7 @@ const LayoutTerminalDrawer = memo(function LayoutTerminalDrawer({
   return (
     <>
       {/* Resize handle — sits above the drawer, draggable. */}
-      <div
+      {!expanded ? <div
         ref={dragRef}
         onMouseDown={(e) => {
           startRef.current = { y: e.clientY, h: height };
@@ -166,13 +167,18 @@ const LayoutTerminalDrawer = memo(function LayoutTerminalDrawer({
         style={{ height: 4, cursor: "row-resize", flexShrink: 0 }}
         className="bg-transparent hover:bg-strong"
         aria-hidden
-      />
+      /> : null}
       <TerminalDrawer
         open={open}
-        height={height - 4}
-        onClose={onClose}
+        height={expanded ? Math.max(TERMINAL_MIN_HEIGHT, window.innerHeight - TITLEBAR_HEIGHT) : height - 4}
+        onClose={() => {
+          setExpanded(false);
+          onClose();
+        }}
         onResize={onResize}
         sessionFactory={stubFactory}
+        expanded={expanded}
+        onToggleExpanded={() => setExpanded((value) => !value)}
       />
     </>
   );
