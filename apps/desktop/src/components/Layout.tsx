@@ -34,6 +34,7 @@ import type { ReactNode } from "react";
 
 interface LayoutProps {
   sidebar: ReactNode;
+  sidebarVisible?: boolean;
   main: ReactNode;
   inspector: ReactNode;
   /** Hides the contextual inspector when a technical split needs the width. */
@@ -192,6 +193,7 @@ const stubFactory = pickTerminalSessionFactory();
 
 function LayoutImpl({
   sidebar,
+  sidebarVisible = true,
   main,
   inspector,
   inspectorVisible = true,
@@ -265,7 +267,7 @@ function LayoutImpl({
       {/* Three-region body. */}
       <div className="flex min-h-0 flex-1">
         {/* Sidebar. */}
-        <aside
+        {sidebarVisible ? <aside
           className={cn(
             "flex h-full flex-col border-r border-subtle bg-sidebar",
             density === "compact" && "py-0",
@@ -278,7 +280,7 @@ function LayoutImpl({
           }}
         >
           {sidebar}
-        </aside>
+        </aside> : null}
 
         {/* Main working surface. The inspector stays a floating contextual
             card at normal widths, preserving the conversation as the primary

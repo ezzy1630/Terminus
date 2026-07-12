@@ -16,13 +16,14 @@ noted. Where a shortcut has a UI affordance, the affordance is listed.
 | `⌘]`           | Toggle the inspector                  | Command palette → Toggle inspector | 11 |
 | `⌘\`           | Toggle the sidebar                    | —          | 7      |
 | `⌘1` … `⌘9`    | Switch to task N (1-indexed)          | —          | 7      |
+| `⌘O`           | Open the project onboarding flow      | New project recovery action | 19 |
+| `⌘/`           | Open Settings and shortcut reference  | Settings | 18, 20 |
 | `⌘Enter`       | Send (or steer if work is running)    | "Send" / "Steer" button in the composer | 10 |
 | `⇧⌘Enter`      | Queue a follow-up                     | "Queue" pill in the composer (visible when applicable) | 10 |
 | `Esc`          | Interrupt the active turn / close the active overlay | — | 10, 18, 20 |
 
-> ⌘1–⌘9 and ⌘\ remain reserved for task-number navigation and sidebar
-> collapse. ⌘D and ⌘] are wired in `App.tsx`; at narrow widths ⌘] opens the
-> otherwise-hidden inspector overlay deliberately.
+> Number shortcuts select tasks in the active project. At narrow widths ⌘]
+> opens the otherwise-hidden inspector overlay deliberately.
 
 ## Composer-specific shortcuts
 
@@ -87,18 +88,6 @@ whether the drawer is open or closed.
 | --------- | ----------------------------------------------------- |
 | `Enter`   | Advance to the next step (when a button is focused)   |
 | `Esc`     | Skip onboarding                                       |
-
-## Reserved but not yet wired
-
-These shortcuts are documented in the SPEC and listed in the keyboard
-map but the host does not yet act on them. They are slated for a
-follow-up wiring patch:
-
-| Shortcut       | Action                                |
-| -------------- | ------------------------------------- |
-| `⌘O`           | Open an existing project              |
-| `⌘T`           | Open an existing task                 |
-| `⌘/`           | View keyboard shortcuts (cheat sheet) |
 
 ## Modifier-key conventions
 

@@ -105,6 +105,19 @@ describe("Layout — three-region render", () => {
 // ────────────────────────── 2. Sidebar collapses at narrow widths ───────────
 
 describe("Layout — sidebar responsive collapse", () => {
+  test("can hide the sidebar without removing the main working surface", () => {
+    render(
+      <Layout
+        sidebar={<div data-testid="hidden-sidebar">Sidebar</div>}
+        sidebarVisible={false}
+        main={<div data-testid="visible-main">Main</div>}
+        inspector={<div>Inspector</div>}
+      />,
+    );
+    expect(screen.queryByTestId("hidden-sidebar")).toBeNull();
+    expect(screen.getByTestId("visible-main")).toBeInTheDocument();
+  });
+
   test("at width ≥ 1100px, the sidebar uses the full sidebar-width token", () => {
     setViewport(1400, 900);
     renderLayout();

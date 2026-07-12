@@ -260,5 +260,5 @@ index.html
 
 No `React.lazy` / `Suspense` boundaries yet — the bundle is small
 enough that eager loading is fine on the target M4 MacBook Air. See
-`docs/performance.md` for the lazy-loading plan when the bundle
+`docs/ui-performance.md` for the measured bundle and lazy-loading evidence when the bundle
 crosses ~700KB.

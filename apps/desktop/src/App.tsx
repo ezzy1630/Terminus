@@ -30,7 +30,7 @@ import { Conversation } from "./components/Conversation";
 import { Composer } from "./components/Composer";
 import { NewTaskScreen } from "./components/NewTaskScreen";
 import { CommandPalette, buildDefaultCommands } from "./components/CommandPalette";
-import { useTerminusStore, useSelectedTask, useSelectedTaskEvents } from "./hooks/use-terminus";
+import { useTerminusStore, useSelectedSessionTasks, useSelectedTask, useSelectedTaskEvents } from "./hooks/use-terminus";
 import { useThemeStore } from "./hooks/use-theme";
 import { useViewport } from "./hooks/use-viewport";
 import type { Theme } from "./types";
@@ -79,6 +79,7 @@ export function App(): JSX.Element {
   const setDraft = useTerminusStore((s) => s.setDraft);
   const selectedTask = useSelectedTask();
   const selectedTaskEvents = useSelectedTaskEvents();
+  const selectedSessionTasks = useSelectedSessionTasks();
   const viewport = useViewport();
 
   const theme = useThemeStore((s) => s.theme);
@@ -101,6 +102,7 @@ export function App(): JSX.Element {
   const [inspectorVisible, setInspectorVisible] = useState(true);
   const [inspectorPinned, setInspectorPinned] = useState(false);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [sidebarVisible, setSidebarVisible] = useState(true);
 
   const toggleInspector = useCallback((): void => {
     if (viewport.inspectorOverlay && !inspectorPinned) {
@@ -114,12 +116,13 @@ export function App(): JSX.Element {
   // Initial data load.
   useEffect(() => {
     void refreshAll();
-    // Refresh sessions every 30s as a slow fallback. SSE is the primary
-    // update channel; this is just for reconciliation.
-    const id = window.setInterval(() => {
+    // Reconcile when the user returns to the app instead of polling while
+    // idle. Active task updates remain event-driven through SSE.
+    const refreshOnFocus = (): void => {
       void useTerminusStore.getState().refreshSessions();
-    }, 30_000);
-    return () => window.clearInterval(id);
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    return () => window.removeEventListener("focus", refreshOnFocus);
   }, [refreshAll]);
 
   // ⌘K opens the command palette (SPEC §18). ⌘, opens Settings (SPEC §20).
@@ -143,6 +146,22 @@ export function App(): JSX.Element {
       } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
         setSettingsOpen((o) => !o);
+      } else if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+        e.preventDefault();
+        setSidebarVisible((visible) => !visible);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "o") {
+        e.preventDefault();
+        setOnboardingOpen(true);
+      } else if ((e.metaKey || e.ctrlKey) && e.key === "/") {
+        e.preventDefault();
+        setSettingsOpen(true);
+      } else if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+        const task = selectedSessionTasks[Number(e.key) - 1];
+        if (task) {
+          e.preventDefault();
+          selectTask(task.id);
+          setChangesOpen(false);
+        }
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "c") {
         e.preventDefault();
         setComputerUseActive((a) => !a);
@@ -152,7 +171,7 @@ export function App(): JSX.Element {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedTaskId, selectTask, toggleInspector]);
+  }, [selectedSessionTasks, selectedTaskId, selectTask, toggleInspector]);
 
   useEffect(() => {
     const openSettings = (): void => setSettingsOpen(true);
@@ -217,6 +236,7 @@ export function App(): JSX.Element {
     <>
       <Layout
         sidebar={<Sidebar />}
+        sidebarVisible={sidebarVisible}
         // The inspector is contextual. A new-task screen has no task-bound
         // context yet, so keeping it out of the canvas restores the calm,
         // focused Codex-style start composition.
