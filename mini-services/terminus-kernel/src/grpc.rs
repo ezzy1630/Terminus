@@ -3,8 +3,8 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 use std::path::PathBuf;
-use tonic::{transport::Server, Request, Response, Status};
 use tokio_stream::StreamExt;
+use tonic::{transport::Server, Request, Response, Status};
 
 pub mod protocol {
     tonic::include_proto!("terminus.kernel.v1");
@@ -264,13 +264,6 @@ macro_rules! unavailable_unary {
 }
 
 unavailable_unary!(
-    CodeIntelligenceRpc,
-    search,
-    protocol::CodeSearchRequest,
-    protocol::CodeSearchResponse,
-    "CodeIntelligence.Search is not wired"
-);
-unavailable_unary!(
     ExtensionRuntimeRpc,
     invoke,
     protocol::ExtensionInvokeRequest,
@@ -400,25 +393,94 @@ impl SecretServiceRpc for GrpcKernel {
 }
 
 #[tonic::async_trait]
+impl CodeIntelligenceRpc for GrpcKernel {
+    async fn search(
+        &self,
+        request: Request<protocol::CodeSearchRequest>,
+    ) -> Result<Response<protocol::CodeSearchResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request.context.map(context).ok_or_else(|| Status::invalid_argument("context is required"))?;
+        if request.query.is_empty() {
+            return Err(Status::invalid_argument("query is required"));
+        }
+        let result = self.kernel.code_intel.inspect(&ctx, &Default::default(), &request.query).map_err(status)?;
+        let limit = if request.limit == 0 { 100 } else { request.limit as usize };
+        let mut results = Vec::new();
+        if let Some(symbol) = result.symbol {
+            if request.workspace_id.is_empty() || symbol.path.starts_with(&request.workspace_id) {
+                results.push(protocol::CodeSearchResult { path: symbol.path, line: symbol.start_line, symbol: symbol.name, method: "symbol-index".to_string() });
+            }
+        }
+        let truncated = results.len() > limit;
+        results.truncate(limit);
+        Ok(Response::new(protocol::CodeSearchResponse { results, truncated, continuation: None }))
+    }
+}
+
+#[tonic::async_trait]
 impl PatchServiceRpc for GrpcKernel {
     async fn apply(
         &self,
-        _request: Request<protocol::PatchRequest>,
+        request: Request<protocol::PatchRequest>,
     ) -> Result<Response<protocol::PatchResponse>, Status> {
-        Err(Status::unimplemented("Patch.Apply is not wired"))
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let intent = request.intent.map(intent).unwrap_or_default();
+        let baseline = request
+            .baseline
+            .ok_or_else(|| Status::invalid_argument("baseline is required"))?;
+        let baseline = terminus_kernel_protocol::WorkspaceBaseline {
+            workspace_id: baseline.workspace_id,
+            repository_revision: baseline.repository_revision,
+            dirty_digest: baseline.dirty_digest,
+            sources: baseline
+                .sources
+                .into_iter()
+                .map(source_version)
+                .collect::<Result<_, _>>()?,
+        };
+        let edits = request
+            .edits
+            .into_iter()
+            .map(patch_edit)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mode = match request.commit_mode {
+            1 => terminus_kernel_protocol::PatchCommitMode::PreviewOnly,
+            2 => terminus_kernel_protocol::PatchCommitMode::StageOnly,
+            _ => terminus_kernel_protocol::PatchCommitMode::ApplyToWorktree,
+        };
+        let result = self
+            .kernel
+            .patches
+            .apply_with_mode(
+                &ctx,
+                &intent,
+                &request.transaction_id,
+                &baseline,
+                &edits,
+                mode,
+            )
+            .map_err(status)?;
+        Ok(Response::new(patch_response(result)))
     }
     async fn reconcile(
         &self,
         _request: Request<protocol::PatchReconcileRequest>,
     ) -> Result<Response<protocol::PatchResponse>, Status> {
-        Err(Status::unimplemented("Patch.Reconcile is not wired"))
+        Err(Status::unimplemented(
+            "Patch.Reconcile requires the durable journal reconciliation API",
+        ))
     }
 }
 
 #[tonic::async_trait]
 impl ProcessServiceRpc for GrpcKernel {
-    type StartStream =
-        tokio_stream::wrappers::ReceiverStream<Result<protocol::ProcessEvent, Status>>;
+    type StartStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<protocol::ProcessEvent, Status>> + Send>,
+    >;
     async fn start(
         &self,
         request: Request<protocol::StartProcessRequest>,
@@ -434,14 +496,21 @@ impl ProcessServiceRpc for GrpcKernel {
             .map(command)
             .transpose()?
             .ok_or_else(|| Status::invalid_argument("command is required"))?;
-        let profile = if request.sandbox_profile_id.is_empty() { "secure-local-default" } else { request.sandbox_profile_id.as_str() };
+        let profile = if request.sandbox_profile_id.is_empty() {
+            "secure-local-default"
+        } else {
+            request.sandbox_profile_id.as_str()
+        };
         let receiver = self
             .kernel
             .processes
             .start_in_profile(&ctx, &intent, command, profile)
             .await
             .map_err(status)?;
-        let stream = tokio_stream::wrappers::ReceiverStream::new(receiver).map(|event| Ok(process_event(event)));
+        let stream = Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(receiver)
+                .map(|event| Ok(process_event(event))),
+        );
         Ok(Response::new(stream))
     }
     async fn cancel(
@@ -449,8 +518,16 @@ impl ProcessServiceRpc for GrpcKernel {
         request: Request<protocol::CancelProcessRequest>,
     ) -> Result<Response<protocol::CancelProcessResponse>, Status> {
         let request = request.into_inner();
-        let ctx = request.context.map(context).ok_or_else(|| Status::invalid_argument("context is required"))?;
-        let state = self.kernel.processes.cancel(&ctx, &request.process_id, &request.reason).await.map_err(status)?;
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let state = self
+            .kernel
+            .processes
+            .cancel(&ctx, &request.process_id, &request.reason)
+            .await
+            .map_err(status)?;
         Ok(Response::new(protocol::CancelProcessResponse { state }))
     }
 }
@@ -526,35 +603,94 @@ fn path(value: protocol::WorkspacePath) -> terminus_kernel_protocol::WorkspacePa
     }
 }
 fn command(value: protocol::CommandSpec) -> Result<terminus_kernel_protocol::CommandSpec, Status> {
-    let timeout_ms = value.timeout.as_ref().map(|duration| {
-        let seconds = u64::try_from(duration.seconds).ok()?;
-        let millis = u64::from(duration.nanos.max(0) as u32) / 1_000_000;
-        Some(seconds.saturating_mul(1_000).saturating_add(millis))
-    }).flatten().unwrap_or(0);
+    let timeout_ms = value
+        .timeout
+        .as_ref()
+        .map(|duration| {
+            let seconds = u64::try_from(duration.seconds).ok()?;
+            let millis = u64::from(duration.nanos.max(0) as u32) / 1_000_000;
+            Some(seconds.saturating_mul(1_000).saturating_add(millis))
+        })
+        .flatten()
+        .unwrap_or(0);
     let shell = value.shell.unwrap_or_default();
     Ok(terminus_kernel_protocol::CommandSpec {
         program: value.program,
         args: value.args,
-        cwd: value.cwd.map(path).ok_or_else(|| Status::invalid_argument("command.cwd is required"))?,
+        cwd: value
+            .cwd
+            .map(path)
+            .ok_or_else(|| Status::invalid_argument("command.cwd is required"))?,
         public_env: value.public_env.into_iter().collect(),
         secret_capability_uris: value.secret_capability_uris,
         timeout_ms,
         allocate_pty: value.allocate_pty,
-        shell: terminus_kernel_protocol::ShellSpec { enabled: shell.enabled, script: shell.script, dialect: shell.dialect },
+        shell: terminus_kernel_protocol::ShellSpec {
+            enabled: shell.enabled,
+            script: shell.script,
+            dialect: shell.dialect,
+        },
     })
 }
 fn timestamp(value: &str) -> Option<prost_types::Timestamp> {
     let parsed = chrono::DateTime::parse_from_rfc3339(value).ok()?;
-    Some(prost_types::Timestamp { seconds: parsed.timestamp(), nanos: parsed.timestamp_subsec_nanos() as i32 })
+    Some(prost_types::Timestamp {
+        seconds: parsed.timestamp(),
+        nanos: parsed.timestamp_subsec_nanos() as i32,
+    })
 }
 fn process_event(value: terminus_kernel_protocol::ProcessEvent) -> protocol::ProcessEvent {
     use protocol::process_event::Event;
     match value {
-        terminus_kernel_protocol::ProcessEvent::Started(event) => protocol::ProcessEvent { sequence: 0, occurred_at: timestamp(&event.started_at), event: Some(Event::Started(protocol::ProcessStarted { process_id: event.process_id, job_id: event.job_id, resolved_executable: event.resolved_executable, started_at: timestamp(&event.started_at) })) },
-        terminus_kernel_protocol::ProcessEvent::Stdout(event) => protocol::ProcessEvent { sequence: event.cursor, occurred_at: None, event: Some(Event::Stdout(protocol::OutputChunk { cursor: event.cursor, bytes: event.bytes, redacted: event.redacted })) },
-        terminus_kernel_protocol::ProcessEvent::Stderr(event) => protocol::ProcessEvent { sequence: event.cursor, occurred_at: None, event: Some(Event::Stderr(protocol::OutputChunk { cursor: event.cursor, bytes: event.bytes, redacted: event.redacted })) },
-        terminus_kernel_protocol::ProcessEvent::Exited(event) => protocol::ProcessEvent { sequence: 0, occurred_at: timestamp(&event.exited_at), event: Some(Event::Exited(protocol::ProcessExited { exit_code: event.exit_code, signal: event.signal, exited_at: timestamp(&event.exited_at), stdout_artifact: event.stdout_artifact.map(artifact_ref), stderr_artifact: event.stderr_artifact.map(artifact_ref) })) },
-        terminus_kernel_protocol::ProcessEvent::Policy(event) => protocol::ProcessEvent { sequence: 0, occurred_at: None, event: Some(Event::Policy(protocol::PolicyDecision { decision_id: event.decision_id, decision: event.decision, rule_ids: event.rule_ids, explanation: event.explanation })) },
+        terminus_kernel_protocol::ProcessEvent::Started(event) => protocol::ProcessEvent {
+            sequence: 0,
+            occurred_at: timestamp(&event.started_at),
+            event: Some(Event::Started(protocol::ProcessStarted {
+                process_id: event.process_id,
+                job_id: event.job_id,
+                resolved_executable: event.resolved_executable,
+                started_at: timestamp(&event.started_at),
+            })),
+        },
+        terminus_kernel_protocol::ProcessEvent::Stdout(event) => protocol::ProcessEvent {
+            sequence: event.cursor,
+            occurred_at: None,
+            event: Some(Event::Stdout(protocol::OutputChunk {
+                cursor: event.cursor,
+                bytes: event.bytes,
+                redacted: event.redacted,
+            })),
+        },
+        terminus_kernel_protocol::ProcessEvent::Stderr(event) => protocol::ProcessEvent {
+            sequence: event.cursor,
+            occurred_at: None,
+            event: Some(Event::Stderr(protocol::OutputChunk {
+                cursor: event.cursor,
+                bytes: event.bytes,
+                redacted: event.redacted,
+            })),
+        },
+        terminus_kernel_protocol::ProcessEvent::Exited(event) => protocol::ProcessEvent {
+            sequence: 0,
+            occurred_at: timestamp(&event.exited_at),
+            event: Some(Event::Exited(protocol::ProcessExited {
+                exit_code: event.exit_code,
+                signal: event.signal,
+                exited_at: timestamp(&event.exited_at),
+                stdout_artifact: event.stdout_artifact.map(artifact_ref),
+                stderr_artifact: event.stderr_artifact.map(artifact_ref),
+            })),
+        },
+        terminus_kernel_protocol::ProcessEvent::Policy(event) => protocol::ProcessEvent {
+            sequence: 0,
+            occurred_at: None,
+            event: Some(Event::Policy(protocol::PolicyDecision {
+                decision_id: event.decision_id,
+                decision: event.decision,
+                rule_ids: event.rule_ids,
+                explanation: event.explanation,
+            })),
+        },
     }
 }
 fn artifact_ref(value: terminus_kernel_protocol::ArtifactRef) -> ArtifactRef {
@@ -562,6 +698,165 @@ fn artifact_ref(value: terminus_kernel_protocol::ArtifactRef) -> ArtifactRef {
         sha256: value.sha256,
         size_bytes: value.size_bytes,
         media_type: value.media_type,
+    }
+}
+fn source_version(
+    value: protocol::SourceVersion,
+) -> Result<terminus_kernel_protocol::SourceVersion, Status> {
+    Ok(terminus_kernel_protocol::SourceVersion {
+        path: value
+            .path
+            .map(path)
+            .ok_or_else(|| Status::invalid_argument("source path is required"))?,
+        sha256: value.sha256,
+        repository_revision: value.repository_revision,
+    })
+}
+fn line_range(
+    value: Option<protocol::LineRange>,
+) -> Result<terminus_kernel_protocol::LineRange, Status> {
+    let value = value.ok_or_else(|| Status::invalid_argument("line range is required"))?;
+    Ok(terminus_kernel_protocol::LineRange {
+        start_line: value.start_line,
+        end_line: value.end_line,
+    })
+}
+fn patch_edit(value: protocol::PatchEdit) -> Result<terminus_kernel_protocol::PatchEdit, Status> {
+    use protocol::patch_edit::Edit;
+    match value
+        .edit
+        .ok_or_else(|| Status::invalid_argument("patch edit is required"))?
+    {
+        Edit::ReplaceSymbol(value) => Ok(terminus_kernel_protocol::PatchEdit::ReplaceSymbol(
+            terminus_kernel_protocol::ReplaceSymbol {
+                path: value
+                    .path
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("replace symbol path is required"))?,
+                expected_sha256: value.expected_sha256,
+                symbol: value.symbol,
+                structural_fingerprint: value.structural_fingerprint,
+                replacement_utf8: value.replacement_utf8,
+            },
+        )),
+        Edit::ReplaceRange(value) => Ok(terminus_kernel_protocol::PatchEdit::ReplaceRange(
+            terminus_kernel_protocol::ReplaceRange {
+                path: value
+                    .path
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("replace range path is required"))?,
+                expected_sha256: value.expected_sha256,
+                range: line_range(value.range)?,
+                replacement_utf8: value.replacement_utf8,
+            },
+        )),
+        Edit::ReplaceExactText(value) => Ok(terminus_kernel_protocol::PatchEdit::ReplaceExactText(
+            terminus_kernel_protocol::ReplaceExactText {
+                path: value
+                    .path
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("replace exact path is required"))?,
+                expected_sha256: value.expected_sha256,
+                expected_utf8: value.expected_utf8,
+                replacement_utf8: value.replacement_utf8,
+                require_unique: value.require_unique,
+            },
+        )),
+        Edit::Insert(value) => Ok(terminus_kernel_protocol::PatchEdit::Insert(
+            terminus_kernel_protocol::InsertContent {
+                path: value
+                    .path
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("insert path is required"))?,
+                expected_sha256: value.expected_sha256,
+                anchor_kind: value.anchor_kind,
+                anchor: value.anchor,
+                position: value.position,
+                content_utf8: value.content_utf8,
+            },
+        )),
+        Edit::DeleteRange(value) => Ok(terminus_kernel_protocol::PatchEdit::DeleteRange(
+            terminus_kernel_protocol::DeleteRange {
+                path: value
+                    .path
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("delete range path is required"))?,
+                expected_sha256: value.expected_sha256,
+                range: line_range(value.range)?,
+            },
+        )),
+        Edit::CreateFile(value) => Ok(terminus_kernel_protocol::PatchEdit::CreateFile(
+            terminus_kernel_protocol::CreateFile {
+                path: value
+                    .path
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("create path is required"))?,
+                must_not_exist: value.must_not_exist,
+                content: value.content,
+                media_type: value.media_type,
+            },
+        )),
+        Edit::MoveFile(value) => Ok(terminus_kernel_protocol::PatchEdit::MoveFile(
+            terminus_kernel_protocol::MoveFile {
+                from: value
+                    .from
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("move source is required"))?,
+                to: value
+                    .to
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("move target is required"))?,
+                expected_sha256: value.expected_sha256,
+                target_must_not_exist: value.target_must_not_exist,
+            },
+        )),
+        Edit::DeleteFile(value) => Ok(terminus_kernel_protocol::PatchEdit::DeleteFile(
+            terminus_kernel_protocol::DeleteFile {
+                path: value
+                    .path
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("delete path is required"))?,
+                expected_sha256: value.expected_sha256,
+            },
+        )),
+        Edit::UnifiedDiff(value) => Ok(terminus_kernel_protocol::PatchEdit::UnifiedDiff(
+            terminus_kernel_protocol::UnifiedDiff {
+                repository_revision: value.repository_revision,
+                diff_utf8: value.diff_utf8,
+            },
+        )),
+    }
+}
+fn patch_response(value: terminus_kernel_protocol::PatchResponse) -> protocol::PatchResponse {
+    protocol::PatchResponse {
+        transaction_id: value.transaction_id,
+        state: value.state,
+        final_repository_revision: value.final_repository_revision,
+        final_dirty_digest: value.final_dirty_digest,
+        changed_files: value
+            .changed_files
+            .into_iter()
+            .map(|file| protocol::ChangedFile {
+                path: Some(protocol::WorkspacePath {
+                    workspace_id: file.path.workspace_id,
+                    relative_path: file.path.relative_path,
+                }),
+                old_sha256: file.old_sha256,
+                new_sha256: file.new_sha256,
+                operation: file.operation,
+            })
+            .collect(),
+        validations: value
+            .validations
+            .into_iter()
+            .map(|validation| protocol::ValidationResult {
+                check_id: validation.check_id,
+                status: validation.status,
+                summary: validation.summary,
+                evidence: validation.evidence.map(artifact_ref),
+            })
+            .collect(),
+        complete_diff: value.complete_diff.map(artifact_ref),
     }
 }
 fn status(error: terminus_kernel_protocol::KernelError) -> Status {
