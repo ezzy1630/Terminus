@@ -1,0 +1,54 @@
+pack:
+  id: forge/images
+  version: 1.0.0
+  name: Images
+  description: |
+    Image capability pack. Provides image generation, editing, vision-based
+    analysis, and format conversion. Generated and edited images are stored
+    as artifacts; the model receives an artifact URI, not raw bytes.
+  publisher: forge
+  trust_level: first_party
+  operations:
+    - id: generate_image
+      description: Generate an image from a text prompt.
+      effects: [NETWORK_WRITE, NETWORK_READ]
+      network_destinations: ["https://image-gen.example.com/**"]
+    - id: edit_image
+      description: Edit an existing image based on a text prompt.
+      effects: [NETWORK_WRITE, NETWORK_READ, READ_LOCAL, WRITE_LOCAL]
+    - id: analyze_image
+      description: Analyze an image and return a structured description.
+      effects: [NETWORK_WRITE, NETWORK_READ, READ_LOCAL]
+    - id: convert_image
+      description: Convert an image between formats.
+      effects: [READ_LOCAL, WRITE_LOCAL]
+  filesystem:
+    read: ["worktree://active/**", "artifact://images/**"]
+    write: ["artifact://images/**"]
+  network:
+    default: deny
+    proxy_required: true
+    destinations:
+      - "https://image-gen.example.com/**"
+      - "https://vision.example.com/**"
+    private_address_denied: true
+  secrets:
+    - secret://providers/image-gen
+    - secret://providers/vision
+  subprocesses: {}
+  external_state:
+    default: deny
+  resource_limits:
+    memory_bytes: 1073741824
+    cpu_seconds: 60
+    wall_clock_seconds: 120
+  model_visibility:
+    content_trust: untrusted
+    redact_patterns: []
+  configuration_schema:
+    type: object
+    properties:
+      default_size: {type: string, enum: [small, medium, large], default: medium}
+      default_format: {type: string, enum: [png, webp, jpeg], default: png}
+      max_bytes: {type: integer, default: 10485760}
+    additionalProperties: false

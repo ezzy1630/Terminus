@@ -1,0 +1,51 @@
+pack:
+  id: forge/debugger
+  version: 1.0.0
+  name: Debugger
+  description: |
+    Debugger capability pack. Provides high-level DAP operations: set
+    breakpoints, step, inspect frames, evaluate expressions, and trace
+    function execution. The Rust code-intelligence service composes DAP
+    calls and degrades gracefully when a debug adapter is unavailable.
+  publisher: forge
+  trust_level: first_party
+  operations:
+    - id: debug_test
+      description: Launch a test under the debugger and capture the first failure frame.
+      effects: [EXECUTE_LOCAL, READ_LOCAL]
+    - id: trace_function
+      description: Trace a function's execution and capture the call sequence.
+      effects: [EXECUTE_LOCAL, READ_LOCAL]
+    - id: inspect_failure
+      description: "Inspect a recorded failure: locals, frames, exception."
+      effects: [READ_LOCAL]
+    - id: set_breakpoint
+      description: Set a breakpoint at a symbol or source location.
+      effects: [WRITE_LOCAL]
+    - id: evaluate_expression
+      description: Evaluate an expression in the context of a paused frame.
+      effects: [READ_LOCAL]
+  filesystem:
+    read: ["worktree://active/**"]
+    write: ["artifact://debugger/**"]
+  network: []
+  secrets: []
+  subprocesses:
+    debug_adapter: pinned
+    max_concurrent: 1
+  external_state:
+    default: deny
+  resource_limits:
+    memory_bytes: 1073741824
+    cpu_seconds: 300
+    wall_clock_seconds: 600
+  model_visibility:
+    content_trust: untrusted
+    redact_patterns: []
+  configuration_schema:
+    type: object
+    properties:
+      adapter: {type: string, enum: [lldb, python, js, go, java], default: lldb}
+      stop_on_entry: {type: boolean, default: false}
+      max_frames: {type: integer, default: 50}
+    additionalProperties: false

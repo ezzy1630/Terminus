@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/capabilities/plugin.json",
+  "title": "PluginCapability",
+  "description": "Capability descriptor for a Forge plugin (SPEC §12.3, §35.8). Plugin tiers: core built-in, first-party, verified third-party, unverified. Third-party plugins run in WASI, isolated process, container, or micro-VM with hard resource limits and revocable capability grants.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "kind", "source", "content_hash", "trust_level", "operations", "tier", "runtime", "hooks"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]+$" },
+    "version": { "type": "string" },
+    "kind": { "const": "plugin" },
+    "source": { "type": "string" },
+    "content_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "signature": { "type": ["string", "null"] },
+    "publisher": { "type": ["string", "null"] },
+    "trust_level": { "enum": ["builtin", "first_party", "verified_third_party", "untrusted"] },
+    "entrypoint": { "type": "string" },
+    "operations": { "type": "array", "items": { "type": "string" } },
+    "filesystem": { "type": "object" },
+    "network": { "type": "object" },
+    "secrets": { "type": "array", "items": { "type": "string" } },
+    "subprocesses": { "type": "object" },
+    "external_state": { "type": "object" },
+    "resource_limits": { "type": "object" },
+    "model_visibility": { "type": "object" },
+    "configuration_schema": { "type": ["object", "null"] },
+    "compatibility": { "type": "object" },
+    "tier": { "enum": ["core_builtin", "first_party", "verified_third_party", "unverified"] },
+    "runtime": { "enum": ["in_process", "wasi", "isolated_process", "container", "microvm"] },
+    "hooks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event", "returns"],
+        "properties": {
+          "event": { "type": "string" },
+          "returns": {
+            "enum": ["observe_only", "propose_annotation", "propose_policy_input", "propose_context_fragment", "propose_tool_result_transform", "veto"]
+          },
+          "timeout_ms": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "sbom": { "type": ["string", "null"] },
+    "lifecycle_scripts_disabled": { "type": "boolean" }
+  }
+}

@@ -1,0 +1,59 @@
+rules:
+  - id: allow-local-tests
+    description: Allow common local test runners in the workspace
+    priority: 10
+    match:
+      executable_any: ["pnpm", "pytest", "cargo", "go", "npm", "yarn", "bun"]
+      effects_any: ["EXECUTE_LOCAL"]
+    effect:
+      kind: allow_with_constraints
+      constraint:
+        max_runtime_ms: 600000
+        max_output_bytes: 16777216
+        disallowed_env: ["AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN"]
+
+  - id: allow-read-tools
+    description: Allow read-only inspection tools
+    priority: 10
+    match:
+      executable_any: ["ls", "cat", "grep", "rg", "fd", "find", "git"]
+      effects_any: ["READ_LOCAL"]
+    effect:
+      kind: allow
+
+  - id: prompt-git-push
+    description: Prompt before any git push
+    priority: 20
+    match:
+      executable_any: ["git"]
+      argv_contains_any: ["push"]
+      effects_any: ["NETWORK_WRITE"]
+    effect:
+      kind: prompt
+
+  - id: deny-download-pipe-interpreter
+    description: Deny curl|bash style installation
+    priority: 30
+    match:
+      executable_any: ["curl", "wget"]
+      argv_contains_any: ["|", "bash", "sh", "python", "perl"]
+      effects_any: ["NETWORK_READ", "EXECUTE_LOCAL"]
+    effect:
+      kind: deny
+
+  - id: deny-protected-path-write
+    description: Deny writes to .git, .forge, credentials, .env
+    priority: 50
+    match:
+      effects_any: ["WRITE_LOCAL"]
+      working_directory_glob: ["**/.git/**", "**/.forge/**", "**/credentials/**", "**/.env*"]
+    effect:
+      kind: deny
+
+  - id: deny-external-state-write-default
+    description: Default-deny external state mutations
+    priority: 40
+    match:
+      effects_any: ["EXTERNAL_STATE_WRITE"]
+    effect:
+      kind: deny

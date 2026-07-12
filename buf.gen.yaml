@@ -1,0 +1,30 @@
+# Buf code generation config (SPEC §45.4).
+# Generates Rust types (prost) and TS clients (connect-es) from proto/.
+# Run via `just codegen-proto` (which calls `buf generate proto`).
+
+version: v2
+
+managed:
+  enabled: true
+  override:
+    - file_option: java_package_prefix
+      value: ai.forge
+  # Disable Python codegen — the Python eval lab does not call the kernel RPC
+  # directly; it consumes exported traces/artifacts.
+
+plugins:
+  - remote: buf.build/community/neoeinstein-prost
+    out: crates/forge-kernel-protocol/src/generated
+    opt:
+      - file_descriptor_set
+  - remote: buf.build/bufbuild/es
+    out: packages/forge-kernel-client/src/generated
+    opt:
+      - target=js+dts
+      - import_extension=.js
+  - remote: buf.build/community/stephenh-ts-proto
+    out: packages/forge-kernel-client/src/generated-ts-proto
+    opt:
+      - esModuleInterop=true
+      - outputJsonMethods=false
+      - useOptionals=none

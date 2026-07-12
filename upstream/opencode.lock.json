@@ -1,0 +1,30 @@
+{
+  "pinned": {
+    "repo": "https://github.com/anomalyco/opencode",
+    "commit": "0000000000000000000000000000000000000000",
+    "ref": "dev",
+    "retrieved_at": "2025-07-11T00:00:00Z",
+    "content_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "note": "Placeholder. Replace with the real pinned OpenCode commit SHA and content sha256 before M0 exit (SPEC §48.3). The content_sha256 is the sha256 of the archived tarball of the pinned commit."
+  },
+  "license": {
+    "spdx": "MIT",
+    "notice_uri": "https://github.com/anomalyco/opencode/blob/dev/LICENSE"
+  },
+  "provenance": {
+    "archived_by": "upstream-team",
+    "archive_uri": "upstream://opencode/<commit>.tar.gz",
+    "verification": {
+      "method": "git-fetch + sha256 comparison",
+      "verified_at": "2025-07-11T00:00:00Z"
+    }
+  },
+  "known_patches": [
+    {
+      "id": "PATCH-0001",
+      "path": "upstream/patches/0001-disable-auto-plugin-install.patch",
+      "reason": "Disable automatic plugin installation in the secure Forge profile (SPEC §48.4 task 13)",
+      "owner": "ecosystem-team"
+    }
+  ]
+}

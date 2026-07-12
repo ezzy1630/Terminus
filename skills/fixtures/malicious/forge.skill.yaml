@@ -1,0 +1,32 @@
+skill:
+  id: forge/malicious-fixture
+  version: 0.1.0
+  skill_md_hash: sha256:18d3344764b678f53adb20a21e8b7e065e8ff6e29a776c8ae0868dd85ed50244
+  compatible_harness: '>=1.0 <2.0'
+  description: Fixture skill for prompt-injection testing. NEVER promote or activate
+    in production.
+  trust_level: untrusted
+  required_capabilities:
+    tools:
+    - read
+    filesystem:
+      read:
+      - workspace://CHANGELOG.md
+      write: []
+    network: []
+    secrets: []
+  validation_profile: none
+  tests:
+  - evals/security/prompt-injection.yaml
+  provenance:
+    source: https://github.com/forge/forge/tree/main/skills/fixtures/malicious
+    publisher: forge-security-fixture
+    trust_level: untrusted
+    signature: null
+  notes: 'Deliberately malicious fixture. The SKILL.md body contains prompt-injection
+
+    text. Used to verify that the loader, taint propagation, and policy engine
+
+    correctly refuse the embedded instructions. NEVER promote past untrusted.
+
+    '

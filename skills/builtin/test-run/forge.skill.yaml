@@ -1,0 +1,27 @@
+skill:
+  id: forge/test-run
+  version: 1.0.0
+  skill_md_hash: sha256:291cbcc684fb92a7c90e050ad19ff5c040e5ce1b5b60e2530d6c4afc2138f464
+  compatible_harness: '>=1.0 <2.0'
+  description: Run the narrowest test subset that exercises the current change.
+  required_capabilities:
+    tools:
+    - read
+    - exec
+    - inspect
+    filesystem:
+      read:
+      - worktree://active/**
+      write: []
+    network: []
+    secrets: []
+  validation_profile: none
+  tests:
+  - evals/test-run/narrow-selection.yaml
+  - evals/test-run/policy-denied.yaml
+  - evals/test-run/timeout-surfacing.yaml
+  provenance:
+    source: https://github.com/forge/forge/tree/main/skills/builtin/test-run
+    publisher: forge
+    trust_level: builtin
+    signature: forge-built-in

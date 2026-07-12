@@ -1,0 +1,33 @@
+[package]
+name = "forge-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The privileged Forge kernel assembly — service groups."
+
+[lints]
+workspace = true
+
+[dependencies]
+forge-kernel-protocol = { workspace = true }
+forge-fs = { workspace = true }
+forge-artifacts = { workspace = true }
+forge-policy = { workspace = true }
+forge-sandbox = { workspace = true }
+forge-sandbox-linux = { workspace = true }
+forge-sandbox-container = { workspace = true }
+forge-process = { workspace = true }
+forge-jobs = { workspace = true }
+forge-patch = { workspace = true }
+forge-secrets = { workspace = true }
+forge-egress = { workspace = true }
+forge-code-intel = { workspace = true }
+forge-extension-runtime = { workspace = true }
+forge-git = { workspace = true }
+forge-authz = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

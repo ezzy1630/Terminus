@@ -1,0 +1,50 @@
+adapter:
+  id: fixture-agent
+  version: 0.1.0
+  inner_harness_version: pinned
+  description: |
+    Forge fixture agent. A deterministic, no-model adapter used by the
+    eval lab for regression testing of the harness itself. The fixture
+    agent replays a recorded trajectory and produces a known workspace
+    state. It is NOT a real coding agent; it is a test fixture.
+
+    The fixture agent has full context visibility, full tool
+    interception, and native enforcement of every control because it
+    runs inside the Forge harness as a test double. Its "observed"
+    capabilities match its declared capabilities exactly — there are no
+    discrepancies.
+  capabilities:
+    exact_context_visibility: full
+    tool_interception: full
+    filesystem_enforcement: native
+    network_enforcement: native
+    secret_isolation: native
+    session_resume: native
+    typed_results: native
+    artifact_export: complete
+    cancellation: reliable
+    model_selection: controlled
+    native_compaction: false
+  observed_by_probe:
+    probe_version: forge-probe-1.0
+    probed_at: "2025-01-15T00:00:00Z"
+    probed_capabilities:
+      exact_context_visibility: full
+      tool_interception: full
+      filesystem_enforcement: native
+      network_enforcement: native
+      secret_isolation: native
+      session_resume: native
+      typed_results: native
+      artifact_export: complete
+      cancellation: reliable
+      model_selection: controlled
+      native_compaction: false
+  discrepancies: []
+  last_verified: "2025-01-15T00:00:00Z"
+  result_schema: forge.worker.v1
+  notes: |
+    The fixture agent is enabled only in the eval lab. It is the
+    canonical "perfect" adapter: every control is native, every
+    capability is observed exactly as declared. The promotion gate
+    uses the fixture agent as the upper bound for adapter fidelity.

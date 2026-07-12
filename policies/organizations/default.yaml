@@ -1,0 +1,118 @@
+# Organization policy (SPEC §35.3, §38.1, Appendix F).
+#
+# Organization policy sits between compiled secure defaults and user
+# configuration. It can tighten but never weaken non-overridable platform
+# controls. The effective policy is inspectable by the user.
+#
+# This file is a sample first-party organization policy. Real organizations
+# replace it with their own; the schema is stable across versions.
+
+policy:
+  id: org-default
+  version: 1
+  description: |
+    Sample organization policy. Tightens provider confidentiality,
+    retention, allowed model providers, and approval thresholds. Lower
+    layers (user, workspace, session/task) cannot weaken anything in this
+    file.
+
+  providers:
+    policy:
+      # Workspace-confidential content (source, tests, internal docs) may
+      # only go to enterprise or local providers with ZDR / no-retention.
+      allowed_confidentiality:
+        workspace:
+          - openai_enterprise
+          - anthropic_enterprise
+          - local
+        secret_adjacent:
+          - local
+        secret:
+          - deny
+      # Default retention mode per provider.
+      retention_mode:
+        openai_enterprise: organization_zdr
+        anthropic_enterprise: enterprise
+        local: none
+      # Provider-side features that are explicitly disabled.
+      disabled_features:
+        openai_enterprise:
+          - training_on_user_content
+        anthropic_enterprise:
+          - training_on_user_content
+
+    accounts:
+      openai_enterprise:
+        adapter: openai
+        credential: secret://providers/openai-enterprise
+        retention_mode: organization_zdr
+        region: configured
+      anthropic_enterprise:
+        adapter: anthropic
+        credential: secret://providers/anthropic-enterprise
+        retention_mode: enterprise
+      local:
+        adapter: openai_compatible_local
+        base_url: http://127.0.0.1:8000
+        credential: null
+
+  approvals:
+    # External state mutations (deploys, merges, registry publishes) always
+    # require human approval, even if the user has pre-granted scope.
+    external_state: prompt
+    secret_use: prompt_unless_pregranted
+    scope_expansion: prompt
+    # High-risk tasks require a second human review before completion.
+    high_risk_second_review: true
+
+  retention:
+    # SQLite event log retention.
+    semantic_events:
+      max_events: 100000
+      max_age_days: 30
+    # Artifact store retention.
+    artifacts:
+      default_max_age_days: 90
+      gc_interval_hours: 24
+    # Provider response artifacts are retained for debugging and audit.
+    provider_responses:
+      max_age_days: 30
+      redact_secrets_in_storage: true
+
+  telemetry:
+    mode: local_only
+    export_endpoint: null
+    include_content: false
+    include_paths: true
+    include_command_args: false
+
+  model_visibility:
+    # What the model can see about the workspace by default.
+    default_trust: derived
+    # Content fetched from the network or from MCP servers is always untrusted.
+    external_content_trust: untrusted
+    # Skill bodies and MCP server descriptions are untrusted (SPEC §35.8).
+    skill_bodies_trust: untrusted
+    mcp_descriptions_trust: untrusted
+
+  extensions:
+    installation:
+      lifecycle_scripts: deny
+      require_lockfile: true
+      require_signature_for_verified: true
+    third_party:
+      execution: wasi_or_process
+      in_process: deny
+    mcp:
+      descriptor_change: require_reauthorization
+      default_network: deny
+
+  non_overridable:
+    # These controls cannot be weakened by user, workspace, or session/task
+    # configuration. Any attempt to weaken them is silently ignored and
+    # logged.
+    - sandbox.filesystem.deny.host
+    - sandbox.secrets.ambient_environment
+    - sandbox.network.direct_sockets
+    - providers.policy.allowed_confidentiality.secret
+    - extensions.installation.lifecycle_scripts

@@ -1,0 +1,27 @@
+skill:
+  id: forge/diff-apply
+  version: 1.0.0
+  skill_md_hash: sha256:da30048bf401d76dd59add4867c65b5bdf9e3844f35480b720b9f27a4efef608
+  compatible_harness: '>=1.0 <2.0'
+  description: Apply structured diffs to source files inside an isolated edit transaction.
+  required_capabilities:
+    tools:
+    - read
+    - patch
+    filesystem:
+      read:
+      - worktree://active/**
+      write:
+      - worktree://active/**
+    network: []
+    secrets: []
+  validation_profile: language_fast
+  tests:
+  - evals/diff-apply/stale-anchor.yaml
+  - evals/diff-apply/atomic-rollback.yaml
+  - evals/diff-apply/multi-file-isolated.yaml
+  provenance:
+    source: https://github.com/forge/forge/tree/main/skills/builtin/diff-apply
+    publisher: forge
+    trust_level: builtin
+    signature: forge-built-in

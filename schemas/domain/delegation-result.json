@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/delegation-result-v1.json",
+  "title": "DelegationResult",
+  "description": "Delegation result envelope (SPEC Appendix E.4). Returned by auxiliary agents (scout, implementer, reviewer, verifier, external harness).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "changed_files", "tests", "findings", "risks", "artifacts"],
+  "properties": {
+    "status": {
+      "enum": ["completed", "blocked", "failed", "budget_exhausted", "policy_denied"]
+    },
+    "summary": { "type": "string", "maxLength": 4000 },
+    "changed_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "commit": { "type": ["string", "null"] },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "status", "evidence", "source_revision"],
+        "properties": {
+          "command": { "type": "string" },
+          "status": { "enum": ["passed", "failed", "skipped", "error"] },
+          "evidence": { "type": ["string", "null"] },
+          "source_revision": { "type": "string" }
+        }
+      }
+    },
+    "findings": { "type": "array", "items": { "type": "string" } },
+    "risks": { "type": "array", "items": { "type": "string" } },
+    "unresolved": { "type": "array", "items": { "type": "string" } },
+    "artifacts": { "type": "array", "items": { "type": "string" } },
+    "actual_budget": { "type": ["object", "null"] }
+  }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "forge-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Workspace-relative path resolution with traversal and symlink-escape protection."
+
+[lints]
+workspace = true
+
+[dependencies]
+forge-kernel-protocol = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

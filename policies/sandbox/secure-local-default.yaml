@@ -1,0 +1,65 @@
+# secure-local-default
+#
+# The first-run default sandbox profile (SPEC §13.3, §36.4). The actual
+# backend selection (Linux namespaces, macOS Seatbelt, Windows AppContainer,
+# container, micro-VM) is decided by the kernel at runtime; this profile
+# declares the *contract* every backend must satisfy when selected.
+#
+# A backend that cannot satisfy `require_full_enforcement: true` MUST fail
+# closed and report a distinct degraded profile name (see degraded-local.yaml).
+# The UI MUST surface the effective profile and never silently downgrade.
+
+profile:
+  id: secure-local-default
+  backend: auto
+  require_full_enforcement: true
+  filesystem:
+    root: read_only
+    workspace: read_only
+    active_worktree: read_write
+    read:
+      - workspace://**
+    write:
+      - worktree://active/**
+    deny:
+      - worktree://active/.git/**
+      - forge-state://**
+      - secret-store://**
+      - host://**
+      - credentials://**
+    protected:
+      - .git
+      - harness_state
+      - credentials
+    symlinks: contained_only
+  process:
+    shell: prompt
+    structured_exec: classify
+    daemonization: deny
+    privilege_escalation: deny
+    no_new_privs: true
+    seccomp: restrictive
+  network:
+    direct_sockets: deny
+    proxy_required: true
+    destinations: []
+    dns: brokered
+    private_address_denied: true
+  secrets:
+    ambient_environment: deny
+    direct_environment: deny
+    model_visibility: deny
+    brokered_capabilities: []
+  external_state:
+    default: prompt
+  extensions:
+    third_party_in_process: deny
+    lifecycle_scripts: deny
+  resources:
+    memory_bytes: 2147483648
+    cpu_seconds: 600
+    pids: 256
+    open_files: 1024
+    wall_clock_seconds: 3600
+  plugins:
+    ambient_authority: deny

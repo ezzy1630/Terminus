@@ -1,0 +1,90 @@
+# CODEOWNERS — Forge ownership matrix (SPEC §49.3).
+# Each line: <path pattern> <owner team(s)>.
+# High-risk areas require two reviewers (see CONTRIBUTING.md).
+
+*                          @forge/release
+
+# Public protocol (SPEC §49.3: protocol owner + client/compat owner)
+/proto/                        @forge/protocol @forge/client
+/packages/public-api/          @forge/protocol @forge/client
+/packages/public-client/       @forge/protocol @forge/client
+/schemas/                      @forge/protocol
+/buf.yaml                      @forge/protocol
+/buf.gen.yaml                  @forge/protocol
+
+# Kernel protocol (runtime + protocol + security)
+/crates/forge-kernel/               @forge/runtime @forge/protocol @forge/security
+/crates/forge-kernel-protocol/      @forge/runtime @forge/protocol
+/crates/forge-kernel-testkit/       @forge/runtime
+/mini-services/forge-kernel/        @forge/runtime @forge/security
+
+# Sandbox/policy/secrets/network (security runtime, two reviewers)
+/crates/forge-sandbox/         @forge/security @forge/runtime
+/crates/forge-sandbox-linux/   @forge/security @forge/runtime
+/crates/forge-sandbox-macos/   @forge/security @forge/runtime
+/crates/forge-sandbox-windows/ @forge/security @forge/runtime
+/crates/forge-sandbox-container/ @forge/security @forge/runtime
+/crates/forge-policy/          @forge/security @forge/runtime
+/crates/forge-secrets/         @forge/security @forge/runtime
+/crates/forge-egress/          @forge/security @forge/runtime
+/crates/forge-authz/           @forge/security @forge/runtime
+/policies/                     @forge/security
+
+# Context compiler (context owner + evaluation owner)
+/packages/context-ir/          @forge/context @forge/eval
+/packages/context-compiler/    @forge/context @forge/eval
+/packages/retrieval/           @forge/context @forge/eval
+
+# Provider adapters (provider owner + context + privacy reviewer)
+/packages/provider-core/       @forge/provider @forge/context
+/packages/provider-openai/     @forge/provider @forge/context
+/packages/provider-anthropic/  @forge/provider @forge/context
+/packages/provider-google/     @forge/provider @forge/context
+/packages/provider-local/      @forge/provider @forge/context
+/packages/model-router/        @forge/provider @forge/context
+
+# ACI/patch/search (ACI owner + runtime + evaluation)
+/crates/forge-patch/           @forge/aci @forge/runtime
+/crates/forge-fs/              @forge/aci @forge/runtime
+/crates/forge-code-intel/      @forge/aci @forge/runtime
+/crates/forge-process/         @forge/aci @forge/runtime
+/crates/forge-jobs/            @forge/aci @forge/runtime
+/packages/capability-registry/ @forge/aci @forge/runtime
+
+# Orchestration (orchestration owner + verification + evaluation)
+/packages/orchestration/       @forge/orchestration @forge/eval
+/packages/verification/        @forge/orchestration @forge/eval
+/packages/task-runtime/        @forge/orchestration @forge/eval
+/packages/session-runtime/     @forge/orchestration @forge/eval
+
+# Memory (memory owner + privacy + evaluation)
+/packages/memory/              @forge/memory @forge/eval
+
+# MCP/plugins/adapters (ecosystem owner + security)
+/packages/extension-host/      @forge/ecosystem @forge/security
+/crates/forge-extension-runtime/ @forge/ecosystem @forge/security
+/packages/adapter-sdk/         @forge/ecosystem @forge/security
+/adapters/                     @forge/ecosystem @forge/security
+/skills/                       @forge/ecosystem @forge/security
+/capability-packs/             @forge/ecosystem @forge/security
+
+# Storage/migrations (persistence owner + recovery owner)
+/prisma/                       @forge/persistence
+/migrations/                   @forge/persistence @forge/recovery
+/crates/forge-artifacts/       @forge/persistence @forge/recovery
+/packages/artifact-client/     @forge/persistence
+
+# Upstream OpenCode (upstream owner + affected package owner)
+/upstream/                     @forge/upstream
+/packages/open-code-bridge/    @forge/upstream
+
+# Release (release owner + security + protocol + eval)
+/.github/workflows/release.yml @forge/release @forge/security @forge/protocol @forge/eval
+/CHANGELOG.md                  @forge/release
+
+# Documentation
+/AGENTS.md                     @forge/release
+/SECURITY.md                   @forge/security
+/CONTRIBUTING.md               @forge/release
+/SPEC.md                       @forge/release
+/docs/                         @forge/release

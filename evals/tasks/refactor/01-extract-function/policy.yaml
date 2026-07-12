@@ -1,0 +1,11 @@
+policy:
+  sandbox_profile: secure-local-default
+  command: policies/command/default.yaml
+  network: policies/network/default.yaml
+  secrets: policies/secrets/default.yaml
+  risk_class: normal
+  approval:
+    external_state: prompt
+    secret_use: prompt_unless_pregranted
+    scope_expansion: prompt
+  budget_overrides: {}

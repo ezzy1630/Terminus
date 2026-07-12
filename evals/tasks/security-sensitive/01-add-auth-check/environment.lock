@@ -1,0 +1,13 @@
+environment:
+  id: python-3.12-tiny
+  base: python:3.12-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  pinned_packages:
+    - pytest==8.3.4
+  python_version: "3.12"
+  os: linux
+  created_at: "2025-01-01T00:00:00Z"
+  env:
+    # The eval harness injects the actual token via the secret broker.
+    # For the fixture, the token is the literal below; the agent must
+    # NOT hardcode it.
+    FORGE_TEST_AUTH_TOKEN: forge-test-token-do-not-hardcode

@@ -1,0 +1,51 @@
+pack:
+  id: forge/notebooks
+  version: 1.0.0
+  name: Notebooks
+  description: |
+    Notebook capability pack. Provides execution of Jupyter notebook cells in
+    a pinned kernel. Outputs (text, tables, images) are stored as artifacts
+    and referenced by URI; the model never sees raw image bytes inline.
+  publisher: forge
+  trust_level: first_party
+  operations:
+    - id: run_cell
+      description: Execute a single notebook cell.
+      effects: [EXECUTE_LOCAL, READ_LOCAL, WRITE_LOCAL]
+    - id: run_notebook
+      description: Execute a full notebook end-to-end.
+      effects: [EXECUTE_LOCAL, READ_LOCAL, WRITE_LOCAL]
+    - id: list_kernels
+      description: List available pinned kernels.
+      effects: [READ_LOCAL]
+    - id: get_cell_output
+      description: Retrieve the output of a previously executed cell.
+      effects: [READ_LOCAL]
+  filesystem:
+    read: ["worktree://active/**"]
+    write: ["artifact://notebooks/**", "worktree://active/notebooks/**"]
+  network:
+    default: deny
+    proxy_required: false
+    destinations: []
+  secrets: []
+  subprocesses:
+    jupyter_binary: pinned
+    kernel: pinned
+    max_concurrent: 1
+  external_state:
+    default: deny
+  resource_limits:
+    memory_bytes: 2147483648
+    cpu_seconds: 600
+    wall_clock_seconds: 900
+  model_visibility:
+    content_trust: untrusted
+    redact_patterns: []
+  configuration_schema:
+    type: object
+    properties:
+      default_kernel: {type: string, default: "python3"}
+      cell_timeout_ms: {type: integer, default: 60000}
+      max_output_bytes: {type: integer, default: 1048576}
+    additionalProperties: false

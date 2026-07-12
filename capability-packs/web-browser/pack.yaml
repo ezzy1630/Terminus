@@ -1,0 +1,63 @@
+pack:
+  id: forge/web-browser
+  version: 1.0.0
+  name: Web Browser
+  description: |
+    Browser automation capability pack. Provides page navigation, content
+    extraction, screenshot capture, and click/type interaction through a
+    sandboxed browser. All network egress goes through the brokered proxy;
+    pages and screenshots are stored as artifacts and referenced by URI in
+    the model context.
+  publisher: forge
+  trust_level: first_party
+  operations:
+    - id: navigate
+      description: Navigate the browser to a URL.
+      effects: [NETWORK_READ]
+      network_destinations: ["https://**"]
+    - id: extract_text
+      description: Extract the visible text content of the current page.
+      effects: [READ_LOCAL]
+    - id: click
+      description: Click an element by selector.
+      effects: [WRITE_LOCAL]
+    - id: type
+      description: Type text into a focused element.
+      effects: [WRITE_LOCAL]
+    - id: screenshot
+      description: Capture a PNG screenshot of the current page.
+      effects: [WRITE_LOCAL]
+  filesystem:
+    read: ["worktree://active/**"]
+    write: ["artifact://browser/**"]
+  network:
+    default: deny
+    proxy_required: true
+    destinations:
+      - "https://**"
+    private_address_denied: true
+  secrets: []
+  subprocesses:
+    browser_binary: pinned
+    args: ["--no-sandbox", "--disable-gpu", "--headless"]
+    max_concurrent: 1
+  external_state:
+    default: deny
+  resource_limits:
+    memory_bytes: 1073741824
+    cpu_seconds: 120
+    wall_clock_seconds: 300
+  model_visibility:
+    content_trust: untrusted
+    redact_patterns: []
+  configuration_schema:
+    type: object
+    properties:
+      viewport:
+        type: object
+        properties:
+          width: {type: integer, default: 1280}
+          height: {type: integer, default: 720}
+      user_agent: {type: string, default: "Forge-Browser/1.0"}
+      block_resources: {type: array, items: {type: string}, default: ["image", "media"]}
+    additionalProperties: false

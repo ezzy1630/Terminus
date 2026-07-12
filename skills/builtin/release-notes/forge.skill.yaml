@@ -1,0 +1,26 @@
+skill:
+  id: forge/release-notes
+  version: 1.2.0
+  skill_md_hash: sha256:cc9bd8786351c8508ef13f7a43496eab54a11531c42848195881db3c899fcd4a
+  compatible_harness: '>=1.0 <2.0'
+  description: Generate release notes from the git history between two refs.
+  required_capabilities:
+    tools:
+    - read
+    filesystem:
+      read:
+      - workspace://**
+      write:
+      - workspace://CHANGELOG.md.draft
+    network: []
+    secrets: []
+  validation_profile: none
+  tests:
+  - evals/release-notes/basic.yaml
+  - evals/release-notes/security-surfacing.yaml
+  - evals/release-notes/empty-range.yaml
+  provenance:
+    source: https://github.com/forge/forge/tree/main/skills/builtin/release-notes
+    publisher: forge
+    trust_level: first_party
+    signature: forge-first-party

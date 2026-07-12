@@ -1,0 +1,22 @@
+# Buf configuration for Protobuf schema governance (SPEC §45.4).
+# The .proto files are the source of truth for the kernel RPC protocol.
+
+version: v2
+
+modules:
+  - path: proto
+
+lint:
+  use:
+    - STANDARD
+    - COMMENTS
+  except:
+    - PACKAGE_VERSION_SUFFIX
+  ignore_only:
+    COMMENTS:
+      - forge/kernel/v1/kernel.proto
+
+breaking:
+  use:
+    - WIRE_JSON
+  ignore: []

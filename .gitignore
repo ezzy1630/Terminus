@@ -1,2 +1,93 @@
-skills/
+# ────────────────────────── Dependencies ───────────────────────────────────
 node_modules/
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Python virtualenvs
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# ────────────────────────── Build outputs ──────────────────────────────────
+# Next.js
+/.next/
+/out/
+/build
+*.tsbuildinfo
+next-env.d.ts
+
+# TypeScript package build outputs
+packages/*/dist/
+packages/*/*.tsbuildinfo
+
+# Generated code (kept under src control per SPEC §45.2, but local regen output)
+schemas/generated/*
+
+# ────────────────────────── Forge runtime state ────────────────────────────
+# Per SPEC §29: SQLite DB, artifact store, journals, patch state are runtime
+# state, NOT source-of-truth. They are regenerated from migrations + events.
+.forge-data/
+db/*.db
+db/*.db-journal
+db/*.db-wal
+db/*.db-shm
+
+# Mini-service logs
+*.log
+dev.log
+dev.out.log
+server.log
+/forge-*.log
+
+# ────────────────────────── Environment & secrets ──────────────────────────
+.env*
+!.env.example
+*.pem
+*.key
+local-*
+.claude
+.z-ai-config
+
+# ────────────────────────── Editor / OS ────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ────────────────────────── Test coverage ──────────────────────────────────
+/coverage
+.nyc_output/
+
+# ────────────────────────── Eval results ───────────────────────────────────
+# Per SPEC §42.1: evals/results/ is "ignored except checked-in golden summaries"
+evals/results/*
+!evals/results/.gitkeep
+!evals/results/golden/
+
+# ────────────────────────── Vercel ─────────────────────────────────────────
+.vercel
+
+# ────────────────────────── Sandbox / temp ─────────────────────────────────
+tool-results/
+upload/
+download/
+/tmp/
+*.tmp
+*.bak

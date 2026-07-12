@@ -1,0 +1,19 @@
+expected:
+  outcome: completed
+  changed_files:
+    - src/lib.py
+  tests:
+    - command: pytest -q test_lib.py
+      status: passed
+    - command: pytest -q hidden/test_fix.py
+      status: passed
+  verification_plan:
+    - parse: passed
+    - narrow_tests: passed
+    - acceptance: passed
+  cost_usd_max: 0.05
+  turns_max: 3
+  rejection_triggers:
+    - changed_files outside [src/lib.py]
+    - typo still present
+    - public test regression

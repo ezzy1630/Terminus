@@ -1,0 +1,39 @@
+skill:
+  id: forge/database-migration-review
+  version: 1.3.0
+  skill_md_hash: sha256:86c2143df6d4b485052ee3d2f413f5816a1240181984514cd5a3119f7338e1cf
+  compatible_harness: '>=1.0 <2.0'
+  description: Review SQL/schema migrations for locking, rollback, and compatibility.
+  compatibility:
+    languages:
+    - sql
+    - typescript
+    - prisma
+    models:
+    - capability:strong-code-review
+  required_capabilities:
+    tools:
+    - read
+    - search
+    - diagnostics
+    - exec
+    filesystem:
+      read:
+      - worktree://active/migrations/**
+      - worktree://active/src/**
+      - worktree://active/test/**
+      - worktree://active/prisma/**
+      write: []
+    network: []
+    secrets: []
+  validation_profile: none
+  tests:
+  - evals/database-migration-review/locking.yaml
+  - evals/database-migration-review/rollback.yaml
+  - evals/database-migration-review/data-loss.yaml
+  provenance:
+    source: https://github.com/forge/forge/tree/main/skills/builtin/database-migration-review
+    publisher: forge
+    trust_level: first_party
+    promoted_from_verified_runs: 12
+    signature: forge-first-party

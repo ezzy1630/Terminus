@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "@forge/domain": ["./packages/domain/src/index.ts"],
+      "@forge/runtime-protocol": ["./packages/runtime-protocol/src/index.ts"],
+      "@forge/context-ir": ["./packages/context-ir/src/index.ts"],
+      "@forge/context-compiler": ["./packages/context-compiler/src/index.ts"],
+      "@forge/provider-core": ["./packages/provider-core/src/index.ts"],
+      "@forge/provider-openai": ["./packages/provider-openai/src/index.ts"],
+      "@forge/provider-anthropic": ["./packages/provider-anthropic/src/index.ts"],
+      "@forge/provider-google": ["./packages/provider-google/src/index.ts"],
+      "@forge/provider-local": ["./packages/provider-local/src/index.ts"],
+      "@forge/model-router": ["./packages/model-router/src/index.ts"],
+      "@forge/task-runtime": ["./packages/task-runtime/src/index.ts"],
+      "@forge/session-runtime": ["./packages/session-runtime/src/index.ts"],
+      "@forge/orchestration": ["./packages/orchestration/src/index.ts"],
+      "@forge/verification": ["./packages/verification/src/index.ts"],
+      "@forge/memory": ["./packages/memory/src/index.ts"],
+      "@forge/capability-registry": ["./packages/capability-registry/src/index.ts"],
+      "@forge/extension-host": ["./packages/extension-host/src/index.ts"],
+      "@forge/adapter-sdk": ["./packages/adapter-sdk/src/index.ts"],
+      "@forge/policy-coordinator": ["./packages/policy-coordinator/src/index.ts"],
+      "@forge/artifact-client": ["./packages/artifact-client/src/index.ts"],
+      "@forge/observability": ["./packages/observability/src/index.ts"],
+      "@forge/config": ["./packages/config/src/index.ts"],
+      "@forge/testkit": ["./packages/testkit/src/index.ts"],
+      "@forge/public-api": ["./packages/public-api/src/index.ts"],
+      "@forge/public-client": ["./packages/public-client/src/index.ts"],
+      "@forge/open-code-bridge": ["./packages/open-code-bridge/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/src/**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules",
+    "packages/*/dist/**",
+    "packages/*/node_modules/**"
+  ]
+}

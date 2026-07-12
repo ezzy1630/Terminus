@@ -1,0 +1,28 @@
+task:
+  id: tiny-bugfix/02-null-check
+  suite: forge-internal
+  version: 1
+  source_commit: b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3
+  image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  timeout_seconds: 300
+  budget:
+    model_micros: 600000
+    compute_seconds: 120
+    wall_clock_seconds: 300
+    human_approvals: 0
+  allowed_network: []
+  secrets: []
+  grader_version: forge-internal-1.0
+  risk_class: low
+  acceptance_criteria:
+    - id: null-handled
+      statement: |
+        The `parse_user` function returns `None` (not raises) when given a
+        `None` input or an input missing the "name" key.
+      required: true
+    - id: existing-tests-pass
+      statement: All existing tests in test_parser.py pass.
+      required: true
+  non_goals:
+    - Do not change the function signature.
+    - Do not add new dependencies.

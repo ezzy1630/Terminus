@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/capabilities/external-harness.json",
+  "title": "ExternalHarnessCapability",
+  "description": "Capability descriptor for an external harness adapter (SPEC §12.4, §35.11, §35.12). Adapters run as separate processes with an observed capability profile; Forge independently inspects the final workspace, collects artifacts, and runs verification. Inner-harness self-report is not sufficient evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "kind", "source", "content_hash", "trust_level", "operations", "inner_harness_version", "capabilities", "observed_by_probe", "last_verified"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]+$" },
+    "version": { "type": "string" },
+    "kind": { "const": "external_harness" },
+    "source": { "type": "string" },
+    "content_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "signature": { "type": ["string", "null"] },
+    "publisher": { "type": ["string", "null"] },
+    "trust_level": { "enum": ["builtin", "first_party", "verified_third_party", "untrusted"] },
+    "entrypoint": { "type": "string" },
+    "operations": { "type": "array", "items": { "type": "string" } },
+    "filesystem": { "type": "object" },
+    "network": { "type": "object" },
+    "secrets": { "type": "array", "items": { "type": "string" } },
+    "subprocesses": { "type": "object" },
+    "external_state": { "type": "object" },
+    "resource_limits": { "type": "object" },
+    "model_visibility": { "type": "object" },
+    "configuration_schema": { "type": ["object", "null"] },
+    "compatibility": { "type": "object" },
+    "inner_harness_version": { "enum": ["pinned", "floating", "unspecified"] },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exact_context_visibility", "tool_interception", "filesystem_enforcement", "network_enforcement", "secret_isolation", "session_resume", "typed_results", "artifact_export", "cancellation", "model_selection", "native_compaction"],
+      "properties": {
+        "exact_context_visibility": { "enum": ["full", "partial", "opaque"] },
+        "tool_interception": { "enum": ["full", "partial", "none"] },
+        "filesystem_enforcement": { "enum": ["native", "outer_sandbox", "none"] },
+        "network_enforcement": { "enum": ["native", "outer_sandbox", "none"] },
+        "secret_isolation": { "enum": ["native", "outer_broker", "none"] },
+        "session_resume": { "enum": ["native", "emulated", "none"] },
+        "typed_results": { "enum": ["native", "parsed", "none"] },
+        "artifact_export": { "enum": ["complete", "partial", "none"] },
+        "cancellation": { "enum": ["reliable", "best_effort", "none"] },
+        "model_selection": { "enum": ["controlled", "constrained", "opaque"] },
+        "native_compaction": { "type": "boolean" }
+      }
+    },
+    "observed_by_probe": { "type": ["object", "null"] },
+    "last_verified": { "type": "string", "format": "date-time" },
+    "discrepancies": { "type": "array", "items": { "type": "string" } },
+    "result_schema": { "type": "string", "description": "Normalization schema for results, e.g., forge.worker.v1" }
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/domain/context-fragment.json",
+  "title": "ContextFragment",
+  "description": "Context Compiler IR fragment (SPEC §8.1, Appendix E.2). Fragments are the unit of context compilation, selection, and invalidation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "kind",
+    "contentRef",
+    "source",
+    "authority",
+    "priority",
+    "trust",
+    "confidentiality",
+    "injectionRisk",
+    "exactness",
+    "dependencies",
+    "invalidation",
+    "estimatedTokens"
+  ],
+  "properties": {
+    "id": { "type": "string", "description": "UUIDv7 fragment id." },
+    "kind": {
+      "enum": [
+        "authority",
+        "project_rule",
+        "task_contract",
+        "world_state",
+        "code",
+        "test",
+        "documentation",
+        "tool_result",
+        "recent_episode",
+        "checkpoint",
+        "memory",
+        "tool_schema",
+        "user_attachment"
+      ]
+    },
+    "contentRef": { "type": "string", "description": "artifact:// URI or inline ref." },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "producer", "producerVersion", "observedAt", "observedBy", "evidenceRefs"],
+      "properties": {
+        "uri": { "type": "string" },
+        "producer": { "type": "string" },
+        "producerVersion": { "type": "string" },
+        "observedAt": { "type": "string", "format": "date-time" },
+        "observedBy": { "enum": ["kernel", "control", "provider", "user", "external"] },
+        "evidenceRefs": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "sourceVersion": { "type": ["string", "null"] },
+    "authority": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "priority": { "type": "integer", "minimum": 0, "maximum": 1000 },
+    "trust": { "enum": ["trusted", "derived", "untrusted"] },
+    "confidentiality": { "enum": ["public", "workspace", "secret_adjacent", "secret"] },
+    "injectionRisk": { "enum": ["none", "low", "medium", "high"] },
+    "exactness": { "enum": ["exact", "semantics_preserving", "recoverable_by_reference"] },
+    "scope": { "type": ["object", "null"] },
+    "freshness": { "type": ["object", "null"] },
+    "dependencies": { "type": "array", "items": { "type": "string" } },
+    "invalidation": { "type": "array", "items": {} },
+    "estimatedTokens": { "type": "object", "additionalProperties": { "type": "integer" } },
+    "selectionFeatures": { "type": ["object", "null"] }
+  }
+}

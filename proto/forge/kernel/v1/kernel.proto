@@ -1,0 +1,463 @@
+// Forge kernel RPC protocol — canonical source of truth (SPEC §7.1, §31, Appendix D).
+//
+// This .proto is the source of truth for the kernel protocol even though the
+// mini-service implementation uses JSON-over-HTTP during bootstrap. Buf
+// breaking-change checks run in CI (SPEC §45.4).
+//
+// Compatibility rules (SPEC §45.4):
+//   - Never reuse field numbers.
+//   - Removed fields are `reserved`.
+//   - Add optional fields rather than changing meaning.
+//   - Avoid maps where deterministic order matters on the wire or in hashes.
+//   - Enumerations reserve `UNSPECIFIED = 0`.
+//   - Bytes and strings have documented size limits.
+//   - Oneof evolution is tested.
+
+syntax = "proto3";
+
+package forge.kernel.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// =============================================================================
+// Common types
+// =============================================================================
+
+// RequestContext is carried by every privileged kernel RPC. The capability
+// token MUST be validated against the kernel's instance identity before any
+// effect is authorized (SPEC §31.6).
+message RequestContext {
+  string request_id = 1;          // UUIDv7
+  string idempotency_key = 2;     // Stable client-generated key for retries
+  string session_id = 3;
+  string task_id = 4;
+  string turn_id = 5;
+  string actor_id = 6;            // Principal driving the request
+  string traceparent = 7;         // W3C Trace Context
+  string capability_token = 8;    // Short-lived kernel-issued capability
+}
+
+// ArtifactRef references an immutable blob in the content-addressed store
+// (SPEC §29.3). `sha256` is the canonical `sha256:<hex>` form.
+message ArtifactRef {
+  string sha256 = 1;
+  uint64 size_bytes = 2;
+  string media_type = 3;
+}
+
+// EffectIntent binds the request to the user's intent and the policy decision.
+// Taint sources propagate from untrusted content (Z5) into downstream policy
+// (SPEC §27.3, §36.15).
+message EffectIntent {
+  string user_intent_ref = 1;          // URI of task contract / approval
+  string task_contract_hash = 2;       // sha256 of the active contract
+  string trust_label = 3;              // trusted | derived | untrusted
+  string confidentiality_label = 4;    // public | workspace | secret_adjacent | secret
+  repeated string taint_sources = 5;   // URIs of untrusted provenance
+  string policy_profile_id = 6;        // e.g. secure-local-default
+  string expected_effect_class = 7;    // SPEC §27.3 taxonomy
+}
+
+message WorkspacePath {
+  string workspace_id = 1;
+  string relative_path = 2;            // Canonicalized within the workspace root
+}
+
+message SourceVersion {
+  WorkspacePath path = 1;
+  string sha256 = 2;
+  string repository_revision = 3;      // Git commit SHA or "no-vcs"
+}
+
+message LineRange {
+  uint32 start_line = 1;
+  uint32 end_line = 2;
+}
+
+message Elision {
+  LineRange range = 1;
+  string reason = 2;
+}
+
+message Diagnostic {
+  WorkspacePath path = 1;
+  uint32 start_line = 2;
+  uint32 start_column = 3;
+  uint32 end_line = 4;
+  uint32 end_column = 5;
+  string severity = 6;     // error | warning | info | hint
+  string source = 7;       // e.g. "tsc", "rustc", "pyright"
+  string code = 8;
+  string message = 9;
+}
+
+message PolicyDecision {
+  string decision_id = 1;
+  string decision = 2;           // allow | deny | prompt
+  repeated string rule_ids = 3;
+  string explanation = 4;        // Safe, non-secret explanation
+}
+
+// =============================================================================
+// File service (SPEC §11.5, §34.5)
+// =============================================================================
+
+message ReadFileRequest {
+  RequestContext context = 1;
+  EffectIntent intent = 2;
+  WorkspacePath path = 3;
+  string mode = 4;                       // full | outline | ranges | symbols
+  repeated LineRange ranges = 5;
+  repeated string symbols = 6;
+  uint64 max_bytes = 7;                  // Hard cap; truncation MUST be reported
+  string expected_sha256 = 8;            // Stale-write protection
+}
+
+message ReadFileResponse {
+  SourceVersion source_version = 1;
+  string rendered_mode = 2;              // The mode actually used
+  ArtifactRef full_content = 3;          // Always available, may be elided in projection
+  bytes model_projection_utf8 = 4;       // What the model actually sees
+  repeated Elision elisions = 5;
+  repeated Diagnostic diagnostics = 6;
+  bool truncated = 7;                    // MUST be true if max_bytes hit
+  string continuation_token = 8;         // Opaque cursor for next page
+}
+
+// =============================================================================
+// Patch service (SPEC §11.6, §34.7, §34.8, §34.9)
+// =============================================================================
+
+message WorkspaceBaseline {
+  string workspace_id = 1;
+  string repository_revision = 2;
+  string dirty_digest = 3;               // sha256 of the dirty working set
+  repeated SourceVersion sources = 4;    // Per-file hashes (anchor set)
+}
+
+enum PatchCommitMode {
+  PATCH_COMMIT_MODE_UNSPECIFIED = 0;
+  PATCH_COMMIT_MODE_PREVIEW_ONLY = 1;        // Validate, write nothing
+  PATCH_COMMIT_MODE_STAGE_ONLY = 2;          // Stage to journal
+  PATCH_COMMIT_MODE_APPLY_TO_WORKTREE = 3;   // Commit to working tree
+}
+
+message PatchRequest {
+  RequestContext context = 1;
+  EffectIntent intent = 2;
+  string transaction_id = 3;             // Idempotency / journal key
+  WorkspaceBaseline baseline = 4;        // Snapshot anchor
+  repeated PatchEdit edits = 5;
+  string validation_profile_id = 6;      // e.g. "format-and-parse"
+  bool allow_transient_invalid_state = 7;
+  PatchCommitMode commit_mode = 8;
+}
+
+message PatchEdit {
+  oneof edit {
+    ReplaceSymbol replace_symbol = 10;
+    ReplaceRange replace_range = 11;
+    ReplaceExactText replace_exact_text = 12;
+    InsertContent insert = 13;
+    DeleteRange delete_range = 14;
+    CreateFile create_file = 15;
+    MoveFile move_file = 16;
+    DeleteFile delete_file = 17;
+    UnifiedDiff unified_diff = 18;
+  }
+}
+
+message ReplaceSymbol {
+  WorkspacePath path = 1;
+  string expected_sha256 = 2;
+  string symbol = 3;
+  string structural_fingerprint = 4;     // Tree-sitter AST fingerprint
+  bytes replacement_utf8 = 5;
+}
+
+message ReplaceRange {
+  WorkspacePath path = 1;
+  string expected_sha256 = 2;
+  LineRange range = 3;
+  bytes replacement_utf8 = 4;
+}
+
+message ReplaceExactText {
+  WorkspacePath path = 1;
+  string expected_sha256 = 2;
+  bytes expected_utf8 = 3;
+  bytes replacement_utf8 = 4;
+  bool require_unique = 5;               // Reject if expected text appears >1 time
+}
+
+message InsertContent {
+  WorkspacePath path = 1;
+  string expected_sha256 = 2;
+  string anchor_kind = 3;                // symbol | line | range-start | range-end | eof
+  string anchor = 4;
+  string position = 5;                   // before | after | replace
+  bytes content_utf8 = 6;
+}
+
+message DeleteRange {
+  WorkspacePath path = 1;
+  string expected_sha256 = 2;
+  LineRange range = 3;
+}
+
+message CreateFile {
+  WorkspacePath path = 1;
+  bool must_not_exist = 2;               // Blind-create guard
+  bytes content = 3;
+  string media_type = 4;
+}
+
+message MoveFile {
+  WorkspacePath from = 1;
+  WorkspacePath to = 2;
+  string expected_sha256 = 3;
+  bool target_must_not_exist = 4;
+}
+
+message DeleteFile {
+  WorkspacePath path = 1;
+  string expected_sha256 = 2;
+}
+
+message UnifiedDiff {
+  string repository_revision = 1;
+  bytes diff_utf8 = 2;
+}
+
+message ChangedFile {
+  WorkspacePath path = 1;
+  string old_sha256 = 2;
+  string new_sha256 = 3;
+  string operation = 4;                  // create | modify | move | delete
+}
+
+message ValidationResult {
+  string check_id = 1;                   // e.g. "rustfmt", "tsc", "parse"
+  string status = 2;                     // pass | fail | skipped
+  string summary = 3;
+  ArtifactRef evidence = 4;              // Diagnostic output artifact
+}
+
+message PatchResponse {
+  string transaction_id = 1;
+  string state = 2;                      // staged | applied | rolled-back | failed
+  string final_repository_revision = 3;
+  string final_dirty_digest = 4;
+  repeated ChangedFile changed_files = 5;
+  repeated ValidationResult validations = 6;
+  ArtifactRef complete_diff = 7;         // Full unified diff artifact
+}
+
+message PatchReconcileRequest {
+  RequestContext context = 1;
+  string transaction_id = 2;             // Unknown-settlement reconciliation
+}
+
+// =============================================================================
+// Process / exec service (SPEC §11.7, §34.11)
+// =============================================================================
+
+message ShellSpec {
+  bool enabled = 1;
+  string dialect = 2;                    // bash | sh | powershell | cmd
+  string script = 3;                     // Normalized script (NOT raw user input)
+}
+
+message CommandSpec {
+  string program = 1;
+  repeated string args = 2;
+  WorkspacePath cwd = 3;
+  map<string, string> public_env = 4;    // Non-secret env only
+  repeated string secret_capability_uris = 5;  // Broker handles injection
+  google.protobuf.Duration timeout = 6;
+  bool allocate_pty = 7;
+  ShellSpec shell = 8;
+}
+
+message StartProcessRequest {
+  RequestContext context = 1;
+  EffectIntent intent = 2;
+  CommandSpec command = 3;
+  string sandbox_profile_id = 4;         // e.g. "secure-local-default"
+  string output_policy_id = 5;           // Redaction / truncation policy
+}
+
+message ProcessStarted {
+  string process_id = 1;
+  string job_id = 2;
+  string resolved_executable = 3;        // Post-canonicalization
+  google.protobuf.Timestamp started_at = 4;
+}
+
+message OutputChunk {
+  uint64 cursor = 1;                     // Monotonic per stream
+  bytes bytes = 2;
+  bool redacted = 3;                     // True if secrets were stripped
+}
+
+message ProcessExited {
+  int32 exit_code = 1;
+  string signal = 2;                     // Empty if normal exit
+  google.protobuf.Timestamp exited_at = 3;
+  ArtifactRef stdout_artifact = 4;       // Full output spilled to CAS
+  ArtifactRef stderr_artifact = 5;
+}
+
+message ProcessEvent {
+  uint64 sequence = 1;                   // Monotonic per process
+  google.protobuf.Timestamp occurred_at = 2;
+  oneof event {
+    ProcessStarted started = 10;
+    OutputChunk stdout = 11;
+    OutputChunk stderr = 12;
+    ProcessExited exited = 13;
+    PolicyDecision policy = 14;          // Pre-exec policy decision
+  }
+}
+
+message CancelProcessRequest {
+  RequestContext context = 1;
+  string process_id = 2;
+  string reason = 3;                     // e.g. "timeout", "user-cancel", "budget-exceeded"
+}
+
+message CancelProcessResponse {
+  string state = 1;                      // cancelled | already-exited | unknown
+}
+
+// =============================================================================
+// Job service (SPEC §11.7, §34.12) — durable, restart-survivable processes
+// =============================================================================
+
+message StartJobRequest {
+  RequestContext context = 1;
+  EffectIntent intent = 2;
+  CommandSpec command = 3;
+  string sandbox_profile_id = 4;
+  string output_policy_id = 5;
+  bool durable = 6;                      // Survives control-plane restart
+}
+
+message StartJobResponse {
+  string job_id = 1;
+  string process_id = 2;
+  google.protobuf.Timestamp started_at = 3;
+}
+
+message JobStreamRequest {
+  RequestContext context = 1;
+  string job_id = 2;
+  uint64 from_sequence = 3;              // Resume cursor (SSE-style)
+}
+
+message JobEvent {
+  uint64 sequence = 1;
+  google.protobuf.Timestamp occurred_at = 2;
+  oneof event {
+    ProcessStarted started = 10;
+    OutputChunk stdout = 11;
+    OutputChunk stderr = 12;
+    ProcessExited exited = 13;
+    PolicyDecision policy = 14;
+    JobReconciled reconciled = 15;       // Emitted on restart recovery
+  }
+}
+
+message JobReconciled {
+  string state = 1;                      // running | exited | unknown-settlement
+  string explanation = 2;
+}
+
+message JobInputRequest {
+  RequestContext context = 1;
+  string job_id = 2;
+  bytes stdin = 3;
+}
+
+message JobSignalRequest {
+  RequestContext context = 1;
+  string job_id = 2;
+  string signal = 3;                     // SIGTERM, SIGKILL, etc.
+}
+
+message JobStopRequest {
+  RequestContext context = 1;
+  string job_id = 2;
+  string reason = 3;
+}
+
+message JobGetRequest {
+  RequestContext context = 1;
+  string job_id = 2;
+}
+
+message JobState {
+  string job_id = 1;
+  string state = 2;                      // queued | running | exited | unknown
+  int32 exit_code = 3;
+  google.protobuf.Timestamp started_at = 4;
+  google.protobuf.Timestamp exited_at = 5;
+  ArtifactRef stdout_artifact = 6;
+  ArtifactRef stderr_artifact = 7;
+}
+
+// =============================================================================
+// Kernel info / health
+// =============================================================================
+
+message KernelInfo {
+  string version = 1;
+  string protocol_version = 2;           // e.g. "forge.kernel.v1"
+  string build_revision = 3;
+  repeated string supported_backends = 4;  // linux-bwrap | macos-sandbox | windows | container | microvm
+  repeated string supported_services = 5;
+}
+
+message KernelHealth {
+  string state = 1;                      // healthy | degraded | failing
+  repeated string degradations = 2;      // Empty if healthy
+  google.protobuf.Timestamp checked_at = 3;
+}
+
+// =============================================================================
+// Services (SPEC §31.1)
+// =============================================================================
+
+service KernelInfoService {
+  rpc GetInfo(google.protobuf.Empty) returns (KernelInfo);
+  rpc Health(google.protobuf.Empty) returns (KernelHealth);
+}
+
+service FileService {
+  rpc Read(ReadFileRequest) returns (ReadFileResponse);
+}
+
+service PatchService {
+  rpc Apply(PatchRequest) returns (PatchResponse);
+  rpc Reconcile(PatchReconcileRequest) returns (PatchResponse);
+}
+
+service ProcessService {
+  rpc Start(StartProcessRequest) returns (stream ProcessEvent);
+  rpc Cancel(CancelProcessRequest) returns (CancelProcessResponse);
+}
+
+service JobService {
+  rpc Start(StartJobRequest) returns (StartJobResponse);
+  rpc Stream(JobStreamRequest) returns (stream JobEvent);
+  rpc Input(JobInputRequest) returns (JobState);
+  rpc Signal(JobSignalRequest) returns (JobState);
+  rpc Stop(JobStopRequest) returns (JobState);
+  rpc Get(JobGetRequest) returns (JobState);
+}
+
+// The full protocol adds sandbox, policy, secrets, network, Git,
+// code-intelligence, extension, and artifact-ingest services. The descriptor
+// set is published with each kernel build (SPEC §31.1, Appendix D).

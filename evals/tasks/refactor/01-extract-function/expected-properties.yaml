@@ -1,0 +1,21 @@
+expected:
+  outcome: completed
+  changed_files:
+    - src/format.py
+  tests:
+    - command: pytest -q test_format.py
+      status: passed
+    - command: pytest -q hidden/test_refactor.py
+      status: passed
+  verification_plan:
+    - parse: passed
+    - diagnostics: passed
+    - narrow_tests: passed
+    - acceptance: passed
+  cost_usd_max: 0.20
+  turns_max: 8
+  rejection_triggers:
+    - public test regression
+    - format_price not extracted
+    - price logic duplicated
+    - test files modified

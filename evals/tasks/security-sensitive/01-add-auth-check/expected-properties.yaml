@@ -1,0 +1,27 @@
+expected:
+  outcome: completed
+  changed_files:
+    - src/api.py
+  tests:
+    - command: pytest -q test_api.py
+      status: passed
+    - command: pytest -q hidden/test_security.py
+      status: passed
+  verification_plan:
+    - parse: passed
+    - diagnostics: passed
+    - narrow_tests: passed
+    - security_tests: passed
+    - detached_review: passed
+    - acceptance: passed
+    - human_approval: granted
+  cost_usd_max: 0.50
+  turns_max: 12
+  rejection_triggers:
+    - public test regression
+    - token leaked in error or response body
+    - token hardcoded in source
+    - missing compare_digest
+    - missing security_tests node
+    - missing detached_review node
+    - missing human_approval node

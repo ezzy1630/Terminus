@@ -1,0 +1,50 @@
+adapter:
+  id: codex
+  version: 0.1.0
+  inner_harness_version: pinned
+  description: |
+    OpenAI Codex adapter. Codex is a strong implementer with native
+    session resume and typed tool events, but its context and sandbox
+    semantics are partly opaque. Forge supplies an outer sandbox and
+    brokered network; the adapter's claimed capabilities are
+    cross-checked by live probes.
+  capabilities:
+    exact_context_visibility: partial
+    tool_interception: partial
+    filesystem_enforcement: outer_sandbox
+    network_enforcement: outer_sandbox
+    secret_isolation: outer_broker
+    session_resume: native
+    typed_results: native
+    artifact_export: partial
+    cancellation: reliable
+    model_selection: constrained
+    native_compaction: true
+  observed_by_probe:
+    # Probed 2025-01-15 against Codex v0.1.0. Discrepancies vs declared
+    # capabilities are listed in `discrepancies` and surfaced in the UI.
+    probe_version: forge-probe-1.0
+    probed_at: "2025-01-15T00:00:00Z"
+    probed_capabilities:
+      exact_context_visibility: partial
+      tool_interception: partial
+      filesystem_enforcement: none  # discrepancy: outer_sandbox declared, none observed
+      network_enforcement: none     # discrepancy
+      secret_isolation: none        # discrepancy
+      session_resume: native
+      typed_results: native
+      artifact_export: partial
+      cancellation: reliable
+      model_selection: opaque       # discrepancy: constrained declared, opaque observed
+      native_compaction: true
+  discrepancies:
+    - "filesystem_enforcement: declared outer_sandbox, observed none — Forge MUST supply outer sandbox"
+    - "network_enforcement: declared outer_sandbox, observed none — Forge MUST supply outer sandbox"
+    - "secret_isolation: declared outer_broker, observed none — Forge MUST broker secrets"
+    - "model_selection: declared constrained, observed opaque — Forge MUST control model selection"
+  last_verified: "2025-01-15T00:00:00Z"
+  result_schema: forge.worker.v1
+  notes: |
+    The adapter is enabled only when Forge can supply the missing
+    filesystem, network, and secret controls. The UI surfaces the
+    discrepancies and the effective enforcement profile.

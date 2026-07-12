@@ -1,0 +1,74 @@
+baseline:
+  id: forge-full
+  version: 1
+  description: |
+    Forge full mode baseline (SPEC §18.1, §41.2). The strongest
+    supported Forge configuration: scout + implementer + reviewer
+    topology, adaptive context with provenance DAG, memory on, native
+    compaction, deterministic routing with escalation. Used as the
+    upper-bound reference and the default comparison point for new
+    features.
+  harness: forge
+  harness_commit: 0000000000000000000000000000000000000000
+  configuration:
+    orchestration:
+      default: single_agent_with_auxiliaries
+      scouts: {enabled: true, read_only: true}
+      writers: {enabled: true, require_positive_expected_value: true, max_parallel: 2}
+      reviewer: {risk_triggered: true}
+      loop_protection:
+        repeated_identical_failure: 3
+        edit_revert_cycles: 2
+        turns_without_progress: 8
+        maximum_turns: 50
+    context:
+      compiler_version: v1
+      hard_safety_margin_tokens: 8192
+      evidence_coverage: true
+      recent_episode_policy:
+        mode: adaptive
+        minimum_complete_episodes: 2
+        maximum_complete_episodes: 10
+      retrieval:
+        lexical: true
+        tree_sitter: true
+        lsp: true
+        dependency_graph: true
+        semantic: {enabled: false}
+      compaction:
+        semantic_boundaries: true
+        projected_context_threshold: 0.72
+        validate_checkpoint: true
+      memory: {enabled: true}
+      external_compression: {enabled: false, shadow_mode: true}
+    aci:
+      default_tools: [read, search, patch, exec, job, inspect, capability]
+      maximum_model_result_bytes: 32768
+      maximum_raw_tool_artifact_bytes: 268435456
+    routing:
+      mode: deterministic
+      max_provider_attempts_per_turn: 3
+      escalate_after:
+        repeated_tool_failures: 2
+        verification_repairs: 2
+        explicit_low_confidence: true
+      learned_router: {enabled: false}
+    verification:
+      profiles:
+        ordinary_code:
+          required: [parse, diagnostics, narrow_tests, acceptance]
+          optional: [package_tests, full_suite, review]
+        security_change:
+          required: [parse, diagnostics, narrow_tests, security_tests, detached_review, acceptance, human_approval]
+  expected_behavior:
+    - scout delegation for unfamiliar repos
+    - reviewer triggered by risk class high or critical
+    - memory retrieval on every turn
+    - compaction at projected_context_threshold
+    - up to 3 provider attempts per turn with escalation
+  use_in_cohorts:
+    - tiny-bugfix
+    - refactor
+    - security-sensitive
+    - terminal-bench
+    - swe-bench-verified

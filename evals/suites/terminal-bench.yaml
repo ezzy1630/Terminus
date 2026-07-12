@@ -1,0 +1,26 @@
+suite:
+  id: terminal-bench
+  version: 1
+  description: |
+    Terminal-Bench 2.x cohort (SPEC §41.3). Tasks that exercise shell,
+    process, and job management — long-running builds, test watchers,
+    interactive CLIs. Used to test job lifecycle, cancellation, and
+    PTY input handling.
+  source: https://github.com/laude-institute/terminal-bench
+  license: MIT
+  task_count: 80
+  pinned_image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  default_timeout_seconds: 600
+  default_budget:
+    model_micros: 2000000
+    compute_seconds: 300
+    wall_clock_seconds: 600
+    human_approvals: 0
+  grader_version: terminal-bench-1.0
+  metrics:
+    primary: task_success
+    secondary: [commands_issued, job_cancellations, pty_interactions, cost_usd]
+  cohorts:
+    - shell-navigation
+    - long-builds
+    - interactive-cli

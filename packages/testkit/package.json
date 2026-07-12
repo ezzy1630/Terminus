@@ -1,0 +1,15 @@
+{
+  "name": "@forge/testkit",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "build": "tsc -p tsconfig.json", "lint": "eslint src", "test": "bun test" },
+  "dependencies": {
+    "@forge/domain": "workspace:*",
+    "@forge/runtime-protocol": "workspace:*",
+    "@forge/context-ir": "workspace:*",
+    "zod": "^4.0.2"
+  }
+}

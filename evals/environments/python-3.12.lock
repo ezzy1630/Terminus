@@ -1,0 +1,26 @@
+environment:
+  id: python-3.12
+  description: |
+    Python 3.12 eval environment. Used by the forge-internal suite and
+    by SWE-bench Python tasks. Image is digest-pinned; mutable tags are
+    NOT accepted (SPEC §36.8).
+  base_image: python:3.12-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  os: linux
+  python_version: "3.12"
+  pinned_packages:
+    - pytest==8.3.4
+    - pip==24.3.1
+    - setuptools==75.6.0
+    - wheel==0.45.1
+  pinned_tools:
+    - rg==14.1.0
+    - fd==10.2.0
+  default_budget:
+    model_micros: 2000000
+    compute_seconds: 300
+    wall_clock_seconds: 600
+    human_approvals: 0
+  created_at: "2025-01-01T00:00:00Z"
+  integrity:
+    sbom: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    signature: null

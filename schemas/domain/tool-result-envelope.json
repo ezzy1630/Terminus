@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/domain/tool-result-envelope.json",
+  "title": "ToolResultEnvelope",
+  "description": "Tool result envelope (SPEC §11.3, Appendix E.3). Every tool returns this envelope; the model never sees raw tool output.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "artifacts",
+    "sourceVersions",
+    "truncation",
+    "diagnostics",
+    "sideEffects",
+    "trust",
+    "confidentiality",
+    "timing",
+    "toolCallId",
+    "traceId"
+  ],
+  "properties": {
+    "status": {
+      "enum": ["success", "partial", "error", "denied", "timeout", "cancelled", "unknown"]
+    },
+    "summary": { "type": "string", "maxLength": 1000 },
+    "data": { "type": ["object", "array", "string", "number", "boolean", "null"] },
+    "artifacts": { "type": "array", "items": {} },
+    "sourceVersions": { "type": "object", "additionalProperties": { "type": "string" } },
+    "truncation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["occurred"],
+      "properties": {
+        "occurred": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "continuation": { "type": ["string", "null"] }
+      }
+    },
+    "diagnostics": { "type": "array", "items": {} },
+    "sideEffects": { "type": "array", "items": {} },
+    "trust": { "enum": ["trusted", "derived", "untrusted"] },
+    "confidentiality": { "enum": ["public", "workspace", "secret_adjacent", "secret"] },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["queuedMs", "executionMs", "totalMs"],
+      "properties": {
+        "queuedMs": { "type": "number", "minimum": 0 },
+        "executionMs": { "type": "number", "minimum": 0 },
+        "totalMs": { "type": "number", "minimum": 0 }
+      }
+    },
+    "resourceUsage": { "type": ["object", "null"] },
+    "toolCallId": { "type": "string" },
+    "traceId": { "type": "string" },
+    "estimatedCostUsd": { "type": ["number", "null"], "minimum": 0 },
+    "policyDecisionId": { "type": ["string", "null"] }
+  }
+}

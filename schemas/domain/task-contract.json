@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/domain/task-contract.json",
+  "title": "TaskContract",
+  "description": "Forge task contract (SPEC §14.3, Appendix E.1). The contract is the user's binding intent; scope expansion requires a new authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "version",
+    "objective",
+    "nonGoals",
+    "acceptanceCriteria",
+    "constraints",
+    "assumptions",
+    "unknowns",
+    "allowedScope",
+    "riskClass",
+    "budget",
+    "changePolicy"
+  ],
+  "properties": {
+    "id": { "type": "string", "description": "UUIDv7 task id." },
+    "version": { "type": "integer", "minimum": 1, "description": "Contract version; increments on any contract change." },
+    "objective": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "userOutcome": { "type": ["string", "null"], "maxLength": 2000 },
+    "nonGoals": { "type": "array", "items": { "type": "string" } },
+    "acceptanceCriteria": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/AcceptanceCriterion" }
+    },
+    "constraints": { "type": "array", "items": { "type": "string" } },
+    "assumptions": { "type": "array", "items": { "type": "string" } },
+    "unknowns": { "type": "array", "items": { "type": "string" } },
+    "allowedScope": { "$ref": "#/$defs/AllowedScope" },
+    "riskClass": { "enum": ["low", "normal", "high", "critical"] },
+    "budget": { "$ref": "#/$defs/TaskBudget" },
+    "changePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mayExpandScope", "scopeExpansionRequiresUser"],
+      "properties": {
+        "mayExpandScope": { "type": "boolean" },
+        "scopeExpansionRequiresUser": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "AcceptanceCriterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement", "required"],
+      "properties": {
+        "id": { "type": "string" },
+        "statement": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "verificationHint": { "type": ["string", "null"] },
+        "required": { "type": "boolean" }
+      }
+    },
+    "AllowedScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["readPaths", "writePaths", "externalSystems"],
+      "properties": {
+        "readPaths": { "type": "array", "items": { "type": "string" } },
+        "writePaths": { "type": "array", "items": { "type": "string" } },
+        "externalSystems": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "TaskBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelMicros", "computeSeconds", "wallClockSeconds", "humanApprovals"],
+      "properties": {
+        "modelMicros": { "type": "integer", "minimum": 0 },
+        "computeSeconds": { "type": "integer", "minimum": 0 },
+        "wallClockSeconds": { "type": "integer", "minimum": 0 },
+        "humanApprovals": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned to the stable Rust toolchain. The exact version is mirrored in mise.toml.
+# Bump both files together in a dedicated toolchain PR (SPEC §43.5).
+channel = "1.97.0"
+components = ["rustfmt", "clippy", "rust-src"]
+profile = "minimal"

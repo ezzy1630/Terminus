@@ -1,0 +1,68 @@
+pack:
+  id: forge/cloud-deploy
+  version: 1.0.0
+  name: Cloud Deploy
+  description: |
+    Cloud deployment capability pack. Provides explicit-approval deployment
+    operations to AWS, GCP, and Azure. All operations are NETWORK_WRITE and
+    EXTERNAL_STATE_WRITE; the policy engine default-denis external state
+    writes, so each call requires a prompt-approved scope rule. Credentials
+    are brokered as short-lived, role-scoped tokens.
+  publisher: forge
+  trust_level: first_party
+  operations:
+    - id: deploy_lambda
+      description: Deploy an AWS Lambda function.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+      network_destinations: ["https://lambda.*.amazonaws.com/**"]
+    - id: deploy_cloud_run
+      description: Deploy a GCP Cloud Run service.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+      network_destinations: ["https://run.googleapis.com/**"]
+    - id: deploy_app_service
+      description: Deploy an Azure App Service.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+      network_destinations: ["https://management.azure.com/**"]
+    - id: roll_back
+      description: Roll back the most recent deployment.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+    - id: get_deployment_status
+      description: Read deployment status.
+      effects: [NETWORK_READ]
+  filesystem:
+    read: ["worktree://active/**"]
+    write: []
+  network:
+    default: deny
+    proxy_required: true
+    destinations:
+      - "https://lambda.*.amazonaws.com/**"
+      - "https://run.googleapis.com/**"
+      - "https://management.azure.com/**"
+    private_address_denied: true
+  secrets:
+    - secret://aws/deploy/dev
+    - secret://gcp/deploy/dev
+    - secret://azure/deploy/dev
+  subprocesses: {}
+  external_state:
+    default: prompt
+    prompt_for: [deploy_lambda, deploy_cloud_run, deploy_app_service, roll_back]
+  resource_limits:
+    memory_bytes: 536870912
+    cpu_seconds: 120
+    wall_clock_seconds: 600
+  model_visibility:
+    content_trust: untrusted
+    redact_patterns: ["AKIA[0-9A-Z]{16}", "AIza[0-9A-Za-z_\\-]{35}"]
+  configuration_schema:
+    type: object
+    properties:
+      default_provider: {type: string, enum: [aws, gcp, azure], default: aws}
+      region: {type: string, default: us-east-1}
+      dry_run: {type: boolean, default: true}
+    additionalProperties: false

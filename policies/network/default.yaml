@@ -1,0 +1,79 @@
+# Network egress policy (SPEC §13.3, §36.4, Appendix F).
+#
+# The kernel's egress proxy consults this file (via the `EgressProxy::authorize`
+# path) before relaying any outbound connection. The default profile denies
+# direct sockets and requires all traffic to flow through the brokered proxy.
+# Private addresses (loopback, RFC1918, link-local) are denied even if
+# allowlisted, to prevent SSRF and metadata-service access.
+
+policy:
+  id: network-default
+  version: 1
+  description: |
+    Default network egress policy. Denies direct sockets, requires brokered
+    proxy, allows DNS only through the broker, and refuses private addresses.
+    Allowlist entries are scoped to capability-pack destinations.
+
+  direct_sockets: deny
+  proxy_required: true
+
+  dns:
+    mode: brokered
+    # The kernel resolves hostnames; the model never performs DNS lookups.
+    # Resolved IPs are checked against private_address_denied before connect.
+    allowed_resolvers:
+      - 1.1.1.1
+      - 8.8.8.8
+
+  private_address_denied: true
+  private_address_ranges:
+    - 127.0.0.0/8       # loopback
+    - 10.0.0.0/8         # RFC1918
+    - 172.16.0.0/12      # RFC1918
+    - 192.168.0.0/16     # RFC1918
+    - 169.254.0.0/16     # link-local (includes cloud metadata service)
+    - fc00::/7           # IPv6 unique local
+    - ::1/128            # IPv6 loopback
+    - fe80::/10          # IPv6 link-local
+
+  # Default empty allowlist; capability packs extend this at activation time
+  # with their declared destinations. A destination not on the allowlist is
+  # denied, even if the URL is otherwise valid.
+  allowlist:
+    - pattern: "https://api.github.com/**"
+      capability: forge/github
+    - pattern: "https://gitlab.com/api/v4/**"
+      capability: forge/gitlab
+    - pattern: "https://lambda.*.amazonaws.com/**"
+      capability: forge/cloud-deploy
+    - pattern: "https://run.googleapis.com/**"
+      capability: forge/cloud-deploy
+    - pattern: "https://management.azure.com/**"
+      capability: forge/cloud-deploy
+    - pattern: "https://image-gen.example.com/**"
+      capability: forge/images
+    - pattern: "https://vision.example.com/**"
+      capability: forge/images
+
+  # The proxy records every request: capability, destination, byte count,
+  # and latency. Redaction is applied before logging.
+  audit:
+    log_request_destinations: true
+    log_request_bodies: false
+    log_response_bodies: false
+    redact_patterns:
+      - "AKIA[0-9A-Z]{16}"
+      - "gh[pousr]_[A-Za-z0-9]{36}"
+      - "glpat-[A-Za-z0-9_\\-]{20}"
+      - "AIza[0-9A-Za-z_\\-]{35}"
+      - "postgres://[^:]+:[^@]+@"
+      - "mysql://[^:]+:[^@]+@"
+
+  rate_limits:
+    requests_per_minute: 120
+    bytes_per_minute: 10485760
+    burst: 30
+
+  # Failsafe: if the proxy itself is unavailable, deny all traffic rather
+  # than falling back to direct sockets.
+  fail_closed: true

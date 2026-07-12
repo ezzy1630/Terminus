@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/tools/inspect.json",
+  "title": "inspect",
+  "description": "High-level LSP/DAP operations (SPEC §11.8). Composes LSP calls and degrades gracefully when a server is unavailable. Operations: inspect_symbol, find_references, diagnose_files, rename_symbol, debug_test, trace_function, inspect_failure.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["op"],
+  "properties": {
+    "op": {
+      "enum": ["inspect_symbol", "find_references", "diagnose_files", "rename_symbol", "debug_test", "trace_function", "inspect_failure"]
+    },
+    "path": {
+      "type": ["string", "null"],
+      "description": "File path for the operation."
+    },
+    "symbol": {
+      "type": ["string", "null"],
+      "description": "Symbol name for inspect_symbol, find_references, rename_symbol."
+    },
+    "files": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "Files for diagnose_files."
+    },
+    "new_name": {
+      "type": ["string", "null"],
+      "description": "New name for rename_symbol."
+    },
+    "test_selector": {
+      "type": ["string", "null"],
+      "description": "Test selector for debug_test."
+    },
+    "function": {
+      "type": ["string", "null"],
+      "description": "Function for trace_function."
+    },
+    "failure_artifact": {
+      "type": ["string", "null"],
+      "description": "Failure artifact URI for inspect_failure."
+    }
+  }
+}

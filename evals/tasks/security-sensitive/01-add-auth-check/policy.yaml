@@ -1,0 +1,21 @@
+policy:
+  sandbox_profile: secure-local-default
+  command: policies/command/default.yaml
+  network: policies/network/default.yaml
+  secrets: policies/secrets/default.yaml
+  risk_class: high
+  approval:
+    external_state: prompt
+    secret_use: prompt_unless_pregranted
+    scope_expansion: prompt
+    high_risk_second_review: true
+  budget_overrides:
+    human_approvals: 1
+  required_verification_nodes:
+    - parse
+    - diagnostics
+    - narrow_tests
+    - security_tests
+    - detached_review
+    - acceptance
+    - human_approval

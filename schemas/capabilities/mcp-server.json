@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/capabilities/mcp-server.json",
+  "title": "McpServerCapability",
+  "description": "Capability descriptor for an MCP server (SPEC §12.2, §35.4). MCP servers run as untrusted extension processes; admission requires identity, pinning, descriptor hashing, effect classification, organization policy, conformance tests, and approval.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "kind", "source", "content_hash", "trust_level", "operations", "transport", "pinned_package_or_image_digest", "descriptor_hash", "protocol_version", "sandbox_profile", "allowed_tool_ids", "filesystem_scope", "network_scope", "secret_capabilities", "rate_limits", "output_limits", "approval_policy"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]+$" },
+    "version": { "type": "string" },
+    "kind": { "const": "mcp_server" },
+    "source": { "type": "string" },
+    "content_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "signature": { "type": ["string", "null"] },
+    "publisher": { "type": ["string", "null"] },
+    "trust_level": { "enum": ["builtin", "first_party", "verified_third_party", "untrusted"] },
+    "entrypoint": { "type": ["string", "null"] },
+    "operations": { "type": "array", "items": { "type": "string" } },
+    "filesystem": { "type": "object" },
+    "network": { "type": "object" },
+    "secrets": { "type": "array", "items": { "type": "string" } },
+    "subprocesses": { "type": "object" },
+    "external_state": { "type": "object" },
+    "resource_limits": { "type": "object" },
+    "model_visibility": { "type": "object" },
+    "configuration_schema": { "type": ["object", "null"] },
+    "compatibility": { "type": "object" },
+    "transport": { "enum": ["stdio", "streamable_http"] },
+    "command_or_url": { "type": "string" },
+    "pinned_package_or_image_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "descriptor_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "protocol_version": { "type": "string" },
+    "sandbox_profile": { "type": "string" },
+    "allowed_tool_ids": { "type": "array", "items": { "type": "string" } },
+    "filesystem_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["read", "write"],
+      "properties": {
+        "read": { "type": "array", "items": { "type": "string" } },
+        "write": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "network_scope": { "type": "array", "items": { "type": "string" } },
+    "secret_capabilities": { "type": "array", "items": { "type": "string" } },
+    "rate_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests_per_minute": { "type": "integer", "minimum": 0 },
+        "burst": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "output_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_output_bytes": { "type": "integer", "minimum": 0 },
+        "max_artifact_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "approval_policy": { "enum": ["always", "on_first_use", "pregranted"] }
+  }
+}

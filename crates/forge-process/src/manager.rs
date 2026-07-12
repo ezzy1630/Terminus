@@ -1,0 +1,551 @@
+//! `ProcessManager` owns child processes and streams `ProcessEvent`s.
+
+use crate::error::ProcessError;
+use crate::spec::{NormalizedSpawn, SpawnOutcome};
+use forge_artifacts::ArtifactStore;
+use forge_kernel_protocol::{
+    ArtifactRef, OutputChunk, ProcessEvent, ProcessExited, ProcessStarted,
+};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::SystemTime;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, Command};
+use tokio::sync::{mpsc, Mutex};
+use tokio::time;
+
+/// A running or recently-exited managed process.
+#[derive(Debug)]
+pub struct ManagedProcess {
+    pub process_id: String,
+    pub job_id: String,
+    pub child: Option<Child>,
+}
+
+/// ProcessManager owns child processes. Construction is cheap; share via
+/// `Arc`. The artifact store is used to capture stdout/stderr.
+#[derive(Debug, Clone)]
+pub struct ProcessManager {
+    artifact_store: Arc<ArtifactStore>,
+    children: Arc<Mutex<HashMap<String, Arc<Mutex<ManagedProcess>>>>>,
+    /// Maximum captured output before spilling to artifact. 1 MiB by default.
+    max_inline_bytes: usize,
+}
+
+impl ProcessManager {
+    pub fn new(artifact_store: Arc<ArtifactStore>) -> Self {
+        Self {
+            artifact_store,
+            children: Arc::new(Mutex::new(HashMap::new())),
+            max_inline_bytes: 1024 * 1024,
+        }
+    }
+
+    pub fn with_max_inline_bytes(mut self, max: usize) -> Self {
+        self.max_inline_bytes = max;
+        self
+    }
+
+    /// Spawn a process and stream its events. Returns the spawn outcome and
+    /// a receiver for `ProcessEvent`s. The receiver closes after `Exited`.
+    pub async fn spawn(
+        &self,
+        spawn: NormalizedSpawn,
+    ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
+        let process_id = forge_kernel_protocol::new_id();
+        let job_id = forge_kernel_protocol::new_id();
+
+        let mut command = Command::new(&spawn.program);
+        command.args(&spawn.args);
+        command.env_clear();
+        command.envs(&spawn.env);
+        if let Some(cwd) = &spawn.working_dir {
+            command.current_dir(cwd);
+        }
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        // Process group on unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+
+        let resolved_executable = spawn.program.clone();
+        let mut child = command
+            .spawn()
+            .map_err(|e| ProcessError::Spawn(format!("{e}")))?;
+
+        let started_at = now_rfc3339();
+        let (tx, rx) = mpsc::channel(64);
+        let started = ProcessStarted {
+            process_id: process_id.clone(),
+            job_id: job_id.clone(),
+            resolved_executable: resolved_executable.clone(),
+            started_at,
+        };
+        let _ = tx.send(ProcessEvent::Started(started.clone())).await;
+
+        let managed = Arc::new(Mutex::new(ManagedProcess {
+            process_id: process_id.clone(),
+            job_id: job_id.clone(),
+            child: Some(child),
+        }));
+        self.children
+            .lock()
+            .await
+            .insert(process_id.clone(), Arc::clone(&managed));
+
+        let store = Arc::clone(&self.artifact_store);
+        let max_inline = self.max_inline_bytes;
+        let pid = process_id.clone();
+        let tx_clone = tx.clone();
+        let timeout_ms = spawn.timeout_ms;
+
+        tokio::spawn(async move {
+            // Pull child out of the managed wrapper so we can take stdout/stderr.
+            let mut child_guard = managed.lock().await;
+            let child = match child_guard.child.as_mut() {
+                Some(c) => c,
+                None => return,
+            };
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            drop(child_guard);
+
+            let stdout_task = if let Some(mut stdout) = stdout {
+                let tx = tx_clone.clone();
+                let store = Arc::clone(&store);
+                Some(tokio::spawn(async move {
+                    capture_stream(&mut stdout, &tx, &store, max_inline, StreamKind::Stdout).await
+                }))
+            } else {
+                None
+            };
+            let stderr_task = if let Some(mut stderr) = stderr {
+                let tx = tx_clone.clone();
+                let store = Arc::clone(&store);
+                Some(tokio::spawn(async move {
+                    capture_stream(&mut stderr, &tx, &store, max_inline, StreamKind::Stderr).await
+                }))
+            } else {
+                None
+            };
+
+            // Wait with timeout.
+            let mut child_guard = managed.lock().await;
+            let child = match child_guard.child.as_mut() {
+                Some(c) => c,
+                None => return,
+            };
+            let wait_fut = child.wait();
+            let exit_result = if timeout_ms == 0 {
+                wait_fut.await
+            } else {
+                match time::timeout(std::time::Duration::from_millis(timeout_ms), wait_fut).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        // Timed out; kill the process group.
+                        let pid = child.id();
+                        drop(child_guard);
+                        if let Some(pid) = pid {
+                            kill_process_group(pid);
+                        }
+                        let _ = tx_clone
+                            .send(ProcessEvent::Exited(ProcessExited {
+                                exit_code: -1,
+                                signal: "TIMEOUT".to_string(),
+                                exited_at: now_rfc3339(),
+                                stdout_artifact: None,
+                                stderr_artifact: None,
+                            }))
+                            .await;
+                        return;
+                    }
+                }
+            };
+            let status = match exit_result {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx_clone
+                        .send(ProcessEvent::Exited(ProcessExited {
+                            exit_code: -1,
+                            signal: format!("io error: {e}"),
+                            exited_at: now_rfc3339(),
+                            stdout_artifact: None,
+                            stderr_artifact: None,
+                        }))
+                        .await;
+                    return;
+                }
+            };
+            drop(child_guard);
+
+            // Drain stdout/stderr tasks.
+            let stdout_artifact = match stdout_task {
+                Some(t) => t.await.unwrap_or(None),
+                None => None,
+            };
+            let stderr_artifact = match stderr_task {
+                Some(t) => t.await.unwrap_or(None),
+                None => None,
+            };
+
+            let signal = if let Some(code) = status.code() {
+                let _ = code;
+                String::new()
+            } else {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(sig) = status.signal() {
+                        format!("SIG{}", signal_name(sig))
+                    } else {
+                        String::new()
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    String::new()
+                }
+            };
+            let exit_code = status.code().unwrap_or(-1);
+            let _ = tx_clone
+                .send(ProcessEvent::Exited(ProcessExited {
+                    exit_code,
+                    signal,
+                    exited_at: now_rfc3339(),
+                    stdout_artifact,
+                    stderr_artifact,
+                }))
+                .await;
+            // Drop the child from the managed wrapper.
+            let mut child_guard = managed.lock().await;
+            child_guard.child = None;
+            // Drop the final sender so the receiver closes.
+            drop(child_guard);
+            let _ = pid;
+        });
+
+        Ok((
+            SpawnOutcome {
+                process_id,
+                job_id,
+                resolved_executable,
+            },
+            rx,
+        ))
+    }
+
+    /// Cancel a running process. Returns the final state.
+    pub async fn cancel(&self, process_id: &str, _reason: &str) -> Result<String, ProcessError> {
+        let managed = {
+            let children = self.children.lock().await;
+            children
+                .get(process_id)
+                .cloned()
+                .ok_or_else(|| ProcessError::NotFound(process_id.to_string()))?
+        };
+        let mut guard = managed.lock().await;
+        if let Some(child) = guard.child.as_mut() {
+            let pid = child.id();
+            // Kill the whole process group.
+            if let Some(pid) = pid {
+                kill_process_group(pid);
+            }
+            // Try to reap.
+            let _ = child.wait().await;
+        }
+        guard.child = None;
+        Ok("cancelled".to_string())
+    }
+
+    pub async fn is_running(&self, process_id: &str) -> bool {
+        let children = self.children.lock().await;
+        if let Some(m) = children.get(process_id) {
+            let g = m.lock().await;
+            g.child.is_some()
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamKind {
+    Stdout,
+    Stderr,
+}
+
+async fn capture_stream<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    tx: &mpsc::Sender<ProcessEvent>,
+    store: &ArtifactStore,
+    max_inline: usize,
+    kind: StreamKind,
+) -> Option<ArtifactRef> {
+    let mut buf = vec![0u8; 8192];
+    let mut total: Vec<u8> = Vec::new();
+    let mut cursor: u64 = 0;
+    let mut spilled = false;
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                let chunk = &buf[..n];
+                if !spilled {
+                    if total.len() + chunk.len() > max_inline {
+                        spilled = true;
+                    } else {
+                        total.extend_from_slice(chunk);
+                    }
+                }
+                cursor += n as u64;
+                let event = match kind {
+                    StreamKind::Stdout => ProcessEvent::Stdout(OutputChunk {
+                        cursor,
+                        bytes: chunk.to_vec(),
+                        redacted: false,
+                    }),
+                    StreamKind::Stderr => ProcessEvent::Stderr(OutputChunk {
+                        cursor,
+                        bytes: chunk.to_vec(),
+                        redacted: false,
+                    }),
+                };
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if total.is_empty() {
+        return None;
+    }
+    let (_, artifact) = store.ingest(&total).ok()?;
+    Some(artifact)
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn kill_process_group(pid: u32) {
+    // ADR-0001: `killpg(2)` has no safe Rust binding in std. We use the
+    // smallest possible `unsafe` block to call `libc::kill(-pgid, SIGKILL)`
+    // and dispatch SIGKILL to the entire process group. The argument is a
+    // negative pid which POSIX defines as "the process group whose ID is the
+    // absolute value of pid". We hold no resources across the call.
+    // SAFETY: `libc::kill` is async-signal-safe per POSIX; the call does not
+    // touch Rust-managed memory and we ignore the return value (the worst
+    // case is ESRCH, which means the process is already gone — exactly what
+    // we want).
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {
+    // No process groups on non-unix; child kill is handled by tokio.
+}
+
+#[cfg(unix)]
+fn signal_name(sig: i32) -> &'static str {
+    match sig {
+        libc::SIGTERM => "TERM",
+        libc::SIGKILL => "KILL",
+        libc::SIGINT => "INT",
+        libc::SIGHUP => "HUP",
+        libc::SIGSEGV => "SEGV",
+        libc::SIGABRT => "ABRT",
+        _ => "UNKNOWN",
+    }
+}
+
+fn now_rfc3339() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:06}+00:00", dur.as_secs(), dur.subsec_micros())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    fn store() -> (tempfile::TempDir, Arc<ArtifactStore>) {
+        let dir = tempdir().unwrap();
+        let store = ArtifactStore::open(dir.path()).unwrap();
+        (dir, Arc::new(store))
+    }
+
+    #[tokio::test]
+    async fn spawn_capture_and_exit() {
+        let (_dir, store) = store();
+        let mgr = ProcessManager::new(store);
+        let spawn = NormalizedSpawn {
+            program: "sh".into(),
+            args: vec!["-c".into(), "echo hello; echo err 1>&2".into()],
+            env: std::collections::BTreeMap::new(),
+            working_dir: None,
+            timeout_ms: 5_000,
+            shell: true,
+        };
+        let (outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
+        let mut got_started = false;
+        let mut got_stdout = false;
+        let mut got_exit = false;
+        let mut exit_code = -999;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                ProcessEvent::Started(_) => got_started = true,
+                ProcessEvent::Stdout(c) => {
+                    if String::from_utf8_lossy(&c.bytes).contains("hello") {
+                        got_stdout = true;
+                    }
+                }
+                ProcessEvent::Exited(e) => {
+                    exit_code = e.exit_code;
+                    got_exit = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(got_started);
+        assert!(got_stdout);
+        assert!(got_exit);
+        assert_eq!(exit_code, 0);
+        let _ = outcome;
+    }
+
+    #[tokio::test]
+    async fn cancel_running_process() {
+        let (_dir, store) = store();
+        let mgr = ProcessManager::new(store);
+        let spawn = NormalizedSpawn {
+            program: "sh".into(),
+            args: vec!["-c".into(), "sleep 30".into()],
+            env: std::collections::BTreeMap::new(),
+            working_dir: None,
+            timeout_ms: 0,
+            shell: true,
+        };
+        let (outcome, _rx) = mgr.spawn(spawn).await.unwrap();
+        assert!(mgr.is_running(&outcome.process_id).await);
+        let state = mgr.cancel(&outcome.process_id, "test").await.unwrap();
+        assert_eq!(state, "cancelled");
+        assert!(!mgr.is_running(&outcome.process_id).await);
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_process() {
+        let (_dir, store) = store();
+        let mgr = ProcessManager::new(store);
+        let spawn = NormalizedSpawn {
+            program: "sh".into(),
+            args: vec!["-c".into(), "sleep 30".into()],
+            env: std::collections::BTreeMap::new(),
+            working_dir: None,
+            timeout_ms: 200,
+            shell: true,
+        };
+        let (outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
+        let mut got_timeout_exit = false;
+        while let Some(ev) = rx.recv().await {
+            if let ProcessEvent::Exited(e) = ev {
+                if e.signal == "TIMEOUT" {
+                    got_timeout_exit = true;
+                }
+            }
+        }
+        assert!(got_timeout_exit);
+        let _ = outcome;
+    }
+
+    #[tokio::test]
+    async fn spawn_with_explicit_env() {
+        let (_dir, store) = store();
+        let mgr = ProcessManager::new(store);
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("FORGE_TEST_VAR".to_string(), "value-123".to_string());
+        let spawn = NormalizedSpawn {
+            program: "sh".into(),
+            args: vec!["-c".into(), "echo $FORGE_TEST_VAR".into()],
+            env,
+            working_dir: None,
+            timeout_ms: 5_000,
+            shell: true,
+        };
+        let (_outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
+        let mut got_value = false;
+        while let Some(ev) = rx.recv().await {
+            if let ProcessEvent::Stdout(c) = ev {
+                if String::from_utf8_lossy(&c.bytes).contains("value-123") {
+                    got_value = true;
+                }
+            }
+        }
+        assert!(got_value);
+    }
+
+    #[tokio::test]
+    async fn no_ambient_env_inherited() {
+        // Ensure no ambient env is leaked: an explicit env var we set IS
+        // visible, but an ambient var (FORGE_TEST_LEAK) is NOT.
+        std::env::set_var("FORGE_TEST_LEAK", "leaked");
+        let (_dir, store) = store();
+        let mgr = ProcessManager::new(store);
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("FORGE_TEST_MARKER".to_string(), "present".to_string());
+        let spawn = NormalizedSpawn {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "echo \"marker=$FORGE_TEST_MARKER leak=$FORGE_TEST_LEAK\"".into(),
+            ],
+            env,
+            working_dir: None,
+            timeout_ms: 5_000,
+            shell: true,
+        };
+        let (_outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
+        let mut line = String::new();
+        while let Some(ev) = rx.recv().await {
+            if let ProcessEvent::Stdout(c) = ev {
+                line.push_str(&String::from_utf8_lossy(&c.bytes));
+            }
+        }
+        std::env::remove_var("FORGE_TEST_LEAK");
+        // Explicit env propagates; ambient FORGE_TEST_LEAK does NOT.
+        assert_eq!(line.trim(), "marker=present leak=");
+    }
+
+    #[tokio::test]
+    async fn working_directory_applied() {
+        let (_dir, store) = store();
+        let tmp = tempdir().unwrap();
+        let mgr = ProcessManager::new(store);
+        let spawn = NormalizedSpawn {
+            program: "pwd".into(),
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            working_dir: Some(PathBuf::from(tmp.path())),
+            timeout_ms: 5_000,
+            shell: false,
+        };
+        let (_outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
+        let mut pwd_line = String::new();
+        while let Some(ev) = rx.recv().await {
+            if let ProcessEvent::Stdout(c) = ev {
+                pwd_line.push_str(&String::from_utf8_lossy(&c.bytes));
+            }
+        }
+        assert_eq!(pwd_line.trim(), tmp.path().to_string_lossy());
+    }
+}

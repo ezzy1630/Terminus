@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/tools/patch.json",
+  "title": "patch",
+  "description": "Apply one or more edit operations atomically inside an isolated transaction. Each operation references an observed source hash; stale anchors are rejected. The transaction commits atomically or rolls back to baseline. Supports ReplaceSymbol, Range, ExactText, Insert, Delete, CreateFile, MoveFile, DeleteFile, and UnifiedDiff operations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operations", "validation_profile"],
+  "properties": {
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["op", "path", "observed_hash"],
+        "properties": {
+          "op": {
+            "enum": ["replace_symbol", "range", "exact_text", "insert", "delete", "create_file", "move_file", "delete_file", "unified_diff"]
+          },
+          "path": {
+            "type": "string",
+            "description": "worktree:// URI of the target file."
+          },
+          "observed_hash": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "description": "The sha256 of the file as last read by the model. Stale hashes are rejected."
+          },
+          "symbol": { "type": ["string", "null"] },
+          "range": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "start": { "type": "integer", "minimum": 1 },
+              "end": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "old_text": { "type": ["string", "null"] },
+          "new_text": { "type": ["string", "null"] },
+          "destination": { "type": ["string", "null"] },
+          "diff": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "validation_profile": {
+      "enum": ["none", "language_fast", "language_strict"],
+      "description": "Validation to run before commit. 'language_fast' parses touched regions; 'language_strict' also runs diagnostics."
+    },
+    "isolated_transaction": {
+      "type": "boolean",
+      "description": "If true, intermediate files may not parse; the transaction cannot commit until all invariants pass. Use for multi-file refactors."
+    }
+  }
+}

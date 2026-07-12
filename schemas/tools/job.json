@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/tools/job.json",
+  "title": "job",
+  "description": "Manage a durable process. Operations: start, read (incremental output by cursor), input (PTY input), signal, stop, status. Long-running processes (servers, watchers, test runners that exceed exec timeout) use job instead of exec.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["op"],
+  "properties": {
+    "op": {
+      "enum": ["start", "read", "input", "signal", "stop", "status"]
+    },
+    "job_id": {
+      "type": ["string", "null"],
+      "description": "Required for read, input, signal, stop, status operations."
+    },
+    "argv": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "Required for start. Structured argv; first element is executable."
+    },
+    "cwd": { "type": ["string", "null"] },
+    "env": {
+      "type": ["object", "null"],
+      "additionalProperties": { "type": "string" }
+    },
+    "cursor": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "For read: return output chunks since this cursor."
+    },
+    "input": {
+      "type": ["string", "null"],
+      "description": "For input: text to send to the PTY."
+    },
+    "signal": {
+      "type": ["string", "null"],
+      "enum": ["SIGINT", "SIGTERM", "SIGKILL", "SIGHUP"],
+      "description": "For signal: the signal to send."
+    },
+    "restart_policy": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "on_exit": { "enum": ["never", "on_failure", "always"] },
+        "max_restarts": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

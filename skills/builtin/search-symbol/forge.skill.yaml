@@ -1,0 +1,28 @@
+skill:
+  id: forge/search-symbol
+  version: 1.0.0
+  skill_md_hash: sha256:cd06795bf3d5cbd0ea2d7025f30edef0b39902988bba43862ce4bf66723be14b
+  compatible_harness: '>=1.0 <2.0'
+  description: Search the workspace for symbols and references via the code-intelligence
+    layer.
+  required_capabilities:
+    tools:
+    - read
+    - search
+    - inspect
+    filesystem:
+      read:
+      - worktree://active/**
+      write: []
+    network: []
+    secrets: []
+  validation_profile: none
+  tests:
+  - evals/search-symbol/lsp-fallback.yaml
+  - evals/search-symbol/dedup-rerank.yaml
+  - evals/search-symbol/continuation.yaml
+  provenance:
+    source: https://github.com/forge/forge/tree/main/skills/builtin/search-symbol
+    publisher: forge
+    trust_level: builtin
+    signature: forge-built-in

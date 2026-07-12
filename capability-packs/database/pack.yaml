@@ -1,0 +1,58 @@
+pack:
+  id: forge/database
+  version: 1.0.0
+  name: Database
+  description: |
+    Database capability pack. Provides read-only and explicit-approval write
+    access to PostgreSQL, MySQL, and SQLite databases. Credentials are brokered
+    as short-lived, destination-scoped tokens. All queries are bounded in
+    runtime and result size; results are stored as artifacts and referenced
+    by URI in the model context.
+  publisher: forge
+  trust_level: first_party
+  operations:
+    - id: run_query
+      description: Run a read-only SQL query.
+      effects: [NETWORK_READ]
+      network_destinations: ["postgres://**", "mysql://**", "sqlite://**"]
+    - id: run_migration
+      description: Apply a migration script. Requires explicit approval.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+    - id: explain_query
+      description: Run EXPLAIN on a query.
+      effects: [NETWORK_READ]
+    - id: list_tables
+      description: List tables in a schema.
+      effects: [NETWORK_READ]
+  filesystem:
+    read: ["worktree://active/migrations/**"]
+    write: []
+  network:
+    default: deny
+    proxy_required: true
+    destinations:
+      - "postgres://**"
+      - "mysql://**"
+    private_address_denied: false
+  secrets:
+    - secret://database/dev-read-only
+    - secret://database/dev-migrate
+  subprocesses: {}
+  external_state:
+    default: prompt
+    prompt_for: [run_migration]
+  resource_limits:
+    memory_bytes: 536870912
+    cpu_seconds: 60
+    wall_clock_seconds: 120
+  model_visibility:
+    content_trust: untrusted
+    redact_patterns: ["postgres://[^:]+:[^@]+@", "mysql://[^:]+:[^@]+@"]
+  configuration_schema:
+    type: object
+    properties:
+      default_dialect: {type: string, enum: [postgres, mysql, sqlite], default: postgres}
+      max_result_rows: {type: integer, default: 1000}
+      query_timeout_ms: {type: integer, default: 30000}
+    additionalProperties: false

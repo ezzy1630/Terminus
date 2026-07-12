@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/capabilities/skill.json",
+  "title": "SkillCapability",
+  "description": "Capability descriptor for an Agent Skills format skill with the Forge forge.skill.yaml extension (SPEC §12.1, §35.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "kind", "source", "content_hash", "trust_level", "operations", "skill_md_hash", "compatible_harness", "required_capabilities", "tests", "provenance"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]+$" },
+    "version": { "type": "string" },
+    "kind": { "const": "skill" },
+    "source": { "type": "string" },
+    "content_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "signature": { "type": ["string", "null"] },
+    "publisher": { "type": ["string", "null"] },
+    "trust_level": { "enum": ["builtin", "first_party", "verified_third_party", "untrusted"] },
+    "entrypoint": { "type": ["string", "null"] },
+    "operations": { "type": "array", "items": { "type": "string" } },
+    "filesystem": { "type": "object" },
+    "network": { "type": "object" },
+    "secrets": { "type": "array", "items": { "type": "string" } },
+    "subprocesses": { "type": "object" },
+    "external_state": { "type": "object" },
+    "resource_limits": { "type": "object" },
+    "model_visibility": { "type": "object" },
+    "configuration_schema": { "type": ["object", "null"] },
+    "compatibility": { "type": "object" },
+    "skill_md_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "compatible_harness": { "type": "string" },
+    "required_capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filesystem", "network", "secrets"],
+      "properties": {
+        "tools": { "type": "array", "items": { "type": "string" } },
+        "filesystem": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["read", "write"],
+          "properties": {
+            "read": { "type": "array", "items": { "type": "string" } },
+            "write": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "network": { "type": "array", "items": { "type": "string" } },
+        "secrets": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "tests": { "type": "array", "items": { "type": "string" } },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "publisher"],
+      "properties": {
+        "source": { "type": "string" },
+        "publisher": { "type": "string" },
+        "signature": { "type": ["string", "null"] },
+        "trust_level": { "enum": ["builtin", "first_party", "verified_third_party", "untrusted"] },
+        "promoted_from_verified_runs": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    }
+  }
+}

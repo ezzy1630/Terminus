@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/tools/exec.json",
+  "title": "exec",
+  "description": "Run a short bounded command in the sandbox. The command AST (not a raw shell string) is classified by the policy engine before execution. Shell requires prompt unless explicitly allowlisted. Returns stdout/stderr artifacts, exit code, and resource usage.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["argv"],
+  "properties": {
+    "argv": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "type": "string" },
+      "description": "Structured argv. The first element is the executable basename or resolved path."
+    },
+    "cwd": {
+      "type": ["string", "null"],
+      "description": "Working directory. Defaults to the active worktree root."
+    },
+    "env": {
+      "type": ["object", "null"],
+      "description": "Additional env vars. Ambient env is scrubbed per the secret broker policy.",
+      "additionalProperties": { "type": "string" }
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 600000,
+      "description": "Maximum runtime. Defaults to aci.exec.default_timeout_ms (30000)."
+    },
+    "stdin_artifact": {
+      "type": ["string", "null"],
+      "description": "Optional artifact:// URI to pipe to stdin."
+    },
+    "redact_patterns": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "Additional regex patterns to redact from stdout/stderr."
+    }
+  }
+}

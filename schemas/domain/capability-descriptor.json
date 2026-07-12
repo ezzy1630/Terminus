@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/capability-v1.json",
+  "title": "CapabilityDescriptor",
+  "description": "Capability descriptor (SPEC §35.1, Appendix E.5). Describes a skill, tool pack, MCP server, plugin, external harness, or environment.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "kind", "source", "content_hash", "trust_level", "operations"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]+$" },
+    "version": { "type": "string" },
+    "kind": { "enum": ["skill", "tool_pack", "mcp_server", "plugin", "external_harness", "environment"] },
+    "source": { "type": "string" },
+    "content_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "signature": { "type": ["string", "null"] },
+    "publisher": { "type": ["string", "null"] },
+    "trust_level": { "enum": ["builtin", "first_party", "verified_third_party", "untrusted"] },
+    "entrypoint": { "type": ["string", "null"] },
+    "operations": { "type": "array", "items": { "type": "string" } },
+    "filesystem": { "type": "object" },
+    "network": { "type": "object" },
+    "secrets": { "type": "array", "items": { "type": "string" } },
+    "subprocesses": { "type": "object" },
+    "external_state": { "type": "object" },
+    "resource_limits": { "type": "object" },
+    "model_visibility": { "type": "object" },
+    "configuration_schema": { "type": ["object", "null"] },
+    "compatibility": { "type": "object" }
+  }
+}

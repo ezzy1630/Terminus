@@ -1,0 +1,48 @@
+adapter:
+  id: pi
+  version: 0.1.0
+  inner_harness_version: floating
+  description: |
+    Pi adapter. Pi is a minimal terminal agent with strong tool-call
+    discipline and small context windows. It is a serious competitor
+    on simple tasks (SPEC §3.7). Its context visibility is opaque, so
+    Forge wraps it in a strict outer sandbox and supplies brokered
+    network and secrets.
+  capabilities:
+    exact_context_visibility: opaque
+    tool_interception: none
+    filesystem_enforcement: outer_sandbox
+    network_enforcement: outer_sandbox
+    secret_isolation: outer_broker
+    session_resume: none
+    typed_results: parsed
+    artifact_export: partial
+    cancellation: best_effort
+    model_selection: opaque
+    native_compaction: false
+  observed_by_probe:
+    probe_version: forge-probe-1.0
+    probed_at: "2025-01-15T00:00:00Z"
+    probed_capabilities:
+      exact_context_visibility: opaque
+      tool_interception: none
+      filesystem_enforcement: none
+      network_enforcement: none
+      secret_isolation: none
+      session_resume: none
+      typed_results: parsed
+      artifact_export: partial
+      cancellation: best_effort
+      model_selection: opaque
+      native_compaction: false
+  discrepancies:
+    - "filesystem_enforcement: declared outer_sandbox, observed none — Forge MUST supply outer sandbox"
+    - "network_enforcement: declared outer_sandbox, observed none — Forge MUST supply outer sandbox"
+    - "secret_isolation: declared outer_broker, observed none — Forge MUST broker secrets"
+  last_verified: "2025-01-15T00:00:00Z"
+  result_schema: forge.worker.v1
+  notes: |
+    Pi is selected as a baseline (SPEC §41.2) and as a comparison
+    point for "minimal harness" research. Its tool-call discipline is
+    strong for simple tasks; its weakness on long-horizon tasks is the
+    expected signal in cohort comparisons.

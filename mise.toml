@@ -1,0 +1,20 @@
+# Forge toolchain pinning (SPEC §43.5).
+# Versions are updated through dependency PRs. The spec does not freeze July
+# 2026 versions forever; bump these in dedicated toolchain PRs.
+
+[tools]
+rust = "1.97.0"
+node = "22.20.0"
+pnpm = "10.18.0"
+bun = "1.3.0"
+python = "3.12.13"
+uv = "0.8.0"
+buf = "1.59.0"
+just = "1.43.0"
+
+[env]
+# Put pinned toolchain bin dirs first so any system-installed versions do not
+# shadow mise-managed binaries.
+RUST_BACKTRACE = "1"
+FORGE_REPO_ROOT = "{{ config_root }}"
+PROTOC = "{{ env.PROTOC_BIN_PREFIX | default(value='protoc') }}"

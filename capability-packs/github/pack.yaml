@@ -1,0 +1,67 @@
+pack:
+  id: forge/github
+  version: 1.0.0
+  name: GitHub
+  description: |
+    GitHub capability pack. Provides repository, issue, pull-request, and
+    workflow operations through the GitHub REST and GraphQL APIs. Credentials
+    are brokered as short-lived tokens via `secret://github/*`; the model
+    never sees the raw token. All operations are rate-limited and audit-logged.
+  publisher: forge
+  trust_level: first_party
+  operations:
+    - id: list_pull_requests
+      description: List pull requests for a repository.
+      effects: [NETWORK_READ]
+      network_destinations: ["https://api.github.com/**"]
+    - id: get_pull_request
+      description: Get a single pull request by number.
+      effects: [NETWORK_READ]
+    - id: create_pull_request
+      description: Open a new pull request.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+    - id: merge_pull_request
+      description: Merge a pull request.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+    - id: create_issue_comment
+      description: Comment on an issue or pull request.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+    - id: trigger_workflow
+      description: Trigger a GitHub Actions workflow.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+  filesystem:
+    read: ["worktree://active/**"]
+    write: []
+  network:
+    default: deny
+    proxy_required: true
+    destinations:
+      - "https://api.github.com/**"
+      - "https://uploads.github.com/**"
+    private_address_denied: true
+  secrets:
+    - secret://github/repo-read
+    - secret://github/repo-write
+    - secret://github/workflow-trigger
+  subprocesses: {}
+  external_state:
+    default: prompt
+    prompt_for: [create_pull_request, merge_pull_request, create_issue_comment, trigger_workflow]
+  resource_limits:
+    memory_bytes: 134217728
+    cpu_seconds: 30
+    wall_clock_seconds: 60
+  model_visibility:
+    content_trust: untrusted
+    redact_patterns: ["gh[pousr]_[A-Za-z0-9]{36}", "github_pat_[A-Za-z0-9_]{82}"]
+  configuration_schema:
+    type: object
+    properties:
+      base_url: {type: string, default: "https://api.github.com"}
+      enterprise: {type: ["string", "null"], default: null}
+      rate_limit_per_minute: {type: integer, default: 60}
+    additionalProperties: false

@@ -1,0 +1,61 @@
+pack:
+  id: forge/gitlab
+  version: 1.0.0
+  name: GitLab
+  description: |
+    GitLab capability pack. Provides project, merge-request, pipeline, and
+    registry operations through the GitLab REST API. Credentials are brokered
+    as short-lived tokens via `secret://gitlab/*`. Self-hosted instances are
+    supported by overriding `base_url`.
+  publisher: forge
+  trust_level: first_party
+  operations:
+    - id: list_merge_requests
+      description: List merge requests for a project.
+      effects: [NETWORK_READ]
+      network_destinations: ["https://gitlab.com/api/v4/**"]
+    - id: get_merge_request
+      description: Get a single merge request.
+      effects: [NETWORK_READ]
+    - id: create_merge_request
+      description: Open a new merge request.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+    - id: merge_merge_request
+      description: Merge a merge request.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+    - id: trigger_pipeline
+      description: Trigger a CI/CD pipeline.
+      effects: [NETWORK_WRITE, EXTERNAL_STATE_WRITE]
+      approval_required: true
+  filesystem:
+    read: ["worktree://active/**"]
+    write: []
+  network:
+    default: deny
+    proxy_required: true
+    destinations:
+      - "https://gitlab.com/api/v4/**"
+    private_address_denied: true
+  secrets:
+    - secret://gitlab/repo-read
+    - secret://gitlab/repo-write
+    - secret://gitlab/pipeline-trigger
+  subprocesses: {}
+  external_state:
+    default: prompt
+    prompt_for: [create_merge_request, merge_merge_request, trigger_pipeline]
+  resource_limits:
+    memory_bytes: 134217728
+    cpu_seconds: 30
+    wall_clock_seconds: 60
+  model_visibility:
+    content_trust: untrusted
+    redact_patterns: ["glpat-[A-Za-z0-9_\\-]{20}"]
+  configuration_schema:
+    type: object
+    properties:
+      base_url: {type: string, default: "https://gitlab.com/api/v4"}
+      rate_limit_per_minute: {type: integer, default: 60}
+    additionalProperties: false

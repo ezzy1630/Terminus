@@ -1,0 +1,84 @@
+# degraded-local
+#
+# A NAMED degraded profile (SPEC §13.4 says degraded must be explicit). This
+# profile is selected only when the kernel cannot install one or more
+# protections required by `secure-local-default` AND the user (or
+# organization policy) has explicitly opted into degraded mode.
+#
+# The UI MUST surface a clear warning whenever this profile is active. Tasks
+# touching untrusted repositories MUST refuse to run under this profile
+# (they require `container-untrusted` or stronger).
+#
+# Compared to secure-local-default, the following controls are weakened:
+#   - filesystem.root remains read_only but the active worktree symlinks are
+#     NOT contained (symlinks: allow). This is the actual gap on hosts
+#     without user-namespace support.
+#   - process.privilege_escalation is still deny, but `no_new_privs` is
+#     reported as best_effort.
+#   - seccomp is not installed.
+#
+# The profile MUST NOT be used to weaken network or secret controls — those
+# are independent of OS backend selection.
+
+profile:
+  id: degraded-local
+  backend: local-restrictive
+  require_full_enforcement: false
+  degraded_controls:
+    - symlinks_containment
+    - no_new_privs
+    - seccomp
+  ui_warning: |
+    Sandbox is running in degraded mode. The host cannot install user
+    namespaces, seccomp, or symlink containment. Do not use this profile
+    with untrusted repositories.
+  filesystem:
+    root: read_only
+    workspace: read_only
+    active_worktree: read_write
+    read:
+      - workspace://**
+    write:
+      - worktree://active/**
+    deny:
+      - worktree://active/.git/**
+      - forge-state://**
+      - secret-store://**
+      - host://**
+      - credentials://**
+    protected:
+      - .git
+      - harness_state
+      - credentials
+    symlinks: allow
+  process:
+    shell: prompt
+    structured_exec: classify
+    daemonization: deny
+    privilege_escalation: deny
+    no_new_privs: best_effort
+    seccomp: unavailable
+  network:
+    direct_sockets: deny
+    proxy_required: true
+    destinations: []
+    dns: brokered
+    private_address_denied: true
+  secrets:
+    ambient_environment: deny
+    direct_environment: deny
+    model_visibility: deny
+    brokered_capabilities: []
+  external_state:
+    default: prompt
+  extensions:
+    third_party_in_process: deny
+    lifecycle_scripts: deny
+  resources:
+    memory_bytes: 2147483648
+    cpu_seconds: 600
+    pids: 256
+    open_files: 1024
+    wall_clock_seconds: 3600
+  plugins:
+    ambient_authority: deny

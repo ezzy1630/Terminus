@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/tools/capability.json",
+  "title": "capability",
+  "description": "List, activate, or deactivate capabilities (SPEC §11.2, §35). Progressive disclosure: capability cards are always visible; full schemas become visible on activation. Activation changes the tool-layer hash and is logged as a cache event.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["op"],
+  "properties": {
+    "op": {
+      "enum": ["list", "activate", "deactivate", "describe"]
+    },
+    "capability_id": {
+      "type": ["string", "null"],
+      "description": "Required for activate, deactivate, describe."
+    },
+    "kind": {
+      "enum": ["skill", "tool_pack", "mcp_server", "plugin", "external_harness", "environment"],
+      "description": "Optional filter for list."
+    },
+    "configuration": {
+      "type": ["object", "null"],
+      "description": "Optional configuration for activate."
+    }
+  }
+}

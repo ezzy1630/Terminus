@@ -1,0 +1,44 @@
+baseline:
+  id: forge-minimal
+  version: 1
+  description: |
+    Forge minimal shell baseline (SPEC §18.1, §41.2). Uses only the
+    minimal always-visible ACI (read, search, edit, exec, job,
+    diagnostics, capability) with no auxiliary agents, no memory, no
+    compaction. Used as the lower-bound reference for harness-controlled
+    comparison.
+  harness: forge
+  harness_commit: 0000000000000000000000000000000000000000
+  configuration:
+    orchestration:
+      default: single_agent
+      scouts: {enabled: false}
+      writers: {enabled: false}
+      reviewer: {enabled: false}
+    context:
+      compiler_version: v1
+      recent_episode_policy:
+        mode: fixed
+        minimum_complete_episodes: 0
+        maximum_complete_episodes: 3
+      memory: {enabled: false}
+      compaction:
+        semantic_boundaries: false
+        projected_context_threshold: 1.0
+        validate_checkpoint: false
+      external_compression: {enabled: false}
+    aci:
+      default_tools: [read, search, patch, exec, job, inspect, capability]
+    routing:
+      mode: deterministic
+      max_provider_attempts_per_turn: 1
+      learned_router: {enabled: false}
+  expected_behavior:
+    - no delegation, no scout, no reviewer
+    - no memory retrieval
+    - no compaction (fails closed when context fills)
+    - single provider attempt per turn
+  use_in_cohorts:
+    - tiny-bugfix
+    - terminal-bench
+    - swe-bench-verified

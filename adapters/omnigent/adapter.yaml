@@ -1,0 +1,50 @@
+adapter:
+  id: omnigent
+  version: 0.1.0
+  inner_harness_version: floating
+  description: |
+    Omnigent adapter. A multi-model orchestrator that delegates
+    subtasks to several inner agents. Its context visibility is
+    opaque and its tool interception is partial. Forge supplies an
+    outer sandbox and brokered network and secrets; the multi-model
+    orchestration inside Omnigent is treated as a black box.
+  capabilities:
+    exact_context_visibility: opaque
+    tool_interception: partial
+    filesystem_enforcement: outer_sandbox
+    network_enforcement: outer_sandbox
+    secret_isolation: outer_broker
+    session_resume: emulated
+    typed_results: parsed
+    artifact_export: partial
+    cancellation: best_effort
+    model_selection: opaque
+    native_compaction: true
+  observed_by_probe:
+    probe_version: forge-probe-1.0
+    probed_at: "2025-01-15T00:00:00Z"
+    probed_capabilities:
+      exact_context_visibility: opaque
+      tool_interception: partial
+      filesystem_enforcement: none
+      network_enforcement: none
+      secret_isolation: none
+      session_resume: emulated
+      typed_results: parsed
+      artifact_export: partial
+      cancellation: best_effort
+      model_selection: opaque
+      native_compaction: true
+  discrepancies:
+    - "filesystem_enforcement: declared outer_sandbox, observed none — Forge MUST supply outer sandbox"
+    - "network_enforcement: declared outer_sandbox, observed none — Forge MUST supply outer sandbox"
+    - "secret_isolation: declared outer_broker, observed none — Forge MUST broker secrets"
+    - "multi-model orchestration is opaque — Forge cannot verify which inner model handled which subtask"
+  last_verified: "2025-01-15T00:00:00Z"
+  result_schema: forge.worker.v1
+  notes: |
+    Omnigent is selected for tasks where multi-model orchestration is
+    expected to help (parallelizable, multi-language). The opaque
+    multi-model routing means Forge cannot attribute outcomes to a
+    specific inner model — the eval lab records this as a known
+    attribution gap.

@@ -1,0 +1,28 @@
+skill:
+  id: forge/verification-plan
+  version: 1.0.0
+  skill_md_hash: sha256:e13ae3cb804ff01ec4c4f972935a7086ee3cbda454a159a65478541d4e65b095
+  compatible_harness: '>=1.0 <2.0'
+  description: Build a task-specific verification DAG before declaring a task complete.
+  required_capabilities:
+    tools:
+    - read
+    - search
+    - inspect
+    - exec
+    filesystem:
+      read:
+      - worktree://active/**
+      write: []
+    network: []
+    secrets: []
+  validation_profile: none
+  tests:
+  - evals/verification-plan/ordinary-code.yaml
+  - evals/verification-plan/security-change.yaml
+  - evals/verification-plan/evidence-coverage.yaml
+  provenance:
+    source: https://github.com/forge/forge/tree/main/skills/builtin/verification-plan
+    publisher: forge
+    trust_level: builtin
+    signature: forge-built-in

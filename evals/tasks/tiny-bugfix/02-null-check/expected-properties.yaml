@@ -1,0 +1,19 @@
+expected:
+  outcome: completed
+  changed_files:
+    - src/parser.py
+  tests:
+    - command: pytest -q test_parser.py
+      status: passed
+    - command: pytest -q hidden/test_fix.py
+      status: passed
+  verification_plan:
+    - parse: passed
+    - narrow_tests: passed
+    - acceptance: passed
+  cost_usd_max: 0.08
+  turns_max: 4
+  rejection_triggers:
+    - changed signature of parse_user
+    - public test regression
+    - null input still raises

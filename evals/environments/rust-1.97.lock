@@ -1,0 +1,25 @@
+environment:
+  id: rust-1.97
+  description: |
+    Rust 1.97 eval environment. Used by SWE-bench Rust tasks and by
+    forge-internal tasks that exercise the Rust kernel crates. Image is
+    digest-pinned.
+  base_image: rust:1.97-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  os: linux
+  rust_version: "1.97.0"
+  pinned_packages:
+    - cargo==1.97.0
+    - rustfmt==1.97.0
+    - clippy==1.97.0
+  pinned_tools:
+    - rg==14.1.0
+    - fd==10.2.0
+  default_budget:
+    model_micros: 3000000
+    compute_seconds: 600
+    wall_clock_seconds: 1200
+    human_approvals: 0
+  created_at: "2025-01-01T00:00:00Z"
+  integrity:
+    sbom: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    signature: null

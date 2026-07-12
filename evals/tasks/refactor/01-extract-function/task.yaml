@@ -1,0 +1,33 @@
+task:
+  id: refactor/01-extract-function
+  suite: forge-internal
+  version: 1
+  source_commit: c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+  image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  timeout_seconds: 600
+  budget:
+    model_micros: 1200000
+    compute_seconds: 240
+    wall_clock_seconds: 600
+    human_approvals: 0
+  allowed_network: []
+  secrets: []
+  grader_version: forge-internal-1.0
+  risk_class: normal
+  acceptance_criteria:
+    - id: function-extracted
+      statement: |
+        A new function `format_price(cents: int) -> str` is extracted from
+        `format_invoice` and lives in `src/format.py`. The original
+        `format_invoice` calls the new function.
+      required: true
+    - id: behavior-preserved
+      statement: All existing tests pass without modification.
+      required: true
+    - id: no-duplication
+      statement: The price-formatting logic appears in exactly one place.
+      required: true
+  non_goals:
+    - Do not change the public API of format_invoice.
+    - Do not introduce new dependencies.
+    - Do not change test files.

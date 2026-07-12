@@ -1,0 +1,74 @@
+# container-untrusted
+#
+# Container/micro-VM profile for untrusted repositories, third-party
+# extension build/test, high-risk MCP servers, and remote multi-user
+# execution (SPEC §13.4, §36.8). The image is digest-pinned; mutable tags
+# are NOT accepted. Credentials are short-lived mounts or injected env vars
+# that the secret broker redacts from output.
+
+profile:
+  id: container-untrusted
+  backend: container
+  backend_image:
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    # In production this is a real digest pinning the gVisor / Firecracker
+    # image with the workspace runtime and pinned toolchain.
+    repository: ghcr.io/forge/sandbox-untrusted
+    tag: pinned
+  require_full_enforcement: true
+  filesystem:
+    root: read_only
+    workspace: read_only
+    active_worktree: read_write
+    read:
+      - worktree://active/**
+    write:
+      - worktree://active/**
+    deny:
+      - worktree://active/.git/**
+      - forge-state://**
+      - secret-store://**
+      - host://**
+      - credentials://**
+    protected:
+      - .git
+      - harness_state
+      - credentials
+    symlinks: contained_only
+  process:
+    shell: prompt
+    structured_exec: classify
+    daemonization: deny
+    privilege_escalation: deny
+    no_new_privs: true
+    seccomp: restrictive
+  network:
+    direct_sockets: deny
+    proxy_required: true
+    destinations: []
+    dns: brokered
+    private_address_denied: true
+  secrets:
+    ambient_environment: deny
+    direct_environment: deny
+    model_visibility: deny
+    brokered_capabilities: []
+  external_state:
+    default: deny
+  extensions:
+    third_party_in_process: deny
+    lifecycle_scripts: deny
+  resources:
+    memory_bytes: 4294967296
+    cpu_seconds: 1200
+    pids: 512
+    open_files: 2048
+    wall_clock_seconds: 7200
+  plugins:
+    ambient_authority: deny
+  isolation:
+    namespace: user
+    pid_namespace: isolated
+    network_namespace: isolated
+    mount_namespace: isolated
+    snapshot_reuse: forbidden_without_integrity_check

@@ -1,0 +1,30 @@
+suite:
+  id: forge-internal
+  version: 1
+  description: |
+    Forge internal cohort (SPEC §41.3). Hand-curated tasks on the Forge
+    codebase itself. Used for regression testing across harness components
+    and for testing forge-on-forge behavior. Tasks are vendored under
+    evals/tasks/.
+  source: internal
+  license: proprietary
+  task_count: 12
+  default_timeout_seconds: 600
+  default_budget:
+    model_micros: 1500000
+    compute_seconds: 300
+    wall_clock_seconds: 600
+    human_approvals: 0
+  grader_version: forge-internal-1.0
+  metrics:
+    primary: resolved
+    secondary: [parse_passes, narrow_tests_pass, acceptance_met, cost_usd, turns_taken]
+  cohorts:
+    - tiny-bugfix
+    - refactor
+    - security-sensitive
+  notes: |
+    Tasks under evals/tasks/{tiny-bugfix,refactor,security-sensitive}/ are
+    the canonical Forge internal fixtures. Each task has a realistic coding
+    prompt, an environment lock, a setup script, a grader, hidden tests
+    (never projected to model context), and a policy profile.

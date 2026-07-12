@@ -1,0 +1,342 @@
+# Forge Semantic Event Catalog (SPEC §45.5).
+#
+# This is the source-of-truth catalog of semantic events emitted by the
+# Forge control plane and kernel. The codegen-events generator produces:
+#   - runtime validators (TS zod, Rust serde);
+#   - event type unions;
+#   - JSON Schemas (in schemas/generated/);
+#   - a Markdown catalog;
+#   - synthetic test fixtures;
+#   - migration compatibility tests.
+#
+# Each event has a stable `type` and `version`. Breaking changes require
+# a new version; old versions are kept for backward-compat tests.
+
+- type: workspace.registered
+  version: 1
+  aggregate: workspace
+  payload:
+    workspace_id: {type: uuid, required: true}
+    root_uri: {type: string, required: true}
+    trust_level: {type: string, enum: [trusted, untrusted], required: true}
+  pii: none
+  retention: audit
+
+- type: session.created
+  version: 1
+  aggregate: session
+  payload:
+    session_id: {type: uuid, required: true}
+    workspace_id: {type: uuid, required: true}
+  pii: none
+  retention: audit
+
+- type: thread.created
+  version: 1
+  aggregate: thread
+  payload:
+    thread_id: {type: uuid, required: true}
+    session_id: {type: uuid, required: true}
+  pii: none
+  retention: audit
+
+- type: task.created
+  version: 1
+  aggregate: task
+  payload:
+    task_id: {type: uuid, required: true}
+    thread_id: {type: uuid, required: true}
+    contract_id: {type: uuid, required: true}
+    objective: {type: string, required: false}
+  pii: low
+  retention: audit
+
+- type: task.activated
+  version: 1
+  aggregate: task
+  payload:
+    task_id: {type: uuid, required: true}
+    contract_version: {type: int, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.started
+  version: 1
+  aggregate: turn
+  payload:
+    turn_id: {type: uuid, required: true}
+    task_id: {type: uuid, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.context_compiling
+  version: 1
+  aggregate: turn
+  payload:
+    turn_id: {type: uuid, required: true}
+    epoch_id: {type: uuid, required: false}
+  pii: none
+  retention: audit
+
+- type: context.manifest_persisted
+  version: 1
+  aggregate: context_epoch
+  payload:
+    epoch_id: {type: uuid, required: true}
+    manifest_artifact: {type: artifact_ref, required: true}
+    fragment_count: {type: int, required: true}
+    estimated_tokens: {type: int, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.provider_running
+  version: 1
+  aggregate: turn
+  payload:
+    turn_id: {type: uuid, required: true}
+    provider_attempt_id: {type: uuid, required: true}
+    provider: {type: string, required: true}
+    model: {type: string, required: true}
+  pii: low
+  retention: audit
+
+- type: turn.response_validating
+  version: 1
+  aggregate: turn
+  payload:
+    turn_id: {type: uuid, required: true}
+    response_artifact: {type: artifact_ref, required: true}
+    usage:
+      type: object
+      required: false
+      properties:
+        prompt_tokens: {type: int, required: true}
+        completion_tokens: {type: int, required: true}
+        cached_tokens: {type: int, required: false}
+  pii: none
+  retention: audit
+
+- type: tool.proposed
+  version: 1
+  aggregate: tool_call
+  payload:
+    tool_call_id: {type: uuid, required: true}
+    turn_id: {type: uuid, required: true}
+    tool: {type: string, required: true}
+    args_artifact: {type: artifact_ref, required: false}
+  pii: low
+  retention: audit
+
+- type: tool.authorized
+  version: 1
+  aggregate: tool_call
+  payload:
+    tool_call_id: {type: uuid, required: true}
+    policy_decision_id: {type: uuid, required: true}
+    decision: {type: string, enum: [allow, allow_with_constraints, prompt, deny], required: true}
+  pii: none
+  retention: audit
+
+- type: tool.settled
+  version: 1
+  aggregate: tool_call
+  payload:
+    tool_call_id: {type: uuid, required: true}
+    status: {type: ToolStatus, required: true}
+    result_artifact: {type: artifact_ref, required: false}
+    timing_ms: {type: int, required: true}
+  pii: low
+  retention: audit
+
+- type: tool.completed
+  version: 1
+  aggregate: tool_call
+  payload:
+    tool_call_id: {type: uuid, required: true}
+    status: {type: ToolStatus, required: true}
+    result_artifact: {type: artifact_ref, required: false}
+  pii: low
+  retention: audit
+
+- type: turn.finalizing
+  version: 1
+  aggregate: turn
+  payload:
+    turn_id: {type: uuid, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.completed
+  version: 1
+  aggregate: turn
+  payload:
+    turn_id: {type: uuid, required: true}
+    outcome: {type: string, enum: [completed, needs_user_decision, blocked, failed, cancelled], required: true}
+  pii: low
+  retention: audit
+
+- type: task.verifying
+  version: 1
+  aggregate: task
+  payload:
+    task_id: {type: uuid, required: true}
+    plan_id: {type: uuid, required: true}
+  pii: none
+  retention: audit
+
+- type: verification.node_passed
+  version: 1
+  aggregate: verification_plan
+  payload:
+    plan_id: {type: uuid, required: true}
+    node_id: {type: string, required: true}
+    evidence_artifact: {type: artifact_ref, required: false}
+  pii: none
+  retention: audit
+
+- type: verification.node_failed
+  version: 1
+  aggregate: verification_plan
+  payload:
+    plan_id: {type: uuid, required: true}
+    node_id: {type: string, required: true}
+    failure_artifact: {type: artifact_ref, required: true}
+  pii: low
+  retention: audit
+
+- type: verification.plan_completed
+  version: 1
+  aggregate: verification_plan
+  payload:
+    plan_id: {type: uuid, required: true}
+    all_passed: {type: bool, required: true}
+  pii: none
+  retention: audit
+
+- type: task.completed
+  version: 1
+  aggregate: task
+  payload:
+    task_id: {type: uuid, required: true}
+    plan_id: {type: uuid, required: false}
+  pii: low
+  retention: audit
+
+- type: policy.evaluated
+  version: 1
+  aggregate: policy_decision
+  payload:
+    policy_decision_id: {type: uuid, required: true}
+    effect_type: {type: string, required: true}
+    decision: {type: string, enum: [allow, allow_with_constraints, prompt, deny], required: true}
+    matched_rules: {type: array, items: {type: string}, required: true}
+  pii: none
+  retention: audit
+
+- type: approval.requested
+  version: 1
+  aggregate: approval
+  payload:
+    approval_id: {type: uuid, required: true}
+    action_hash: {type: string, required: true}
+    operation_class: {type: string, required: true}
+  pii: low
+  retention: audit
+
+- type: approval.granted
+  version: 1
+  aggregate: approval
+  payload:
+    approval_id: {type: uuid, required: true}
+    granted_by: {type: string, required: true}
+  pii: low
+  retention: audit
+
+- type: approval.revoked
+  version: 1
+  aggregate: approval
+  payload:
+    approval_id: {type: uuid, required: true}
+    reason: {type: string, required: true}
+  pii: none
+  retention: audit
+
+- type: secret.requested
+  version: 1
+  aggregate: secret_use
+  payload:
+    capability: {type: string, required: true}
+    destination: {type: string, required: true}
+    operation_class: {type: string, required: true}
+  pii: none
+  retention: audit
+
+- type: secret.brokered
+  version: 1
+  aggregate: secret_use
+  payload:
+    capability: {type: string, required: true}
+    handle_ref: {type: string, required: true}
+    ttl_seconds: {type: int, required: true}
+  pii: none
+  retention: audit
+
+- type: secret.revoked
+  version: 1
+  aggregate: secret_use
+  payload:
+    capability: {type: string, required: true}
+    handle_ref: {type: string, required: true}
+  pii: none
+  retention: audit
+
+- type: security.incident
+  version: 1
+  aggregate: security
+  payload:
+    incident_id: {type: uuid, required: true}
+    category: {type: string, required: true}
+    severity: {type: string, enum: [low, medium, high, critical], required: true}
+    actor: {type: string, required: true}
+    proposed_action: {type: string, required: false}
+    policy_decision_id: {type: uuid, required: false}
+  pii: low
+  retention: audit
+
+- type: capability.activated
+  version: 1
+  aggregate: capability
+  payload:
+    capability_id: {type: string, required: true}
+    kind: {type: string, required: true}
+    tool_layer_hash: {type: string, required: true}
+  pii: none
+  retention: audit
+
+- type: capability.deactivated
+  version: 1
+  aggregate: capability
+  payload:
+    capability_id: {type: string, required: true}
+    tool_layer_hash: {type: string, required: true}
+  pii: none
+  retention: audit
+
+- type: memory.claim_added
+  version: 1
+  aggregate: memory_claim
+  payload:
+    claim_id: {type: uuid, required: true}
+    kind: {type: string, required: true}
+    scope: {type: string, required: true}
+  pii: low
+  retention: audit
+
+- type: memory.claim_quarantined
+  version: 1
+  aggregate: memory_claim
+  payload:
+    claim_id: {type: uuid, required: true}
+    reason: {type: string, required: true}
+  pii: low
+  retention: audit

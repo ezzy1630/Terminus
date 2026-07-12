@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.dev/schemas/tools/read.json",
+  "title": "read",
+  "description": "Read a file or artifact from the workspace. Small files return full content; large files return an outline plus relevant ranges with elision markers. Never silently truncates.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "workspace://, worktree://, or artifact:// URI of the file or artifact to read."
+    },
+    "range": {
+      "type": ["object", "null"],
+      "description": "Optional line range to read. If omitted, the full file or an outline is returned.",
+      "additionalProperties": false,
+      "properties": {
+        "start": { "type": "integer", "minimum": 1 },
+        "end": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "symbol": {
+      "type": ["string", "null"],
+      "description": "Optional symbol name; if given, returns the symbol's definition plus its references."
+    },
+    "continuation": {
+      "type": ["string", "null"],
+      "description": "Continuation token from a previous truncated read."
+    }
+  }
+}

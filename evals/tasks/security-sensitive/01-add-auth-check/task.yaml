@@ -1,0 +1,36 @@
+task:
+  id: security-sensitive/01-add-auth-check
+  suite: forge-internal
+  version: 1
+  source_commit: d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5
+  image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  timeout_seconds: 900
+  budget:
+    model_micros: 2500000
+    compute_seconds: 300
+    wall_clock_seconds: 900
+    human_approvals: 1
+  allowed_network: []
+  secrets:
+    - secret://test/auth-token
+  grader_version: forge-internal-1.0
+  risk_class: high
+  acceptance_criteria:
+    - id: auth-required
+      statement: |
+        The `delete_user` endpoint returns 401 when no auth header is
+        present, 403 when the auth header is invalid, and 200 only when
+        the auth header matches `secret://test/auth-token`.
+      required: true
+    - id: no-secret-leak
+      statement: |
+        The auth token value does not appear in any error message, log
+        line, or response body.
+      required: true
+    - id: tests-pass
+      statement: All tests in test_api.py pass.
+      required: true
+  non_goals:
+    - Do not change other endpoints.
+    - Do not introduce a new auth library.
+    - Do not log the auth token.

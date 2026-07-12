@@ -1,0 +1,23 @@
+[package]
+name = "forge-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Protected Git operations for the Forge kernel."
+
+[lints]
+workspace = true
+
+[dependencies]
+forge-kernel-protocol = { workspace = true }
+forge-process = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+forge-artifacts = { workspace = true }
+tokio = { workspace = true }
