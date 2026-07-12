@@ -1,4 +1,4 @@
-//! Forge kernel HTTP mini-service — the non-bypassable effect boundary
+//! Terminus kernel HTTP mini-service — the non-bypassable effect boundary
 //! (SPEC §5.2, §13, §27, §31).
 //!
 //! Stands up an `axum` HTTP server on port `3040` that wires every kernel
@@ -9,6 +9,7 @@
 mod api;
 mod auth;
 mod error;
+mod grpc;
 mod handlers;
 mod idempotency;
 mod logging;
@@ -43,9 +44,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(AppState::from_env()?);
     let app = build_router(state.clone());
 
-    let addr: SocketAddr = ([0, 0, 0, 0], PORT).into();
+    let grpc_socket = std::env::var("TERMINUS_KERNEL_GRPC_SOCKET")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let require_uds = std::env::var("TERMINUS_KERNEL_REQUIRE_UDS")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+
+    // Production must not retain the privileged HTTP bootstrap once the UDS
+    // transport is required. Failing closed here prevents a misconfigured
+    // deployment from silently exposing the effect kernel over TCP.
+    if require_uds {
+        let socket = grpc_socket.ok_or(
+            "TERMINUS_KERNEL_REQUIRE_UDS=1 requires TERMINUS_KERNEL_GRPC_SOCKET",
+        )?;
+        grpc::serve_grpc(std::path::PathBuf::from(socket), state.kernel.info.clone()).await?;
+        return Ok(());
+    }
+
+    // SPEC §30.1 Boundary B / ADR-0007: the privileged kernel MUST be
+    // reachable only over a loopback Unix-domain socket (gRPC-over-UDS is the
+    // M3 target). Until that binding lands, the JSON-over-HTTP bootstrap is
+    // restricted to the loopback interface so the privileged effect boundary
+    // is never exposed to other hosts or the local network. Binding the kernel
+    // to `0.0.0.0` is a release blocker (SPEC §26.3 invariant 1).
+    let addr: SocketAddr = ([127, 0, 0, 1], PORT).into();
     let listener = TcpListener::bind(addr).await?;
-    info!(%addr, "forge-kernel mini-service listening");
+    info!(%addr, "terminus-kernel mini-service listening (loopback only)");
+
+    // ADR-0007 gRPC-over-UDS transport: if TERMINUS_KERNEL_GRPC_SOCKET is set,
+    // serve KernelInfoService over a Unix-domain socket alongside the HTTP
+    // bootstrap. The gRPC path is the canonical transport; the HTTP path
+    // remains until the control plane migrates method-by-method (M3).
+    if let Some(sock) = grpc_socket {
+        let info = state.kernel.info.clone();
+        let sock_path = std::path::PathBuf::from(sock);
+        tokio::spawn(async move {
+            if let Err(e) = grpc::serve_grpc(sock_path, info).await {
+                tracing::error!(error = %e, "terminus-kernel gRPC server exited with error");
+            }
+        });
+    }
+
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -56,12 +96,15 @@ fn build_router(state: Arc<AppState>) -> Router {
     // All routes in one Router. The state type is `Arc<AppState>`; handlers
     // extract `State<Arc<AppState>>`. Middleware layers carry their own
     // state via `from_fn_with_state` independently of the router's state.
-    let app = Router::<Arc<AppState>>::new()
+    Router::<Arc<AppState>>::new()
         // ----- KernelInfoService -----
         .route("/v1/info", post(handlers::info::info))
         .route("/v1/health", post(handlers::info::health))
         // ----- WorkspaceService -----
-        .route("/v1/workspaces/register", post(handlers::workspaces::register))
+        .route(
+            "/v1/workspaces/register",
+            post(handlers::workspaces::register),
+        )
         .route("/v1/workspaces/:id/get", post(handlers::workspaces::get))
         // ----- FileService -----
         .route("/v1/files/read", post(handlers::files::read))
@@ -94,27 +137,43 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/network/request", post(handlers::network::request))
         .route("/v1/network/allowlist", get(handlers::network::allowlist))
         // ----- CodeIntelligenceService -----
-        .route("/v1/code-intel/inspect-symbol", post(handlers::code_intel::inspect_symbol))
-        .route("/v1/code-intel/find-references", post(handlers::code_intel::find_references))
-        .route("/v1/code-intel/diagnose-files", post(handlers::code_intel::diagnose_files))
+        .route(
+            "/v1/code-intel/inspect-symbol",
+            post(handlers::code_intel::inspect_symbol),
+        )
+        .route(
+            "/v1/code-intel/find-references",
+            post(handlers::code_intel::find_references),
+        )
+        .route(
+            "/v1/code-intel/diagnose-files",
+            post(handlers::code_intel::diagnose_files),
+        )
         // ----- ExtensionRuntimeService -----
         .route("/v1/extensions/load", post(handlers::extensions::load))
         .route("/v1/extensions/invoke", post(handlers::extensions::invoke))
         // ----- ArtifactIngestService -----
         .route("/v1/artifacts/ingest", post(handlers::artifacts::ingest))
         .route("/v1/artifacts/:hash", get(handlers::artifacts::get))
-        .route("/v1/artifacts/:hash/metadata", get(handlers::artifacts::metadata))
+        .route(
+            "/v1/artifacts/:hash/metadata",
+            get(handlers::artifacts::metadata),
+        )
         .route("/v1/artifacts/gc", post(handlers::artifacts::gc))
         // ----- Middleware layers (outermost first) -----
-        .layer(from_fn_with_state(state.clone(), require_capability_for_path))
+        .layer(from_fn_with_state(
+            state.clone(),
+            require_capability_for_path,
+        ))
         .layer(from_fn_with_state(state.clone(), require_bearer))
         .layer(from_fn(logging::log_requests))
         .layer(middleware::from_fn(cors_layer))
-        .with_state(state);
-
-    app
+        .with_state(state)
 }
 
+#[allow(clippy::expect_used)] // signal-handler installation failure is fatal;
+                              // there is no useful recovery, so surfacing it
+                              // immediately is correct.
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
