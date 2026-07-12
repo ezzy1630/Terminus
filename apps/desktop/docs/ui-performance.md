@@ -15,7 +15,7 @@ bun run build:electron
 
 | Artifact | Raw | Gzip |
 | --- | ---: | ---: |
-| Initial application JavaScript | 488.34 kB | 143.77 kB |
+| Initial application JavaScript | 488.66 kB | 143.83 kB |
 | Application CSS | 27.58 kB | 6.35 kB |
 | Deferred ReviewPane | 30.23 kB | 8.21 kB |
 | Deferred Settings | 26.44 kB | 7.93 kB |

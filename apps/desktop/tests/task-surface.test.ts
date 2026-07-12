@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  deriveComputerUseActivity,
   derivePendingApprovals,
   deriveSubagentActivity,
   deriveVerificationActivity,
@@ -13,6 +14,18 @@ function event(id: string, type: string, payload: Record<string, unknown>): Term
 }
 
 describe("task surface event projections", () => {
+  test("computer use remains absent until runtime events start a session", () => {
+    expect(deriveComputerUseActivity([])).toEqual({ active: false, paused: false });
+    expect(deriveComputerUseActivity([
+      event("1", "computer_use.started", { session_id: "cu-1" }),
+      event("2", "computer_use.paused", { session_id: "cu-1" }),
+    ])).toEqual({ active: true, paused: true });
+    expect(deriveComputerUseActivity([
+      event("1", "computer_use.started", { session_id: "cu-1" }),
+      event("2", "computer_use.stopped", { session_id: "cu-1" }),
+    ])).toEqual({ active: false, paused: false });
+  });
+
   test("shows only unresolved approvals", () => {
     const events = [
       event("1", "approval.requested", { approvalId: "approval-a", operationSummary: "Run migration", risk: "high", reversibility: "reversible" }),

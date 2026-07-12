@@ -25,6 +25,11 @@ export interface VerificationActivity {
   detail: string;
 }
 
+export interface ComputerUseActivity {
+  active: boolean;
+  paused: boolean;
+}
+
 function eventPayload(event: TerminusSseEvent): Record<string, unknown> | null {
   try {
     const value: unknown = JSON.parse(event.data);
@@ -116,6 +121,30 @@ export function deriveVerificationActivity(events: TerminusSseEvent[]): Verifica
     }
   }
   return activity;
+}
+
+export function deriveComputerUseActivity(events: TerminusSseEvent[]): ComputerUseActivity {
+  let active = false;
+  let paused = false;
+  for (const event of events) {
+    if (event.event === "computer_use.started" || event.event === "computer-use.started") {
+      active = true;
+      paused = false;
+    } else if (event.event === "computer_use.paused" || event.event === "computer-use.paused") {
+      if (active) paused = true;
+    } else if (event.event === "computer_use.resumed" || event.event === "computer-use.resumed") {
+      if (active) paused = false;
+    } else if (
+      event.event === "computer_use.stopped"
+      || event.event === "computer-use.stopped"
+      || event.event === "computer_use.completed"
+      || event.event === "computer-use.completed"
+    ) {
+      active = false;
+      paused = false;
+    }
+  }
+  return { active, paused };
 }
 
 /**
