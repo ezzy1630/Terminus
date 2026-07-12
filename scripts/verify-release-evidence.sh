@@ -1,41 +1,68 @@
 #!/usr/bin/env bash
-# Validate the externally-produced Linux enforcement evidence required by the
-# release gate (SPEC §36.5, §46.18, §50.5). A local machine must not be able
-# to claim secure release readiness without evidence from a real Linux runner.
+# Verify cryptographically bound Linux enforcement evidence.
 set -euo pipefail
 
 evidence_path="${TERMINUS_LINUX_EVIDENCE:-}"
-if [[ -z "$evidence_path" ]]; then
-  echo "[release-evidence] TERMINUS_LINUX_EVIDENCE is required" >&2
-  echo "[release-evidence] provide the immutable evidence manifest from the dedicated Linux sandbox runner" >&2
-  exit 1
-fi
+signature_path="${TERMINUS_LINUX_EVIDENCE_SIGNATURE:-}"
+certificate_path="${TERMINUS_LINUX_EVIDENCE_CERTIFICATE:-}"
+expected_commit="${TERMINUS_RELEASE_COMMIT:-${GITHUB_SHA:-}}"
 
-if [[ ! -f "$evidence_path" ]]; then
-  echo "[release-evidence] evidence manifest does not exist: $evidence_path" >&2
+fail() {
+  echo "[release-evidence] $*" >&2
   exit 1
-fi
+}
 
-required_patterns=(
-  '^platform: linux$'
-  '^profile: secure-local-default$'
-  '^enforcement: enforced$'
-  '^seccomp: active$'
-  '^cgroup_v2: active$'
-  '^network: proxy-only$'
-  '^status: passed$'
+[[ -n "$evidence_path" ]] || fail "TERMINUS_LINUX_EVIDENCE is required"
+[[ -f "$evidence_path" ]] || fail "evidence manifest does not exist: $evidence_path"
+[[ -n "$signature_path" && -f "$signature_path" ]] || fail "signed evidence signature is required"
+[[ -n "$certificate_path" && -f "$certificate_path" ]] || fail "signed evidence certificate is required"
+command -v cosign >/dev/null 2>&1 || fail "cosign is required to verify signed evidence"
+
+jq -e 'type == "object"' "$evidence_path" >/dev/null || fail "evidence manifest is not valid JSON"
+
+required_paths=(
+  '.schema_version'
+  '.terminus_commit'
+  '.runner.os'
+  '.runner.kernel'
+  '.sandbox.bubblewrap_version'
+  '.sandbox.seccomp_filter_sha256'
+  '.sandbox.cgroup_mode'
+  '.sandbox.network_mode'
+  '.test_suite_sha256'
+  '.command'
+  '.exit_status'
+  '.tests'
+  '.artifact_digests'
+  '.generated_at'
+  '.ci.run_url'
+  '.ci.identity'
 )
-
-for pattern in "${required_patterns[@]}"; do
-  if ! grep -Eq "$pattern" "$evidence_path"; then
-    echo "[release-evidence] missing required evidence field: $pattern" >&2
-    exit 1
-  fi
+for path in "${required_paths[@]}"; do
+  jq -e "${path} != null and ${path} != \"\"" "$evidence_path" >/dev/null || fail "missing evidence field: $path"
 done
 
-if grep -Eiq '(^|: )(skip|skipped|placeholder|unavailable|degraded)($|[[:space:]])' "$evidence_path"; then
-  echo "[release-evidence] evidence contains a skipped, placeholder, unavailable, or degraded result" >&2
-  exit 1
+jq -e '
+  .schema_version == 1 and
+  .runner.os == "linux" and
+  .sandbox.network_mode == "proxy-only" and
+  .sandbox.cgroup_mode == "v2" and
+  (.tests | type == "array" and length > 0) and
+  (.tests | all(.[]; .status == "passed" and (.artifact_digest | type == "string"))) and
+  (.artifact_digests | type == "object" and length > 0) and
+  (.exit_status == 0)
+' "$evidence_path" >/dev/null || fail "evidence does not prove the required enforced Linux profile"
+
+if [[ -n "$expected_commit" ]]; then
+  actual_commit="$(jq -r '.terminus_commit' "$evidence_path")"
+  [[ "$actual_commit" == "$expected_commit" ]] || fail "manifest commit $actual_commit is not bound to release commit $expected_commit"
 fi
 
-echo "[release-evidence] validated $evidence_path"
+cosign verify-blob \
+  --certificate "$certificate_path" \
+  --signature "$signature_path" \
+  --certificate-identity-regexp "${TERMINUS_EVIDENCE_CERTIFICATE_IDENTITY:-https://github.com/.+/.github/workflows/.+}" \
+  --certificate-oidc-issuer "${TERMINUS_EVIDENCE_OIDC_ISSUER:-https://token.actions.githubusercontent.com}" \
+  "$evidence_path" >/dev/null || fail "evidence signature verification failed"
+
+echo "[release-evidence] verified signed manifest: $evidence_path"

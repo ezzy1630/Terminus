@@ -21,10 +21,12 @@ datasource db {
 // --- Schema migrations ----------------------------------------------------
 
 model SchemaMigration {
-  version     Int     @id
-  name        String
-  checksumSha256 String
-  appliedAt   DateTime @default(now())
+  version        Int      @id
+  name           String
+  checksumSha256 String   @map("checksum_sha256")
+  appliedAt      DateTime @default(now()) @map("applied_at")
+
+  @@map("schema_migrations")
 }
 
 // --- Core aggregates ------------------------------------------------------
@@ -32,35 +34,36 @@ model SchemaMigration {
 model Workspace {
   id              String   @id
   kind            String   // local_git | local_directory | container | microvm | remote
-  rootUri         String
-  canonicalRoot   String   @unique
+  rootUri         String   @map("root_uri")
+  canonicalRoot   String   @unique @map("canonical_root")
   trust           String   // trusted | untrusted | restricted
-  repositoryJson  String?
-  policyProfileId String
-  createdAt       DateTime @default(now())
-  lastOpenedAt    DateTime @default(now())
-  deletedAt       DateTime?
+  repositoryJson  String?  @map("repository_json")
+  policyProfileId String   @map("policy_profile_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  lastOpenedAt    DateTime @default(now()) @map("last_opened_at")
+  deletedAt       DateTime? @map("deleted_at")
 
   sessions        Session[]
   artifacts       ArtifactLink[]
 
   @@index([lastOpenedAt])
+  @@map("workspaces")
 }
 
 model Session {
   id                       String   @id
-  workspaceId              String
-  ownerPrincipal           String
+  workspaceId              String   @map("workspace_id")
+  ownerPrincipal           String   @map("owner_principal")
   title                    String
   status                   String   // active | paused | archived | deleted
-  defaultModelProfile      String
-  defaultPermissionProfile String
-  activeThreadId           String?
-  metadataJson             String   @default("{}")
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
-  archivedAt               DateTime?
-  deletedAt                DateTime?
+  defaultModelProfile      String   @map("default_model_profile")
+  defaultPermissionProfile String   @map("default_permission_profile")
+  activeThreadId           String?  @map("active_thread_id")
+  metadataJson             String   @default("{}") @map("metadata_json")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+  archivedAt               DateTime? @map("archived_at")
+  deletedAt                DateTime? @map("deleted_at")
 
   workspace                Workspace @relation(fields: [workspaceId], references: [id])
   threads                  Thread[]
@@ -69,18 +72,19 @@ model Session {
   capabilityActivations    CapabilityActivation[]
 
   @@index([workspaceId, updatedAt])
+  @@map("sessions")
 }
 
 model Thread {
   id                     String   @id
-  sessionId              String
-  parentThreadId         String?
-  forkedFromTurnId       String?
+  sessionId              String   @map("session_id")
+  parentThreadId         String?  @map("parent_thread_id")
+  forkedFromTurnId       String?  @map("forked_from_turn_id")
   status                 String   // active | idle | paused | archived | deleted
-  activeContextEpochId   String?
-  headTurnId             String?
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
+  activeContextEpochId   String?  @map("active_context_epoch_id")
+  headTurnId             String?  @map("head_turn_id")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
 
   session                Session  @relation(fields: [sessionId], references: [id])
   parent                 Thread?  @relation("ThreadParent", fields: [parentThreadId], references: [id])
@@ -90,23 +94,24 @@ model Thread {
   tasks                  Task[]
 
   @@index([sessionId, createdAt])
+  @@map("threads")
 }
 
 model Task {
   id                       String   @id
-  sessionId                String
-  threadId                 String
+  sessionId                String   @map("session_id")
+  threadId                 String   @map("thread_id")
   status                   String   // DRAFT|ACTIVE|NEEDS_USER_DECISION|BLOCKED|VERIFYING|COMPLETED|FAILED|FAILED_VERIFICATION|BUDGET_EXHAUSTED|POLICY_DENIED|ABORTED
   phase                    String   // INTAKE|CONTRACT|DISCOVER|PLAN|IMPLEMENT|VERIFY|REVIEW|COMPLETE
-  activeContractVersion    Int      @default(1)
-  riskClass                String   @default("normal")
-  verificationPlanId       String?
-  budgetJson               String
-  scopeDigest              String
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
-  completedAt              DateTime?
-  terminalReasonJson       String?
+  activeContractVersion    Int      @default(1) @map("active_contract_version")
+  riskClass                String   @default("normal") @map("risk_class")
+  verificationPlanId       String?  @map("verification_plan_id")
+  budgetJson               String   @map("budget_json")
+  scopeDigest              String   @map("scope_digest")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+  completedAt              DateTime? @map("completed_at")
+  terminalReasonJson       String?  @map("terminal_reason_json")
 
   session                  Session         @relation(fields: [sessionId], references: [id])
   thread                   Thread          @relation(fields: [threadId], references: [id])
@@ -121,58 +126,62 @@ model Task {
   capabilityActivations    CapabilityActivation[]
 
   @@index([sessionId, status, updatedAt])
+  @@map("tasks")
 }
 
 model TaskContractVersion {
   task_id            String
   version            Int
   objective          String
-  userOutcome        String?
-  nonGoalsJson       String
-  constraintsJson    String
-  assumptionsJson    String
-  unknownsJson       String
-  allowedScopeJson   String
-  changePolicyJson   String
-  contentHash        String
-  createdBy          String
-  createdAt          DateTime @default(now())
+  userOutcome        String?  @map("user_outcome")
+  nonGoalsJson       String   @map("non_goals_json")
+  constraintsJson    String   @map("constraints_json")
+  assumptionsJson    String   @map("assumptions_json")
+  unknownsJson       String   @map("unknowns_json")
+  allowedScopeJson   String   @map("allowed_scope_json")
+  changePolicyJson   String   @map("change_policy_json")
+  contentHash        String   @map("content_hash")
+  createdBy          String   @map("created_by")
+  createdAt          DateTime @default(now()) @map("created_at")
 
   task               Task                  @relation(fields: [task_id], references: [id])
   acceptanceCriteria AcceptanceCriterion[]
 
   @@id([task_id, version])
+  @@map("task_contract_versions")
 }
 
 model AcceptanceCriterion {
-  taskId            String
-  contractVersion   Int
-  criterionId       String
+  taskId            String  @map("task_id")
+  contractVersion   Int     @map("contract_version")
+  criterionId       String  @map("criterion_id")
   statement         String
-  verificationHint  String?
+  verificationHint  String? @map("verification_hint")
   required          Boolean
   status            String   @default("pending")
 
   task              TaskContractVersion @relation(fields: [taskId, contractVersion], references: [task_id, version])
 
   @@id([taskId, contractVersion, criterionId])
+  @@map("acceptance_criteria")
 }
 
 model ScopeLedgerEntry {
   id                String   @id
-  taskId            String
-  contractVersion   Int
-  resourceUri       String
-  accessClass       String   // read_allowed | write_allowed | read_observed | write_proposed | write_effective | external_proposed | external_effective | denied
+  taskId            String   @map("task_id")
+  contractVersion   Int      @map("contract_version")
+  resourceUri       String   @map("resource_uri")
+  accessClass       String   @map("access_class") // read_allowed | write_allowed | read_observed | write_proposed | write_effective | external_proposed | external_effective | denied
   source            String
   reason            String
-  approvalId        String?
-  createdAt         DateTime @default(now())
+  approvalId        String?  @map("approval_id")
+  createdAt         DateTime @default(now()) @map("created_at")
 
   task              Task      @relation(fields: [taskId], references: [id])
   approval          Approval? @relation("ScopeApproval", fields: [approvalId], references: [id])
 
   @@index([taskId, resourceUri, createdAt])
+  @@map("scope_ledger_entries")
 }
 
 model Turn {
@@ -639,15 +648,16 @@ model CapabilityActivation {
 model IdempotencyRecord {
   principal       String
   method          String
-  idempotencyKey  String
-  requestHash     String
+  idempotencyKey  String  @map("idempotency_key")
+  requestHash     String  @map("request_hash")
   state           String
-  responseArtifact String?
-  errorJson       String?
-  createdAt       DateTime @default(now())
-  expiresAt       DateTime
+  responseArtifact String? @map("response_artifact")
+  errorJson       String?  @map("error_json")
+  createdAt       DateTime @default(now()) @map("created_at")
+  expiresAt       DateTime @map("expires_at")
 
   @@id([principal, method, idempotencyKey])
+  @@map("idempotency_records")
 }
 
 model Lease {
@@ -660,30 +670,33 @@ model Lease {
 }
 
 model SemanticEvent {
-  eventId         String   @id
-  eventType       String
-  schemaVersion   Int
-  aggregateType   String
-  aggregateId     String
-  aggregateSequence Int
-  occurredAt      DateTime @default(now())
-  actorJson       String
-  correlationId   String
-  causationId     String?
-  idempotencyKey  String?
-  payloadJson     String
-  artifactRefsJson String
-  traceId         String?
+  eventId         String   @id @map("event_id")
+  eventType       String   @map("event_type")
+  schemaVersion   Int      @map("schema_version")
+  aggregateType   String   @map("aggregate_type")
+  aggregateId     String   @map("aggregate_id")
+  aggregateSequence Int    @map("aggregate_sequence")
+  occurredAt      DateTime @default(now()) @map("occurred_at")
+  actorJson       String   @map("actor_json")
+  correlationId   String   @map("correlation_id")
+  causationId     String?  @map("causation_id")
+  idempotencyKey  String?  @map("idempotency_key")
+  payloadJson     String   @map("payload_json")
+  artifactRefsJson String  @map("artifact_refs_json")
+  traceId         String?  @map("trace_id")
 
   @@unique([aggregateType, aggregateId, aggregateSequence])
   @@index([correlationId, occurredAt])
+  @@map("semantic_events")
 }
 
 model EventStreamCursor {
-  streamName    String   @id
-  lastEventId   String
-  lastSequence  Int
-  updatedAt     DateTime @updatedAt
+  streamName    String   @id @map("stream_name")
+  lastEventId   String   @map("last_event_id")
+  lastSequence  Int      @map("last_sequence")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("event_stream_cursors")
 }
 
 // --- Checkpoints and recovery (SPEC §29.5) -------------------------------

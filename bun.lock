@@ -5,6 +5,7 @@
     "": {
       "name": "nextjs_tailwind_shadcn_ts",
       "dependencies": {
+        "@bufbuild/protobuf": "^2.9.0",
         "@dnd-kit/core": "^6.3.1",
         "@dnd-kit/sortable": "^10.0.0",
         "@dnd-kit/utilities": "^3.2.2",
@@ -62,6 +63,7 @@
         "react-resizable-panels": "^3.0.3",
         "react-syntax-highlighter": "^15.6.1",
         "recharts": "^2.15.4",
+        "rxjs": "^7.8.2",
         "sharp": "^0.34.3",
         "sonner": "^2.0.6",
         "tailwind-merge": "^3.3.1",
@@ -91,240 +93,240 @@
       },
     },
     "packages/aci": {
-      "name": "@forge/aci",
+      "name": "@terminus/aci",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
-        "@forge/provider-core": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/provider-core": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/adapter-sdk": {
-      "name": "@forge/adapter-sdk",
+      "name": "@terminus/adapter-sdk",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/artifact-client": {
-      "name": "@forge/artifact-client",
+      "name": "@terminus/artifact-client",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/capability-registry": {
-      "name": "@forge/capability-registry",
+      "name": "@terminus/capability-registry",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/config": {
-      "name": "@forge/config",
+      "name": "@terminus/config",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
+        "@terminus/domain": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/context-compiler": {
-      "name": "@forge/context-compiler",
+      "name": "@terminus/context-compiler",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/provider-core": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/provider-core": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/context-ir": {
-      "name": "@forge/context-ir",
+      "name": "@terminus/context-ir",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
+        "@terminus/domain": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/domain": {
-      "name": "@forge/domain",
+      "name": "@terminus/domain",
       "version": "0.1.0",
       "dependencies": {
         "zod": "^4.0.2",
       },
     },
     "packages/extension-host": {
-      "name": "@forge/extension-host",
+      "name": "@terminus/extension-host",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/capability-registry": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/capability-registry": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/memory": {
-      "name": "@forge/memory",
+      "name": "@terminus/memory",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/model-router": {
-      "name": "@forge/model-router",
+      "name": "@terminus/model-router",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
-        "@forge/provider-core": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/provider-core": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/observability": {
-      "name": "@forge/observability",
+      "name": "@terminus/observability",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
+        "@terminus/domain": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/open-code-bridge": {
-      "name": "@forge/open-code-bridge",
+      "name": "@terminus/open-code-bridge",
       "version": "0.1.0",
     },
     "packages/orchestration": {
-      "name": "@forge/orchestration",
+      "name": "@terminus/orchestration",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/policy-coordinator": {
-      "name": "@forge/policy-coordinator",
+      "name": "@terminus/policy-coordinator",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/provider-anthropic": {
-      "name": "@forge/provider-anthropic",
+      "name": "@terminus/provider-anthropic",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/provider-core": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/provider-core": "workspace:*",
       },
     },
     "packages/provider-core": {
-      "name": "@forge/provider-core",
+      "name": "@terminus/provider-core",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/provider-google": {
-      "name": "@forge/provider-google",
+      "name": "@terminus/provider-google",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/provider-core": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/provider-core": "workspace:*",
       },
     },
     "packages/provider-local": {
-      "name": "@forge/provider-local",
+      "name": "@terminus/provider-local",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/provider-core": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/provider-core": "workspace:*",
       },
     },
     "packages/provider-openai": {
-      "name": "@forge/provider-openai",
+      "name": "@terminus/provider-openai",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/provider-core": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/provider-core": "workspace:*",
       },
     },
     "packages/public-api": {
-      "name": "@forge/public-api",
+      "name": "@terminus/public-api",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
+        "@terminus/domain": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/public-client": {
-      "name": "@forge/public-client",
+      "name": "@terminus/public-client",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/public-api": "workspace:*",
+        "@terminus/public-api": "workspace:*",
       },
     },
     "packages/runtime-protocol": {
-      "name": "@forge/runtime-protocol",
+      "name": "@terminus/runtime-protocol",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
+        "@terminus/domain": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/session-runtime": {
-      "name": "@forge/session-runtime",
+      "name": "@terminus/session-runtime",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
-        "@forge/observability": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/observability": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/task-runtime": {
-      "name": "@forge/task-runtime",
+      "name": "@terminus/task-runtime",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/domain": "workspace:*",
-        "@forge/observability": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/observability": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/testkit": {
-      "name": "@forge/testkit",
+      "name": "@terminus/testkit",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
     "packages/verification": {
-      "name": "@forge/verification",
+      "name": "@terminus/verification",
       "version": "0.1.0",
       "dependencies": {
-        "@forge/context-ir": "workspace:*",
-        "@forge/domain": "workspace:*",
-        "@forge/runtime-protocol": "workspace:*",
+        "@terminus/context-ir": "workspace:*",
+        "@terminus/domain": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
     },
@@ -377,6 +379,8 @@
     "@babel/types": ["@babel/types@7.28.6", "https://registry.npmjs.com/@babel/types/-/types-7.28.6.tgz", { "dependencies": { "@babel/helper-string-parser": "^7.27.1", "@babel/helper-validator-identifier": "^7.28.5" } }, "sha512-0ZrskXVEHSWIqZM/sQZ4EV3jZJXRkio/WCxaqKZP1g//CEWEPSfeZFcms4XeKBCHU0ZKnIkdJeU/kF+eRp5lBg=="],
 
     "@bramus/specificity": ["@bramus/specificity@2.4.2", "", { "dependencies": { "css-tree": "^3.0.0" }, "bin": { "specificity": "bin/cli.js" } }, "sha512-ctxtJ/eA+t+6q2++vj5j7FYX3nRu311q1wfYH3xjlLOsczhlhxAg2FWNUXhpGvAw3BWo1xBcvOV6/YLc2r5FJw=="],
+
+    "@bufbuild/protobuf": ["@bufbuild/protobuf@2.12.1", "", {}, "sha512-BvAMfS6LrgZiryOAZ4pBYucu4wG/Ei/9o9DZ9akbREnMLbPJiom2i8b9C8IsKErQoiKqVhrerzt3kOT/RrzLHg=="],
 
     "@codemirror/autocomplete": ["@codemirror/autocomplete@6.20.0", "https://registry.npmjs.com/@codemirror/autocomplete/-/autocomplete-6.20.0.tgz", { "dependencies": { "@codemirror/language": "^6.0.0", "@codemirror/state": "^6.0.0", "@codemirror/view": "^6.17.0", "@lezer/common": "^1.0.0" } }, "sha512-bOwvTOIJcG5FVo5gUUupiwYh8MioPLQ4UcqbcRf7UQ98X90tCa9E1kZ3Z7tqwpZxYyOvh1YTYbmZE9RTfTp5hg=="],
 
@@ -549,60 +553,6 @@
     "@floating-ui/react-dom": ["@floating-ui/react-dom@2.1.6", "https://registry.npmjs.com/@floating-ui/react-dom/-/react-dom-2.1.6.tgz", { "dependencies": { "@floating-ui/dom": "^1.7.4" }, "peerDependencies": { "react": ">=16.8.0", "react-dom": ">=16.8.0" } }, "sha512-4JX6rEatQEvlmgU80wZyq9RT96HZJa88q8hp0pBd+LrczeDI4o6uA2M+uvxngVHo4Ihr8uibXxH6+70zhAFrVw=="],
 
     "@floating-ui/utils": ["@floating-ui/utils@0.2.10", "https://registry.npmjs.com/@floating-ui/utils/-/utils-0.2.10.tgz", {}, "sha512-aGTxbpbg8/b5JfU1HXSrbH3wXZuLPJcNEcZQFMxLs3oSzgtVu6nFPkbbGGUvBcUjKV2YyB9Wxxabo+HEH9tcRQ=="],
-
-    "@forge/aci": ["@forge/aci@workspace:packages/aci"],
-
-    "@forge/adapter-sdk": ["@forge/adapter-sdk@workspace:packages/adapter-sdk"],
-
-    "@forge/artifact-client": ["@forge/artifact-client@workspace:packages/artifact-client"],
-
-    "@forge/capability-registry": ["@forge/capability-registry@workspace:packages/capability-registry"],
-
-    "@forge/config": ["@forge/config@workspace:packages/config"],
-
-    "@forge/context-compiler": ["@forge/context-compiler@workspace:packages/context-compiler"],
-
-    "@forge/context-ir": ["@forge/context-ir@workspace:packages/context-ir"],
-
-    "@forge/domain": ["@forge/domain@workspace:packages/domain"],
-
-    "@forge/extension-host": ["@forge/extension-host@workspace:packages/extension-host"],
-
-    "@forge/memory": ["@forge/memory@workspace:packages/memory"],
-
-    "@forge/model-router": ["@forge/model-router@workspace:packages/model-router"],
-
-    "@forge/observability": ["@forge/observability@workspace:packages/observability"],
-
-    "@forge/open-code-bridge": ["@forge/open-code-bridge@workspace:packages/open-code-bridge"],
-
-    "@forge/orchestration": ["@forge/orchestration@workspace:packages/orchestration"],
-
-    "@forge/policy-coordinator": ["@forge/policy-coordinator@workspace:packages/policy-coordinator"],
-
-    "@forge/provider-anthropic": ["@forge/provider-anthropic@workspace:packages/provider-anthropic"],
-
-    "@forge/provider-core": ["@forge/provider-core@workspace:packages/provider-core"],
-
-    "@forge/provider-google": ["@forge/provider-google@workspace:packages/provider-google"],
-
-    "@forge/provider-local": ["@forge/provider-local@workspace:packages/provider-local"],
-
-    "@forge/provider-openai": ["@forge/provider-openai@workspace:packages/provider-openai"],
-
-    "@forge/public-api": ["@forge/public-api@workspace:packages/public-api"],
-
-    "@forge/public-client": ["@forge/public-client@workspace:packages/public-client"],
-
-    "@forge/runtime-protocol": ["@forge/runtime-protocol@workspace:packages/runtime-protocol"],
-
-    "@forge/session-runtime": ["@forge/session-runtime@workspace:packages/session-runtime"],
-
-    "@forge/task-runtime": ["@forge/task-runtime@workspace:packages/task-runtime"],
-
-    "@forge/testkit": ["@forge/testkit@workspace:packages/testkit"],
-
-    "@forge/verification": ["@forge/verification@workspace:packages/verification"],
 
     "@formatjs/ecma402-abstract": ["@formatjs/ecma402-abstract@2.3.6", "https://registry.npmjs.com/@formatjs/ecma402-abstract/-/ecma402-abstract-2.3.6.tgz", { "dependencies": { "@formatjs/fast-memoize": "2.2.7", "@formatjs/intl-localematcher": "0.6.2", "decimal.js": "^10.4.3", "tslib": "^2.8.0" } }, "sha512-HJnTFeRM2kVFVr5gr5kH1XP6K0JcJtE7Lzvtr3FS/so5f1kpsqqqxy5JF+FRaO6H2qmcMfAUIox7AJteieRtVw=="],
 
@@ -1091,6 +1041,60 @@
     "@tanstack/react-table": ["@tanstack/react-table@8.21.3", "https://registry.npmjs.com/@tanstack/react-table/-/react-table-8.21.3.tgz", { "dependencies": { "@tanstack/table-core": "8.21.3" }, "peerDependencies": { "react": ">=16.8", "react-dom": ">=16.8" } }, "sha512-5nNMTSETP4ykGegmVkhjcS8tTLW6Vl4axfEGQN3v0zdHYbK4UfoqfPChclTrJ4EoK9QynqAu9oUf8VEmrpZ5Ww=="],
 
     "@tanstack/table-core": ["@tanstack/table-core@8.21.3", "https://registry.npmjs.com/@tanstack/table-core/-/table-core-8.21.3.tgz", {}, "sha512-ldZXEhOBb8Is7xLs01fR3YEc3DERiz5silj8tnGkFZytt1abEvl/GhUmCE0PMLaMPTa3Jk4HbKmRlHmu+gCftg=="],
+
+    "@terminus/aci": ["@terminus/aci@workspace:packages/aci"],
+
+    "@terminus/adapter-sdk": ["@terminus/adapter-sdk@workspace:packages/adapter-sdk"],
+
+    "@terminus/artifact-client": ["@terminus/artifact-client@workspace:packages/artifact-client"],
+
+    "@terminus/capability-registry": ["@terminus/capability-registry@workspace:packages/capability-registry"],
+
+    "@terminus/config": ["@terminus/config@workspace:packages/config"],
+
+    "@terminus/context-compiler": ["@terminus/context-compiler@workspace:packages/context-compiler"],
+
+    "@terminus/context-ir": ["@terminus/context-ir@workspace:packages/context-ir"],
+
+    "@terminus/domain": ["@terminus/domain@workspace:packages/domain"],
+
+    "@terminus/extension-host": ["@terminus/extension-host@workspace:packages/extension-host"],
+
+    "@terminus/memory": ["@terminus/memory@workspace:packages/memory"],
+
+    "@terminus/model-router": ["@terminus/model-router@workspace:packages/model-router"],
+
+    "@terminus/observability": ["@terminus/observability@workspace:packages/observability"],
+
+    "@terminus/open-code-bridge": ["@terminus/open-code-bridge@workspace:packages/open-code-bridge"],
+
+    "@terminus/orchestration": ["@terminus/orchestration@workspace:packages/orchestration"],
+
+    "@terminus/policy-coordinator": ["@terminus/policy-coordinator@workspace:packages/policy-coordinator"],
+
+    "@terminus/provider-anthropic": ["@terminus/provider-anthropic@workspace:packages/provider-anthropic"],
+
+    "@terminus/provider-core": ["@terminus/provider-core@workspace:packages/provider-core"],
+
+    "@terminus/provider-google": ["@terminus/provider-google@workspace:packages/provider-google"],
+
+    "@terminus/provider-local": ["@terminus/provider-local@workspace:packages/provider-local"],
+
+    "@terminus/provider-openai": ["@terminus/provider-openai@workspace:packages/provider-openai"],
+
+    "@terminus/public-api": ["@terminus/public-api@workspace:packages/public-api"],
+
+    "@terminus/public-client": ["@terminus/public-client@workspace:packages/public-client"],
+
+    "@terminus/runtime-protocol": ["@terminus/runtime-protocol@workspace:packages/runtime-protocol"],
+
+    "@terminus/session-runtime": ["@terminus/session-runtime@workspace:packages/session-runtime"],
+
+    "@terminus/task-runtime": ["@terminus/task-runtime@workspace:packages/task-runtime"],
+
+    "@terminus/testkit": ["@terminus/testkit@workspace:packages/testkit"],
+
+    "@terminus/verification": ["@terminus/verification@workspace:packages/verification"],
 
     "@testing-library/dom": ["@testing-library/dom@10.4.1", "", { "dependencies": { "@babel/code-frame": "^7.10.4", "@babel/runtime": "^7.12.5", "@types/aria-query": "^5.0.1", "aria-query": "5.3.0", "dom-accessibility-api": "^0.5.9", "lz-string": "^1.5.0", "picocolors": "1.1.1", "pretty-format": "^27.0.2" } }, "sha512-o4PXJQidqJl82ckFaXUeoAW+XysPLauYI43Abki5hABd853iMhitooc6znOnczgbTYmEP6U6/y1ZyKAIsvMKGg=="],
 
@@ -2135,6 +2139,8 @@
     "rollup": ["rollup@4.62.2", "", { "dependencies": { "@types/estree": "1.0.9" }, "optionalDependencies": { "@rollup/rollup-android-arm-eabi": "4.62.2", "@rollup/rollup-android-arm64": "4.62.2", "@rollup/rollup-darwin-arm64": "4.62.2", "@rollup/rollup-darwin-x64": "4.62.2", "@rollup/rollup-freebsd-arm64": "4.62.2", "@rollup/rollup-freebsd-x64": "4.62.2", "@rollup/rollup-linux-arm-gnueabihf": "4.62.2", "@rollup/rollup-linux-arm-musleabihf": "4.62.2", "@rollup/rollup-linux-arm64-gnu": "4.62.2", "@rollup/rollup-linux-arm64-musl": "4.62.2", "@rollup/rollup-linux-loong64-gnu": "4.62.2", "@rollup/rollup-linux-loong64-musl": "4.62.2", "@rollup/rollup-linux-ppc64-gnu": "4.62.2", "@rollup/rollup-linux-ppc64-musl": "4.62.2", "@rollup/rollup-linux-riscv64-gnu": "4.62.2", "@rollup/rollup-linux-riscv64-musl": "4.62.2", "@rollup/rollup-linux-s390x-gnu": "4.62.2", "@rollup/rollup-linux-x64-gnu": "4.62.2", "@rollup/rollup-linux-x64-musl": "4.62.2", "@rollup/rollup-openbsd-x64": "4.62.2", "@rollup/rollup-openharmony-arm64": "4.62.2", "@rollup/rollup-win32-arm64-msvc": "4.62.2", "@rollup/rollup-win32-ia32-msvc": "4.62.2", "@rollup/rollup-win32-x64-gnu": "4.62.2", "@rollup/rollup-win32-x64-msvc": "4.62.2", "fsevents": "~2.3.2" }, "bin": { "rollup": "dist/bin/rollup" } }, "sha512-RFnrW4lhXA3s3eqHDZvN654g8OTjzRfqpIRJYczCGB6HzphckVAi/Qh4tbPUbRuDi7s1Llv8g/NspLkttY3gTA=="],
 
     "run-parallel": ["run-parallel@1.2.0", "https://registry.npmjs.com/run-parallel/-/run-parallel-1.2.0.tgz", { "dependencies": { "queue-microtask": "^1.2.2" } }, "sha512-5l4VyZR86LZ/lDxZTR6jqL8AFE2S0IFLMP26AbjsLVADxHdhB/c0GUsH+y39UfCi3dzz8OlQuPmnaJOMoDHQBA=="],
+
+    "rxjs": ["rxjs@7.8.2", "", { "dependencies": { "tslib": "^2.1.0" } }, "sha512-dhKf903U/PQZY6boNNtAGdWbG85WAbjT/1xYoZIC7FAY0yWapOBQVsVrDl58W86//e1VpMNBtRV4MaXfdMySFA=="],
 
     "sade": ["sade@1.8.1", "https://registry.npmjs.com/sade/-/sade-1.8.1.tgz", { "dependencies": { "mri": "^1.1.0" } }, "sha512-xal3CZX1Xlo/k4ApwCFrHVACi9fBqJ7V+mwhBsuf/1IOKbBy098Fex+Wa/5QMubw09pSZ/u8EY8PWgevJsXp1A=="],
 

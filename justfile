@@ -1,9 +1,8 @@
-# Forge root task runner (SPEC §43.7, §43.8, §45.3).
+# Terminus root task runner (SPEC §43.7, §43.8, §45.3).
 # User-facing commands. Individual package commands remain available via
 # cargo/pnpm/bun/uv directly.
 
-set -eu
-shell := ["bash", "-c"]
+set shell := ["bash", "-eu", "-c"]
 export FORGE_ROOT := justfile_directory()
 export CARGO_TARGET_DIR := justfile_directory() / "target"
 export RUST_BACKTRACE := "1"
@@ -27,7 +26,7 @@ bootstrap:
     echo "[bootstrap] installing TS workspace deps..."
     bun install --frozen-lockfile
     echo "[bootstrap] installing Python eval deps..."
-    cd python && uv sync --frozen || uv sync
+    cd python && uv sync --frozen
     echo "[bootstrap] verifying buf..."
     buf --version
     echo "[bootstrap] OK"
@@ -35,23 +34,43 @@ bootstrap:
 # Build Rust, TypeScript, and generated contracts.
 build:
     cargo build --workspace --all-targets
+    # SPEC §42: build (typecheck) the canonical Terminus TS packages, then the
+    # Next.js dashboard. The kernel mini-service builds via its own crate.
+    bun run build:packages
     bun run build
-    cd python && uv run build || true
+    cd python && uv run build
 
 # Fast lint/type/unit checks.
 check: boundary-check
     cargo fmt --all -- --check
-    cargo clippy --workspace --all-targets -- -D warnings
+    # Rely on [workspace.lints] (SPEC §44.2): clippy::all, unwrap/expect/panic,
+    # unsafe_code, and unused_must_use are denied at the Cargo.toml level;
+    # pedantic/nursery are advisory (warn) and must NOT be escalated to errors.
+    cargo clippy --workspace --all-targets
     bun run lint
+    # SPEC §44.3: typecheck the canonical Terminus packages under strict
+    # settings (tsconfig.packages.json), then the Next.js dashboard.
+    bun run typecheck:packages
     bun run typecheck
-    cd python && uv run ruff check . && uv run mypy forge_evals || true
+    cd python && uv run ruff check . && uv run mypy forge_evals
+
+# Lint + test the kernel HTTP mini-service, which intentionally sits outside
+# the root Cargo workspace (SPEC §42.5 boundary). The root `cargo clippy
+# --workspace` does not cover it, so it is checked explicitly here and in CI.
+kernel-mini-check:
+    #!/usr/bin/env bash
+    set -eu
+    cd mini-services/terminus-kernel
+    cargo fmt -- --check
+    cargo clippy --all-targets
+    cargo test
 
 # Architecture boundary checks (SPEC §42.5).
 boundary-check:
     bun run tools/boundary-check.ts
 
 # Full local validation.
-check-all: check codegen-check unit integration security
+check-all: check kernel-mini-check codegen-check unit integration security
 
 # Regenerate all derived contracts.
 codegen: codegen-proto codegen-public-api codegen-events codegen-tools codegen-config codegen-sqlx codegen-docs
@@ -103,43 +122,45 @@ unit:
 # Integration tests.
 integration:
     cargo test --workspace --test '*'
-    bun run test:integration || true
-    cd python && uv run pytest -q tests/integration || true
+    bun run test:integration
+    cd python && uv run pytest -q tests/integration
 
 # Local-capable security suite (per-PR subset).
 security:
     cargo test --workspace --test security
-    bun run test:security || true
-    cargo deny check || true
+    bun run test:security
+    cargo deny check
 
 # End-to-end task tests.
 e2e:
-    bun run test:e2e || true
-    echo "[e2e] TODO: drive full session/task/event/approval/resume cycle"
+    bun run test:e2e
 
 # Small deterministic eval suite.
 eval-smoke:
-    cd python && uv run forge-eval run --suite forge-internal --tasks tiny-bugfix/01-fix-typo,tiny-bugfix/02-null-check --runs 1
+    cd python && uv run terminus-eval run --suite terminus-internal --tasks tiny-bugfix/01-fix-typo,tiny-bugfix/02-null-check --runs 1
 
 # Full configured evaluation suite.
 eval-full:
-    cd python && uv run forge-eval run --suite forge-internal --runs 3
-    cd python && uv run forge-eval run --suite swe-bench-verified --runs 3
-    cd python && uv run forge-eval run --suite terminal-bench --runs 3
+    cd python && uv run terminus-eval run --suite terminus-internal --runs 3
+    cd python && uv run terminus-eval run --suite swe-bench-verified --runs 3
+    cd python && uv run terminus-eval run --suite terminal-bench --runs 3
 
 # OpenCode parity and divergence checks.
 upstream-check:
     #!/usr/bin/env bash
     set -eu
-    echo "[upstream-check] verifying pinned OpenCode commit..."
-    test -f upstream/opencode.lock.json
+    echo "[upstream-check] verifying upstream OpenCode pin..."
+    bash scripts/verify-upstream-pin.sh
     echo "[upstream-check] divergence budget:"
     cat upstream/divergence-budget.yaml
-    echo "[upstream-check] TODO: run parity test suite against pinned upstream commit"
+    echo "[upstream-check] effect bypass register:"
+    cat docs/security/effect-bypass-register.yaml
 
-# Release gate (SPEC §46.18, §50).
-release-check: check-all e2e eval-smoke
-    echo "[release-check] TODO: full release gate per SPEC §46.18"
+# Release gate (SPEC §46.18, §50). Every dependency is mandatory; missing
+# infrastructure or evidence is a release failure, not a warning.
+release-check: check-all e2e eval-smoke upstream-check
+    bash scripts/verify-release-evidence.sh
+    echo "[release-check] PASS — required local checks and release evidence are present"
 
 # Run control plane and kernel locally (supervised).
 run:
@@ -154,11 +175,11 @@ run:
 
 # Run the Rust kernel mini-service on :3040.
 run-kernel:
-    cd mini-services/forge-kernel && cargo run --release
+    cd mini-services/terminus-kernel && cargo run --release
 
 # Run the TS control plane mini-service on :3050.
 run-control:
-    cd mini-services/forge-control && bun run dev
+    cd mini-services/terminus-control && bun run dev
 
 # Run the Next.js dashboard on :3000.
 run-tui:
