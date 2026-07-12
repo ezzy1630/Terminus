@@ -49,7 +49,7 @@ interface LayoutProps {
   onTerminalOpenChange?: (open: boolean) => void;
 }
 
-const TITLEBAR_HEIGHT = 48;
+const TITLEBAR_HEIGHT = 44;
 const TRAFFIC_LIGHTS_PAD = 80;
 const TERMINAL_MIN_HEIGHT = 120;
 const TERMINAL_DEFAULT_HEIGHT = 240;
@@ -75,7 +75,7 @@ const TitleBar = memo(function TitleBar({
         height: TITLEBAR_HEIGHT,
         // Leave space for macOS traffic lights on the left.
         paddingLeft: TRAFFIC_LIGHTS_PAD + 4,
-        paddingRight: 14,
+        paddingRight: 12,
         WebkitAppRegion: "drag",
       } as React.CSSProperties}
     >

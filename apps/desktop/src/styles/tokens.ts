@@ -20,22 +20,22 @@
 
 export const darkTokens = {
   // Main canvas — neutral Codex-like charcoal
-  "--bg-canvas": "#1b1c1e",
+  "--bg-canvas": "#1c1c1e",
   // Elevated surfaces — barely warmer gray
-  "--bg-elevated": "#232427",
+  "--bg-elevated": "#242426",
   // Sidebar — native macOS material (simulated)
-  "--bg-sidebar": "#202124",
+  "--bg-sidebar": "#202022",
   // Inspector — floating card
   "--bg-inspector": "#252629",
   // Terminal and diff — slightly cooler and darker
   "--bg-terminal": "#161618",
   "--bg-diff": "#161618",
   // Composer
-  "--bg-composer": "#252629",
+  "--bg-composer": "#262628",
   // Hover
-  "--bg-hover": "#303136",
+  "--bg-hover": "#2d2d30",
   // Selected (no bright saturated background)
-  "--bg-selected": "#303238",
+  "--bg-selected": "#343438",
 
   // Text
   "--text-primary": "#f1f1f2",
@@ -44,8 +44,8 @@ export const darkTokens = {
   "--text-inverse": "#1a1a1c",
 
   // Separators
-  "--border-subtle": "#303136",
-  "--border-default": "#3a3b40",
+  "--border-subtle": "#2c2c2f",
+  "--border-default": "#3b3b3f",
   "--border-strong": "#505158",
 
   // Semantic colors (color is reserved for meaning)

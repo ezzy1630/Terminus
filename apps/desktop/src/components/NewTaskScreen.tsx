@@ -17,13 +17,13 @@
  * Per SPEC §8: "Opening a new task should focus the composer
  * immediately."
  */
-import { memo, useCallback, useState } from "react";
-import { Bug, Code2, FileSearch, Hammer, TerminalSquare } from "lucide-react";
+import { memo, useCallback, useMemo, useState } from "react";
+import { Bug, Code2, FileSearch, Hammer } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, TerminusApiError } from "../lib/api";
 import { useTerminusStore } from "../hooks/use-terminus";
 import { Composer } from "./Composer";
-import type { Session } from "../types";
+import type { Session, Task } from "../types";
 
 interface NewTaskScreenProps {
   className?: string;
@@ -37,7 +37,7 @@ interface Suggestion {
   prompt: string;
 }
 
-const SUGGESTIONS: Suggestion[] = [
+const STARTER_TEMPLATES: Suggestion[] = [
   {
     id: "explore",
     icon: <FileSearch size={14} />,
@@ -72,44 +72,68 @@ const SUGGESTIONS: Suggestion[] = [
   },
 ];
 
+/**
+ * Starters are a task-intent surface, not decorative static cards. The
+ * project-aware prompt gives the runtime concrete workspace context while
+ * retaining a compact set of useful intent classes for a new task.
+ */
+function suggestionsFor(session: Session | undefined, tasks: Task[]): Suggestion[] {
+  if (!session) return STARTER_TEMPLATES;
+  const scope = `Work in the ${session.title} project. `;
+  const scoped = STARTER_TEMPLATES.map((starter) => ({
+    ...starter,
+    prompt: `${scope}${starter.prompt}`,
+  }));
+  const latestTask = tasks[0];
+  const latestObjective = latestTask?.contract?.objective?.trim();
+  if (!latestObjective) return scoped;
+
+  const shortObjective = latestObjective.split("\n")[0]?.slice(0, 38) ?? latestObjective;
+  const continuePrompt = `${scope}Continue the task “${latestObjective}”. First summarize its current state, then propose the next smallest verified step.`;
+  return scoped.map((starter) => starter.id === "explore"
+    ? {
+      ...starter,
+      label: `Continue: ${shortObjective}${shortObjective.length < latestObjective.length ? "…" : ""}`,
+      detail: "Pick up the most recently active task",
+      prompt: continuePrompt,
+    }
+    : starter,
+  );
+}
+
 function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
   const selectedSessionId = useTerminusStore((s) => s.selectedSessionId);
   const sessions = useTerminusStore((s) => s.sessions);
+  const tasksBySession = useTerminusStore((s) => s.tasksBySession);
   const refreshTasks = useTerminusStore((s) => s.refreshTasks);
   const selectTask = useTerminusStore((s) => s.selectTask);
-  const draftsByTask = useTerminusStore((s) => s.draftsByTask);
   const setDraft = useTerminusStore((s) => s.setDraft);
 
   const session: Session | undefined = sessions.find((s) => s.id === selectedSessionId);
-  const draftKey = "__new__";
-  const draft = draftsByTask[draftKey] ?? "";
-
+  const sessionTasks = session ? tasksBySession[session.id] ?? [] : [];
+  const suggestions = useMemo(() => suggestionsFor(session, sessionTasks), [session, sessionTasks]);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const createDisabled = creating || draft.trim().length === 0;
 
   const pickSuggestion = useCallback(
     (s: Suggestion) => {
       // Pre-fill the new-task draft with the scaffolded prompt.
-      setDraft(draftKey, s.prompt);
+      setDraft("__new__", s.prompt);
     },
     [setDraft],
   );
 
-  const createTask = useCallback(async (): Promise<void> => {
+  const createTask = useCallback(async (objective: string): Promise<void> => {
     if (!session) {
-      setError("Select or create a project first.");
-      return;
-    }
-    const objective = draft.trim();
-    if (objective.length === 0) {
-      setError("Describe what you want to build before creating a task.");
-      return;
+      const message = "Select or create a project first.";
+      setError(message);
+      throw new Error(message);
     }
     const threadId = session.active_thread_id;
     if (!threadId) {
-      setError("Session has no active thread. Open the session in the sidebar first.");
-      return;
+      const message = "Session has no active thread. Open the session in the sidebar first.";
+      setError(message);
+      throw new Error(message);
     }
     setCreating(true);
     setError(null);
@@ -124,160 +148,71 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
       await api.startTask(task.id);
       // Refresh + select the new task.
       await refreshTasks(session.id);
-      // Clear the new-task draft.
-      useTerminusStore.setState((state) => {
-        const next = { ...state.draftsByTask };
-        delete next[draftKey];
-        return { draftsByTask: next };
-      });
       selectTask(task.id);
     } catch (err) {
-      setError(err instanceof TerminusApiError ? err.message : "Failed to create task");
+      const message = err instanceof TerminusApiError || err instanceof Error ? err.message : "Failed to create task";
+      setError(message);
+      throw err;
     } finally {
       setCreating(false);
     }
-  }, [session, draft, refreshTasks, selectTask]);
+  }, [session, refreshTasks, selectTask]);
 
   return (
     <div
-      className={cn("flex h-full w-full flex-col overflow-y-auto", className)}
-      style={{ padding: "56px 42px 36px" }}
+      className={cn("flex h-full w-full flex-col justify-center overflow-y-auto", className)}
+      style={{ padding: "48px clamp(24px, 6vw, 72px) 76px" }}
     >
-      {/* Centered column matching the conversation reading column. */}
-      <div style={{ maxWidth: "760px", margin: "0 auto", width: "100%" }}>
-        {/* Restrained product mark. */}
-        <div className="mb-4 flex items-center gap-2 text-tertiary">
-          <span
-            className="flex h-9 w-9 items-center justify-center rounded-md border border-subtle"
-            style={{ background: "var(--bg-elevated)" }}
-            aria-hidden
-          >
-            <TerminalSquare size={18} className="text-secondary" strokeWidth={1.7} />
-          </span>
-          <div className="flex flex-col">
-            <span className="uppercase tracking-wide" style={{ fontSize: "var(--font-size-xs)", fontWeight: 600 }}>
-              Terminus
-            </span>
-            <span style={{ fontSize: "var(--font-size-xs)" }}>New task</span>
-          </div>
+      {/* The empty-task composition intentionally stays quiet and centered,
+          mirroring Codex's start surface rather than a dashboard. */}
+      <div style={{ maxWidth: "680px", margin: "2vh auto 0", width: "100%" }}>
+        <div className="mb-3 text-center text-tertiary" style={{ fontSize: "var(--font-size-xs)", letterSpacing: "0.01em" }}>
+          {session ? session.title : "New task"}
         </div>
 
-        {/* Contextual heading. */}
         <h1
-          className="text-primary"
+          className="text-center text-primary"
           style={{
-            fontSize: "var(--font-size-3xl)",
-            fontWeight: 600,
+            fontSize: "30px",
+            fontWeight: 500,
             lineHeight: "var(--line-height-tight)" as unknown as string,
-            letterSpacing: "-0.01em",
+            letterSpacing: "-0.025em",
           }}
         >
-          {session ? `What should we build in ${session.title}?` : "What should we build?"}
+          {session ? "What are we working on?" : "What should we work on?"}
         </h1>
-        <p className="mt-3 max-w-[620px] text-secondary" style={{ fontSize: "var(--font-size-md)", lineHeight: "var(--line-height-relaxed)" as unknown as string }}>
-          Give the harness a concrete outcome. It will plan, work through the changes, verify them, and return evidence.
-        </p>
 
-        {session ? (
-          <div className="mt-5 flex items-center gap-2 border-l-2 border-default pl-3 text-secondary" style={{ fontSize: "var(--font-size-xs)" }}>
-            <span className="font-medium text-primary">{session.title}</span>
-            <span className="text-tertiary">·</span>
-            <span>{session.default_model_profile ?? "implementer"}</span>
-            <span className="text-tertiary">·</span>
-            <span className="font-mono">{session.active_thread_id?.slice(0, 8) ?? "no active thread"}</span>
-          </div>
-        ) : null}
+        {/* Composer. */}
+        <div style={{ marginTop: "32px" }}>
+          <Composer onCreateTask={createTask} />
+        </div>
 
-        {/* Action suggestions. */}
-        <div className="mt-7 grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
-          {SUGGESTIONS.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              onClick={() => pickSuggestion(s)}
-              className={cn(
-                "flex min-h-16 items-start gap-3 rounded-md border border-subtle px-3.5 py-3 text-left",
-                "hover:border-default hover:bg-hover",
-              )}
-              style={{ background: "var(--bg-elevated)" }}
-            >
-              <span className="mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-sm bg-canvas text-secondary">{s.icon}</span>
-              <span className="flex flex-col gap-1">
-                <span
-                  className="text-primary"
-                  style={{ fontSize: "var(--font-size-sm)", fontWeight: 500 }}
-                >
-                  {s.label}
-                </span>
-                <span className="text-tertiary" style={{ fontSize: "var(--font-size-xs)", lineHeight: 1.35 }}>
-                  {s.detail}
-                </span>
-              </span>
-            </button>
+        {/* Starters are quiet shortcuts, not a dashboard. */}
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-x-1 gap-y-2" aria-label="Task starters">
+          {suggestions.map((suggestion, index) => (
+            <div key={suggestion.id} className="flex items-center">
+              {index > 0 ? <span className="mx-1 text-tertiary" aria-hidden>·</span> : null}
+              <button
+                type="button"
+                onClick={() => pickSuggestion(suggestion)}
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-tertiary hover:bg-hover hover:text-secondary"
+                style={{ fontSize: "var(--font-size-xs)" }}
+                title={suggestion.detail}
+              >
+                {suggestion.icon}
+                <span>{suggestion.label}</span>
+              </button>
+            </div>
           ))}
         </div>
 
-        {/* Composer. */}
-        <div className="mt-7">
-          <Composer />
-        </div>
+        {creating ? (
+          <div className="mt-2 px-1 text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>Creating task…</div>
+        ) : null}
+        {error ? (
+          <div className="mt-2 px-1 text-error" role="alert" style={{ fontSize: "var(--font-size-xs)" }}>{error}</div>
+        ) : null}
 
-        {/* Create button (the Composer's send shortcut works too, but
-            this is the explicit primary action for the New Task screen). */}
-        <div className="mt-4 flex items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={() => void createTask()}
-            disabled={createDisabled}
-            className={cn(
-              "flex h-8 items-center gap-2 rounded-md px-4 text-xs font-medium",
-              "transition-opacity",
-              createDisabled ? "opacity-50" : "hover:opacity-90",
-            )}
-            style={{
-              background: createDisabled ? "var(--bg-hover)" : "var(--color-primary)",
-              color: createDisabled ? "var(--text-tertiary)" : "var(--text-inverse)",
-              fontSize: "var(--font-size-sm)",
-            }}
-          >
-            {creating ? "Creating…" : "Create task"}
-          </button>
-          {error ? (
-            <span
-              className="truncate text-error"
-              style={{ fontSize: "var(--font-size-xs)", maxWidth: 360 }}
-              title={error}
-            >
-              {error}
-            </span>
-          ) : null}
-        </div>
-
-        {/* Current project / environment metadata. */}
-        <div
-          className="mt-9 border-t border-subtle pt-3 text-tertiary"
-          style={{ fontSize: "var(--font-size-xs)" }}
-        >
-          {session ? (
-            <div className="flex flex-wrap gap-x-4 gap-y-1">
-              <span>
-                <span className="text-secondary">Project:</span> {session.title}
-              </span>
-              <span>
-                <span className="text-secondary">Status:</span> {session.status}
-              </span>
-              <span>
-                <span className="text-secondary">Model:</span> {session.default_model_profile ?? "implementer"}
-              </span>
-              <span>
-                <span className="text-secondary">Thread:</span>{" "}
-                <code className="font-mono">{session.active_thread_id?.slice(0, 8) ?? "—"}</code>
-              </span>
-            </div>
-          ) : (
-            <div>No project selected. Choose one from the sidebar, or create a new project.</div>
-          )}
-        </div>
       </div>
     </div>
   );

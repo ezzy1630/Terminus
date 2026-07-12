@@ -176,8 +176,13 @@ function OnboardingImpl({
     setCreating(true);
     setError(null);
     try {
+      const workspace = await api.openWorkspace({
+        root_uri: projectPathToUri(projectPath),
+        kind: "local_directory",
+        trust: "trusted",
+      });
       const session = await api.createSession({
-        workspace_id: projectPath || `local-${Date.now()}`,
+        workspace_id: workspace.id,
         title: deriveProjectTitle(projectPath) || "My first project",
       });
       // Refresh sidebar + select the new session.
@@ -237,10 +242,10 @@ function OnboardingImpl({
         </button>
       </div>
       {/* Body. */}
-      <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-6 py-8">
-        <div className="w-full" style={{ maxWidth: 560 }}>
-          <StepIndicator step={step} />
-          <div style={{ marginTop: 24 }}>
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-12">
+        <div className="w-full" style={{ maxWidth: 680, marginTop: "-4vh" }}>
+          <div className="flex justify-center"><StepIndicator step={step} /></div>
+          <div style={{ marginTop: 40 }}>
             {step === 1 ? <WelcomeStep onNext={next} /> : null}
             {step === 2 ? (
               <ProjectStep
@@ -279,6 +284,14 @@ function deriveProjectTitle(path: string): string {
   const cleaned = path.replace(/\/+$/, "");
   const parts = cleaned.split("/");
   return parts[parts.length - 1] ?? cleaned;
+}
+
+/** Convert the native path collected by onboarding to the canonical URI the
+ * control plane accepts. Keeping this at the renderer boundary avoids
+ * smuggling path semantics into session creation. */
+function projectPathToUri(path: string): string {
+  if (path.startsWith("file://")) return path;
+  return new URL(path, "file:///").href;
 }
 
 // ────────────────────────── Step indicator ──────────────────────────────────
@@ -330,14 +343,14 @@ function StepIndicator({ step }: { step: number }): JSX.Element {
 
 function WelcomeStep({ onNext }: { onNext: () => void }): JSX.Element {
   return (
-    <div className="flex flex-col" style={{ gap: 16 }}>
-      <div className="flex items-center gap-3">
+    <div className="flex flex-col items-center text-center" style={{ gap: 18 }}>
+      <div className="flex flex-col items-center gap-4">
         <div
           aria-hidden
           className="flex items-center justify-center text-primary"
           style={{
-            width: 40,
-            height: 40,
+            width: 48,
+            height: 48,
             borderRadius: "var(--radius-lg)",
             background: "var(--bg-elevated)",
             border: "1px solid var(--border-subtle)",
@@ -348,22 +361,22 @@ function WelcomeStep({ onNext }: { onNext: () => void }): JSX.Element {
           <TerminalIcon size={18} strokeWidth={1.7} />
         </div>
         <div>
-          <h1 className="text-primary" style={{ fontSize: "var(--font-size-2xl)", fontWeight: 600 }}>
+          <h1 className="text-primary" style={{ fontSize: "32px", fontWeight: 550, letterSpacing: "-0.025em" }}>
             Welcome to Terminus
           </h1>
-          <p className="text-secondary" style={{ fontSize: "var(--font-size-sm)", marginTop: 2 }}>
-            A calm, focused way to operate coding agents.
+          <p className="text-secondary" style={{ fontSize: "var(--font-size-md)", marginTop: 6 }}>
+            Your work, agents, and evidence in one focused workspace.
           </p>
         </div>
       </div>
       <p
         className="text-secondary"
-        style={{ fontSize: "var(--font-size-sm)", lineHeight: "var(--line-height-relaxed)" }}
+        style={{ maxWidth: 540, fontSize: "var(--font-size-sm)", lineHeight: "var(--line-height-relaxed)" }}
       >
-        Terminus runs long-running tasks, branches, terminals, and code review in one window.
-        We've set sensible defaults for a 13-inch MacBook Air — you can change anything later in Settings.
+        Set up one local project, confirm the tools you already use, and start your first task.
+        Everything can be changed later in Settings.
       </p>
-      <div className="flex items-center justify-end" style={{ marginTop: 8 }}>
+      <div className="flex items-center justify-center" style={{ marginTop: 10 }}>
         <button
           type="button"
           onClick={onNext}

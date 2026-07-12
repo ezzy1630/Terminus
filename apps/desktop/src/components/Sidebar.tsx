@@ -125,13 +125,12 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Application name + new task. */}
-      <div className="flex flex-col gap-2 px-3 pb-3 pt-3">
-        <div className="flex items-center justify-between">
+      {/* Application name + global task navigation. */}
+      <div className="flex flex-col gap-1 px-3 pb-3 pt-3">
+        <div className="flex items-center">
           <div className="flex items-center gap-2">
             <span
-              className="flex h-7 w-7 items-center justify-center rounded-md border border-subtle text-secondary"
-              style={{ background: "var(--bg-elevated)" }}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-secondary"
               aria-hidden
             >
               <TerminalSquare size={15} strokeWidth={1.8} />
@@ -143,27 +142,17 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
               Terminus
             </span>
           </div>
-          <button
-            type="button"
-            onClick={onNewTask}
-            className="flex h-6 items-center gap-1 rounded-md px-2 text-xs text-secondary hover:bg-hover hover:text-primary"
-            style={{ fontSize: "var(--font-size-xs)" }}
-            aria-label="New task"
-          >
-            <Plus size={12} />
-            <span>New task</span>
-          </button>
         </div>
 
         <button
           type="button"
           onClick={onNewTask}
-          className="flex h-9 items-center gap-2 rounded-md border border-subtle px-2.5 text-left text-secondary hover:border-default hover:bg-hover hover:text-primary"
-          style={{ background: "var(--bg-elevated)", fontSize: "var(--font-size-sm)" }}
+          className="mt-1 flex h-8 items-center gap-2 rounded-md px-2 text-left text-secondary hover:bg-hover hover:text-primary"
+          style={{ fontSize: "var(--font-size-sm)" }}
         >
-          <Plus size={14} />
-          <span className="font-medium">Start a task</span>
-          <span className="ml-auto text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>⌘ N</span>
+          <Plus size={15} strokeWidth={1.8} />
+          <span>New task</span>
+          <span className="ml-auto text-tertiary" style={{ fontSize: 10 }}>⌘ N</span>
         </button>
 
         {/* Search. */}
@@ -178,13 +167,13 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search tasks"
             className={cn(
-              "w-full rounded-md border border-subtle bg-canvas pl-7 pr-2 text-secondary placeholder:text-tertiary",
-              "focus:border-default focus:outline-none",
+              "w-full rounded-md bg-transparent pl-7 pr-2 text-secondary placeholder:text-tertiary",
+              "focus:bg-hover focus:outline-none",
             )}
             style={{
               height: 26,
               fontSize: "var(--font-size-xs)",
-              background: "var(--bg-canvas)",
+              background: "transparent",
             }}
             aria-label="Search tasks"
           />
@@ -194,14 +183,14 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
           <button
             type="button"
             onClick={() => void refreshAll()}
-            className="flex min-h-8 items-center gap-2 rounded-sm border border-subtle px-2 text-left text-tertiary hover:border-default hover:bg-hover hover:text-secondary"
+            className="mt-1 flex min-h-7 items-center gap-2 rounded-md px-2 text-left text-tertiary hover:bg-hover hover:text-secondary"
             role="alert"
             title={lastError}
             style={{ fontSize: "var(--font-size-xs)" }}
           >
             <TriangleAlert size={13} className="flex-shrink-0 text-warning" />
-            <span className="min-w-0 flex-1 truncate">Control plane unavailable</span>
-            <span className="font-medium">Retry</span>
+            <span className="min-w-0 flex-1 truncate">Offline</span>
+            <span className="font-medium text-secondary">Retry</span>
           </button>
         ) : null}
       </div>
@@ -318,13 +307,13 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
             className="truncate text-primary"
             style={{ fontSize: "var(--font-size-sm)", fontWeight: 500 }}
           >
-            Developer
+            Local workspace
           </div>
           <div
             className="truncate text-tertiary"
             style={{ fontSize: "var(--font-size-xs)" }}
           >
-            Local control plane
+            {healthReady ? "Control plane connected" : "Control plane offline"}
           </div>
         </div>
         <button

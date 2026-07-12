@@ -36,15 +36,17 @@
  * drafts to the store via requestIdleCallback so streaming renders
  * don't block keystrokes.
  */
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   ChevronDown,
   CircleSlash,
+  FolderGit2,
   GitBranch,
   ListPlus,
   Monitor,
   Paperclip,
+  ShieldCheck,
   Square,
 } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -56,9 +58,15 @@ import type { AccessLevel, ComposerSendMode } from "../types";
 
 interface ComposerProps {
   className?: string;
+  /**
+   * The start surface supplies this so the same composer can turn a fresh
+   * objective into a real task.  A selected task continues to use the turn
+   * APIs below; there is no second, look-alike input implementation.
+   */
+  onCreateTask?: (objective: string) => Promise<void>;
 }
 
-const AGENT_OPTIONS = [
+const FALLBACK_AGENT_OPTIONS = [
   { id: "implementer", label: "Implementer" },
   { id: "scout", label: "Scout" },
   { id: "reviewer", label: "Reviewer" },
@@ -81,8 +89,10 @@ function computeSendMode(taskStatus: string | undefined): ComposerSendMode {
   return "send";
 }
 
-function ComposerImpl({ className }: ComposerProps): JSX.Element {
+function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
   const task = useSelectedTask();
+  const selectedSessionId = useTerminusStore((s) => s.selectedSessionId);
+  const sessions = useTerminusStore((s) => s.sessions);
   const density = useThemeStore((s) => s.density);
   const draftsByTask = useTerminusStore((s) => s.draftsByTask);
   const setDraft = useTerminusStore((s) => s.setDraft);
@@ -93,16 +103,34 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
   const draft = draftsByTask[taskId] ?? "";
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [agentOpen, setAgentOpen] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
-  const [agentId, setAgentId] = useState<string>(AGENT_OPTIONS[0]!.id);
+  const [agentId, setAgentId] = useState<string>(FALLBACK_AGENT_OPTIONS[0]!.id);
   const [accessLevel, setAccessLevel] = useState<AccessLevel>("local_dev");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const sendMode = computeSendMode(task?.status);
+  const activeSession = useMemo(
+    () => sessions.find((session) => session.id === (task?.session_id ?? selectedSessionId)),
+    [selectedSessionId, sessions, task?.session_id],
+  );
+  const agentOptions = useMemo(() => {
+    const profile = activeSession?.default_model_profile?.trim();
+    if (!profile || FALLBACK_AGENT_OPTIONS.some((option) => option.id === profile)) return FALLBACK_AGENT_OPTIONS;
+    return [{ id: profile, label: profile }, ...FALLBACK_AGENT_OPTIONS];
+  }, [activeSession?.default_model_profile]);
+
+  // A project can nominate a default profile. Keep the selector aligned on
+  // the new-task surface while leaving an active task's explicit choice alone.
+  useEffect(() => {
+    if (!task && activeSession?.default_model_profile) {
+      setAgentId(activeSession.default_model_profile);
+    }
+  }, [activeSession?.default_model_profile, task]);
 
   // Auto-resize the textarea up to the max height from the density token.
   useLayoutEffect(() => {
@@ -164,13 +192,17 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
 
     const text = draft.trim();
     if (text.length === 0) return;
-    if (!task) {
-      setError("Select or create a task before sending.");
-      return;
-    }
-
     try {
       setSending(true);
+      if (!task) {
+        if (!onCreateTask) {
+          setError("Select or create a project before sending.");
+          return;
+        }
+        await onCreateTask(text);
+        clearDraft(taskId);
+        return;
+      }
       if (mode === "send" || mode === "steer") {
         // For the very first send on a PENDING task, start the task.
         // For subsequent sends, this is a steer — the control plane's
@@ -198,7 +230,7 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
         clearDraft(taskId);
       }
     } catch (err) {
-      setError(err instanceof TerminusApiError ? err.message : "Failed to submit");
+      setError(err instanceof TerminusApiError || err instanceof Error ? err.message : "Failed to submit");
     } finally {
       setSending(false);
     }
@@ -224,30 +256,33 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
   };
 
   // Drag-and-drop + paste of images.
+  const addImageFiles = (files: Iterable<File>): void => {
+    for (const file of files) {
+      if (file.type.startsWith("image/")) {
+        const url = URL.createObjectURL(file);
+        setAttachments((prev) => [...prev, url]);
+      }
+    }
+  };
+
   const onPaste = (e: React.ClipboardEvent): void => {
     const items = e.clipboardData?.items;
     if (!items) return;
+    const files: File[] = [];
     for (const item of Array.from(items)) {
       if (item.kind === "file" && item.type.startsWith("image/")) {
         const file = item.getAsFile();
-        if (file) {
-          const url = URL.createObjectURL(file);
-          setAttachments((prev) => [...prev, url]);
-        }
+        if (file) files.push(file);
       }
     }
+    addImageFiles(files);
   };
 
   const onDrop = (e: React.DragEvent): void => {
     e.preventDefault();
     const files = e.dataTransfer?.files;
     if (!files) return;
-    for (const file of Array.from(files)) {
-      if (file.type.startsWith("image/")) {
-        const url = URL.createObjectURL(file);
-        setAttachments((prev) => [...prev, url]);
-      }
-    }
+    addImageFiles(Array.from(files));
   };
 
   const onDragOver = (e: React.DragEvent): void => {
@@ -256,6 +291,9 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
 
   // Send button content varies by mode.
   const sendButtonContent: { icon: JSX.Element; label: string; mode: ComposerSendMode } = (() => {
+    if (!task && onCreateTask) {
+      return { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Create task", mode: "send" };
+    }
     switch (sendMode) {
       case "steer":
         return { icon: <ArrowUp size={14} />, label: "Steer", mode: "steer" };
@@ -270,18 +308,40 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
   })();
 
   const selectedAccess = ACCESS_LEVELS.find((a) => a.id === accessLevel) ?? ACCESS_LEVELS[1]!;
-  const selectedAgent = AGENT_OPTIONS.find((a) => a.id === agentId) ?? AGENT_OPTIONS[0]!;
+  const selectedAgent = agentOptions.find((a) => a.id === agentId) ?? agentOptions[0]!;
   const sendDisabled = sending || (sendButtonContent.mode !== "stop" && draft.trim().length === 0);
 
   return (
     <div className={cn("relative", className)}>
       {/* Reading-column-width container — matches Conversation. */}
       <div style={{ maxWidth: "var(--conversation-max-width)", margin: "0 auto" }}>
+        {activeSession ? (
+          <div
+            className="mb-2 flex min-w-0 items-center gap-4 px-2 text-secondary"
+            style={{ fontSize: "var(--font-size-xs)" }}
+            aria-label="Task environment"
+          >
+            <span className="flex min-w-0 items-center gap-1.5">
+              <FolderGit2 size={14} className="flex-shrink-0 text-tertiary" strokeWidth={1.7} />
+              <span className="truncate">{activeSession.title}</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <Monitor size={14} className="text-tertiary" strokeWidth={1.7} />
+              <span>{activeSession.default_permission_profile === "secure-local-default" ? "Local" : activeSession.default_permission_profile ?? "Local"}</span>
+            </span>
+            {task ? (
+              <span className="flex min-w-0 items-center gap-1.5">
+                <GitBranch size={14} className="flex-shrink-0 text-tertiary" strokeWidth={1.7} />
+                <span className="truncate font-mono">{task.thread_id.slice(0, 8)}</span>
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         <div
           onDrop={onDrop}
           onDragOver={onDragOver}
           className={cn(
-            "flex flex-col rounded-lg border border-default bg-composer shadow-sm",
+            "flex flex-col rounded-xl border border-default bg-composer shadow-md",
             "focus-within:border-strong",
           )}
           style={{ background: "var(--bg-composer)" }}
@@ -313,6 +373,19 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
             </div>
           ) : null}
 
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="sr-only"
+            onChange={(event) => {
+              if (event.target.files) addImageFiles(Array.from(event.target.files));
+              event.target.value = "";
+            }}
+            aria-label="Choose image attachments"
+          />
+
           {/* Textarea. */}
           <textarea
             ref={textareaRef}
@@ -333,7 +406,7 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
             style={{
               fontSize: "var(--font-size-md)",
               lineHeight: "var(--line-height-relaxed)" as unknown as string,
-              minHeight: 44,
+              minHeight: task ? 44 : 64,
               maxHeight: "var(--composer-max-height)",
               fontFamily: "var(--font-family)",
             }}
@@ -343,12 +416,13 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
           {/* Control row — always visible. Reserved height so metadata
               appearing/disappearing never causes layout shift (SPEC §10). */}
           <div
-            className="flex items-center gap-1 px-2 py-2"
+            className="flex items-center gap-0.5 px-2 pb-2 pt-1"
             style={{ minHeight: 40 }}
           >
             {/* Attachment. */}
             <button
               type="button"
+              onClick={() => fileInputRef.current?.click()}
               aria-label="Attach file"
               title="Attach file"
               className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
@@ -371,7 +445,7 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
               </button>
               {agentOpen ? (
                 <Dropdown onClose={() => setAgentOpen(false)}>
-                  {AGENT_OPTIONS.map((a) => (
+                  {agentOptions.map((a) => (
                     <DropdownItem
                       key={a.id}
                       selected={a.id === agentId}
@@ -394,6 +468,7 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
                 aria-haspopup="menu"
                 aria-expanded={accessOpen}
               >
+                <ShieldCheck size={13} strokeWidth={1.8} />
                 <span>{selectedAccess.label}</span>
                 <ChevronDown size={11} />
               </button>
@@ -478,7 +553,7 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
                 aria-label={sendButtonContent.label}
                 title={sendButtonContent.label}
                 className={cn(
-                  "flex h-7 items-center gap-1 rounded-md px-3 text-xs font-medium",
+                  "flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium",
                   sendButtonContent.mode === "stop"
                     ? "bg-hover text-error"
                     : "text-primary",
@@ -501,7 +576,7 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
                 }}
               >
                 {sendButtonContent.icon}
-                <span>{sendButtonContent.label}</span>
+                <span className="sr-only">{sendButtonContent.label}</span>
               </button>
             </div>
           </div>
@@ -509,12 +584,10 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
 
         {/* Keyboard shortcut hint. */}
         <div
-          className="mt-1.5 flex items-center justify-between px-1 text-tertiary"
+          className="mt-2 flex items-center justify-between px-1 text-tertiary"
           style={{ fontSize: "var(--font-size-xs)" }}
         >
-          <span>
-            <kbd className="font-mono">⌘↵</kbd> send · <kbd className="font-mono">⇧⌘↵</kbd> queue · <kbd className="font-mono">esc</kbd> interrupt
-          </span>
+          <span>{task ? <><kbd className="font-mono">⌘↵</kbd> send · <kbd className="font-mono">⇧⌘↵</kbd> queue · <kbd className="font-mono">esc</kbd> interrupt</> : "Drop files or paste images to add context"}</span>
           {task ? (
             <span className="truncate" style={{ maxWidth: 200 }}>
               {task.thread_id.slice(0, 8)} · {task.risk_class} risk
