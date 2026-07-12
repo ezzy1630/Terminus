@@ -3,7 +3,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 use std::path::PathBuf;
-use tokio_stream::StreamExt;
+use tokio_stream::{Stream, StreamExt};
 use tonic::{transport::Server, Request, Response, Status};
 
 pub mod protocol {
@@ -247,6 +247,56 @@ impl ArtifactIngestRpc for GrpcKernel {
             already_present: false,
         }))
     }
+
+    async fn get(
+        &self,
+        request: Request<protocol::GetArtifactRequest>,
+    ) -> Result<Response<protocol::GetArtifactResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        if request.sha256.is_empty() {
+            return Err(Status::invalid_argument("sha256 is required"));
+        }
+        let content = self
+            .kernel
+            .artifact_ingest
+            .get(&ctx, &request.sha256)
+            .map_err(status)?;
+        let artifact = self
+            .kernel
+            .artifact_ingest
+            .metadata(&ctx, &request.sha256)
+            .map_err(status)?;
+        Ok(Response::new(protocol::GetArtifactResponse {
+            artifact: Some(artifact_ref(artifact)),
+            content,
+        }))
+    }
+
+    async fn get_metadata(
+        &self,
+        request: Request<protocol::GetArtifactMetadataRequest>,
+    ) -> Result<Response<protocol::GetArtifactMetadataResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        if request.sha256.is_empty() {
+            return Err(Status::invalid_argument("sha256 is required"));
+        }
+        let artifact = self
+            .kernel
+            .artifact_ingest
+            .metadata(&ctx, &request.sha256)
+            .map_err(status)?;
+        Ok(Response::new(protocol::GetArtifactMetadataResponse {
+            artifact: Some(artifact_ref(artifact)),
+        }))
+    }
 }
 
 macro_rules! unavailable_unary {
@@ -468,11 +518,22 @@ impl PatchServiceRpc for GrpcKernel {
     }
     async fn reconcile(
         &self,
-        _request: Request<protocol::PatchReconcileRequest>,
+        request: Request<protocol::PatchReconcileRequest>,
     ) -> Result<Response<protocol::PatchResponse>, Status> {
-        Err(Status::unimplemented(
-            "Patch.Reconcile requires the durable journal reconciliation API",
-        ))
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        if request.transaction_id.is_empty() {
+            return Err(Status::invalid_argument("transaction_id is required"));
+        }
+        let result = self
+            .kernel
+            .patches
+            .reconcile(&ctx, &request.transaction_id)
+            .map_err(status)?;
+        Ok(Response::new(patch_response(result)))
     }
 }
 
@@ -534,42 +595,197 @@ impl ProcessServiceRpc for GrpcKernel {
 
 #[tonic::async_trait]
 impl JobServiceRpc for GrpcKernel {
-    type StreamStream = tokio_stream::wrappers::ReceiverStream<Result<protocol::JobEvent, Status>>;
+    type StreamStream = std::pin::Pin<
+        Box<dyn Stream<Item = Result<protocol::JobEvent, Status>> + Send>,
+    >;
     async fn start(
         &self,
-        _request: Request<protocol::StartJobRequest>,
+        request: Request<protocol::StartJobRequest>,
     ) -> Result<Response<protocol::StartJobResponse>, Status> {
-        Err(Status::unimplemented("Job.Start is not wired"))
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let intent = request.intent.map(intent).unwrap_or_default();
+        let command = request
+            .command
+            .map(command)
+            .transpose()?
+            .ok_or_else(|| Status::invalid_argument("command is required"))?;
+        let profile = if request.sandbox_profile_id.is_empty() {
+            "secure-local-default"
+        } else {
+            request.sandbox_profile_id.as_str()
+        };
+        let (job_id, outcome, mut receiver) = self
+            .kernel
+            .jobs
+            .start(&ctx, &intent, command, profile, request.durable)
+            .await
+            .map_err(status)?;
+        // Keep consuming the bounded process stream when the caller only
+        // wants the durable start response. Job.Stream reconnects through the
+        // durable job record instead of leaving the child backpressured.
+        tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+        Ok(Response::new(protocol::StartJobResponse {
+            job_id,
+            process_id: outcome.process_id,
+            started_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+        }))
     }
     async fn stream(
         &self,
-        _request: Request<protocol::JobStreamRequest>,
+        request: Request<protocol::JobStreamRequest>,
     ) -> Result<Response<Self::StreamStream>, Status> {
-        Err(Status::unimplemented("Job.Stream is not wired"))
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        authorize_job_control(&self.kernel, &ctx)?;
+        let job_id = request.job_id;
+        let record = self
+            .kernel
+            .jobs
+            .manager()
+            .get(&job_id)
+            .await
+            .ok_or_else(|| Status::not_found("job not found"))?;
+        let manager = self.kernel.jobs.manager().clone();
+        let from_sequence = request.from_sequence;
+        let stream = async_stream::try_stream! {
+            let mut sequence = from_sequence;
+            if sequence == 0 {
+                sequence = 1;
+                yield protocol::JobEvent {
+                    sequence,
+                    occurred_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+                    event: Some(protocol::job_event::Event::Started(protocol::ProcessStarted {
+                        process_id: record.process_identity.clone().unwrap_or_default(),
+                        job_id: job_id.clone(),
+                        resolved_executable: record.resolved_executable.clone(),
+                        started_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+                    })),
+                };
+            }
+            loop {
+                let current = manager.get(&job_id).await.ok_or_else(|| Status::not_found("job disappeared"))?;
+                if current.state.is_terminal() {
+                    sequence = sequence.saturating_add(1);
+                    yield protocol::JobEvent {
+                        sequence,
+                        occurred_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+                        event: Some(protocol::job_event::Event::Reconciled(protocol::JobReconciled {
+                            state: current.state.as_str().to_ascii_lowercase(),
+                            explanation: "durable job reached a terminal state".to_string(),
+                        })),
+                    };
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        };
+        Ok(Response::new(Box::pin(stream)))
     }
     async fn input(
         &self,
-        _request: Request<protocol::JobInputRequest>,
+        request: Request<protocol::JobInputRequest>,
     ) -> Result<Response<protocol::JobState>, Status> {
-        Err(Status::unimplemented("Job.Input is not wired"))
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        authorize_job_control(&self.kernel, &ctx)?;
+        let state = self
+            .kernel
+            .jobs
+            .input(&request.job_id, &request.stdin)
+            .await
+            .map_err(status)?;
+        Ok(Response::new(job_state(&request.job_id, state)))
     }
     async fn signal(
         &self,
-        _request: Request<protocol::JobSignalRequest>,
+        request: Request<protocol::JobSignalRequest>,
     ) -> Result<Response<protocol::JobState>, Status> {
-        Err(Status::unimplemented("Job.Signal is not wired"))
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        authorize_job_control(&self.kernel, &ctx)?;
+        let state = self
+            .kernel
+            .jobs
+            .signal(&request.job_id, &request.signal)
+            .await
+            .map_err(status)?;
+        Ok(Response::new(job_state(&request.job_id, state)))
     }
     async fn stop(
         &self,
-        _request: Request<protocol::JobStopRequest>,
+        request: Request<protocol::JobStopRequest>,
     ) -> Result<Response<protocol::JobState>, Status> {
-        Err(Status::unimplemented("Job.Stop is not wired"))
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        authorize_job_control(&self.kernel, &ctx)?;
+        let state = self
+            .kernel
+            .jobs
+            .stop(&request.job_id, &request.reason)
+            .await
+            .map_err(status)?;
+        Ok(Response::new(job_state(&request.job_id, state)))
     }
     async fn get(
         &self,
-        _request: Request<protocol::JobGetRequest>,
+        request: Request<protocol::JobGetRequest>,
     ) -> Result<Response<protocol::JobState>, Status> {
-        Err(Status::unimplemented("Job.Get is not wired"))
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        authorize_job_control(&self.kernel, &ctx)?;
+        let record = self
+            .kernel
+            .jobs
+            .manager()
+            .get(&request.job_id)
+            .await
+            .ok_or_else(|| Status::not_found("job not found"))?;
+        Ok(Response::new(job_state(&request.job_id, record.state)))
+    }
+}
+
+fn authorize_job_control(
+    kernel: &terminus_kernel::KernelHandle,
+    ctx: &terminus_kernel_protocol::RequestContext,
+) -> Result<(), Status> {
+    terminus_kernel::validate_capability_for_op(
+        &kernel.token_issuer,
+        ctx,
+        terminus_authz::OperationClass::Exec,
+        &terminus_authz::Scope::default(),
+    )
+    .map(|_| ())
+    .map_err(status)
+}
+
+fn job_state(job_id: &str, state: terminus_jobs::JobState) -> protocol::JobState {
+    protocol::JobState {
+        job_id: job_id.to_string(),
+        state: state.as_str().to_ascii_lowercase(),
+        exit_code: 0,
+        started_at: None,
+        exited_at: None,
+        stdout_artifact: None,
+        stderr_artifact: None,
     }
 }
 
@@ -894,7 +1110,15 @@ pub async fn serve_grpc(
         tokio::fs::create_dir_all(parent).await?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let metadata = tokio::fs::symlink_metadata(parent).await?;
+            if !metadata.is_dir() || metadata.mode() & 0o077 != 0 {
+                return Err(format!(
+                    "gRPC socket parent {} must be a private directory",
+                    parent.display()
+                )
+                .into());
+            }
             tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
         }
     }
@@ -902,10 +1126,17 @@ pub async fn serve_grpc(
         Ok(metadata) => {
             #[cfg(unix)]
             {
-                use std::os::unix::fs::FileTypeExt;
+                use std::os::unix::fs::{FileTypeExt, MetadataExt};
                 if !metadata.file_type().is_socket() {
                     return Err(format!(
                         "refusing to replace non-socket path {}",
+                        socket_path.display()
+                    )
+                    .into());
+                }
+                if metadata.mode() & 0o077 != 0 {
+                    return Err(format!(
+                        "refusing to replace a group/world-accessible socket {}",
                         socket_path.display()
                     )
                     .into());
@@ -926,7 +1157,7 @@ pub async fn serve_grpc(
 
     tracing::info!(socket = %socket_path.display(), "kernel gRPC listening on UDS");
     let service = GrpcKernel::new(kernel);
-    Server::builder()
+    let result = Server::builder()
         .add_service(KernelInfoServiceServer::new(service.clone()))
         .add_service(FileServiceServer::new(service.clone()))
         .add_service(PatchServiceServer::new(service.clone()))
@@ -941,7 +1172,9 @@ pub async fn serve_grpc(
         .add_service(ExtensionRuntimeServiceServer::new(service.clone()))
         .add_service(ArtifactIngestServiceServer::new(service))
         .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener))
-        .await?;
+        .await;
+    let _ = tokio::fs::remove_file(&socket_path).await;
+    result?;
     Ok(())
 }
 

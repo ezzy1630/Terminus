@@ -647,6 +647,25 @@ export interface IngestArtifactResponse {
   alreadyPresent: boolean;
 }
 
+export interface GetArtifactRequest {
+  context: RequestContext | undefined;
+  sha256: string;
+}
+
+export interface GetArtifactResponse {
+  artifact: ArtifactRef | undefined;
+  content: Uint8Array;
+}
+
+export interface GetArtifactMetadataRequest {
+  context: RequestContext | undefined;
+  sha256: string;
+}
+
+export interface GetArtifactMetadataResponse {
+  artifact: ArtifactRef | undefined;
+}
+
 function createBaseRequestContext(): RequestContext {
   return {
     requestId: "",
@@ -6706,6 +6725,234 @@ export const IngestArtifactResponse: MessageFns<IngestArtifactResponse> = {
   },
 };
 
+function createBaseGetArtifactRequest(): GetArtifactRequest {
+  return { context: undefined, sha256: "" };
+}
+
+export const GetArtifactRequest: MessageFns<GetArtifactRequest> = {
+  encode(message: GetArtifactRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.sha256 !== "") {
+      writer.uint32(18).string(message.sha256);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetArtifactRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetArtifactRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sha256 = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<GetArtifactRequest>, I>>(base?: I): GetArtifactRequest {
+    return GetArtifactRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetArtifactRequest>, I>>(object: I): GetArtifactRequest {
+    const message = createBaseGetArtifactRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.sha256 = object.sha256 ?? "";
+    return message;
+  },
+};
+
+function createBaseGetArtifactResponse(): GetArtifactResponse {
+  return { artifact: undefined, content: new Uint8Array(0) };
+}
+
+export const GetArtifactResponse: MessageFns<GetArtifactResponse> = {
+  encode(message: GetArtifactResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.artifact !== undefined) {
+      ArtifactRef.encode(message.artifact, writer.uint32(10).fork()).join();
+    }
+    if (message.content.length !== 0) {
+      writer.uint32(18).bytes(message.content);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetArtifactResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetArtifactResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.artifact = ArtifactRef.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.content = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<GetArtifactResponse>, I>>(base?: I): GetArtifactResponse {
+    return GetArtifactResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetArtifactResponse>, I>>(object: I): GetArtifactResponse {
+    const message = createBaseGetArtifactResponse();
+    message.artifact = (object.artifact !== undefined && object.artifact !== null)
+      ? ArtifactRef.fromPartial(object.artifact)
+      : undefined;
+    message.content = object.content ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseGetArtifactMetadataRequest(): GetArtifactMetadataRequest {
+  return { context: undefined, sha256: "" };
+}
+
+export const GetArtifactMetadataRequest: MessageFns<GetArtifactMetadataRequest> = {
+  encode(message: GetArtifactMetadataRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.sha256 !== "") {
+      writer.uint32(18).string(message.sha256);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetArtifactMetadataRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetArtifactMetadataRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sha256 = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<GetArtifactMetadataRequest>, I>>(base?: I): GetArtifactMetadataRequest {
+    return GetArtifactMetadataRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetArtifactMetadataRequest>, I>>(object: I): GetArtifactMetadataRequest {
+    const message = createBaseGetArtifactMetadataRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.sha256 = object.sha256 ?? "";
+    return message;
+  },
+};
+
+function createBaseGetArtifactMetadataResponse(): GetArtifactMetadataResponse {
+  return { artifact: undefined };
+}
+
+export const GetArtifactMetadataResponse: MessageFns<GetArtifactMetadataResponse> = {
+  encode(message: GetArtifactMetadataResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.artifact !== undefined) {
+      ArtifactRef.encode(message.artifact, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): GetArtifactMetadataResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseGetArtifactMetadataResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.artifact = ArtifactRef.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<GetArtifactMetadataResponse>, I>>(base?: I): GetArtifactMetadataResponse {
+    return GetArtifactMetadataResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<GetArtifactMetadataResponse>, I>>(object: I): GetArtifactMetadataResponse {
+    const message = createBaseGetArtifactMetadataResponse();
+    message.artifact = (object.artifact !== undefined && object.artifact !== null)
+      ? ArtifactRef.fromPartial(object.artifact)
+      : undefined;
+    return message;
+  },
+};
+
 export interface KernelInfoService {
   GetInfo(request: Empty): Promise<KernelInfo>;
   Health(request: Empty): Promise<KernelHealth>;
@@ -7020,6 +7267,8 @@ export class ExtensionRuntimeServiceClientImpl implements ExtensionRuntimeServic
 
 export interface ArtifactIngestService {
   Ingest(request: IngestArtifactRequest): Promise<IngestArtifactResponse>;
+  Get(request: GetArtifactRequest): Promise<GetArtifactResponse>;
+  GetMetadata(request: GetArtifactMetadataRequest): Promise<GetArtifactMetadataResponse>;
 }
 
 export const ArtifactIngestServiceServiceName = "terminus.kernel.v1.ArtifactIngestService";
@@ -7030,11 +7279,25 @@ export class ArtifactIngestServiceClientImpl implements ArtifactIngestService {
     this.service = opts?.service || ArtifactIngestServiceServiceName;
     this.rpc = rpc;
     this.Ingest = this.Ingest.bind(this);
+    this.Get = this.Get.bind(this);
+    this.GetMetadata = this.GetMetadata.bind(this);
   }
   Ingest(request: IngestArtifactRequest): Promise<IngestArtifactResponse> {
     const data = IngestArtifactRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "Ingest", data);
     return promise.then((data) => IngestArtifactResponse.decode(new BinaryReader(data)));
+  }
+
+  Get(request: GetArtifactRequest): Promise<GetArtifactResponse> {
+    const data = GetArtifactRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "Get", data);
+    return promise.then((data) => GetArtifactResponse.decode(new BinaryReader(data)));
+  }
+
+  GetMetadata(request: GetArtifactMetadataRequest): Promise<GetArtifactMetadataResponse> {
+    const data = GetArtifactMetadataRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "GetMetadata", data);
+    return promise.then((data) => GetArtifactMetadataResponse.decode(new BinaryReader(data)));
   }
 }
 

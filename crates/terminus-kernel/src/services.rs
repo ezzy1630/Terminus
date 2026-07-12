@@ -161,7 +161,17 @@ impl KernelHandle {
                 Arc::clone(&approvals),
             )
             .with_sandbox(Arc::clone(&sandbox_manager)),
-            jobs: JobService::new(job_manager, Arc::clone(&token_issuer)),
+            jobs: JobService::new(
+                job_manager,
+                Arc::clone(&token_issuer),
+                ProcessService::new(
+                    Arc::clone(&process_manager),
+                    Arc::clone(&policy_engine),
+                    Arc::clone(&token_issuer),
+                    Arc::clone(&approvals),
+                )
+                .with_sandbox(Arc::clone(&sandbox_manager)),
+            ),
             sandboxes: SandboxService::new(sandbox_manager),
             policies: PolicyService::new(policy_engine),
             secrets: SecretService::new(secret_broker, Arc::clone(&token_issuer)),
@@ -599,6 +609,28 @@ impl PatchService {
                 )
             })
     }
+
+    pub fn reconcile(
+        &self,
+        ctx: &RequestContext,
+        transaction_id: &str,
+    ) -> KernelResult<PatchResponse> {
+        let requested_scope = Scope::default();
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Patch,
+            &requested_scope,
+        )?;
+        self.engine.reconcile(transaction_id).map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::Internal,
+                terminus_kernel_protocol::ErrorCategory::Internal,
+                e.to_string(),
+                false,
+            )
+        })
+    }
 }
 
 /// Resolve a sandbox profile id to a `SandboxProfile`. The kernel currently
@@ -767,6 +799,24 @@ impl ProcessService {
         command: CommandSpec,
         sandbox_profile_id: &str,
     ) -> KernelResult<tokio::sync::mpsc::Receiver<ProcessEvent>> {
+        self.start_in_profile_with_outcome(ctx, intent, command, sandbox_profile_id)
+            .await
+            .map(|(_, receiver)| receiver)
+    }
+
+    /// Start a process and retain its identity for durable JobService
+    /// ownership. The ordinary ProcessService API intentionally returns only
+    /// the event stream; jobs need the generated process id as well.
+    pub async fn start_in_profile_with_outcome(
+        &self,
+        ctx: &RequestContext,
+        intent: &EffectIntent,
+        command: CommandSpec,
+        sandbox_profile_id: &str,
+    ) -> KernelResult<(
+        terminus_process::SpawnOutcome,
+        tokio::sync::mpsc::Receiver<ProcessEvent>,
+    )> {
         // §31.3 step 3: capability-token validation. Process start requires
         // the `Exec` operation class. The requested scope is the cwd path
         // and any secret capability URIs.
@@ -1058,7 +1108,7 @@ impl ProcessService {
             } else {
                 Arc::clone(&self.process)
             };
-        let (_outcome, rx) = if let Some((wrapper_bin, wrapper_argv)) = sandbox_wrapper {
+        let (outcome, rx) = if let Some((wrapper_bin, wrapper_argv)) = sandbox_wrapper {
             // SPEC §34.11: spawn inside the OS sandbox wrapper (bwrap).
             // ProcessManager still owns the process group, timeout, output
             // streaming, and tree-kill on cancel.
@@ -1098,7 +1148,7 @@ impl ProcessService {
             program = %command.program,
             "process effect started; exit artifacts recorded by ProcessManager"
         );
-        Ok(rx)
+        Ok((outcome, rx))
     }
 
     pub async fn cancel(
@@ -1145,6 +1195,7 @@ impl ProcessService {
 pub struct JobService {
     manager: Arc<JobManager>,
     token_issuer: Arc<TokenIssuer>,
+    process: ProcessService,
 }
 
 impl std::fmt::Debug for JobService {
@@ -1156,10 +1207,15 @@ impl std::fmt::Debug for JobService {
 }
 
 impl JobService {
-    pub fn new(manager: Arc<JobManager>, token_issuer: Arc<TokenIssuer>) -> Self {
+    pub fn new(
+        manager: Arc<JobManager>,
+        token_issuer: Arc<TokenIssuer>,
+        process: ProcessService,
+    ) -> Self {
         Self {
             manager,
             token_issuer,
+            process,
         }
     }
 
@@ -1173,6 +1229,73 @@ impl JobService {
     pub fn token_issuer(&self) -> &Arc<TokenIssuer> {
         &self.token_issuer
     }
+
+    /// Start a durable job through the same policy, capability, approval, and
+    /// sandbox pipeline as ProcessService. The returned receiver is retained
+    /// by the caller for the initial stream; process ownership remains in the
+    /// shared ProcessManager held by both services.
+    pub async fn start(
+        &self,
+        ctx: &RequestContext,
+        intent: &EffectIntent,
+        command: CommandSpec,
+        sandbox_profile_id: &str,
+        durable: bool,
+    ) -> KernelResult<(
+        String,
+        terminus_process::SpawnOutcome,
+        tokio::sync::mpsc::Receiver<ProcessEvent>,
+    )> {
+        let job_id = terminus_kernel_protocol::new_id();
+        let command_text = format!("{} {}", command.program, command.args.join(" "));
+        let record =
+            terminus_jobs::JobRecord::new(&job_id, &ctx.session_id, &ctx.task_id, command_text);
+        self.manager.create(record).await.map_err(job_error)?;
+        let started = self
+            .process
+            .start_in_profile_with_outcome(ctx, intent, command, sandbox_profile_id)
+            .await;
+        let (outcome, receiver) = match started {
+            Ok(value) => value,
+            Err(error) => {
+                self.manager.remove(&job_id).await;
+                return Err(error);
+            }
+        };
+        if !durable {
+            tracing::debug!(job_id = %job_id, "job started in non-durable mode");
+        }
+        self.manager
+            .attach_started(&job_id, &outcome)
+            .await
+            .map_err(job_error)?;
+        Ok((job_id, outcome, receiver))
+    }
+
+    pub async fn input(&self, job_id: &str, bytes: &[u8]) -> KernelResult<terminus_jobs::JobState> {
+        self.manager.input(job_id, bytes).await.map_err(job_error)
+    }
+
+    pub async fn signal(
+        &self,
+        job_id: &str,
+        signal: &str,
+    ) -> KernelResult<terminus_jobs::JobState> {
+        self.manager.signal(job_id, signal).await.map_err(job_error)
+    }
+
+    pub async fn stop(&self, job_id: &str, reason: &str) -> KernelResult<terminus_jobs::JobState> {
+        self.manager.stop(job_id, reason).await.map_err(job_error)
+    }
+}
+
+fn job_error(error: terminus_jobs::JobError) -> KernelError {
+    KernelError::new(
+        terminus_kernel_protocol::ErrorCode::Internal,
+        terminus_kernel_protocol::ErrorCategory::Internal,
+        error.to_string(),
+        false,
+    )
 }
 
 // ---------- SandboxService ----------
@@ -1597,5 +1720,44 @@ impl ArtifactIngestService {
             )
         })?;
         Ok(artifact)
+    }
+
+    pub fn get(&self, ctx: &RequestContext, sha256: &str) -> KernelResult<Vec<u8>> {
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::ArtifactIngest,
+            &Scope::default(),
+        )?;
+        self.store.get(sha256).map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::ArtifactNotFound,
+                terminus_kernel_protocol::ErrorCategory::NotFound,
+                e.to_string(),
+                false,
+            )
+        })
+    }
+
+    pub fn metadata(&self, ctx: &RequestContext, sha256: &str) -> KernelResult<ArtifactRef> {
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::ArtifactIngest,
+            &Scope::default(),
+        )?;
+        let metadata = self.store.metadata(sha256).map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::ArtifactNotFound,
+                terminus_kernel_protocol::ErrorCategory::NotFound,
+                e.to_string(),
+                false,
+            )
+        })?;
+        Ok(ArtifactRef::new(
+            metadata.hash,
+            metadata.size_bytes,
+            metadata.media_type,
+        ))
     }
 }

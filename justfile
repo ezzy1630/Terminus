@@ -3,7 +3,7 @@
 # cargo/pnpm/bun/uv directly.
 
 set shell := ["bash", "-eu", "-c"]
-export FORGE_ROOT := justfile_directory()
+export TERMINUS_ROOT := justfile_directory()
 export CARGO_TARGET_DIR := justfile_directory() / "target"
 export RUST_BACKTRACE := "1"
 
@@ -91,6 +91,15 @@ codegen-check:
 codegen-proto:
     buf generate proto
 
+# Read-only Linux host preflight for the real enforcement runner.
+linux-enforcement-prereqs:
+    bash scripts/verify-linux-enforcement-prereqs.sh
+
+# Produce signed evidence only from a Linux runner that publishes an effective
+# enforcement report; the producer fails closed when that proof is absent.
+linux-enforcement-evidence:
+    bash scripts/produce-linux-enforcement-evidence.sh
+
 # Public API codegen (OpenAPI → TS/Rust/Python clients).
 codegen-public-api:
     bun run tools/codegen/public-api.ts
@@ -152,6 +161,7 @@ upstream-check:
     #!/usr/bin/env bash
     set -eu
     python3 scripts/verify-upstream-divergence.py
+    bash scripts/verify-opencode-parity.sh
 
 # Release gate (SPEC §46.18, §50). Every dependency is mandatory; missing
 # infrastructure or evidence is a release failure, not a warning.

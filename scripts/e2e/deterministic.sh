@@ -36,6 +36,8 @@ export TERMINUS_CONTROL_TOKEN="terminus-control-e2e-token"
 export TERMINUS_KERNEL_CAPABILITY_SECRET="terminus-kernel-e2e-capability-secret"
 export TERMINUS_DATA="$TMP_DIR/kernel-data"
 export TERMINUS_KERNEL_CAP_TOKEN_FILE="$TMP_DIR/capability.token"
+export TERMINUS_KERNEL_GRPC_SOCKET="$TMP_DIR/kernel.sock"
+export TERMINUS_KERNEL_REQUIRE_UDS=1
 export DATABASE_URL="file:$TMP_DIR/control.db"
 export TERMINUS_E2E_WORKSPACE_ROOT="$TMP_DIR/workspace"
 KERNEL_PORT="${TERMINUS_E2E_KERNEL_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')}"
@@ -44,10 +46,6 @@ export TERMINUS_KERNEL_PORT="$KERNEL_PORT"
 export TERMINUS_CONTROL_PORT="$CONTROL_PORT"
 mkdir -p "$TERMINUS_E2E_WORKSPACE_ROOT"
 
-if curl --noproxy '*' -sS --max-time 1 "http://127.0.0.1:$KERNEL_PORT/v1/health" -X POST >/dev/null 2>&1; then
-  echo "[e2e] port $KERNEL_PORT is already in use; refusing to share a privileged kernel" >&2
-  exit 1
-fi
 if curl --noproxy '*' -sS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" >/dev/null 2>&1; then
   echo "[e2e] port $CONTROL_PORT is already in use; refusing to share a control plane" >&2
   exit 1
@@ -71,15 +69,13 @@ nohup "$kernel_runtime" </dev/null >"$TMP_DIR/kernel.log" 2>&1 &
 KERNEL_PID=$!
 
 for _ in $(seq 1 600); do
-  if curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$KERNEL_PORT/v1/health" \
-    -X POST -H "Authorization: Bearer $TERMINUS_KERNEL_TOKEN" -d '{}' >/dev/null 2>&1; then
+  if [[ -S "$TERMINUS_KERNEL_GRPC_SOCKET" ]]; then
     break
   fi
   sleep 0.1
 done
 
-if ! curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$KERNEL_PORT/v1/health" \
-  -X POST -H "Authorization: Bearer $TERMINUS_KERNEL_TOKEN" -d '{}' >/dev/null; then
+if [[ ! -S "$TERMINUS_KERNEL_GRPC_SOCKET" ]]; then
   echo "[e2e] kernel did not become healthy; see $TMP_DIR/kernel.log" >&2
   exit 1
 fi

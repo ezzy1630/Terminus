@@ -12,7 +12,7 @@ use terminus_kernel_protocol::{
     ArtifactRef, OutputChunk, ProcessEvent, ProcessExited, ProcessStarted,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time;
 
@@ -22,6 +22,7 @@ pub struct ManagedProcess {
     pub process_id: String,
     pub job_id: String,
     pub child: Option<Child>,
+    pub stdin: Option<ChildStdin>,
 }
 
 /// ProcessManager owns child processes. Construction is cheap; share via
@@ -104,7 +105,7 @@ impl ProcessManager {
         let process_id = terminus_kernel_protocol::new_id();
         let job_id = terminus_kernel_protocol::new_id();
 
-        command.stdin(Stdio::null());
+        command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         // Process group on unix so tree-kill reaches sandbox descendants.
@@ -128,10 +129,12 @@ impl ProcessManager {
         };
         let _ = tx.send(ProcessEvent::Started(started.clone())).await;
 
+        let stdin = child.stdin.take();
         let managed = Arc::new(Mutex::new(ManagedProcess {
             process_id: process_id.clone(),
             job_id: job_id.clone(),
             child: Some(child),
+            stdin,
         }));
         self.children
             .lock()
@@ -307,7 +310,58 @@ impl ProcessManager {
             let _ = child.wait().await;
         }
         guard.child = None;
+        guard.stdin = None;
         Ok("cancelled".to_string())
+    }
+
+    /// Write bytes to a managed process stdin. The write is bounded by the
+    /// caller's request size and fails once the process has exited.
+    pub async fn write_stdin(&self, process_id: &str, bytes: &[u8]) -> Result<(), ProcessError> {
+        let managed = {
+            let children = self.children.lock().await;
+            children
+                .get(process_id)
+                .cloned()
+                .ok_or_else(|| ProcessError::NotFound(process_id.to_string()))?
+        };
+        let mut guard = managed.lock().await;
+        let stdin = guard
+            .stdin
+            .as_mut()
+            .ok_or_else(|| ProcessError::NotFound(format!("stdin for {process_id}")))?;
+        stdin.write_all(bytes).await.map_err(ProcessError::Io)?;
+        stdin.flush().await.map_err(ProcessError::Io)?;
+        Ok(())
+    }
+
+    /// Deliver a narrowly allow-listed signal to the process group.
+    pub async fn signal(&self, process_id: &str, signal: &str) -> Result<String, ProcessError> {
+        let managed = {
+            let children = self.children.lock().await;
+            children
+                .get(process_id)
+                .cloned()
+                .ok_or_else(|| ProcessError::NotFound(process_id.to_string()))?
+        };
+        let guard = managed.lock().await;
+        let pid = guard
+            .child
+            .as_ref()
+            .and_then(Child::id)
+            .ok_or_else(|| ProcessError::NotFound(process_id.to_string()))?;
+        let signal_number = match signal {
+            "SIGTERM" => libc::SIGTERM,
+            "SIGKILL" => libc::SIGKILL,
+            "SIGINT" => libc::SIGINT,
+            "SIGHUP" => libc::SIGHUP,
+            _ => {
+                return Err(ProcessError::InvalidSpec(format!(
+                    "unsupported signal `{signal}`"
+                )))
+            }
+        };
+        send_process_signal(pid, signal_number)?;
+        Ok(signal.to_string())
     }
 
     pub async fn is_running(&self, process_id: &str) -> bool {
@@ -392,6 +446,26 @@ fn kill_process_group(pid: u32) {
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn send_process_signal(pid: u32, signal: i32) -> Result<(), ProcessError> {
+    // SAFETY: libc::kill only receives the validated process-group id and an
+    // allow-listed signal number; no Rust-managed memory crosses the call.
+    let result = unsafe { libc::kill(-(pid as i32), signal) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(ProcessError::Io(std::io::Error::last_os_error()))
+    }
+}
+
+#[cfg(not(unix))]
+fn send_process_signal(_pid: u32, _signal: i32) -> Result<(), ProcessError> {
+    Err(ProcessError::InvalidSpec(
+        "signals are unsupported on this platform".to_string(),
+    ))
 }
 
 #[cfg(not(unix))]

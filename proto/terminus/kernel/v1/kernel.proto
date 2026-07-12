@@ -661,8 +661,29 @@ message IngestArtifactResponse {
   bool already_present = 2;
 }
 
+message GetArtifactRequest {
+  RequestContext context = 1;
+  string sha256 = 2;
+}
+
+message GetArtifactResponse {
+  ArtifactRef artifact = 1;
+  bytes content = 2;
+}
+
+message GetArtifactMetadataRequest {
+  RequestContext context = 1;
+  string sha256 = 2;
+}
+
+message GetArtifactMetadataResponse {
+  ArtifactRef artifact = 1;
+}
+
 service ArtifactIngestService {
   rpc Ingest(IngestArtifactRequest) returns (IngestArtifactResponse);
+  rpc Get(GetArtifactRequest) returns (GetArtifactResponse);
+  rpc GetMetadata(GetArtifactMetadataRequest) returns (GetArtifactMetadataResponse);
 }
 
 // The descriptor set is published with each kernel build (SPEC §31.1,

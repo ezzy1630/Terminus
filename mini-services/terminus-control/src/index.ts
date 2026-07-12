@@ -13,8 +13,8 @@
  *   - The agent loop: context compile → provider attempt → tool settlement →
  *     verification → completion, all observable via events and manifests.
  *
- * The service uses Prisma (SQLite) for operational state, the kernel HTTP
- * API for effects, and the @terminus/* packages for domain logic.
+ * The service uses Prisma (SQLite) for operational state, generated gRPC over
+ * UDS for effects, and the @terminus/* packages for domain logic.
  *
  * Security (SPEC §30.5/§30.6/§30.8):
  *   - Every request except `GET /v1/system/health` MUST present a bearer
@@ -32,11 +32,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
+import { firstValueFrom } from "rxjs";
+import { createKernelUdsClients, type KernelUdsClients } from "./kernel-uds.js";
 
 // ────────────────────────── Configuration ──────────────────────────────────
 
 const PORT = Number.parseInt(process.env.TERMINUS_CONTROL_PORT ?? "3050", 10);
-const KERNEL_PORT = Number.parseInt(process.env.TERMINUS_KERNEL_PORT ?? "3040", 10);
+const KERNEL_GRPC_SOCKET = process.env.TERMINUS_KERNEL_GRPC_SOCKET ?? "";
 // SPEC §13.6 / §31.6: secrets are short-lived brokered capabilities, never
 // environment-wide shared defaults. The control plane MUST fail closed if no
 // token is configured. A well-known dev token is permitted ONLY when
@@ -54,9 +56,13 @@ function requireToken(envVar: string, devValue: string, label: string): string {
   console.error(msg);
   throw new Error(msg);
 }
-const KERNEL_TOKEN = requireToken("TERMINUS_KERNEL_TOKEN", "terminus-kernel-dev-token", "kernel token");
 const CONTROL_TOKEN = requireToken("TERMINUS_CONTROL_TOKEN", "terminus-control-dev-token", "control token");
-const CONTROL_CORS_ORIGIN = process.env.TERMINUS_CONTROL_CORS_ORIGIN ?? "http://127.0.0.1:81";
+// The packaged desktop shell uses the loopback bridge origin. During local
+// renderer development Vite serves from localhost:5173, so the documented
+// TERMINUS_DEV mode must allow that exact origin rather than making the
+// desktop appear permanently offline.
+const CONTROL_CORS_ORIGIN = process.env.TERMINUS_CONTROL_CORS_ORIGIN
+  ?? (process.env.TERMINUS_DEV === "1" ? "http://localhost:5173" : "http://127.0.0.1:81");
 // Platform-appropriate default SQLite location (replaces the leftover
 // `/home/z/my-project/...` template path so the control plane starts
 // out-of-the-box on any host).
@@ -81,39 +87,40 @@ const db = new PrismaClient({
   datasources: { db: { url: DATABASE_URL } },
 });
 
-// ────────────────────────── Kernel client ──────────────────────────────────
+const kernelUds: KernelUdsClients | null = KERNEL_GRPC_SOCKET
+  ? createKernelUdsClients(KERNEL_GRPC_SOCKET, process.env.TERMINUS_KERNEL_CAP_TOKEN ?? "")
+  : null;
 
-async function kernel<T = unknown>(
-  path: string,
-  body: unknown = {},
-  method = "POST",
-): Promise<T> {
-  const url = `http://127.0.0.1:${KERNEL_PORT}${path}`;
-  const init: RequestInit = {
-    method,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${KERNEL_TOKEN}`,
-      "x-capability-token": process.env.TERMINUS_KERNEL_CAP_TOKEN ?? "",
-    },
+function requireKernelUds(): KernelUdsClients {
+  if (!kernelUds) {
+    throw new Error("TERMINUS_KERNEL_GRPC_SOCKET is required for privileged control-plane effects");
+  }
+  return kernelUds;
+}
+
+function kernelContext() {
+  return {
+    requestId: randomUUID(),
+    idempotencyKey: randomUUID(),
+    sessionId: "control",
+    taskId: "control",
+    turnId: "control",
+    actorId: SERVER_PRINCIPAL,
+    traceparent: "",
+    capabilityToken: process.env.TERMINUS_KERNEL_CAP_TOKEN ?? "",
   };
-  if (method !== "GET") init.body = JSON.stringify(body);
-  const res = await fetch(url, init);
-  const text = await res.text();
-  let json: unknown = null;
-  if (text) {
-    try { json = JSON.parse(text); } catch { json = text; }
-  }
-  if (!res.ok) {
-    const message =
-      json && typeof json === "object" && "error" in json &&
-      (json as { error: unknown }).error &&
-      typeof (json as { error: { message?: unknown } }).error.message === "string"
-        ? (json as { error: { message: string } }).error.message
-        : `kernel ${res.status}`;
-    throw new Error(message);
-  }
-  return json as T;
+}
+
+function kernelIntent() {
+  return {
+    userIntentRef: "control-plane",
+    taskContractHash: "",
+    trustLabel: "trusted",
+    confidentialityLabel: "workspace",
+    taintSources: [],
+    policyProfileId: "secure-local-default",
+    expectedEffectClass: "",
+  };
 }
 
 // ────────────────────────── Event bus ──────────────────────────────────────
@@ -634,14 +641,14 @@ function route(method: string, path: string, handler: Handler): Route {
 const routes: Route[] = [
   // ────────────────────────── /system ────────────────────────────────────
   route("GET", "/v1/system/health", async (_req, res) => {
-    const kernelHealth = await kernel<{ status: string; ready: boolean }>("/v1/health", {});
+    const kernelHealth = await requireKernelUds().info.Health({});
     sendJson(res, 200, {
-      status: kernelHealth.ready ? "ok" : "degraded",
+      status: kernelHealth.state === "healthy" || kernelHealth.state === "ok" ? "ok" : "degraded",
       version: "0.1.0",
       build_commit: "dev",
       instance_id: "terminus-control-dev",
       uptime_seconds: process.uptime(),
-      ready: kernelHealth.ready,
+      ready: kernelHealth.state === "healthy" || kernelHealth.state === "ok",
       kernel: kernelHealth,
     });
   }),
@@ -1223,10 +1230,13 @@ const routes: Route[] = [
   // ────────────────────────── /artifacts ─────────────────────────────────
   route("GET", "/v1/artifacts/:hash", async (_req, res, params) => {
     try {
-      const bytes = await kernel<Uint8Array>(`/v1/artifacts/${encodeURIComponent(String(params.hash))}`, {}, "GET");
-      const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array();
+      const artifact = await requireKernelUds().artifacts.Get({
+        context: kernelContext(),
+        sha256: String(params.hash),
+      });
+      const buf = artifact.content;
       res.writeHead(200, {
-        "content-type": "application/octet-stream",
+        "content-type": artifact.artifact?.mediaType ?? "application/octet-stream",
         "content-length": String(buf.length),
         "access-control-allow-origin": CONTROL_CORS_ORIGIN,
         "access-control-allow-headers": CORS_ALLOW_HEADERS,
@@ -1238,8 +1248,11 @@ const routes: Route[] = [
   }),
   route("GET", "/v1/artifacts/:hash/metadata", async (_req, res, params) => {
     try {
-      const meta = await kernel(`/v1/artifacts/${encodeURIComponent(String(params.hash))}/metadata`, {}, "GET");
-      sendJson(res, 200, meta);
+      const meta = await requireKernelUds().artifacts.GetMetadata({
+        context: kernelContext(),
+        sha256: String(params.hash),
+      });
+      sendJson(res, 200, meta.artifact ?? { sha256: String(params.hash) });
     } catch (err) {
       sendError(res, 500, "ARTIFACT_METADATA_FAILED", String(err), "internal");
     }
@@ -1329,7 +1342,11 @@ const routes: Route[] = [
   route("POST", "/v1/jobs/:id/stop", async (req, res, params) => {
     const body = await jsonBody(req) as { reason?: string | null };
     try {
-      const r = await kernel(`/v1/jobs/${encodeURIComponent(String(params.id))}/stop`, { reason: body.reason ?? null });
+      const r = await requireKernelUds().jobs.Stop({
+        context: kernelContext(),
+        jobId: String(params.id),
+        reason: body.reason ?? "stopped",
+      });
       sendJson(res, 200, r);
     } catch (err) {
       sendError(res, 500, "JOB_STOP_FAILED", String(err), "internal");
@@ -1340,9 +1357,11 @@ const routes: Route[] = [
   route("POST", "/v1/jobs/:id/input", async (req, res, params) => {
     const body = await jsonBody(req) as { input?: string; eof?: boolean };
     try {
-      const r = await kernel(`/v1/jobs/${encodeURIComponent(String(params.id))}/input`, {
-        input: body.input ?? "",
-        eof: body.eof ?? false,
+      const input = body.input ?? "";
+      const r = await requireKernelUds().jobs.Input({
+        context: kernelContext(),
+        jobId: String(params.id),
+        stdin: new TextEncoder().encode(input + (body.eof ? "\n" : "")),
       });
       sendJson(res, 200, r);
     } catch (err) {
@@ -1385,11 +1404,11 @@ const routes: Route[] = [
   route("POST", "/v1/tools/read", async (req, res) => {
     const body = await jsonBody(req) as { workspace_id: string; path: string };
     try {
-      const r = await kernel("/v1/files/read", {
-        context: { request_id: uuid(), session_id: "dev", task_id: "dev", turn_id: "dev", actor_id: SERVER_PRINCIPAL, traceparent: null, capability_token: null },
-        intent: { user_intent_ref: null, task_contract_hash: null, trust_label: "trusted", confidentiality_label: "workspace", taint_sources: [], policy_profile_id: "secure-local-default" },
-        path: { workspace_id: body.workspace_id, relative_path: body.path },
-        mode: "full", max_bytes: 32768, expected_sha256: null,
+      const r = await requireKernelUds().files.Read({
+        context: kernelContext(),
+        intent: kernelIntent(),
+        path: { workspaceId: body.workspace_id, relativePath: body.path },
+        mode: "full", ranges: [], symbols: [], maxBytes: 32768, expectedSha256: "",
       });
       sendJson(res, 200, r);
     } catch (err) {
@@ -1399,13 +1418,23 @@ const routes: Route[] = [
   route("POST", "/v1/tools/exec", async (req, res) => {
     const body = await jsonBody(req) as { program: string; args?: string[]; cwd?: string };
     try {
-      const r = await kernel("/v1/process/start", {
-        context: { request_id: uuid(), session_id: "dev", task_id: "dev", turn_id: "dev", actor_id: SERVER_PRINCIPAL, traceparent: null, capability_token: null },
-        intent: { user_intent_ref: null, task_contract_hash: null, trust_label: "trusted", confidentiality_label: "workspace", taint_sources: [], policy_profile_id: "secure-local-default" },
-        command: { program: body.program, args: body.args ?? [], cwd: { workspace_id: "dev", relative_path: body.cwd ?? "." }, public_env: {}, secret_capability_uris: [], timeout: "30s", allocate_pty: false },
-        sandbox_profile_id: "secure-local-default",
-        output_policy_id: "default",
+      const events = requireKernelUds().process.Start({
+        context: kernelContext(),
+        intent: kernelIntent(),
+        command: {
+          program: body.program,
+          args: body.args ?? [],
+          cwd: { workspaceId: "dev", relativePath: body.cwd ?? "." },
+          publicEnv: {}, secretCapabilityUris: [], timeout: undefined,
+          allocatePty: false, shell: undefined,
+        },
+        sandboxProfileId: "secure-local-default",
+        outputPolicyId: "default",
       });
+      const first = await firstValueFrom(events);
+      const r = first.started
+        ? { process_id: first.started.processId, job_id: first.started.jobId, resolved_executable: first.started.resolvedExecutable }
+        : { process_id: "", job_id: "", resolved_executable: "" };
       sendJson(res, 200, r);
     } catch (err) {
       sendError(res, 500, "EXEC_FAILED", String(err), "internal");
@@ -1458,7 +1487,7 @@ const routes: Route[] = [
   route("GET", "/v1/configuration", async (_req, res) => {
     sendJson(res, 200, {
       terminus: { version: 1, log_level: "info" },
-      kernel: { port: KERNEL_PORT, required_protocol: "1.x" },
+      kernel: { transport: "grpc+uds", socket: KERNEL_GRPC_SOCKET, required_protocol: "terminus.kernel.v1" },
       context: { compiler_version: "v1", evidence_coverage: true, memory: { enabled: false } },
       aci: { default_tools: ["read", "search", "patch", "exec", "job", "inspect", "capability"] },
       sandbox: { profile: "secure-local-default", backend: "local-restrictive" },
@@ -2030,14 +2059,14 @@ const server = createServer(async (req, res) => {
   // 2. Public health endpoint.
   if (req.method === "GET" && url.pathname === "/v1/system/health") {
     try {
-      const kernelHealth = await kernel<{ status: string; ready: boolean }>("/v1/health", {});
+    const kernelHealth = await requireKernelUds().info.Health({});
       sendJson(res, 200, {
-        status: kernelHealth.ready ? "ok" : "degraded",
+        status: kernelHealth.state === "healthy" || kernelHealth.state === "ok" ? "ok" : "degraded",
         version: "0.1.0",
         build_commit: "dev",
         instance_id: "terminus-control-dev",
         uptime_seconds: process.uptime(),
-        ready: kernelHealth.ready,
+        ready: kernelHealth.state === "healthy" || kernelHealth.state === "ok",
         kernel: kernelHealth,
       });
     } catch (err) {
@@ -2107,9 +2136,13 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+// The Electron preload and desktop documentation use the IPv4 loopback URL
+// (`http://127.0.0.1:3050`). Binding explicitly keeps that documented local
+// transport reachable on macOS, where Node otherwise prefers an IPv6-only
+// localhost listener in some environments.
+server.listen(PORT, "127.0.0.1", () => {
   console.log(`[terminus-control] listening on http://localhost:${PORT}`);
-  console.log(`[terminus-control] kernel at http://localhost:${KERNEL_PORT} (via ?XTransformPort=${KERNEL_PORT})`);
+  console.log(`[terminus-control] kernel transport: grpc+uds (${KERNEL_GRPC_SOCKET || "not configured"})`);
   console.log(`[terminus-control] CORS origin: ${CONTROL_CORS_ORIGIN}`);
   console.log(`[terminus-control] auth: bearer token (TERMINUS_CONTROL_TOKEN)`);
 });

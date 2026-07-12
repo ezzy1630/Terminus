@@ -9,6 +9,7 @@
     "lint": "eslint src"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.13.4",
     "@terminus/domain": "workspace:*",
     "@terminus/runtime-protocol": "workspace:*",
     "@terminus/context-ir": "workspace:*",

@@ -4,15 +4,8 @@
 # A maximum divergence budget per release is enforced at the release gate
 # (SPEC §46.18). Generic fixes are proposed upstream.
 #
-# HONESTY NOTE (2026-07-12 audit): the previous version listed six
-# modified_files entries pointing at packages/open-code-bridge/src/inherited/*.ts.
-# Those files did not exist — the OpenCode fork had not been imported (see
-# upstream/opencode.lock.json, status `pending`). The entries were removed
-# because they tracked modifications to files that were not present. This
-# budget now reflects reality: zero inherited files have been modified yet.
-# When the OpenCode fork is imported, every Terminus-side modification to an
-# inherited file MUST be recorded here with reason, owner, upstream PR,
-# removal milestone, and conflict-hour estimate.
+# The immutable import is exercised through a tracked overlay. Overlay changes
+# are applied to a temporary copy during parity and remain budgeted here.
 
 version: 1
 last_updated: "2026-07-12"
@@ -25,7 +18,13 @@ budget:
     max_bypass_register_open: 0  # SPEC §27.5: no unknown entries; all contained
   review_cadence: per-release
 
-modified_files: []
+modified_files:
+  - source: "packages/opencode/src/bus/global.ts"
+    reason: "Keep the event-id enrichment override compatible with the pinned TypeScript EventEmitter signature."
+    owner: "upstream-team"
+    upstream_pr: "pending-upstream-fix"
+    removal_milestone: "next-upstream-sync"
+    conflict_hours: 0.5
 
 # Summary (auto-computed by tools/upstream-sync):
 #   total_modified_files: 0

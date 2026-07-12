@@ -118,6 +118,74 @@ impl PatchEngine {
         }
     }
 
+    /// Reconcile an interrupted transaction from its durable journal. An
+    /// unfinished transaction is rolled back from the snapshots it recorded;
+    /// a finished transaction is reported idempotently. Missing journals are
+    /// explicit unknown settlement rather than an invented success.
+    pub fn reconcile(&self, transaction_id: &str) -> Result<PatchResponse, PatchError> {
+        let journal_path = self.journal_dir.join(format!("{transaction_id}.json"));
+        if !journal_path.exists() {
+            return Ok(PatchResponse {
+                transaction_id: transaction_id.to_string(),
+                state: "unknown_settlement".to_string(),
+                final_repository_revision: String::new(),
+                final_dirty_digest: String::new(),
+                changed_files: Vec::new(),
+                validations: Vec::new(),
+                complete_diff: None,
+            });
+        }
+        let mut journal: JournalRecord = serde_json::from_slice(&std::fs::read(&journal_path)?)?;
+        if journal.finished_at.is_none() {
+            for entry in journal.entries.iter().rev() {
+                if let JournalEntry::FileSnapshotted {
+                    relative_path,
+                    snapshot_path,
+                    ..
+                } = entry
+                {
+                    let safe = SafePath::new(relative_path)?;
+                    let resolved = self.resolver.resolve_strict(&safe)?;
+                    let snapshot = Path::new(snapshot_path);
+                    if snapshot.exists() {
+                        std::fs::copy(snapshot, &resolved.host.host_path)?;
+                    }
+                }
+            }
+            journal.push(JournalEntry::RollbackCompleted);
+            journal.finish();
+            journal.write_to(&self.journal_dir)?;
+            let _ = std::fs::remove_dir_all(self.state_dir.join(format!("tx-{transaction_id}")));
+            return Ok(PatchResponse {
+                transaction_id: transaction_id.to_string(),
+                state: "rolled_back".to_string(),
+                final_repository_revision: String::new(),
+                final_dirty_digest: String::new(),
+                changed_files: Vec::new(),
+                validations: Vec::new(),
+                complete_diff: None,
+            });
+        }
+        let state = if journal
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, JournalEntry::CommitSucceeded { .. }))
+        {
+            "applied"
+        } else {
+            "rolled_back"
+        };
+        Ok(PatchResponse {
+            transaction_id: transaction_id.to_string(),
+            state: state.to_string(),
+            final_repository_revision: String::new(),
+            final_dirty_digest: String::new(),
+            changed_files: Vec::new(),
+            validations: Vec::new(),
+            complete_diff: None,
+        })
+    }
+
     fn apply_inner(
         &self,
         tx: &mut Transaction,

@@ -2382,6 +2382,85 @@ export declare type IngestArtifactResponse = Message<"terminus.kernel.v1.IngestA
 export declare const IngestArtifactResponseSchema: GenMessage<IngestArtifactResponse>;
 
 /**
+ * @generated from message terminus.kernel.v1.GetArtifactRequest
+ */
+export declare type GetArtifactRequest = Message<"terminus.kernel.v1.GetArtifactRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string sha256 = 2;
+   */
+  sha256: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.GetArtifactRequest.
+ * Use `create(GetArtifactRequestSchema)` to create a new message.
+ */
+export declare const GetArtifactRequestSchema: GenMessage<GetArtifactRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.GetArtifactResponse
+ */
+export declare type GetArtifactResponse = Message<"terminus.kernel.v1.GetArtifactResponse"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.ArtifactRef artifact = 1;
+   */
+  artifact?: ArtifactRef | undefined;
+
+  /**
+   * @generated from field: bytes content = 2;
+   */
+  content: Uint8Array;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.GetArtifactResponse.
+ * Use `create(GetArtifactResponseSchema)` to create a new message.
+ */
+export declare const GetArtifactResponseSchema: GenMessage<GetArtifactResponse>;
+
+/**
+ * @generated from message terminus.kernel.v1.GetArtifactMetadataRequest
+ */
+export declare type GetArtifactMetadataRequest = Message<"terminus.kernel.v1.GetArtifactMetadataRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string sha256 = 2;
+   */
+  sha256: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.GetArtifactMetadataRequest.
+ * Use `create(GetArtifactMetadataRequestSchema)` to create a new message.
+ */
+export declare const GetArtifactMetadataRequestSchema: GenMessage<GetArtifactMetadataRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.GetArtifactMetadataResponse
+ */
+export declare type GetArtifactMetadataResponse = Message<"terminus.kernel.v1.GetArtifactMetadataResponse"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.ArtifactRef artifact = 1;
+   */
+  artifact?: ArtifactRef | undefined;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.GetArtifactMetadataResponse.
+ * Use `create(GetArtifactMetadataResponseSchema)` to create a new message.
+ */
+export declare const GetArtifactMetadataResponseSchema: GenMessage<GetArtifactMetadataResponse>;
+
+/**
  * @generated from enum terminus.kernel.v1.PatchCommitMode
  */
 export enum PatchCommitMode {
@@ -2733,6 +2812,22 @@ export declare const ArtifactIngestService: GenService<{
     methodKind: "unary";
     input: typeof IngestArtifactRequestSchema;
     output: typeof IngestArtifactResponseSchema;
+  },
+  /**
+   * @generated from rpc terminus.kernel.v1.ArtifactIngestService.Get
+   */
+  get: {
+    methodKind: "unary";
+    input: typeof GetArtifactRequestSchema;
+    output: typeof GetArtifactResponseSchema;
+  },
+  /**
+   * @generated from rpc terminus.kernel.v1.ArtifactIngestService.GetMetadata
+   */
+  getMetadata: {
+    methodKind: "unary";
+    input: typeof GetArtifactMetadataRequestSchema;
+    output: typeof GetArtifactMetadataResponseSchema;
   },
 }>;
 

@@ -3,7 +3,7 @@ use crate::record::JobRecord;
 use crate::state::JobState;
 use std::collections::HashMap;
 use std::sync::Arc;
-use terminus_process::{NormalizedSpawn, ProcessManager};
+use terminus_process::{NormalizedSpawn, ProcessManager, SpawnOutcome};
 use tokio::sync::Mutex;
 
 /// JobManager owns the durable job state and reuses a `ProcessManager`.
@@ -30,7 +30,11 @@ impl JobManager {
 
     /// Start a job. Transitions Created → Starting → Running (when the
     /// process actually starts streaming events).
-    pub async fn start(&self, job_id: &str, spawn: NormalizedSpawn) -> Result<(), JobError> {
+    pub async fn start(
+        &self,
+        job_id: &str,
+        spawn: NormalizedSpawn,
+    ) -> Result<SpawnOutcome, JobError> {
         let mut jobs = self.jobs.lock().await;
         let record = jobs
             .get_mut(job_id)
@@ -40,8 +44,53 @@ impl JobManager {
         record.resolved_executable = spawn.program.clone();
         let (outcome, _rx) = self.process_manager.spawn(spawn).await?;
         record.state = record.state.transition(JobState::Running)?;
-        record.process_identity = Some(outcome.process_id);
+        record.process_identity = Some(outcome.process_id.clone());
+        Ok(outcome)
+    }
+
+    /// Attach a process already authorized and spawned by the kernel's
+    /// ProcessService to a durable job record.
+    pub async fn attach_started(
+        &self,
+        job_id: &str,
+        outcome: &SpawnOutcome,
+    ) -> Result<(), JobError> {
+        let mut jobs = self.jobs.lock().await;
+        let record = jobs
+            .get_mut(job_id)
+            .ok_or_else(|| JobError::NotFound(job_id.to_string()))?;
+        record.state = record.state.transition(JobState::Starting)?;
+        record.state = record.state.transition(JobState::Running)?;
+        record.started_at = Some(now_rfc3339());
+        record.resolved_executable = outcome.resolved_executable.clone();
+        record.process_identity = Some(outcome.process_id.clone());
         Ok(())
+    }
+
+    pub async fn remove(&self, job_id: &str) {
+        self.jobs.lock().await.remove(job_id);
+    }
+
+    pub async fn input(&self, job_id: &str, bytes: &[u8]) -> Result<JobState, JobError> {
+        let process_id = self
+            .get(job_id)
+            .await
+            .ok_or_else(|| JobError::NotFound(job_id.to_string()))?
+            .process_identity
+            .ok_or_else(|| JobError::NotFound(format!("process for job {job_id}")))?;
+        self.process_manager.write_stdin(&process_id, bytes).await?;
+        Ok(self.state(job_id).await.unwrap_or(JobState::Lost))
+    }
+
+    pub async fn signal(&self, job_id: &str, signal: &str) -> Result<JobState, JobError> {
+        let process_id = self
+            .get(job_id)
+            .await
+            .ok_or_else(|| JobError::NotFound(job_id.to_string()))?
+            .process_identity
+            .ok_or_else(|| JobError::NotFound(format!("process for job {job_id}")))?;
+        self.process_manager.signal(&process_id, signal).await?;
+        Ok(self.state(job_id).await.unwrap_or(JobState::Lost))
     }
 
     /// Stop a running job. Transitions Running → Stopping → Exited.
