@@ -19,7 +19,7 @@
  *   - "Take over" button to switch control back to the user.
  *
  * The screen capture itself uses Electron's `desktopCapturer.getSources`
- * (handled in the main process — see `forgeDesktop.getScreenSources()`)
+ * (handled in the main process — see `terminusDesktop.getScreenSources()`)
  * to fetch a screen source id, then `navigator.mediaDevices.getUserMedia`
  * in the renderer to capture the stream and pipe it into a <video>.
  *
@@ -117,12 +117,12 @@ function ComputerUsePiPImpl({
   // Acquire a screen-capture stream when the PiP mounts (or when it
   // resumes from a paused/hidden state).
   const acquireStream = useCallback(async (): Promise<void> => {
-    if (!window.forgeDesktop?.getScreenSources) {
+    if (!window.terminusDesktop?.getScreenSources) {
       setSourceError("Screen capture requires the Terminus desktop runtime.");
       return;
     }
     try {
-      const sources = await window.forgeDesktop.getScreenSources();
+      const sources = await window.terminusDesktop.getScreenSources();
       if (sources.length === 0) {
         setSourceError("Screen capture requires macOS Screen Recording permission.");
         return;

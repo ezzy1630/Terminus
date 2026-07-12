@@ -192,7 +192,7 @@ export interface StartTurnInput {
  * A single decoded SSE event from the control plane. `data` is the raw
  * payload string (already-parsed via JSON.parse at the boundary).
  */
-export interface ForgeSseEvent {
+export interface TerminusSseEvent {
   id: string;
   event: string;
   data: string;
@@ -324,16 +324,16 @@ export interface ActivityBlock {
 // ────────────────────────── Terminus Desktop bridge ───────────────────────────
 // Exposed by Electron preload (electron/preload.ts). The runtime `window`
 // augmentation lives in `src/types/global.d.ts` (alongside the
-// `forgeTerminal` bridge); the interfaces here are for code that imports
+// `terminusTerminal` bridge); the interfaces here are for code that imports
 // the typed shape directly.
 
-export interface ForgeScreenSource {
+export interface TerminusScreenSource {
   id: string;
   name: string;
   display_id?: string;
 }
 
-export interface ForgeDesktopBridge {
+export interface TerminusDesktopBridge {
   apiBase: string;
   gateway: string;
   token: string;
@@ -345,23 +345,23 @@ export interface ForgeDesktopBridge {
   windowClose: () => Promise<unknown>;
   getTheme: () => Promise<"system" | "light" | "dark">;
   setTheme: (theme: Theme) => Promise<"system" | "light" | "dark">;
-  getScreenSources: () => Promise<ForgeScreenSource[]>;
+  getScreenSources: () => Promise<TerminusScreenSource[]>;
 }
 
-export interface ForgeTerminalSpawnResult {
+export interface TerminusTerminalSpawnResult {
   id: string;
   label: string;
   cwd?: string;
   error?: string;
 }
 
-export interface ForgeTerminalBridge {
+export interface TerminusTerminalBridge {
   spawn: (
     cwd?: string,
     command?: string,
     cols?: number,
     rows?: number,
-  ) => Promise<ForgeTerminalSpawnResult>;
+  ) => Promise<TerminusTerminalSpawnResult>;
   write: (termId: string, data: string) => Promise<void>;
   resize: (termId: string, cols: number, rows: number) => Promise<void>;
   kill: (termId: string) => Promise<void>;

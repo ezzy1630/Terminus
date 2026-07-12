@@ -29,7 +29,7 @@ import { Conversation } from "./components/Conversation";
 import { Composer } from "./components/Composer";
 import { NewTaskScreen } from "./components/NewTaskScreen";
 import { CommandPalette, buildDefaultCommands } from "./components/CommandPalette";
-import { useForgeStore, useSelectedTask, useSelectedTaskEvents } from "./hooks/use-terminus";
+import { useTerminusStore, useSelectedTask, useSelectedTaskEvents } from "./hooks/use-terminus";
 import { useThemeStore } from "./hooks/use-theme";
 import { useViewport } from "./hooks/use-viewport";
 import type { Theme } from "./types";
@@ -70,12 +70,12 @@ function markOnboardingComplete(): void {
 }
 
 export function App(): JSX.Element {
-  const refreshAll = useForgeStore((s) => s.refreshAll);
-  const selectedTaskId = useForgeStore((s) => s.selectedTaskId);
-  const selectTask = useForgeStore((s) => s.selectTask);
-  const healthReady = useForgeStore((s) => s.healthReady);
-  const lastError = useForgeStore((s) => s.lastError);
-  const setDraft = useForgeStore((s) => s.setDraft);
+  const refreshAll = useTerminusStore((s) => s.refreshAll);
+  const selectedTaskId = useTerminusStore((s) => s.selectedTaskId);
+  const selectTask = useTerminusStore((s) => s.selectTask);
+  const healthReady = useTerminusStore((s) => s.healthReady);
+  const lastError = useTerminusStore((s) => s.lastError);
+  const setDraft = useTerminusStore((s) => s.setDraft);
   const selectedTask = useSelectedTask();
   const selectedTaskEvents = useSelectedTaskEvents();
   const viewport = useViewport();
@@ -116,7 +116,7 @@ export function App(): JSX.Element {
     // Refresh sessions every 30s as a slow fallback. SSE is the primary
     // update channel; this is just for reconciliation.
     const id = window.setInterval(() => {
-      void useForgeStore.getState().refreshSessions();
+      void useTerminusStore.getState().refreshSessions();
     }, 30_000);
     return () => window.clearInterval(id);
   }, [refreshAll]);

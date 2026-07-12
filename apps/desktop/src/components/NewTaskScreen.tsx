@@ -20,8 +20,8 @@
 import { memo, useCallback, useState } from "react";
 import { Bug, Code2, FileSearch, Hammer, TerminalSquare } from "lucide-react";
 import { cn } from "../lib/cn";
-import { api, ForgeApiError } from "../lib/api";
-import { useForgeStore } from "../hooks/use-terminus";
+import { api, TerminusApiError } from "../lib/api";
+import { useTerminusStore } from "../hooks/use-terminus";
 import { Composer } from "./Composer";
 import type { Session } from "../types";
 
@@ -73,12 +73,12 @@ const SUGGESTIONS: Suggestion[] = [
 ];
 
 function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
-  const selectedSessionId = useForgeStore((s) => s.selectedSessionId);
-  const sessions = useForgeStore((s) => s.sessions);
-  const refreshTasks = useForgeStore((s) => s.refreshTasks);
-  const selectTask = useForgeStore((s) => s.selectTask);
-  const draftsByTask = useForgeStore((s) => s.draftsByTask);
-  const setDraft = useForgeStore((s) => s.setDraft);
+  const selectedSessionId = useTerminusStore((s) => s.selectedSessionId);
+  const sessions = useTerminusStore((s) => s.sessions);
+  const refreshTasks = useTerminusStore((s) => s.refreshTasks);
+  const selectTask = useTerminusStore((s) => s.selectTask);
+  const draftsByTask = useTerminusStore((s) => s.draftsByTask);
+  const setDraft = useTerminusStore((s) => s.setDraft);
 
   const session: Session | undefined = sessions.find((s) => s.id === selectedSessionId);
   const draftKey = "__new__";
@@ -125,14 +125,14 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
       // Refresh + select the new task.
       await refreshTasks(session.id);
       // Clear the new-task draft.
-      useForgeStore.setState((state) => {
+      useTerminusStore.setState((state) => {
         const next = { ...state.draftsByTask };
         delete next[draftKey];
         return { draftsByTask: next };
       });
       selectTask(task.id);
     } catch (err) {
-      setError(err instanceof ForgeApiError ? err.message : "Failed to create task");
+      setError(err instanceof TerminusApiError ? err.message : "Failed to create task");
     } finally {
       setCreating(false);
     }

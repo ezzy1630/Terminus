@@ -9,15 +9,15 @@
  * ┌──────────────────────────────────────────────────────────────┐
  * │ Native integrated title bar (draggable, 44px)                │
  * ├──────────┬───────────────────────────────┬───────────────────┤
- * │ Left     │ Main conversation             │ Dynamic inspector │
- * │ sidebar  │ and working surface           │ (contextual)      │
+ * │ Left     │ Main conversation and working surface              │
+ * │ sidebar  │                          ╭─ Dynamic inspector ─╮  │
  * ├──────────┴───────────────────────────────┴───────────────────┤
  * │ Optional resizable terminal drawer (hidden by default)       │
  * └──────────────────────────────────────────────────────────────┘
  *
  * Progressive collapse (SPEC §6):
  *   < 1100px → narrow sidebar (compact-width token)
- *   < 900px  → inspector becomes floating overlay
+ *   < 900px  → inspector becomes a wider floating overlay
  *   < 700px  → sidebar collapses to a 56px rail
  *
  * Per SPEC §5: title bar uses `-webkit-app-region: drag` so the whole
@@ -172,7 +172,7 @@ const LayoutTerminalDrawer = memo(function LayoutTerminalDrawer({
 });
 
 // Pick the best available factory at module load. In Electron with the
-// `forgeTerminal` preload bridge, this is a real PTY (node-pty) factory.
+// `terminusTerminal` preload bridge, this is a real PTY (node-pty) factory.
 // In jsdom tests and non-Electron browsers, it falls back to the stub.
 // Memoized at module scope so it survives Layout re-renders.
 const stubFactory = pickTerminalSessionFactory();
@@ -258,38 +258,45 @@ function LayoutImpl({
           {sidebar}
         </aside>
 
-        {/* Main conversation + inspector region. */}
-        <main className="flex min-w-0 flex-1">
-          <section className="flex min-w-0 flex-1 flex-col">
+        {/* Main working surface. The inspector stays a floating contextual
+            card at normal widths, preserving the conversation as the primary
+            surface instead of becoming an IDE-style permanent column. */}
+        <main className="relative flex min-w-0 flex-1">
+          <section
+            className="flex min-w-0 flex-1 flex-col"
+            style={
+              inspectorVisible && !vp.inspectorOverlay
+                ? { paddingRight: "calc(var(--inspector-width) + 32px)" }
+                : undefined
+            }
+          >
             <div className="min-h-0 flex-1 overflow-hidden">{main}</div>
           </section>
 
-          {/* Inspector.
-              At < 900px, becomes an absolutely-positioned floating overlay. */}
-          {inspectorVisible && vp.inspectorOverlay ? (
+          {/* At all widths, this is a lightweight floating card. Narrow
+              layouts stop reserving reading width and let it act as a true
+              overlay that can be dismissed from the title-bar shortcut. */}
+          {inspectorVisible ? (
             <div
+              data-testid="inspector-float"
+              data-layout={vp.inspectorOverlay ? "overlay" : "floating"}
               className="pointer-events-none absolute"
               style={{
-                top: TITLEBAR_HEIGHT + 12,
-                right: 12,
-                bottom: terminalOpen ? terminalHeight + 12 : 12,
-                width: "min(var(--inspector-width), calc(100vw - 24px))",
+                top: vp.inspectorOverlay ? 8 : 16,
+                right: vp.inspectorOverlay ? 8 : 16,
+                width: vp.inspectorOverlay
+                  ? "min(var(--inspector-width), calc(100vw - 24px))"
+                  : "var(--inspector-width)",
+                maxHeight: vp.inspectorOverlay
+                  ? "calc(100% - 16px)"
+                  : "min(560px, calc(100% - 32px))",
                 zIndex: 30,
               }}
             >
-              <div className="pointer-events-auto h-full overflow-hidden rounded-lg border border-default bg-inspector shadow-lg">
+              <div className="pointer-events-auto max-h-full overflow-hidden rounded-lg border border-default bg-inspector shadow-lg">
                 {inspector}
               </div>
             </div>
-          ) : inspectorVisible ? (
-            <aside
-              className="h-full flex-shrink-0 border-l border-subtle p-3"
-              style={{ width: "var(--inspector-width)" }}
-            >
-              <div className="h-full overflow-hidden rounded-lg border border-subtle bg-inspector shadow-sm">
-                {inspector}
-              </div>
-            </aside>
           ) : null}
         </main>
       </div>

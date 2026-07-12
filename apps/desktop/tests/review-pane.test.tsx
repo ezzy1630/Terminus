@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { ReviewPane } from "../src/components/ReviewPane";
-import type { ForgeSseEvent } from "../src/types";
+import type { TerminusSseEvent } from "../src/types";
 
 const DIFF = [
   "diff --git a/src/answer.ts b/src/answer.ts",
@@ -12,7 +12,7 @@ const DIFF = [
   "+export const answer = 42;",
 ].join("\n");
 
-function patchEvent(): ForgeSseEvent {
+function patchEvent(): TerminusSseEvent {
   return {
     id: "patch-1",
     event: "tool.settled",

@@ -41,10 +41,10 @@ CREATE TABLE IF NOT EXISTS workspaces (
     trust               TEXT NOT NULL CHECK (trust IN ('trusted','untrusted','restricted')),
     repository_json     TEXT,
     policy_profile_id   TEXT NOT NULL,
-    created_at          TEXT NOT NULL,
-    last_opened_at      TEXT NOT NULL,
-    deleted_at          TEXT
-) STRICT;
+    created_at          BIGINT NOT NULL,
+    last_opened_at      BIGINT NOT NULL,
+    deleted_at          BIGINT
+);
 
 CREATE UNIQUE INDEX IF NOT EXISTS workspaces_canonical_root_active
 ON workspaces(canonical_root)
@@ -60,11 +60,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     default_permission_profile TEXT NOT NULL,
     active_thread_id        TEXT,
     metadata_json           TEXT NOT NULL DEFAULT '{}',
-    created_at              TEXT NOT NULL,
-    updated_at              TEXT NOT NULL,
-    archived_at             TEXT,
-    deleted_at              TEXT
-) STRICT;
+    created_at              BIGINT NOT NULL,
+    updated_at              BIGINT NOT NULL,
+    archived_at             BIGINT,
+    deleted_at              BIGINT
+);
 
 CREATE INDEX IF NOT EXISTS sessions_workspace_updated
 ON sessions(workspace_id, updated_at DESC);
@@ -77,9 +77,9 @@ CREATE TABLE IF NOT EXISTS threads (
     status                  TEXT NOT NULL CHECK (status IN ('active','idle','paused','archived','deleted')),
     active_context_epoch_id TEXT,
     head_turn_id            TEXT,
-    created_at              TEXT NOT NULL,
-    updated_at              TEXT NOT NULL
-) STRICT;
+    created_at              BIGINT NOT NULL,
+    updated_at              BIGINT NOT NULL
+);
 
 CREATE INDEX IF NOT EXISTS threads_session_created
 ON threads(session_id, created_at);
@@ -95,11 +95,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     verification_plan_id    TEXT,
     budget_json             TEXT NOT NULL,
     scope_digest            TEXT NOT NULL,
-    created_at              TEXT NOT NULL,
-    updated_at              TEXT NOT NULL,
-    completed_at            TEXT,
+    created_at              BIGINT NOT NULL,
+    updated_at              BIGINT NOT NULL,
+    completed_at            BIGINT,
     terminal_reason_json    TEXT
-) STRICT;
+);
 
 CREATE INDEX IF NOT EXISTS tasks_session_status
 ON tasks(session_id, status, updated_at DESC);
@@ -117,9 +117,9 @@ CREATE TABLE IF NOT EXISTS task_contract_versions (
     change_policy_json      TEXT NOT NULL,
     content_hash            TEXT NOT NULL,
     created_by              TEXT NOT NULL,
-    created_at              TEXT NOT NULL,
+    created_at              BIGINT NOT NULL,
     PRIMARY KEY (task_id, version)
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS acceptance_criteria (
     task_id                 TEXT NOT NULL,
@@ -148,8 +148,8 @@ CREATE TABLE IF NOT EXISTS scope_ledger_entries (
     source                  TEXT NOT NULL,
     reason                  TEXT NOT NULL,
     approval_id             TEXT,
-    created_at              TEXT NOT NULL
-) STRICT;
+    created_at              BIGINT NOT NULL
+);
 
 CREATE INDEX IF NOT EXISTS scope_ledger_task_resource
 ON scope_ledger_entries(task_id, resource_uri, created_at);
@@ -162,11 +162,11 @@ CREATE TABLE IF NOT EXISTS turns (
     state                   TEXT NOT NULL,
     initiating_actor        TEXT NOT NULL,
     initiating_input_artifact TEXT,
-    started_at              TEXT,
-    completed_at            TEXT,
+    started_at              BIGINT,
+    completed_at            BIGINT,
     terminal_error_json     TEXT,
     UNIQUE(thread_id, sequence)
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS episodes (
     id                      TEXT PRIMARY KEY,
@@ -177,9 +177,9 @@ CREATE TABLE IF NOT EXISTS episodes (
     content_artifact        TEXT,
     tool_call_id            TEXT,
     source_versions_json    TEXT NOT NULL DEFAULT '{}',
-    created_at              TEXT NOT NULL,
+    created_at              BIGINT NOT NULL,
     UNIQUE(turn_id, sequence)
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS provider_attempts (
     id                      TEXT PRIMARY KEY,
@@ -195,11 +195,11 @@ CREATE TABLE IF NOT EXISTS provider_attempts (
     status                  TEXT NOT NULL,
     usage_json              TEXT,
     cost_micros             INTEGER,
-    started_at              TEXT NOT NULL,
-    completed_at             TEXT,
+    started_at              BIGINT NOT NULL,
+    completed_at             BIGINT,
     error_json              TEXT,
     UNIQUE(turn_id, attempt_number)
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS context_epochs (
     id                      TEXT PRIMARY KEY,
@@ -210,11 +210,11 @@ CREATE TABLE IF NOT EXISTS context_epochs (
     baseline_hash           TEXT NOT NULL,
     snapshot_artifact       TEXT NOT NULL,
     state                   TEXT NOT NULL CHECK (state IN ('initializing','active','replacement_pending','sealed')),
-    created_at              TEXT NOT NULL,
-    sealed_at               TEXT,
+    created_at              BIGINT NOT NULL,
+    sealed_at               BIGINT,
     seal_reason             TEXT,
     UNIQUE(thread_id, generation)
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS context_manifests (
     id                      TEXT PRIMARY KEY,
@@ -229,9 +229,9 @@ CREATE TABLE IF NOT EXISTS context_manifests (
     estimated_tokens_json   TEXT NOT NULL,
     cache_plan_json         TEXT NOT NULL,
     experiment_json         TEXT NOT NULL,
-    created_at              TEXT NOT NULL,
+    created_at              BIGINT NOT NULL,
     FOREIGN KEY (provider_attempt_id) REFERENCES provider_attempts(id)
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS context_fragments (
     id                      TEXT PRIMARY KEY,
@@ -276,10 +276,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
     redaction_status        TEXT NOT NULL,
     source_uri              TEXT,
     source_version          TEXT,
-    created_at              TEXT NOT NULL,
-    last_verified_at        TEXT NOT NULL,
+    created_at              BIGINT NOT NULL,
+    last_verified_at        BIGINT NOT NULL,
     quarantine_reason       TEXT
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS artifact_links (
     id                      TEXT PRIMARY KEY,
@@ -287,9 +287,9 @@ CREATE TABLE IF NOT EXISTS artifact_links (
     owner_type              TEXT NOT NULL,
     owner_id                TEXT NOT NULL,
     purpose                 TEXT NOT NULL,
-    created_at              TEXT NOT NULL,
+    created_at              BIGINT NOT NULL,
     UNIQUE(artifact_hash, owner_type, owner_id, purpose)
-) STRICT;
+);
 
 CREATE INDEX IF NOT EXISTS artifact_links_owner
 ON artifact_links(owner_type, owner_id);
@@ -309,11 +309,11 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     approval_id             TEXT,
     result_artifact         TEXT,
     result_status           TEXT,
-    proposed_at             TEXT NOT NULL,
-    started_at              TEXT,
-    settled_at              TEXT,
+    proposed_at             BIGINT NOT NULL,
+    started_at              BIGINT,
+    settled_at              BIGINT,
     error_json              TEXT
-) STRICT;
+);
 
 CREATE INDEX IF NOT EXISTS tool_calls_turn_sequence
 ON tool_calls(turn_id, proposed_at);
@@ -328,8 +328,8 @@ CREATE TABLE IF NOT EXISTS policy_decisions (
     constraints_json        TEXT NOT NULL,
     policy_version          TEXT NOT NULL,
     explanation             TEXT NOT NULL,
-    created_at              TEXT NOT NULL
-) STRICT;
+    created_at              BIGINT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS approvals (
     id                      TEXT PRIMARY KEY,
@@ -341,12 +341,12 @@ CREATE TABLE IF NOT EXISTS approvals (
     status                  TEXT NOT NULL CHECK (status IN ('pending','allowed','denied','expired','revoked')),
     use_limit               INTEGER NOT NULL DEFAULT 1,
     use_count               INTEGER NOT NULL DEFAULT 0,
-    expires_at              TEXT,
-    requested_at            TEXT NOT NULL,
-    resolved_at             TEXT,
+    expires_at              BIGINT,
+    requested_at            BIGINT NOT NULL,
+    resolved_at             BIGINT,
     resolved_by             TEXT,
     rationale               TEXT
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS side_effects (
     id                      TEXT PRIMARY KEY,
@@ -358,11 +358,11 @@ CREATE TABLE IF NOT EXISTS side_effects (
     reversibility           TEXT NOT NULL,
     request_artifact        TEXT NOT NULL,
     evidence_artifact       TEXT,
-    started_at              TEXT,
-    settled_at              TEXT,
+    started_at              BIGINT,
+    settled_at              BIGINT,
     reconciliation_json     TEXT,
     UNIQUE(effect_type, idempotency_key)
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS jobs (
     id                      TEXT PRIMARY KEY,
@@ -380,10 +380,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     output_artifact         TEXT NOT NULL,
     output_cursor           INTEGER NOT NULL DEFAULT 0,
     cleanup_policy_json     TEXT NOT NULL,
-    started_at              TEXT,
-    settled_at              TEXT,
+    started_at              BIGINT,
+    settled_at              BIGINT,
     exit_json               TEXT
-) STRICT;
+);
 
 CREATE INDEX IF NOT EXISTS jobs_session
 ON jobs(session_id);
@@ -399,9 +399,9 @@ CREATE TABLE IF NOT EXISTS agents (
     model_profile           TEXT NOT NULL,
     worktree_uri            TEXT,
     state                   TEXT NOT NULL,
-    created_at              TEXT NOT NULL,
-    completed_at            TEXT
-) STRICT;
+    created_at              BIGINT NOT NULL,
+    completed_at            BIGINT
+);
 
 CREATE INDEX IF NOT EXISTS agents_task
 ON agents(task_id);
@@ -415,9 +415,9 @@ CREATE TABLE IF NOT EXISTS delegations (
     result_artifact         TEXT,
     status                  TEXT NOT NULL,
     budget_json             TEXT NOT NULL,
-    created_at              TEXT NOT NULL,
-    completed_at            TEXT
-) STRICT;
+    created_at              BIGINT NOT NULL,
+    completed_at            BIGINT
+);
 
 CREATE INDEX IF NOT EXISTS delegations_task
 ON delegations(task_id);
@@ -431,8 +431,8 @@ CREATE TABLE IF NOT EXISTS verification_plans (
     source_revision         TEXT NOT NULL,
     completion_expression   TEXT NOT NULL,
     plan_artifact           TEXT NOT NULL,
-    created_at              TEXT NOT NULL
-) STRICT;
+    created_at              BIGINT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS verification_nodes (
     id                      TEXT PRIMARY KEY,
@@ -462,11 +462,11 @@ CREATE TABLE IF NOT EXISTS verification_results (
     environment_digest      TEXT NOT NULL,
     evidence_artifact       TEXT,
     tool_call_id            TEXT REFERENCES tool_calls(id),
-    started_at              TEXT NOT NULL,
-    completed_at            TEXT,
+    started_at              BIGINT NOT NULL,
+    completed_at            BIGINT,
     reason                  TEXT,
     UNIQUE(plan_id, node_id, attempt)
-) STRICT;
+);
 
 CREATE INDEX IF NOT EXISTS verification_results_plan
 ON verification_results(plan_id);
@@ -485,19 +485,19 @@ CREATE TABLE IF NOT EXISTS memory_claims (
     invalidation_json       TEXT NOT NULL,
     usage_json              TEXT NOT NULL,
     status                  TEXT NOT NULL,
-    created_at              TEXT NOT NULL,
-    updated_at              TEXT NOT NULL,
+    created_at              BIGINT NOT NULL,
+    updated_at              BIGINT NOT NULL,
     UNIQUE(statement_hash, scope_json)
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS memory_relations (
     from_memory_id          TEXT NOT NULL REFERENCES memory_claims(id) ON DELETE CASCADE,
     to_memory_id            TEXT NOT NULL REFERENCES memory_claims(id) ON DELETE CASCADE,
     relation                TEXT NOT NULL CHECK (relation IN ('supports','contradicts','supersedes')),
     status                  TEXT NOT NULL,
-    created_at              TEXT NOT NULL,
+    created_at              BIGINT NOT NULL,
     PRIMARY KEY(from_memory_id, to_memory_id, relation)
-) STRICT;
+);
 
 -- ────────────────────────── Capabilities ──────────────────────────────────
 
@@ -511,10 +511,10 @@ CREATE TABLE IF NOT EXISTS capabilities (
     trust_level             TEXT NOT NULL,
     manifest_artifact       TEXT NOT NULL,
     status                  TEXT NOT NULL,
-    admitted_at             TEXT,
-    revoked_at              TEXT,
+    admitted_at             BIGINT,
+    revoked_at              BIGINT,
     PRIMARY KEY(id, version)
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS capability_activations (
     id                      TEXT PRIMARY KEY,
@@ -524,11 +524,11 @@ CREATE TABLE IF NOT EXISTS capability_activations (
     capability_version      TEXT NOT NULL,
     state                   TEXT NOT NULL,
     granted_scope_json      TEXT NOT NULL,
-    activated_at            TEXT NOT NULL,
-    deactivated_at          TEXT,
+    activated_at            BIGINT NOT NULL,
+    deactivated_at          BIGINT,
     FOREIGN KEY(capability_id, capability_version)
       REFERENCES capabilities(id, version)
-) STRICT;
+);
 
 -- ────────────────────────── Infrastructure ────────────────────────────────
 
@@ -540,19 +540,19 @@ CREATE TABLE IF NOT EXISTS idempotency_records (
     state                   TEXT NOT NULL,
     response_artifact       TEXT,
     error_json              TEXT,
-    created_at              TEXT NOT NULL,
-    expires_at              TEXT NOT NULL,
+    created_at              BIGINT NOT NULL,
+    expires_at              BIGINT NOT NULL,
     PRIMARY KEY(principal, method, idempotency_key)
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS leases (
     lease_key               TEXT PRIMARY KEY,
     owner_instance          TEXT NOT NULL,
     fencing_token           INTEGER NOT NULL,
-    acquired_at             TEXT NOT NULL,
-    expires_at              TEXT NOT NULL,
+    acquired_at             BIGINT NOT NULL,
+    expires_at              BIGINT NOT NULL,
     metadata_json           TEXT NOT NULL
-) STRICT;
+);
 
 CREATE TABLE IF NOT EXISTS semantic_events (
     event_id                TEXT PRIMARY KEY,
@@ -561,7 +561,7 @@ CREATE TABLE IF NOT EXISTS semantic_events (
     aggregate_type          TEXT NOT NULL,
     aggregate_id            TEXT NOT NULL,
     aggregate_sequence      INTEGER NOT NULL,
-    occurred_at             TEXT NOT NULL,
+    occurred_at             BIGINT NOT NULL,
     actor_json              TEXT NOT NULL,
     correlation_id          TEXT NOT NULL,
     causation_id            TEXT,
@@ -570,7 +570,7 @@ CREATE TABLE IF NOT EXISTS semantic_events (
     artifact_refs_json      TEXT NOT NULL,
     trace_id                TEXT,
     UNIQUE(aggregate_type, aggregate_id, aggregate_sequence)
-) STRICT;
+);
 
 CREATE INDEX IF NOT EXISTS semantic_events_correlation
 ON semantic_events(correlation_id, occurred_at);
@@ -582,8 +582,8 @@ CREATE TABLE IF NOT EXISTS event_stream_cursors (
     stream_name             TEXT PRIMARY KEY,
     last_event_id           TEXT NOT NULL,
     last_sequence           INTEGER NOT NULL,
-    updated_at              TEXT NOT NULL
-) STRICT;
+    updated_at              BIGINT NOT NULL
+);
 
 -- ────────────────────────── FTS5 full-text search (§7.3) ───────────────────
 -- Source files and memory claims are indexed for lexical retrieval.
@@ -622,8 +622,8 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     unsettled_effects_json  TEXT NOT NULL DEFAULT '[]',
     artifact_refs_json      TEXT NOT NULL DEFAULT '[]',
     continuation_json       TEXT,
-    created_at              TEXT NOT NULL
-) STRICT;
+    created_at              BIGINT NOT NULL
+);
 
 CREATE INDEX IF NOT EXISTS checkpoints_thread_created
 ON checkpoints(thread_id, created_at DESC);
@@ -632,8 +632,8 @@ ON checkpoints(thread_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS recovery_reports (
     id                      TEXT PRIMARY KEY,
-    started_at              TEXT NOT NULL,
-    completed_at             TEXT,
+    started_at              BIGINT NOT NULL,
+    completed_at             BIGINT,
     instance_id             TEXT NOT NULL,
     schema_version          INTEGER NOT NULL,
     non_terminal_tasks      INTEGER NOT NULL DEFAULT 0,
@@ -645,7 +645,7 @@ CREATE TABLE IF NOT EXISTS recovery_reports (
     integrity_ok            INTEGER NOT NULL CHECK (integrity_ok IN (0,1)),
     report_artifact         TEXT,
     details_json            TEXT NOT NULL DEFAULT '{}'
-) STRICT;
+);
 
 -- The migration runner (`scripts/migrate.ts`) records this migration in
 -- `schema_migrations` with a sha256 checksum computed from this file's bytes

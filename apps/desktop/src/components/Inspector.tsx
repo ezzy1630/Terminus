@@ -30,7 +30,7 @@ import { statusLabel, StatusIndicator } from "./StatusIndicator";
 import { ComputerUsePiP, type ComputerUseState } from "./ComputerUsePiP";
 import { ComputerUsePlaceholder } from "./ComputerUsePlaceholder";
 import { formatDistanceToNowStrict } from "date-fns";
-import type { ForgeSseEvent } from "../types";
+import type { TerminusSseEvent } from "../types";
 
 interface InspectorProps {
   className?: string;
@@ -244,7 +244,7 @@ function InspectorImpl({
             className="flex flex-col gap-1.5 text-secondary"
             style={{ fontSize: "var(--font-size-xs)" }}
           >
-            {recentEvents.map((ev: ForgeSseEvent, i) => (
+            {recentEvents.map((ev: TerminusSseEvent, i) => (
               <li key={ev.id ?? i} className="flex flex-col gap-0.5">
                 <div className="flex items-center gap-1.5">
                   <span

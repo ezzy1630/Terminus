@@ -3,7 +3,7 @@
  * surfaces. The control plane remains the source of truth; this module only
  * derives presentation state from its existing event contract.
  */
-import type { ForgeSseEvent } from "../types";
+import type { TerminusSseEvent } from "../types";
 
 export interface PendingApproval {
   id: string;
@@ -25,7 +25,7 @@ export interface VerificationActivity {
   detail: string;
 }
 
-function eventPayload(event: ForgeSseEvent): Record<string, unknown> | null {
+function eventPayload(event: TerminusSseEvent): Record<string, unknown> | null {
   try {
     const value: unknown = JSON.parse(event.data);
     return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -48,7 +48,7 @@ function approvalRisk(value: string | undefined): PendingApproval["risk"] {
   return value === "low" || value === "high" || value === "critical" ? value : "normal";
 }
 
-export function derivePendingApprovals(events: ForgeSseEvent[]): PendingApproval[] {
+export function derivePendingApprovals(events: TerminusSseEvent[]): PendingApproval[] {
   const pending = new Map<string, PendingApproval>();
   for (const event of events) {
     const payload = eventPayload(event);
@@ -71,7 +71,7 @@ export function derivePendingApprovals(events: ForgeSseEvent[]): PendingApproval
   return [...pending.values()];
 }
 
-export function deriveSubagentActivity(events: ForgeSseEvent[]): SubagentActivity[] {
+export function deriveSubagentActivity(events: TerminusSseEvent[]): SubagentActivity[] {
   const agents = new Map<string, SubagentActivity>();
   for (const event of events) {
     const payload = eventPayload(event);
@@ -97,7 +97,7 @@ export function deriveSubagentActivity(events: ForgeSseEvent[]): SubagentActivit
   return [...agents.values()];
 }
 
-export function deriveVerificationActivity(events: ForgeSseEvent[]): VerificationActivity[] {
+export function deriveVerificationActivity(events: TerminusSseEvent[]): VerificationActivity[] {
   const activity: VerificationActivity[] = [];
   for (const event of events) {
     const payload = eventPayload(event);
@@ -123,7 +123,7 @@ export function deriveVerificationActivity(events: ForgeSseEvent[]): Verificatio
  * payloads may carry a unified diff, which we surface only when present rather
  * than inventing a synthetic review payload.
  */
-export function extractUnifiedDiffs(events: ForgeSseEvent[]): string[] {
+export function extractUnifiedDiffs(events: TerminusSseEvent[]): string[] {
   const diffs = new Set<string>();
   for (const event of events) {
     if (event.event !== "tool.proposed" && event.event !== "tool.settled") continue;

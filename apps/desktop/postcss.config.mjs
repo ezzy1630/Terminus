@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — PostCSS config.
+ * Terminus Desktop — PostCSS config.
  *
  * The desktop app uses the `@tailwindcss/vite` plugin (configured in
  * `vite.config.ts`) rather than the legacy `@tailwindcss/postcss` plugin

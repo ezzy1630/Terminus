@@ -48,8 +48,8 @@ import {
   Square,
 } from "lucide-react";
 import { cn } from "../lib/cn";
-import { api, ForgeApiError } from "../lib/api";
-import { useForgeStore, useSelectedTask } from "../hooks/use-terminus";
+import { api, TerminusApiError } from "../lib/api";
+import { useTerminusStore, useSelectedTask } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
 import { normalizeTaskStatus } from "../hooks/use-terminus";
 import type { AccessLevel, ComposerSendMode } from "../types";
@@ -84,10 +84,10 @@ function computeSendMode(taskStatus: string | undefined): ComposerSendMode {
 function ComposerImpl({ className }: ComposerProps): JSX.Element {
   const task = useSelectedTask();
   const density = useThemeStore((s) => s.density);
-  const draftsByTask = useForgeStore((s) => s.draftsByTask);
-  const setDraft = useForgeStore((s) => s.setDraft);
-  const clearDraft = useForgeStore((s) => s.clearDraft);
-  const refreshTasks = useForgeStore((s) => s.refreshTasks);
+  const draftsByTask = useTerminusStore((s) => s.draftsByTask);
+  const setDraft = useTerminusStore((s) => s.setDraft);
+  const clearDraft = useTerminusStore((s) => s.clearDraft);
+  const refreshTasks = useTerminusStore((s) => s.refreshTasks);
 
   const taskId = task?.id ?? "__new__";
   const draft = draftsByTask[taskId] ?? "";
@@ -155,7 +155,7 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
         setSending(true);
         await api.cancelTask(task.id, "user_stopped");
       } catch (err) {
-        setError(err instanceof ForgeApiError ? err.message : "Failed to stop task");
+        setError(err instanceof TerminusApiError ? err.message : "Failed to stop task");
       } finally {
         setSending(false);
       }
@@ -198,7 +198,7 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
         clearDraft(taskId);
       }
     } catch (err) {
-      setError(err instanceof ForgeApiError ? err.message : "Failed to submit");
+      setError(err instanceof TerminusApiError ? err.message : "Failed to submit");
     } finally {
       setSending(false);
     }

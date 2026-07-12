@@ -14,7 +14,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
  *
  * It DOES own two native bridges the renderer cannot reach on its own:
  *
- *   1. `forgeTerminal` — `node-pty` PTY sessions (SPEC §15). The renderer
+ *   1. `terminusTerminal` — `node-pty` PTY sessions (SPEC §15). The renderer
  *      asks to spawn a shell, sends input, receives output, resizes, and
  *      kills. Each session is identified by an opaque id. We pipe PTY
  *      stdout/stderr to the renderer via `webContents.send` and route
@@ -26,12 +26,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
  *      `try/catch` the require so the main process still boots; the
  *      renderer falls back to the StubTerminalSessionFactory in that case.
  *
- *   2. `forgeDesktop.getScreenSources` — `desktopCapturer.getSources()`
+ *   2. `terminusDesktop.getScreenSources` — `desktopCapturer.getSources()`
  *      (SPEC §16). The renderer needs a screen-source id to feed into
  *      `navigator.mediaDevices.getUserMedia({ video: { chromeMediaSource:
  *      'desktop', chromeMediaSourceId } })` for the computer-use PiP.
  *
- *   3. `forgeDesktop` notifications + window controls + theme — same as
+ *   3. `terminusDesktop` notifications + window controls + theme — same as
  *      before.
  */
 const electron_1 = require("electron");
@@ -97,13 +97,13 @@ function handleTerminalSpawn(event, opts) {
                 return;
             // Forward stdout/stderr to the renderer that owns this session.
             const wc = electron_1.BrowserWindow.fromId(session.senderId)?.webContents;
-            wc?.send(`forgeTerminal:data:${id}`, data);
+            wc?.send(`terminusTerminal:data:${id}`, data);
         });
         term.onExit(({ exitCode }) => {
             if (session.disposed)
                 return;
             const wc = electron_1.BrowserWindow.fromId(session.senderId)?.webContents;
-            wc?.send(`forgeTerminal:exit:${id}`, exitCode);
+            wc?.send(`terminusTerminal:exit:${id}`, exitCode);
             ptySessions.delete(id);
         });
         ptySessions.set(id, session);
@@ -215,7 +215,7 @@ function createWindow() {
         return { action: "allow" };
     });
     if (isDev) {
-        // Keep the dev renderer from reusing a pre-migration Forge document from
+        // Keep the dev renderer from reusing a pre-migration Terminus document from
         // Electron's HTTP cache after the app rename.
         void mainWindow.loadURL("http://localhost:5173/?app=terminus");
         mainWindow.webContents.openDevTools({ mode: "detach" });
@@ -261,10 +261,10 @@ function registerIpc() {
     });
     electron_1.ipcMain.handle("desktop:getScreenSources", handleGetScreenSources);
     // ── Terminal (node-pty) ──
-    electron_1.ipcMain.handle("forgeTerminal:spawn", handleTerminalSpawn);
-    electron_1.ipcMain.handle("forgeTerminal:write", handleTerminalWrite);
-    electron_1.ipcMain.handle("forgeTerminal:resize", handleTerminalResize);
-    electron_1.ipcMain.handle("forgeTerminal:kill", handleTerminalKill);
+    electron_1.ipcMain.handle("terminusTerminal:spawn", handleTerminalSpawn);
+    electron_1.ipcMain.handle("terminusTerminal:write", handleTerminalWrite);
+    electron_1.ipcMain.handle("terminusTerminal:resize", handleTerminalResize);
+    electron_1.ipcMain.handle("terminusTerminal:kill", handleTerminalKill);
 }
 electron_1.app.whenReady().then(() => {
     registerIpc();

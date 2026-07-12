@@ -6,9 +6,9 @@ import {
   extractUnifiedDiffs,
 } from "../src/lib/task-surface";
 import { decodeFeed } from "../src/components/Conversation";
-import type { ForgeSseEvent } from "../src/types";
+import type { TerminusSseEvent } from "../src/types";
 
-function event(id: string, type: string, payload: Record<string, unknown>): ForgeSseEvent {
+function event(id: string, type: string, payload: Record<string, unknown>): TerminusSseEvent {
   return { id, event: type, data: JSON.stringify(payload) };
 }
 

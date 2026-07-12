@@ -2,8 +2,8 @@
  * Terminus Desktop — API client tests (SPEC §29 — required test scenarios).
  *
  * Coverage:
- *   1. ForgeApiClient URL builder + header construction (unit, offline).
- *   2. ForgeApiError envelope shape (unit, offline — driven via fetch mock).
+ *   1. TerminusApiClient URL builder + header construction (unit, offline).
+ *   2. TerminusApiError envelope shape (unit, offline — driven via fetch mock).
  *   3. Live integration tests against the control plane at
  *      http://127.0.0.1:3050 with bearer `terminus-control-dev-token`:
  *        - health()
@@ -31,7 +31,7 @@
  *   cd apps/desktop && bunx vitest run tests/api.test.ts --reporter=verbose
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { ForgeApiClient, ForgeApiError } from "../src/lib/api";
+import { TerminusApiClient, TerminusApiError } from "../src/lib/api";
 import type { CreateSessionInput, CreateTaskInput } from "../src/types";
 
 // ────────────────────────── Configuration ───────────────────────────────────
@@ -75,19 +75,19 @@ const describeLive = live ? describe : describe.skip;
 
 // ────────────────────────── 1. Unit tests (offline) ─────────────────────────
 
-describe("ForgeApiClient — URL + headers (offline)", () => {
+describe("TerminusApiClient — URL + headers (offline)", () => {
   test("url() builds a path with no query when query is empty", () => {
-    const c = new ForgeApiClient("http://example.test/", "tok");
+    const c = new TerminusApiClient("http://example.test/", "tok");
     expect(c.url("/v1/sessions")).toBe("http://example.test/v1/sessions");
   });
 
   test("url() strips trailing slashes from the base", () => {
-    const c = new ForgeApiClient("http://example.test///", "tok");
+    const c = new TerminusApiClient("http://example.test///", "tok");
     expect(c.url("/v1/sessions")).toBe("http://example.test/v1/sessions");
   });
 
   test("url() serializes query parameters, skipping null/undefined", () => {
-    const c = new ForgeApiClient("http://example.test", "tok");
+    const c = new TerminusApiClient("http://example.test", "tok");
     const u = c.url("/v1/events", {
       cursor: "abc",
       task_id: "t-1",
@@ -97,7 +97,7 @@ describe("ForgeApiClient — URL + headers (offline)", () => {
   });
 
   test("buildHeaders() exposes content-type, accept, and bearer auth", () => {
-    const c = new ForgeApiClient("http://example.test", "secret-token");
+    const c = new TerminusApiClient("http://example.test", "secret-token");
     const h = c.buildHeaders();
     expect(h["content-type"]).toBe("application/json");
     expect(h["accept"]).toBe("application/json");
@@ -105,16 +105,16 @@ describe("ForgeApiClient — URL + headers (offline)", () => {
   });
 
   test("buildHeaders() merges extra headers without losing auth", () => {
-    const c = new ForgeApiClient("http://example.test", "tok");
+    const c = new TerminusApiClient("http://example.test", "tok");
     const h = c.buildHeaders({ accept: "text/event-stream" });
     expect(h["accept"]).toBe("text/event-stream");
     expect(h["authorization"]).toBe("Bearer tok");
   });
 });
 
-// ────────────────────────── 2. ForgeApiError shape (offline) ────────────────
+// ────────────────────────── 2. TerminusApiError shape (offline) ────────────────
 
-describe("ForgeApiError — envelope shape (offline)", () => {
+describe("TerminusApiError — envelope shape (offline)", () => {
   test("carries status, message, and envelope fields", () => {
     const env = {
       code: "TASK_NOT_FOUND",
@@ -124,31 +124,31 @@ describe("ForgeApiError — envelope shape (offline)", () => {
       suggested_action: null,
       trace_id: "trace-abc",
     };
-    const err = new ForgeApiError(404, "task not found", env);
+    const err = new TerminusApiError(404, "task not found", env);
     expect(err.status).toBe(404);
     expect(err.message).toBe("task not found");
     expect(err.envelope?.code).toBe("TASK_NOT_FOUND");
     expect(err.envelope?.category).toBe("not_found");
     expect(err.envelope?.retryable).toBe(false);
-    expect(err.name).toBe("ForgeApiError");
+    expect(err.name).toBe("TerminusApiError");
     expect(err).toBeInstanceOf(Error);
   });
 
   test("envelope is null when the server returns an unstructured body", () => {
-    const err = new ForgeApiError(500, "internal", null);
+    const err = new TerminusApiError(500, "internal", null);
     expect(err.envelope).toBeNull();
     expect(err.status).toBe(500);
   });
 
   test("network errors surface as status=0 (SPEC §30.4)", async () => {
-    const c = new ForgeApiClient("http://127.0.0.1:1", TOKEN);
+    const c = new TerminusApiClient("http://127.0.0.1:1", TOKEN);
     await expect(c.health()).rejects.toMatchObject({
-      name: "ForgeApiError",
+      name: "TerminusApiError",
       status: 0,
     });
   });
 
-  test("a non-JSON 4xx body still raises ForgeApiError with envelope=null", async () => {
+  test("a non-JSON 4xx body still raises TerminusApiError with envelope=null", async () => {
     // Mock fetch to return a 502 with an HTML body (typical from a
     // misconfigured gateway). The client should still raise rather
     // than throw a JSON parse error.
@@ -161,9 +161,9 @@ describe("ForgeApiError — envelope shape (offline)", () => {
     );
     globalThis.fetch = mocked as unknown as typeof fetch;
     try {
-      const c = new ForgeApiClient("http://example.test", "tok");
+      const c = new TerminusApiClient("http://example.test", "tok");
       await expect(c.listSessions()).rejects.toMatchObject({
-        name: "ForgeApiError",
+        name: "TerminusApiError",
         status: 502,
       });
     } finally {
@@ -171,7 +171,7 @@ describe("ForgeApiError — envelope shape (offline)", () => {
     }
   });
 
-  test("an error envelope from the server is parsed into the ForgeApiError", async () => {
+  test("an error envelope from the server is parsed into the TerminusApiError", async () => {
     const original = globalThis.fetch;
     const body = {
       error: {
@@ -191,9 +191,9 @@ describe("ForgeApiError — envelope shape (offline)", () => {
     );
     globalThis.fetch = mocked as unknown as typeof fetch;
     try {
-      const c = new ForgeApiClient("http://example.test", "wrong-token");
-      const err = (await c.listSessions().catch((e: unknown) => e)) as ForgeApiError;
-      expect(err).toBeInstanceOf(ForgeApiError);
+      const c = new TerminusApiClient("http://example.test", "wrong-token");
+      const err = (await c.listSessions().catch((e: unknown) => e)) as TerminusApiError;
+      expect(err).toBeInstanceOf(TerminusApiError);
       expect(err.status).toBe(401);
       expect(err.envelope?.code).toBe("UNAUTHENTICATED");
       expect(err.envelope?.category).toBe("auth");
@@ -206,16 +206,16 @@ describe("ForgeApiError — envelope shape (offline)", () => {
 
 // ────────────────────────── 3. Live integration tests ───────────────────────
 
-describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", () => {
+describeLive("TerminusApiClient — live control plane (http://127.0.0.1:3050)", () => {
   /**
    * The control plane's `POST /v1/sessions` validates that `workspace_id`
    * references an existing Workspace row (foreign-key constraint). To
    * keep the live tests self-contained, we open a fresh workspace via
-   * the public API (not via ForgeApiClient — the client doesn't yet
+   * the public API (not via TerminusApiClient — the client doesn't yet
    * surface /v1/workspaces/open) at the start of each test that needs
    * one. The workspace_id is then reused for createSession.
    */
-  async function openWorkspace(c: ForgeApiClient): Promise<string> {
+  async function openWorkspace(c: TerminusApiClient): Promise<string> {
     const rootUri = `file:///tmp/terminus-desktop-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const res = await fetch(`${API_BASE}/v1/workspaces/open`, {
       method: "POST",
@@ -235,7 +235,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
   }
 
   test("health() returns ok=true with a version string", async () => {
-    const c = new ForgeApiClient(API_BASE, TOKEN);
+    const c = new TerminusApiClient(API_BASE, TOKEN);
     const h = await c.health();
     expect(h.status).toBe("ok");
     expect(h.ready).toBe(true);
@@ -246,7 +246,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
   });
 
   test("listSessions() returns an array (possibly empty) of Session objects", async () => {
-    const c = new ForgeApiClient(API_BASE, TOKEN);
+    const c = new TerminusApiClient(API_BASE, TOKEN);
     const res = await c.listSessions();
     expect(Array.isArray(res.sessions)).toBe(true);
     if (res.sessions.length > 0) {
@@ -260,7 +260,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
   });
 
   test("createSession() creates a session + auto-creates an active thread", async () => {
-    const c = new ForgeApiClient(API_BASE, TOKEN);
+    const c = new TerminusApiClient(API_BASE, TOKEN);
     const workspaceId = await openWorkspace(c);
     const input: CreateSessionInput = {
       workspace_id: workspaceId,
@@ -277,7 +277,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
   });
 
   test("listTasks(sessionId) returns tasks for the freshly created session", async () => {
-    const c = new ForgeApiClient(API_BASE, TOKEN);
+    const c = new TerminusApiClient(API_BASE, TOKEN);
     const workspaceId = await openWorkspace(c);
     const session = await c.createSession({
       workspace_id: workspaceId,
@@ -290,7 +290,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
   });
 
   test("createTask() + getTask() round-trips a draft task", async () => {
-    const c = new ForgeApiClient(API_BASE, TOKEN);
+    const c = new TerminusApiClient(API_BASE, TOKEN);
     const workspaceId = await openWorkspace(c);
     const session = await c.createSession({
       workspace_id: workspaceId,
@@ -323,7 +323,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
   });
 
   test("startTask() transitions DRAFT → ACTIVE", async () => {
-    const c = new ForgeApiClient(API_BASE, TOKEN);
+    const c = new TerminusApiClient(API_BASE, TOKEN);
     const workspaceId = await openWorkspace(c);
     const session = await c.createSession({
       workspace_id: workspaceId,
@@ -346,7 +346,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
   });
 
   test("startTurn() creates a new turn on the task thread", async () => {
-    const c = new ForgeApiClient(API_BASE, TOKEN);
+    const c = new TerminusApiClient(API_BASE, TOKEN);
     const workspaceId = await openWorkspace(c);
     const session = await c.createSession({
       workspace_id: workspaceId,
@@ -374,11 +374,11 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
 
 // ────────────────────────── 4. Error handling ───────────────────────────────
 
-describeLive("ForgeApiClient — error handling (live)", () => {
-  test("401 without auth: listSessions with a bogus token raises ForgeApiError(401, UNAUTHENTICATED)", async () => {
-    const c = new ForgeApiClient(API_BASE, "this-token-does-not-exist");
-    const err = (await c.listSessions().catch((e: unknown) => e)) as ForgeApiError;
-    expect(err).toBeInstanceOf(ForgeApiError);
+describeLive("TerminusApiClient — error handling (live)", () => {
+  test("401 without auth: listSessions with a bogus token raises TerminusApiError(401, UNAUTHENTICATED)", async () => {
+    const c = new TerminusApiClient(API_BASE, "this-token-does-not-exist");
+    const err = (await c.listSessions().catch((e: unknown) => e)) as TerminusApiError;
+    expect(err).toBeInstanceOf(TerminusApiError);
     expect(err.status).toBe(401);
     expect(err.envelope).not.toBeNull();
     expect(err.envelope?.code).toBe("UNAUTHENTICATED");
@@ -386,24 +386,24 @@ describeLive("ForgeApiClient — error handling (live)", () => {
     expect(err.envelope?.retryable).toBe(false);
   });
 
-  test("404 for missing resource: getTask on a non-existent id raises ForgeApiError(404, TASK_NOT_FOUND)", async () => {
-    const c = new ForgeApiClient(API_BASE, TOKEN);
-    const err = (await c.getTask("no-such-task-id-00000000").catch((e: unknown) => e)) as ForgeApiError;
-    expect(err).toBeInstanceOf(ForgeApiError);
+  test("404 for missing resource: getTask on a non-existent id raises TerminusApiError(404, TASK_NOT_FOUND)", async () => {
+    const c = new TerminusApiClient(API_BASE, TOKEN);
+    const err = (await c.getTask("no-such-task-id-00000000").catch((e: unknown) => e)) as TerminusApiError;
+    expect(err).toBeInstanceOf(TerminusApiError);
     expect(err.status).toBe(404);
     expect(err.envelope).not.toBeNull();
     expect(err.envelope?.category).toBe("not_found");
   });
 
-  test("400 for invalid input: resolveApproval with an unsupported decision raises ForgeApiError(400, INVALID_APPROVAL_DECISION)", async () => {
-    const c = new ForgeApiClient(API_BASE, TOKEN);
+  test("400 for invalid input: resolveApproval with an unsupported decision raises TerminusApiError(400, INVALID_APPROVAL_DECISION)", async () => {
+    const c = new TerminusApiClient(API_BASE, TOKEN);
     // The control plane's /v1/approvals/:id/resolve handler returns 400
     // when the `decision` field doesn't match an accepted value. We don't
     // need a real approval id — the validation runs before the lookup.
     const err = (await c
       .resolveApproval("approval-does-not-matter", "not-a-real-decision" as never)
-      .catch((e: unknown) => e)) as ForgeApiError;
-    expect(err).toBeInstanceOf(ForgeApiError);
+      .catch((e: unknown) => e)) as TerminusApiError;
+    expect(err).toBeInstanceOf(TerminusApiError);
     expect(err.status).toBe(400);
     expect(err.envelope).not.toBeNull();
     expect(err.envelope?.code).toBe("INVALID_APPROVAL_DECISION");
@@ -412,12 +412,12 @@ describeLive("ForgeApiClient — error handling (live)", () => {
     expect(err.envelope?.details).toHaveProperty("accepted");
   });
 
-  test("network error (server offline) surfaces as ForgeApiError(status=0)", async () => {
+  test("network error (server offline) surfaces as TerminusApiError(status=0)", async () => {
     // Point at a port nothing is listening on. The connection must
     // fail synchronously inside fetch and surface as status=0.
-    const c = new ForgeApiClient("http://127.0.0.1:1", TOKEN);
-    const err = (await c.health().catch((e: unknown) => e)) as ForgeApiError;
-    expect(err).toBeInstanceOf(ForgeApiError);
+    const c = new TerminusApiClient("http://127.0.0.1:1", TOKEN);
+    const err = (await c.health().catch((e: unknown) => e)) as TerminusApiError;
+    expect(err).toBeInstanceOf(TerminusApiError);
     expect(err.status).toBe(0);
     expect(err.envelope).toBeNull();
   });
@@ -430,7 +430,7 @@ describeLive("ForgeApiClient — error handling (live)", () => {
 // skipped. It makes the skipped set visible in `bunx vitest run` output
 // instead of silently disappearing.
 
-describe("ForgeApiClient — live-suite status", () => {
+describe("TerminusApiClient — live-suite status", () => {
   test(`control plane at ${API_BASE} is ${live ? "reachable" : "unreachable (live tests skipped)"}`, () => {
     expect(live).toBe(live);
   });

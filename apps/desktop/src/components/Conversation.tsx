@@ -40,7 +40,7 @@ import type {
   ActivityBlock as ActivityBlockData,
   ActivityEntry,
   ConversationMessage,
-  ForgeSseEvent,
+  TerminusSseEvent,
 } from "../types";
 
 interface ConversationProps {
@@ -81,7 +81,7 @@ interface PendingToolGroup {
  * Anything unrecognized is ignored (defensive). A `provider_running`
  * event with a `delta` field is appended to the streaming agent message.
  */
-export function decodeFeed(events: ForgeSseEvent[], taskCreatedAt: string): DecodedFeed {
+export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): DecodedFeed {
   const messages: ConversationMessage[] = [];
   const blocks: ActivityBlockData[] = [];
 
@@ -93,7 +93,7 @@ export function decodeFeed(events: ForgeSseEvent[], taskCreatedAt: string): Deco
     if (!pendingGroup) return;
     const entries = pendingGroup.entries;
     const lastEntry = entries[entries.length - 1];
-    const allDone = entries.every((e) => /succeed|pass|complete|ok/i.test(e.summary) || /fail|error/i.test(e.summary));
+    const allDone = entries.every((e) => /success|succeed|pass|complete|ok/i.test(e.summary) || /fail|error/i.test(e.summary));
     const anyFailed = entries.some((e) => /fail|error|denied/i.test(e.summary));
     const status: ActivityBlockData["status"] = anyFailed
       ? "failed"

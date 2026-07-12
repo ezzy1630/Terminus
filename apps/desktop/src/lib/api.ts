@@ -13,11 +13,11 @@
  *   startTask(taskId)
  *   startTurn(input)
  *   getTask(taskId)
- *   subscribeEvents(opts) — returns a ForgeEventStream (EventSource-like)
+ *   subscribeEvents(opts) — returns a TerminusEventStream (EventSource-like)
  *
  * Per SPEC §30.4: every non-2xx response carries a structured error
  * envelope `{ error: { code, message, retryable, category, … } }`. We
- * surface that as `ForgeApiError`.
+ * surface that as `TerminusApiError`.
  *
  * Per SPEC §30.6: SSE reconnects with `Last-Event-ID` / cursor. The
  * browser's native EventSource cannot send `Authorization` headers, so
@@ -36,7 +36,7 @@ import type {
   ApprovalDecision,
   CreateSessionInput,
   CreateTaskInput,
-  ForgeSseEvent,
+  TerminusSseEvent,
   HealthResponse,
   Session,
   SessionListResponse,
@@ -52,20 +52,20 @@ import type {
 
 /**
  * Resolve API base + token. In Electron, the preload exposes these via
- * `window.forgeDesktop`. In a plain browser (Vite dev), we fall back to
+ * `window.terminusDesktop`. In a plain browser (Vite dev), we fall back to
  * env vars injected by Vite or to documented defaults.
  */
 function resolveApiBase(): string {
-  if (typeof window !== "undefined" && window.forgeDesktop?.apiBase) {
-    return window.forgeDesktop.apiBase;
+  if (typeof window !== "undefined" && window.terminusDesktop?.apiBase) {
+    return window.terminusDesktop.apiBase;
   }
   const env = (import.meta.env.VITE_TERMINUS_API_BASE as string | undefined) ?? null;
   return env ?? "http://127.0.0.1:3050";
 }
 
 function resolveApiToken(): string {
-  if (typeof window !== "undefined" && window.forgeDesktop?.token) {
-    return window.forgeDesktop.token;
+  if (typeof window !== "undefined" && window.terminusDesktop?.token) {
+    return window.terminusDesktop.token;
   }
   const env = (import.meta.env.VITE_TERMINUS_TOKEN as string | undefined) ?? null;
   return env ?? "terminus-control-dev-token";
@@ -73,7 +73,7 @@ function resolveApiToken(): string {
 
 // ────────────────────────── Errors ─────────────────────────────────────────
 
-export interface ForgeErrorEnvelope {
+export interface TerminusErrorEnvelope {
   code: string;
   message: string;
   retryable: boolean;
@@ -83,13 +83,13 @@ export interface ForgeErrorEnvelope {
   trace_id?: string | null;
 }
 
-export class ForgeApiError extends Error {
+export class TerminusApiError extends Error {
   readonly status: number;
-  readonly envelope: ForgeErrorEnvelope | null;
+  readonly envelope: TerminusErrorEnvelope | null;
 
-  constructor(status: number, message: string, envelope: ForgeErrorEnvelope | null) {
+  constructor(status: number, message: string, envelope: TerminusErrorEnvelope | null) {
     super(message);
-    this.name = "ForgeApiError";
+    this.name = "TerminusApiError";
     this.status = status;
     this.envelope = envelope;
   }
@@ -97,7 +97,7 @@ export class ForgeApiError extends Error {
 
 // ────────────────────────── Client ─────────────────────────────────────────
 
-export class ForgeApiClient {
+export class TerminusApiClient {
   private readonly baseUrl: string;
   private readonly token: string;
 
@@ -154,13 +154,13 @@ export class ForgeApiClient {
     } catch (err) {
       // Network error (control plane offline, CORS, etc.).
       const msg = err instanceof Error ? err.message : String(err);
-      throw new ForgeApiError(0, `network error: ${msg}`, null);
+      throw new TerminusApiError(0, `network error: ${msg}`, null);
     }
 
     if (res.status === 204) return undefined as T;
 
     if (!res.ok) {
-      let envelope: ForgeErrorEnvelope | null = null;
+      let envelope: TerminusErrorEnvelope | null = null;
       try {
         const body = (await res.json()) as unknown;
         if (body && typeof body === "object" && "error" in body) {
@@ -186,7 +186,7 @@ export class ForgeApiClient {
         // ignore JSON parse failure
       }
       const msg = envelope?.message ?? `HTTP ${res.status}`;
-      throw new ForgeApiError(res.status, msg, envelope);
+      throw new TerminusApiError(res.status, msg, envelope);
     }
 
     // Empty body — let caller decide.
@@ -276,30 +276,30 @@ export class ForgeApiClient {
 // `/v1/events`, so we use fetch + a streaming reader + the SSE decoder
 // from @terminus/public-api, and surface an EventSource-like object.
 
-export type ForgeEventStreamHandler = (event: ForgeSseEvent) => void;
+export type TerminusEventStreamHandler = (event: TerminusSseEvent) => void;
 
-export interface ForgeEventStream {
+export interface TerminusEventStream {
   readonly readyState: 0 | 1 | 2 | 3;
   /** Register a listener. Returns an unsubscribe function. */
-  addEventListener(type: "message" | "open" | "error", handler: ForgeEventStreamHandler | (() => void)): () => void;
+  addEventListener(type: "message" | "open" | "error", handler: TerminusEventStreamHandler | (() => void)): () => void;
   /** Close the stream. Safe to call multiple times. */
   close(): void;
   /** Last received event id (durable cursor). */
   lastEventId: string | null;
 }
 
-class FetchEventStream implements ForgeEventStream {
+class FetchEventStream implements TerminusEventStream {
   readyState: 0 | 1 | 2 | 3 = 0;
   lastEventId: string | null = null;
-  private readonly listeners = new Map<string, Set<ForgeEventStreamHandler | (() => void)>>();
+  private readonly listeners = new Map<string, Set<TerminusEventStreamHandler | (() => void)>>();
   private readonly abort: AbortController;
   private readonly cursor: string | null;
   private readonly taskId: string | null;
   private readonly sessionId: string | null;
-  private readonly client: ForgeApiClient;
+  private readonly client: TerminusApiClient;
   private closed = false;
 
-  constructor(client: ForgeApiClient, opts: SubscribeEventsOptions) {
+  constructor(client: TerminusApiClient, opts: SubscribeEventsOptions) {
     this.client = client;
     this.cursor = opts.cursor ?? null;
     this.taskId = opts.task_id ?? null;
@@ -314,7 +314,7 @@ class FetchEventStream implements ForgeEventStream {
 
   addEventListener(
     type: "message" | "open" | "error",
-    handler: ForgeEventStreamHandler | (() => void),
+    handler: TerminusEventStreamHandler | (() => void),
   ): () => void {
     let set = this.listeners.get(type);
     if (!set) {
@@ -332,14 +332,14 @@ class FetchEventStream implements ForgeEventStream {
     this.abort.abort();
   }
 
-  private emit(type: "message", ev: ForgeSseEvent): void;
+  private emit(type: "message", ev: TerminusSseEvent): void;
   private emit(type: "open" | "error"): void;
-  private emit(type: "message" | "open" | "error", ev?: ForgeSseEvent): void {
+  private emit(type: "message" | "open" | "error", ev?: TerminusSseEvent): void {
     const set = this.listeners.get(type);
     if (!set) return;
     for (const h of set) {
       try {
-        if (type === "message") (h as ForgeEventStreamHandler)(ev as ForgeSseEvent);
+        if (type === "message") (h as TerminusEventStreamHandler)(ev as TerminusSseEvent);
         else (h as () => void)();
       } catch {
         // Listener errors must not break the stream.
@@ -392,7 +392,7 @@ class FetchEventStream implements ForgeEventStream {
           if (!ev.event && (!ev.data || ev.data.startsWith(":heartbeat"))) continue;
           if (ev.id) this.lastEventId = ev.id;
           // Normalize event name: SSE may use the default "message" event.
-          const named: ForgeSseEvent = {
+          const named: TerminusSseEvent = {
             id: ev.id,
             event: ev.event || "message",
             data: ev.data,
@@ -422,11 +422,11 @@ class FetchEventStream implements ForgeEventStream {
 
 // ────────────────────────── Public singleton ───────────────────────────────
 
-export const api = new ForgeApiClient();
+export const api = new TerminusApiClient();
 
 /**
  * Subscribe to the SSE event stream. Returns an EventSource-like
- * `ForgeEventStream` whose `addEventListener("message", …)` callback
+ * `TerminusEventStream` whose `addEventListener("message", …)` callback
  * receives decoded `{ id, event, data }` payloads. Reconnect is the
  * caller's responsibility — pass `cursor: stream.lastEventId` on retry.
  *
@@ -435,11 +435,11 @@ export const api = new ForgeApiClient();
  * by Terminus Desktop, because the native EventSource cannot send the
  * `Authorization: Bearer` header the control plane requires.
  */
-export function subscribeEvents(opts: SubscribeEventsOptions = {}): ForgeEventStream {
+export function subscribeEvents(opts: SubscribeEventsOptions = {}): TerminusEventStream {
   return new FetchEventStream(api, opts);
 }
 
 /** Variant accepting the legacy single-argument form: `subscribeEvents(taskId?)`. */
-export function subscribeTaskEvents(taskId: string | null): ForgeEventStream {
+export function subscribeTaskEvents(taskId: string | null): TerminusEventStream {
   return subscribeEvents({ task_id: taskId });
 }

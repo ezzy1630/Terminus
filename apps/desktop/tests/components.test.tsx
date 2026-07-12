@@ -32,7 +32,7 @@ import { CommandPalette, type Command } from "../src/components/CommandPalette";
 import { Composer } from "../src/components/Composer";
 import { SidebarItem } from "../src/components/SidebarItem";
 
-import { useForgeStore } from "../src/hooks/use-terminus";
+import { useTerminusStore } from "../src/hooks/use-terminus";
 import { useThemeStore } from "../src/hooks/use-theme";
 
 // ────────────────────────── 1. StatusIndicator ──────────────────────────────
@@ -204,7 +204,7 @@ vi.mock("../src/lib/api", async (importOriginal) => {
 // Import the mocked api AFTER vi.mock so the mock is in effect.
 // The dynamic import above is hoisted by vitest, so the static import
 // below resolves to the mocked module.
-import { api, ForgeApiError } from "../src/lib/api";
+import { api, TerminusApiError } from "../src/lib/api";
 
 describe("ApprovalCard", () => {
   beforeEach(() => {
@@ -360,7 +360,7 @@ describe("ApprovalCard", () => {
   test("renders an error message if the API call rejects", async () => {
     const user = userEvent.setup();
     vi.mocked(api.resolveApproval).mockRejectedValueOnce(
-      new ForgeApiError(409, "approval already resolved", {
+      new TerminusApiError(409, "approval already resolved", {
         code: "APPROVAL_ALREADY_RESOLVED",
         message: "approval already resolved",
         retryable: false,
@@ -544,7 +544,7 @@ describe("CommandPalette", () => {
 describe("Composer — send-button mode switches based on task status", () => {
   beforeEach(() => {
     // Reset both stores between tests so state doesn't bleed.
-    useForgeStore.setState({
+    useTerminusStore.setState({
       sessions: [],
       tasksBySession: {},
       taskById: {},
@@ -560,7 +560,7 @@ describe("Composer — send-button mode switches based on task status", () => {
   });
 
   function makeTask(status: string): void {
-    useForgeStore.setState({
+    useTerminusStore.setState({
       selectedTaskId: "task-1",
       taskById: {
         "task-1": {
@@ -623,7 +623,7 @@ describe("Composer — send-button mode switches based on task status", () => {
   });
 
   test("no task selected → button label is 'Send' (default)", () => {
-    useForgeStore.setState({ selectedTaskId: null });
+    useTerminusStore.setState({ selectedTaskId: null });
     render(<Composer />);
     expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
   });

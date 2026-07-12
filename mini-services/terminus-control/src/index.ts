@@ -35,8 +35,8 @@ import { PrismaClient } from "@prisma/client";
 
 // ────────────────────────── Configuration ──────────────────────────────────
 
-const PORT = 3050;
-const KERNEL_PORT = 3040;
+const PORT = Number.parseInt(process.env.TERMINUS_CONTROL_PORT ?? "3050", 10);
+const KERNEL_PORT = Number.parseInt(process.env.TERMINUS_KERNEL_PORT ?? "3040", 10);
 // SPEC §13.6 / §31.6: secrets are short-lived brokered capabilities, never
 // environment-wide shared defaults. The control plane MUST fail closed if no
 // token is configured. A well-known dev token is permitted ONLY when

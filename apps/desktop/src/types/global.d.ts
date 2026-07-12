@@ -6,7 +6,7 @@
  * React 19 types removed the implicit global JSX namespace.
  *
  * Also pulls in Vite's `import.meta.env` typing via `vite/client` and
- * declares the Electron preload bridges (`forgeDesktop`, `forgeTerminal`)
+ * declares the Electron preload bridges (`terminusDesktop`, `terminusTerminal`)
  * on `window`.
  */
 /// <reference types="vite/client" />
@@ -15,8 +15,8 @@ import type { JSX as ReactJSX } from "react/jsx-runtime";
 
 // ────────────────────────── Electron preload bridges ─────────────────────────
 
-/** Result of forgeTerminal.spawn — `error` is set when the PTY backend is unavailable. */
-export interface ForgeTerminalSpawnResult {
+/** Result of terminusTerminal.spawn — `error` is set when the PTY backend is unavailable. */
+export interface TerminusTerminalSpawnResult {
   id: string;
   label: string;
   cwd?: string;
@@ -24,19 +24,19 @@ export interface ForgeTerminalSpawnResult {
 }
 
 /** Screen source from desktopCapturer.getSources (SPEC §16). */
-export interface ForgeScreenSource {
+export interface TerminusScreenSource {
   id: string;
   name: string;
   display_id?: string;
 }
 
-export interface ForgeTerminalBridge {
+export interface TerminusTerminalBridge {
   spawn: (
     cwd?: string,
     command?: string,
     cols?: number,
     rows?: number,
-  ) => Promise<ForgeTerminalSpawnResult>;
+  ) => Promise<TerminusTerminalSpawnResult>;
   write: (termId: string, data: string) => Promise<void>;
   resize: (termId: string, cols: number, rows: number) => Promise<void>;
   kill: (termId: string) => Promise<void>;
@@ -59,7 +59,7 @@ declare global {
   }
 
   interface Window {
-    forgeDesktop?: {
+    terminusDesktop?: {
       apiBase: string;
       gateway: string;
       token: string;
@@ -71,9 +71,9 @@ declare global {
       windowClose: () => Promise<unknown>;
       getTheme: () => Promise<"system" | "light" | "dark">;
       setTheme: (theme: "system" | "light" | "dark") => Promise<"system" | "light" | "dark">;
-      getScreenSources: () => Promise<ForgeScreenSource[]>;
+      getScreenSources: () => Promise<TerminusScreenSource[]>;
     };
-    forgeTerminal?: ForgeTerminalBridge;
+    terminusTerminal?: TerminusTerminalBridge;
   }
 }
 

@@ -4,10 +4,10 @@ import { DiffViewer, parseUnifiedDiff } from "./DiffViewer";
 import { EmptyState } from "./EmptyState";
 import { extractUnifiedDiffs } from "../lib/task-surface";
 import type { DiffComment } from "./DiffViewer";
-import type { ForgeSseEvent } from "../types";
+import type { TerminusSseEvent } from "../types";
 
 interface ReviewPaneProps {
-  events: ForgeSseEvent[];
+  events: TerminusSseEvent[];
   onClose: () => void;
   onDraftRevision: (instruction: string) => void;
 }

@@ -27,7 +27,7 @@
  * Two session factories are shipped:
  *
  *   - `PtyTerminalSessionFactory` — real PTY via `node-pty` (Electron
- *     main) + xterm.js (renderer). Used when `window.forgeTerminal`
+ *     main) + xterm.js (renderer). Used when `window.terminusTerminal`
  *     is present and `spawn()` returns an id without an error.
  *   - `StubTerminalSessionFactory` — echo-only fallback for tests,
  *     non-Electron browsers, and sandboxes where node-pty didn't
@@ -778,13 +778,13 @@ export class StubTerminalSessionFactory implements TerminalSessionFactory {
 /**
  * A factory that bridges the drawer to a real `node-pty` session running
  * in the Electron main process. Each `create()` returns a
- * {@link TerminalSessionAdapter} backed by `window.forgeTerminal`.
+ * {@link TerminalSessionAdapter} backed by `window.terminusTerminal`.
  *
  * The renderer attaches xterm.js to the drawer's container in a separate
  * effect (see {@link TerminalDrawerImpl}) — the adapter only owns the
  * transport (spawn/write/resize/kill/onData).
  *
- * If `window.forgeTerminal` is missing (non-Electron browser, jsdom test)
+ * If `window.terminusTerminal` is missing (non-Electron browser, jsdom test)
  * or `spawn()` returns an error (node-pty unavailable on this platform),
  * the factory falls back to a {@link StubTerminalSessionFactory} session
  * so the drawer remains interactive. Callers can detect this via the
@@ -796,7 +796,7 @@ export class PtyTerminalSessionFactory implements TerminalSessionFactory {
   private fallback = new StubTerminalSessionFactory();
 
   create(cwd?: string): TerminalSessionAdapter {
-    const bridge = (typeof window !== "undefined" ? window.forgeTerminal : undefined) ?? null;
+    const bridge = (typeof window !== "undefined" ? window.terminusTerminal : undefined) ?? null;
     if (!bridge) {
       // Non-Electron context. Fall back to stub.
       const stub = this.fallback.create(cwd);
@@ -883,7 +883,7 @@ export class PtyTerminalSessionFactory implements TerminalSessionFactory {
 /**
  * Pick the best available factory for the current environment.
  *
- *   - When `window.forgeTerminal` is present (Electron with PTY bridge),
+ *   - When `window.terminusTerminal` is present (Electron with PTY bridge),
  *     return a singleton {@link PtyTerminalSessionFactory}.
  *   - Otherwise, return a singleton {@link StubTerminalSessionFactory}.
  *
@@ -891,7 +891,7 @@ export class PtyTerminalSessionFactory implements TerminalSessionFactory {
  * re-creating it on every render.
  */
 export function pickTerminalSessionFactory(): TerminalSessionFactory {
-  if (typeof window !== "undefined" && window.forgeTerminal) {
+  if (typeof window !== "undefined" && window.terminusTerminal) {
     return PtyTerminalFactorySingleton;
   }
   return StubTerminalFactorySingleton;

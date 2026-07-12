@@ -27,7 +27,7 @@ import { memo, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Plus, Search, Settings, TerminalSquare, TriangleAlert, User } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
-import { useForgeStore, usePinnedTasks, normalizeTaskStatus } from "../hooks/use-terminus";
+import { useTerminusStore, usePinnedTasks, normalizeTaskStatus } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
 import { useViewport } from "../hooks/use-viewport";
 import { SidebarItem } from "./SidebarItem";
@@ -41,19 +41,19 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
   const viewport = useViewport();
   const compact = compactProp ?? viewport.sidebarRail;
 
-  const sessions = useForgeStore((s) => s.sessions);
-  const tasksBySession = useForgeStore((s) => s.tasksBySession);
-  const selectedSessionId = useForgeStore((s) => s.selectedSessionId);
-  const selectedTaskId = useForgeStore((s) => s.selectedTaskId);
-  const pinnedTaskIds = useForgeStore((s) => s.pinnedTaskIds);
-  const loadingSessions = useForgeStore((s) => s.loadingSessions);
-  const healthReady = useForgeStore((s) => s.healthReady);
-  const lastError = useForgeStore((s) => s.lastError);
+  const sessions = useTerminusStore((s) => s.sessions);
+  const tasksBySession = useTerminusStore((s) => s.tasksBySession);
+  const selectedSessionId = useTerminusStore((s) => s.selectedSessionId);
+  const selectedTaskId = useTerminusStore((s) => s.selectedTaskId);
+  const pinnedTaskIds = useTerminusStore((s) => s.pinnedTaskIds);
+  const loadingSessions = useTerminusStore((s) => s.loadingSessions);
+  const healthReady = useTerminusStore((s) => s.healthReady);
+  const lastError = useTerminusStore((s) => s.lastError);
 
-  const selectSession = useForgeStore((s) => s.selectSession);
-  const selectTask = useForgeStore((s) => s.selectTask);
-  const togglePin = useForgeStore((s) => s.togglePin);
-  const refreshAll = useForgeStore((s) => s.refreshAll);
+  const selectSession = useTerminusStore((s) => s.selectSession);
+  const selectTask = useTerminusStore((s) => s.selectTask);
+  const togglePin = useTerminusStore((s) => s.togglePin);
+  const refreshAll = useTerminusStore((s) => s.refreshAll);
 
   const pinnedTasks = usePinnedTasks();
 

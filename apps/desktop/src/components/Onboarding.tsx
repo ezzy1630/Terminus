@@ -18,7 +18,7 @@
  *
  * The component is self-contained: it manages its own step state and
  * emits the chosen project path + initial prompt via callbacks. The
- * host owns the directory picker (via window.forgeDesktop or a
+ * host owns the directory picker (via window.terminusDesktop or a
  * future Electron IPC bridge) — we accept a `pickDirectory` callback.
  *
  * Per design constraints: calm visuals, lucide-react icons, CSS
@@ -39,8 +39,8 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "../lib/cn";
-import { api, ForgeApiError } from "../lib/api";
-import { useForgeStore } from "../hooks/use-terminus";
+import { api, TerminusApiError } from "../lib/api";
+import { useTerminusStore } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
 import type { Session } from "../types";
 
@@ -153,7 +153,7 @@ function OnboardingImpl({
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [initialPrompt, setInitialPrompt] = useState("");
-  const selectSession = useForgeStore((s) => s.selectSession);
+  const selectSession = useTerminusStore((s) => s.selectSession);
 
   // Sync the system theme on mount so first paint matches.
   useEffect(() => {
@@ -181,12 +181,12 @@ function OnboardingImpl({
         title: deriveProjectTitle(projectPath) || "My first project",
       });
       // Refresh sidebar + select the new session.
-      await useForgeStore.getState().refreshSessions();
+      await useTerminusStore.getState().refreshSessions();
       selectSession(session.id);
       onComplete({ projectPath: projectPath || null, initialPrompt, session, skipped: false });
     } catch (err) {
       const msg =
-        err instanceof ForgeApiError
+        err instanceof TerminusApiError
           ? err.envelope?.message ?? err.message
           : err instanceof Error
             ? err.message

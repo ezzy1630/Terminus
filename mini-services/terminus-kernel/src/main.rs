@@ -29,8 +29,9 @@ use tracing_subscriber::EnvFilter;
 use crate::auth::{cors_layer, require_bearer, require_capability_for_path};
 use crate::state::AppState;
 
-/// Hardcoded port — never from env (SPEC §31 dev mini-service contract).
-const PORT: u16 = 3040;
+/// Loopback bootstrap port. Production uses the UDS transport; the env
+/// override keeps deterministic local harnesses isolated from other runs.
+const DEFAULT_PORT: u16 = 3040;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -68,7 +69,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // restricted to the loopback interface so the privileged effect boundary
     // is never exposed to other hosts or the local network. Binding the kernel
     // to `0.0.0.0` is a release blocker (SPEC §26.3 invariant 1).
-    let addr: SocketAddr = ([127, 0, 0, 1], PORT).into();
+    let port = std::env::var("TERMINUS_KERNEL_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_PORT);
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "terminus-kernel mini-service listening (loopback only)");
 

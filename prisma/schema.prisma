@@ -32,117 +32,117 @@ model SchemaMigration {
 // --- Core aggregates ------------------------------------------------------
 
 model Workspace {
-  id              String   @id
-  kind            String   // local_git | local_directory | container | microvm | remote
-  rootUri         String   @map("root_uri")
-  canonicalRoot   String   @unique @map("canonical_root")
-  trust           String   // trusted | untrusted | restricted
-  repositoryJson  String?  @map("repository_json")
-  policyProfileId String   @map("policy_profile_id")
-  createdAt       DateTime @default(now()) @map("created_at")
-  lastOpenedAt    DateTime @default(now()) @map("last_opened_at")
+  id              String    @id
+  kind            String // local_git | local_directory | container | microvm | remote
+  rootUri         String    @map("root_uri")
+  canonicalRoot   String    @unique @map("canonical_root")
+  trust           String // trusted | untrusted | restricted
+  repositoryJson  String?   @map("repository_json")
+  policyProfileId String    @map("policy_profile_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  lastOpenedAt    DateTime  @default(now()) @map("last_opened_at")
   deletedAt       DateTime? @map("deleted_at")
 
-  sessions        Session[]
-  artifacts       ArtifactLink[]
+  sessions  Session[]
+  artifacts ArtifactLink[]
 
   @@index([lastOpenedAt])
   @@map("workspaces")
 }
 
 model Session {
-  id                       String   @id
-  workspaceId              String   @map("workspace_id")
-  ownerPrincipal           String   @map("owner_principal")
+  id                       String    @id
+  workspaceId              String    @map("workspace_id")
+  ownerPrincipal           String    @map("owner_principal")
   title                    String
-  status                   String   // active | paused | archived | deleted
-  defaultModelProfile      String   @map("default_model_profile")
-  defaultPermissionProfile String   @map("default_permission_profile")
-  activeThreadId           String?  @map("active_thread_id")
-  metadataJson             String   @default("{}") @map("metadata_json")
-  createdAt                DateTime @default(now()) @map("created_at")
-  updatedAt                DateTime @updatedAt @map("updated_at")
+  status                   String // active | paused | archived | deleted
+  defaultModelProfile      String    @map("default_model_profile")
+  defaultPermissionProfile String    @map("default_permission_profile")
+  activeThreadId           String?   @map("active_thread_id")
+  metadataJson             String    @default("{}") @map("metadata_json")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
   archivedAt               DateTime? @map("archived_at")
   deletedAt                DateTime? @map("deleted_at")
 
-  workspace                Workspace @relation(fields: [workspaceId], references: [id])
-  threads                  Thread[]
-  tasks                    Task[]
-  jobs                     Job[]
-  capabilityActivations    CapabilityActivation[]
+  workspace             Workspace              @relation(fields: [workspaceId], references: [id])
+  threads               Thread[]
+  tasks                 Task[]
+  jobs                  Job[]
+  capabilityActivations CapabilityActivation[]
 
   @@index([workspaceId, updatedAt])
   @@map("sessions")
 }
 
 model Thread {
-  id                     String   @id
-  sessionId              String   @map("session_id")
-  parentThreadId         String?  @map("parent_thread_id")
-  forkedFromTurnId       String?  @map("forked_from_turn_id")
-  status                 String   // active | idle | paused | archived | deleted
-  activeContextEpochId   String?  @map("active_context_epoch_id")
-  headTurnId             String?  @map("head_turn_id")
-  createdAt              DateTime @default(now()) @map("created_at")
-  updatedAt              DateTime @updatedAt @map("updated_at")
+  id                   String   @id
+  sessionId            String   @map("session_id")
+  parentThreadId       String?  @map("parent_thread_id")
+  forkedFromTurnId     String?  @map("forked_from_turn_id")
+  status               String // active | idle | paused | archived | deleted
+  activeContextEpochId String?  @map("active_context_epoch_id")
+  headTurnId           String?  @map("head_turn_id")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
 
-  session                Session  @relation(fields: [sessionId], references: [id])
-  parent                 Thread?  @relation("ThreadParent", fields: [parentThreadId], references: [id])
-  children               Thread[] @relation("ThreadParent")
-  turns                  Turn[]
-  contextEpochs          ContextEpoch[]
-  tasks                  Task[]
+  session       Session        @relation(fields: [sessionId], references: [id])
+  parent        Thread?        @relation("ThreadParent", fields: [parentThreadId], references: [id])
+  children      Thread[]       @relation("ThreadParent")
+  turns         Turn[]
+  contextEpochs ContextEpoch[]
+  tasks         Task[]
 
   @@index([sessionId, createdAt])
   @@map("threads")
 }
 
 model Task {
-  id                       String   @id
-  sessionId                String   @map("session_id")
-  threadId                 String   @map("thread_id")
-  status                   String   // DRAFT|ACTIVE|NEEDS_USER_DECISION|BLOCKED|VERIFYING|COMPLETED|FAILED|FAILED_VERIFICATION|BUDGET_EXHAUSTED|POLICY_DENIED|ABORTED
-  phase                    String   // INTAKE|CONTRACT|DISCOVER|PLAN|IMPLEMENT|VERIFY|REVIEW|COMPLETE
-  activeContractVersion    Int      @default(1) @map("active_contract_version")
-  riskClass                String   @default("normal") @map("risk_class")
-  verificationPlanId       String?  @map("verification_plan_id")
-  budgetJson               String   @map("budget_json")
-  scopeDigest              String   @map("scope_digest")
-  createdAt                DateTime @default(now()) @map("created_at")
-  updatedAt                DateTime @updatedAt @map("updated_at")
-  completedAt              DateTime? @map("completed_at")
-  terminalReasonJson       String?  @map("terminal_reason_json")
+  id                    String    @id
+  sessionId             String    @map("session_id")
+  threadId              String    @map("thread_id")
+  status                String // DRAFT|ACTIVE|NEEDS_USER_DECISION|BLOCKED|VERIFYING|COMPLETED|FAILED|FAILED_VERIFICATION|BUDGET_EXHAUSTED|POLICY_DENIED|ABORTED
+  phase                 String // INTAKE|CONTRACT|DISCOVER|PLAN|IMPLEMENT|VERIFY|REVIEW|COMPLETE
+  activeContractVersion Int       @default(1) @map("active_contract_version")
+  riskClass             String    @default("normal") @map("risk_class")
+  verificationPlanId    String?   @map("verification_plan_id")
+  budgetJson            String    @map("budget_json")
+  scopeDigest           String    @map("scope_digest")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  completedAt           DateTime? @map("completed_at")
+  terminalReasonJson    String?   @map("terminal_reason_json")
 
-  session                  Session         @relation(fields: [sessionId], references: [id])
-  thread                   Thread          @relation(fields: [threadId], references: [id])
-  contractVersions         TaskContractVersion[]
-  scopeLedgerEntries       ScopeLedgerEntry[]
-  turns                    Turn[]
-  approvals                Approval[]
-  agents                   Agent[]
-  delegations              Delegation[]
-  verificationPlans        VerificationPlan[]
-  jobs                     Job[]
-  capabilityActivations    CapabilityActivation[]
+  session               Session                @relation(fields: [sessionId], references: [id])
+  thread                Thread                 @relation(fields: [threadId], references: [id])
+  contractVersions      TaskContractVersion[]
+  scopeLedgerEntries    ScopeLedgerEntry[]
+  turns                 Turn[]
+  approvals             Approval[]
+  agents                Agent[]
+  delegations           Delegation[]
+  verificationPlans     VerificationPlan[]
+  jobs                  Job[]
+  capabilityActivations CapabilityActivation[]
 
   @@index([sessionId, status, updatedAt])
   @@map("tasks")
 }
 
 model TaskContractVersion {
-  task_id            String
-  version            Int
-  objective          String
-  userOutcome        String?  @map("user_outcome")
-  nonGoalsJson       String   @map("non_goals_json")
-  constraintsJson    String   @map("constraints_json")
-  assumptionsJson    String   @map("assumptions_json")
-  unknownsJson       String   @map("unknowns_json")
-  allowedScopeJson   String   @map("allowed_scope_json")
-  changePolicyJson   String   @map("change_policy_json")
-  contentHash        String   @map("content_hash")
-  createdBy          String   @map("created_by")
-  createdAt          DateTime @default(now()) @map("created_at")
+  task_id          String
+  version          Int
+  objective        String
+  userOutcome      String?  @map("user_outcome")
+  nonGoalsJson     String   @map("non_goals_json")
+  constraintsJson  String   @map("constraints_json")
+  assumptionsJson  String   @map("assumptions_json")
+  unknownsJson     String   @map("unknowns_json")
+  allowedScopeJson String   @map("allowed_scope_json")
+  changePolicyJson String   @map("change_policy_json")
+  contentHash      String   @map("content_hash")
+  createdBy        String   @map("created_by")
+  createdAt        DateTime @default(now()) @map("created_at")
 
   task               Task                  @relation(fields: [task_id], references: [id])
   acceptanceCriteria AcceptanceCriterion[]
@@ -152,538 +152,567 @@ model TaskContractVersion {
 }
 
 model AcceptanceCriterion {
-  taskId            String  @map("task_id")
-  contractVersion   Int     @map("contract_version")
-  criterionId       String  @map("criterion_id")
-  statement         String
-  verificationHint  String? @map("verification_hint")
-  required          Boolean
-  status            String   @default("pending")
+  taskId           String  @map("task_id")
+  contractVersion  Int     @map("contract_version")
+  criterionId      String  @map("criterion_id")
+  statement        String
+  verificationHint String? @map("verification_hint")
+  required         Boolean
+  status           String  @default("pending")
 
-  task              TaskContractVersion @relation(fields: [taskId, contractVersion], references: [task_id, version])
+  task TaskContractVersion @relation(fields: [taskId, contractVersion], references: [task_id, version])
 
   @@id([taskId, contractVersion, criterionId])
   @@map("acceptance_criteria")
 }
 
 model ScopeLedgerEntry {
-  id                String   @id
-  taskId            String   @map("task_id")
-  contractVersion   Int      @map("contract_version")
-  resourceUri       String   @map("resource_uri")
-  accessClass       String   @map("access_class") // read_allowed | write_allowed | read_observed | write_proposed | write_effective | external_proposed | external_effective | denied
-  source            String
-  reason            String
-  approvalId        String?  @map("approval_id")
-  createdAt         DateTime @default(now()) @map("created_at")
+  id              String   @id
+  taskId          String   @map("task_id")
+  contractVersion Int      @map("contract_version")
+  resourceUri     String   @map("resource_uri")
+  accessClass     String   @map("access_class") // read_allowed | write_allowed | read_observed | write_proposed | write_effective | external_proposed | external_effective | denied
+  source          String
+  reason          String
+  approvalId      String?  @map("approval_id")
+  createdAt       DateTime @default(now()) @map("created_at")
 
-  task              Task      @relation(fields: [taskId], references: [id])
-  approval          Approval? @relation("ScopeApproval", fields: [approvalId], references: [id])
+  task     Task      @relation(fields: [taskId], references: [id])
+  approval Approval? @relation("ScopeApproval", fields: [approvalId], references: [id])
 
   @@index([taskId, resourceUri, createdAt])
   @@map("scope_ledger_entries")
 }
 
 model Turn {
-  id                       String   @id
-  threadId                 String
-  taskId                   String?
-  sequence                 Int
-  state                    String   // PENDING|CONTEXT_COMPILING|PROVIDER_RUNNING|RESPONSE_VALIDATING|TOOL_SETTLEMENT|FINALIZING|COMPLETED|INTERRUPTED|FAILED|BUDGET_EXHAUSTED|POLICY_DENIED
-  initiatingActor          String
-  initiatingInputArtifact  String?
-  startedAt                DateTime?
-  completedAt              DateTime?
-  terminalErrorJson        String?
+  id                      String    @id
+  threadId                String    @map("thread_id")
+  taskId                  String?   @map("task_id")
+  sequence                Int
+  state                   String // PENDING|CONTEXT_COMPILING|PROVIDER_RUNNING|RESPONSE_VALIDATING|TOOL_SETTLEMENT|FINALIZING|COMPLETED|INTERRUPTED|FAILED|BUDGET_EXHAUSTED|POLICY_DENIED
+  initiatingActor         String    @map("initiating_actor")
+  initiatingInputArtifact String?   @map("initiating_input_artifact")
+  startedAt               DateTime? @map("started_at")
+  completedAt             DateTime? @map("completed_at")
+  terminalErrorJson       String?   @map("terminal_error_json")
 
-  thread                   Thread             @relation(fields: [threadId], references: [id])
-  task                     Task?              @relation(fields: [taskId], references: [id])
-  episodes                 Episode[]
-  providerAttempts         ProviderAttempt[]
-  toolCalls                ToolCall[]
+  thread           Thread            @relation(fields: [threadId], references: [id])
+  task             Task?             @relation(fields: [taskId], references: [id])
+  episodes         Episode[]
+  providerAttempts ProviderAttempt[]
+  toolCalls        ToolCall[]
 
   @@unique([threadId, sequence])
   @@index([taskId])
+  @@map("turns")
 }
 
 model Episode {
-  id                  String   @id
-  turnId              String
-  sequence            Int
-  kind                String
-  modelVisible        Boolean
-  contentArtifact     String?
-  toolCallId          String?
-  sourceVersionsJson  String   @default("{}")
-  createdAt           DateTime @default(now())
+  id                 String   @id
+  turnId             String   @map("turn_id")
+  sequence           Int
+  kind               String
+  modelVisible       Boolean  @map("model_visible")
+  contentArtifact    String?  @map("content_artifact")
+  toolCallId         String?  @map("tool_call_id")
+  sourceVersionsJson String   @default("{}") @map("source_versions_json")
+  createdAt          DateTime @default(now()) @map("created_at")
 
-  turn                Turn @relation(fields: [turnId], references: [id])
+  turn Turn @relation(fields: [turnId], references: [id])
 
   @@unique([turnId, sequence])
+  @@map("episodes")
 }
 
 model ProviderAttempt {
-  id                       String   @id
-  turnId                   String
-  attemptNumber            Int
-  providerId               String
-  modelKey                 String
-  capabilitySnapshotHash   String
-  contextManifestId        String
-  requestArtifact          String
-  responseArtifact         String?
-  nativeContinuationJson   String?
-  status                   String
-  usageJson                String?
-  costMicros               Int?
-  startedAt                DateTime @default(now())
-  completedAt              DateTime?
-  errorJson                String?
+  id                     String    @id
+  turnId                 String    @map("turn_id")
+  attemptNumber          Int       @map("attempt_number")
+  providerId             String    @map("provider_id")
+  modelKey               String    @map("model_key")
+  capabilitySnapshotHash String    @map("capability_snapshot_hash")
+  contextManifestId      String    @map("context_manifest_id")
+  requestArtifact        String    @map("request_artifact")
+  responseArtifact       String?   @map("response_artifact")
+  nativeContinuationJson String?   @map("native_continuation_json")
+  status                 String
+  usageJson              String?   @map("usage_json")
+  costMicros             Int?      @map("cost_micros")
+  startedAt              DateTime  @default(now()) @map("started_at")
+  completedAt            DateTime? @map("completed_at")
+  errorJson              String?   @map("error_json")
 
-  turn                     Turn              @relation(fields: [turnId], references: [id])
-  contextManifest          ContextManifest?  @relation("AttemptManifest")
-  toolCalls                ToolCall[]
+  turn            Turn             @relation(fields: [turnId], references: [id])
+  contextManifest ContextManifest? @relation("AttemptManifest")
+  toolCalls       ToolCall[]
 
   @@unique([turnId, attemptNumber])
+  @@map("provider_attempts")
 }
 
 model ContextEpoch {
-  id                       String   @id
-  threadId                 String
+  id                       String    @id
+  threadId                 String    @map("thread_id")
   generation               Int
-  providerCompatibilityKey String
-  baselineArtifact         String
-  baselineHash             String
-  snapshotArtifact         String
-  state                    String   // initializing | active | replacement_pending | sealed
-  createdAt                DateTime @default(now())
-  sealedAt                 DateTime?
-  sealReason               String?
+  providerCompatibilityKey String    @map("provider_compatibility_key")
+  baselineArtifact         String    @map("baseline_artifact")
+  baselineHash             String    @map("baseline_hash")
+  snapshotArtifact         String    @map("snapshot_artifact")
+  state                    String // initializing | active | replacement_pending | sealed
+  createdAt                DateTime  @default(now()) @map("created_at")
+  sealedAt                 DateTime? @map("sealed_at")
+  sealReason               String?   @map("seal_reason")
 
-  thread                   Thread @relation(fields: [threadId], references: [id])
-  manifests                ContextManifest[]
+  thread    Thread            @relation(fields: [threadId], references: [id])
+  manifests ContextManifest[]
 
   @@unique([threadId, generation])
+  @@map("context_epochs")
 }
 
 model ContextManifest {
-  id                    String   @id
-  providerAttemptId     String?  @unique
-  compilerVersion       String
-  policyVersion         String
-  epochId               String?
-  providerKey           String
-  modelKey              String
-  manifestArtifact      String
-  renderedRequestHash   String
-  estimatedTokensJson   String
-  cachePlanJson         String
-  experimentJson        String
-  createdAt             DateTime @default(now())
+  id                  String   @id
+  providerAttemptId   String?  @unique @map("provider_attempt_id")
+  compilerVersion     String   @map("compiler_version")
+  policyVersion       String   @map("policy_version")
+  epochId             String?  @map("epoch_id")
+  providerKey         String   @map("provider_key")
+  modelKey            String   @map("model_key")
+  manifestArtifact    String   @map("manifest_artifact")
+  renderedRequestHash String   @map("rendered_request_hash")
+  estimatedTokensJson String   @map("estimated_tokens_json")
+  cachePlanJson       String   @map("cache_plan_json")
+  experimentJson      String   @map("experiment_json")
+  createdAt           DateTime @default(now()) @map("created_at")
 
-  epoch                 ContextEpoch?   @relation(fields: [epochId], references: [id])
-  providerAttempt       ProviderAttempt? @relation("AttemptManifest", fields: [providerAttemptId], references: [id])
-  fragments             ContextFragment[]
+  epoch           ContextEpoch?     @relation(fields: [epochId], references: [id])
+  providerAttempt ProviderAttempt?  @relation("AttemptManifest", fields: [providerAttemptId], references: [id])
+  fragments       ContextFragment[]
 
   @@index([epochId])
+  @@map("context_manifests")
 }
 
 model ContextFragment {
-  id                String   @id
-  manifestId        String
-  fragmentKey       String
-  kind              String   // authority|project_rule|task_contract|world_state|code|test|documentation|tool_result|recent_episode|checkpoint|memory|tool_schema|user_attachment
-  sourceUri         String
-  sourceVersion     String?
-  contentArtifact   String
-  authority         Int
-  priority          Int
-  trust             String   // trusted | derived | untrusted
-  confidentiality   String   // public | workspace | secret_adjacent | secret
-  injectionRisk     String   // none | low | medium | high
-  exactness         String   // exact | semantics_preserving | recoverable_by_reference
-  selected          Boolean
-  renderedPosition  Int?
-  estimatedTokens   Int
-  selectionReason   String?
-  omissionReason    String?
-  transformationJson String?
-  invalidationJson  String
+  id                 String  @id
+  manifestId         String  @map("manifest_id")
+  fragmentKey        String  @map("fragment_key")
+  kind               String // authority|project_rule|task_contract|world_state|code|test|documentation|tool_result|recent_episode|checkpoint|memory|tool_schema|user_attachment
+  sourceUri          String  @map("source_uri")
+  sourceVersion      String? @map("source_version")
+  contentArtifact    String  @map("content_artifact")
+  authority          Int
+  priority           Int
+  trust              String // trusted | derived | untrusted
+  confidentiality    String // public | workspace | secret_adjacent | secret
+  injectionRisk      String  @map("injection_risk") // none | low | medium | high
+  exactness          String // exact | semantics_preserving | recoverable_by_reference
+  selected           Boolean
+  renderedPosition   Int?    @map("rendered_position")
+  estimatedTokens    Int     @map("estimated_tokens")
+  selectionReason    String? @map("selection_reason")
+  omissionReason     String? @map("omission_reason")
+  transformationJson String? @map("transformation_json")
+  invalidationJson   String  @map("invalidation_json")
 
-  manifest          ContextManifest @relation(fields: [manifestId], references: [id])
+  manifest ContextManifest @relation(fields: [manifestId], references: [id])
 
   @@unique([manifestId, fragmentKey])
   @@index([sourceUri, sourceVersion])
+  @@map("context_fragments")
 }
 
 // --- Artifact store (content-addressed) ----------------------------------
 
 model Artifact {
-  hash              String   @id // sha256:<hex>
-  sizeBytes         Int
-  mediaType         String
-  contentEncoding   String   // identity | zstd
-  storagePath       String
-  confidentiality   String
-  trust             String
-  retentionClass    String   // ephemeral | session | audit | evidence | memory_source | legal_hold
-  redactionStatus   String
-  sourceUri         String?
-  sourceVersion     String?
-  createdAt         DateTime @default(now())
-  lastVerifiedAt    DateTime @default(now())
-  quarantineReason  String?
+  hash             String   @id // sha256:<hex>
+  sizeBytes        Int      @map("size_bytes")
+  mediaType        String   @map("media_type")
+  contentEncoding  String   @map("content_encoding") // identity | zstd
+  storagePath      String   @map("storage_path")
+  confidentiality  String
+  trust            String
+  retentionClass   String   @map("retention_class") // ephemeral | session | audit | evidence | memory_source | legal_hold
+  redactionStatus  String   @map("redaction_status")
+  sourceUri        String?  @map("source_uri")
+  sourceVersion    String?  @map("source_version")
+  createdAt        DateTime @default(now()) @map("created_at")
+  lastVerifiedAt   DateTime @default(now()) @map("last_verified_at")
+  quarantineReason String?  @map("quarantine_reason")
 
-  links             ArtifactLink[]
+  links ArtifactLink[]
+
+  @@map("artifacts")
 }
 
 model ArtifactLink {
-  id            String   @id
-  artifactHash  String
-  ownerType     String   // turn | task | provider_attempt | tool_call | verification_result | memory | capability | ...
-  ownerId       String
-  purpose       String
-  createdAt     DateTime @default(now())
+  id           String   @id
+  artifactHash String   @map("artifact_hash")
+  ownerType    String   @map("owner_type") // turn | task | provider_attempt | tool_call | verification_result | memory | capability | ...
+  ownerId      String   @map("owner_id")
+  purpose      String
+  createdAt    DateTime @default(now()) @map("created_at")
 
-  artifact      Artifact  @relation(fields: [artifactHash], references: [hash])
-  workspace     Workspace? @relation(fields: [ownerId], references: [id], onDelete: NoAction)
+  artifact  Artifact   @relation(fields: [artifactHash], references: [hash])
+  workspace Workspace? @relation(fields: [ownerId], references: [id], onDelete: NoAction)
 
   @@unique([artifactHash, ownerType, ownerId, purpose])
   @@index([ownerType, ownerId])
+  @@map("artifact_links")
 }
 
 // --- Tools, policy, approvals, effects, jobs -----------------------------
 
 model ToolCall {
-  id                       String   @id
-  turnId                   String
-  providerAttemptId        String?
-  toolId                   String
-  toolVersion              String
-  argumentsArtifact        String
-  normalizedOperationHash  String
-  state                    String   // PROPOSED|VALIDATED|POLICY_EVALUATED|AUTHORIZED|APPROVAL_PENDING|DENIED|STARTED|SETTLED|FAILED|TIMED_OUT|CANCELLED|UNKNOWN|RECONCILING
-  policyDecisionId         String?
-  approvalId               String?
-  resultArtifact           String?
-  resultStatus             String?
-  proposedAt               DateTime @default(now())
-  startedAt                DateTime?
-  settledAt                DateTime?
-  errorJson                String?
+  id                      String    @id
+  turnId                  String    @map("turn_id")
+  providerAttemptId       String?   @map("provider_attempt_id")
+  toolId                  String    @map("tool_id")
+  toolVersion             String    @map("tool_version")
+  argumentsArtifact       String    @map("arguments_artifact")
+  normalizedOperationHash String    @map("normalized_operation_hash")
+  state                   String // PROPOSED|VALIDATED|POLICY_EVALUATED|AUTHORIZED|APPROVAL_PENDING|DENIED|STARTED|SETTLED|FAILED|TIMED_OUT|CANCELLED|UNKNOWN|RECONCILING
+  policyDecisionId        String?   @map("policy_decision_id")
+  approvalId              String?   @map("approval_id")
+  resultArtifact          String?   @map("result_artifact")
+  resultStatus            String?   @map("result_status")
+  proposedAt              DateTime  @default(now()) @map("proposed_at")
+  startedAt               DateTime? @map("started_at")
+  settledAt               DateTime? @map("settled_at")
+  errorJson               String?   @map("error_json")
 
-  turn                     Turn             @relation(fields: [turnId], references: [id])
-  providerAttempt          ProviderAttempt? @relation(fields: [providerAttemptId], references: [id])
-  policyDecision           PolicyDecision?  @relation("ToolPolicy")
-  approval                 Approval?        @relation("ToolApproval")
-  sideEffects              SideEffect[]
+  turn            Turn             @relation(fields: [turnId], references: [id])
+  providerAttempt ProviderAttempt? @relation(fields: [providerAttemptId], references: [id])
+  policyDecision  PolicyDecision?  @relation("ToolPolicy")
+  approval        Approval?        @relation("ToolApproval")
+  sideEffects     SideEffect[]
 
   @@index([turnId, proposedAt])
+  @@map("tool_calls")
 }
 
 model PolicyDecision {
-  id                       String   @id
-  toolCallId               String?  @unique
-  effectType               String
-  normalizedInputArtifact  String
-  decision                 String   // allow | allow_with_constraints | prompt | deny
-  ruleIdsJson              String
-  constraintsJson          String
-  policyVersion            String
-  explanation              String
-  createdAt                DateTime @default(now())
+  id                      String   @id
+  toolCallId              String?  @unique @map("tool_call_id")
+  effectType              String   @map("effect_type")
+  normalizedInputArtifact String   @map("normalized_input_artifact")
+  decision                String // allow | allow_with_constraints | prompt | deny
+  ruleIdsJson             String   @map("rule_ids_json")
+  constraintsJson         String   @map("constraints_json")
+  policyVersion           String   @map("policy_version")
+  explanation             String
+  createdAt               DateTime @default(now()) @map("created_at")
 
-  toolCall                 ToolCall? @relation("ToolPolicy", fields: [toolCallId], references: [id])
+  toolCall ToolCall? @relation("ToolPolicy", fields: [toolCallId], references: [id])
+
+  @@map("policy_decisions")
 }
 
 model Approval {
-  id              String   @id
-  taskId          String
-  toolCallId      String?  @unique
-  operationHash   String
-  scopeJson       String
-  riskJson        String
-  status          String   // pending | allowed | denied | expired | revoked
-  useLimit        Int      @default(1)
-  useCount        Int      @default(0)
-  expiresAt       DateTime?
-  requestedAt     DateTime @default(now())
-  resolvedAt      DateTime?
-  resolvedBy      String?
-  rationale       String?
+  id            String    @id
+  taskId        String    @map("task_id")
+  toolCallId    String?   @unique @map("tool_call_id")
+  operationHash String    @map("operation_hash")
+  scopeJson     String    @map("scope_json")
+  riskJson      String    @map("risk_json")
+  status        String // pending | allowed | denied | expired | revoked
+  useLimit      Int       @default(1) @map("use_limit")
+  useCount      Int       @default(0) @map("use_count")
+  expiresAt     DateTime? @map("expires_at")
+  requestedAt   DateTime  @default(now()) @map("requested_at")
+  resolvedAt    DateTime? @map("resolved_at")
+  resolvedBy    String?   @map("resolved_by")
+  rationale     String?
 
-  task            Task      @relation(fields: [taskId], references: [id])
-  toolCall        ToolCall? @relation("ToolApproval", fields: [toolCallId], references: [id])
-  scopeLedger     ScopeLedgerEntry[] @relation("ScopeApproval")
+  task        Task               @relation(fields: [taskId], references: [id])
+  toolCall    ToolCall?          @relation("ToolApproval", fields: [toolCallId], references: [id])
+  scopeLedger ScopeLedgerEntry[] @relation("ScopeApproval")
+
+  @@map("approvals")
 }
 
 model SideEffect {
-  id                String   @id
-  toolCallId        String
-  effectType        String   // READ_LOCAL | WRITE_LOCAL | EXECUTE_LOCAL | NETWORK_READ | NETWORK_WRITE | EXTERNAL_STATE_READ | EXTERNAL_STATE_WRITE | SECRET_USE | PROCESS_CONTROL | ...
-  resourceUri       String
-  idempotencyKey    String
-  state             String   // PROPOSED|AUTHORIZED|STARTED|SETTLED|FAILED|UNKNOWN|RECONCILING|MANUAL_REVIEW
-  reversibility     String
-  requestArtifact   String
-  evidenceArtifact  String?
-  startedAt         DateTime?
-  settledAt         DateTime?
-  reconciliationJson String?
+  id                 String    @id
+  toolCallId         String    @map("tool_call_id")
+  effectType         String    @map("effect_type") // READ_LOCAL | WRITE_LOCAL | EXECUTE_LOCAL | NETWORK_READ | NETWORK_WRITE | EXTERNAL_STATE_READ | EXTERNAL_STATE_WRITE | SECRET_USE | PROCESS_CONTROL | ...
+  resourceUri        String    @map("resource_uri")
+  idempotencyKey     String    @map("idempotency_key")
+  state              String // PROPOSED|AUTHORIZED|STARTED|SETTLED|FAILED|UNKNOWN|RECONCILING|MANUAL_REVIEW
+  reversibility      String
+  requestArtifact    String    @map("request_artifact")
+  evidenceArtifact   String?   @map("evidence_artifact")
+  startedAt          DateTime? @map("started_at")
+  settledAt          DateTime? @map("settled_at")
+  reconciliationJson String?   @map("reconciliation_json")
 
-  toolCall          ToolCall @relation(fields: [toolCallId], references: [id])
+  toolCall ToolCall @relation(fields: [toolCallId], references: [id])
 
   @@unique([effectType, idempotencyKey])
+  @@map("side_effects")
 }
 
 model Job {
-  id                  String   @id
-  sessionId           String
-  taskId              String?
-  toolCallId          String?
-  state               String   // CREATED|STARTING|RUNNING|EXITED|STOPPING|KILLING|ORPHANED|LOST|REATTACHED
-  commandArtifact     String
-  resolvedExecutable  String?
-  cwdUri              String
-  environmentDigest   String
-  sandboxId           String
-  processIdentityJson String?
-  resourceLimitsJson  String
-  outputArtifact      String
-  outputCursor        Int      @default(0)
-  cleanupPolicyJson   String
-  startedAt           DateTime?
-  settledAt           DateTime?
-  exitJson            String?
+  id                  String    @id
+  sessionId           String    @map("session_id")
+  taskId              String?   @map("task_id")
+  toolCallId          String?   @map("tool_call_id")
+  state               String // CREATED|STARTING|RUNNING|EXITED|STOPPING|KILLING|ORPHANED|LOST|REATTACHED
+  commandArtifact     String    @map("command_artifact")
+  resolvedExecutable  String?   @map("resolved_executable")
+  cwdUri              String    @map("cwd_uri")
+  environmentDigest   String    @map("environment_digest")
+  sandboxId           String    @map("sandbox_id")
+  processIdentityJson String?   @map("process_identity_json")
+  resourceLimitsJson  String    @map("resource_limits_json")
+  outputArtifact      String    @map("output_artifact")
+  outputCursor        Int       @default(0) @map("output_cursor")
+  cleanupPolicyJson   String    @map("cleanup_policy_json")
+  startedAt           DateTime? @map("started_at")
+  settledAt           DateTime? @map("settled_at")
+  exitJson            String?   @map("exit_json")
 
-  session             Session   @relation(fields: [sessionId], references: [id])
-  task                Task?     @relation(fields: [taskId], references: [id])
+  session Session @relation(fields: [sessionId], references: [id])
+  task    Task?   @relation(fields: [taskId], references: [id])
 
   @@index([sessionId])
+  @@map("jobs")
 }
 
 // --- Orchestration --------------------------------------------------------
 
 model Agent {
-  id            String   @id
-  taskId        String
-  parentAgentId String?
-  role          String   // main | scout | implementer | reviewer | verifier | specialist
-  adapterId     String?
-  modelProfile  String
-  worktreeUri   String?
+  id            String    @id
+  taskId        String    @map("task_id")
+  parentAgentId String?   @map("parent_agent_id")
+  role          String // main | scout | implementer | reviewer | verifier | specialist
+  adapterId     String?   @map("adapter_id")
+  modelProfile  String    @map("model_profile")
+  worktreeUri   String?   @map("worktree_uri")
   state         String
-  createdAt     DateTime @default(now())
-  completedAt   DateTime?
+  createdAt     DateTime  @default(now()) @map("created_at")
+  completedAt   DateTime? @map("completed_at")
 
-  task          Task @relation(fields: [taskId], references: [id])
-  parent        Agent?  @relation("AgentParent", fields: [parentAgentId], references: [id])
-  children      Agent[] @relation("AgentParent")
-  delegations   Delegation[]
+  task        Task         @relation(fields: [taskId], references: [id])
+  parent      Agent?       @relation("AgentParent", fields: [parentAgentId], references: [id])
+  children    Agent[]      @relation("AgentParent")
+  delegations Delegation[]
 
   @@index([taskId])
+  @@map("agents")
 }
 
 model Delegation {
-  id              String   @id
-  taskId          String
-  agentId         String
-  contractArtifact String
-  contractHash    String
-  resultArtifact  String?
-  status          String
-  budgetJson      String
-  createdAt       DateTime @default(now())
-  completedAt     DateTime?
+  id               String    @id
+  taskId           String    @map("task_id")
+  agentId          String    @map("agent_id")
+  contractArtifact String    @map("contract_artifact")
+  contractHash     String    @map("contract_hash")
+  resultArtifact   String?   @map("result_artifact")
+  status           String
+  budgetJson       String    @map("budget_json")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  completedAt      DateTime? @map("completed_at")
 
-  task            Task  @relation(fields: [taskId], references: [id])
-  agent           Agent @relation(fields: [agentId], references: [id])
+  task  Task  @relation(fields: [taskId], references: [id])
+  agent Agent @relation(fields: [agentId], references: [id])
 
   @@index([taskId])
+  @@map("delegations")
 }
 
 // --- Verification ---------------------------------------------------------
 
 model VerificationPlan {
-  id                  String   @id
-  taskId              String
-  contractVersion     Int
-  sourceRevision      String
-  completionExpression String
-  planArtifact        String
-  createdAt           DateTime @default(now())
+  id                   String   @id
+  taskId               String   @map("task_id")
+  contractVersion      Int      @map("contract_version")
+  sourceRevision       String   @map("source_revision")
+  completionExpression String   @map("completion_expression")
+  planArtifact         String   @map("plan_artifact")
+  createdAt            DateTime @default(now()) @map("created_at")
 
-  task                Task @relation(fields: [taskId], references: [id])
-  nodes               VerificationNode[]
-  edges               VerificationEdge[]
-  results             VerificationResult[]
+  task    Task                 @relation(fields: [taskId], references: [id])
+  nodes   VerificationNode[]
+  edges   VerificationEdge[]
+  results VerificationResult[]
 
   @@index([taskId])
+  @@map("verification_plans")
 }
 
 model VerificationNode {
-  id                String   @id
-  planId            String
-  kind              String   // command | diagnostic | diff_rule | human | external_query
+  id                String  @id
+  planId            String  @map("plan_id")
+  kind              String // command | diagnostic | diff_rule | human | external_query
   required          Boolean
-  specificationJson String
-  timeoutMs         Int?
-  retryPolicyJson   String
+  specificationJson String  @map("specification_json")
+  timeoutMs         Int?    @map("timeout_ms")
+  retryPolicyJson   String  @map("retry_policy_json")
 
-  plan              VerificationPlan @relation(fields: [planId], references: [id])
-  outEdges          VerificationEdge[] @relation("EdgeFrom")
-  inEdges           VerificationEdge[] @relation("EdgeTo")
-  results           VerificationResult[]
+  plan     VerificationPlan     @relation(fields: [planId], references: [id])
+  outEdges VerificationEdge[]   @relation("EdgeFrom")
+  inEdges  VerificationEdge[]   @relation("EdgeTo")
+  results  VerificationResult[]
 
   @@unique([planId, id])
+  @@map("verification_nodes")
 }
 
 model VerificationEdge {
-  planId      String
-  fromNodeId  String
-  toNodeId    String
+  planId     String @map("plan_id")
+  fromNodeId String @map("from_node_id")
+  toNodeId   String @map("to_node_id")
 
-  plan        VerificationPlan @relation(fields: [planId], references: [id])
-  fromNode    VerificationNode @relation("EdgeFrom", fields: [fromNodeId], references: [id])
-  toNode      VerificationNode @relation("EdgeTo", fields: [toNodeId], references: [id])
+  plan     VerificationPlan @relation(fields: [planId], references: [id])
+  fromNode VerificationNode @relation("EdgeFrom", fields: [fromNodeId], references: [id])
+  toNode   VerificationNode @relation("EdgeTo", fields: [toNodeId], references: [id])
 
   @@id([planId, fromNodeId, toNodeId])
+  @@map("verification_edges")
 }
 
 model VerificationResult {
-  id               String   @id
-  planId           String
-  nodeId           String
-  attempt          Int
-  status           String   // pass | fail | error | skipped | blocked
-  sourceRevision   String
-  environmentDigest String
-  evidenceArtifact String?
-  toolCallId       String?
-  startedAt        DateTime @default(now())
-  completedAt      DateTime?
-  reason           String?
+  id                String    @id
+  planId            String    @map("plan_id")
+  nodeId            String    @map("node_id")
+  attempt           Int
+  status            String // pass | fail | error | skipped | blocked
+  sourceRevision    String    @map("source_revision")
+  environmentDigest String    @map("environment_digest")
+  evidenceArtifact  String?   @map("evidence_artifact")
+  toolCallId        String?   @map("tool_call_id")
+  startedAt         DateTime  @default(now()) @map("started_at")
+  completedAt       DateTime? @map("completed_at")
+  reason            String?
 
-  plan             VerificationPlan @relation(fields: [planId], references: [id])
-  node             VerificationNode @relation(fields: [nodeId], references: [id])
+  plan VerificationPlan @relation(fields: [planId], references: [id])
+  node VerificationNode @relation(fields: [nodeId], references: [id])
 
   @@unique([planId, nodeId, attempt])
   @@index([planId])
+  @@map("verification_results")
 }
 
 // --- Memory ---------------------------------------------------------------
 
 model MemoryClaim {
-  id                String   @id
-  kind              String   // fact | convention | preference | pitfall | command | architecture | procedure | failure_resolution
-  statement         String
-  statementHash     String
-  scopeJson         String
-  provenanceJson    String
-  confidencePpm     Int      // 0..1_000_000
-  verificationJson  String
-  invalidationJson  String
-  usageJson         String
-  status            String   // candidate | active | disputed | expired | rejected
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id               String   @id
+  kind             String // fact | convention | preference | pitfall | command | architecture | procedure | failure_resolution
+  statement        String
+  statementHash    String   @map("statement_hash")
+  scopeJson        String   @map("scope_json")
+  provenanceJson   String   @map("provenance_json")
+  confidencePpm    Int      @map("confidence_ppm") // 0..1_000_000
+  verificationJson String   @map("verification_json")
+  invalidationJson String   @map("invalidation_json")
+  usageJson        String   @map("usage_json")
+  status           String // candidate | active | disputed | expired | rejected
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
 
-  relationsFrom     MemoryRelation[] @relation("MemFrom")
-  relationsTo       MemoryRelation[] @relation("MemTo")
+  relationsFrom MemoryRelation[] @relation("MemFrom")
+  relationsTo   MemoryRelation[] @relation("MemTo")
 
   @@unique([statementHash, scopeJson])
+  @@map("memory_claims")
 }
 
 model MemoryRelation {
-  fromMemoryId String
-  toMemoryId   String
-  relation     String   // supports | contradicts | supersedes
+  fromMemoryId String   @map("from_memory_id")
+  toMemoryId   String   @map("to_memory_id")
+  relation     String // supports | contradicts | supersedes
   status       String
-  createdAt    DateTime @default(now())
+  createdAt    DateTime @default(now()) @map("created_at")
 
-  fromMem      MemoryClaim @relation("MemFrom", fields: [fromMemoryId], references: [id])
-  toMem        MemoryClaim @relation("MemTo", fields: [toMemoryId], references: [id])
+  fromMem MemoryClaim @relation("MemFrom", fields: [fromMemoryId], references: [id])
+  toMem   MemoryClaim @relation("MemTo", fields: [toMemoryId], references: [id])
 
   @@id([fromMemoryId, toMemoryId, relation])
+  @@map("memory_relations")
 }
 
 // --- Capabilities ---------------------------------------------------------
 
 model Capability {
-  id              String
-  version         String
-  kind            String   // skill | tool_pack | mcp_server | plugin | external_harness | environment
-  source          String
-  contentHash     String
-  descriptorHash  String
-  trustLevel      String   // builtin | first_party | verified_third_party | untrusted
-  manifestArtifact String
-  status          String   // admitted | active | revoked
-  admittedAt      DateTime?
-  revokedAt       DateTime?
+  id               String
+  version          String
+  kind             String // skill | tool_pack | mcp_server | plugin | external_harness | environment
+  source           String
+  contentHash      String    @map("content_hash")
+  descriptorHash   String    @map("descriptor_hash")
+  trustLevel       String    @map("trust_level") // builtin | first_party | verified_third_party | untrusted
+  manifestArtifact String    @map("manifest_artifact")
+  status           String // admitted | active | revoked
+  admittedAt       DateTime? @map("admitted_at")
+  revokedAt        DateTime? @map("revoked_at")
 
-  activations     CapabilityActivation[]
+  activations CapabilityActivation[]
 
   @@id([id, version])
+  @@map("capabilities")
 }
 
 model CapabilityActivation {
-  id                String   @id
-  sessionId         String
-  taskId            String?
-  capabilityId      String
-  capabilityVersion String
+  id                String    @id
+  sessionId         String    @map("session_id")
+  taskId            String?   @map("task_id")
+  capabilityId      String    @map("capability_id")
+  capabilityVersion String    @map("capability_version")
   state             String
-  grantedScopeJson  String
-  activatedAt       DateTime @default(now())
-  deactivatedAt     DateTime?
+  grantedScopeJson  String    @map("granted_scope_json")
+  activatedAt       DateTime  @default(now()) @map("activated_at")
+  deactivatedAt     DateTime? @map("deactivated_at")
 
-  session           Session    @relation(fields: [sessionId], references: [id])
-  task              Task?      @relation(fields: [taskId], references: [id])
-  capability        Capability @relation(fields: [capabilityId, capabilityVersion], references: [id, version])
+  session    Session    @relation(fields: [sessionId], references: [id])
+  task       Task?      @relation(fields: [taskId], references: [id])
+  capability Capability @relation(fields: [capabilityId, capabilityVersion], references: [id, version])
+
+  @@map("capability_activations")
 }
 
 // --- Infrastructure -------------------------------------------------------
 
 model IdempotencyRecord {
-  principal       String
-  method          String
-  idempotencyKey  String  @map("idempotency_key")
-  requestHash     String  @map("request_hash")
-  state           String
-  responseArtifact String? @map("response_artifact")
-  errorJson       String?  @map("error_json")
-  createdAt       DateTime @default(now()) @map("created_at")
-  expiresAt       DateTime @map("expires_at")
+  principal        String
+  method           String
+  idempotencyKey   String   @map("idempotency_key")
+  requestHash      String   @map("request_hash")
+  state            String
+  responseArtifact String?  @map("response_artifact")
+  errorJson        String?  @map("error_json")
+  createdAt        DateTime @default(now()) @map("created_at")
+  expiresAt        DateTime @map("expires_at")
 
   @@id([principal, method, idempotencyKey])
   @@map("idempotency_records")
 }
 
 model Lease {
-  leaseKey       String   @id
-  ownerInstance  String
-  fencingToken   Int
-  acquiredAt     DateTime @default(now())
-  expiresAt      DateTime
-  metadataJson   String
+  leaseKey      String   @id @map("lease_key")
+  ownerInstance String   @map("owner_instance")
+  fencingToken  Int      @map("fencing_token")
+  acquiredAt    DateTime @default(now()) @map("acquired_at")
+  expiresAt     DateTime @map("expires_at")
+  metadataJson  String   @map("metadata_json")
+
+  @@map("leases")
 }
 
 model SemanticEvent {
-  eventId         String   @id @map("event_id")
-  eventType       String   @map("event_type")
-  schemaVersion   Int      @map("schema_version")
-  aggregateType   String   @map("aggregate_type")
-  aggregateId     String   @map("aggregate_id")
-  aggregateSequence Int    @map("aggregate_sequence")
-  occurredAt      DateTime @default(now()) @map("occurred_at")
-  actorJson       String   @map("actor_json")
-  correlationId   String   @map("correlation_id")
-  causationId     String?  @map("causation_id")
-  idempotencyKey  String?  @map("idempotency_key")
-  payloadJson     String   @map("payload_json")
-  artifactRefsJson String  @map("artifact_refs_json")
-  traceId         String?  @map("trace_id")
+  eventId           String   @id @map("event_id")
+  eventType         String   @map("event_type")
+  schemaVersion     Int      @map("schema_version")
+  aggregateType     String   @map("aggregate_type")
+  aggregateId       String   @map("aggregate_id")
+  aggregateSequence Int      @map("aggregate_sequence")
+  occurredAt        DateTime @default(now()) @map("occurred_at")
+  actorJson         String   @map("actor_json")
+  correlationId     String   @map("correlation_id")
+  causationId       String?  @map("causation_id")
+  idempotencyKey    String?  @map("idempotency_key")
+  payloadJson       String   @map("payload_json")
+  artifactRefsJson  String   @map("artifact_refs_json")
+  traceId           String?  @map("trace_id")
 
   @@unique([aggregateType, aggregateId, aggregateSequence])
   @@index([correlationId, occurredAt])
@@ -691,10 +720,10 @@ model SemanticEvent {
 }
 
 model EventStreamCursor {
-  streamName    String   @id @map("stream_name")
-  lastEventId   String   @map("last_event_id")
-  lastSequence  Int      @map("last_sequence")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  streamName   String   @id @map("stream_name")
+  lastEventId  String   @map("last_event_id")
+  lastSequence Int      @map("last_sequence")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   @@map("event_stream_cursors")
 }
@@ -702,40 +731,43 @@ model EventStreamCursor {
 // --- Checkpoints and recovery (SPEC §29.5) -------------------------------
 
 model Checkpoint {
-  id                        String   @id
-  sessionId                 String
-  threadId                  String
-  taskId                    String?
-  checkpointArtifact        String
-  schemaVersion             Int
-  lastCommittedSequencesJson String
-  activeContextEpochId      String?
-  promotedInputCursor       String?
-  unsettledToolCallsJson    String   @default("[]")
-  activeJobsJson            String   @default("[]")
-  workspaceRevision         String?
-  dirtyStateDigest          String?
-  unsettledEffectsJson      String   @default("[]")
-  artifactRefsJson          String   @default("[]")
-  continuationJson          String?
-  createdAt                 DateTime @default(now())
+  id                         String   @id
+  sessionId                  String   @map("session_id")
+  threadId                   String   @map("thread_id")
+  taskId                     String?  @map("task_id")
+  checkpointArtifact         String   @map("checkpoint_artifact")
+  schemaVersion              Int      @map("schema_version")
+  lastCommittedSequencesJson String   @map("last_committed_sequences_json")
+  activeContextEpochId       String?  @map("active_context_epoch_id")
+  promotedInputCursor        String?  @map("promoted_input_cursor")
+  unsettledToolCallsJson     String   @default("[]") @map("unsettled_tool_calls_json")
+  activeJobsJson             String   @default("[]") @map("active_jobs_json")
+  workspaceRevision          String?  @map("workspace_revision")
+  dirtyStateDigest           String?  @map("dirty_state_digest")
+  unsettledEffectsJson       String   @default("[]") @map("unsettled_effects_json")
+  artifactRefsJson           String   @default("[]") @map("artifact_refs_json")
+  continuationJson           String?  @map("continuation_json")
+  createdAt                  DateTime @default(now()) @map("created_at")
 
   @@index([threadId, createdAt])
+  @@map("checkpoints")
 }
 
 model RecoveryReport {
-  id                      String   @id
-  startedAt               DateTime @default(now())
-  completedAt             DateTime?
-  instanceId              String
-  schemaVersion           Int
-  nonTerminalTasks        Int      @default(0)
-  nonTerminalTurns        Int      @default(0)
-  reconciledJobs          Int      @default(0)
-  lostJobs                Int      @default(0)
-  reconciledEffects       Int      @default(0)
-  manualReviewEffects     Int      @default(0)
-  integrityOk             Boolean  @default(true)
-  reportArtifact          String?
-  detailsJson             String   @default("{}")
+  id                  String    @id
+  startedAt           DateTime  @default(now()) @map("started_at")
+  completedAt         DateTime? @map("completed_at")
+  instanceId          String    @map("instance_id")
+  schemaVersion       Int       @map("schema_version")
+  nonTerminalTasks    Int       @default(0) @map("non_terminal_tasks")
+  nonTerminalTurns    Int       @default(0) @map("non_terminal_turns")
+  reconciledJobs      Int       @default(0) @map("reconciled_jobs")
+  lostJobs            Int       @default(0) @map("lost_jobs")
+  reconciledEffects   Int       @default(0) @map("reconciled_effects")
+  manualReviewEffects Int       @default(0) @map("manual_review_effects")
+  integrityOk         Boolean   @default(true) @map("integrity_ok")
+  reportArtifact      String?   @map("report_artifact")
+  detailsJson         String    @default("{}") @map("details_json")
+
+  @@map("recovery_reports")
 }

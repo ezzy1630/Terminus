@@ -4,7 +4,7 @@
  * Coverage:
  *   1. Layout renders sidebar, main, inspector, and terminal drawer.
  *   2. Sidebar collapses (rail mode at < 700px; narrow token at < 1100px).
- *   3. Inspector becomes an absolutely-positioned overlay at < 900px.
+ *   3. Inspector is a floating card and becomes a wider overlay at < 900px.
  *   4. ⌘` toggles the terminal drawer.
  *
  * The breakpoints live in `hooks/use-viewport.ts` (1100 / 900 / 700).
@@ -134,38 +134,23 @@ describe("Layout — sidebar responsive collapse", () => {
 
 // ────────────────────────── 3. Inspector becomes overlay ────────────────────
 
-describe("Layout — inspector overlay", () => {
-  test("at width ≥ 900px, the inspector sits inline as a flex item", () => {
+describe("Layout — floating inspector", () => {
+  test("at width ≥ 900px, the inspector floats while reserving conversation width", () => {
     setViewport(1200, 900);
     renderLayout();
-    // The inline inspector wrapper has a class `aside` (HTML element).
-    // The overlay variant renders with `pointer-events-none absolute`.
-    const inspectorContent = screen.getByTestId("inspector-content");
-    // Walk up to the wrapping box and check it isn't absolutely positioned.
-    const wrapper = inspectorContent.closest("aside, div.pointer-events-none");
-    expect(wrapper).not.toBeNull();
-    // The inline variant uses an <aside> tag; the overlay uses a div.
-    const closestAside = inspectorContent.closest("aside");
-    expect(closestAside).not.toBeNull();
+    expect(screen.getByTestId("inspector-float")).toHaveAttribute("data-layout", "floating");
+    expect(screen.getByTestId("main-content").parentElement?.parentElement).toHaveStyle({
+      paddingRight: "calc(var(--inspector-width) + 32px)",
+    });
   });
 
   test("at width < 900px, the inspector becomes an absolutely-positioned overlay", () => {
     setViewport(800, 900);
     renderLayout();
-    const inspectorContent = screen.getByTestId("inspector-content");
-    // The overlay wrapper is a div with class "pointer-events-none absolute".
-    // Walk up until we find a div whose class list contains both.
-    let node: HTMLElement | null = inspectorContent;
-    let foundOverlay = false;
-    while (node && node !== document.body) {
-      const cls = node.getAttribute("class") ?? "";
-      if (cls.includes("pointer-events-none") && cls.includes("absolute")) {
-        foundOverlay = true;
-        break;
-      }
-      node = node.parentElement;
-    }
-    expect(foundOverlay).toBe(true);
+    expect(screen.getByTestId("inspector-float")).toHaveAttribute("data-layout", "overlay");
+    expect(screen.getByTestId("main-content").parentElement?.parentElement).not.toHaveStyle({
+      paddingRight: "calc(var(--inspector-width) + 32px)",
+    });
   });
 });
 

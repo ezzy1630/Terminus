@@ -33,7 +33,7 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import { Check, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { cn } from "../lib/cn";
-import { api, ForgeApiError } from "../lib/api";
+import { api, TerminusApiError } from "../lib/api";
 import type { ApprovalDecision } from "../types";
 
 // ────────────────────────── Risk model ──────────────────────────────────────
@@ -120,7 +120,7 @@ function ApprovalCardImpl({
         onResolved?.(cfg.decision);
       } catch (err) {
         const msg =
-          err instanceof ForgeApiError
+          err instanceof TerminusApiError
             ? err.envelope?.message ?? err.message
             : err instanceof Error
               ? err.message

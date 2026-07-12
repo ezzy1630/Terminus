@@ -38,14 +38,18 @@ export TERMINUS_DATA="$TMP_DIR/kernel-data"
 export TERMINUS_KERNEL_CAP_TOKEN_FILE="$TMP_DIR/capability.token"
 export DATABASE_URL="file:$TMP_DIR/control.db"
 export TERMINUS_E2E_WORKSPACE_ROOT="$TMP_DIR/workspace"
+KERNEL_PORT="${TERMINUS_E2E_KERNEL_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')}"
+CONTROL_PORT="${TERMINUS_E2E_CONTROL_PORT:-$((KERNEL_PORT + 1))}"
+export TERMINUS_KERNEL_PORT="$KERNEL_PORT"
+export TERMINUS_CONTROL_PORT="$CONTROL_PORT"
 mkdir -p "$TERMINUS_E2E_WORKSPACE_ROOT"
 
-if curl -sS --max-time 1 http://127.0.0.1:3040/v1/health -X POST >/dev/null 2>&1; then
-  echo "[e2e] port 3040 is already in use; refusing to share a privileged kernel" >&2
+if curl --noproxy '*' -sS --max-time 1 "http://127.0.0.1:$KERNEL_PORT/v1/health" -X POST >/dev/null 2>&1; then
+  echo "[e2e] port $KERNEL_PORT is already in use; refusing to share a privileged kernel" >&2
   exit 1
 fi
-if curl -sS --max-time 1 http://127.0.0.1:3050/v1/system/health >/dev/null 2>&1; then
-  echo "[e2e] port 3050 is already in use; refusing to share a control plane" >&2
+if curl --noproxy '*' -sS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" >/dev/null 2>&1; then
+  echo "[e2e] port $CONTROL_PORT is already in use; refusing to share a control plane" >&2
   exit 1
 fi
 
@@ -61,14 +65,14 @@ nohup "$kernel_binary" </dev/null >"$TMP_DIR/kernel.log" 2>&1 &
 KERNEL_PID=$!
 
 for _ in $(seq 1 600); do
-  if curl -fsS --max-time 1 http://127.0.0.1:3040/v1/health \
+  if curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$KERNEL_PORT/v1/health" \
     -X POST -H "Authorization: Bearer $TERMINUS_KERNEL_TOKEN" -d '{}' >/dev/null 2>&1; then
     break
   fi
   sleep 0.1
 done
 
-if ! curl -fsS --max-time 1 http://127.0.0.1:3040/v1/health \
+if ! curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$KERNEL_PORT/v1/health" \
   -X POST -H "Authorization: Bearer $TERMINUS_KERNEL_TOKEN" -d '{}' >/dev/null; then
   echo "[e2e] kernel did not become healthy; see $TMP_DIR/kernel.log" >&2
   exit 1
@@ -93,19 +97,19 @@ nohup bun run "$ROOT/mini-services/terminus-control/src/index.ts" </dev/null >"$
 CONTROL_PID=$!
 
 for _ in $(seq 1 600); do
-  if curl -fsS --max-time 1 http://127.0.0.1:3050/v1/system/health \
+  if curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" \
     -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" >/dev/null 2>&1; then
     break
   fi
   sleep 0.1
 done
 
-if ! curl -fsS --max-time 1 http://127.0.0.1:3050/v1/system/health \
+if ! curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" \
   -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" >/dev/null; then
   echo "[e2e] control plane did not become healthy; see $TMP_DIR/control.log" >&2
   exit 1
 fi
 
-TERMINUS_E2E_CONTROL_URL="http://127.0.0.1:3050" \
+TERMINUS_E2E_CONTROL_URL="http://127.0.0.1:$CONTROL_PORT" \
   TERMINUS_E2E_CONTROL_TOKEN="$TERMINUS_CONTROL_TOKEN" \
   bun run "$ROOT/scripts/e2e/assert-lifecycle.ts"
