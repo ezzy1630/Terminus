@@ -16,8 +16,8 @@ each hypothesis at the chosen alpha.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 __all__ = [
     "AdjustedPValues",
@@ -119,7 +119,7 @@ def benjamini_hochberg(p_values: Sequence[float], alpha: float = 0.05) -> Adjust
     # If no rank satisfies the threshold, no hypotheses are rejected.
     rejected = [False] * n
     threshold_rank = -1  # sentinel: no rejections yet
-    for rank, (orig_idx, p) in enumerate(indexed):
+    for rank, (_orig_idx, p) in enumerate(indexed):
         i = rank + 1
         if p <= (i / n) * alpha:
             threshold_rank = rank

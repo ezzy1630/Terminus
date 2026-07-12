@@ -1,6 +1,6 @@
 """SPEC §46.8 fake provider — scripted, reproducible runtime testing.
 
-Mirrors the ``@forge/testkit`` ``FakeProvider``. The Python fake provider
+Mirrors the ``@terminus/testkit`` ``FakeProvider``. The Python fake provider
 plays back a fixed sequence of *script steps* and emits chunks through an
 async iterator (or, for tests, a synchronous generator that yields lists).
 
@@ -27,9 +27,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, AsyncIterator, Iterator, Literal
+from enum import StrEnum
+from typing import Any, Literal
 
 __all__ = [
     "FakeProvider",
@@ -68,7 +69,7 @@ class ScriptStep:
     """A single scripted step in a fake provider stream.
 
     Field semantics mirror ``FakeProviderScriptStep`` in
-    ``@forge/testkit`` so test scripts can be ported directly.
+    ``@terminus/testkit`` so test scripts can be ported directly.
     """
 
     kind: StepKind
@@ -94,7 +95,7 @@ class ScriptStep:
     delay_ms: int = 0
 
 
-class ChunkKind(str, Enum):
+class ChunkKind(StrEnum):
     """Fake provider chunk kinds (matches FakeProviderChunk in TS testkit)."""
 
     TEXT = "text"
@@ -229,7 +230,6 @@ class FakeProvider:
         reasoning_tokens = 0
         cache_write_tokens = 0
         cache_read_tokens = 0
-        emitted_usage = False
         chunks_emitted = 0
 
         for step in self._steps:
@@ -275,9 +275,7 @@ class FakeProvider:
                 # Sleep then check — caller should set cancel between.
                 if step.delay_ms > 0:
                     time.sleep(step.delay_ms / 1000.0)
-                yield FakeProviderChunk(
-                    kind=ChunkKind.TEXT, text=step.text or "[cancel-race]"
-                )
+                yield FakeProviderChunk(kind=ChunkKind.TEXT, text=step.text or "[cancel-race]")
                 chunks_emitted += 1
             elif kind == "error":
                 yield FakeProviderChunk(
@@ -303,9 +301,7 @@ class FakeProvider:
                     step.cached_tokens if step.cached_tokens is not None else cached_tokens
                 )
                 reasoning_tokens = (
-                    step.reasoning_tokens
-                    if step.reasoning_tokens is not None
-                    else reasoning_tokens
+                    step.reasoning_tokens if step.reasoning_tokens is not None else reasoning_tokens
                 )
                 cache_write_tokens = (
                     step.cache_write_tokens
@@ -317,7 +313,6 @@ class FakeProvider:
                     if step.cache_read_tokens is not None
                     else cache_read_tokens
                 )
-                emitted_usage = True
             elif kind == "cache_usage":
                 cached_tokens = (
                     step.cached_tokens if step.cached_tokens is not None else cached_tokens
@@ -363,7 +358,9 @@ class FakeProvider:
 
     def collect_text(self, request: Any | None = None) -> str:
         """Concatenate all TEXT chunks into a single string."""
-        return "".join(c.text or "" for c in self.stream(request=request) if c.kind is ChunkKind.TEXT)
+        return "".join(
+            c.text or "" for c in self.stream(request=request) if c.kind is ChunkKind.TEXT
+        )
 
 
 # ──────────────────────────── builders ────────────────────────────────────
@@ -391,8 +388,10 @@ def fake_tool_call_provider(
         FakeProviderOptions(
             provider_id=provider_id,
             model=model,
-            steps=[ScriptStep(kind="tool_call", tool_name=tool_name, tool_arguments=args),
-                   ScriptStep(kind="done")],
+            steps=[
+                ScriptStep(kind="tool_call", tool_name=tool_name, tool_arguments=args),
+                ScriptStep(kind="done"),
+            ],
         )
     )
 
@@ -437,8 +436,9 @@ class FakeProviderBuilder:
         self, name: str, args: dict[str, Any] | None = None, call_id: str | None = None
     ) -> FakeProviderBuilder:
         self.steps.append(
-            ScriptStep(kind="tool_call", tool_name=name, tool_arguments=args or {},
-                       tool_call_id=call_id)
+            ScriptStep(
+                kind="tool_call", tool_name=name, tool_arguments=args or {}, tool_call_id=call_id
+            )
         )
         return self
 

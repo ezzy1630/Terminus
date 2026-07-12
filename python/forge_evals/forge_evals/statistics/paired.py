@@ -19,18 +19,18 @@ statistic, p-value (exact or via permutation/bootstrap), and effect size.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
 
 __all__ = [
     "McNemarResult",
     "PairedDelta",
     "PairedSequence",
     "TestResult",
+    "mc_nemar",
     "paired_mean_delta",
     "paired_t_test",
     "paired_wilcoxon",
-    "mc_nemar",
     "sign_test",
 ]
 
@@ -125,8 +125,14 @@ def paired_t_test(seq: PairedSequence) -> TestResult:
     deltas = seq.values
     n = len(deltas)
     if n < 2:
-        return TestResult(test="paired_t", statistic=0.0, p_value=1.0, n=n, effect_size=0.0,
-                          effect_size_name="cohens_d")
+        return TestResult(
+            test="paired_t",
+            statistic=0.0,
+            p_value=1.0,
+            n=n,
+            effect_size=0.0,
+            effect_size_name="cohens_d",
+        )
     mean = sum(deltas) / n
     var = sum((d - mean) ** 2 for d in deltas) / (n - 1)
     sd = math.sqrt(var)
@@ -175,11 +181,7 @@ def _betai(x: float, a: float, b: float) -> float:
         return 1.0
     # Numerical Recipes' continued fraction expansion.
     bt = math.exp(
-        math.lgamma(a + b)
-        - math.lgamma(a)
-        - math.lgamma(b)
-        + a * math.log(x)
-        + b * math.log(1 - x)
+        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log(1 - x)
     )
     if x < (a + 1) / (a + b + 2):
         return bt * _beta_cf(x, a, b) / a
@@ -323,7 +325,7 @@ def _binom_cdf(k: int, n: int, p: float) -> float:
         return 1.0
     cdf = 0.0
     for i in range(k + 1):
-        cdf += math.comb(n, i) * (p ** i) * ((1 - p) ** (n - i))
+        cdf += math.comb(n, i) * (p**i) * ((1 - p) ** (n - i))
     return cdf
 
 
@@ -355,16 +357,13 @@ def mc_nemar(
     For ``b + c < 25`` we use the exact binomial.
     """
     if len(baseline_passed) != len(candidate_passed):
-        raise ValueError(
-            f"length mismatch: {len(baseline_passed)} vs {len(candidate_passed)}"
-        )
-    b = sum(1 for x, y in zip(baseline_passed, candidate_passed) if x and not y)
-    c = sum(1 for x, y in zip(baseline_passed, candidate_passed) if not x and y)
+        raise ValueError(f"length mismatch: {len(baseline_passed)} vs {len(candidate_passed)}")
+    b = sum(1 for x, y in zip(baseline_passed, candidate_passed, strict=False) if x and not y)
+    c = sum(1 for x, y in zip(baseline_passed, candidate_passed, strict=False) if not x and y)
     n = len(baseline_passed)
     disc = b + c
     if disc == 0:
-        return McNemarResult(statistic=0.0, p_value=1.0, n=n, discordant=0,
-                              extras={"b": b, "c": c})
+        return McNemarResult(statistic=0.0, p_value=1.0, n=n, discordant=0, extras={"b": b, "c": c})
     if disc < 25:
         # Exact binomial.
         k = min(b, c)

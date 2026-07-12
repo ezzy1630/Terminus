@@ -362,9 +362,7 @@ def _grader_run_py(acceptance_criteria: list[str]) -> str:
     criterion is treated as a "must appear in some file under workdir"
     check; for synthetic packages this is sufficient.
     """
-    checks = "\n    ".join(
-        f"check_substring(workdir, {c!r})" for c in acceptance_criteria
-    )
+    checks = "\n    ".join(f"check_substring(workdir, {c!r})" for c in acceptance_criteria)
     return textwrap.dedent(
         f'''\
         """Synthetic grader for task package.
@@ -520,7 +518,10 @@ def generate_all(base_dir: Path) -> list[Path]:
         allowed_network,
     ) in TASKS:
         d = base_dir / suite / task_id
-        _write(d / "task.yaml", _task_yaml(cohort_id, suite, task_id, title, risk_class, allowed_network))
+        _write(
+            d / "task.yaml",
+            _task_yaml(cohort_id, suite, task_id, title, risk_class, allowed_network),
+        )
         _write(d / "prompt.md", _prompt(task_id, title, body))
         _write(d / "environment.lock", _environment_lock())
         _write(d / "setup.sh", _setup_sh())

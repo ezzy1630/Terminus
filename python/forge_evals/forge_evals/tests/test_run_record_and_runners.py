@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -39,8 +40,12 @@ def _make_task_dir(d: Path) -> Path:
 def test_run_record_new_generates_id_and_start() -> None:
     """RunRecord.new sets run_id and start."""
     r = RunRecord.new(
-        suite="s", task="t", harness="h", harness_commit="c",
-        environment_digest="d", random_seed=42,
+        suite="s",
+        task="t",
+        harness="h",
+        harness_commit="c",
+        environment_digest="d",
+        random_seed=42,
     )
     assert r.run_id
     assert r.start is not None
@@ -58,27 +63,37 @@ def test_run_record_score_validation() -> None:
 
 def test_run_record_end_before_start_raises() -> None:
     """end before start raises."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with pytest.raises(RunRecordError):
         RunRecord(
-            run_id="x", suite="s", task="t", harness="h", harness_commit="c",
-            model_capability_snapshot={}, environment_digest="d", random_seed=1,
-            budgets={}, start=now, end=now - timedelta(seconds=1),
+            run_id="x",
+            suite="s",
+            task="t",
+            harness="h",
+            harness_commit="c",
+            model_capability_snapshot={},
+            environment_digest="d",
+            random_seed=1,
+            budgets={},
+            start=now,
+            end=now - timedelta(seconds=1),
         )
 
 
 def test_run_record_json_round_trip(tmp_path: Path) -> None:
     """Run record JSON round-trips."""
     r = RunRecord.new(
-        suite="s", task="t", harness="h", harness_commit="c",
-        environment_digest="d", random_seed=42,
+        suite="s",
+        task="t",
+        harness="h",
+        harness_commit="c",
+        environment_digest="d",
+        random_seed=42,
     )
     r.outcome = Outcome.COMPLETED
-    r.grader_results = [
-        GraderResult(grader_id="g", grader_version="0.1", passed=True, score=1.0)
-    ]
+    r.grader_results = [GraderResult(grader_id="g", grader_version="0.1", passed=True, score=1.0)]
     r.cost = CostBreakdown(
         provider_reported_usd=0.01, computed_usd=0.01, input_tokens=10, output_tokens=5
     )
@@ -96,8 +111,12 @@ def test_run_record_jsonl_round_trip(tmp_path: Path) -> None:
     p = tmp_path / "runs.jsonl"
     for i in range(3):
         r = RunRecord.new(
-            suite="s", task=f"t{i}", harness="h", harness_commit="c",
-            environment_digest="d", random_seed=i,
+            suite="s",
+            task=f"t{i}",
+            harness="h",
+            harness_commit="c",
+            environment_digest="d",
+            random_seed=i,
         )
         with p.open("a", encoding="utf-8") as fh:
             fh.write(r.to_jsonl_line() + "\n")
@@ -109,13 +128,15 @@ def test_run_record_jsonl_round_trip(tmp_path: Path) -> None:
 def test_run_record_parquet_round_trip(tmp_path: Path) -> None:
     """Parquet round-trip preserves scalar fields."""
     r = RunRecord.new(
-        suite="s", task="t", harness="h", harness_commit="c",
-        environment_digest="d", random_seed=42,
+        suite="s",
+        task="t",
+        harness="h",
+        harness_commit="c",
+        environment_digest="d",
+        random_seed=42,
     )
     r.outcome = Outcome.COMPLETED
-    r.grader_results = [
-        GraderResult(grader_id="g", grader_version="0.1", passed=True, score=0.95)
-    ]
+    r.grader_results = [GraderResult(grader_id="g", grader_version="0.1", passed=True, score=0.95)]
     p = r.to_parquet(tmp_path / "r.parquet")
     assert p.exists()
     # Read back via Polars.
@@ -130,14 +151,20 @@ def test_run_record_parquet_round_trip(tmp_path: Path) -> None:
 def test_run_record_passed_property() -> None:
     """``passed`` requires COMPLETED and all graders pass."""
     r = RunRecord.new(
-        suite="s", task="t", harness="h", harness_commit="c",
-        environment_digest="d", random_seed=42,
+        suite="s",
+        task="t",
+        harness="h",
+        harness_commit="c",
+        environment_digest="d",
+        random_seed=42,
     )
     assert not r.passed  # MISSING outcome, no graders.
     r.outcome = Outcome.COMPLETED
     r.grader_results = [GraderResult(grader_id="g", grader_version="0", passed=True, score=1.0)]
     assert r.passed
-    r.grader_results.append(GraderResult(grader_id="g2", grader_version="0", passed=False, score=0.0))
+    r.grader_results.append(
+        GraderResult(grader_id="g2", grader_version="0", passed=False, score=0.0)
+    )
     assert not r.passed
 
 
@@ -188,12 +215,7 @@ def test_fake_provider_builder_text() -> None:
 
 def test_fake_provider_builder_tool_call() -> None:
     """FakeProviderBuilder.tool_call() emits a TOOL_CALL chunk."""
-    p = (
-        FakeProviderBuilder()
-        .tool_call("edit", {"path": "a.py"})
-        .done()
-        .build()
-    )
+    p = FakeProviderBuilder().tool_call("edit", {"path": "a.py"}).done().build()
     chunks = p.collect()
     tool_chunks = [c for c in chunks if c.kind.value == "tool_call"]
     assert len(tool_chunks) == 1
@@ -222,29 +244,16 @@ def test_fake_provider_builder_rate_limited_emits_retry_after() -> None:
 
 def test_fake_provider_builder_cache_usage() -> None:
     """cache_usage step sets cached_tokens on the final usage."""
-    p = (
-        FakeProviderBuilder()
-        .text("hi")
-        .cache_usage(100)
-        .done()
-        .build()
-    )
+    p = FakeProviderBuilder().text("hi").cache_usage(100).done().build()
     chunks = p.collect()
-    done = [c for c in chunks if c.kind.value == "done"][0]
+    done = next(c for c in chunks if c.kind.value == "done")
     assert done.usage is not None
     assert done.usage.cached_tokens == 100
 
 
 def test_fake_provider_cancel_after_chunks() -> None:
     """cancel_after_chunks emits a CANCELLED error after N chunks."""
-    p = (
-        FakeProviderBuilder()
-        .text("a")
-        .text("b")
-        .text("c")
-        .done()
-        .build()
-    )
+    p = FakeProviderBuilder().text("a").text("b").text("c").done().build()
     chunks = list(p.stream(cancel_after_chunks=2))
     kinds = [c.kind.value for c in chunks]
     assert kinds[-1] == "error"
@@ -306,7 +315,7 @@ def test_harness_runner_produces_complete_record(tmp_path: Path) -> None:
         suite="tiny_bugfix",
         task="t1",
         task_dir=task_dir,
-        harness_id="forge-minimal",
+        harness_id="terminus-minimal",
         harness_commit="abc",
         model_snapshot=ModelCapabilitySnapshot(
             provider="fake",
@@ -335,19 +344,39 @@ def test_harness_runner_produces_complete_record(tmp_path: Path) -> None:
 def test_run_record_serialization_includes_all_fields(tmp_path: Path) -> None:
     """to_dict includes every SPEC §41.5 field."""
     r = RunRecord.new(
-        suite="s", task="t", harness="h", harness_commit="c",
-        environment_digest="d", random_seed=42,
+        suite="s",
+        task="t",
+        harness="h",
+        harness_commit="c",
+        environment_digest="d",
+        random_seed=42,
     )
     r.outcome = Outcome.COMPLETED
     r.end = r.start
-    r.cost = CostBreakdown(provider_reported_usd=0.01, computed_usd=0.01, input_tokens=1, output_tokens=1)
+    r.cost = CostBreakdown(
+        provider_reported_usd=0.01, computed_usd=0.01, input_tokens=1, output_tokens=1
+    )
     d = r.to_dict()
     expected_keys = {
-        "run_id", "suite", "task", "harness", "harness_commit",
-        "model_capability_snapshot", "environment_digest", "random_seed",
-        "budgets", "experiment_assignments", "start", "end", "outcome",
-        "grader_results", "cost", "artifacts", "context_manifests",
-        "trajectory", "notes",
+        "run_id",
+        "suite",
+        "task",
+        "harness",
+        "harness_commit",
+        "model_capability_snapshot",
+        "environment_digest",
+        "random_seed",
+        "budgets",
+        "experiment_assignments",
+        "start",
+        "end",
+        "outcome",
+        "grader_results",
+        "cost",
+        "artifacts",
+        "context_manifests",
+        "trajectory",
+        "notes",
     }
     assert expected_keys.issubset(d.keys())
     # JSON-serializable.

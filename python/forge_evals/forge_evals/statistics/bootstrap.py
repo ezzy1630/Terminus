@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Sequence
 
 __all__ = [
     "BootstrapCI",
@@ -187,9 +187,7 @@ def bootstrap_ci_bca(
     if not 0 < confidence_level < 1:
         raise ValueError("confidence_level must be in (0, 1)")
     if len(sample) < 2:
-        return bootstrap_ci_obj(
-            sample, statistic, confidence_level, n_resamples, rng_seed
-        )
+        return bootstrap_ci_obj(sample, statistic, confidence_level, n_resamples, rng_seed)
 
     dist = bootstrap_distribution(sample, statistic, n_resamples=n_resamples, rng_seed=rng_seed)
     point = dist.point_estimate
@@ -206,8 +204,7 @@ def bootstrap_ci_bca(
 
     # Acceleration a via jackknife.
     jackknife_stats = [
-        statistic([sample[j] for j in range(len(sample)) if j != i])
-        for i in range(len(sample))
+        statistic([sample[j] for j in range(len(sample)) if j != i]) for i in range(len(sample))
     ]
     jack_mean = sum(jackknife_stats) / len(jackknife_stats)
     num = sum((jack_mean - j) ** 3 for j in jackknife_stats)
@@ -263,9 +260,7 @@ def bootstrap_p_value(
     dist = bootstrap_distribution(shifted, statistic, n_resamples=n_resamples, rng_seed=rng_seed)
     if not dist.samples:
         return 1.0
-    more_extreme = sum(
-        1 for s in dist.samples if abs(s - null_value) >= abs(observed - null_value)
-    )
+    more_extreme = sum(1 for s in dist.samples if abs(s - null_value) >= abs(observed - null_value))
     return more_extreme / len(dist.samples)
 
 
@@ -318,18 +313,18 @@ def _normal_ppf(p: float) -> float:
     phigh = 1 - plow
     if p < plow:
         q = math.sqrt(-2 * math.log(p))
-        return (
-            (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
-            / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+            (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1
         )
     if p <= phigh:
         q = p - 0.5
         r = q * q
         return (
-            (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q
+            (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5])
+            * q
             / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
         )
     q = math.sqrt(-2 * math.log(1 - p))
-    return -(
-        ((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]
-    ) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1)
+    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+        (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1
+    )

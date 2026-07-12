@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from forge_evals.statistics.multiple_comparisons import (
@@ -38,8 +36,8 @@ def test_holm_bonferroni_step_down() -> None:
     res = holm_bonferroni(pvals, alpha=0.05)
     # Smallest p (0.01) gets multiplied by 4 (n=4, rank=0).
     # Adjusted should be monotonic non-decreasing.
-    sorted_adj = sorted(res.adjusted)
-    assert sorted_adj == res.adjusted or True  # may not be in original order
+    sorted(res.adjusted)
+    assert True  # may not be in original order
     # Check step-down logic: the smallest adjusted = max(0.04, ...) = 0.04.
     assert min(res.adjusted) == pytest.approx(0.04)
 
@@ -57,8 +55,8 @@ def test_benjamini_hochberg_rejects_at_alpha() -> None:
 def test_benjamini_hochberg_adjusted_monotone_in_sorted_order() -> None:
     """BH adjusted p-values are monotone non-decreasing in sorted order."""
     pvals = [0.001, 0.008, 0.039, 0.041, 0.082]
-    res = benjamini_hochberg(pvals)
-    sorted_adj = sorted(p * len(pvals) / (i + 1) for i, p in enumerate(sorted(pvals)))
+    benjamini_hochberg(pvals)
+    sorted(p * len(pvals) / (i + 1) for i, p in enumerate(sorted(pvals)))
     # The BH adjusted values should be a non-decreasing sequence when sorted.
     # (We compute the cumulative min from the top.)
     pass  # Property verified by inspection of the algorithm.
@@ -69,7 +67,7 @@ def test_benjamini_yekutieli_more_conservative_than_bh() -> None:
     pvals = [0.001, 0.008, 0.039, 0.041, 0.082]
     bh = benjamini_hochberg(pvals)
     by = benjamini_yekutieli(pvals)
-    for a, b in zip(bh.adjusted, by.adjusted):
+    for a, b in zip(bh.adjusted, by.adjusted, strict=False):
         assert b >= a - 1e-9
 
 

@@ -16,8 +16,8 @@ SPEC §50.7: "Cost accounting reconciles" — this is the gate.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 
 import polars as pl
 

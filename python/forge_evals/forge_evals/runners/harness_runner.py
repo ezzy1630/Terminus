@@ -1,6 +1,6 @@
 """SPEC §41.5 harness runner.
 
-Drives a single harness (Forge minimal, Forge full, or external baseline)
+Drives a single harness (Terminus minimal, Terminus full, or external baseline)
 through a benchmark task and produces a :class:`RunRecord`.
 
 The runner is *harness-agnostic*: it talks to a :class:`Harness` interface
@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -197,7 +197,7 @@ class HarnessResult:
 
 
 class Harness(Protocol):
-    """Interface that any harness — Forge or external — must implement.
+    """Interface that any harness — Terminus or external — must implement.
 
     The harness is given a :class:`RunRequest` and a
     :class:`TrajectoryRecorder` (already initialized with the run id). It
@@ -206,7 +206,7 @@ class Harness(Protocol):
     Concrete harnesses live in adapters (SPEC §41.2). The Python eval lab
     ships a :class:`FakeScriptHarness` for tests and the
     :class:`cross_harness` comparator; production harness adapters wrap the
-    real Forge control plane.
+    real Terminus control plane.
     """
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
@@ -422,9 +422,12 @@ class HarnessRunner:
                 args = payload.get("arguments")
                 if isinstance(args, dict):
                     for v in args.values():
-                        if isinstance(v, str) and ("/" in v or v.endswith(".py") or v.endswith(".sh")):
-                            if v not in files_changed:
-                                files_changed.append(v)
+                        if (
+                            isinstance(v, str)
+                            and ("/" in v or v.endswith(".py") or v.endswith(".sh"))
+                            and v not in files_changed
+                        ):
+                            files_changed.append(v)
                 path = payload.get("path")
                 if isinstance(path, str) and path not in files_changed:
                     files_changed.append(path)
@@ -477,8 +480,11 @@ class FakeScriptHarness:
         recorder.record("turn.context_compiling", {"turn": 1})
         recorder.record(
             "context.manifest_persisted",
-            {"manifest_id": "m-1", "token_budget": request.budgets.max_input_tokens,
-             "fragment_count": 4},
+            {
+                "manifest_id": "m-1",
+                "token_budget": request.budgets.max_input_tokens,
+                "fragment_count": 4,
+            },
         )
         recorder.record("turn.provider_running", {"turn": 1})
         recorder.record_provider_chunk(attempt_id="a-1", chunk_kind="text", text="hello")
@@ -545,7 +551,7 @@ def make_default_cost(usage: dict[str, int], pricing: dict[str, float]) -> CostB
 
 def now_utc() -> datetime:
     """Timezone-aware UTC now (re-exported for harness adapters)."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def to_jsonable(obj: Any) -> Any:

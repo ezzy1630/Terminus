@@ -26,16 +26,13 @@ from forge_evals.runners import (
     MiniSweAgentTurn,
     ModelCapabilitySnapshot,
     RunRequest,
-    TrajectoryRecorder,
 )
 
 
 def _make_task_dir(d: Path) -> Path:
     """Build a minimal task package dir."""
     d.mkdir(parents=True, exist_ok=True)
-    (d / "task.yaml").write_text(
-        "source_commit: abc123\nimage_digest: sha:img\n", encoding="utf-8"
-    )
+    (d / "task.yaml").write_text("source_commit: abc123\nimage_digest: sha:img\n", encoding="utf-8")
     (d / "setup.sh").write_text("echo hi\n", encoding="utf-8")
     (d / "environment.lock").write_text("python=3.12\n", encoding="utf-8")
     return d
@@ -46,7 +43,7 @@ def _make_request(task_dir: Path) -> RunRequest:
         suite="tiny_bugfix",
         task="t1",
         task_dir=task_dir,
-        harness_id="forge-minimal",
+        harness_id="terminus-minimal",
         harness_commit="abc",
         model_snapshot=ModelCapabilitySnapshot(
             provider="fake",

@@ -9,16 +9,16 @@ production critical path (SPEC §43.3).
 from __future__ import annotations
 
 from .aci_ablations import (
+    ACI_ABLATIONS,
     ACIAblation,
     ACIAblationCatalog,
-    ACI_ABLATIONS,
     aci_ablation_by_id,
     build_aci_ablation_assignments,
 )
 from .context_ablations import (
+    CONTEXT_ABLATIONS,
     ContextAblation,
     ContextAblationCatalog,
-    CONTEXT_ABLATIONS,
     build_context_ablation_assignments,
     context_ablation_by_id,
 )
@@ -43,16 +43,16 @@ from .routing_research import (
 )
 
 __all__ = [
-    "ACIAblation",
-    "ACIAblationCatalog",
     "ACI_ABLATIONS",
     "CONTEXT_ABLATIONS",
+    "ORCHESTRATION_ABLATIONS",
+    "ACIAblation",
+    "ACIAblationCatalog",
     "CohortRoutingResult",
     "ContextAblation",
     "ContextAblationCatalog",
     "DeterministicRouterSpec",
     "LearnedRouterSpec",
-    "ORCHESTRATION_ABLATIONS",
     "OrchestrationAblation",
     "OrchestrationAblationCatalog",
     "RouterExperiment",

@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
 
 from ..run_record import CostBreakdown, Outcome
 from .fake_provider import FakeProvider, FakeProviderBuilder
@@ -93,7 +92,7 @@ class MiniSweAgentAdapter:
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
         """Replay the scripted turns as a linear bash-loop trajectory."""
         recorder.record("task.activated", {"task": request.task})
-        provider = self._build_provider()
+        self._build_provider()
         attempt_id = "mini-swe-1"
         for i, turn in enumerate(self.turns):
             recorder.record("turn.started", {"turn": turn.turn})
@@ -112,7 +111,9 @@ class MiniSweAgentAdapter:
                 {
                     "attempt_id": attempt_id,
                     "turn": turn.turn,
-                    "model": (self.model_snapshot.model if self.model_snapshot else "mini-swe-model"),
+                    "model": (
+                        self.model_snapshot.model if self.model_snapshot else "mini-swe-model"
+                    ),
                     "provider": (self.model_snapshot.provider if self.model_snapshot else "fake"),
                 },
             )

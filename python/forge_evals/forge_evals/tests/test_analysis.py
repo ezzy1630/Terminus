@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import random
 from pathlib import Path
 
 import pytest
@@ -49,8 +47,13 @@ def _make_record(
         GraderResult(grader_id="end_state.noop", grader_version="0.1.0", passed=passed, score=score)
     ]
     r.cost = cost or CostBreakdown(
-        provider_reported_usd=0.01, computed_usd=0.01, input_tokens=1000, output_tokens=500,
-        cached_tokens=200, cache_write_tokens=100, cache_read_tokens=100,
+        provider_reported_usd=0.01,
+        computed_usd=0.01,
+        input_tokens=1000,
+        output_tokens=500,
+        cached_tokens=200,
+        cache_write_tokens=100,
+        cache_read_tokens=100,
     )
     r.end = r.start
     return r
@@ -141,8 +144,10 @@ def test_reconcile_costs_flags_anomaly() -> None:
     records = []
     for i in range(5):
         c = CostBreakdown(
-            provider_reported_usd=0.05, computed_usd=0.01,  # 400% discrepancy
-            input_tokens=1000, output_tokens=500,
+            provider_reported_usd=0.05,
+            computed_usd=0.01,  # 400% discrepancy
+            input_tokens=1000,
+            output_tokens=500,
         )
         records.append(_make_record(harness="h", task=f"t{i}", seed=i, cost=c))
     recs = reconcile_costs(records)
@@ -154,13 +159,17 @@ def test_find_anomalies_severity_classification() -> None:
     """find_anomalies classifies severity by delta_pct."""
     # High severity (large discrepancy).
     c_high = CostBreakdown(
-        provider_reported_usd=10.0, computed_usd=0.01,
-        input_tokens=1000, output_tokens=500,
+        provider_reported_usd=10.0,
+        computed_usd=0.01,
+        input_tokens=1000,
+        output_tokens=500,
     )
     # Medium severity.
     c_med = CostBreakdown(
-        provider_reported_usd=0.015, computed_usd=0.01,
-        input_tokens=1000, output_tokens=500,
+        provider_reported_usd=0.015,
+        computed_usd=0.01,
+        input_tokens=1000,
+        output_tokens=500,
     )
     records = [
         _make_record(harness="h", task="t1", seed=1, cost=c_high),
@@ -174,9 +183,13 @@ def test_find_anomalies_severity_classification() -> None:
 def test_compute_cache_stats() -> None:
     """compute_cache_stats extracts per-run cache stats."""
     c = CostBreakdown(
-        provider_reported_usd=0.01, computed_usd=0.01,
-        input_tokens=1000, output_tokens=500,
-        cached_tokens=200, cache_write_tokens=100, cache_read_tokens=100,
+        provider_reported_usd=0.01,
+        computed_usd=0.01,
+        input_tokens=1000,
+        output_tokens=500,
+        cached_tokens=200,
+        cache_write_tokens=100,
+        cache_read_tokens=100,
     )
     r = _make_record(harness="h", task="t", seed=1, cost=c)
     stats = compute_cache_stats([r])

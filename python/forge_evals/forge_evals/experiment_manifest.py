@@ -12,8 +12,8 @@ YAML (matching the SPEC schema) and to JSON for storage alongside run records.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
-from enum import Enum
+from dataclasses import dataclass, field
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ __all__ = [
 ]
 
 
-class Decision(str, Enum):
+class Decision(StrEnum):
     """Post-run decision attached to a change manifest (SPEC §18.6)."""
 
     PROMOTE = "promote"

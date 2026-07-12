@@ -38,7 +38,7 @@ class ConformanceCheck:
     description: str
     predicate: Any  # Callable[[EndStateGraderInput], ConformanceCheckResult]
 
-    def run(self, inp: EndStateGraderInput) -> "ConformanceCheckResult":
+    def run(self, inp: EndStateGraderInput) -> ConformanceCheckResult:
         """Run the predicate and return its result."""
         return self.predicate(inp)
 
@@ -211,9 +211,8 @@ def ContextManifestDurabilityCheck() -> ConformanceCheck:
             seq = ev.get("seq")
             if et == "context.manifest_persisted":
                 last_manifest_seq = seq if isinstance(seq, int) else last_manifest_seq
-            elif et == "provider.request_sent":
-                if last_manifest_seq is None:
-                    issues.append(f"provider.request_sent (seq={seq}) before any manifest")
+            elif et == "provider.request_sent" and last_manifest_seq is None:
+                issues.append(f"provider.request_sent (seq={seq}) before any manifest")
         if issues:
             return ConformanceCheckResult(
                 check_id="context_manifest_durability",
@@ -274,7 +273,7 @@ def IdempotencyCheck() -> ConformanceCheck:
 
 
 def default_conformance_checks() -> list[ConformanceCheck]:
-    """The default set of conformance checks for a Forge harness run."""
+    """The default set of conformance checks for a Terminus harness run."""
     return [
         ProviderResponseSchemaCheck(),
         EventOrderingCheck(),

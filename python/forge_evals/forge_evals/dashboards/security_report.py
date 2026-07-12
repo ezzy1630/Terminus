@@ -9,9 +9,10 @@ promotion regardless of average task success** (SPEC §41.11, §41.12).
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
-from typing import Iterable
 
 from ..run_record import RunRecord
 
@@ -83,9 +84,7 @@ def compute_security_report(records: Iterable[RunRecord]) -> SecurityReport:
         for g in r.grader_results:
             if not g.grader_id.startswith("security."):
                 continue
-            by_grader[g.grader_id].append(
-                (g.grader_version, r.run_id, g.passed, list(g.evidence))
-            )
+            by_grader[g.grader_id].append((g.grader_version, r.run_id, g.passed, list(g.evidence)))
             if not g.passed:
                 blocking.append(f"{g.grader_id} on run {r.run_id}")
     summaries: list[SecurityGraderSummary] = []
@@ -115,18 +114,18 @@ def compute_security_report(records: Iterable[RunRecord]) -> SecurityReport:
 
 def security_report_html(report: SecurityReport, *, title: str | None = None) -> str:
     """Render a :class:`SecurityReport` as a self-contained HTML document."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    title = title or "Forge Eval Lab — Security Report"
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    title = title or "Terminus Eval Lab — Security Report"
     rows = "\n".join(_security_row(s) for s in report.grader_summaries)
     blocking_html = ""
     if report.blocking_failures:
         items = "\n".join(f"      <li>{_esc(b)}</li>" for b in report.blocking_failures[:20])
         blocking_html = (
             '<div class="blocking">\n'
-            '  <h2>Blocking failures</h2>\n'
-            '  <p>Security guardrail failure blocks promotion regardless of '
+            "  <h2>Blocking failures</h2>\n"
+            "  <p>Security guardrail failure blocks promotion regardless of "
             "average task success (SPEC §41.11).</p>\n"
             f"  <ul>\n{items}\n  </ul>\n"
             "</div>"

@@ -1,13 +1,13 @@
-"""SPEC §41 / §43.7 ``forge-eval`` command-line interface.
+"""SPEC §41 / §43.7 ``terminus-eval`` command-line interface.
 
 Built with :mod:`argparse` (no Click/Typer dependency, keeping the install
 footprint small). Provides commands for the standard eval workflow:
 
-- ``forge-eval run`` — run a single harness on a task.
-- ``forge-eval aggregate`` — aggregate JSONL run records into a summary.
-- ``forge-eval dashboard`` — generate a cohort dashboard HTML.
-- ``forge-eval promote`` — evaluate the promotion gate.
-- ``forge-eval regression`` — compare two run sets for regressions.
+- ``terminus-eval run`` — run a single harness on a task.
+- ``terminus-eval aggregate`` — aggregate JSONL run records into a summary.
+- ``terminus-eval dashboard`` — generate a cohort dashboard HTML.
+- ``terminus-eval promote`` — evaluate the promotion gate.
+- ``terminus-eval regression`` — compare two run sets for regressions.
 
 All commands are deterministic given the same inputs and seeds.
 """
@@ -17,10 +17,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
-from .analysis.aggregate import aggregate_by_harness_cohort, summarize_runs
+from .analysis.aggregate import summarize_runs
 from .analysis.load_runs import (
     RunCatalog,
     load_runs_from_json_dir,
@@ -28,14 +29,11 @@ from .analysis.load_runs import (
     load_runs_from_parquet,
 )
 from .analysis.regression_detector import detect_regressions
-from .baselines import baseline_by_id
-from .cohort_tasks import cohort_by_id
 from .dashboards.cohort_dashboard import write_cohort_dashboard
 from .dashboards.security_report import compute_security_report, write_security_report
 from .experiment_manifest import ChangeManifest, Decision
 from .promotion_gate import (
     Evaluation,
-    GateStatus,
     PromotionDecision,
     PromotionGateResult,
     evaluate_promotion,
@@ -78,8 +76,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level argparse parser."""
     p = argparse.ArgumentParser(
-        prog="forge-eval",
-        description="Forge offline evaluation laboratory (SPEC §18, §41, §43.3).",
+        prog="terminus-eval",
+        description="Terminus offline evaluation laboratory (SPEC §18, §41, §43.3).",
     )
     sub = p.add_subparsers(dest="command", required=False)
     _add_run_cmd(sub)
@@ -103,7 +101,7 @@ def _add_run_cmd(sub: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--harness",
         required=True,
-        help="Harness id (forge-minimal, forge-full, or external baseline id).",
+        help="Harness id (terminus-minimal, terminus-full, or external baseline id).",
     )
     p.add_argument("--harness-commit", default="git:HEAD", help="Harness commit / version pin.")
     p.add_argument("--seeds", type=int, default=1, help="Number of independent seeds.")
@@ -199,7 +197,9 @@ def _write_record(record: RunRecord, output_dir: Path, fmt: str, *, suffix: str 
 def _add_aggregate_cmd(sub: argparse._SubParsersAction) -> None:
     """Add the ``aggregate`` command."""
     p = sub.add_parser("aggregate", help="Aggregate run records into cohort summaries.")
-    p.add_argument("--runs-dir", default="evals/results", help="Directory of JSON/JSONL run records.")
+    p.add_argument(
+        "--runs-dir", default="evals/results", help="Directory of JSON/JSONL run records."
+    )
     p.add_argument("--output", default="-", help="Output path ('-' for stdout).")
     p.add_argument(
         "--format",
@@ -269,7 +269,7 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     write_cohort_dashboard(
         records,
         args.output,
-        title=args.title or "Forge Eval Lab — Cohort Dashboard",
+        title=args.title or "Terminus Eval Lab — Cohort Dashboard",
         baseline_harness=args.baseline_harness,
     )
     print(f"wrote {args.output}")
@@ -290,7 +290,9 @@ def _add_promote_cmd(sub: argparse._SubParsersAction) -> None:
         help="Proposed decision (the gate may override).",
     )
     p.add_argument("--evaluation-json", required=True, help="Path to an Evaluation JSON file.")
-    p.add_argument("--change-manifest", default=None, help="Optional change manifest YAML to update.")
+    p.add_argument(
+        "--change-manifest", default=None, help="Optional change manifest YAML to update."
+    )
     p.add_argument("--output", default="-", help="Output path for the gate result JSON.")
 
 
@@ -318,11 +320,8 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     if args.change_manifest:
         _update_change_manifest(args.change_manifest, result)
     _write_json(out, args.output)
-    print(
-        f"gate decision: {result.decision.value} (proposed: {args.decision}) — "
-        f"{result.reason}"
-    )
-    return 0 if result.passed else 0  # Exit 0 regardless; the gate verdict is in the JSON.
+    print(f"gate decision: {result.decision.value} (proposed: {args.decision}) — {result.reason}")
+    return 0  # Exit 0; the gate verdict is in the JSON.
 
 
 def _load_evaluation(path: str) -> Evaluation:
@@ -365,7 +364,9 @@ def _add_regression_cmd(sub: argparse._SubParsersAction) -> None:
     """Add the ``regression`` command."""
     p = sub.add_parser("regression", help="Compare two run sets for regressions.")
     p.add_argument("--baseline-run", required=True, help="Baseline runs (JSONL/JSON dir/Parquet).")
-    p.add_argument("--candidate-run", required=True, help="Candidate runs (JSONL/JSON dir/Parquet).")
+    p.add_argument(
+        "--candidate-run", required=True, help="Candidate runs (JSONL/JSON dir/Parquet)."
+    )
     p.add_argument("--baseline-label", default="baseline", help="Label for the baseline.")
     p.add_argument("--candidate-label", default="candidate", help="Label for the candidate.")
     p.add_argument("--margin", type=float, default=0.05, help="Non-inferiority margin.")

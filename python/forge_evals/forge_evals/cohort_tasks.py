@@ -101,7 +101,7 @@ COHORTS: list[Cohort] = [
         id="cross_file_feature",
         name="Cross-file feature",
         description=(
-            "Features that require coordinated edits across 2–6 files, including "
+            "Features that require coordinated edits across 2-6 files, including "
             "type/signature updates and call-site adjustments."
         ),
         task_count=30,
@@ -195,9 +195,7 @@ COHORTS: list[Cohort] = [
     Cohort(
         id="dependency_upgrade",
         name="Dependency upgrade",
-        description=(
-            "Bump a dependency and reconcile breaking API changes across the codebase."
-        ),
+        description=("Bump a dependency and reconcile breaking API changes across the codebase."),
         task_count=15,
         sample_tasks=[
             TaskSpec(

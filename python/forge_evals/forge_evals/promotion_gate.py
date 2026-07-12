@@ -22,7 +22,7 @@ that records each gate's verdict, the overall decision, and the reason.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 __all__ = [
     "Evaluation",
@@ -33,7 +33,7 @@ __all__ = [
 ]
 
 
-class PromotionDecision(str, Enum):
+class PromotionDecision(StrEnum):
     """Final promotion decision."""
 
     PROMOTE = "promote"
@@ -42,7 +42,7 @@ class PromotionDecision(str, Enum):
     ROLLBACK = "rollback"
 
 
-class GateStatus(str, Enum):
+class GateStatus(StrEnum):
     """Per-gate verdict."""
 
     PASS = "pass"
@@ -202,8 +202,7 @@ def _gate_confidence(ev: Evaluation) -> GateVerdict:
                 "primary_ci": f"[{ev.primary_ci_low:.4f}, {ev.primary_ci_high:.4f}]",
                 "effect_size": f"{ev.primary_effect_size:.4f}",
                 "effect_size_ci": (
-                    f"[{ev.primary_effect_size_ci_low:.4f}, "
-                    f"{ev.primary_effect_size_ci_high:.4f}]"
+                    f"[{ev.primary_effect_size_ci_low:.4f}, {ev.primary_effect_size_ci_high:.4f}]"
                 ),
                 "min_effect_size": f"{ev.min_effect_size:.4f}",
             },
@@ -374,7 +373,8 @@ def evaluate_promotion(ev: Evaluation) -> PromotionGateResult:
         return PromotionGateResult(
             decision=PromotionDecision.ROLLBACK,
             reason=(
-                "Hard block from gate(s): " + ", ".join(blocking)
+                "Hard block from gate(s): "
+                + ", ".join(blocking)
                 + ". Promotion impossible (SPEC §41.11)."
             ),
             gates=gates,
@@ -386,9 +386,7 @@ def evaluate_promotion(ev: Evaluation) -> PromotionGateResult:
         # If the only failures are operational / maintainability (i.e. the
         # candidate is *promising* but not yet ready), retain experimental
         # rather than forcing a revise. Otherwise revise.
-        operational_only = all(
-            g.name in {"operations", "maintainability"} for g in failed
-        )
+        operational_only = all(g.name in {"operations", "maintainability"} for g in failed)
         # Pareto + confidence + regressions must all have passed for
         # "retain_experimental" to make sense.
         core_passed = all(
@@ -408,9 +406,7 @@ def evaluate_promotion(ev: Evaluation) -> PromotionGateResult:
             )
         return PromotionGateResult(
             decision=PromotionDecision.REVISE,
-            reason=(
-                "Failed gate(s): " + ", ".join(g.name for g in failed) + "."
-            ),
+            reason=("Failed gate(s): " + ", ".join(g.name for g in failed) + "."),
             gates=gates,
         )
 

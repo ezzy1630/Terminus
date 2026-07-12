@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from forge_evals.task_package import TaskPackage, TaskPackageError, load_task_package
+from forge_evals.task_package import TaskPackageError, load_task_package
 
 
 def _make_minimal_pkg(d: Path) -> Path:
@@ -39,11 +39,9 @@ def _make_minimal_pkg(d: Path) -> Path:
     (d / "hidden" / "test_hidden.py").write_text(
         "def test_hidden():\n    assert True\n", encoding="utf-8"
     )
-    (d / "expected-properties.yaml").write_text(
-        "primary_score_band: 0.7-1.0\n", encoding="utf-8"
-    )
+    (d / "expected-properties.yaml").write_text("primary_score_band: 0.7-1.0\n", encoding="utf-8")
     (d / "policy.yaml").write_text(
-        "default: allow_local\n" "deny:\n  - /etc/passwd\n", encoding="utf-8"
+        "default: allow_local\ndeny:\n  - /etc/passwd\n", encoding="utf-8"
     )
     (d / "README.md").write_text("# Sample task\n", encoding="utf-8")
     return d

@@ -10,8 +10,8 @@ state) and security graders (which verify no policy violation occurred).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from ..run_record import GraderResult
 from .end_state import EndStateGrader, EndStateGraderInput

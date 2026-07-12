@@ -1,7 +1,7 @@
 """SPEC §18.1 / §41.2 permanent baselines.
 
 Each baseline is a pinned, versioned harness that runs against the same
-cohorts as the candidate Forge builds. Baselines are *refreshed deliberately*
+cohorts as the candidate Terminus builds. Baselines are *refreshed deliberately*
 — old results retain exact version metadata (SPEC §41.2).
 
 Two comparison modes (SPEC §18.1):
@@ -48,31 +48,31 @@ class Baseline:
 
 # ──────────────────────────── baseline catalog ────────────────────────────
 # SPEC §18.1 lists: upstream OpenCode; Codex; Claude Code (where licensing
-# permits); Pi; Oh My Pi; mini-SWE-agent; Forge minimal; Forge full.
+# permits); Pi; Oh My Pi; mini-SWE-agent; Terminus minimal; Terminus full.
 # SPEC §41.2 adds the same set with the explicit "pinned runners" requirement.
 
 BASELINES: list[Baseline] = [
     Baseline(
         id="forge_minimal",
-        name="Forge minimal",
+        name="Terminus minimal",
         description=(
-            "Forge in minimal shell-only mode (SPEC §3.7): Bash, Read, Edit, List, "
+            "Terminus in minimal shell-only mode (SPEC §3.7): Bash, Read, Edit, List, "
             "Search. No MCP, no plugins, no parallel agents. Permanent floor — "
             "the minimal mode remains permanently available (SPEC §18.7)."
         ),
-        pin="git:forge@v0.1.0",
+        pin="git:terminus@v0.1.0",
         pin_kind="git_commit",
         supports_model_fixed=True,
         supports_native_best=True,
     ),
     Baseline(
         id="forge_full",
-        name="Forge full",
+        name="Terminus full",
         description=(
-            "Forge with all components enabled: context compiler, orchestration, "
+            "Terminus with all components enabled: context compiler, orchestration, "
             "verification, memory, capability registry."
         ),
-        pin="git:forge@v0.1.0",
+        pin="git:terminus@v0.1.0",
         pin_kind="git_commit",
         supports_model_fixed=True,
         supports_native_best=True,

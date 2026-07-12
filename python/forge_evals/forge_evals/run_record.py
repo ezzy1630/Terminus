@@ -1,6 +1,6 @@
 """SPEC §41.5 run record schema.
 
-A ``RunRecord`` is the immutable unit of evaluation evidence. Every Forge
+A ``RunRecord`` is the immutable unit of evaluation evidence. Every Terminus
 evaluation run — whether harness-controlled, product-comparison, or component
 ablation — emits exactly one ``RunRecord`` per (task, harness, seed) triple.
 
@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 __all__ = [
     "CostBreakdown",
@@ -33,10 +34,10 @@ __all__ = [
 
 def utc_now() -> datetime:
     """Return a timezone-aware UTC ``datetime``."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-class Outcome(str, Enum):
+class Outcome(StrEnum):
     """Terminal task outcomes (SPEC §41.5, §15.x)."""
 
     COMPLETED = "completed"

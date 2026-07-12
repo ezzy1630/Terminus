@@ -17,8 +17,8 @@ This module provides:
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 __all__ = [
     "CliffsDeltaResult",
@@ -49,9 +49,9 @@ class EffectSizeResult:
     def magnitude(self) -> str:
         """Cohen's convention: small / medium / large.
 
-        For d-like effect sizes: |d| < 0.2 → negligible, 0.2–0.5 → small,
-        0.5–0.8 → medium, > 0.8 → large. For Cliff's delta:
-        |δ| < 0.147 → negligible, 0.147–0.33 → small, 0.33–0.474 → medium,
+        For d-like effect sizes: |d| < 0.2 -> negligible, 0.2-0.5 -> small,
+        0.5-0.8 -> medium, > 0.8 -> large. For Cliff's delta:
+        |δ| < 0.147 -> negligible, 0.147-0.33 -> small, 0.33-0.474 -> medium,
         > 0.474 → large.
         """
         a = abs(self.value)
@@ -108,7 +108,7 @@ def cohens_d(sample1: Sequence[float], sample2: Sequence[float]) -> EffectSizeRe
         )
     d = (m1 - m2) / sp
     return EffectSizeResult(
-        name="cohens_d", value=d, interpretation=f"mean1-mean2={m1-m2:.4f}, s_pooled={sp:.4f}"
+        name="cohens_d", value=d, interpretation=f"mean1-mean2={m1 - m2:.4f}, s_pooled={sp:.4f}"
     )
 
 
@@ -240,7 +240,9 @@ def odds_ratio(a: int, b: int, c: int, d: int, confidence_level: float = 0.95) -
     )
 
 
-def relative_risk(a: int, b: int, c: int, d: int, confidence_level: float = 0.95) -> OddsRatioResult:
+def relative_risk(
+    a: int, b: int, c: int, d: int, confidence_level: float = 0.95
+) -> OddsRatioResult:
     """Relative risk for a 2x2 table [[a, b], [c, d]].
 
     ``RR = (a / (a + b)) / (c / (c + d))``. CI via the delta method on the

@@ -14,9 +14,10 @@ snapshot — that path doesn't need this module.
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Protocol
 
 from ..run_record import RunRecord
 from .harness_runner import Budgets, Harness, HarnessRunner, ModelCapabilitySnapshot, RunRequest

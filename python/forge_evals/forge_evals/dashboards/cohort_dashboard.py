@@ -8,9 +8,9 @@ fully self-contained and can be opened in any browser.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
 
 from ..analysis.aggregate import CohortSummary, aggregate_by_harness_cohort
 from ..analysis.load_runs import RunCatalog
@@ -22,7 +22,7 @@ __all__ = ["cohort_dashboard_html", "write_cohort_dashboard"]
 def cohort_dashboard_html(
     records: Iterable[RunRecord] | RunCatalog,
     *,
-    title: str = "Forge Eval Lab — Cohort Dashboard",
+    title: str = "Terminus Eval Lab — Cohort Dashboard",
     baseline_harness: str | None = None,
 ) -> str:
     """Build the cohort dashboard HTML."""
@@ -34,7 +34,7 @@ def write_cohort_dashboard(
     records: Iterable[RunRecord] | RunCatalog,
     output: Path | str,
     *,
-    title: str = "Forge Eval Lab — Cohort Dashboard",
+    title: str = "Terminus Eval Lab — Cohort Dashboard",
     baseline_harness: str | None = None,
 ) -> Path:
     """Write the cohort dashboard to ``output``."""
@@ -55,7 +55,7 @@ def _render(
     baseline_harness: str | None,
 ) -> str:
     """Render the dashboard HTML."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     rows_html = "\n".join(_render_row(s, baseline_harness) for s in summaries)
     n_runs = sum(s.n for s in summaries)
     n_cohorts = len({s.cohort for s in summaries})
@@ -101,13 +101,16 @@ def _bar(value: float, lo: float, hi: float, vmin: float, vmax: float) -> str:
     span = vmax - vmin
     if span <= 0:
         return ""
-    pct = lambda x: max(0, min(100, (x - vmin) / span * 100))
+
+    def pct(x):
+        return max(0, min(100, (x - vmin) / span * 100))
+
     val_pct = pct(value)
     lo_pct = pct(lo)
     hi_pct = pct(hi)
     return (
         f'<div class="bar-container">'
-        f'<div class="bar-whisker" style="left:{lo_pct:.1f}%;width:{hi_pct-lo_pct:.1f}%"></div>'
+        f'<div class="bar-whisker" style="left:{lo_pct:.1f}%;width:{hi_pct - lo_pct:.1f}%"></div>'
         f'<div class="bar-value" style="left:{val_pct:.1f}%"></div>'
         f"</div>"
     )

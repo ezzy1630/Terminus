@@ -12,8 +12,8 @@ the promotion gate consumes.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 
 from ..run_record import RunRecord
 from ..statistics.bootstrap import bootstrap_ci
@@ -21,10 +21,8 @@ from ..statistics.noninferiority import NonInferiorityResult, noninferiority_bin
 from ..statistics.paired import (
     McNemarResult,
     PairedDelta,
-    PairedMeanDelta,
     PairedSequence,
     mc_nemar,
-    paired_mean_delta,
     paired_t_test,
 )
 from .load_runs import RunCatalog
@@ -190,7 +188,9 @@ def detect_regressions(
         # Non-inferiority on binary outcomes.
         ni = noninferiority_binary(c_passed, b_passed, margin=noninferiority_margin, alpha=alpha)
         # Verdict.
-        mean_delta = sum(deltas_scores.values) / len(deltas_scores.values) if deltas_scores.values else 0.0
+        mean_delta = (
+            sum(deltas_scores.values) / len(deltas_scores.values) if deltas_scores.values else 0.0
+        )
         if len(cohort_pairs) < 5:
             verdict = "inconclusive"
         elif mean_delta > 0 and ci_low > 0:

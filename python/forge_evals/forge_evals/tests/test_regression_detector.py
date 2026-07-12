@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import random
-from typing import Iterable
-
-import pytest
 
 from forge_evals.analysis.regression_detector import (
     RegressionReport,
@@ -43,8 +40,14 @@ def _make_record(
 
 def test_match_pairs_by_task_and_seed() -> None:
     """Pairs are matched by (task, seed)."""
-    baseline = [_make_record(harness="b", task="t1", seed=1), _make_record(harness="b", task="t2", seed=2)]
-    candidate = [_make_record(harness="c", task="t2", seed=2), _make_record(harness="c", task="t1", seed=1)]
+    baseline = [
+        _make_record(harness="b", task="t1", seed=1),
+        _make_record(harness="b", task="t2", seed=2),
+    ]
+    candidate = [
+        _make_record(harness="c", task="t2", seed=2),
+        _make_record(harness="c", task="t1", seed=1),
+    ]
     pairs = match_pairs(baseline, candidate)
     assert len(pairs) == 2
     by_task = {b.task: (b, c) for b, c in pairs}
@@ -69,8 +72,12 @@ def test_detect_regressions_improvement() -> None:
     for i in range(20):
         s_b = 0.5
         s_c = 0.8
-        baseline.append(_make_record(harness="b", task=f"t{i}", seed=42, passed=s_b > 0.5, score=s_b))
-        candidate.append(_make_record(harness="c", task=f"t{i}", seed=42, passed=s_c > 0.5, score=s_c))
+        baseline.append(
+            _make_record(harness="b", task=f"t{i}", seed=42, passed=s_b > 0.5, score=s_b)
+        )
+        candidate.append(
+            _make_record(harness="c", task=f"t{i}", seed=42, passed=s_c > 0.5, score=s_c)
+        )
     report = detect_regressions(baseline, candidate)
     assert isinstance(report, RegressionReport)
     assert "tiny_bugfix" in report.improved_cohorts
@@ -96,8 +103,12 @@ def test_detect_regressions_no_change() -> None:
     for i in range(20):
         s_b = 0.5
         s_c = s_b + random.gauss(0, 0.02)  # tiny noise
-        baseline.append(_make_record(harness="b", task=f"t{i}", seed=42, score=s_b, passed=s_b > 0.5))
-        candidate.append(_make_record(harness="c", task=f"t{i}", seed=42, score=s_c, passed=s_c > 0.5))
+        baseline.append(
+            _make_record(harness="b", task=f"t{i}", seed=42, score=s_b, passed=s_b > 0.5)
+        )
+        candidate.append(
+            _make_record(harness="c", task=f"t{i}", seed=42, score=s_c, passed=s_c > 0.5)
+        )
     report = detect_regressions(baseline, candidate)
     assert report.regressed_cohorts == []
     assert report.improved_cohorts == []
@@ -120,8 +131,12 @@ def test_detect_regressions_multiple_cohorts() -> None:
     candidate = []
     for suite in ("tiny_bugfix", "refactor"):
         for i in range(10):
-            baseline.append(_make_record(harness="b", task=f"{suite}-{i}", suite=suite, seed=42, score=0.5))
-            candidate.append(_make_record(harness="c", task=f"{suite}-{i}", suite=suite, seed=42, score=0.6))
+            baseline.append(
+                _make_record(harness="b", task=f"{suite}-{i}", suite=suite, seed=42, score=0.5)
+            )
+            candidate.append(
+                _make_record(harness="c", task=f"{suite}-{i}", suite=suite, seed=42, score=0.6)
+            )
     report = detect_regressions(baseline, candidate)
     cohort_names = {c.cohort for c in report.cohort_results}
     assert cohort_names == {"tiny_bugfix", "refactor"}

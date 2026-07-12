@@ -1,4 +1,5 @@
 """Hidden test (SPEC §41.4 — never projected into model context)."""
+
 from pathlib import Path
 
 

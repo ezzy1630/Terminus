@@ -17,9 +17,10 @@ orchestration (§41.10) ablations.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
-from typing import Iterable
 
 from ..analysis.load_runs import RunCatalog
 from ..analysis.regression_detector import match_pairs
@@ -162,9 +163,9 @@ def compute_ablation_contributions(
 
 def ablation_report_html(report: AblationReport, *, title: str | None = None) -> str:
     """Render an :class:`AblationReport` as a self-contained HTML document."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     title = title or f"Ablation Report — baseline: {report.baseline_label}"
     rows = "\n".join(_ablation_row(c) for c in report.contributions)
     n_components = len(report.contributions)
@@ -225,7 +226,10 @@ def _delta_bar(value: float, lo: float, hi: float) -> str:
     span = vmax - vmin
     if span <= 0:
         return ""
-    pct = lambda x: max(0, min(100, (x - vmin) / span * 100))
+
+    def pct(x):
+        return max(0, min(100, (x - vmin) / span * 100))
+
     val_pct = pct(value)
     lo_pct = pct(lo)
     hi_pct = pct(hi)
@@ -233,7 +237,7 @@ def _delta_bar(value: float, lo: float, hi: float) -> str:
     return (
         f'<div class="bar-container">'
         f'<div class="bar-zero" style="left:{zero_pct:.1f}%"></div>'
-        f'<div class="bar-whisker" style="left:{lo_pct:.1f}%;width:{hi_pct-lo_pct:.1f}%"></div>'
+        f'<div class="bar-whisker" style="left:{lo_pct:.1f}%;width:{hi_pct - lo_pct:.1f}%"></div>'
         f'<div class="bar-value" style="left:{val_pct:.1f}%"></div>'
         f"</div>"
     )

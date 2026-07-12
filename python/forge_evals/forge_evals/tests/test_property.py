@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import math
 
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from forge_evals.statistics.bootstrap import bootstrap_ci
 from forge_evals.statistics.effect_size import cliffs_delta, cohens_d
@@ -27,7 +28,6 @@ from forge_evals.statistics.multiple_comparisons import (
     holm_bonferroni,
 )
 from forge_evals.statistics.paired import PairedDelta, PairedSequence, paired_t_test
-
 
 # ──────────────────────────── helpers ─────────────────────────────────────
 
@@ -42,7 +42,10 @@ def normal_sample(
 ) -> list[float]:
     """Draw a random sample from Normal(mu, sigma)."""
     n = draw(st.integers(min_value=min_size, max_value=max_size))
-    return [draw(st.floats(mu - 5 * sigma, mu + 5 * sigma, allow_nan=False, allow_infinity=False)) for _ in range(n)]
+    return [
+        draw(st.floats(mu - 5 * sigma, mu + 5 * sigma, allow_nan=False, allow_infinity=False))
+        for _ in range(n)
+    ]
 
 
 @st.composite
@@ -56,8 +59,14 @@ def two_normal_samples(
     mu1 = draw(st.floats(-2.0, 2.0, allow_nan=False, allow_infinity=False))
     mu2 = draw(st.floats(-2.0, 2.0, allow_nan=False, allow_infinity=False))
     sigma = draw(st.floats(0.5, 2.0, allow_nan=False, allow_infinity=False))
-    s1 = [mu1 + draw(st.floats(-3 * sigma, 3 * sigma, allow_nan=False, allow_infinity=False)) for _ in range(n)]
-    s2 = [mu2 + draw(st.floats(-3 * sigma, 3 * sigma, allow_nan=False, allow_infinity=False)) for _ in range(n)]
+    s1 = [
+        mu1 + draw(st.floats(-3 * sigma, 3 * sigma, allow_nan=False, allow_infinity=False))
+        for _ in range(n)
+    ]
+    s2 = [
+        mu2 + draw(st.floats(-3 * sigma, 3 * sigma, allow_nan=False, allow_infinity=False))
+        for _ in range(n)
+    ]
     return s1, s2, mu1 - mu2, sigma
 
 
@@ -104,9 +113,7 @@ def test_paired_t_test_p_value_is_in_unit_interval(s: list[float]) -> None:
         return
     # Build a paired sequence with a near-zero delta.
     seq = PairedSequence(
-        deltas=[
-            PairedDelta(task=f"t{i}", baseline=0.0, candidate=s[i]) for i in range(len(s))
-        ]
+        deltas=[PairedDelta(task=f"t{i}", baseline=0.0, candidate=s[i]) for i in range(len(s))]
     )
     res = paired_t_test(seq)
     assert 0.0 <= res.p_value <= 1.0, f"p_value={res.p_value} not in [0, 1]"
@@ -121,9 +128,7 @@ def test_effect_size_is_zero_for_identical_samples(s: list[float]) -> None:
         f"cohens_d for identical samples should be 0, got {d.value}"
     )
     cd = cliffs_delta(s, s)
-    assert abs(cd.value) < 1e-9, (
-        f"cliffs_delta for identical samples should be 0, got {cd.value}"
-    )
+    assert abs(cd.value) < 1e-9, f"cliffs_delta for identical samples should be 0, got {cd.value}"
 
 
 @given(
@@ -164,7 +169,7 @@ def test_bonferroni_adjusted_never_below_raw(pvals: list[float]) -> None:
     n (capped at 1), so ``adjusted_i >= raw_i`` always holds.
     """
     res = bonferroni(pvals, alpha=0.05)
-    for raw, adj in zip(res.raw, res.adjusted):
+    for raw, adj in zip(res.raw, res.adjusted, strict=False):
         assert adj >= raw - 1e-9, (
             f"adjusted={adj} < raw={raw} (Bonferroni should never decrease p-values)"
         )

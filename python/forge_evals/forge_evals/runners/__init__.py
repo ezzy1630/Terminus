@@ -11,8 +11,10 @@ from .cross_harness import (
     CrossHarnessResult,
     CrossHarnessRunner,
     HarnessSpec,
-    TaskSpec as CrossTaskSpec,
     run_paired_comparison,
+)
+from .cross_harness import (
+    TaskSpec as CrossTaskSpec,
 )
 from .fake_provider import (
     FakeProvider,

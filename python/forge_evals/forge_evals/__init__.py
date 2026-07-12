@@ -1,6 +1,6 @@
-"""Forge evaluation and research laboratory (SPEC §18, §41, §43.3).
+"""Terminus evaluation and research laboratory (SPEC §18, §41, §43.3).
 
-This package is the offline / non-privileged research plane for the Forge
+This package is the offline / non-privileged research plane for the Terminus
 coding-agent operating system. Python is **NOT** on the production enforcement
 boundary (SPEC §43.3) — this code performs evaluation analysis, statistical
 tests, retrieval/compression experiments, model-routing research, benchmark
@@ -12,7 +12,8 @@ Reference: SPEC §18 (Evaluation laboratory), §41 (Implementation contract),
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
 from .baselines import BASELINES, Baseline, baseline_by_id
 from .cohort_tasks import COHORTS, Cohort, cohort_by_id
@@ -37,15 +38,15 @@ from .run_record import (
 )
 
 try:
-    __version__ = _pkg_version("forge-evals")
+    __version__ = _pkg_version("terminus-evals")
 except PackageNotFoundError:  # pragma: no cover - dev install fallback
     __version__ = "0.1.0"
 
 __all__ = [
     "BASELINES",
+    "COHORTS",
     "Baseline",
     "ChangeManifest",
-    "COHORTS",
     "Cohort",
     "CostBreakdown",
     "Decision",

@@ -93,7 +93,7 @@ __all__ = [
     "paired_mean_delta",
     "paired_t_test",
     "paired_wilcoxon",
-    "relative_risk",
     "reject_decisions",
+    "relative_risk",
     "sign_test",
 ]

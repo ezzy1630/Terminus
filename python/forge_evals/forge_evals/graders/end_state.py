@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ..run_record import GraderResult
 
@@ -101,7 +102,9 @@ class PassFailGrader(EndStateGrader):
     grader_id = "end_state.pass_fail"
     grader_version = "0.1.0"
 
-    def __init__(self, predicate: Callable[[EndStateGraderInput], tuple[bool, float, list[str]]]) -> None:
+    def __init__(
+        self, predicate: Callable[[EndStateGraderInput], tuple[bool, float, list[str]]]
+    ) -> None:
         self.predicate: Callable[[EndStateGraderInput], tuple[bool, float, list[str]]] = predicate
 
     def grade(self, inp: EndStateGraderInput) -> GraderResult:
@@ -449,9 +452,7 @@ def _sha256_text(s: str) -> str:
     return "sha256:" + hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-def _compute_diff_stats(
-    workdir: Path, baseline: str, final: str
-) -> tuple[int, int, list[str]]:
+def _compute_diff_stats(workdir: Path, baseline: str, final: str) -> tuple[int, int, list[str]]:
     """Compute added/removed line counts and modified path list.
 
     Falls back to (0, 0, []) if git is unavailable or the revisions don't

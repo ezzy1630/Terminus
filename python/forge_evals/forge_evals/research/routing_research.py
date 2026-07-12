@@ -6,7 +6,7 @@ added latency.
 
 This module is *research-grade* — it provides the experiment scaffolding
 but does not ship a trained router. The deterministic router
-(``@forge/model-router``) is the production baseline; a learned router
+(``@terminus/model-router``) is the production baseline; a learned router
 must clear the promotion gate (SPEC §18.7, §41.12) before becoming
 default.
 """
@@ -14,8 +14,9 @@ default.
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable, Literal, Protocol
+from typing import Literal, Protocol
 
 from ..analysis.load_runs import RunCatalog
 from ..analysis.regression_detector import RegressionReport, detect_regressions
@@ -259,8 +260,18 @@ def detect_routing_regressions(
 
 def random_learned_policy(
     rng_seed: int = 0,
-    models: tuple[str, ...] = ("fast-model", "balanced-model", "strong-model", "long-context-model"),
-    cohorts: tuple[str, ...] = ("tiny_bugfix", "refactor", "security_sensitive", "large_context_migration"),
+    models: tuple[str, ...] = (
+        "fast-model",
+        "balanced-model",
+        "strong-model",
+        "long-context-model",
+    ),
+    cohorts: tuple[str, ...] = (
+        "tiny_bugfix",
+        "refactor",
+        "security_sensitive",
+        "large_context_migration",
+    ),
 ) -> dict[str, str]:
     """Generate a random learned router policy.
 

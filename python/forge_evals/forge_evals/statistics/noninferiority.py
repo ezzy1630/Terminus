@@ -19,8 +19,8 @@ supports the claim of non-inferiority.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Sequence
 
 from .bootstrap import _normal_cdf, _normal_ppf
 
@@ -180,9 +180,7 @@ def noninferiority_proportion(
     p_b_null = max(0.0, min(1.0, p_b_null))
     p_c_null = max(0.0, min(1.0, p_c_null))
     # Score statistic.
-    var_null = (
-        p_c_null * (1 - p_c_null) / n_candidate + p_b_null * (1 - p_b_null) / n_baseline
-    )
+    var_null = p_c_null * (1 - p_c_null) / n_candidate + p_b_null * (1 - p_b_null) / n_baseline
     if var_null == 0:
         is_ni_point = (p_c - p_b) >= -margin
         return NonInferiorityResult(
@@ -200,9 +198,7 @@ def noninferiority_proportion(
     p_value = 1 - _normal_cdf(z)
     z_crit = _normal_ppf(1 - alpha)
     # (1 - 2*alpha) CI on the risk difference.
-    se_obs = math.sqrt(
-        p_c * (1 - p_c) / n_candidate + p_b * (1 - p_b) / n_baseline
-    )
+    se_obs = math.sqrt(p_c * (1 - p_c) / n_candidate + p_b * (1 - p_b) / n_baseline)
     if se_obs == 0:
         ci_low = p_c - p_b
         ci_high = p_c - p_b

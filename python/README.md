@@ -1,6 +1,6 @@
-# forge-evals
+# terminus-evals
 
-The Forge offline evaluation and research laboratory (SPEC §18, §41, §43.3).
+The Terminus offline evaluation and research laboratory (SPEC §18, §41, §43.3).
 
 Python is **NOT** on the production enforcement boundary. This package runs
 offline: analysis, statistical tests, retrieval/compression experiments,
@@ -16,7 +16,7 @@ forge_evals/
   baselines.py             # SPEC §18.1 / §41.2 baselines
   experiment_manifest.py   # SPEC §18.6 / §41.7 manifest + decision
   promotion_gate.py        # SPEC §18.7 / §41.12 / §50 promotion rule
-  cli.py                   # forge-eval CLI
+  cli.py                   # terminus-eval CLI
   runners/                 # harness_runner, cross_harness, fake_provider, trajectory_recorder
   graders/                 # end_state, acceptance, security_graders, conformance
   analysis/                # load_runs, aggregate, cost_analysis, cache_analysis, regression_detector

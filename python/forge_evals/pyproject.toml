@@ -1,9 +1,9 @@
 [project]
-name = "forge-evals"
+name = "terminus-evals"
 version = "0.1.0"
-description = "Forge evaluation laboratory — offline/non-privileged research plane (SPEC §18, §41, §43.3)."
+description = "Terminus evaluation laboratory — offline/non-privileged research plane (SPEC §18, §41, §43.3)."
 requires-python = ">=3.12"
-authors = [{ name = "Forge" }]
+authors = [{ name = "Terminus" }]
 license = "Apache-2.0"
 dependencies = [
     "pydantic>=2.0",
@@ -24,7 +24,7 @@ test = [
 ]
 
 [project.scripts]
-forge-eval = "forge_evals.cli:main"
+terminus-eval = "forge_evals.cli:main"
 
 [build-system]
 requires = ["hatchling"]

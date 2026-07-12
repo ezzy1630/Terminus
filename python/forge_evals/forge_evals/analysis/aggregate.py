@@ -13,8 +13,8 @@ summaries with confidence intervals. Each summary row contains:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import polars as pl
 
@@ -33,7 +33,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class CohortSummary:
-    """A single cohort × harness summary row."""
+    """A single cohort x harness summary row."""
 
     cohort: str
     harness: str
@@ -72,7 +72,9 @@ class CohortSummary:
         }
 
 
-def _bootstrap_mean(values: list[float], n_resamples: int = 2000, rng_seed: int = 0) -> tuple[float, float]:
+def _bootstrap_mean(
+    values: list[float], n_resamples: int = 2000, rng_seed: int = 0
+) -> tuple[float, float]:
     """Bootstrap CI on the mean of ``values`` (empty list → (0, 0))."""
     if not values:
         return 0.0, 0.0

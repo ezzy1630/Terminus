@@ -62,9 +62,7 @@ def test_file_contains_grader_fails_when_required_absent(tmp_path: Path) -> None
     """FileContainsGrader fails when a required substring is missing."""
     (tmp_path / "main.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
     inp = _make_input(tmp_path)
-    g = FileContainsGrader(
-        path="main.py", required_substrings=["def add", "return a + b"]
-    )
+    g = FileContainsGrader(path="main.py", required_substrings=["def add", "return a + b"])
     res = g.grade(inp)
     assert not res.passed
     assert res.score == 0.5  # 1 of 2 required present.
@@ -173,7 +171,9 @@ def test_hidden_test_grader_runs_command(tmp_path: Path) -> None:
     hidden = tmp_path / "hidden"
     hidden.mkdir()
     (hidden / "test_hidden.py").write_text("print('hidden test passed')\n", encoding="utf-8")
-    (tmp_path / "runner.sh").write_text("#!/bin/bash\necho HIDDEN_DIR=$HIDDEN_DIR\nexit 0\n", encoding="utf-8")
+    (tmp_path / "runner.sh").write_text(
+        "#!/bin/bash\necho HIDDEN_DIR=$HIDDEN_DIR\nexit 0\n", encoding="utf-8"
+    )
     os.chmod(tmp_path / "runner.sh", 0o755)
     inp = _make_input(tmp_path)
     g = HiddenTestGrader(
@@ -213,11 +213,17 @@ def test_diff_grader_passes_when_diff_within_limits(tmp_path: Path) -> None:
 def test_diff_grader_fails_when_diff_exceeds_limits(tmp_path: Path) -> None:
     """DiffGrader fails when added lines exceed the limit."""
     _init_git_repo(tmp_path)
-    (tmp_path / "main.py").write_text("\n".join(f"line{i}" for i in range(50)) + "\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text(
+        "\n".join(f"line{i}" for i in range(50)) + "\n", encoding="utf-8"
+    )
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "c2"], cwd=tmp_path, check=True, capture_output=True)
-    new_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
-    base_commit = subprocess.check_output(["git", "rev-parse", "HEAD~1"], cwd=tmp_path, text=True).strip()
+    new_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
+    ).strip()
+    base_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD~1"], cwd=tmp_path, text=True
+    ).strip()
     inp = EndStateGraderInput(
         snapshot=WorkspaceSnapshot(
             workdir=tmp_path, final_revision=new_commit, baseline_revision=base_commit

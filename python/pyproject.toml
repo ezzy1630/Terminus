@@ -1,10 +1,10 @@
 [project]
-name = "forge-evals"
+name = "terminus-evals"
 version = "0.1.0"
-description = "Forge offline evaluation and research laboratory (SPEC §18, §41, §43.3)."
+description = "Terminus offline evaluation and research laboratory (SPEC §18, §41, §43.3)."
 readme = "README.md"
 requires-python = ">=3.12"
-authors = [{ name = "Forge" }]
+authors = [{ name = "Terminus" }]
 license = { text = "MIT" }
 dependencies = [
     "polars>=1.0",
@@ -26,7 +26,7 @@ dev = [
 ]
 
 [project.scripts]
-forge-eval = "forge_evals.cli:main"
+terminus-eval = "forge_evals.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -50,6 +50,7 @@ ignore = ["E501"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+exclude = ["forge_evals/evals/tasks/"]
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

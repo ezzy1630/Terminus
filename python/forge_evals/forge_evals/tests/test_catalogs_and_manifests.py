@@ -56,12 +56,12 @@ def test_baseline_catalog_has_eight_baselines() -> None:
 def test_baseline_by_id_returns_baseline() -> None:
     """baseline_by_id returns the matching baseline."""
     b = baseline_by_id("forge_minimal")
-    assert b.name == "Forge minimal"
+    assert b.name == "Terminus minimal"
     assert b.pin_kind in ("git_commit", "image_digest", "release_tag")
 
 
 def test_forge_minimal_supports_native_best_and_model_fixed() -> None:
-    """Forge minimal supports both comparison modes (SPEC §18.1)."""
+    """Terminus minimal supports both comparison modes (SPEC §18.1)."""
     b = baseline_by_id("forge_minimal")
     assert b.supports_model_fixed
     assert b.supports_native_best
@@ -119,9 +119,7 @@ def test_change_manifest_rollback_condition_matches() -> None:
         hypothesis="h",
         target_cohort="c",
         changed_components=["x"],
-        rollback_condition=RollbackCondition(
-            metric="primary", threshold=">= -0.05"
-        ),
+        rollback_condition=RollbackCondition(metric="primary", threshold=">= -0.05"),
     )
     m.attach_observed(
         ObservedDeltas(primary_metric_delta=-0.10)  # worse than -0.05
@@ -135,9 +133,7 @@ def test_change_manifest_rollback_condition_no_match() -> None:
         hypothesis="h",
         target_cohort="c",
         changed_components=["x"],
-        rollback_condition=RollbackCondition(
-            metric="primary", threshold=">= -0.05"
-        ),
+        rollback_condition=RollbackCondition(metric="primary", threshold=">= -0.05"),
     )
     m.attach_observed(ObservedDeltas(primary_metric_delta=0.10))  # improvement
     assert m.should_rollback() is False
@@ -183,7 +179,9 @@ def test_experiment_manifest_yaml_round_trip() -> None:
 def test_sample_plan_total_runs() -> None:
     """SamplePlan.total_runs excludes holdouts."""
     sp = SamplePlan(
-        cohorts=["c1", "c2", "c3"], tasks_per_cohort=10, seeds_per_task=3,
+        cohorts=["c1", "c2", "c3"],
+        tasks_per_cohort=10,
+        seeds_per_task=3,
         holdout_cohorts=["c3"],
     )
     assert sp.total_runs == 2 * 10 * 3  # c1 + c2 only.

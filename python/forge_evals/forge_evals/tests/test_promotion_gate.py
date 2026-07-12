@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
-
 from forge_evals.promotion_gate import (
     Evaluation,
     GateStatus,
     PromotionDecision,
-    PromotionGateResult,
     evaluate_promotion,
 )
 
@@ -53,14 +50,17 @@ def test_promotion_gate_security_failure_blocks() -> None:
     ev = _winning_evaluation()
     # Replace with a failed guardrail.
     ev = Evaluation(
-        **{**ev.__dict__, "security_guardrails": {"workspace_escape": False},
-           "security_guardrail_failed": True}
+        **{
+            **ev.__dict__,
+            "security_guardrails": {"workspace_escape": False},
+            "security_guardrail_failed": True,
+        }
     )
     result = evaluate_promotion(ev)
     assert result.decision is PromotionDecision.ROLLBACK
     assert "security_guardrails" in result.blocking_gates
     # The security gate specifically returns BLOCKED.
-    sec_gate = [g for g in result.gates if g.name == "security_guardrails"][0]
+    sec_gate = next(g for g in result.gates if g.name == "security_guardrails")
     assert sec_gate.status is GateStatus.BLOCKED
 
 
@@ -68,12 +68,17 @@ def test_promotion_gate_ci_includes_zero_fails_confidence() -> None:
     """CI including zero fails the confidence gate."""
     ev = _winning_evaluation()
     ev = Evaluation(
-        **{**ev.__dict__, "primary_ci_low": -0.02, "primary_ci_high": 0.10,
-           "primary_effect_size_ci_low": -0.1, "primary_effect_size_ci_high": 0.5}
+        **{
+            **ev.__dict__,
+            "primary_ci_low": -0.02,
+            "primary_ci_high": 0.10,
+            "primary_effect_size_ci_low": -0.1,
+            "primary_effect_size_ci_high": 0.5,
+        }
     )
     result = evaluate_promotion(ev)
     assert result.decision is not PromotionDecision.PROMOTE
-    conf_gate = [g for g in result.gates if g.name == "confidence_bounds"][0]
+    conf_gate = next(g for g in result.gates if g.name == "confidence_bounds")
     assert conf_gate.status is GateStatus.FAIL
 
 
@@ -82,7 +87,7 @@ def test_promotion_gate_regression_fails() -> None:
     ev = _winning_evaluation()
     ev = Evaluation(**{**ev.__dict__, "regression_cohorts": ["security_sensitive"]})
     result = evaluate_promotion(ev)
-    reg_gate = [g for g in result.gates if g.name == "regressions"][0]
+    reg_gate = next(g for g in result.gates if g.name == "regressions")
     assert reg_gate.status is GateStatus.FAIL
     assert result.decision is PromotionDecision.REVISE
 
@@ -92,7 +97,7 @@ def test_promotion_gate_no_pareto_improvement_fails() -> None:
     ev = _winning_evaluation()
     ev = Evaluation(**{**ev.__dict__, "pareto_improves": False})
     result = evaluate_promotion(ev)
-    par_gate = [g for g in result.gates if g.name == "pareto_frontier"][0]
+    par_gate = next(g for g in result.gates if g.name == "pareto_frontier")
     assert par_gate.status is GateStatus.FAIL
 
 
@@ -100,11 +105,10 @@ def test_promotion_gate_hard_security_need_overrides_pareto() -> None:
     """A hard security need overrides the Pareto requirement."""
     ev = _winning_evaluation()
     ev = Evaluation(
-        **{**ev.__dict__, "pareto_improves": False,
-           "satisfies_hard_security_need": True}
+        **{**ev.__dict__, "pareto_improves": False, "satisfies_hard_security_need": True}
     )
     result = evaluate_promotion(ev)
-    par_gate = [g for g in result.gates if g.name == "pareto_frontier"][0]
+    par_gate = next(g for g in result.gates if g.name == "pareto_frontier")
     assert par_gate.status is GateStatus.PASS
     assert "hard security/reliability need" in par_gate.detail
 
@@ -112,9 +116,7 @@ def test_promotion_gate_hard_security_need_overrides_pareto() -> None:
 def test_promotion_gate_operations_fail_retains_experimental() -> None:
     """Operational-only failures with core passing → RETAIN_EXPERIMENTAL."""
     ev = _winning_evaluation()
-    ev = Evaluation(
-        **{**ev.__dict__, "has_documentation": False, "has_migration_behavior": False}
-    )
+    ev = Evaluation(**{**ev.__dict__, "has_documentation": False, "has_migration_behavior": False})
     result = evaluate_promotion(ev)
     assert result.decision is PromotionDecision.RETAIN_EXPERIMENTAL
 
@@ -140,11 +142,16 @@ def test_promotion_gate_min_effect_size_not_met_fails_confidence() -> None:
     """Effect size below min → confidence gate fails."""
     ev = _winning_evaluation()
     ev = Evaluation(
-        **{**ev.__dict__, "primary_effect_size": 0.1, "min_effect_size": 0.3,
-           "primary_effect_size_ci_low": 0.0, "primary_effect_size_ci_high": 0.2}
+        **{
+            **ev.__dict__,
+            "primary_effect_size": 0.1,
+            "min_effect_size": 0.3,
+            "primary_effect_size_ci_low": 0.0,
+            "primary_effect_size_ci_high": 0.2,
+        }
     )
     result = evaluate_promotion(ev)
-    conf_gate = [g for g in result.gates if g.name == "confidence_bounds"][0]
+    conf_gate = next(g for g in result.gates if g.name == "confidence_bounds")
     assert conf_gate.status is GateStatus.FAIL
 
 
@@ -152,11 +159,10 @@ def test_promotion_gate_hard_reliability_need_overrides_pareto() -> None:
     """Hard reliability need also overrides Pareto."""
     ev = _winning_evaluation()
     ev = Evaluation(
-        **{**ev.__dict__, "pareto_improves": False,
-           "satisfies_hard_reliability_need": True}
+        **{**ev.__dict__, "pareto_improves": False, "satisfies_hard_reliability_need": True}
     )
     result = evaluate_promotion(ev)
-    par_gate = [g for g in result.gates if g.name == "pareto_frontier"][0]
+    par_gate = next(g for g in result.gates if g.name == "pareto_frontier")
     assert par_gate.status is GateStatus.PASS
 
 
@@ -166,8 +172,11 @@ def test_promotion_gate_passed_property_matches_decision() -> None:
     assert evaluate_promotion(ev_win).passed
 
     ev_lose = Evaluation(
-        **{**ev_win.__dict__, "security_guardrails": {"x": False},
-           "security_guardrail_failed": True}
+        **{
+            **ev_win.__dict__,
+            "security_guardrails": {"x": False},
+            "security_guardrail_failed": True,
+        }
     )
     assert not evaluate_promotion(ev_lose).passed
 
@@ -191,8 +200,7 @@ def test_promotion_gate_result_blocking_gates_property() -> None:
     """``blocking_gates`` lists the names of BLOCKED gates."""
     ev = _winning_evaluation()
     ev = Evaluation(
-        **{**ev.__dict__, "security_guardrails": {"x": False},
-           "security_guardrail_failed": True}
+        **{**ev.__dict__, "security_guardrails": {"x": False}, "security_guardrail_failed": True}
     )
     result = evaluate_promotion(ev)
     assert "security_guardrails" in result.blocking_gates
