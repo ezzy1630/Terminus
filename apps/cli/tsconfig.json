@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": ".",
+    "baseUrl": "..",
+    "paths": {
+      "@forge/public-api": ["./packages/public-api/src/index.ts"],
+      "@forge/public-client": ["./packages/public-client/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

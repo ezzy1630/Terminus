@@ -1,250 +1,279 @@
-"use client";
+/**
+ * Forge — public API surface page.
+ *
+ * Per SPEC §43.4, the primary clients are the TUI (apps/tui/) and CLI
+ * (apps/cli/). The web client is explicitly OPTIONAL. This page is NOT a
+ * dashboard — it is a minimal status + endpoint discovery page that
+ * documents the public API and SSE event stream so a human or tool can
+ * connect with a real client.
+ *
+ * The durable product is the kernel + control plane + eval lab, exposed
+ * through the public API (SPEC §32) and SSE event stream (SPEC §30.6).
+ */
+import type { Metadata } from "next";
 
-import * as React from "react";
-import { forgeFetch } from "@/lib/forge-client";
-import { useForgeData } from "@/hooks/use-forge-data";
-import { ForgeSidebar, ForgeMobileNav, type ForgeSection } from "@/components/forge/sidebar";
-import { ForgeHeader } from "@/components/forge/header";
-import { Overview } from "@/components/forge/sections/overview";
-import { Sessions } from "@/components/forge/sections/sessions";
-import { Tasks } from "@/components/forge/sections/tasks";
-import { TaskDetail } from "@/components/forge/sections/task-detail";
-import { Context } from "@/components/forge/sections/context";
-import { ToolCalls } from "@/components/forge/sections/tool-calls";
-import { Approvals } from "@/components/forge/sections/approvals";
-import { Verification } from "@/components/forge/sections/verification";
-import { Memory } from "@/components/forge/sections/memory";
-import { Capabilities } from "@/components/forge/sections/capabilities";
-import { Evals } from "@/components/forge/sections/evals";
-import { Configuration } from "@/components/forge/sections/configuration";
-import { Architecture } from "@/components/forge/sections/architecture";
-import { DemoSeed } from "@/components/forge/demo-seed";
-import { NewTaskDialog } from "@/components/forge/new-task-dialog";
-import { Button } from "@/components/ui/button";
-import { Github, FileText } from "lucide-react";
-import { toast } from "sonner";
-import { cn } from "@/lib/utils";
+export const metadata: Metadata = {
+  title: "Forge — Public API",
+  description:
+    "Forge public API surface. The durable product is the Rust effect kernel, TypeScript control plane, and Python eval lab — exposed through the public API and SSE event stream. Use the TUI (apps/tui/) or CLI (apps/cli/) as the real clients.",
+};
 
-interface HealthState {
-  status: "ok" | "degraded" | "down" | "loading";
+const API_GROUPS: Array<{ name: string; path: string; methods: string[]; description: string }> = [
+  { name: "System health", path: "/v1/system/health", methods: ["GET"], description: "Kernel + control plane liveness and readiness." },
+  { name: "Initialize", path: "/v1/system/initialize", methods: ["POST"], description: "Client capability negotiation handshake (SPEC §30.3)." },
+  { name: "Open workspace", path: "/v1/workspaces/open", methods: ["POST"], description: "Register a workspace root URI." },
+  { name: "Create session", path: "/v1/sessions", methods: ["POST"], description: "Open a durable collaboration session." },
+  { name: "Create thread", path: "/v1/threads", methods: ["POST"], description: "Forkable chronological interaction lineage." },
+  { name: "Create task", path: "/v1/tasks", methods: ["POST"], description: "Create a task with a contract (objective, non-goals, acceptance criteria, scope)." },
+  { name: "Start task", path: "/v1/tasks/{id}/start", methods: ["POST"], description: "Activate a DRAFT task." },
+  { name: "Start turn", path: "/v1/turns", methods: ["POST"], description: "Begin one user-to-terminal-outcome cycle. Triggers the agent loop." },
+  { name: "Subscribe events", path: "/v1/events", methods: ["GET"], description: "SSE stream of semantic events with resumable cursors (SPEC §30.6)." },
+  { name: "Get context manifest", path: "/v1/context/manifests/{id}", methods: ["GET"], description: "Exact record of what the model saw (SPEC §8.6, §33.13)." },
+  { name: "Get artifact", path: "/v1/artifacts/{hash}", methods: ["GET"], description: "Content-addressed immutable artifact bytes." },
+  { name: "Resolve approval", path: "/v1/approvals/{id}/resolve", methods: ["POST"], description: "Allow or deny a pending privileged action (SPEC §32.4)." },
+  { name: "Stop job", path: "/v1/jobs/{id}/stop", methods: ["POST"], description: "Terminate a durable process tree." },
+  { name: "Verification plan", path: "/v1/verification/plans/{id}", methods: ["GET"], description: "DAG of evidence-producing predicates (SPEC §17, §40)." },
+  { name: "Eval suites", path: "/v1/evals", methods: ["GET"], description: "Benchmark cohorts and baselines (SPEC §18, §41)." },
+  { name: "Configuration", path: "/v1/configuration", methods: ["GET"], description: "Effective layered configuration (SPEC §43.5, Appendix F)." },
+];
+
+const ARCHITECTURE_LAYERS = [
+  {
+    name: "Rust Effect Kernel",
+    port: "3040",
+    role: "Non-bypassable privileged boundary. All process, filesystem, network, secret, and patch operations cross this boundary (SPEC §5.2, §13, §27, §31).",
+    status: "104 tests passing",
+  },
+  {
+    name: "TypeScript Control Plane",
+    port: "3050",
+    role: "Cognition and product state — sessions, tasks, context compiler, providers, orchestration, verification, memory. No ambient effect authority (SPEC §5, §27, §32).",
+    status: "26 packages, 0 typecheck errors",
+  },
+  {
+    name: "Python Eval Lab",
+    port: "—",
+    role: "Offline/non-privileged research plane. Evaluation analysis, statistical tests, ablations. Never on the production enforcement path (SPEC §18, §41, §43.3).",
+    status: "158 tests passing",
+  },
+  {
+    name: "Data Plane",
+    port: "—",
+    role: "SQLite/WAL · content-addressed artifact store · Git/worktrees · FTS5/BM25 · OpenTelemetry · Parquet/DuckDB (SPEC §7.3, §29).",
+    status: "Prisma schema synced",
+  },
+];
+
+export default function HomePage() {
+  return (
+    <main className="min-h-screen flex flex-col bg-background text-foreground">
+      <div className="flex-1 max-w-4xl mx-auto w-full px-4 py-8 sm:py-12 space-y-10">
+        <header className="space-y-3">
+          <h1 className="text-3xl sm:text-4xl font-bold tracking-tight">Forge</h1>
+          <p className="text-base sm:text-lg text-muted-foreground max-w-2xl">
+            A provider-neutral coding-agent operating system with a non-bypassable
+            Rust effect kernel, an inspectable Context Compiler, evidence-based
+            completion, and an eval gate for complexity.
+          </p>
+          <p className="text-sm text-muted-foreground">
+            This page documents the public API surface. The durable clients are
+            the <span className="font-mono">TUI</span> (apps/tui/) and{" "}
+            <span className="font-mono">CLI</span> (apps/cli/). A web dashboard is
+            explicitly optional per SPEC §43.4 and is not provided here.
+          </p>
+        </header>
+
+        <section className="space-y-4">
+          <h2 className="text-xl font-semibold">Architecture</h2>
+          <div className="grid gap-3">
+            {ARCHITECTURE_LAYERS.map((layer) => (
+              <div
+                key={layer.name}
+                className="rounded-lg border border-border bg-card p-4 space-y-1"
+              >
+                <div className="flex items-baseline justify-between gap-3 flex-wrap">
+                  <h3 className="font-medium">{layer.name}</h3>
+                  <span className="font-mono text-xs text-muted-foreground">
+                    port {layer.port}
+                  </span>
+                </div>
+                <p className="text-sm text-muted-foreground">{layer.role}</p>
+                <p className="text-xs font-mono text-muted-foreground/80">
+                  {layer.status}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="space-y-4">
+          <h2 className="text-xl font-semibold">Public API (SPEC §32)</h2>
+          <p className="text-sm text-muted-foreground">
+            All endpoints are relative. Through the Caddy gateway, append{" "}
+            <span className="font-mono">?XTransformPort=3050</span> to reach the
+            control plane, or <span className="font-mono">?XTransformPort=3040</span>{" "}
+            to reach the kernel directly. Mutating requests accept an{" "}
+            <span className="font-mono">x-idempotency-key</span> header (SPEC §30.5).
+          </p>
+          <div className="rounded-lg border border-border overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50">
+                <tr>
+                  <th className="text-left p-3 font-medium">Endpoint</th>
+                  <th className="text-left p-3 font-medium w-20">Methods</th>
+                  <th className="text-left p-3 font-medium">Description</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {API_GROUPS.map((ep) => (
+                  <tr key={ep.path} className="hover:bg-muted/30">
+                    <td className="p-3 font-mono text-xs align-top">{ep.path}</td>
+                    <td className="p-3 align-top">
+                      <span className="font-mono text-xs">{ep.methods.join(", ")}</span>
+                    </td>
+                    <td className="p-3 text-muted-foreground align-top">{ep.description}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="space-y-4">
+          <h2 className="text-xl font-semibold">SSE Event Stream (SPEC §30.6)</h2>
+          <div className="rounded-lg border border-border bg-card p-4 space-y-2">
+            <p className="text-sm">
+              Subscribe to semantic events with resumable cursors:
+            </p>
+            <pre className="font-mono text-xs bg-muted/50 p-3 rounded overflow-x-auto">
+{`GET /v1/events?cursor=<last-event-id>&task_id=<optional>&session_id=<optional>
+
+# Each event is an SSE block:
+# id: <event_id>
+# event: <event_type>
+# data: <payload_json>
+
+# Reconnect with Last-Event-ID to resume.
+# If the cursor expired, server returns CURSOR_EXPIRED
+# plus the resource snapshot endpoint to resynchronize.`}
+            </pre>
+            <p className="text-xs text-muted-foreground">
+              Event types include: task.created, task.activated, task.completed,
+              task.failed, turn.started, turn.context_compiled,
+              turn.provider_running, turn.tool_settled, turn.completed,
+              tool.proposed, tool.authorized, tool.settled, tool.failed,
+              policy.decision, approval.requested, approval.resolved,
+              effect.proposed, effect.authorized, effect.started, effect.settled,
+              context.epoch_started, context.manifest_persisted,
+              checkpoint.created, agent.spawned, agent.completed,
+              verification.node_passed, verification.node_failed,
+              verification.plan_completed, memory.claim_created,
+              capability.activated.
+            </p>
+          </div>
+        </section>
+
+        <section className="space-y-4">
+          <h2 className="text-xl font-semibold">Error Model (SPEC §30.4)</h2>
+          <pre className="font-mono text-xs bg-muted/50 p-3 rounded overflow-x-auto border border-border">
+{`{
+  "error": {
+    "code": "STALE_SOURCE_VERSION",
+    "message": "src/auth/token.ts changed after it was observed.",
+    "retryable": true,
+    "category": "conflict",
+    "details": { "path": "...", "expected": "...", "actual": "..." },
+    "suggested_action": "Re-read the affected symbol and retry the patch.",
+    "trace_id": "..."
+  }
 }
 
-export default function Page() {
-  const [section, setSection] = React.useState<ForgeSection>("overview");
-  const [selectedTaskId, setSelectedTaskId] = React.useState<string | null>(null);
-  const [selectedManifestId, setSelectedManifestId] = React.useState<string | null>(null);
-  const [newTaskOpen, setNewTaskOpen] = React.useState(false);
-  const [health, setHealth] = React.useState<HealthState>({ status: "loading" });
+# Categories: validation, not_found, conflict, permission, policy_denied,
+# approval_required, sandbox_unavailable, resource_exhausted, budget_exhausted,
+# timeout, cancelled, provider, external_dependency, integrity, internal,
+# unknown_settlement`}
+          </pre>
+        </section>
 
-  const { sessions, tasks, workspaces, loading, error, reload } = useForgeData();
+        <section className="space-y-4">
+          <h2 className="text-xl font-semibold">Clients</h2>
+          <div className="grid sm:grid-cols-2 gap-3">
+            <div className="rounded-lg border border-border bg-card p-4 space-y-1">
+              <h3 className="font-medium font-mono text-sm">apps/tui/</h3>
+              <p className="text-xs text-muted-foreground">
+                Terminal client. The primary client surface per SPEC §43.4.
+                Reconnects from server snapshots and event cursors.
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-card p-4 space-y-1">
+              <h3 className="font-medium font-mono text-sm">apps/cli/</h3>
+              <p className="text-xs text-muted-foreground">
+                Non-interactive CLI for CI and automation. Same public API.
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-card p-4 space-y-1">
+              <h3 className="font-medium font-mono text-sm">apps/ide-acp/</h3>
+              <p className="text-xs text-muted-foreground">
+                ACP adapter for editor integration. Calls the public API; no
+                direct filesystem authority (SPEC §32.6).
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-card p-4 space-y-1">
+              <h3 className="font-medium font-mono text-sm">apps/web/</h3>
+              <p className="text-xs text-muted-foreground">
+                Optional browser client. Not provided. Framework remains
+                replaceable behind generated clients (SPEC §43.4).
+              </p>
+            </div>
+          </div>
+        </section>
 
-  // Poll kernel health every 15s.
-  React.useEffect(() => {
-    let aborted = false;
-    const check = async () => {
-      try {
-        const h = await forgeFetch<{ status: string; ready: boolean; kernel?: { status?: string; ready?: boolean } }>(
-          "/v1/system/health",
-        );
-        if (aborted) return;
-        const k = h.kernel ?? { ready: h.ready, status: h.status };
-        if (k.ready === false) setHealth({ status: "degraded" });
-        else if (h.status === "ok" && k.status === "ok") setHealth({ status: "ok" });
-        else setHealth({ status: h.status === "ok" ? "ok" : "degraded" });
-      } catch {
-        if (!aborted) setHealth({ status: "down" });
-      }
-    };
-    void check();
-    const t = window.setInterval(check, 15_000);
-    return () => {
-      aborted = true;
-      window.clearInterval(t);
-    };
-  }, []);
+        <section className="space-y-4">
+          <h2 className="text-xl font-semibold">Quickstart</h2>
+          <pre className="font-mono text-xs bg-muted/50 p-3 rounded overflow-x-auto border border-border">
+{`# 1. Start the Rust kernel + TS control plane
+bash scripts/start-mini-services.sh
 
-  // Helpers to navigate between sections while preserving context.
-  const openTask = React.useCallback((taskId: string) => {
-    setSelectedTaskId(taskId);
-    setSection("tasks");
-  }, []);
-  const openManifest = React.useCallback((manifestId: string) => {
-    setSelectedManifestId(manifestId);
-    setSection("context");
-  }, []);
+# 2. Verify health
+curl -sS http://127.0.0.1:3040/v1/health \\
+  -X POST -H "Authorization: Bearer forge-kernel-dev-token" -d '{}'
 
-  const showDemo = !loading && sessions.length === 0;
+curl -sS http://127.0.0.1:3050/v1/system/health
 
-  const renderSection = () => {
-    switch (section) {
-      case "overview":
-        return (
-          <Overview
-            sessions={sessions}
-            tasks={tasks}
-            onOpenTask={openTask}
-            onOpenSession={() => setSection("sessions")}
-            onSwitchSection={(s) => setSection(s)}
-          />
-        );
-      case "sessions":
-        return (
-          <Sessions
-            workspaces={workspaces}
-            onOpenTask={openTask}
-            onCreatedSession={() => reload()}
-          />
-        );
-      case "tasks":
-        return selectedTaskId ? (
-          <TaskDetail
-            taskId={selectedTaskId}
-            onBack={() => setSelectedTaskId(null)}
-            onOpenManifest={openManifest}
-          />
-        ) : (
-          <Tasks
-            tasks={tasks}
-            sessions={sessions}
-            loading={loading}
-            onOpenTask={openTask}
-            onCreatedTask={(t) => {
-              reload();
-              openTask(t.id);
-            }}
-          />
-        );
-      case "context":
-        return <Context manifestId={selectedManifestId} onClear={() => setSelectedManifestId(null)} />;
-      case "tool-calls":
-        return <ToolCalls defaultWorkspaceId={workspaces[0]?.id} />;
-      case "approvals":
-        return <Approvals />;
-      case "verification":
-        return <Verification />;
-      case "memory":
-        return <Memory />;
-      case "capabilities":
-        return <Capabilities />;
-      case "evals":
-        return <Evals />;
-      case "configuration":
-        return <Configuration />;
-      case "architecture":
-        return <Architecture />;
-      default:
-        return null;
-    }
-  };
+# 3. Create a workspace, session, task, and turn
+W=$(curl -sS -X POST http://127.0.0.1:3050/v1/workspaces/open \\
+  -d '{"root_uri":"/tmp/forge-demo"}' | jq -r .id)
 
-  return (
-    <div className="min-h-screen flex flex-col bg-background text-foreground">
-      <div className="flex flex-1 min-h-0">
-        <ForgeSidebar
-          active={section}
-          onSelect={(s) => {
-            setSection(s);
-            if (s !== "tasks") setSelectedTaskId(null);
-            if (s !== "context") setSelectedManifestId(null);
-          }}
-          counts={{
-            tasks: tasks.length,
-            sessions: sessions.length,
-          }}
-          health={health.status}
-        />
-        <div className="flex-1 flex flex-col min-w-0">
-          <ForgeHeader
-            health={health.status}
-            onReload={reload}
-            onNewTask={() => {
-              if (sessions.length === 0) {
-                toast.info("Create a session first — opening New Session flow.");
-                setSection("sessions");
-              } else {
-                setNewTaskOpen(true);
-              }
-            }}
-            rightSlot={
-              <DemoSeed
-                visible={showDemo && section === "overview"}
-                onDone={(t) => {
-                  reload();
-                  openTask(t.id);
-                }}
-              />
-            }
-          />
-          <main className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6">
-            {error && section === "overview" ? (
-              <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-                Failed to load dashboard: {error}. Is the control plane running on port 3050?
-              </div>
-            ) : null}
-            {renderSection()}
-          </main>
-        </div>
+S=$(curl -sS -X POST http://127.0.0.1:3050/v1/sessions \\
+  -d "{\\"workspace_id\\":\\"$W\\",\\"title\\":\\"demo\\"}" \\
+  | jq -r '.id,.active_thread_id')
+SID=$(echo "$S" | head -1); TID=$(echo "$S" | tail -1)
+
+T=$(curl -sS -X POST http://127.0.0.1:3050/v1/tasks \\
+  -d "{\\"session_id\\":\\"$SID\\",\\"thread_id\\":\\"$TID\\",\\"objective\\":\\"demo\\"}" \\
+  | jq -r .id)
+
+curl -sS -X POST "http://127.0.0.1:3050/v1/tasks/$T/start" > /dev/null
+
+curl -sS -X POST http://127.0.0.1:3050/v1/turns \\
+  -d "{\\"thread_id\\":\\"$TID\\",\\"task_id\\":\\"$T\\",\\"user_input\\":\\"hello\\"}"
+
+# 4. Watch the agent loop complete
+sleep 5
+curl -sS "http://127.0.0.1:3050/v1/tasks/$T" | jq '{status,phase}'`}
+          </pre>
+        </section>
       </div>
 
-      <ForgeFooter />
-
-      <ForgeMobileNav active={section} onSelect={(s) => setSection(s)} />
-
-      {/* Header-controlled New Task dialog. Renders a hidden trigger because
-          Radix Dialog needs a Trigger to anchor focus, but we drive open state
-          from the header button. */}
-      <NewTaskDialog
-        sessions={sessions.map((s) => ({
-          id: s.id,
-          title: s.title,
-          workspace_id: s.workspace_id,
-          active_thread_id: s.active_thread_id,
-        }))}
-        open={newTaskOpen}
-        onOpenChange={setNewTaskOpen}
-        onCreated={(t) => {
-          setNewTaskOpen(false);
-          reload();
-          openTask(t.id);
-        }}
-        trigger={<span className="hidden" aria-hidden />}
-      />
-    </div>
-  );
-}
-
-function ForgeFooter() {
-  return (
-    <footer
-      className={cn(
-        "mt-auto border-t bg-background/95 backdrop-blur",
-        "px-4 py-2 text-[10px] text-muted-foreground",
-        "flex flex-wrap items-center justify-between gap-2",
-      )}
-    >
-      <span>
-        Forge v0.1.0 — provider-neutral coding-agent OS · Rust effect kernel · TypeScript control plane · Python eval lab
-      </span>
-      <span className="flex items-center gap-3">
-        <a
-          href="/SPEC.md"
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-1 hover:text-foreground"
-        >
-          <FileText className="size-3" />
-          SPEC.md
-        </a>
-        <a
-          href="https://github.com/forge/forge"
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-1 hover:text-foreground"
-        >
-          <Github className="size-3" />
-          GitHub
-        </a>
-      </span>
-    </footer>
+      <footer className="mt-auto border-t border-border bg-card">
+        <div className="max-w-4xl mx-auto w-full px-4 py-4 text-xs text-muted-foreground flex flex-wrap items-center justify-between gap-2">
+          <span>
+            Forge v0.1.0 — provider-neutral coding-agent OS · Rust effect kernel
+            · TypeScript control plane · Python eval lab
+          </span>
+          <span className="font-mono">SPEC §1, §5, §32, §43.4</span>
+        </div>
+      </footer>
+    </main>
   );
 }

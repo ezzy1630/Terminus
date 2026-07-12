@@ -1,0 +1,15 @@
+{
+  "name": "@forge/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "start": "bun src/index.ts",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@forge/public-client": "workspace:*",
+    "@forge/public-api": "workspace:*"
+  }
+}
