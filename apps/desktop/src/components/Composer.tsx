@@ -43,6 +43,7 @@ import {
   CircleSlash,
   FolderGit2,
   GitBranch,
+  Hash,
   ListPlus,
   Monitor,
   Paperclip,
@@ -104,6 +105,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const attachmentUrlsRef = useRef<Set<string>>(new Set());
   const [agentOpen, setAgentOpen] = useState(false);
   const [accessOpen, setAccessOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -131,6 +133,11 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
       setAgentId(activeSession.default_model_profile);
     }
   }, [activeSession?.default_model_profile, task]);
+
+  useEffect(() => () => {
+    for (const url of attachmentUrlsRef.current) URL.revokeObjectURL(url);
+    attachmentUrlsRef.current.clear();
+  }, []);
 
   // Auto-resize the textarea up to the max height from the density token.
   useLayoutEffect(() => {
@@ -260,6 +267,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
     for (const file of files) {
       if (file.type.startsWith("image/")) {
         const url = URL.createObjectURL(file);
+        attachmentUrlsRef.current.add(url);
         setAttachments((prev) => [...prev, url]);
       }
     }
@@ -331,7 +339,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             </span>
             {task ? (
               <span className="flex min-w-0 items-center gap-1.5">
-                <GitBranch size={14} className="flex-shrink-0 text-tertiary" strokeWidth={1.7} />
+                <Hash size={14} className="flex-shrink-0 text-tertiary" strokeWidth={1.7} />
                 <span className="truncate font-mono">{task.thread_id.slice(0, 8)}</span>
               </span>
             ) : null}
@@ -362,7 +370,11 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
                   />
                   <button
                     type="button"
-                    onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
+                    onClick={() => {
+                      URL.revokeObjectURL(url);
+                      attachmentUrlsRef.current.delete(url);
+                      setAttachments((prev) => prev.filter((_, idx) => idx !== i));
+                    }}
                     aria-label={`Remove attachment ${i + 1}`}
                     className="absolute right-0 top-0 flex h-5 w-5 items-center justify-center rounded-bl-md bg-terminal/80 text-primary"
                   >
@@ -410,7 +422,6 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
               maxHeight: "var(--composer-max-height)",
               fontFamily: "var(--font-family)",
             }}
-            disabled={sending}
           />
 
           {/* Control row — always visible. Reserved height so metadata

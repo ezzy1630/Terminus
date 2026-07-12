@@ -155,8 +155,13 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     const openSettings = (): void => setSettingsOpen(true);
+    const openOnboarding = (): void => setOnboardingOpen(true);
     window.addEventListener("terminus:open-settings", openSettings);
-    return () => window.removeEventListener("terminus:open-settings", openSettings);
+    window.addEventListener("terminus:open-onboarding", openOnboarding);
+    return () => {
+      window.removeEventListener("terminus:open-settings", openSettings);
+      window.removeEventListener("terminus:open-onboarding", openOnboarding);
+    };
   }, []);
 
   // Build the command catalog. Memoized so the palette doesn't re-rank

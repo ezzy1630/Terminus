@@ -34,7 +34,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Message } from "./Message";
 import { ActivityBlock } from "./ActivityBlock";
 import { ApprovalCard } from "./ApprovalCard";
-import { useSelectedTask, useSelectedTaskEvents } from "../hooks/use-terminus";
+import { ErrorState, errorPreset } from "./ErrorState";
+import { normalizeTaskStatus, useSelectedTask, useSelectedTaskEvents, useTerminusStore } from "../hooks/use-terminus";
 import { derivePendingApprovals } from "../lib/task-surface";
 import type {
   ActivityBlock as ActivityBlockData,
@@ -51,6 +52,7 @@ interface ConversationProps {
 interface DecodedFeed {
   messages: ConversationMessage[];
   blocks: ActivityBlockData[];
+  order: Array<{ kind: "message" | "block"; id: string }>;
 }
 
 interface PendingUserInput {
@@ -84,6 +86,7 @@ interface PendingToolGroup {
 export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): DecodedFeed {
   const messages: ConversationMessage[] = [];
   const blocks: ActivityBlockData[] = [];
+  const order: DecodedFeed["order"] = [];
 
   let pendingUser: PendingUserInput | null = null;
   let pendingGroup: PendingToolGroup | null = null;
@@ -101,13 +104,15 @@ export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): D
         ? "done"
         : "working";
     const metric = computeMetric(entries, pendingGroup.title);
-    blocks.push({
+    const block: ActivityBlockData = {
       id: `block-${pendingGroup.startedAt}-${blocks.length}`,
       title: pendingGroup.title,
       metric,
       status,
       entries,
-    });
+    };
+    blocks.push(block);
+    order.push({ kind: "block", id: block.id });
     if (lastEntry) {
       void lastEntry;
     }
@@ -131,22 +136,26 @@ export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): D
         const userInput = typeof p.user_input === "string" ? p.user_input : "";
         const at = typeof p.started_at === "string" ? p.started_at : taskCreatedAt;
         pendingUser = { text: userInput, at };
-        messages.push({
+        const userMessage: ConversationMessage = {
           id: `user-${ev.id}`,
           role: "user",
           content: userInput,
           createdAt: at,
-        });
+        };
+        messages.push(userMessage);
+        order.push({ kind: "message", id: userMessage.id });
         pendingUser = null;
         // Begin an empty agent message that we'll stream into.
         streamingMessageId = `agent-${ev.id}`;
-        messages.push({
+        const agentMessage: ConversationMessage = {
           id: streamingMessageId,
           role: "agent",
           content: "",
           createdAt: at,
           streaming: true,
-        });
+        };
+        messages.push(agentMessage);
+        order.push({ kind: "message", id: agentMessage.id });
         break;
       }
       case "turn.completed": {
@@ -223,10 +232,10 @@ export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): D
   // If the conversation is empty, seed with the task objective so the
   // surface isn't blank while the first turn kicks off.
   if (messages.length === 0) {
-    return { messages, blocks };
+    return { messages, blocks, order };
   }
 
-  return { messages, blocks };
+  return { messages, blocks, order };
 }
 
 function summarizeToolPayload(eventName: string, p: Record<string, unknown>): string {
@@ -324,9 +333,10 @@ function estimateItemHeight(item: FeedItem): number {
 function ConversationImpl({ className }: ConversationProps): JSX.Element {
   const task = useSelectedTask();
   const events = useSelectedTaskEvents();
+  const streamState = useTerminusStore((state) => state.streamState);
 
   const decoded = useMemo(() => {
-    if (!task) return { messages: [], blocks: [] };
+    if (!task) return { messages: [], blocks: [], order: [] };
     return decodeFeed(events, task.created_at);
     // Recompute when the events list grows OR the task changes. The last
     // event id is included so streaming appends trigger a re-decode.
@@ -335,9 +345,18 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
 
   // Build the flattened feed items list.
   const items = useMemo<FeedItem[]>(() => {
+    const messages = new Map(decoded.messages.map((message) => [message.id, message]));
+    const blocks = new Map(decoded.blocks.map((block) => [block.id, block]));
     const out: FeedItem[] = [];
-    for (const m of decoded.messages) out.push({ kind: "message", message: m });
-    for (const b of decoded.blocks) out.push({ kind: "block", block: b });
+    for (const entry of decoded.order) {
+      if (entry.kind === "message") {
+        const message = messages.get(entry.id);
+        if (message) out.push({ kind: "message", message });
+      } else {
+        const block = blocks.get(entry.id);
+        if (block) out.push({ kind: "block", block });
+      }
+    }
     return out;
   }, [decoded]);
 
@@ -475,9 +494,28 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
         </div>
 
         {/* Empty state. */}
-        {items.length === 0 ? (
-          <div className="py-8 text-center text-tertiary" style={{ fontSize: "var(--font-size-sm)" }}>
-            Waiting for the first turn…
+        {streamState === "reconnecting" ? (
+          <ErrorState
+            {...errorPreset("reconnecting")}
+            compact
+            className="mb-4 rounded-md border border-subtle bg-elevated"
+          />
+        ) : null}
+        {items.length === 0 && normalizeTaskStatus(task.status) === "failed" ? (
+          <ErrorState
+            {...errorPreset("failedTask")}
+            action={{
+              label: "Send a follow-up",
+              onClick: () => window.dispatchEvent(new Event("terminus:focus-composer")),
+            }}
+          />
+        ) : items.length === 0 ? (
+          <div className="py-8 text-center text-tertiary" role="status" style={{ fontSize: "var(--font-size-sm)" }}>
+            {normalizeTaskStatus(task.status) === "queued"
+              ? "Queued. Work will begin when the runtime is ready."
+              : normalizeTaskStatus(task.status) === "waiting"
+                ? "Waiting for input before work can continue."
+                : "Preparing the first turn…"}
           </div>
         ) : null}
 

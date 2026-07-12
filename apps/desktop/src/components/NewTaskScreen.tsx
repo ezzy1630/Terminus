@@ -182,8 +182,21 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
           {session ? "What are we working on?" : "What should we work on?"}
         </h1>
 
+        {!session ? (
+          <div className="mt-3 flex justify-center">
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new Event("terminus:open-onboarding"))}
+              className="rounded-md px-2 py-1 text-secondary hover:bg-hover hover:text-primary"
+              style={{ fontSize: "var(--font-size-sm)" }}
+            >
+              Open a project to begin
+            </button>
+          </div>
+        ) : null}
+
         {/* Composer. */}
-        <div style={{ marginTop: "32px" }}>
+        <div style={{ marginTop: session ? "32px" : "24px" }}>
           <Composer onCreateTask={createTask} />
         </div>
 
