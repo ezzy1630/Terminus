@@ -20,6 +20,30 @@ impl Default for RetentionClass {
     }
 }
 
+impl RetentionClass {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Ephemeral => "ephemeral",
+            Self::Session => "session",
+            Self::Audit => "audit",
+            Self::Evidence => "evidence",
+            Self::MemorySource => "memory_source",
+            Self::LegalHold => "legal_hold",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "ephemeral" => Self::Ephemeral,
+            "audit" => Self::Audit,
+            "evidence" => Self::Evidence,
+            "memory_source" => Self::MemorySource,
+            "legal_hold" => Self::LegalHold,
+            _ => Self::Session,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RedactionStatus {
@@ -32,6 +56,26 @@ pub enum RedactionStatus {
 impl Default for RedactionStatus {
     fn default() -> Self {
         Self::NotRequired
+    }
+}
+
+impl RedactionStatus {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
+            Self::Pending => "pending",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "applied" => Self::Applied,
+            "rejected" => Self::Rejected,
+            "pending" => Self::Pending,
+            _ => Self::NotRequired,
+        }
     }
 }
 
@@ -50,6 +94,26 @@ impl Default for Confidentiality {
     }
 }
 
+impl Confidentiality {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Workspace => "workspace",
+            Self::SecretAdjacent => "secret_adjacent",
+            Self::Secret => "secret",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "public" => Self::Public,
+            "secret_adjacent" => Self::SecretAdjacent,
+            "secret" => Self::Secret,
+            _ => Self::Workspace,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrustLabel {
@@ -64,6 +128,24 @@ impl Default for TrustLabel {
     }
 }
 
+impl TrustLabel {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Derived => "derived",
+            Self::Untrusted => "untrusted",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "trusted" => Self::Trusted,
+            "untrusted" => Self::Untrusted,
+            _ => Self::Derived,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContentEncoding {
     Identity,
@@ -73,6 +155,22 @@ pub enum ContentEncoding {
 impl Default for ContentEncoding {
     fn default() -> Self {
         Self::Identity
+    }
+}
+
+impl ContentEncoding {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Zstd => "zstd",
+        }
+    }
+
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "zstd" => Self::Zstd,
+            _ => Self::Identity,
+        }
     }
 }
 
@@ -117,6 +215,18 @@ impl ArtifactMetadata {
     pub fn from_json(s: &str) -> Result<Self, ArtifactError> {
         Ok(serde_json::from_str(s)?)
     }
+}
+
+/// A row in the `artifact_links` table. Links an artifact to an owning
+/// entity (turn, task, tool_call, verification_result, etc.) by purpose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactLink {
+    pub id: String,
+    pub artifact_hash: String,
+    pub owner_type: String,
+    pub owner_id: String,
+    pub purpose: String,
+    pub created_at: String,
 }
 
 fn now_rfc3339() -> String {

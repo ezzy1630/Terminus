@@ -682,8 +682,9 @@ describe("SidebarItem — truncation + tooltip", () => {
       />,
     );
     // When not pinned and not hovered, the pin button is invisible
-    // (CSS class `invisible`).
-    const pinButton = screen.getByLabelText("Pin");
+    // (CSS class `invisible`). The aria-label includes the task title
+    // for screen readers ("Pin task <title>").
+    const pinButton = screen.getByLabelText("Pin task Short title");
     expect(pinButton).toHaveClass("invisible");
 
     // When pinned, the pin button is visible regardless of hover.
@@ -695,7 +696,7 @@ describe("SidebarItem — truncation + tooltip", () => {
         onTogglePin={onTogglePin}
       />,
     );
-    const unpinButton = screen.getByLabelText("Unpin");
+    const unpinButton = screen.getByLabelText("Unpin task Short title");
     expect(unpinButton).not.toHaveClass("invisible");
   });
 });

@@ -29,7 +29,7 @@ import { PanelBottomClose, PanelBottomOpen } from "lucide-react";
 import { cn } from "../lib/cn";
 import { useViewport } from "../hooks/use-viewport";
 import { useThemeStore } from "../hooks/use-theme";
-import { TerminalDrawer, StubTerminalSessionFactory } from "./TerminalDrawer";
+import { TerminalDrawer, pickTerminalSessionFactory } from "./TerminalDrawer";
 import type { ReactNode } from "react";
 
 interface LayoutProps {
@@ -166,9 +166,11 @@ const LayoutTerminalDrawer = memo(function LayoutTerminalDrawer({
   );
 });
 
-// A single stub factory instance — real integrations pass their own.
+// Pick the best available factory at module load. In Electron with the
+// `forgeTerminal` preload bridge, this is a real PTY (node-pty) factory.
+// In jsdom tests and non-Electron browsers, it falls back to the stub.
 // Memoized at module scope so it survives Layout re-renders.
-const stubFactory = new StubTerminalSessionFactory();
+const stubFactory = pickTerminalSessionFactory();
 
 function LayoutImpl({
   sidebar,

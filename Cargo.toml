@@ -38,6 +38,7 @@ anyhow = "1"
 hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
 forge-kernel-protocol = { path = "crates/forge-kernel-protocol" }
 forge-fs = { path = "crates/forge-fs" }
 forge-artifacts = { path = "crates/forge-artifacts" }

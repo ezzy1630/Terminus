@@ -316,6 +316,9 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
             rows={1}
             placeholder={task ? "Send a message, steer work, or queue a follow-up…" : "Describe what you want to build…"}
             aria-label="Message composer"
+            aria-description="Press Command Enter to send, Shift Command Enter to queue, Escape to interrupt."
+            role="textbox"
+            aria-multiline="true"
             className={cn(
               "selectable w-full resize-none bg-transparent px-4 pt-3 text-primary placeholder:text-tertiary",
               "focus:outline-none",

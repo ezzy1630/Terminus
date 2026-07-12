@@ -52,6 +52,7 @@ import {
   Terminal as TerminalIcon,
   X,
 } from "lucide-react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
 import { EmptyState } from "./EmptyState";
 
@@ -862,6 +863,97 @@ function HeaderIconButton({
 
 // ────────────────────────── Body ────────────────────────────────────────────
 
+/**
+ * Flattened row representation for the virtualized diff body. Each row is
+ * either a hunk header (with resolution banner + controls) or a single
+ * diff line (unified view) or a paired left/right row (split view).
+ */
+type DiffRow =
+  | { kind: "hunk-header"; hunk: DiffHunk; resolution: "accept" | "reject" | undefined }
+  | { kind: "hunk-resolution"; hunk: DiffHunk; resolution: "accept" | "reject" }
+  | {
+      kind: "unified-line";
+      hunk: DiffHunk;
+      line: DiffLine;
+      changeIdx: number; // -1 if not a change line
+    }
+  | {
+      kind: "split-row";
+      hunk: DiffHunk;
+      left: DiffLine | null;
+      right: DiffLine | null;
+      changeIdx: number; // -1 if neither side is a change
+    };
+
+/**
+ * Build the flat row list for the virtualizer. We also collect the
+ * virtual-row indices that correspond to each change line so the j/k
+ * navigation can scroll to them via `virtualizer.scrollToIndex`.
+ */
+function buildDiffRows(
+  file: DiffFile,
+  viewMode: DiffViewMode,
+  path: string,
+  resolvedHunks: Record<string, "accept" | "reject">,
+): { rows: DiffRow[]; changeRowIndices: number[] } {
+  const rows: DiffRow[] = [];
+  const changeRowIndices: number[] = [];
+  let changeIdx = 0;
+  for (const hunk of file.hunks) {
+    const resolution = resolvedHunks[`${path}:${hunk.key}`];
+    rows.push({ kind: "hunk-header", hunk, resolution });
+    if (resolution) {
+      rows.push({ kind: "hunk-resolution", hunk, resolution });
+    }
+    if (viewMode === "unified") {
+      for (const line of hunk.lines) {
+        const isChange = line.kind === "add" || line.kind === "del";
+        const idx = isChange ? changeIdx++ : -1;
+        const rowIndex = rows.length;
+        rows.push({ kind: "unified-line", hunk, line, changeIdx: idx });
+        if (isChange) changeRowIndices.push(rowIndex);
+      }
+    } else {
+      // Build aligned split rows.
+      let i = 0;
+      while (i < hunk.lines.length) {
+        const line = hunk.lines[i];
+        if (!line) {
+          i++;
+          continue;
+        }
+        if (line.kind === "del") {
+          const next = hunk.lines[i + 1];
+          if (next && next.kind === "add") {
+            const isChange = true;
+            const idx = isChange ? changeIdx++ : -1;
+            const rowIndex = rows.length;
+            rows.push({ kind: "split-row", hunk, left: line, right: next, changeIdx: idx });
+            if (isChange) changeRowIndices.push(rowIndex);
+            i += 2;
+          } else {
+            const idx = changeIdx++;
+            const rowIndex = rows.length;
+            rows.push({ kind: "split-row", hunk, left: line, right: null, changeIdx: idx });
+            changeRowIndices.push(rowIndex);
+            i++;
+          }
+        } else if (line.kind === "add") {
+          const idx = changeIdx++;
+          const rowIndex = rows.length;
+          rows.push({ kind: "split-row", hunk, left: null, right: line, changeIdx: idx });
+          changeRowIndices.push(rowIndex);
+          i++;
+        } else {
+          rows.push({ kind: "split-row", hunk, left: line, right: line, changeIdx: -1 });
+          i++;
+        }
+      }
+    }
+  }
+  return { rows, changeRowIndices };
+}
+
 function DiffBody({
   file,
   viewMode,
@@ -894,7 +986,51 @@ function DiffBody({
   focusIndex: number;
 }): JSX.Element {
   const path = file.displayPath ?? file.newPath;
-  let changeIdx = -1;
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  const { rows, changeRowIndices } = useMemo(
+    () => buildDiffRows(file, viewMode, path, resolvedHunks),
+    [file, viewMode, path, resolvedHunks],
+  );
+
+  // Virtualizer — only visible rows are mounted. Per SPEC §25.1: large
+  // diffs (10k+ lines) must remain interactive. Each line is ~20px.
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (i) => {
+      const row = rows[i];
+      if (!row) return 24;
+      if (row.kind === "hunk-header") return 28;
+      if (row.kind === "hunk-resolution") return 28;
+      return 20;
+    },
+    overscan: 16,
+  });
+
+  // Keep changeLineRefs in sync with the virtualized rows that are
+  // currently mounted. The parent (DiffViewerImpl) reads this array to
+  // navigate j/k. With virtualization only visible rows have refs, so
+  // the j/k handler falls back to `virtualizer.scrollToIndex` (below).
+  useEffect(() => {
+    changeLineRefs.current = changeLineRefs.current.slice(0, changeRowIndices.length);
+  }, [changeLineRefs, changeRowIndices.length]);
+
+  // When focusIndex changes, scroll the matching change row into view.
+  // With virtualization we can't rely on `scrollIntoView` for off-screen
+  // rows, so we ask the virtualizer to bring the row into view first.
+  useEffect(() => {
+    if (focusIndex < 0 || focusIndex >= changeRowIndices.length) return;
+    const rowIndex = changeRowIndices[focusIndex];
+    if (rowIndex === undefined) return;
+    virtualizer.scrollToIndex(rowIndex, { align: "center" });
+    // After the virtual row mounts, scroll the inner element into view
+    // for the focus ring + browser semantics.
+    window.setTimeout(() => {
+      const el = changeLineRefs.current[focusIndex];
+      el?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 30);
+  }, [focusIndex, changeRowIndices, virtualizer]);
 
   if (file.binary) {
     return (
@@ -905,98 +1041,36 @@ function DiffBody({
   }
 
   return (
-    <div className="selectable min-h-0 flex-1 overflow-auto bg-diff font-mono">
-      {file.hunks.map((hunk) => {
-        const key = `${path}:${hunk.key}`;
-        const resolution = resolvedHunks[key];
-        return (
-          <div key={hunk.key} className="border-b border-subtle">
-            {/* Hunk header. */}
+    <div
+      ref={scrollRef}
+      className="selectable min-h-0 flex-1 overflow-auto bg-diff font-mono"
+      role="region"
+      aria-label={`Diff body for ${path}`}
+    >
+      <div
+        style={{
+          height: virtualizer.getTotalSize(),
+          position: "relative",
+          width: "100%",
+        }}
+      >
+        {virtualizer.getVirtualItems().map((vi) => {
+          const row = rows[vi.index];
+          if (!row) return null;
+          return (
             <div
-              className="diff-line diff-hunk-header flex items-center gap-2"
+              key={vi.key}
+              data-row-index={vi.index}
               style={{
-                position: "sticky",
+                position: "absolute",
                 top: 0,
-                zIndex: 2,
-                padding: "4px 12px",
-                fontSize: "var(--font-size-xs)",
+                left: 0,
+                width: "100%",
+                transform: `translateY(${vi.start}px)`,
               }}
             >
-              <span className="text-secondary">{hunk.header}</span>
-              {hunk.group ? (
-                <span
-                  className="rounded-sm bg-hover px-1.5 py-0.5 text-tertiary"
-                  style={{ fontSize: 10 }}
-                >
-                  {hunk.group}
-                </span>
-              ) : null}
-              <div className="ml-auto flex items-center gap-1">
-                {/* Restore hunk. */}
-                <button
-                  type="button"
-                  onClick={() => onRestore?.(hunk.key)}
-                  className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-tertiary hover:bg-hover hover:text-primary"
-                  style={{ fontSize: 10 }}
-                  title="Restore hunk"
-                >
-                  <RotateCcw size={10} />
-                  <span>Restore</span>
-                </button>
-                {/* Reject. */}
-                <button
-                  type="button"
-                  onClick={() => onHunkResolve(hunk.key, "reject")}
-                  disabled={resolution === "reject"}
-                  className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-tertiary hover:text-error disabled:opacity-50"
-                  style={{ fontSize: 10 }}
-                  title="Reject this change"
-                >
-                  <X size={10} />
-                  <span>Reject</span>
-                </button>
-                {/* Accept. */}
-                <button
-                  type="button"
-                  onClick={() => onHunkResolve(hunk.key, "accept")}
-                  disabled={resolution === "accept"}
-                  className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-tertiary hover:text-success disabled:opacity-50"
-                  style={{ fontSize: 10 }}
-                  title="Accept this change"
-                >
-                  <Check size={10} />
-                  <span>Accept</span>
-                </button>
-              </div>
-            </div>
-            {resolution ? (
-              <div
-                className="flex items-center gap-2 px-3 py-1"
-                style={{
-                  fontSize: "var(--font-size-xs)",
-                  color: resolution === "accept" ? "var(--color-success)" : "var(--color-error)",
-                  background:
-                    resolution === "accept"
-                      ? "color-mix(in srgb, var(--color-success) 6%, transparent)"
-                      : "color-mix(in srgb, var(--color-error) 6%, transparent)",
-                }}
-              >
-                <Check size={10} />
-                <span>{resolution === "accept" ? "Accepted" : "Rejected"}</span>
-                <button
-                  type="button"
-                  onClick={() => onHunkResolve(hunk.key, resolution === "accept" ? "reject" : "accept")}
-                  className="ml-auto text-tertiary hover:text-primary"
-                  style={{ fontSize: 10 }}
-                >
-                  Undo
-                </button>
-              </div>
-            ) : null}
-            {/* Lines. */}
-            {viewMode === "unified" ? (
-              <UnifiedHunkLines
-                hunk={hunk}
+              <DiffRowView
+                row={row}
                 path={path}
                 comments={comments}
                 commentDraft={commentDraft}
@@ -1005,215 +1079,23 @@ function DiffBody({
                 onSubmitComment={onSubmitComment}
                 onCancelComment={onCancelComment}
                 onAskAgentRevise={onAskAgentRevise}
+                onHunkResolve={onHunkResolve}
+                onRestore={onRestore}
+                focusIndex={focusIndex}
                 changeLineRefs={changeLineRefs}
-                focusIndexRef={{ current: focusIndex, getChangeIdx: () => ++changeIdx }}
               />
-            ) : (
-              <SplitHunkLines
-                hunk={hunk}
-                path={path}
-                comments={comments}
-                commentDraft={commentDraft}
-                onLineClick={onLineClick}
-                onCommentDraftChange={onCommentDraftChange}
-                onSubmitComment={onSubmitComment}
-                onCancelComment={onCancelComment}
-                onAskAgentRevise={onAskAgentRevise}
-                changeLineRefs={changeLineRefs}
-                focusIndexRef={{ current: focusIndex, getChangeIdx: () => ++changeIdx }}
-              />
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ────────────────────────── Unified lines ───────────────────────────────────
-
-interface FocusIndexRef {
-  current: number;
-  getChangeIdx: () => number;
-}
-
-function UnifiedHunkLines({
-  hunk,
-  path,
-  comments,
-  commentDraft,
-  onLineClick,
-  onCommentDraftChange,
-  onSubmitComment,
-  onCancelComment,
-  onAskAgentRevise,
-  changeLineRefs,
-  focusIndexRef,
-}: {
-  hunk: DiffHunk;
-  path: string;
-  comments: DiffComment[];
-  commentDraft: { path: string; lineNo: number; text: string } | null;
-  onLineClick: (path: string, lineNo: number) => void;
-  onCommentDraftChange: (text: string) => void;
-  onSubmitComment: () => void;
-  onCancelComment: () => void;
-  onAskAgentRevise?: (filePath: string, lineStart: number, lineEnd: number) => void;
-  changeLineRefs: React.MutableRefObject<Array<HTMLDivElement | null>>;
-  focusIndexRef: FocusIndexRef;
-}): JSX.Element {
-  return (
-    <div className="font-mono">
-      {hunk.lines.map((line) => {
-        const isChange = line.kind === "add" || line.kind === "del";
-        const idx = isChange ? focusIndexRef.getChangeIdx() : -1;
-        const isFocused = idx === focusIndexRef.current && isChange;
-        const lineNo = line.newNo ?? line.oldNo ?? 0;
-        const draftHere =
-          commentDraft && commentDraft.path === path && commentDraft.lineNo === lineNo;
-        const commentsHere = comments.filter(
-          (c) => c.filePath === path && c.lineNo === lineNo,
-        );
-        return (
-          <div key={line.key}>
-            <div
-              ref={(el) => {
-                if (isChange) {
-                  changeLineRefs.current[idx] = el;
-                }
-              }}
-              className={cn(
-                "diff-line group flex items-stretch hover:bg-hover",
-                line.kind === "add" && "diff-add",
-                line.kind === "del" && "diff-del",
-                line.kind === "context" && "diff-context",
-                isFocused && "ring-1 ring-inset",
-              )}
-              style={{
-                background: isFocused
-                  ? line.kind === "add"
-                    ? "color-mix(in srgb, var(--color-addition) 22%, transparent)"
-                    : line.kind === "del"
-                      ? "color-mix(in srgb, var(--color-deletion) 22%, transparent)"
-                      : "var(--bg-hover)"
-                  : undefined,
-              }}
-            >
-              {/* Line numbers. */}
-              <span
-                aria-hidden
-                className="flex-shrink-0 select-none text-tertiary"
-                style={{
-                  width: 48,
-                  padding: "0 8px",
-                  textAlign: "right",
-                  borderRight: "1px solid var(--border-subtle)",
-                  fontSize: "var(--font-size-xs)",
-                }}
-              >
-                {line.oldNo ?? ""}
-              </span>
-              <span
-                aria-hidden
-                className="flex-shrink-0 select-none text-tertiary"
-                style={{
-                  width: 48,
-                  padding: "0 8px",
-                  textAlign: "right",
-                  borderRight: "1px solid var(--border-subtle)",
-                  fontSize: "var(--font-size-xs)",
-                }}
-              >
-                {line.newNo ?? ""}
-              </span>
-              <span
-                aria-hidden
-                className="flex-shrink-0 select-none px-1"
-                style={{
-                  width: 18,
-                  textAlign: "center",
-                  color:
-                    line.kind === "add"
-                      ? "var(--color-addition)"
-                      : line.kind === "del"
-                        ? "var(--color-deletion)"
-                        : "var(--text-tertiary)",
-                }}
-              >
-                {line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "}
-              </span>
-              <code
-                className="flex-1 whitespace-pre select-text"
-                style={{ padding: "0 8px", fontSize: "var(--font-size-sm)" }}
-              >
-                {line.text || " "}
-              </code>
-              {/* Hover actions. */}
-              {line.kind !== "hunk-header" && (line.newNo ?? line.oldNo) !== null ? (
-                <div
-                  className="flex flex-shrink-0 items-center gap-0.5 pr-1 opacity-0 group-hover:opacity-100"
-                  style={{ transition: "opacity var(--duration-fast) var(--easing-default)" }}
-                >
-                  <button
-                    type="button"
-                    onClick={() => onLineClick(path, lineNo)}
-                    aria-label="Add comment"
-                    title="Add comment"
-                    className="flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
-                  >
-                    <MessageSquarePlus size={11} />
-                  </button>
-                  {isChange && onAskAgentRevise ? (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onAskAgentRevise(
-                          path,
-                          line.oldNo ?? line.newNo ?? 0,
-                          line.newNo ?? line.oldNo ?? 0,
-                        )
-                      }
-                      aria-label="Ask agent to revise selected code"
-                      title="Ask agent to revise"
-                      className="flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
-                    >
-                      <RefreshCw size={11} />
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
             </div>
-            {draftHere ? (
-              <CommentDraftRow
-                value={commentDraft?.text ?? ""}
-                onChange={onCommentDraftChange}
-                onSubmit={onSubmitComment}
-                onCancel={onCancelComment}
-              />
-            ) : null}
-            {commentsHere.length > 0 ? (
-              <div className="border-l-2 pl-2" style={{ borderColor: "var(--border-default)" }}>
-                {commentsHere.map((c) => (
-                  <div key={c.id} className="flex flex-col gap-0.5 py-1 px-2" style={{ fontSize: "var(--font-size-xs)" }}>
-                    <span className="text-secondary">{c.body}</span>
-                    <span className="font-mono text-tertiary" style={{ fontSize: 10 }}>
-                      {c.at}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-// ────────────────────────── Split lines ─────────────────────────────────────
+// ────────────────────────── Row renderer ────────────────────────────────────
 
-function SplitHunkLines({
-  hunk,
+function DiffRowView({
+  row,
   path,
   comments,
   commentDraft,
@@ -1222,10 +1104,12 @@ function SplitHunkLines({
   onSubmitComment,
   onCancelComment,
   onAskAgentRevise,
+  onHunkResolve,
+  onRestore,
+  focusIndex,
   changeLineRefs,
-  focusIndexRef,
 }: {
-  hunk: DiffHunk;
+  row: DiffRow;
   path: string;
   comments: DiffComment[];
   commentDraft: { path: string; lineNo: number; text: string } | null;
@@ -1234,93 +1118,399 @@ function SplitHunkLines({
   onSubmitComment: () => void;
   onCancelComment: () => void;
   onAskAgentRevise?: (filePath: string, lineStart: number, lineEnd: number) => void;
+  onHunkResolve: (hunkKey: string, decision: "accept" | "reject") => void;
+  onRestore?: (hunkKey: string) => void;
+  focusIndex: number;
   changeLineRefs: React.MutableRefObject<Array<HTMLDivElement | null>>;
-  focusIndexRef: FocusIndexRef;
 }): JSX.Element {
-  // Build aligned rows. For unmatched add/del rows, render the
-  // opposite side as empty.
-  const rows: Array<{ left: DiffLine | null; right: DiffLine | null; key: string }> = [];
-  {
-    let i = 0;
-    while (i < hunk.lines.length) {
-      const line = hunk.lines[i];
-      if (!line) {
-        i++;
-        continue;
-      }
-      if (line.kind === "del") {
-        const next = hunk.lines[i + 1];
-        if (next && next.kind === "add") {
-          rows.push({ left: line, right: next, key: `${line.key}-${next.key}` });
-          i += 2;
-        } else {
-          rows.push({ left: line, right: null, key: line.key });
-          i++;
-        }
-      } else if (line.kind === "add") {
-        rows.push({ left: null, right: line, key: line.key });
-        i++;
-      } else {
-        rows.push({ left: line, right: line, key: line.key });
-        i++;
-      }
-    }
+  if (row.kind === "hunk-header") {
+    const hunk = row.hunk;
+    return (
+      <div className="border-b border-subtle">
+        <div
+          className="diff-line diff-hunk-header flex items-center gap-2"
+          style={{
+            padding: "4px 12px",
+            fontSize: "var(--font-size-xs)",
+            background: "var(--bg-diff)",
+          }}
+        >
+          <span className="text-secondary">{hunk.header}</span>
+          {hunk.group ? (
+            <span
+              className="rounded-sm bg-hover px-1.5 py-0.5 text-tertiary"
+              style={{ fontSize: 10 }}
+            >
+              {hunk.group}
+            </span>
+          ) : null}
+          <div className="ml-auto flex items-center gap-1">
+            {/* Restore hunk. */}
+            <button
+              type="button"
+              onClick={() => onRestore?.(hunk.key)}
+              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-tertiary hover:bg-hover hover:text-primary"
+              style={{ fontSize: 10 }}
+              title="Restore hunk"
+              aria-label={`Restore hunk ${hunk.header}`}
+            >
+              <RotateCcw size={10} />
+              <span>Restore</span>
+            </button>
+            {/* Reject. */}
+            <button
+              type="button"
+              onClick={() => onHunkResolve(hunk.key, "reject")}
+              disabled={row.resolution === "reject"}
+              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-tertiary hover:text-error disabled:opacity-50"
+              style={{ fontSize: 10 }}
+              title="Reject this change"
+              aria-label={`Reject hunk ${hunk.header}`}
+            >
+              <X size={10} />
+              <span>Reject</span>
+            </button>
+            {/* Accept. */}
+            <button
+              type="button"
+              onClick={() => onHunkResolve(hunk.key, "accept")}
+              disabled={row.resolution === "accept"}
+              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-tertiary hover:text-success disabled:opacity-50"
+              style={{ fontSize: 10 }}
+              title="Accept this change"
+              aria-label={`Accept hunk ${hunk.header}`}
+            >
+              <Check size={10} />
+              <span>Accept</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
-
+  if (row.kind === "hunk-resolution") {
+    const resolution = row.resolution;
+    return (
+      <div
+        className="flex items-center gap-2 px-3 py-1"
+        style={{
+          fontSize: "var(--font-size-xs)",
+          color: resolution === "accept" ? "var(--color-success)" : "var(--color-error)",
+          background:
+            resolution === "accept"
+              ? "color-mix(in srgb, var(--color-success) 6%, transparent)"
+              : "color-mix(in srgb, var(--color-error) 6%, transparent)",
+        }}
+      >
+        <Check size={10} />
+        <span>{resolution === "accept" ? "Accepted" : "Rejected"}</span>
+        <button
+          type="button"
+          onClick={() => onHunkResolve(row.hunk.key, resolution === "accept" ? "reject" : "accept")}
+          className="ml-auto text-tertiary hover:text-primary"
+          style={{ fontSize: 10 }}
+        >
+          Undo
+        </button>
+      </div>
+    );
+  }
+  if (row.kind === "unified-line") {
+    return (
+      <UnifiedLineView
+        line={row.line}
+        path={path}
+        comments={comments}
+        commentDraft={commentDraft}
+        onLineClick={onLineClick}
+        onCommentDraftChange={onCommentDraftChange}
+        onSubmitComment={onSubmitComment}
+        onCancelComment={onCancelComment}
+        onAskAgentRevise={onAskAgentRevise}
+        changeIdx={row.changeIdx}
+        focused={row.changeIdx === focusIndex && row.changeIdx >= 0}
+        changeLineRefs={changeLineRefs}
+      />
+    );
+  }
+  // split-row
   return (
-    <div className="font-mono">
-      {rows.map((row) => {
-        const isChange = (row.left?.kind === "del") || (row.right?.kind === "add");
-        const idx = isChange ? focusIndexRef.getChangeIdx() : -1;
-        const isFocused = idx === focusIndexRef.current && isChange;
-        return (
+    <SplitRowView
+      left={row.left}
+      right={row.right}
+      path={path}
+      comments={comments}
+      commentDraft={commentDraft}
+      onLineClick={onLineClick}
+      onCommentDraftChange={onCommentDraftChange}
+      onSubmitComment={onSubmitComment}
+      onCancelComment={onCancelComment}
+      onAskAgentRevise={onAskAgentRevise}
+      changeIdx={row.changeIdx}
+      focused={row.changeIdx === focusIndex && row.changeIdx >= 0}
+      changeLineRefs={changeLineRefs}
+    />
+  );
+}
+
+// ────────────────────────── Unified line view ───────────────────────────────────
+
+/**
+ * Renders a single unified-mode diff line (and its inline comment draft +
+ * attached comments). Used inside the virtualized {@link DiffBody}.
+ */
+function UnifiedLineView({
+  line,
+  path,
+  comments,
+  commentDraft,
+  onLineClick,
+  onCommentDraftChange,
+  onSubmitComment,
+  onCancelComment,
+  onAskAgentRevise,
+  changeIdx,
+  focused,
+  changeLineRefs,
+}: {
+  line: DiffLine;
+  path: string;
+  comments: DiffComment[];
+  commentDraft: { path: string; lineNo: number; text: string } | null;
+  onLineClick: (path: string, lineNo: number) => void;
+  onCommentDraftChange: (text: string) => void;
+  onSubmitComment: () => void;
+  onCancelComment: () => void;
+  onAskAgentRevise?: (filePath: string, lineStart: number, lineEnd: number) => void;
+  changeIdx: number;
+  focused: boolean;
+  changeLineRefs: React.MutableRefObject<Array<HTMLDivElement | null>>;
+}): JSX.Element {
+  const isChange = line.kind === "add" || line.kind === "del";
+  const lineNo = line.newNo ?? line.oldNo ?? 0;
+  const draftHere =
+    commentDraft && commentDraft.path === path && commentDraft.lineNo === lineNo;
+  const commentsHere = comments.filter(
+    (c) => c.filePath === path && c.lineNo === lineNo,
+  );
+  return (
+    <div>
+      <div
+        ref={(el) => {
+          if (isChange && changeIdx >= 0) {
+            changeLineRefs.current[changeIdx] = el;
+          }
+        }}
+        className={cn(
+          "diff-line group flex items-stretch hover:bg-hover",
+          line.kind === "add" && "diff-add",
+          line.kind === "del" && "diff-del",
+          line.kind === "context" && "diff-context",
+          focused && "ring-1 ring-inset",
+        )}
+        style={{
+          background: focused
+            ? line.kind === "add"
+              ? "color-mix(in srgb, var(--color-addition) 22%, transparent)"
+              : line.kind === "del"
+                ? "color-mix(in srgb, var(--color-deletion) 22%, transparent)"
+                : "var(--bg-hover)"
+            : undefined,
+        }}
+      >
+        {/* Line numbers. */}
+        <span
+          aria-hidden
+          className="flex-shrink-0 select-none text-tertiary"
+          style={{
+            width: 48,
+            padding: "0 8px",
+            textAlign: "right",
+            borderRight: "1px solid var(--border-subtle)",
+            fontSize: "var(--font-size-xs)",
+          }}
+        >
+          {line.oldNo ?? ""}
+        </span>
+        <span
+          aria-hidden
+          className="flex-shrink-0 select-none text-tertiary"
+          style={{
+            width: 48,
+            padding: "0 8px",
+            textAlign: "right",
+            borderRight: "1px solid var(--border-subtle)",
+            fontSize: "var(--font-size-xs)",
+          }}
+        >
+          {line.newNo ?? ""}
+        </span>
+        <span
+          aria-hidden
+          className="flex-shrink-0 select-none px-1"
+          style={{
+            width: 18,
+            textAlign: "center",
+            color:
+              line.kind === "add"
+                ? "var(--color-addition)"
+                : line.kind === "del"
+                  ? "var(--color-deletion)"
+                  : "var(--text-tertiary)",
+          }}
+        >
+          {line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "}
+        </span>
+        <code
+          className="flex-1 whitespace-pre select-text"
+          style={{ padding: "0 8px", fontSize: "var(--font-size-sm)" }}
+          aria-label={
+            isChange
+              ? `${line.kind === "add" ? "Added" : "Removed"} line ${line.newNo ?? line.oldNo ?? ""}`
+              : undefined
+          }
+        >
+          {line.text || " "}
+        </code>
+        {/* Hover actions. */}
+        {line.kind !== "hunk-header" && (line.newNo ?? line.oldNo) !== null ? (
           <div
-            key={row.key}
-            ref={(el) => {
-              if (isChange) {
-                changeLineRefs.current[idx] = el;
-              }
-            }}
-            className={cn("flex items-stretch hover:bg-hover", isFocused && "ring-1 ring-inset")}
-            style={{
-              background: isFocused
-                ? "color-mix(in srgb, var(--color-primary) 8%, transparent)"
-                : undefined,
-            }}
+            className="flex flex-shrink-0 items-center gap-0.5 pr-1 opacity-0 group-hover:opacity-100"
+            style={{ transition: "opacity var(--duration-fast) var(--easing-default)" }}
           >
-            <SplitSide
-              line={row.left}
-              side="left"
-              path={path}
-              onLineClick={onLineClick}
-              onAskAgentRevise={onAskAgentRevise}
-              commentDraft={commentDraft}
-              onCommentDraftChange={onCommentDraftChange}
-              onSubmitComment={onSubmitComment}
-              onCancelComment={onCancelComment}
-              comments={comments}
-            />
-            <div style={{ width: 1, background: "var(--border-default)" }} />
-            <SplitSide
-              line={row.right}
-              side="right"
-              path={path}
-              onLineClick={onLineClick}
-              onAskAgentRevise={onAskAgentRevise}
-              commentDraft={commentDraft}
-              onCommentDraftChange={onCommentDraftChange}
-              onSubmitComment={onSubmitComment}
-              onCancelComment={onCancelComment}
-              comments={comments}
-            />
+            <button
+              type="button"
+              onClick={() => onLineClick(path, lineNo)}
+              aria-label="Add comment"
+              title="Add comment"
+              className="flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
+            >
+              <MessageSquarePlus size={11} />
+            </button>
+            {isChange && onAskAgentRevise ? (
+              <button
+                type="button"
+                onClick={() =>
+                  onAskAgentRevise(
+                    path,
+                    line.oldNo ?? line.newNo ?? 0,
+                    line.newNo ?? line.oldNo ?? 0,
+                  )
+                }
+                aria-label="Ask agent to revise selected code"
+                title="Ask agent to revise"
+                className="flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
+              >
+                <RefreshCw size={11} />
+              </button>
+            ) : null}
           </div>
-        );
-      })}
+        ) : null}
+      </div>
+      {draftHere ? (
+        <CommentDraftRow
+          value={commentDraft?.text ?? ""}
+          onChange={onCommentDraftChange}
+          onSubmit={onSubmitComment}
+          onCancel={onCancelComment}
+        />
+      ) : null}
+      {commentsHere.length > 0 ? (
+        <div className="border-l-2 pl-2" style={{ borderColor: "var(--border-default)" }}>
+          {commentsHere.map((c) => (
+            <div key={c.id} className="flex flex-col gap-0.5 py-1 px-2" style={{ fontSize: "var(--font-size-xs)" }}>
+              <span className="text-secondary">{c.body}</span>
+              <span className="font-mono text-tertiary" style={{ fontSize: 10 }}>
+                {c.at}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function SplitSide({
+// ────────────────────────── Split row view ─────────────────────────────────
+
+/**
+ * Renders a single split-mode row (paired left/right DiffLine). Used
+ * inside the virtualized {@link DiffBody}.
+ */
+function SplitRowView({
+  left,
+  right,
+  path,
+  comments,
+  commentDraft,
+  onLineClick,
+  onCommentDraftChange,
+  onSubmitComment,
+  onCancelComment,
+  onAskAgentRevise,
+  changeIdx,
+  focused,
+  changeLineRefs,
+}: {
+  left: DiffLine | null;
+  right: DiffLine | null;
+  path: string;
+  comments: DiffComment[];
+  commentDraft: { path: string; lineNo: number; text: string } | null;
+  onLineClick: (path: string, lineNo: number) => void;
+  onCommentDraftChange: (text: string) => void;
+  onSubmitComment: () => void;
+  onCancelComment: () => void;
+  onAskAgentRevise?: (filePath: string, lineStart: number, lineEnd: number) => void;
+  changeIdx: number;
+  focused: boolean;
+  changeLineRefs: React.MutableRefObject<Array<HTMLDivElement | null>>;
+}): JSX.Element {
+  const isChange = (left?.kind === "del") || (right?.kind === "add");
+  return (
+    <div
+      ref={(el) => {
+        if (isChange && changeIdx >= 0) {
+          changeLineRefs.current[changeIdx] = el;
+        }
+      }}
+      className={cn("flex items-stretch hover:bg-hover", focused && "ring-1 ring-inset")}
+      style={{
+        background: focused
+          ? "color-mix(in srgb, var(--color-primary) 8%, transparent)"
+          : undefined,
+      }}
+    >
+      <SplitSideView
+        line={left}
+        side="left"
+        path={path}
+        onLineClick={onLineClick}
+        onAskAgentRevise={onAskAgentRevise}
+        commentDraft={commentDraft}
+        onCommentDraftChange={onCommentDraftChange}
+        onSubmitComment={onSubmitComment}
+        onCancelComment={onCancelComment}
+        comments={comments}
+      />
+      <div style={{ width: 1, background: "var(--border-default)" }} />
+      <SplitSideView
+        line={right}
+        side="right"
+        path={path}
+        onLineClick={onLineClick}
+        onAskAgentRevise={onAskAgentRevise}
+        commentDraft={commentDraft}
+        onCommentDraftChange={onCommentDraftChange}
+        onSubmitComment={onSubmitComment}
+        onCancelComment={onCancelComment}
+        comments={comments}
+      />
+    </div>
+  );
+}
+
+function SplitSideView({
   line,
   side,
   path,

@@ -72,6 +72,13 @@ export function App(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => shouldShowOnboarding());
 
+  // Computer-use session state (SPEC §16). In production this would be
+  // driven by a `computer_use.started` event from the control plane;
+  // for now it's locally toggled via the command palette / keyboard.
+  const [computerUseActive, setComputerUseActive] = useState(false);
+  const [computerUseExpanded, setComputerUseExpanded] = useState(false);
+  const [computerUseHidden, setComputerUseHidden] = useState(false);
+
   // Initial data load.
   useEffect(() => {
     void refreshAll();
@@ -84,6 +91,8 @@ export function App(): JSX.Element {
   }, [refreshAll]);
 
   // ⌘K opens the command palette (SPEC §18). ⌘, opens Settings (SPEC §20).
+  // ⌘⇧C toggles a computer-use session (SPEC §16 — demo shortcut until
+  // the control plane emits computer_use.started events).
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -92,6 +101,11 @@ export function App(): JSX.Element {
       } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
         setSettingsOpen((o) => !o);
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        setComputerUseActive((a) => !a);
+        setComputerUseExpanded(false);
+        setComputerUseHidden(false);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -140,7 +154,22 @@ export function App(): JSX.Element {
     <>
       <Layout
         sidebar={<Sidebar />}
-        inspector={<Inspector />}
+        inspector={
+          <Inspector
+            computerUseSession={{
+              active: computerUseActive,
+              expanded: computerUseExpanded,
+              hidden: computerUseHidden,
+            }}
+            onComputerUseHide={() => setComputerUseHidden(true)}
+            onComputerUseStop={() => {
+              setComputerUseActive(false);
+              setComputerUseExpanded(false);
+              setComputerUseHidden(false);
+            }}
+            onComputerUseToggleExpanded={(expanded) => setComputerUseExpanded(expanded)}
+          />
+        }
         main={
           showNewTask ? (
             <NewTaskScreen />

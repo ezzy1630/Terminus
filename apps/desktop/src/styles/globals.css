@@ -7,6 +7,10 @@
  */
 
 @import "tailwindcss";
+/* xterm.js core CSS (SPEC §15 — real PTY integration). Imported here
+   so the rules are available app-wide and apply to whichever drawer
+   tab is mounted. */
+@import "@xterm/xterm/css/xterm.css";
 
 /* ────────────────────────── CSS Reset ─────────────────────────────────── */
 

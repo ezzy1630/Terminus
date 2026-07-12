@@ -4,10 +4,11 @@
  * Per SPEC §11: "The inspector must not be a fixed list of empty
  * sections. Sections appear only after relevant information exists."
  *
- * For the primary slice we surface three sections conditionally:
+ * For the primary slice we surface four sections conditionally:
  *   - Environment (when a task is selected)
  *   - Activity (when the selected task has emitted events)
  *   - Approvals (when an approval event has been observed)
+ *   - Computer Use (SPEC §16, when a computer-use session is active)
  *
  * Each section is independently collapsible. The inspector pins by
  * default and never reorders sections while the user is reading.
@@ -15,17 +16,35 @@
  * Per SPEC §11.1: floating rounded card, lightweight, restrained
  * maximum width. The wrapping Layout provides the card chrome — the
  * inspector itself is just scrollable content.
+ *
+ * Per SPEC §11: "Do not show Computer Use before computer use has
+ * occurred." The Computer Use section is omitted entirely when no
+ * session is active — we don't render an empty placeholder.
  */
 import { memo, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, GitBranch, ShieldAlert, Workflow } from "lucide-react";
+import { ChevronDown, ChevronRight, GitBranch, Monitor, ShieldAlert, Workflow } from "lucide-react";
 import { cn } from "../lib/cn";
 import { useSelectedTask, useSelectedTaskEvents, normalizeTaskStatus } from "../hooks/use-forge";
 import { statusLabel, StatusIndicator } from "./StatusIndicator";
+import { ComputerUsePiP, type ComputerUseState } from "./ComputerUsePiP";
+import { ComputerUsePlaceholder } from "./ComputerUsePlaceholder";
 import { formatDistanceToNowStrict } from "date-fns";
 import type { ForgeSseEvent } from "../types";
 
 interface InspectorProps {
   className?: string;
+  /** Computer-use session state. When undefined or inactive, the section is hidden. */
+  computerUseSession?: {
+    active: boolean;
+    expanded?: boolean;
+    hidden?: boolean;
+  };
+  /** Called when the user hides the PiP. */
+  onComputerUseHide?: () => void;
+  /** Called when the user stops the session. */
+  onComputerUseStop?: () => void;
+  /** Called when the user toggles expanded mode. */
+  onComputerUseToggleExpanded?: (expanded: boolean) => void;
 }
 
 interface InspectorSectionProps {
@@ -79,7 +98,13 @@ function NoSelection(): JSX.Element {
   );
 }
 
-function InspectorImpl({ className }: InspectorProps): JSX.Element {
+function InspectorImpl({
+  className,
+  computerUseSession,
+  onComputerUseHide,
+  onComputerUseStop,
+  onComputerUseToggleExpanded,
+}: InspectorProps): JSX.Element {
   const task = useSelectedTask();
   const events = useSelectedTaskEvents();
 
@@ -91,6 +116,9 @@ function InspectorImpl({ className }: InspectorProps): JSX.Element {
     () => events.some((ev) => ev.event.startsWith("approval.") || ev.event === "tool.authorized"),
     [events],
   );
+
+  // Local state for "Take over" — the host can override via props.
+  const [controlState, setControlState] = useState<ComputerUseState>("agent-controlled");
 
   if (!task) {
     return (
@@ -193,6 +221,31 @@ function InspectorImpl({ className }: InspectorProps): JSX.Element {
             style={{ fontSize: "var(--font-size-xs)" }}
           >
             Approval requests will appear here when the agent asks for permission.
+          </div>
+        </InspectorSection>
+      ) : null}
+
+      {/* Computer Use section — only when a session is active (SPEC §11). */}
+      {computerUseSession?.active ? (
+        <InspectorSection title="Computer Use" icon={<Monitor size={12} />} defaultOpen>
+          <div className="flex flex-col gap-2" aria-live="polite">
+            <ComputerUsePiP
+              expanded={computerUseSession.expanded}
+              hidden={computerUseSession.hidden}
+              onHide={onComputerUseHide}
+              onStop={onComputerUseStop}
+              onToggleExpanded={onComputerUseToggleExpanded}
+              onTakeOver={(next) => setControlState(next)}
+            />
+            <div
+              className="text-tertiary"
+              style={{ fontSize: "var(--font-size-xs)", lineHeight: 1.4 }}
+              aria-label={`Control state: ${controlState}`}
+            >
+              {controlState === "agent-controlled"
+                ? "The agent is driving your desktop. Use Take over to interrupt."
+                : "You are in control. Hand back to let the agent continue."}
+            </div>
           </div>
         </InspectorSection>
       ) : null}

@@ -17,13 +17,19 @@
     "package:dir": "electron-builder --mac --arm64 --dir"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.5",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/xterm": "^6.0.0",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "lucide-react": "^0.525.0",
+    "node-pty": "^1.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "zustand": "^5.0.6",
-    "clsx": "^2.1.1",
+    "react-draggable": "^4.7.0",
     "tailwind-merge": "^3.3.1",
-    "lucide-react": "^0.525.0",
-    "date-fns": "^4.1.0"
+    "zustand": "^5.0.6"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

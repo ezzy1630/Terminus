@@ -1,32 +1,50 @@
 use crate::error::ArtifactError;
 use crate::metadata::ArtifactMetadata;
+use crate::sqlite::SqliteMetadataStore;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Content-addressed artifact store.
 ///
 /// The store roots at `$FORGE_DATA/artifacts/` (or any directory passed to
-/// `open`). Files are laid out as `sha256/ab/cd/<hash>` and metadata as
-/// `metadata/<hash>.json`. Temp files live under `tmp/` and are renamed
-/// atomically into place.
-#[derive(Debug, Clone)]
+/// `open`). Files are laid out as `sha256/ab/cd/<hash>`, metadata lives in
+/// a SQLite database at `metadata.db` (primary) with a JSON sidecar at
+/// `metadata/<hash>.json` (fallback). Temp files live under `tmp/` and are
+/// renamed atomically into place.
+///
+/// The store is `Send + Sync` because the underlying SQLite connection is
+/// guarded by a `Mutex` shared via `Arc`. Cloning is cheap.
+#[derive(Clone)]
 pub struct ArtifactStore {
     root: PathBuf,
     max_bytes: u64,
+    sqlite: SqliteMetadataStore,
+}
+
+impl std::fmt::Debug for ArtifactStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArtifactStore")
+            .field("root", &self.root.display().to_string())
+            .field("max_bytes", &self.max_bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ArtifactStore {
-    /// Open or create a store rooted at `root`.
+    /// Open or create a store rooted at `root`. Creates the CAS directories
+    /// and the SQLite metadata database at `<root>/metadata.db`.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ArtifactError> {
         let root = root.into();
         for sub in ["sha256", "metadata", "tmp", "quarantine"] {
             fs::create_dir_all(root.join(sub))?;
         }
+        let sqlite = SqliteMetadataStore::open(&root.join("metadata.db"))?;
         Ok(Self {
             root,
             max_bytes: 4 * 1024 * 1024 * 1024, // 4 GiB default ceiling
+            sqlite,
         })
     }
 
@@ -39,9 +57,17 @@ impl ArtifactStore {
         &self.root
     }
 
+    /// Direct accessor for the SQLite metadata store. Used by GC and by
+    /// callers that want to add or query `artifact_links` rows.
+    pub fn sqlite(&self) -> &SqliteMetadataStore {
+        &self.sqlite
+    }
+
     /// Ingest bytes into the store. Returns the artifact reference and
     /// metadata. If the artifact already exists, returns the existing
-    /// metadata (re-ingest is idempotent).
+    /// metadata (re-ingest is idempotent). After the atomic rename + fsync,
+    /// the metadata row is upserted into the SQLite database. The JSON
+    /// sidecar is also written as a fallback.
     pub fn ingest(&self, bytes: &[u8]) -> Result<(ArtifactMetadata, forge_kernel_protocol::ArtifactRef), ArtifactError> {
         if bytes.len() as u64 > self.max_bytes {
             return Err(ArtifactError::TooLarge { max: self.max_bytes });
@@ -53,6 +79,24 @@ impl ArtifactStore {
         let hex_hash = &hash["sha256:".len()..];
         let cas_path = self.cas_path(hex_hash);
         let metadata_path = self.metadata_path(hex_hash);
+
+        // If the SQLite row already exists, treat the ingest as idempotent
+        // and return the existing metadata without touching the filesystem.
+        // (The CAS blob is content-addressed so a re-write would be a no-op
+        // anyway.)
+        if let Some(existing) = self.sqlite.get(&hash)? {
+            // Best-effort: ensure the JSON sidecar exists for tools that
+            // cannot read SQLite. Ignore errors here — SQLite is primary.
+            if !metadata_path.exists() {
+                let _ = fs::write(&metadata_path, existing.to_json().unwrap_or_default());
+            }
+            let artifact_ref = forge_kernel_protocol::ArtifactRef::new(
+                existing.hash.clone(),
+                existing.size_bytes,
+                existing.media_type.clone(),
+            );
+            return Ok((existing, artifact_ref));
+        }
 
         if !cas_path.exists() {
             // Stream into a temp file then atomic rename.
@@ -87,7 +131,7 @@ impl ArtifactStore {
 
         let media_type = infer_media_type(bytes);
         let mut metadata = ArtifactMetadata::new(hash.clone(), bytes.len() as u64, media_type);
-        // Persist metadata if missing.
+        // Persist metadata if missing (JSON sidecar fallback).
         if !metadata_path.exists() {
             fs::write(&metadata_path, metadata.to_json()?)?;
         } else if let Ok(s) = fs::read_to_string(&metadata_path) {
@@ -95,6 +139,9 @@ impl ArtifactStore {
                 metadata = existing;
             }
         }
+        // Upsert into SQLite (primary store).
+        let storage_path = cas_path.to_string_lossy().to_string();
+        self.sqlite.upsert(&metadata, &storage_path)?;
 
         let artifact_ref = forge_kernel_protocol::ArtifactRef::new(
             hash,
@@ -115,22 +162,74 @@ impl ArtifactStore {
         Ok(fs::read(&path)?)
     }
 
-    /// Fetch metadata for an artifact.
+    /// Fetch metadata for an artifact. Reads from SQLite first (primary
+    /// store); falls back to the JSON sidecar if SQLite has no row. If
+    /// neither exists but the blob is present, derives minimal metadata.
     pub fn metadata(&self, hash: &str) -> Result<ArtifactMetadata, ArtifactError> {
         let hex_hash = strip_sha256_prefix(hash)?;
         validate_hex_hash(hex_hash)?;
-        let path = self.metadata_path(hex_hash);
-        if !path.exists() {
-            // If the blob exists but metadata is missing, derive minimal metadata.
-            let blob = self.cas_path(hex_hash);
-            if blob.exists() {
-                let size = fs::metadata(&blob)?.len();
-                return Ok(ArtifactMetadata::new(hash.to_string(), size, "application/octet-stream"));
-            }
-            return Err(ArtifactError::NotFound(hash.to_string()));
+        // Primary: SQLite.
+        if let Some(meta) = self.sqlite.get(hash)? {
+            return Ok(meta);
         }
-        let s = fs::read_to_string(&path)?;
-        ArtifactMetadata::from_json(&s)
+        // Fallback: JSON sidecar.
+        let path = self.metadata_path(hex_hash);
+        if path.exists() {
+            let s = fs::read_to_string(&path)?;
+            if let Ok(meta) = ArtifactMetadata::from_json(&s) {
+                // Backfill SQLite so subsequent reads are fast.
+                let storage_path = self.cas_path(hex_hash).to_string_lossy().to_string();
+                let _ = self.sqlite.upsert(&meta, &storage_path);
+                return Ok(meta);
+            }
+        }
+        // Last resort: derive minimal metadata from the blob itself.
+        let blob = self.cas_path(hex_hash);
+        if blob.exists() {
+            let size = fs::metadata(&blob)?.len();
+            let meta = ArtifactMetadata::new(hash.to_string(), size, "application/octet-stream");
+            let storage_path = blob.to_string_lossy().to_string();
+            let _ = self.sqlite.upsert(&meta, &storage_path);
+            return Ok(meta);
+        }
+        Err(ArtifactError::NotFound(hash.to_string()))
+    }
+
+    /// Update the metadata for an existing artifact. Writes to BOTH the
+    /// SQLite store (primary) and the JSON sidecar (fallback). Use this
+    /// instead of writing the JSON sidecar directly so the two stores do
+    /// not diverge.
+    pub fn update_metadata(&self, meta: &ArtifactMetadata) -> Result<(), ArtifactError> {
+        let hex_hash = strip_sha256_prefix(&meta.hash)?;
+        validate_hex_hash(hex_hash)?;
+        let storage_path = self.cas_path(hex_hash).to_string_lossy().to_string();
+        self.sqlite.upsert(meta, &storage_path)?;
+        let metadata_path = self.metadata_path(hex_hash);
+        fs::write(&metadata_path, meta.to_json()?)?;
+        Ok(())
+    }
+
+    /// Create a link between an artifact and an owning entity (task, turn,
+    /// tool_call, verification_result, etc.) by purpose. Idempotent —
+    /// inserting a duplicate `(hash, owner_type, owner_id, purpose)` tuple
+    /// is silently ignored.
+    pub fn link(
+        &self,
+        hash: &str,
+        owner_type: &str,
+        owner_id: &str,
+        purpose: &str,
+    ) -> Result<(), ArtifactError> {
+        self.sqlite.link(hash, owner_type, owner_id, purpose)
+    }
+
+    /// List all artifact links for a given owner.
+    pub fn list_by_owner(
+        &self,
+        owner_type: &str,
+        owner_id: &str,
+    ) -> Result<Vec<crate::metadata::ArtifactLink>, ArtifactError> {
+        self.sqlite.list_by_owner(owner_type, owner_id)
     }
 
     /// Stream-copy an external file into the store. Useful for large outputs.
@@ -189,6 +288,19 @@ impl ArtifactStore {
             fs::remove_file(&meta)?;
         }
         Ok(())
+    }
+
+    /// SQLite-backed GC dry run. Finds artifact hashes (with `sha256:`
+    /// prefix) that have NO links and whose `retention_class` is NOT
+    /// `legal_hold`. These are candidates for garbage collection.
+    ///
+    /// Unlike [`gc_dry_run`](crate::store::ArtifactStore::gc_dry_run),
+    /// this method consults the SQLite `artifact_links` table rather than
+    /// the caller-supplied `live` set. Both can be used together: the
+    /// SQLite-based scan finds unlinked artifacts; the JSON-based scan
+    /// cross-checks against an external live set.
+    pub fn gc_dry_run_sqlite(&self) -> Result<Vec<String>, ArtifactError> {
+        self.sqlite.gc_dry_run()
     }
 }
 
@@ -301,5 +413,109 @@ mod tests {
         assert_eq!(art.media_type, "application/pdf");
         let (_, art) = store.ingest(b"plain text").unwrap();
         assert_eq!(art.media_type, "text/plain; charset=utf-8");
+    }
+
+    // ---------- SQLite-specific tests (SPEC §29.3 step 7-8) ----------
+
+    #[test]
+    fn ingest_writes_to_sqlite() {
+        let (_dir, store) = open_store();
+        let bytes = b"sqlite-persisted";
+        let (meta, art) = store.ingest(bytes).unwrap();
+        // The SQLite store MUST have a row for this artifact.
+        let fetched = store
+            .sqlite()
+            .get(&art.sha256)
+            .expect("sqlite get")
+            .expect("row present");
+        assert_eq!(fetched.hash, meta.hash);
+        assert_eq!(fetched.size_bytes, bytes.len() as u64);
+        assert_eq!(store.sqlite().count_artifacts().unwrap(), 1);
+    }
+
+    #[test]
+    fn metadata_reads_from_sqlite_first() {
+        let (dir, store) = open_store();
+        let bytes = b"primary-store";
+        let (meta, art) = store.ingest(bytes).unwrap();
+        // Delete the JSON sidecar — metadata() MUST still succeed via SQLite.
+        let hex = art.sha256.strip_prefix("sha256:").unwrap();
+        let json_path = dir.path().join("metadata").join(format!("{hex}.json"));
+        std::fs::remove_file(&json_path).unwrap();
+        let fetched = store.metadata(&art.sha256).unwrap();
+        assert_eq!(fetched.hash, meta.hash);
+        assert_eq!(fetched.size_bytes, bytes.len() as u64);
+    }
+
+    #[test]
+    fn metadata_falls_back_to_json_sidecar() {
+        let (dir, store) = open_store();
+        let bytes = b"fallback";
+        let (meta, art) = store.ingest(bytes).unwrap();
+        // Simulate SQLite corruption by removing the row. We use a fresh
+        // SQLite store so the JSON sidecar is the only source of truth.
+        let sqlite_path = dir.path().join("metadata.db");
+        // Close the current connection by dropping the store, then remove
+        // the SQLite file. Re-open — the JSON sidecar is still there.
+        drop(store);
+        std::fs::remove_file(&sqlite_path).unwrap();
+        // Also remove -wal and -shm if present.
+        let _ = std::fs::remove_file(dir.path().join("metadata.db-wal"));
+        let _ = std::fs::remove_file(dir.path().join("metadata.db-shm"));
+        let store2 = ArtifactStore::open(dir.path()).unwrap();
+        let fetched = store2.metadata(&art.sha256).unwrap();
+        assert_eq!(fetched.hash, meta.hash);
+        assert_eq!(fetched.size_bytes, bytes.len() as u64);
+    }
+
+    #[test]
+    fn link_creates_row_in_sqlite() {
+        let (_dir, store) = open_store();
+        let (_, art) = store.ingest(b"linked").unwrap();
+        store
+            .link(&art.sha256, "task", "task-42", "output")
+            .unwrap();
+        let links = store.list_by_owner("task", "task-42").unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].artifact_hash, art.sha256);
+        assert_eq!(links[0].purpose, "output");
+    }
+
+    #[test]
+    fn gc_dry_run_sqlite_finds_unlinked_artifacts() {
+        let (_dir, store) = open_store();
+        let (_, a) = store.ingest(b"linked").unwrap();
+        let (_, b) = store.ingest(b"unlinked").unwrap();
+        store.link(&a.sha256, "task", "task-1", "input").unwrap();
+        let collectable = store.gc_dry_run_sqlite().unwrap();
+        assert!(collectable.contains(&b.sha256));
+        assert!(!collectable.contains(&a.sha256));
+    }
+
+    #[test]
+    fn gc_dry_run_sqlite_skips_legal_hold() {
+        let (_dir, store) = open_store();
+        let (mut meta, art) = store.ingest(b"locked").unwrap();
+        meta.retention_class = crate::metadata::RetentionClass::LegalHold;
+        store.update_metadata(&meta).unwrap();
+        let collectable = store.gc_dry_run_sqlite().unwrap();
+        assert!(!collectable.contains(&art.sha256));
+    }
+
+    #[test]
+    fn update_metadata_writes_both_stores() {
+        let (dir, store) = open_store();
+        let (mut meta, art) = store.ingest(b"original").unwrap();
+        meta.retention_class = crate::metadata::RetentionClass::Audit;
+        store.update_metadata(&meta).unwrap();
+        // SQLite should reflect the new retention class.
+        let fetched = store.sqlite().get(&art.sha256).unwrap().unwrap();
+        assert_eq!(fetched.retention_class, crate::metadata::RetentionClass::Audit);
+        // JSON sidecar should also reflect the new retention class.
+        let hex = art.sha256.strip_prefix("sha256:").unwrap();
+        let json_path = dir.path().join("metadata").join(format!("{hex}.json"));
+        let s = std::fs::read_to_string(&json_path).unwrap();
+        let json_meta = crate::metadata::ArtifactMetadata::from_json(&s).unwrap();
+        assert_eq!(json_meta.retention_class, crate::metadata::RetentionClass::Audit);
     }
 }

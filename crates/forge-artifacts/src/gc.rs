@@ -131,9 +131,10 @@ mod tests {
         let (mut meta, a) = store.ingest(b"locked").unwrap();
         meta.retention_class = RetentionClass::LegalHold;
         let hex = hash_hex(&a.sha256);
-        // Re-write metadata with retention=legal_hold.
-        let metadata_path = store.root().join("metadata").join(format!("{hex}.json"));
-        std::fs::write(&metadata_path, serde_json::to_string(&meta).unwrap()).unwrap();
+        // Persist the legal_hold retention to BOTH stores via the store API.
+        // (Direct JSON writes would diverge from SQLite, which is now the
+        // primary store consulted by `metadata()`.)
+        store.update_metadata(&meta).unwrap();
         let live = HashSet::new();
         let report = store.gc_dry_run(&live).unwrap();
         assert!(report.collectable.is_empty());

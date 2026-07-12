@@ -23,8 +23,9 @@
  *
  * Per SPEC §24: compact mode = icons only.
  */
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Plus, Search, Settings, User } from "lucide-react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
 import { useForgeStore, usePinnedTasks, normalizeTaskStatus } from "../hooks/use-forge";
 import { useThemeStore } from "../hooks/use-theme";
@@ -200,8 +201,7 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
           {filtered.map((session) => {
             const collapsed = collapsedSessions.has(session.id);
             const tasks = tasksBySession[session.id] ?? [];
-            const visibleTasks = collapsed ? tasks.slice(0, 0) : tasks.slice(0, 8);
-            const hasMore = tasks.length > 8;
+            const visibleTasks = collapsed ? [] : tasks;
             return (
               <div key={session.id} className="flex flex-col">
                 {/* Project row. */}
@@ -217,6 +217,8 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
                   )}
                   style={{ height: "var(--row-height)", paddingLeft: 4, paddingRight: 6 }}
                   title={session.title}
+                  aria-expanded={!collapsed}
+                  aria-controls={`session-tasks-${session.id}`}
                 >
                   {tasks.length > 0 ? (
                     collapsed ? (
@@ -233,34 +235,26 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
                   >
                     {session.title}
                   </span>
+                  {tasks.length > 0 ? (
+                    <span
+                      className="flex-shrink-0 font-mono text-tertiary"
+                      style={{ fontSize: 10 }}
+                      aria-label={`${tasks.length} tasks`}
+                    >
+                      {tasks.length}
+                    </span>
+                  ) : null}
                 </button>
                 {/* Tasks under this session. */}
                 {!collapsed && visibleTasks.length > 0 ? (
-                  <div className="flex flex-col">
-                    {visibleTasks.map((task) => (
-                      <SidebarItem
-                        key={task.id}
-                        title={taskTitle(task)}
-                        status={normalizeTaskStatus(task.status)}
-                        updatedAt={task.updated_at}
-                        selected={task.id === selectedTaskId}
-                        pinned={pinnedTaskIds.has(task.id)}
-                        depth={1}
-                        onClick={() => selectTask(task.id)}
-                        onTogglePin={() => togglePin(task.id)}
-                      />
-                    ))}
-                    {hasMore ? (
-                      <button
-                        type="button"
-                        onClick={() => selectSession(session.id)}
-                        className="ml-7 mt-0.5 self-start rounded px-2 py-0.5 text-xs text-tertiary hover:bg-hover hover:text-secondary"
-                        style={{ fontSize: "var(--font-size-xs)" }}
-                      >
-                        Show {tasks.length - 8} more
-                      </button>
-                    ) : null}
-                  </div>
+                  <SessionTaskList
+                    id={`session-tasks-${session.id}`}
+                    tasks={visibleTasks}
+                    selectedTaskId={selectedTaskId}
+                    pinnedTaskIds={pinnedTaskIds}
+                    onSelectTask={selectTask}
+                    onTogglePin={togglePin}
+                  />
                 ) : null}
               </div>
             );
@@ -323,6 +317,132 @@ function SidebarSection({
         {title}
       </div>
       {children}
+    </div>
+  );
+}
+
+// ────────────────────────── Virtualized task list ───────────────────────────
+
+const VIRTUALIZATION_THRESHOLD = 50;
+
+/**
+ * Renders the tasks belonging to a single session.
+ *
+ * Per SPEC §25.1: virtualize long lists. We only switch on the
+ * virtualizer when a section has more than {@link VIRTUALIZATION_THRESHOLD}
+ * items — small lists render inline so they can use the parent's
+ * natural flow (and we avoid the absolute-positioning overhead).
+ *
+ * Row heights: 36px spacious / 28px compact (per design spec).
+ */
+function SessionTaskList({
+  id,
+  tasks,
+  selectedTaskId,
+  pinnedTaskIds,
+  onSelectTask,
+  onTogglePin,
+}: {
+  id: string;
+  tasks: Task[];
+  selectedTaskId: string | null;
+  pinnedTaskIds: Set<string>;
+  onSelectTask: (taskId: string) => void;
+  onTogglePin: (taskId: string) => void;
+}): JSX.Element {
+  const density = useThemeStore((s) => s.density);
+  const rowHeight = density === "compact" ? 28 : 36;
+  // The scroll element is the sidebar's outer scroll container. We
+  // find it by walking up to the nearest scrollable ancestor — but
+  // because we don't have a direct ref here, we use a local ref and
+  // let the virtualizer attach to the parent's scroll. In practice
+  // the closest scrollable ancestor IS the sidebar's task list.
+  const parentRef = useRef<HTMLDivElement | null>(null);
+
+  // Virtualize when >threshold items; otherwise render inline.
+  const shouldVirtualize = tasks.length > VIRTUALIZATION_THRESHOLD;
+
+  const virtualizer = useVirtualizer({
+    count: shouldVirtualize ? tasks.length : 0,
+    getScrollElement: () => {
+      // Walk up to find the scrollable ancestor. This is robust to
+      // re-renders without requiring the parent to forward a ref.
+      let el = parentRef.current?.parentElement ?? null;
+      while (el) {
+        const style = window.getComputedStyle(el);
+        if (
+          (style.overflowY === "auto" || style.overflowY === "scroll") &&
+          el.scrollHeight > el.clientHeight
+        ) {
+          return el;
+        }
+        el = el.parentElement;
+      }
+      return parentRef.current ?? null;
+    },
+    estimateSize: () => rowHeight,
+    overscan: 8,
+    enabled: shouldVirtualize,
+  });
+
+  if (!shouldVirtualize) {
+    return (
+      <div id={id} className="flex flex-col" ref={parentRef} role="list" aria-label="Tasks">
+        {tasks.map((task) => (
+          <SidebarItem
+            key={task.id}
+            title={taskTitle(task)}
+            status={normalizeTaskStatus(task.status)}
+            updatedAt={task.updated_at}
+            selected={task.id === selectedTaskId}
+            pinned={pinnedTaskIds.has(task.id)}
+            depth={1}
+            onClick={() => onSelectTask(task.id)}
+            onTogglePin={() => onTogglePin(task.id)}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  // Virtualized render. The outer div sets the total height; each
+  // virtual row is absolutely positioned inside it.
+  return (
+    <div
+      id={id}
+      ref={parentRef}
+      role="list"
+      aria-label={`Tasks (${tasks.length})`}
+      style={{ position: "relative", height: virtualizer.getTotalSize() }}
+    >
+      {virtualizer.getVirtualItems().map((vi) => {
+        const task = tasks[vi.index];
+        if (!task) return null;
+        return (
+          <div
+            key={task.id}
+            data-index={vi.index}
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              transform: `translateY(${vi.start}px)`,
+            }}
+          >
+            <SidebarItem
+              title={taskTitle(task)}
+              status={normalizeTaskStatus(task.status)}
+              updatedAt={task.updated_at}
+              selected={task.id === selectedTaskId}
+              pinned={pinnedTaskIds.has(task.id)}
+              depth={1}
+              onClick={() => onSelectTask(task.id)}
+              onTogglePin={() => onTogglePin(task.id)}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }

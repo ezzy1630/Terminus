@@ -16,17 +16,21 @@
  * event id, so streaming tokens that append to the last message don't
  * re-render earlier messages.
  *
- * Per SPEC §25.1: "Virtualize long conversations." For the primary
- * slice we use CSS containment (content-visibility: auto) as a
- * pragmatic stand-in. Full windowing can be layered in Phase 6 without
- * changing the public surface.
+ * Per SPEC §25.1: "Virtualize long conversations." We use
+ * `@tanstack/react-virtual` to window the message + activity-block
+ * list. Each row is dynamically measured (`measureElement`) so
+ * expanded activity blocks and long agent messages can grow without
+ * being clipped. Scroll position is sticky-at-bottom only when the
+ * user is already at the bottom — new messages arriving while the
+ * user is reading history don't yank them down.
  *
  * The feed consumes raw SSE events from the control plane and decodes
  * them into messages + activity blocks. Decoding is intentionally
  * defensive — every payload is `unknown` until we shape it.
  */
-import { memo, useEffect, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import { formatDistanceToNowStrict } from "date-fns";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { Message } from "./Message";
 import { ActivityBlock } from "./ActivityBlock";
 import { useSelectedTask, useSelectedTaskEvents } from "../hooks/use-forge";
@@ -269,6 +273,37 @@ function computeMetric(entries: ActivityEntry[], title: string): string {
   return `${entries.length} actions`;
 }
 
+// ────────────────────────── Virtualization ───────────────────────────────────
+
+/**
+ * A flattened feed item — either a message or an activity block. We
+ * interleave them in document order: messages appear in the order
+ * they were emitted, and activity blocks render below the agent
+ * message that triggered them.
+ */
+type FeedItem =
+  | { kind: "message"; message: ConversationMessage }
+  | { kind: "block"; block: ActivityBlockData };
+
+/**
+ * Estimate row heights for the virtualizer. The actual height is
+ * measured at runtime via `measureElement`. We pick modest estimates
+ * so the virtualizer's initial layout is in the right ballpark — over-
+ * estimating wastes a bit of padding, under-estimating causes a brief
+ * reflow when the row mounts. The defaults below match the typical
+ * message (~80px) and collapsed activity block (~40px) sizes from
+ * the design spec.
+ */
+function estimateItemHeight(item: FeedItem): number {
+  if (item.kind === "message") {
+    // User messages are short. Agent messages with code blocks are
+    // taller — 120 is a reasonable middle ground.
+    return item.message.role === "user" ? 80 : 120;
+  }
+  // Activity block collapsed header is 40px. Expanded can be 200px+.
+  return 40;
+}
+
 function ConversationImpl({ className }: ConversationProps): JSX.Element {
   const task = useSelectedTask();
   const events = useSelectedTaskEvents();
@@ -280,25 +315,70 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
     // event id is included so streaming appends trigger a re-decode.
   }, [events, task?.id, events.length, events[events.length - 1]?.id]);
 
+  // Build the flattened feed items list.
+  const items = useMemo<FeedItem[]>(() => {
+    const out: FeedItem[] = [];
+    for (const m of decoded.messages) out.push({ kind: "message", message: m });
+    for (const b of decoded.blocks) out.push({ kind: "block", block: b });
+    return out;
+  }, [decoded]);
+
   // Auto-scroll to bottom on new events, but only if the user is already
   // near the bottom (so we don't yank them while reading history).
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickRef = useRef(true);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (stickRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [decoded]);
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (i) => {
+      const item = items[i];
+      return item ? estimateItemHeight(item) : 80;
+    },
+    overscan: 8,
+    // measureElement is what makes dynamic heights work — the virtualizer
+    // measures the actual DOM node and updates its layout.
+    measureElement:
+      typeof window !== "undefined" && navigator.userAgent.includes("Firefox")
+        ? undefined // Firefox has a bug with measureElement + transform
+        : (el) => el?.getBoundingClientRect().height ?? 80,
+  });
 
-  const onScroll = (): void => {
+  // Stick to bottom when new items arrive AND the user was at the bottom.
+  const lastCountRef = useRef(items.length);
+  useEffect(() => {
+    if (items.length <= lastCountRef.current) {
+      lastCountRef.current = items.length;
+      return;
+    }
+    lastCountRef.current = items.length;
+    if (stickRef.current) {
+      virtualizer.scrollToIndex(items.length - 1, { align: "end" });
+    }
+  }, [items.length, virtualizer]);
+
+  const onScroll = useCallback((): void => {
     const el = scrollRef.current;
     if (!el) return;
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickRef.current = distFromBottom < 80;
-  };
+  }, []);
+
+  // Live region for screen readers — politely announces new messages
+  // (SPEC §28 / accessibility — streaming updates should be announced).
+  const liveMessage = useMemo(() => {
+    const last = items[items.length - 1];
+    if (!last) return "";
+    if (last.kind === "message") {
+      const m = last.message;
+      return m.role === "user"
+        ? `You sent a message`
+        : m.streaming
+          ? `Forge is responding`
+          : `Forge responded`;
+    }
+    return `Activity: ${last.block.title}`;
+  }, [items]);
 
   if (!task) {
     return (
@@ -324,7 +404,14 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
         overflowX: "hidden",
         padding: "24px 32px 64px",
       }}
+      role="feed"
+      aria-label="Conversation feed"
+      aria-busy={items.length === 0}
     >
+      {/* Polite live region — announces new messages for screen readers. */}
+      <div aria-live="polite" aria-atomic="false" style={{ position: "absolute", left: -9999, width: 1, height: 1, overflow: "hidden" }}>
+        {liveMessage}
+      </div>
       {/* Reading column. Prose stays narrow; blocks expand wider.
           Per SPEC §9.1: comfortable centered reading column. */}
       <div
@@ -369,35 +456,49 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
           </div>
         </div>
 
-        {/* Messages interleaved with activity blocks. We render messages
-            in order; activity blocks follow the message they were
-            emitted during. For simplicity in the primary slice, we
-            render all messages then all blocks at the bottom of the
-            relevant turn — Phase 5 will interleave precisely. */}
-        {decoded.messages.length === 0 && decoded.blocks.length === 0 ? (
+        {/* Empty state. */}
+        {items.length === 0 ? (
           <div className="py-8 text-center text-tertiary" style={{ fontSize: "var(--font-size-sm)" }}>
             Waiting for the first turn…
           </div>
         ) : null}
 
-        {decoded.messages.map((m) => (
-          <Message key={m.id} message={m} />
-        ))}
-
-        {/* Activity blocks — render after messages, slightly wider. */}
-        {decoded.blocks.length > 0 ? (
-          <div className="mt-6" style={{ maxWidth: "calc(var(--conversation-max-width) + 160px)" }}>
-            <div
-              className="mb-2 text-xs uppercase tracking-wide text-tertiary"
-              style={{ fontSize: "var(--font-size-xs)" }}
-            >
-              Activity
-            </div>
-            {decoded.blocks.map((b) => (
-              <ActivityBlock key={b.id} block={b} />
-            ))}
-          </div>
-        ) : null}
+        {/* Virtualized feed. The outer div sets the total height; each
+            virtual row is absolutely positioned inside it. */}
+        <div
+          style={{
+            height: virtualizer.getTotalSize(),
+            position: "relative",
+            width: "100%",
+          }}
+        >
+          {virtualizer.getVirtualItems().map((vi) => {
+            const item = items[vi.index];
+            if (!item) return null;
+            return (
+              <div
+                key={vi.key}
+                data-index={vi.index}
+                ref={virtualizer.measureElement}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  transform: `translateY(${vi.start}px)`,
+                }}
+              >
+                {item.kind === "message" ? (
+                  <Message message={item.message} />
+                ) : (
+                  <div style={{ maxWidth: "calc(var(--conversation-max-width) + 160px)" }}>
+                    <ActivityBlock block={item.block} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

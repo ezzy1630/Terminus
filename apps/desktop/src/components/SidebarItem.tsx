@@ -99,6 +99,11 @@ function SidebarItemImpl({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       aria-pressed={selected}
+      aria-label={
+        status
+          ? `${title}, status ${status}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
+          : `${title}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
+      }
       title={title}
       className={cn(
         "group relative flex cursor-default items-center gap-2 rounded-md text-sm",
@@ -138,6 +143,7 @@ function SidebarItemImpl({
           <span
             className="truncate text-tertiary"
             style={{ fontSize: "var(--font-size-xs)" }}
+            aria-hidden
           >
             {formatDistanceToNowStrict(new Date(updatedAt), { addSuffix: false })}
           </span>
@@ -149,7 +155,7 @@ function SidebarItemImpl({
               e.stopPropagation();
               onTogglePin();
             }}
-            aria-label={pinned ? "Unpin" : "Pin"}
+            aria-label={`${pinned ? "Unpin" : "Pin"} task ${title}`}
             title={pinned ? "Unpin" : "Pin"}
             className={cn(
               "flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover",

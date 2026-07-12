@@ -5,20 +5,30 @@
  * existing typed interfaces. Do not move harness logic into React components
  * or Electron renderer code."
  *
- * The preload exposes a minimal, safe IPC bridge so the renderer can:
- * - Read the Forge API base URL (configured in main process or env)
- * - Get the platform info for macOS-specific UI decisions
- * - Request native notifications
+ * The preload exposes three IPC bridges so the renderer can:
+ *
+ *   1. `forgeDesktop` — read the Forge API base URL, platform info, send
+ *      native notifications, control the window, and read/set the theme.
+ *
+ *   2. `forgeTerminal` — spawn/write/resize/kill PTY sessions and receive
+ *      their output stream (SPEC §15). Backed by `node-pty` in the main
+ *      process. The renderer attaches each session to an xterm.js Terminal
+ *      instance.
+ *
+ *   3. `forgeDesktop.getScreenSources` — request desktopCapturer sources for
+ *      the computer-use PiP (SPEC §16).
  *
  * All harness logic stays in the Rust kernel + TS control plane. The renderer
  * uses @forge/public-client to talk to the control plane over HTTP/SSE.
  */
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 const FORGE_API_BASE = process.env.FORGE_API_BASE ?? "http://127.0.0.1:3050";
 const FORGE_GATEWAY = process.env.FORGE_GATEWAY ?? "http://127.0.0.1:81";
 const FORGE_TOKEN = process.env.FORGE_TOKEN ?? "forge-control-dev-token";
 const PLATFORM = process.platform;
+
+// ────────────────────────── forgeDesktop ─────────────────────────────────────
 
 contextBridge.exposeInMainWorld("forgeDesktop", {
   apiBase: FORGE_API_BASE,
@@ -28,14 +38,61 @@ contextBridge.exposeInMainWorld("forgeDesktop", {
   isMac: PLATFORM === "darwin",
   // Native notification bridge (SPEC §5: "Use native notifications only when
   // the app is unfocused or a task requires attention")
-  notify: (title: string, body: string) =>
+  notify: (title: string, body: string): Promise<unknown> =>
     ipcRenderer.invoke("notify", { title, body }),
   // Window controls
-  windowMinimize: () => ipcRenderer.invoke("window:minimize"),
-  windowMaximize: () => ipcRenderer.invoke("window:maximize"),
-  windowClose: () => ipcRenderer.invoke("window:close"),
+  windowMinimize: (): Promise<unknown> => ipcRenderer.invoke("window:minimize"),
+  windowMaximize: (): Promise<unknown> => ipcRenderer.invoke("window:maximize"),
+  windowClose: (): Promise<unknown> => ipcRenderer.invoke("window:close"),
   // Theme
-  getTheme: () => ipcRenderer.invoke("theme:get"),
-  setTheme: (theme: "system" | "light" | "dark") =>
+  getTheme: (): Promise<"system" | "light" | "dark"> => ipcRenderer.invoke("theme:get"),
+  setTheme: (theme: "system" | "light" | "dark"): Promise<"system" | "light" | "dark"> =>
     ipcRenderer.invoke("theme:set", theme),
+  // Screen capture (SPEC §16 — computer-use PiP).
+  getScreenSources: (): Promise<Array<{ id: string; name: string; display_id?: string }>> =>
+    ipcRenderer.invoke("desktop:getScreenSources"),
+});
+
+// ────────────────────────── forgeTerminal ────────────────────────────────────
+
+/**
+ * PTY bridge. Each `spawn()` returns an opaque id; the renderer subscribes
+ * to per-id `data` and `exit` events.
+ *
+ * The spawn response carries an `error` field when node-pty could not be
+ * loaded (Linux sandbox without the native toolchain, missing prebuilt
+ * binary, etc.). In that case the renderer falls back to the
+ * StubTerminalSessionFactory so the drawer still renders a banner.
+ */
+contextBridge.exposeInMainWorld("forgeTerminal", {
+  spawn: (
+    cwd?: string,
+    command?: string,
+    cols?: number,
+    rows?: number,
+  ): Promise<{ id: string; label: string; cwd?: string; error?: string }> =>
+    ipcRenderer.invoke("forgeTerminal:spawn", { cwd, command, cols, rows }),
+  write: (termId: string, data: string): Promise<void> =>
+    ipcRenderer.invoke("forgeTerminal:write", termId, data),
+  resize: (termId: string, cols: number, rows: number): Promise<void> =>
+    ipcRenderer.invoke("forgeTerminal:resize", termId, cols, rows),
+  kill: (termId: string): Promise<void> =>
+    ipcRenderer.invoke("forgeTerminal:kill", termId),
+  // Per-id event listeners. Returns an unsubscribe.
+  onData: (termId: string, cb: (data: string) => void): (() => void) => {
+    const channel = `forgeTerminal:data:${termId}`;
+    const listener = (_e: IpcRendererEvent, data: string): void => cb(data);
+    ipcRenderer.on(channel, listener);
+    return () => {
+      ipcRenderer.removeListener(channel, listener);
+    };
+  },
+  onExit: (termId: string, cb: (exitCode: number) => void): (() => void) => {
+    const channel = `forgeTerminal:exit:${termId}`;
+    const listener = (_e: IpcRendererEvent, code: number): void => cb(code);
+    ipcRenderer.on(channel, listener);
+    return () => {
+      ipcRenderer.removeListener(channel, listener);
+    };
+  },
 });

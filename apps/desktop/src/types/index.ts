@@ -322,7 +322,16 @@ export interface ActivityBlock {
 }
 
 // ────────────────────────── Forge Desktop bridge ───────────────────────────
-// Exposed by Electron preload (electron/preload.ts).
+// Exposed by Electron preload (electron/preload.ts). The runtime `window`
+// augmentation lives in `src/types/global.d.ts` (alongside the
+// `forgeTerminal` bridge); the interfaces here are for code that imports
+// the typed shape directly.
+
+export interface ForgeScreenSource {
+  id: string;
+  name: string;
+  display_id?: string;
+}
 
 export interface ForgeDesktopBridge {
   apiBase: string;
@@ -334,12 +343,28 @@ export interface ForgeDesktopBridge {
   windowMinimize: () => Promise<unknown>;
   windowMaximize: () => Promise<unknown>;
   windowClose: () => Promise<unknown>;
-  getTheme: () => Promise<unknown>;
-  setTheme: (theme: Theme) => Promise<unknown>;
+  getTheme: () => Promise<"system" | "light" | "dark">;
+  setTheme: (theme: Theme) => Promise<"system" | "light" | "dark">;
+  getScreenSources: () => Promise<ForgeScreenSource[]>;
 }
 
-declare global {
-  interface Window {
-    forgeDesktop?: ForgeDesktopBridge;
-  }
+export interface ForgeTerminalSpawnResult {
+  id: string;
+  label: string;
+  cwd?: string;
+  error?: string;
+}
+
+export interface ForgeTerminalBridge {
+  spawn: (
+    cwd?: string,
+    command?: string,
+    cols?: number,
+    rows?: number,
+  ) => Promise<ForgeTerminalSpawnResult>;
+  write: (termId: string, data: string) => Promise<void>;
+  resize: (termId: string, cols: number, rows: number) => Promise<void>;
+  kill: (termId: string) => Promise<void>;
+  onData: (termId: string, cb: (data: string) => void) => () => void;
+  onExit: (termId: string, cb: (exitCode: number) => void) => () => void;
 }

@@ -1,74 +1,546 @@
 # Forge
 
-[![CI](https://img.shields.io/badge/CI-pending-lightgrey)](.github/workflows/ci.yml)
-[![Spec](https://img.shields.io/badge/SPEC.md-50%20sections%2C%2011%20appendices-blue)](SPEC.md)
-[![License](https://img.shields.io/badge/license-Apache--2.0%20%7C%20MIT-green)](LICENSE)
-[![Status](https://img.shields.io/badge/status-development-orange)](CHANGELOG.md)
+> A provider-neutral coding-agent operating system with a non-bypassable Rust effect kernel, an inspectable Context Compiler, evidence-based completion, and an eval gate for complexity.
 
-**Forge** is a provider-neutral coding-agent operating system with a non-bypassable Rust effect kernel, an inspectable Context Compiler, evidence-based completion, and an eval gate for complexity. It is local-first: a UI process may disconnect without stopping a task, a model provider may change between compatible turns, and a worker may crash and be reconciled — but a task is never complete solely because a model produced a completion statement.
+Forge is built from the [complete product, architecture, security, and implementation specification](SPEC.md) (9,550 lines, 50 sections, 11 appendices). The system uses a fork-assisted strangler architecture: the durable contracts, evidence, context manifests, and Rust effect boundary survive any component replacement.
 
-The durable product is the combination of a task/session runtime, a canonical Context Compiler, a provider-neutral model broker, a non-bypassable effect kernel, an artifact and evidence store, a verification engine, a capability-secured extension system, a selective agent scheduler, client surfaces, and an offline evaluation laboratory. See `SPEC.md` for the normative contract and `docs/architecture/overview.md` for the layered diagram.
+---
 
 ## Architecture
 
 ```
-CLIENTS  (TUI · CLI · Web · Desktop · IDE/ACP · SDK · CI · Remote supervisor)
-   │ Public API / ACP adapter
-CONTROL AND COGNITION PLANE — TypeScript, OpenCode-derived initially
-   │ privileged effects RPC          │ unprivileged capability RPC
-EXECUTION/SECURITY MICROKERNEL        CAPABILITY PLANE
-(Rust, non-bypassable)               (built-in tools, skills, MCP, plugins, adapters)
-   │
-WORKSPACES (local worktrees · containers · gVisor · micro-VMs · remote sandboxes)
+┌──────────────────────────────────────────────────────────────────┐
+│ CLIENTS                                                          │
+│ TUI · CLI · Desktop (Electron) · IDE/ACP · SDK · CI             │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │ Public API / SSE (SPEC §30, §32)
+┌──────────────────────────────▼───────────────────────────────────┐
+│ CONTROL AND COGNITION PLANE — TypeScript                        │
+│                                                                  │
+│ Session/task engine     Context Compiler       Provider renderers│
+│ Model broker            Scope/policy coordinator Agent scheduler │
+│ Verification planner    Capability registry   External adapters │
+└───────────────┬───────────────────────────┬──────────────────────┘
+                │ privileged effects RPC    │ unprivileged capability RPC
+┌───────────────▼────────────────────┐  ┌───▼──────────────────────┐
+│ EXECUTION/SECURITY MICROKERNEL     │  │ CAPABILITY PLANE         │
+│ Rust, non-bypassable               │  │                          │
+│                                    │  │ Built-in tools · Skills  │
+│ Sandbox broker (Bubblewrap/Seatbelt)│  │ MCP servers · Plugins   │
+│ PTY/process/job manager            │  │ External harness adapters│
+│ FS snapshot/edit transactions      │  │                          │
+│ Network egress proxy               │  │ Runs out of process      │
+│ Secret broker                      │  │                          │
+│ Resource/cgroup limits             │  │                          │
+│ LSP/DAP/Tree-sitter services       │  │                          │
+│ Artifact store (CAS + SQLite)      │  │                          │
+└───────────────┬────────────────────┘  └──────────────────────────┘
+                │
+┌───────────────▼──────────────────────────────────────────────────┐
+│ WORKSPACES                                                       │
+│ Local worktrees · containers · gVisor · micro-VMs · remote      │
+└──────────────────────────────────────────────────────────────────┘
 
-EVIDENCE/EVAL/EVOLUTION PLANE  ·  DATA PLANE (SQLite/WAL · events · CAS · Git · OTel · Parquet)
+┌──────────────────────────────────────────────────────────────────┐
+│ EVIDENCE, EVALUATION, AND EVOLUTION PLANE (Python)              │
+│ Exact manifests · artifacts · traces · replay · ablations       │
+│ Security conformance · A/B tests · cost/cache analytics         │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ DATA PLANE                                                       │
+│ SQLite/WAL · semantic event log · content-addressed blobs       │
+│ Git/worktrees · FTS5/BM25 · OpenTelemetry · Parquet analytics   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-See `docs/architecture/overview.md` for the full diagram and `docs/architecture/trust-boundaries.md` for the trust-zone model (Z0–Z5).
+### Non-bypassability invariant (SPEC §5.2)
+
+> No model-facing process, TypeScript module, plugin, skill script, MCP server, or external agent can directly spawn a host process, mutate a file, access a secret, or open a network connection outside the Rust broker.
+
+All effects cross the Rust kernel boundary. The control plane has no ambient authority. Plugins run in separate processes with capabilities. Secrets are short-lived process capabilities, never environment-wide values.
+
+---
+
+## Repository structure
+
+```
+forge/
+├── apps/
+│   ├── desktop/              # Electron + React + TypeScript macOS app
+│   ├── tui/                  # Terminal client (primary per SPEC §43.4)
+│   ├── cli/                  # Non-interactive CLI for CI/automation
+│   └── ide-acp/             # ACP adapter for editor integration
+├── packages/                 # 27 TypeScript packages (domain, context, providers, ...)
+├── crates/                   # 19 Rust crates (kernel, sandbox, process, patch, ...)
+├── mini-services/
+│   ├── forge-kernel/         # Rust kernel HTTP service (port 3040)
+│   └── forge-control/        # TS control plane HTTP service (port 3050)
+├── python/forge_evals/       # Python evaluation laboratory
+├── adapters/                 # External harness adapters (codex, claude-code, pi, ...)
+├── skills/                   # Agent Skills (builtin + fixtures)
+├── capability-packs/         # Tool packs (web, github, database, debugger, ...)
+├── policies/                 # Sandbox, command, network, secrets, organizations
+├── prompts/                  # Authority, provider-renderer, checkpoint, delegation, review, memory
+├── schemas/                  # Domain JSON Schemas, event catalog, tool definitions
+├── evals/                    # Benchmark suites, task packages, graders, security tests
+├── proto/                    # Protobuf kernel protocol (Appendix D)
+├── migrations/sqlite/        # SQL migrations (Appendix C)
+├── prisma/                   # Prisma schema (TypeScript-facing)
+├── docs/                     # Architecture, ADRs, runbooks, security, plans
+├── upstream/                 # OpenCode pin + divergence budget
+├── scripts/                  # Start services, migrations, codegen
+├── tools/                    # Codegen, boundary checks, scaffolding
+├── AGENTS.md                 # Root repository instructions (Appendix G)
+├── SECURITY.md               # Trust zones, threat model, non-bypassability
+├── CONTRIBUTING.md           # Contribution guide + PR template
+├── SPEC.md                   # The 9,550-line normative specification
+└── justfile                  # Root task runner (SPEC §43.7)
+```
+
+---
 
 ## Quickstart
 
+### Prerequisites
+
+- **Rust** 1.97+ (`rustup`)
+- **Bun** 1.3+ (TypeScript runtime + package manager)
+- **Python** 3.12+ with **uv**
+- **just** (task runner)
+- **macOS** for desktop app packaging (Linux for development)
+
+### Start the services
+
 ```bash
-# 1. Install mise and bootstrap the pinned toolchain.
-curl https://mise.run | sh
-just bootstrap
+# Start the Rust kernel (port 3040) + TS control plane (port 3050)
+bash scripts/start-mini-services.sh
 
-# 2. Build everything.
-just codegen-check && just build
+# Start the Next.js API surface page (port 3000, via Caddy gateway on :81)
+bash scripts/start-next.sh
 
-# 3. Run the mini-services + dashboard (3 terminals).
-just run-kernel   # Rust kernel on :3040
-just run-control  # TS control plane on :3050
-just run-tui      # Next.js dashboard on :3000
+# Start the desktop app (on macOS)
+cd apps/desktop && bun install && bun run dev:electron
 ```
 
-Open <http://localhost:3000> for the Forge Control Plane dashboard. The Caddy gateway routes to mini-services via `?XTransformPort=3040` or `?XTransformPort=3050`.
+### Verify
 
-Or run all three supervised: `just run`.
+```bash
+# Kernel health
+curl -sS http://127.0.0.1:3040/v1/health \
+  -X POST -H "Authorization: Bearer forge-kernel-dev-token" -d '{}'
 
-## What's built
+# Control plane health
+curl -sS http://127.0.0.1:3050/v1/system/health \
+  -H "Authorization: Bearer forge-control-dev-token"
 
-| Component | Status | Tests |
-|---|---|---|
-| Rust kernel (19 crates) | Scaffolded | 115 passing |
-| TS control plane (26 packages, ~11k lines) | Scaffolded | — |
-| Next.js dashboard (5,283 lines) | Scaffolded | — |
-| Python eval lab (12,711 lines) | Functional | 158/175 passing |
-| Declarative config (skills, policies, prompts, schemas, evals, adapters) | 125 files | YAML/JSON validated |
-| Governance (30 ADRs, runbooks, security docs) | This task | — |
+# End-to-end: create workspace → session → task → turn → COMPLETED
+W=$(curl -sS -X POST http://127.0.0.1:3050/v1/workspaces/open \
+  -d '{"root_uri":"/tmp/forge-demo"}' \
+  -H "Authorization: Bearer forge-control-dev-token" | jq -r .id)
 
-See `CHANGELOG.md` for the full 0.1.0 inventory.
+S=$(curl -sS -X POST http://127.0.0.1:3050/v1/sessions \
+  -d "{\"workspace_id\":\"$W\",\"title\":\"demo\"}" \
+  -H "Authorization: Bearer forge-control-dev-token" \
+  | jq -r '.id,.active_thread_id')
+SID=$(echo "$S" | head -1); TID=$(echo "$S" | tail -1)
 
-## Documentation
+T=$(curl -sS -X POST http://127.0.0.1:3050/v1/tasks \
+  -d "{\"session_id\":\"$SID\",\"thread_id\":\"$TID\",\"objective\":\"demo\"}" \
+  -H "Authorization: Bearer forge-control-dev-token" | jq -r .id)
 
-- `SPEC.md` — the normative specification (9,550 lines).
-- `docs/architecture/` — subsystem deep dives.
-- `docs/decisions/` — 30 ADRs from Appendix H.
-- `docs/runbooks/` — operational runbooks.
-- `docs/security/` — threat model, bypass register, non-bypassability tests.
-- `docs/plans/roadmap.md` — milestones M0–M12.
-- `docs/plans/pr-sequence.md` — first 40 PRs.
+curl -sS -X POST "http://127.0.0.1:3050/v1/tasks/$T/start" \
+  -H "Authorization: Bearer forge-control-dev-token" > /dev/null
+
+curl -sS -X POST http://127.0.0.1:3050/v1/turns \
+  -d "{\"thread_id\":\"$TID\",\"task_id\":\"$T\",\"user_input\":\"hello forge\"}" \
+  -H "Authorization: Bearer forge-control-dev-token" > /dev/null
+
+sleep 5
+
+# Task should be COMPLETED with verification DAG passed
+curl -sS "http://127.0.0.1:3050/v1/tasks/$T" \
+  -H "Authorization: Bearer forge-control-dev-token" | jq '{status,phase}'
+```
+
+### Use the clients
+
+```bash
+# TUI (primary client)
+bun apps/tui/src/index.ts health
+bun apps/tui/src/index.ts sessions
+bun apps/tui/src/index.ts events <task-id>
+
+# CLI (CI/automation)
+bun apps/cli/src/index.ts health
+bun apps/cli/src/index.ts new-task --session <id> --thread <id> --objective "fix the bug"
+bun apps/cli/src/index.ts wait <task-id> --timeout 300
+
+# Desktop app (macOS)
+cd apps/desktop && bun run dev:electron
+```
+
+---
+
+## Implementation stack
+
+### Rust — trusted and performance-sensitive (SPEC §43.1)
+
+The non-bypassable effect kernel. All process, filesystem, network, secret, and patch operations cross this boundary.
+
+| Crate | Responsibility | Tests |
+|---|---|---:|
+| `forge-kernel` | Service assembly (13 service groups) | 0 |
+| `forge-kernel-protocol` | Request/response types, error codes | 13 |
+| `forge-authz` | Capability tokens (HMAC, audience, nonce, revocation) | 5 |
+| `forge-policy` | Command policy engine (strictest-wins rule evaluation) | 8 |
+| `forge-sandbox` | Sandbox backend trait + `LocalRestrictive` | 3 |
+| `forge-sandbox-linux` | Bubblewrap backend (real bwrap argv construction) | 18 |
+| `forge-sandbox-macos` | Seatbelt detection + honest reporting | 4 |
+| `forge-sandbox-windows` | AppContainer detection + honest reporting | 4 |
+| `forge-sandbox-container` | Container/micro-VM backend stub | 2 |
+| `forge-process` | Process manager (env_clear, PTY, process groups, timeout) | 6 |
+| `forge-jobs` | Durable job state machine + recovery | 12 |
+| `forge-fs` | Safe path resolution (traversal/symlink rejection) | 13 |
+| `forge-patch` | Transactional edit engine (journal, snapshots, rollback) | 10 |
+| `forge-artifacts` | CAS (sha256/ab/cd layout, atomic rename, SQLite metadata) | 25 |
+| `forge-secrets` | Secret broker (short-lived handles, redaction) | 11 |
+| `forge-egress` | Network egress proxy (allowlist, DNS, private-address denial) | 7 |
+| `forge-code-intel` | Tree-sitter symbol index | 4 |
+| `forge-extension-runtime` | WASI extension host stub | 4 |
+| `forge-git` | Protected worktree/commit/merge operations | 3 |
+| `forge-kernel-testkit` | Fakes, builders, in-memory stores | 7 |
+| **Total** | | **205** |
+
+### TypeScript — rapidly changing product/cognition (SPEC §43.2)
+
+The control plane. Owns sessions, tasks, context compiler, providers, orchestration, verification, memory, and the public API. No ambient effect authority.
+
+| Package | Responsibility |
+|---|---|
+| `@forge/domain` | Canonical types, state machines, typed errors (2,032 lines) |
+| `@forge/runtime-protocol` | 40+ semantic event types, SSE encoder/decoder |
+| `@forge/context-ir` | Context fragments, source descriptors, exactness classes |
+| `@forge/context-compiler` | 16-step assembly algorithm, retrieval pipeline, budget allocator |
+| `@forge/provider-core` | Provider-neutral broker, capability snapshots, cost accounting |
+| `@forge/provider-{openai,anthropic,google,local}` | Provider-specific renderers |
+| `@forge/model-router` | Deterministic routing, rate limiting, circuit breaker |
+| `@forge/task-runtime` | Task lifecycle, contract versioning, scope ledger |
+| `@forge/session-runtime` | Session/thread/turn services, context epoch lifecycle |
+| `@forge/orchestration` | Scheduler, delegation, worktree ownership, loop detection (10 signals), budget control, cancellation |
+| `@forge/verification` | DAG engine (parallel execution), 17 predicate types, changed-code invalidation, flaky-test policy |
+| `@forge/memory` | Candidate extraction, consolidation, retrieval, working memory |
+| `@forge/capability-registry` | Skills, MCP, plugins, activation lifecycle |
+| `@forge/extension-host` | WASI/Process hosts, hook semantics |
+| `@forge/adapter-sdk` | External harness adapter SDK |
+| `@forge/policy-coordinator` | Bridges task contracts and kernel capability requests |
+| `@forge/artifact-client` | Artifact ingest/get/link/gc |
+| `@forge/observability` | OTel spans, structured logging, metrics |
+| `@forge/config` | Layered typed configuration (defaults < org < user < workspace < task) |
+| `@forge/testkit` | Fake provider, fake kernel, builders |
+| `@forge/public-api` | HTTP API definitions, error envelope, SSE, 18 resource groups |
+| `@forge/public-client` | Generated-style TypeScript client with SSE subscription |
+| `@forge/open-code-bridge` | OpenCode compatibility facade, bypass register, divergence budget |
+| `@forge/aci` | Agent-Computer Interface (7 tools, ToolRegistry, ProgressiveDisclosure) |
+| **Total** | **27 packages, 12,000+ lines, 0 typecheck errors** |
+
+### Python — offline/non-privileged research (SPEC §43.3)
+
+The evaluation laboratory. Never on the production enforcement path.
+
+| Module | Responsibility |
+|---|---|
+| `runners/` | Harness runner, cross-harness comparison, fake provider, mini-SWE adapter, trajectory recorder |
+| `graders/` | End-state, acceptance, security (11 graders), conformance |
+| `analysis/` | Load runs, aggregate, cost analysis, cache analysis, regression detector |
+| `statistics/` | Paired t-test, bootstrap CI, multiple comparisons, effect size, non-inferiority |
+| `dashboards/` | Cohort, feature contribution, security report |
+| `research/` | Context ablations, ACI ablations, orchestration ablations, routing research |
+| **Total** | **51 modules, 12,711 lines, 200 tests passing** |
+
+### Data (SPEC §7.3, §29)
+
+- **SQLite/WAL** — operational state, indexes, leases, task ledgers
+- **Semantic event log** — append-only audit events (task/tool/effect/verification transitions)
+- **Content-addressed artifact store** — CAS with sha256 layout + SQLite metadata bridge
+- **Git/worktrees** — repository state and isolated changes
+- **FTS5/BM25** — lexical retrieval for source files and memory claims
+- **OpenTelemetry** — traces, metrics, structured logs
+- **Parquet/DuckDB** — analytical exports for eval analysis
+
+---
+
+## Clients
+
+### Desktop application (SPEC §43.4, desktop UI spec)
+
+A production-quality Electron + Vite + React + TypeScript macOS-native desktop application at `apps/desktop/`.
+
+- **Real PTY** — `node-pty` + `xterm.js` terminal drawer with multi-tab, resize, search, session preservation
+- **Full virtualization** — `@tanstack/react-virtual` for conversations (thousands of messages), sidebar lists (thousands of tasks), and diff viewers (10k+ lines)
+- **Computer-use PiP** — draggable, resizable picture-in-picture with `desktopCapturer` screen capture, pause/resume, expand-to-main-canvas
+- **Command palette** (⌘K) — fuzzy search, grouped results, keyboard navigation, <100ms open
+- **Diff viewer** — unified + side-by-side, hunk accept/reject/restore, inline comments, ask-agent-to-revise
+- **Dynamic inspector** — sections appear only when relevant (Environment, Activity, Approvals, Computer Use, Subagents, Terminal, Changes, Verification)
+- **Onboarding** — 4-step flow (Welcome → Project → Tools → First task)
+- **Settings** — 14 categories with search, per-setting reset, immediate appearance preview
+- **112 tests passing** (API, components, layout, theme)
+- **13,532 lines** across 40 files
+
+```bash
+cd apps/desktop
+bun install
+bun run dev:electron    # Vite + Electron concurrently
+bun run package         # Produces release/Forge-0.1.0-arm64.dmg
+```
+
+### TUI (SPEC §43.4 primary client)
+
+```bash
+bun apps/tui/src/index.ts health       # System + kernel health
+bun apps/tui/src/index.ts sessions     # List sessions
+bun apps/tui/src/index.ts tasks <sid>  # List tasks in a session
+bun apps/tui/src/index.ts events [tid] # Subscribe to SSE event stream
+bun apps/tui/src/index.ts new          # Create workspace+session+task+turn
+```
+
+### CLI (SPEC §42.1 non-interactive)
+
+```bash
+bun apps/cli/src/index.ts health
+bun apps/cli/src/index.ts new-task --session <id> --thread <id> --objective "fix bug"
+bun apps/cli/src/index.ts start-turn --thread <id> --task <id> --input "fix it"
+bun apps/cli/src/index.ts wait <task-id> --timeout 300
+bun apps/cli/src/index.ts events --task <id>    # SSE as JSONL
+```
+
+### IDE/ACP (SPEC §32.6)
+
+ACP-over-stdio JSON-RPC adapter for editor integration. Not privileged — calls the public API only.
+
+---
+
+## Security (SPEC §13, §27, §36)
+
+### Trust zones (SPEC §27.2)
+
+| Zone | Examples | Trust | Ambient authority |
+|---|---|---|---|
+| Z0 | kernel policy engine, secret broker | highest | narrowly defined host capabilities |
+| Z1 | control plane, signed first-party clients | trusted, non-privileged | no raw process/fs/network authority |
+| Z2 | built-in tools, code-intelligence workers | constrained | explicit kernel grants |
+| Z3 | first-party plugins, adapters | partially trusted | declared capabilities only |
+| Z4 | third-party plugins, MCP servers, external harnesses | untrusted | isolated capability grants only |
+| Z5 | model output, repository text, web content, issues, logs | untrusted data | none |
+
+### Enforcement (SPEC §31.3)
+
+Every kernel effect request follows the 14-step validation order:
+1. authenticate connection → 2. validate schema → 3. validate capability token → 4. resolve workspace/sandbox → 5. canonicalize paths (reject traversal/symlink escape) → 6. classify effect + taint → 7. evaluate command/resource policy → 8. resolve approval → 9. reserve budgets → 10. persist AUTHORIZED state → 11. execute → 12. stream bounded observations → 13. settle + persist evidence → 14. release leases
+
+### Capability tokens (SPEC §31.6)
+
+Short-lived, audience-restricted, nonce-protected, revocable tokens bound to:
+- principal, session, task, workspace
+- operation classes (Read, Patch, Exec, Job, Sandbox, Policy, Secret, Network, CodeIntel, Extension, Git, ArtifactIngest, Admin)
+- max scope (workspace_paths, network_destinations, secret_capabilities)
+
+**10 end-to-end tests** verify: operation-class enforcement, path-scope enforcement, network-destination enforcement, secret-capability enforcement, expiry, revocation, audience mismatch, signature tampering.
+
+### Sandbox backends (SPEC §13.4, §36.5-§36.8)
+
+- **Linux**: Bubblewrap detection + real `bwrap` argv construction (`--unshare-all`, `--ro-bind`, `--proc`, `--dev`, `--die-with-parent`, `--new-session`, `--cap-drop ALL`). Reports `Enforced` when bwrap is available; honestly reports `Degraded` when not.
+- **macOS**: Seatbelt (`sandbox-exec`) detection. Reports `Degraded` with "profile generation not implemented" note.
+- **Windows**: AppContainer/Job Object detection. Reports `Degraded` with "CreateProcess+Job Object wiring not implemented" note.
+- **Container/micro-VM**: Stub for gVisor/Firecracker backends.
+
+**Never silently downgrade** (SPEC §13.4): the UI displays effective enforcement at all times.
+
+---
+
+## Persistence (SPEC §29)
+
+### SQLite requirements (SPEC §29.2)
+
+- WAL journal mode, foreign keys ON, busy timeout 5s, synchronous NORMAL
+- Monotonic checksum-verified migrations (`migrations/sqlite/0001_initial.sql`)
+- Single writer queue per database file
+- Startup integrity check (`PRAGMA quick_check`)
+- JSON columns schema-versioned and validated before insertion
+
+### Artifact store (SPEC §29.3)
+
+Content-addressed storage with:
+- SHA-256 layout: `sha256/ab/cd/<hash>`
+- Streaming hash + atomic rename + `fsync` + parent dir `fsync`
+- **SQLite metadata bridge**: metadata upserted into `artifacts` table after CAS rename; `artifact_links` table tracks ownership
+- JSON sidecar fallback for backwards compatibility
+- Reference-aware GC with `legal_hold` protection
+- Retention classes: `ephemeral`, `session`, `audit`, `evidence`, `memory_source`, `legal_hold`
+
+### Checkpoint and recovery (SPEC §29.5)
+
+- Durable checkpoints with: schema version, session/thread/task IDs, last committed sequences, active context epoch, unsettled tool calls, active jobs, workspace revision, dirty-state digest, unsettled external effects, artifact references, continuation state
+- 10-step startup recovery: acquire lease → verify integrity → load non-terminal tasks/turns → reconcile jobs → reconcile patch transactions → reconcile external effects → mark interrupted attempts → restore context epochs → expose resumable/blocked/manual-review → emit recovery report
+- `POST /v1/system/recover` endpoint runs the full recovery procedure
+
+### Portable export (SPEC §29.6)
+
+- `POST /v1/system/export` produces a self-describing, versioned, checksum-listed export with sessions, tasks, events, context manifests, and verification plans
+
+---
+
+## Context Compiler (SPEC §8, §33)
+
+The Context Compiler — not the transcript — is the model's input authority. Before every provider attempt:
+
+1. **Collect required fragments** — authority (policy), task contract, project rules, unresolved acceptance criteria (hard-included)
+2. **Derive retrieval queries** — from objective, changed files, diagnostics, symbols, tests, unknowns
+3. **Retrieve** — exact paths → lexical BM25 → tree-sitter symbols → LSP references → dependency graph → fault localization → optional semantic
+4. **Deduplicate and validate freshness** — reject stale versions
+5. **Build evidence-coverage matrix** — expand for gaps
+6. **Score candidates** — `utility = relevance × authority × freshness × novelty × coverage × uncertainty_reduction × risk_reduction × model_compatibility / token_cost`
+7. **Allocate budget** — reserve output/reasoning/tool-results/recovery; greedy selection preserving dependency closure and complete-episode integrity
+8. **Plan cache epoch** — stable prefix, volatile suffix
+9. **Render provider-specific request** — via provider renderer
+10. **Persist manifest** — durable before send
+
+Every request records: exact fragment IDs, source hashes, order, role mapping, rendered text hash, omitted candidates + reasons, token estimates vs actual usage, cache reads/writes, tool-schema versions, trust/confidentiality decisions, compression transforms, policy/scope state.
+
+### Context epochs (SPEC §8.7, §33.15)
+
+`ContextEpochService` manages the immutable cacheable baseline lifecycle:
+- Start new epoch on: first request, compaction completed, workspace/trust boundary changed, authority changed incompatibly, tool semantics changed, continuation incompatible, session fork, user requests clean context
+- Seal epoch when replaced
+- Ordinary world-state changes become deltas at safe provider-turn boundaries
+
+---
+
+## Verification (SPEC §17, §40)
+
+Completion is evidence-based, not assertion-based. The model cannot produce `COMPLETED` without the harness accepting the evidence ledger.
+
+- **DAG engine** with parallel execution (up to 4 nodes concurrently, dependency-respecting)
+- **17 predicate types**: file_parses, formatter_check, static_diagnostics, unit_test, integration_test, e2e_test, property_test, fuzz_test, security_scanner, performance_threshold, schema_compatibility, migration_dry_run, diff_policy, acceptance_query, detached_review, human_approval, external_reconciliation
+- **Changed-code invalidation** — path/symbol/test-ownership/build-graph aware
+- **Flaky-test policy** — known-flake identity, historical rate, independent rerun limit, final confidence
+- **Completion record** — final revision, criteria status, unresolved risks, accepted risks, cost, duration, final checkpoint
+
+---
+
+## Evaluation laboratory (SPEC §18, §41)
+
+### Baselines (SPEC §18.2)
+
+`forge-minimal` (Bash-only permanent baseline), `forge-full`, upstream OpenCode, Codex, Claude Code, Pi, Oh My Pi, mini-SWE-agent.
+
+### Cohorts (SPEC §18.2, §41.3)
+
+19 cohorts: tiny-bugfix, cross-file-feature, refactor, test-generation, unfamiliar-repository, build-failure, dependency-upgrade, migration, security-sensitive, large-context-migration, web-document-research, interruption/resume, compaction-mid-implementation, stale-snapshot-conflict, malicious-repository-instructions, poisoned-MCP-metadata, distributed-multi-tool-poisoning, parallelizable-task, task-where-multi-agent-should-lose.
+
+### Statistical practice (SPEC §41.6)
+
+Paired comparisons, bootstrap confidence intervals, multiple-comparison corrections (Bonferroni, Benjamini-Hochberg), effect sizes (Cohen's d, Hedges' g, Cliff's delta), non-inferiority tests for promotion gates.
+
+### Feature promotion gate (SPEC §18.7, §41.12)
+
+A feature becomes default only when it:
+- Improves the intended cohort's Pareto frontier or satisfies a hard security/reliability need
+- Has confidence bounds consistent with the claimed improvement
+- Does not create unacceptable regressions in other critical cohorts
+- Has operational observability and rollback
+- Has documentation and migration behavior
+- Remains within maintainability/divergence budgets
+
+Security guardrail failure blocks promotion regardless of average task success.
+
+---
+
+## Development
+
+### Commands (SPEC §43.7)
+
+```bash
+just bootstrap      # Install pinned tools/dependencies
+just build          # Build Rust, TypeScript, and generated contracts
+just check          # Fast lint/type/unit checks
+just check-all      # Full local validation
+just codegen        # Regenerate all derived contracts
+just codegen-check  # Verify no generated drift
+just unit           # All unit tests
+just integration    # Integration tests
+just security       # Local-capable security suite
+just e2e            # End-to-end task tests
+just eval-smoke     # Small deterministic eval suite
+just upstream-check # OpenCode parity and divergence checks
+just release-check  # Release gate
+just run            # Run control plane and kernel locally
+```
+
+### Testing
+
+| Layer | Tests | Command |
+|---|---:|---|
+| Rust crates | 205 | `cargo test --release` |
+| TS packages | 101 | `bun test packages/` |
+| Desktop app | 112 | `cd apps/desktop && bunx vitest run` |
+| Python eval | 200 | `cd python/forge_evals && .venv/bin/python -m pytest` |
+| Next.js | — | `bun run lint` (0 errors) |
+
+### Architecture boundary checks (SPEC §42.5)
+
+```bash
+just boundary-check
+# Checks: no packages/* imports child_process/fs/net/crypto (except allow-listed)
+#         no packages/* imports from mini-services/ or apps/
+#         no crates/forge-kernel imports UI or provider code
+#         no packages/domain imports provider SDKs
+#         no raw SQL outside prisma/ and migrations/
+```
+
+### CI/CD (SPEC §46)
+
+- **4-platform matrix**: Ubuntu x86_64, Ubuntu arm64, macOS arm64, Windows x86_64
+- **Supply-chain gate**: `cargo deny`, `bun audit`, `pip-audit`, boundary-check, codegen-check
+- **SBOM**: CycloneDX via `syft`, vulnerability scan via `grype`
+- **Provenance**: `actions/attest-build-provenance`
+- **Release channels**: nightly, preview, stable, lts
+
+### Dev Container (SPEC §43.6)
+
+`.devcontainer/` with TypeScript+Node base, Rust via rustup, mise-managed Bun/uv/just/buf/Python.
+
+---
+
+## Governance
+
+### ADRs (Appendix H)
+
+30 Architecture Decision Records at `docs/decisions/`, each with Context, Decision, Status, Alternatives, Consequences, Security Impact, Evaluation Plan, Migration, Rollback.
+
+Statuses: ADOPTED (1-5, 9-11, 13-25), PROVISIONAL (6-8, 26), EXPERIMENTAL (12, 27-30 OPEN).
+
+### Runbooks (SPEC §47.9)
+
+12 runbooks at `docs/runbooks/`: database corruption, artifact store inconsistency, kernel/control version mismatch, sandbox unavailable, orphaned jobs, stuck external effect, leaked credential, compromised extension, provider outage, upstream merge conflict, eval regression, security incident.
+
+### Risk register (SPEC §49.4)
+
+12 risks (R1-R12) with likelihood, impact, controls, triggers, and responses.
+
+---
 
 ## License
 
-Dual-licensed under Apache-2.0 and MIT (see `LICENSE`). Third-party licenses are audited by `cargo deny` (see `deny.toml`) and `npm audit`.
+Apache-2.0. See [LICENSE](LICENSE).
+
+---
+
+## Reference
+
+- [SPEC.md](SPEC.md) — The complete 9,550-line normative specification
+- [AGENTS.md](AGENTS.md) — Root repository instructions (Appendix G)
+- [SECURITY.md](SECURITY.md) — Trust zones, threat model, non-bypassability
+- [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution guide + PR template
+- [docs/](docs/) — Architecture, ADRs, runbooks, security, plans
+- [worklog.md](worklog.md) — Complete build log (all tasks, agents, decisions)

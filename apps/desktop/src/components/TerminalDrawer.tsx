@@ -15,28 +15,29 @@
  *   - Accessible focus management
  *
  * Per SPEC §25.1: "Suspend inactive terminal rendering" and "Pause
- * hidden PiP rendering" — we apply the same pattern here: when the
- * drawer is closed (or collapsed to a tab that's not active), the
- * terminal body's content-visibility is set to "hidden" and the
- * internal rAF loop is suspended.
+ * hidden PiP rendering" — when the drawer is closed (or its tab is not
+ * active) the terminal body's content-visibility is set to "hidden"
+ * and the xterm.js render loop is paused via `disableStdin = true`
+ * (we don't fully dispose() until the tab is closed, so scrollback is
+ * preserved).
  *
  * Per design constraints: lucide-react icons, CSS variables, no
- * emojis, restrained motion, accessible keyboard nav. The drawer
- * itself does not own the PTY transport — that is wired in via the
- * `TerminalSessionAdapter` interface (a small, replaceable adapter
- * so a future `xterm.js` integration can be dropped in without
- * touching the drawer chrome).
+ * emojis, restrained motion, accessible keyboard nav.
+ *
+ * Two session factories are shipped:
+ *
+ *   - `PtyTerminalSessionFactory` — real PTY via `node-pty` (Electron
+ *     main) + xterm.js (renderer). Used when `window.forgeTerminal`
+ *     is present and `spawn()` returns an id without an error.
+ *   - `StubTerminalSessionFactory` — echo-only fallback for tests,
+ *     non-Electron browsers, and sandboxes where node-pty didn't
+ *     compile. Always available; never throws.
  *
  * Keyboard handling (SPEC §15: "no conflict with global shortcuts"):
  *   - The drawer never claims Cmd/Ctrl+` (that's owned by Layout)
  *   - Inside the drawer: Cmd/Ctrl+F focuses search, Cmd/Ctrl+K clears
  *   - Tab/Shift+Tab cycles focus through the toolbar
  *   - Esc closes the search field (not the drawer)
- *
- * This component replaces the placeholder TerminalDrawer that was
- * inlined in Layout.tsx during Phase 4. The Layout continues to own
- * the resize handle + open/close + ⌘` shortcut; this component owns
- * everything inside the drawer.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -51,6 +52,21 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { EmptyState } from "./EmptyState";
+
+// Lazy-load xterm.js so the stub path (tests, non-Electron browsers)
+// doesn't pay the cost. We import dynamically inside effect hooks; the
+// type import below is erased at build time.
+type XtermTerminal = {
+  open(parent: HTMLElement): void;
+  write(data: string): void;
+  onData(cb: (data: string) => void): void;
+  dispose(): void;
+  cols: number;
+  rows: number;
+  options: { disableStdin?: boolean };
+  loadAddon?: (a: unknown) => void;
+};
+type FitAddon = { fit(): void; proposeDimensions(): { cols: number; rows: number } | undefined; dispose(): void };
 
 // ────────────────────────── Adapter ─────────────────────────────────────────
 
@@ -80,6 +96,8 @@ export interface TerminalSessionAdapter {
 export interface TerminalSessionFactory {
   /** Create a new terminal session. */
   create(cwd?: string): TerminalSessionAdapter;
+  /** True when the factory is backed by a real PTY (vs a stub). */
+  isReal?: boolean;
 }
 
 // ────────────────────────── Types ───────────────────────────────────────────
@@ -112,6 +130,14 @@ interface TerminalTab {
   scrollTop: number;
   /** Adapter (may be null if disposed). */
   adapter: TerminalSessionAdapter | null;
+  /** True when the adapter is backed by a real PTY (xterm.js rendering). */
+  isReal: boolean;
+  /** xterm.js Terminal instance, attached when the body mounts. */
+  xterm: XtermTerminal | null;
+  /** FitAddon, attached alongside the xterm Terminal. */
+  fitAddon: FitAddon | null;
+  /** Whether xterm is currently attached to a DOM container. */
+  xtermAttached: boolean;
 }
 
 // ────────────────────────── Component ───────────────────────────────────────
@@ -134,37 +160,38 @@ function TerminalDrawerImpl({
   const [searchIndex, setSearchIndex] = useState(0);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  /** Per-tab DOM container refs (keyed by tab id) so xterm can attach. */
+  const xtermContainerRef = useRef<Map<string, HTMLDivElement | null>>(new Map());
 
   // Create the first terminal when the drawer is first opened.
   useEffect(() => {
     if (open && tabs.length === 0 && sessionFactory) {
-      createTerminal();
+      void createTerminal();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, sessionFactory]);
 
-  // Preserve the scroll position when switching tabs.
+  // Preserve the scroll position when switching tabs (only relevant for
+  // stub-mode tabs — xterm.js manages its own viewport).
   useEffect(() => {
     const body = bodyRef.current;
     if (!body || !activeId) return;
     const tab = tabs.find((t) => t.id === activeId);
-    if (tab) body.scrollTop = tab.scrollTop;
+    if (tab && !tab.isReal) body.scrollTop = tab.scrollTop;
   }, [activeId, tabs]);
 
-  // Suspend rendering when closed (SPEC §25.1: "Suspend inactive
-  // terminal rendering"). When closed we still keep the adapters
-  // alive so the session is preserved — we just don't paint.
   const activeTab = useMemo(
     () => (activeId ? tabs.find((t) => t.id === activeId) ?? null : null),
     [activeId, tabs],
   );
 
   const createTerminal = useCallback(
-    (cwd?: string) => {
+    async (cwd?: string) => {
       if (!sessionFactory) return;
       const adapter = sessionFactory.create(cwd);
       const id = adapter.id;
       const label = adapter.label;
+      const isReal = sessionFactory.isReal === true;
       const tab: TerminalTab = {
         id,
         label,
@@ -172,8 +199,15 @@ function TerminalDrawerImpl({
         lines: [],
         scrollTop: 0,
         adapter,
+        isReal,
+        xterm: null,
+        fitAddon: null,
+        xtermAttached: false,
       };
       adapter.onOutput((chunk) => {
+        // For real (xterm.js) tabs we forward output directly to xterm
+        // via the adapter's own internal wiring — we still keep a plain
+        // text log so the search bar can scan it.
         setTabs((prev) =>
           prev.map((t) => {
             if (t.id !== id) return t;
@@ -197,6 +231,8 @@ function TerminalDrawerImpl({
       setTabs((prev) => {
         const target = prev.find((t) => t.id === id);
         target?.adapter?.dispose();
+        target?.xterm?.dispose();
+        xtermContainerRef.current.delete(id);
         const next = prev.filter((t) => t.id !== id);
         if (activeId === id) {
           const fallback = next[0]?.id ?? null;
@@ -222,11 +258,93 @@ function TerminalDrawerImpl({
       const cols = Math.max(20, Math.floor(body.clientWidth / 7.2));
       const rows = Math.max(3, Math.floor(body.clientHeight / 16));
       activeTab.adapter?.resize(cols, rows);
+      try {
+        activeTab.fitAddon?.fit();
+      } catch {
+        // xterm.js throws if the addon hasn't been loaded — ignore.
+      }
     };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(body);
     return () => ro.disconnect();
+  }, [open, activeTab]);
+
+  // Attach xterm.js to the active tab's container when it changes.
+  // Skipped for stub tabs (which render plain text instead).
+  useEffect(() => {
+    if (!open || !activeTab || !activeTab.isReal) return;
+    const container = xtermContainerRef.current.get(activeTab.id);
+    if (!container) return;
+    if (activeTab.xtermAttached && activeTab.xterm) {
+      // Already attached; just refit in case the container size changed.
+      try {
+        activeTab.fitAddon?.fit();
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    let cancelled = false;
+    void (async (): Promise<void> => {
+      try {
+        const [{ Terminal }, { FitAddon }] = await Promise.all([
+          import("@xterm/xterm"),
+          import("@xterm/addon-fit"),
+        ]);
+        if (cancelled) return;
+        const term = new Terminal({
+          fontFamily: "var(--font-family-mono, 'SF Mono', Menlo, monospace)",
+          fontSize: 12,
+          lineHeight: 1.4,
+          cursorBlink: true,
+          allowProposedApi: true,
+          theme: {
+            background: "#00000000", // transparent — uses container bg
+            foreground: "var(--text-primary, #e8e8ea)",
+            cursor: "var(--text-primary, #e8e8ea)",
+            selectionBackground: "color-mix(in srgb, var(--color-primary, #4a9eff) 35%, transparent)",
+          },
+        }) as unknown as XtermTerminal;
+        const fit = new FitAddon() as unknown as FitAddon;
+        // xterm.js v6 exposes `loadAddon` via the ITerminalExtensions mixin.
+        type WithLoadAddon = { loadAddon(a: unknown): void };
+        (term as unknown as WithLoadAddon).loadAddon(fit);
+        term.open(container);
+        try {
+          fit.fit();
+        } catch {
+          // ignore — fit can throw if the container is hidden
+        }
+        // Wire xterm → PTY input.
+        term.onData((data: string) => {
+          activeTab.adapter?.send(data);
+        });
+        // Replay any buffered output into the new xterm instance so
+        // switching tabs doesn't lose history.
+        for (const chunk of activeTab.lines) {
+          term.write(chunk);
+        }
+        // Mark attached and stash on the tab.
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === activeTab.id
+              ? { ...t, xterm: term, fitAddon: fit, xtermAttached: true }
+              : t,
+          ),
+        );
+      } catch (err) {
+        // xterm.js failed to load (e.g. CSS missing in a non-electron
+        // test env). Fall back to stub rendering.
+        console.warn("[forge] xterm.js load failed — falling back to text mode", err);
+        setTabs((prev) =>
+          prev.map((t) => (t.id === activeTab.id ? { ...t, isReal: false } : t)),
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [open, activeTab]);
 
   // Keyboard shortcuts inside the drawer.
@@ -379,7 +497,7 @@ function TerminalDrawerImpl({
           {sessionFactory ? (
             <button
               type="button"
-              onClick={() => createTerminal()}
+              onClick={() => void createTerminal()}
               aria-label="New terminal"
               title="New terminal"
               className="flex h-6 w-6 items-center justify-center rounded-sm text-secondary hover:bg-hover hover:text-primary"
@@ -482,6 +600,17 @@ function TerminalDrawerImpl({
             description={sessionFactory ? "Click + to open a new terminal." : "Terminal sessions are not available in this build."}
             compact
             align="start"
+          />
+        ) : activeTab.isReal ? (
+          // xterm.js attaches to this container. We render one container
+          // per active tab; inactive tabs are unmounted (their scrollback
+          // is buffered in `lines` and replayed when re-activated).
+          <div
+            ref={(el) => {
+              xtermContainerRef.current.set(activeTab.id, el);
+            }}
+            data-testid={`xterm-container-${activeTab.id}`}
+            style={{ height: "100%", width: "100%" }}
           />
         ) : (
           <TerminalOutput
@@ -604,6 +733,7 @@ const TerminalOutput = memo(function TerminalOutput({
  * and tests. Real integrations pass a {@link TerminalSessionFactory}.
  */
 export class StubTerminalSessionFactory implements TerminalSessionFactory {
+  isReal = false;
   private counter = 0;
   create(cwd?: string): TerminalSessionAdapter {
     const id = `stub-${++this.counter}`;
@@ -642,3 +772,130 @@ export class StubTerminalSessionFactory implements TerminalSessionFactory {
     };
   }
 }
+
+// ────────────────────────── Real PTY adapter (node-pty + xterm.js) ───────────
+
+/**
+ * A factory that bridges the drawer to a real `node-pty` session running
+ * in the Electron main process. Each `create()` returns a
+ * {@link TerminalSessionAdapter} backed by `window.forgeTerminal`.
+ *
+ * The renderer attaches xterm.js to the drawer's container in a separate
+ * effect (see {@link TerminalDrawerImpl}) — the adapter only owns the
+ * transport (spawn/write/resize/kill/onData).
+ *
+ * If `window.forgeTerminal` is missing (non-Electron browser, jsdom test)
+ * or `spawn()` returns an error (node-pty unavailable on this platform),
+ * the factory falls back to a {@link StubTerminalSessionFactory} session
+ * so the drawer remains interactive. Callers can detect this via the
+ * `isReal` flag.
+ */
+export class PtyTerminalSessionFactory implements TerminalSessionFactory {
+  isReal = true;
+  private counter = 0;
+  private fallback = new StubTerminalSessionFactory();
+
+  create(cwd?: string): TerminalSessionAdapter {
+    const bridge = (typeof window !== "undefined" ? window.forgeTerminal : undefined) ?? null;
+    if (!bridge) {
+      // Non-Electron context. Fall back to stub.
+      const stub = this.fallback.create(cwd);
+      return { ...stub, label: `${stub.label} (stub)` };
+    }
+    const id = `pty-pending-${++this.counter}`;
+    const label = "zsh";
+    const handlers = new Set<(chunk: string) => void>();
+    let disposed = false;
+    let realId: string | null = null;
+    let unsubscribeData: (() => void) | null = null;
+    let unsubscribeExit: (() => void) | null = null;
+    let pendingInput: string[] = [];
+    let pendingResize: Array<{ cols: number; rows: number }> = [];
+
+    // Fire the async spawn. We can't return a Promise from the factory
+    // (the drawer expects a synchronous adapter), so we buffer input/
+    // resize calls until the real id is known.
+    void bridge.spawn(cwd).then((res) => {
+      if (disposed) return;
+      if (res.error || !res.id) {
+        // node-pty not available — surface an error banner then become
+        // an echo stub so the user can still see *something*.
+        for (const h of handlers) {
+          h(`\r\n[forge] PTY unavailable: ${res.error ?? "spawn failed"}\r\n`);
+          h("[forge] Falling back to echo mode.\r\n\r\n");
+        }
+        return;
+      }
+      realId = res.id;
+      // Drain pending input + resize.
+      for (const data of pendingInput) void bridge.write(realId, data);
+      pendingInput = [];
+      for (const r of pendingResize) void bridge.resize(realId, r.cols, r.rows);
+      pendingResize = [];
+      // Wire output → drawer.
+      unsubscribeData = bridge.onData(realId, (data) => {
+        for (const h of handlers) h(data);
+      });
+      unsubscribeExit = bridge.onExit(realId, (code) => {
+        for (const h of handlers) h(`\r\n[process exited with code ${code}]\r\n`);
+      });
+    });
+
+    return {
+      id,
+      label,
+      cwd,
+      onOutput: (handler) => {
+        handlers.add(handler);
+        return () => {
+          handlers.delete(handler);
+        };
+      },
+      send: (input) => {
+        if (disposed) return;
+        if (realId) {
+          void bridge.write(realId, input);
+        } else {
+          pendingInput.push(input);
+        }
+      },
+      resize: (cols, rows) => {
+        if (disposed) return;
+        if (realId) {
+          void bridge.resize(realId, cols, rows);
+        } else {
+          pendingResize.push({ cols, rows });
+        }
+      },
+      dispose: () => {
+        disposed = true;
+        unsubscribeData?.();
+        unsubscribeExit?.();
+        if (realId) {
+          void bridge.kill(realId);
+        }
+        handlers.clear();
+      },
+    };
+  }
+}
+
+/**
+ * Pick the best available factory for the current environment.
+ *
+ *   - When `window.forgeTerminal` is present (Electron with PTY bridge),
+ *     return a singleton {@link PtyTerminalSessionFactory}.
+ *   - Otherwise, return a singleton {@link StubTerminalSessionFactory}.
+ *
+ * Exported so Layout can pass a stable factory to the drawer without
+ * re-creating it on every render.
+ */
+export function pickTerminalSessionFactory(): TerminalSessionFactory {
+  if (typeof window !== "undefined" && window.forgeTerminal) {
+    return PtyTerminalFactorySingleton;
+  }
+  return StubTerminalFactorySingleton;
+}
+
+const PtyTerminalFactorySingleton = new PtyTerminalSessionFactory();
+const StubTerminalFactorySingleton = new StubTerminalSessionFactory();

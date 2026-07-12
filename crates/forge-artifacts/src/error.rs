@@ -18,4 +18,6 @@ pub enum ArtifactError {
     InvalidPath,
     #[error("quarantine rejected: {0}")]
     Quarantine(String),
+    #[error("sqlite error: {0}")]
+    Sqlite(String),
 }
