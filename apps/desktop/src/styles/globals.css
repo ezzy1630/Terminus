@@ -1,0 +1,227 @@
+/* Forge Desktop — Global styles.
+ *
+ * Per SPEC §4: near-monochrome, color reserved for meaning.
+ * Per SPEC §21: SF Pro system font stack, SF Mono for code.
+ * Per SPEC §22: restrained motion, respect Reduce Motion.
+ * Per SPEC §5: native macOS traffic lights, draggable title bar.
+ */
+
+@import "tailwindcss";
+
+/* ────────────────────────── CSS Reset ─────────────────────────────────── */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-family, -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif);
+  font-size: var(--font-size-base, 13px);
+  line-height: var(--line-height-normal, 1.5);
+  color: var(--text-primary);
+  background: var(--bg-canvas);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+}
+
+/* Allow text selection in conversation and code */
+.selectable, .selectable * {
+  user-select: text;
+}
+
+/* ────────────────────────── Scrollbars ────────────────────────────────── */
+/* Minimal macOS-style scrollbars */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
+
+/* ────────────────────────── Focus ─────────────────────────────────────── */
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* ────────────────────────── Draggable title bar ───────────────────────── */
+
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+
+.titlebar-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* ────────────────────────── Animations ───────────────────────────────── */
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-down {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in var(--duration-normal, 250ms) var(--easing-default, cubic-bezier(0.25,0.1,0.25,1));
+}
+
+.animate-slide-up {
+  animation: slide-up var(--duration-normal, 250ms) var(--easing-default, cubic-bezier(0.25,0.1,0.25,1));
+}
+
+.animate-slide-down {
+  animation: slide-down var(--duration-normal, 250ms) var(--easing-default, cubic-bezier(0.25,0.1,0.25,1));
+}
+
+/* ────────────────────────── Spinner ──────────────────────────────────── */
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--border-default);
+  border-top-color: var(--color-agent-working);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* ────────────────────────── Reduced motion ───────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ────────────────────────── Utility classes ──────────────────────────── */
+
+.font-mono {
+  font-family: var(--font-family-mono, "SF Mono", ui-monospace, monospace);
+}
+
+.text-xs { font-size: var(--font-size-xs, 11px); }
+.text-sm { font-size: var(--font-size-sm, 12px); }
+.text-base { font-size: var(--font-size-base, 13px); }
+.text-md { font-size: var(--font-size-md, 14px); }
+.text-lg { font-size: var(--font-size-lg, 16px); }
+.text-xl { font-size: var(--font-size-xl, 18px); }
+.text-2xl { font-size: var(--font-size-2xl, 22px); }
+
+.text-primary { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-tertiary { color: var(--text-tertiary); }
+.text-success { color: var(--color-success); }
+.text-error { color: var(--color-error); }
+.text-warning { color: var(--color-warning); }
+.text-info { color: var(--color-info); }
+.text-addition { color: var(--color-addition); }
+.text-deletion { color: var(--color-deletion); }
+
+.bg-canvas { background: var(--bg-canvas); }
+.bg-elevated { background: var(--bg-elevated); }
+.bg-sidebar { background: var(--bg-sidebar); }
+.bg-inspector { background: var(--bg-inspector); }
+.bg-hover:hover { background: var(--bg-hover); }
+.bg-selected { background: var(--bg-selected); }
+
+.border-subtle { border-color: var(--border-subtle); }
+.border-default { border-color: var(--border-default); }
+.border-strong { border-color: var(--border-strong); }
+
+.shadow-sm { box-shadow: var(--shadow-sm); }
+.shadow-md { box-shadow: var(--shadow-md); }
+.shadow-lg { box-shadow: var(--shadow-lg); }
+
+.rounded-sm { border-radius: var(--radius-sm); }
+.rounded-md { border-radius: var(--radius-md); }
+.rounded-lg { border-radius: var(--radius-lg); }
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ────────────────────────── Code blocks ──────────────────────────────── */
+
+code, pre {
+  font-family: var(--font-family-mono, "SF Mono", ui-monospace, monospace);
+  font-size: var(--font-size-sm, 12px);
+}
+
+pre {
+  background: var(--bg-terminal);
+  color: var(--text-primary);
+  padding: var(--space-3, 12px) var(--space-4, 16px);
+  border-radius: var(--radius-md, 10px);
+  overflow-x: auto;
+}
+
+/* ────────────────────────── Diff ─────────────────────────────────────── */
+
+.diff-line {
+  font-family: var(--font-family-mono, "SF Mono", monospace);
+  font-size: var(--font-size-sm, 12px);
+  line-height: 1.5;
+  white-space: pre;
+  padding: 0 var(--space-2, 8px);
+}
+
+.diff-add {
+  background: color-mix(in srgb, var(--color-addition) 12%, transparent);
+  color: var(--text-primary);
+}
+
+.diff-del {
+  background: color-mix(in srgb, var(--color-deletion) 12%, transparent);
+  color: var(--text-primary);
+}
+
+.diff-context {
+  color: var(--text-secondary);
+}
+
+.diff-hunk-header {
+  background: var(--bg-hover);
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+}
