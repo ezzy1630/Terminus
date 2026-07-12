@@ -29,6 +29,8 @@ bootstrap:
     cd python && uv sync --frozen
     echo "[bootstrap] verifying buf..."
     buf --version
+    echo "[bootstrap] verifying OpenCode source pin..."
+    bash scripts/fetch-opencode.sh
     echo "[bootstrap] OK"
 
 # Build Rust, TypeScript, and generated contracts.
@@ -149,12 +151,7 @@ eval-full:
 upstream-check:
     #!/usr/bin/env bash
     set -eu
-    echo "[upstream-check] verifying upstream OpenCode pin..."
-    bash scripts/verify-upstream-pin.sh
-    echo "[upstream-check] divergence budget:"
-    cat upstream/divergence-budget.yaml
-    echo "[upstream-check] effect bypass register:"
-    cat docs/security/effect-bypass-register.yaml
+    python3 scripts/verify-upstream-divergence.py
 
 # Release gate (SPEC §46.18, §50). Every dependency is mandatory; missing
 # infrastructure or evidence is a release failure, not a warning.
