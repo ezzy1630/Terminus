@@ -61,7 +61,13 @@ kernel_binary="$ROOT/mini-services/terminus-kernel/target/debug/terminus-kernel-
 if [[ ! -x "$kernel_binary" ]]; then
   cargo build --manifest-path "$ROOT/mini-services/terminus-kernel/Cargo.toml" >"$TMP_DIR/kernel-build.log" 2>&1
 fi
-nohup "$kernel_binary" </dev/null >"$TMP_DIR/kernel.log" 2>&1 &
+# macOS dyld can hold an executable on the external Neural volume in the
+# loader before main() starts. Copy the verified build into the isolated
+# temporary run directory so startup is independent of the source volume.
+kernel_runtime="$TMP_DIR/terminus-kernel-mini"
+cp "$kernel_binary" "$kernel_runtime"
+chmod 700 "$kernel_runtime"
+nohup "$kernel_runtime" </dev/null >"$TMP_DIR/kernel.log" 2>&1 &
 KERNEL_PID=$!
 
 for _ in $(seq 1 600); do
