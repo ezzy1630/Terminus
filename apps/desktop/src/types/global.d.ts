@@ -72,6 +72,7 @@ declare global {
       getTheme: () => Promise<"system" | "light" | "dark">;
       setTheme: (theme: "system" | "light" | "dark") => Promise<"system" | "light" | "dark">;
       getScreenSources: () => Promise<TerminusScreenSource[]>;
+      pickDirectory: () => Promise<string | null>;
     };
     terminusTerminal?: TerminusTerminalBridge;
   }

@@ -154,6 +154,7 @@ function OnboardingImpl({
   const [error, setError] = useState<string | null>(null);
   const [initialPrompt, setInitialPrompt] = useState("");
   const selectSession = useTerminusStore((s) => s.selectSession);
+  const selectTask = useTerminusStore((s) => s.selectTask);
 
   // Sync the system theme on mount so first paint matches.
   useEffect(() => {
@@ -188,6 +189,18 @@ function OnboardingImpl({
       // Refresh sidebar + select the new session.
       await useTerminusStore.getState().refreshSessions();
       selectSession(session.id);
+      const objective = initialPrompt.trim();
+      if (objective && session.active_thread_id) {
+        const task = await api.createTask({
+          session_id: session.id,
+          thread_id: session.active_thread_id,
+          objective,
+          risk_class: "normal",
+        });
+        await api.startTask(task.id);
+        await useTerminusStore.getState().refreshTasks(session.id);
+        selectTask(task.id);
+      }
       onComplete({ projectPath: projectPath || null, initialPrompt, session, skipped: false });
     } catch (err) {
       const msg =
@@ -200,7 +213,7 @@ function OnboardingImpl({
     } finally {
       setCreating(false);
     }
-  }, [projectPath, initialPrompt, onComplete, selectSession]);
+  }, [projectPath, initialPrompt, onComplete, selectSession, selectTask]);
 
   const onPick = useCallback(async (): Promise<void> => {
     if (!pickDirectory) return;

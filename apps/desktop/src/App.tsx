@@ -21,7 +21,7 @@
  * — no React.lazy / Suspense boundaries yet.
  */
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { Command, Monitor, Moon, Rows3, Sun } from "lucide-react";
+import { Command, Monitor, Moon, PanelRight, Rows3, Sun } from "lucide-react";
 import { Layout } from "./components/Layout";
 import { Sidebar } from "./components/Sidebar";
 import { Inspector } from "./components/Inspector";
@@ -153,6 +153,12 @@ export function App(): JSX.Element {
     return () => window.removeEventListener("keydown", onKey);
   }, [selectedTaskId, selectTask, toggleInspector]);
 
+  useEffect(() => {
+    const openSettings = (): void => setSettingsOpen(true);
+    window.addEventListener("terminus:open-settings", openSettings);
+    return () => window.removeEventListener("terminus:open-settings", openSettings);
+  }, []);
+
   // Build the command catalog. Memoized so the palette doesn't re-rank
   // on every App re-render.
   const commands = useMemo(
@@ -205,7 +211,10 @@ export function App(): JSX.Element {
     <>
       <Layout
         sidebar={<Sidebar />}
-        inspectorVisible={inspectorVisible && (!changesOpen || inspectorPinned) && (!viewport.inspectorOverlay || inspectorPinned)}
+        // The inspector is contextual. A new-task screen has no task-bound
+        // context yet, so keeping it out of the canvas restores the calm,
+        // focused Codex-style start composition.
+        inspectorVisible={Boolean(selectedTask) && inspectorVisible && (!changesOpen || inspectorPinned) && (!viewport.inspectorOverlay || inspectorPinned)}
         terminalOpen={terminalOpen}
         onTerminalOpenChange={setTerminalOpen}
         center={
@@ -273,6 +282,16 @@ export function App(): JSX.Element {
             >
               {theme === "system" ? <Monitor size={14} /> : theme === "light" ? <Sun size={14} /> : <Moon size={14} />}
             </button>
+            <button
+              type="button"
+              onClick={toggleInspector}
+              disabled={!selectedTask}
+              aria-label={inspectorVisible ? "Hide task context" : "Show task context"}
+              title={selectedTask ? (inspectorVisible ? "Hide task context" : "Show task context") : "Task context appears when a task is selected"}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              <PanelRight size={14} />
+            </button>
             {/* Density toggle. */}
             <button
               type="button"
@@ -315,7 +334,10 @@ export function App(): JSX.Element {
       ) : null}
       {onboardingOpen ? (
         <Suspense fallback={null}>
-          <Onboarding onComplete={onCompleteOnboarding} />
+          <Onboarding
+            onComplete={onCompleteOnboarding}
+            pickDirectory={window.terminusDesktop?.pickDirectory}
+          />
         </Suspense>
       ) : null}
     </>

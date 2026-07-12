@@ -318,6 +318,7 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
         </div>
         <button
           type="button"
+          onClick={() => window.dispatchEvent(new Event("terminus:open-settings"))}
           aria-label="Settings"
           title="Settings"
           className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-secondary"

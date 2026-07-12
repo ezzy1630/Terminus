@@ -25,6 +25,10 @@ import type {
 } from "../types";
 
 const MAX_EVENTS_PER_TASK = 2000;
+const RECONNECT_BASE_MS = 500;
+const RECONNECT_MAX_MS = 15_000;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let streamGeneration = 0;
 
 // ────────────────────────── Status normalization ───────────────────────────
 
@@ -74,6 +78,7 @@ interface TerminusState {
   // Connection status.
   healthReady: boolean;
   lastError: string | null;
+  streamState: "idle" | "connecting" | "connected" | "reconnecting";
 
   // Sessions + tasks (per-session list).
   sessions: Session[];
@@ -119,6 +124,7 @@ interface TerminusState {
 export const useTerminusStore = create<TerminusState>((set, get) => ({
   healthReady: false,
   lastError: null,
+  streamState: "idle",
 
   sessions: [],
   tasksBySession: {},
@@ -255,21 +261,49 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
   },
 
   _attachStream: (taskId) => {
+    streamGeneration += 1;
+    const generation = streamGeneration;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     const existing = get()._stream;
     if (existing) {
       existing.close();
-      set({ _stream: null });
+      set({ _stream: null, streamState: "idle" });
     }
     if (!taskId) return;
-    // If events for this task are already loaded, resume from the last id.
-    const events = get().eventsByTask[taskId] ?? [];
-    const cursor = events.length > 0 ? (events[events.length - 1]?.id ?? null) : null;
-    const stream = subscribeEvents({ task_id: taskId, cursor });
-    stream.addEventListener("message", (ev) => {
-      get()._appendEvent(taskId, ev);
-      get()._updateTaskFromEvent(ev);
-    });
-    set({ _stream: stream });
+    let attempts = 0;
+
+    const connect = (): void => {
+      if (generation !== streamGeneration || get().selectedTaskId !== taskId) return;
+      const events = get().eventsByTask[taskId] ?? [];
+      const cursor = events.length > 0 ? (events[events.length - 1]?.id ?? null) : null;
+      const stream = subscribeEvents({ task_id: taskId, cursor });
+      set({ _stream: stream, streamState: attempts > 0 ? "reconnecting" : "connecting" });
+      stream.addEventListener("open", () => {
+        if (generation !== streamGeneration) return;
+        attempts = 0;
+        set({ streamState: "connected", lastError: null });
+      });
+      stream.addEventListener("message", (ev) => {
+        if (generation !== streamGeneration) return;
+        get()._appendEvent(taskId, ev);
+        get()._updateTaskFromEvent(ev);
+      });
+      stream.addEventListener("error", () => {
+        if (generation !== streamGeneration || reconnectTimer) return;
+        attempts += 1;
+        const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.min(attempts - 1, 5));
+        set({ streamState: "reconnecting", lastError: "Live updates interrupted. Reconnecting…" });
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connect();
+        }, delay);
+      });
+    };
+
+    connect();
   },
 }));
 

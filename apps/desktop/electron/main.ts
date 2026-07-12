@@ -32,9 +32,10 @@
  *   3. `terminusDesktop` notifications + window controls + theme — same as
  *      before.
  */
-import { app, BrowserWindow, shell, nativeTheme, screen, ipcMain, desktopCapturer, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, shell, nativeTheme, screen, ipcMain, desktopCapturer, systemPreferences, dialog, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 
 // __dirname is provided natively by CommonJS (Electron's main process
 // is compiled to CommonJS by electron/tsconfig.json). We avoid
@@ -46,6 +47,69 @@ const isDev = !app.isPackaged;
 app.setName("Terminus");
 
 let mainWindow: BrowserWindow | null = null;
+const WINDOW_STATE_FILE = "window-state.json";
+
+interface PersistedWindowState {
+  bounds: Rectangle;
+  maximized: boolean;
+}
+
+function windowStatePath(): string {
+  return join(app.getPath("userData"), WINDOW_STATE_FILE);
+}
+
+function isVisibleOnAnyDisplay(bounds: Rectangle): boolean {
+  return screen.getAllDisplays().some(({ workArea }) => {
+    const overlapWidth = Math.max(0, Math.min(bounds.x + bounds.width, workArea.x + workArea.width) - Math.max(bounds.x, workArea.x));
+    const overlapHeight = Math.max(0, Math.min(bounds.y + bounds.height, workArea.y + workArea.height) - Math.max(bounds.y, workArea.y));
+    return overlapWidth >= 160 && overlapHeight >= 120;
+  });
+}
+
+function readWindowState(): PersistedWindowState | null {
+  try {
+    const parsed = JSON.parse(readFileSync(windowStatePath(), "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const candidate = parsed as Record<string, unknown>;
+    const bounds = candidate.bounds;
+    if (!bounds || typeof bounds !== "object") return null;
+    const value = bounds as Record<string, unknown>;
+    if (![value.x, value.y, value.width, value.height].every((entry) => typeof entry === "number")) return null;
+    const restored: Rectangle = {
+      x: value.x as number,
+      y: value.y as number,
+      width: Math.max(900, value.width as number),
+      height: Math.max(600, value.height as number),
+    };
+    if (!isVisibleOnAnyDisplay(restored)) return null;
+    return { bounds: restored, maximized: candidate.maximized === true };
+  } catch {
+    return null;
+  }
+}
+
+function persistWindowState(window: BrowserWindow): void {
+  try {
+    const state: PersistedWindowState = {
+      bounds: window.isMaximized() ? window.getNormalBounds() : window.getBounds(),
+      maximized: window.isMaximized(),
+    };
+    writeFileSync(windowStatePath(), JSON.stringify(state), { encoding: "utf8", mode: 0o600 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[terminus] unable to persist window state: ${message}`);
+  }
+}
+
+function prefersReducedTransparency(): boolean {
+  if (process.platform !== "darwin") return false;
+  try {
+    return systemPreferences.getUserDefault("reduceTransparency", "boolean") === true
+      || systemPreferences.getUserDefault("AppleReduceTransparency", "boolean") === true;
+  } catch {
+    return false;
+  }
+}
 
 // ────────────────────────── node-pty (graceful) ───────────────────────────────
 
@@ -201,20 +265,23 @@ function createWindow(): void {
   const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
   const width = Math.min(Math.round(screenWidth * 0.88), 1600);
   const height = Math.min(Math.round(screenHeight * 0.88), 1000);
+  const restored = readWindowState();
+  const reduceTransparency = prefersReducedTransparency();
 
   mainWindow = new BrowserWindow({
-    width,
-    height,
+    width: restored?.bounds.width ?? width,
+    height: restored?.bounds.height ?? height,
+    ...(restored ? { x: restored.bounds.x, y: restored.bounds.y } : { center: true }),
     title: "Terminus",
-    minWidth: 900,
+    // Keep the <900px inspector-overlay and <700px sidebar-rail states
+    // reachable in the packaged app for side-by-side workflows.
+    minWidth: 640,
     minHeight: 600,
-    center: true,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 18 },
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#1a1a1c" : "#f7f7f8",
     show: false,
-    vibrancy: "under-window",
-    visualEffectState: "active",
+    ...(reduceTransparency ? {} : { vibrancy: "under-window" as const, visualEffectState: "active" as const }),
     webPreferences: {
       preload: join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -223,11 +290,13 @@ function createWindow(): void {
     },
   });
 
-  // SPEC §5: "Remember previous window size and position"
-  // TODO: persist bounds to electron-store.
-
   mainWindow.once("ready-to-show", () => {
+    if (restored?.maximized) mainWindow?.maximize();
     mainWindow?.show();
+  });
+
+  mainWindow.on("close", () => {
+    if (mainWindow) persistWindowState(mainWindow);
   });
 
   // SPEC §5: "Support multiple application windows if existing product
@@ -263,7 +332,7 @@ function registerIpc(): void {
   // ── Terminus desktop bridge ──
   ipcMain.handle("notify", (_e, { title, body }: { title: string; body: string }) => {
     const { Notification } = require("electron") as typeof import("electron");
-    if (Notification.isSupported()) {
+    if (Notification.isSupported() && !mainWindow?.isFocused()) {
       new Notification({ title, body }).show();
     }
     return null;
@@ -290,6 +359,16 @@ function registerIpc(): void {
     return nativeTheme.themeSource;
   });
   ipcMain.handle("desktop:getScreenSources", handleGetScreenSources);
+  ipcMain.handle("desktop:pickDirectory", async () => {
+    const options = {
+      title: "Open project",
+      properties: ["openDirectory", "createDirectory"] as Array<"openDirectory" | "createDirectory">,
+    };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, options)
+      : await dialog.showOpenDialog(options);
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
 
   // ── Terminal (node-pty) ──
   ipcMain.handle("terminusTerminal:spawn", handleTerminalSpawn);

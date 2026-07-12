@@ -54,6 +54,13 @@ const TRAFFIC_LIGHTS_PAD = 80;
 const TERMINAL_MIN_HEIGHT = 120;
 const TERMINAL_DEFAULT_HEIGHT = 240;
 const TERMINAL_MAX_HEIGHT_RATIO = 0.6;
+const TERMINAL_HEIGHT_KEY = "terminus-desktop.terminal-height.v1";
+
+function readTerminalHeight(): number {
+  if (typeof window === "undefined") return TERMINAL_DEFAULT_HEIGHT;
+  const value = Number(window.localStorage.getItem(TERMINAL_HEIGHT_KEY));
+  return Number.isFinite(value) && value >= TERMINAL_MIN_HEIGHT ? value : TERMINAL_DEFAULT_HEIGHT;
+}
 
 interface TitleBarProps {
   center?: ReactNode;
@@ -192,7 +199,7 @@ function LayoutImpl({
   const density = useThemeStore((s) => s.density);
 
   const [uncontrolledTerminalOpen, setUncontrolledTerminalOpen] = useState(terminalInitiallyOpen);
-  const [terminalHeight, setTerminalHeight] = useState(TERMINAL_DEFAULT_HEIGHT);
+  const [terminalHeight, setTerminalHeight] = useState(readTerminalHeight);
   const terminalOpen = terminalOpenProp ?? uncontrolledTerminalOpen;
   const setTerminalOpen = useCallback((open: boolean): void => {
     if (terminalOpenProp === undefined) setUncontrolledTerminalOpen(open);
@@ -209,6 +216,15 @@ function LayoutImpl({
   const toggleTerminal = useCallback(() => {
     setTerminalOpen(!terminalOpen);
   }, [setTerminalOpen, terminalOpen]);
+
+  const updateTerminalHeight = useCallback((height: number): void => {
+    setTerminalHeight(height);
+    try {
+      window.localStorage.setItem(TERMINAL_HEIGHT_KEY, String(height));
+    } catch {
+      // Persistence is a convenience; resizing must still work when storage is unavailable.
+    }
+  }, []);
 
   // Keyboard: Cmd/Ctrl + ` toggles terminal (common macOS convention).
   useEffect(() => {
@@ -305,7 +321,7 @@ function LayoutImpl({
       <LayoutTerminalDrawer
         open={terminalOpen}
         height={terminalHeight}
-        onResize={setTerminalHeight}
+        onResize={updateTerminalHeight}
         onClose={() => setTerminalOpen(false)}
       />
     </div>

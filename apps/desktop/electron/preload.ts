@@ -51,6 +51,7 @@ contextBridge.exposeInMainWorld("terminusDesktop", {
   // Screen capture (SPEC §16 — computer-use PiP).
   getScreenSources: (): Promise<Array<{ id: string; name: string; display_id?: string }>> =>
     ipcRenderer.invoke("desktop:getScreenSources"),
+  pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("desktop:pickDirectory"),
 });
 
 // ────────────────────────── terminusTerminal ────────────────────────────────────
