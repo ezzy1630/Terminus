@@ -1,0 +1,12 @@
+# Policy overrides for this task (SPEC §41.4 policy.yaml).
+risk_class: normal
+default_decision: allow_local
+deny:
+  - /etc/passwd
+  - /etc/shadow
+  - ~/.ssh
+allow_network:
+  - pypi.org
+require_approval_for:
+  - side_effect.network
+  - side_effect.external_state

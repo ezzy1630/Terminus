@@ -13,6 +13,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Platform matrix (SPEC §46.13). The full test suite runs on Linux x86_64;
+# other platforms run build + a curated subset of tests. Flaky combinations
+# are marked continue-on-error so a single platform regression does not
+# block the whole pipeline. fail-fast is disabled so every platform
+# reports independently.
 jobs:
   # ---------- Toolchain setup (shared) ----------
   setup:
@@ -28,6 +33,18 @@ jobs:
         with:
           experimental: true
       - run: just bootstrap
+
+  # ---------- Architecture boundary checks (SPEC §42.5) ----------
+  boundary-check:
+    name: Architecture boundary checks
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: just bootstrap
+      - name: Run boundary checks (§42.5)
+        run: just boundary-check
 
   # ---------- Lint + typecheck + codegen drift ----------
   lint-typecheck:
@@ -54,27 +71,68 @@ jobs:
       - name: Codegen drift check
         run: just codegen-check
 
-  # ---------- Build ----------
+  # ---------- Build matrix (§46.13) ----------
   build:
-    name: Build (Rust + TS)
-    runs-on: ubuntu-latest
+    name: Build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
     needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            continue-on-error: false
+          - os: ubuntu-24.04-arm
+            label: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            continue-on-error: true  # arm runners can be flaky
+          - os: macos-latest
+            label: macos-arm64
+            target: aarch64-apple-darwin
+            continue-on-error: false
+          - os: windows-latest
+            label: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            continue-on-error: false
+    continue-on-error: ${{ matrix.continue-on-error }}
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
       - run: just bootstrap
-      - name: Build Rust workspace
-        run: cargo build --workspace --all-targets --locked
+      - name: Build Rust workspace (${{ matrix.target }})
+        shell: bash
+        run: |
+          rustup target add ${{ matrix.target }} || true
+          cargo build --workspace --all-targets --locked
       - name: Build TypeScript workspace
         run: bun run build
       - name: Build Python package
         run: cd python && uv sync
 
-  # ---------- Tests ----------
+  # ---------- Tests (Linux x86_64 = full) ----------
   unit-rust:
-    name: Unit tests (Rust)
-    runs-on: ubuntu-latest
+    name: Unit tests (Rust, ${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+            continue-on-error: false
+          - os: ubuntu-24.04-arm
+            label: linux-arm64
+            continue-on-error: true
+          - os: macos-latest
+            label: macos-arm64
+            continue-on-error: false
+          - os: windows-latest
+            label: windows-x86_64
+            continue-on-error: false
+    continue-on-error: ${{ matrix.continue-on-error }}
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
@@ -82,9 +140,23 @@ jobs:
       - run: cargo test --workspace --lib --locked
 
   unit-ts:
-    name: Unit tests (TypeScript)
-    runs-on: ubuntu-latest
+    name: Unit tests (TypeScript, ${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+            continue-on-error: false
+          - os: macos-latest
+            label: macos-arm64
+            continue-on-error: false
+          - os: windows-latest
+            label: windows-x86_64
+            continue-on-error: false
+    continue-on-error: ${{ matrix.continue-on-error }}
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
@@ -132,12 +204,6 @@ jobs:
         run: cd python && uv run pip-audit --strict || true
       - name: Path traversal / secret redaction tests
         run: cargo test --workspace --test security
-      - name: Architecture boundary checks
-        run: |
-          # Forbidden TS imports, direct provider SDK use, raw SQL outside
-          # repositories/migrations, untyped event emission, direct secret
-          # environment reads, checked-in generated-file drift (SPEC §42.5).
-          echo "[boundary] TODO: run architecture-boundary checks"
 
   # ---------- Eval smoke (per PR for agent-behavior changes) ----------
   eval-smoke:

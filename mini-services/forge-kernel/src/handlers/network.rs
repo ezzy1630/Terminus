@@ -12,12 +12,14 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::Extension;
 use axum::Json;
 use forge_egress::EgressPolicy;
 use serde::{Deserialize, Serialize};
 use std::net::ToSocketAddrs;
 
 use crate::api::Envelope;
+use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
 use crate::state::AppState;
 use crate::trace_id::TraceId;
@@ -47,11 +49,13 @@ pub struct EgressResponse {
 
 pub async fn request(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<EgressResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: EgressRequest =
+    let mut req: EgressRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
+    req.envelope.inject_capability_token(&cap_token);
 
     // Parse the URL.
     let url = match url::Url::parse(&req.url) {

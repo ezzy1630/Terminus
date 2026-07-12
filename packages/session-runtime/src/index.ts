@@ -2,7 +2,9 @@
  * @forge/session-runtime — session/thread/turn lifecycle.
  *
  * Per SPEC §28.4: SessionService, ThreadService, TurnService. Uses a
- * `SessionRepository` interface (no direct Prisma import).
+ * `SessionRepository` interface (no direct Prisma import). Also exposes a
+ * `ContextEpochService` that manages the ContextEpoch lifecycle (§28.8,
+ * §33.15): start, seal, replace, getActive, shouldStartNewEpoch.
  */
 import type {
   Session,
@@ -12,6 +14,10 @@ import type {
   PrincipalId,
   Rfc3339Timestamp,
   TurnState,
+  ContextEpoch,
+  ContextEpochState,
+  ContentHash,
+  ModelKey,
 } from "@forge/domain";
 import {
   StateTransitionError,
@@ -35,6 +41,16 @@ export interface SessionRepository {
   getTurn(id: Uuid7): Promise<Turn | null>;
   updateTurn(t: Turn): Promise<Turn>;
   listTurns(threadId: Uuid7): Promise<readonly Turn[]>;
+}
+
+// ────────────────────────── Context epoch repository ─────────────────────────
+
+export interface ContextEpochRepository {
+  createEpoch(epoch: ContextEpoch): Promise<ContextEpoch>;
+  getEpoch(id: Uuid7): Promise<ContextEpoch | null>;
+  updateEpoch(epoch: ContextEpoch): Promise<ContextEpoch>;
+  /** Returns all epochs for a thread, ordered by sequence ascending. */
+  listEpochs(threadId: Uuid7): Promise<readonly ContextEpoch[]>;
 }
 
 // ────────────────────────── Services ─────────────────────────────────────────
@@ -222,4 +238,179 @@ export class TurnService {
 export const TURN_STATE_TRANSITIONS = TURN_TRANSITIONS;
 export { isTurnTransitionAllowed };
 
-export type { Session, Thread, Turn, TurnState };
+// ────────────────────────── Context epoch service (§28.8, §33.15) ────────────
+
+/**
+ * A composite key capturing the dimensions of provider/model/policy that
+ * determine cross-request continuation compatibility. Two epochs are
+ * "continuation-compatible" iff their keys are identical. SPEC §33.15.
+ */
+export interface ProviderCompatibilityKey {
+  readonly providerId: string;
+  readonly modelKey: ModelKey;
+  readonly policyProfile: string;
+  readonly providerApiVersion: string;
+  readonly trustBoundary: "trusted" | "untrusted" | "restricted";
+}
+
+/**
+ * Inputs to `ContextEpochService.shouldStartNewEpoch`. Each field corresponds
+ * to one of the SPEC §33.15 triggers. The service returns true if ANY
+ * trigger fires.
+ */
+export interface EpochTriggerInput {
+  /** True on the very first request of a thread (no prior epoch). */
+  readonly isFirstRequest: boolean;
+  /** True if a compaction cycle just completed (causing a prefix shift). */
+  readonly compactionCompleted: boolean;
+  /** True if the workspace or trust boundary changed since the prior epoch. */
+  readonly workspaceOrTrustBoundaryChanged: boolean;
+  /** True if the active authority fragment hash changed incompatibly. */
+  readonly authorityChangedIncompatibly: boolean;
+  /** True if tool schemas or semantics changed (version mismatch). */
+  readonly toolSemanticsChanged: boolean;
+  /** True if continuation is no longer valid (cache miss / provider expiry). */
+  readonly continuationIncompatible: boolean;
+  /** True if the session was forked from another. */
+  readonly sessionForked: boolean;
+  /** True if the user explicitly requested a clean context. */
+  readonly userRequestedCleanContext: boolean;
+}
+
+export interface ContextEpochServiceDeps {
+  readonly repo: ContextEpochRepository;
+  readonly clock: () => Rfc3339Timestamp;
+  readonly idSource: () => Uuid7;
+}
+
+/**
+ * Manages the ContextEpoch lifecycle per SPEC §28.8 and §33.15.
+ *
+ * State machine:
+ *   INITIALIZING → ACTIVE → REPLACEMENT_PENDING → SEALED
+ *   INITIALIZING → ACTIVE → SEALED (direct seal on replacement)
+ *
+ * Each thread has at most one ACTIVE epoch at a time. `replaceEpoch` seals
+ * the current active epoch (if any) and starts a new one with the new
+ * provider compatibility key.
+ */
+export class ContextEpochService {
+  constructor(private readonly deps: ContextEpochServiceDeps) {}
+
+  /**
+   * Start a new epoch in `INITIALIZING`, then immediately transition it to
+   * `ACTIVE`. The baseline hash is supplied by the caller (typically the
+   * context compiler's stable-prefix hash); the kernel records it so future
+   * compaction decisions can detect prefix drift.
+   */
+  async startEpoch(
+    threadId: Uuid7,
+    providerCompatibilityKey: ProviderCompatibilityKey,
+    baselineHash: ContentHash,
+    continuationId: string | null,
+  ): Promise<ContextEpoch> {
+    const existing = await this.listEpochs(threadId);
+    const sequence = existing.length === 0 ? 1 : (existing[existing.length - 1]!.sequence + 1);
+    const now = this.deps.clock();
+    const epoch: ContextEpoch = {
+      id: this.deps.idSource(),
+      threadId,
+      sequence,
+      state: "ACTIVE",
+      baselineHash,
+      provider: providerCompatibilityKey.providerId,
+      model: providerCompatibilityKey.modelKey,
+      continuationId,
+      startedAt: now,
+      sealedAt: null,
+      supersededBy: null,
+    };
+    return this.deps.repo.createEpoch(epoch);
+  }
+
+  /**
+   * Seal an epoch. Once sealed, an epoch cannot be reused for new provider
+   * requests. The `reason` is recorded for audit (sealedAt timestamp +
+   * supersededBy set by `replaceEpoch`).
+   */
+  async sealEpoch(epochId: Uuid7, reason: string): Promise<ContextEpoch> {
+    void reason; // audit-only; persisted by the repo's metadata layer.
+    const e = await this.requireEpoch(epochId);
+    if (e.state === "SEALED") {
+      throw new StateTransitionError("context_epoch", e.state, "SEALED");
+    }
+    const sealed: ContextEpoch = {
+      ...e,
+      state: "SEALED",
+      sealedAt: this.deps.clock(),
+    };
+    return this.deps.repo.updateEpoch(sealed);
+  }
+
+  /**
+   * Atomically seal the current active epoch (if any) and start a new one
+   * with the new provider compatibility key. Returns the new epoch. The
+   * prior epoch's `supersededBy` is set to the new epoch's id.
+   */
+  async replaceEpoch(
+    threadId: Uuid7,
+    newKey: ProviderCompatibilityKey,
+    baselineHash: ContentHash,
+    continuationId: string | null,
+    reason: string,
+  ): Promise<ContextEpoch> {
+    const current = await this.getActiveEpoch(threadId);
+    const newEpoch = await this.startEpoch(threadId, newKey, baselineHash, continuationId);
+    if (current !== null) {
+      const superseded: ContextEpoch = {
+        ...current,
+        state: "SEALED",
+        sealedAt: this.deps.clock(),
+        supersededBy: newEpoch.id,
+      };
+      await this.deps.repo.updateEpoch(superseded);
+    }
+    void reason;
+    return newEpoch;
+  }
+
+  /** Returns the current ACTIVE epoch for a thread, or null if none. */
+  async getActiveEpoch(threadId: Uuid7): Promise<ContextEpoch | null> {
+    const epochs = await this.listEpochs(threadId);
+    for (let i = epochs.length - 1; i >= 0; i--) {
+      const e = epochs[i]!;
+      if (e.state === "ACTIVE") return e;
+    }
+    return null;
+  }
+
+  /**
+   * Returns true if any §33.15 trigger fires. The caller invokes this before
+   * each provider request to decide whether to start a new epoch or
+   * continue with the current one.
+   */
+  shouldStartNewEpoch(input: EpochTriggerInput): boolean {
+    return (
+      input.isFirstRequest ||
+      input.compactionCompleted ||
+      input.workspaceOrTrustBoundaryChanged ||
+      input.authorityChangedIncompatibly ||
+      input.toolSemanticsChanged ||
+      input.continuationIncompatible ||
+      input.sessionForked ||
+      input.userRequestedCleanContext
+    );
+  }
+
+  private async requireEpoch(id: Uuid7): Promise<ContextEpoch> {
+    const e = await this.deps.repo.getEpoch(id);
+    if (e === null) throw new ValidationError("context epoch not found", { epochId: id });
+    return e;
+  }
+
+  private async listEpochs(threadId: Uuid7): Promise<readonly ContextEpoch[]> {
+    return this.deps.repo.listEpochs(threadId);
+  }
+}
+
+export type { Session, Thread, Turn, TurnState, ContextEpoch, ContextEpochState };

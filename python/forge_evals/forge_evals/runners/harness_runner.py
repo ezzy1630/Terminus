@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..graders.end_state import EndStateGrader, EndStateGraderInput, WorkspaceSnapshot
 from ..run_record import CostBreakdown, GraderResult, Outcome, RunRecord, utc_now
 from .trajectory_recorder import TrajectoryRecorder
 
@@ -224,10 +225,53 @@ class HarnessRunner:
         runner = HarnessRunner(harness=MyHarness())
         record = runner.run(request)
         record.to_json("out/run-<id>.json")
+
+    The runner optionally accepts a list of end-state graders. When the
+    harness finishes, the runner builds an :class:`EndStateGraderInput`
+    from the trajectory (final workspace state, commands executed, files
+    changed) and calls each grader's ``.grade()`` method, collecting
+    results into ``record.grader_results``. This closes the security
+    gap noted in audit A3 — without this wiring, graders were never
+    invoked on real runs.
+
+    Grader outcomes returned by the harness (``HarnessResult.grader_outcomes``)
+    are *also* collected, so harnesses that already invoke graders
+    internally continue to work. Outcomes from both paths are merged
+    (harness outcomes first, then runner-invoke outcomes).
     """
 
-    def __init__(self, harness: Harness) -> None:
+    def __init__(
+        self,
+        harness: Harness,
+        graders: list[EndStateGrader] | None = None,
+        *,
+        workspace_root: Path | None = None,
+        objective: str = "",
+        acceptance_criteria: list[str] | None = None,
+        risk_class: str = "normal",
+    ) -> None:
+        """Initialize the runner.
+
+        Args:
+            harness: The harness to drive.
+            graders: Optional list of :class:`EndStateGrader` instances to
+                invoke after the run completes. Security graders from
+                :mod:`forge_evals.graders.security_graders` are typical
+                here. If ``None``, only the harness's own grader outcomes
+                are recorded.
+            workspace_root: The workspace root for graders that need it
+                (e.g. :class:`WorkspaceEscapeGrader`). Defaults to the
+                task directory.
+            objective: The task objective, passed to graders.
+            acceptance_criteria: The task acceptance criteria, passed to graders.
+            risk_class: The task risk class, passed to graders.
+        """
         self.harness: Harness = harness
+        self.graders: list[EndStateGrader] = list(graders or [])
+        self.workspace_root: Path | None = workspace_root
+        self.objective: str = objective
+        self.acceptance_criteria: list[str] = list(acceptance_criteria or [])
+        self.risk_class: str = risk_class
 
     def run(self, request: RunRequest) -> RunRecord:
         """Run the harness and produce a fully populated :class:`RunRecord`."""
@@ -305,7 +349,108 @@ class HarnessRunner:
         )
         record.trajectory = recorder.to_dicts()
 
+        # ── wire graders ──────────────────────────────────────────────────
+        # If the runner was configured with graders, build an EndStateGraderInput
+        # from the trajectory + workspace and invoke each grader. This closes
+        # the audit A3 gap where security graders were written but never
+        # invoked on real runs.
+        if self.graders:
+            grader_input = self._build_grader_input(request, result, record.trajectory)
+            for grader in self.graders:
+                try:
+                    grader_result = grader.grade(grader_input)
+                except Exception as exc:  # pragma: no cover — defensive
+                    # A grader failure must never mask the run result.
+                    grader_result = GraderResult(
+                        grader_id=getattr(grader, "grader_id", "unknown"),
+                        grader_version=getattr(grader, "grader_version", "0.0.0"),
+                        passed=False,
+                        score=0.0,
+                        evidence=[f"grader raised {type(exc).__name__}: {exc}"],
+                        metadata={"grader_error": str(exc)},
+                    )
+                record.grader_results.append(grader_result)
+
         return record
+
+    def _build_grader_input(
+        self,
+        request: RunRequest,
+        result: HarnessResult,
+        trajectory: list[dict[str, Any]],
+    ) -> EndStateGraderInput:
+        """Build an :class:`EndStateGraderInput` from the trajectory and run state.
+
+        The graders see:
+        - ``snapshot.workdir`` — the task directory (or the configured workspace root).
+        - ``snapshot.final_revision`` — the agent's final revision (from the harness result).
+        - ``snapshot.baseline_revision`` — the source commit from ``task.yaml`` (or empty).
+        - ``metadata['trajectory']`` — the recorded trajectory events, with
+          ``payload`` as plain dicts (see :class:`TrajectoryEvent`).
+        - ``metadata['commands_executed']`` — list of shell commands from
+          ``side_effect.started``/``side_effect.settled`` events.
+        - ``metadata['files_changed']`` — list of paths from ``tool.settled`` events.
+        """
+        workdir = self.workspace_root or request.task_dir
+        baseline_revision = ""
+        try:
+            import yaml
+
+            task_yaml = request.task_dir / "task.yaml"
+            if task_yaml.exists():
+                data = yaml.safe_load(task_yaml.read_text(encoding="utf-8")) or {}
+                baseline_revision = str(data.get("source_commit", "") or "")
+        except Exception:  # pragma: no cover — defensive
+            pass
+
+        commands: list[str] = []
+        files_changed: list[str] = []
+        for ev in trajectory:
+            et = ev.get("event_type")
+            payload = ev.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            if et == "side_effect.started":
+                # Only count each command once (started event; settled event
+                # also carries the command but we skip it to avoid dupes).
+                cmd = payload.get("command") or payload.get("argv")
+                if isinstance(cmd, (str, list)):
+                    cmd_str = cmd if isinstance(cmd, str) else " ".join(str(x) for x in cmd)
+                    if cmd_str not in commands:
+                        commands.append(cmd_str)
+            if et in ("tool.settled", "tool.proposed"):
+                args = payload.get("arguments")
+                if isinstance(args, dict):
+                    for v in args.values():
+                        if isinstance(v, str) and ("/" in v or v.endswith(".py") or v.endswith(".sh")):
+                            if v not in files_changed:
+                                files_changed.append(v)
+                path = payload.get("path")
+                if isinstance(path, str) and path not in files_changed:
+                    files_changed.append(path)
+
+        snapshot = WorkspaceSnapshot(
+            workdir=workdir,
+            final_revision=result.final_revision,
+            baseline_revision=baseline_revision,
+        )
+        metadata: dict[str, Any] = {
+            "trajectory": trajectory,
+            "commands_executed": commands,
+            "files_changed": files_changed,
+            "task_dir": str(request.task_dir),
+            "suite": request.suite,
+            "task": request.task,
+            "harness": request.harness_id,
+            "seed": request.random_seed,
+        }
+        return EndStateGraderInput(
+            snapshot=snapshot,
+            objective=self.objective or f"Task {request.task} in suite {request.suite}",
+            acceptance_criteria=self.acceptance_criteria,
+            risk_class=self.risk_class,
+            metadata=metadata,
+        )
 
 
 # ──────────────────────────── fake harness (for tests) ────────────────────

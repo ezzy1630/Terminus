@@ -9,9 +9,14 @@
 
 #![forbid(unsafe_code)]
 
+mod approvals;
 mod error;
 mod services;
 
+pub use approvals::{
+    operation_hash, ApprovalRecord, ApprovalRequest, ApprovalRisk, ApprovalScope,
+    ApprovalStatus, ApprovalStore,
+};
 pub use services::{
     ArtifactIngestService, CodeIntelligenceService, ExtensionRuntimeService, FileService,
     JobService, KernelHandle, KernelInfoService, NetworkService, PatchService, PolicyService,

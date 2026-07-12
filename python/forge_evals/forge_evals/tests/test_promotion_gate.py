@@ -166,7 +166,7 @@ def test_promotion_gate_passed_property_matches_decision() -> None:
     assert evaluate_promotion(ev_win).passed
 
     ev_lose = Evaluation(
-        **{**ev.__dict__, "security_guardrails": {"x": False},
+        **{**ev_win.__dict__, "security_guardrails": {"x": False},
            "security_guardrail_failed": True}
     )
     assert not evaluate_promotion(ev_lose).passed

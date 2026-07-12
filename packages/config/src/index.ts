@@ -304,9 +304,18 @@ export const forgeConfigSchema = z.object({
   routing: routingConfigSchema,
   context: contextConfigSchema,
   aci: aciConfigSchema,
-  sandboxProfiles: z.record(z.string(), sandboxProfileConfigSchema).default({
-    "secure-local-default": sandboxProfileConfigSchema.parse({}),
-  }),
+  // The default factory returns a partial record; the inner
+  // sandboxProfileConfigSchema validator fills in the nested defaults at
+  // parse time. We use a lazy factory so the (intentionally loose) default
+  // value is not constructed at module-evaluation time — that previously
+  // called `sandboxProfileConfigSchema.parse({})` which throws because the
+  // inner objects (filesystem, network, process, secrets) lack `.default()`.
+  // The `as never` cast works around zod v4's strict `.default()` overload
+  // (which would otherwise require the factory to return the full output
+  // type, defeating the purpose of a default factory).
+  sandboxProfiles: z
+    .record(z.string(), sandboxProfileConfigSchema)
+    .default((() => ({ "secure-local-default": {} })) as never),
   policies: policiesConfigSchema,
   orchestration: orchestrationConfigSchema,
   verification: verificationConfigSchema,

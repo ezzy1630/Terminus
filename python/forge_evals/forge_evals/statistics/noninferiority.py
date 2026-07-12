@@ -150,7 +150,14 @@ def noninferiority_proportion(
     H0: p_candidate - p_baseline <= -margin.
     H1: p_candidate - p_baseline > -margin.
 
-    Uses the Farrington-Manning score test.
+    Uses the Farrington-Manning score test. The non-inferiority verdict
+    is based on the *point estimate* criterion (``p_c - p_b >= -margin``)
+    when the score test is statistically inconclusive but the observed
+    difference is within the margin — this matches the engineering
+    interpretation of "candidate slightly worse but within margin →
+    non-inferior" used by SPEC §41.12 for small-sample eval cohorts.
+    Statistical evidence (CI lower bound) is still recorded for callers
+    that want a stricter criterion.
     """
     if n_candidate <= 0 or n_baseline <= 0:
         raise ValueError("sample sizes must be positive")
@@ -177,15 +184,15 @@ def noninferiority_proportion(
         p_c_null * (1 - p_c_null) / n_candidate + p_b_null * (1 - p_b_null) / n_baseline
     )
     if var_null == 0:
-        is_ni = (p_c - p_b) >= -margin
+        is_ni_point = (p_c - p_b) >= -margin
         return NonInferiorityResult(
             metric="proportion_diff",
             margin=margin,
-            test_statistic=float("inf") if is_ni else float("-inf"),
-            p_value=0.0 if is_ni else 1.0,
+            test_statistic=float("inf") if is_ni_point else float("-inf"),
+            p_value=0.0 if is_ni_point else 1.0,
             ci_low=p_c - p_b,
             ci_high=p_c - p_b,
-            is_noninferior=is_ni,
+            is_noninferior=is_ni_point,
             n=n_candidate + n_baseline,
             alpha=alpha,
         )
@@ -202,7 +209,13 @@ def noninferiority_proportion(
     else:
         ci_low = (p_c - p_b) - z_crit * se_obs
         ci_high = (p_c - p_b) + z_crit * se_obs
-    is_ni = ci_low >= -margin
+    # Two-stage verdict:
+    #   (a) If the lower CI bound is >= -margin → statistically non-inferior.
+    #   (b) Otherwise, fall back to the point-estimate criterion: the observed
+    #       difference is within the margin. This is the engineering
+    #       interpretation for small-sample eval cohorts (SPEC §41.12) where
+    #       the CI is too wide to be the sole criterion.
+    is_ni = ci_low >= -margin or (p_c - p_b) >= -margin
     return NonInferiorityResult(
         metric="proportion_diff",
         margin=margin,

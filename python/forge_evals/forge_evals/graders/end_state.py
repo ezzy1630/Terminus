@@ -258,7 +258,7 @@ class TestRunGrader(EndStateGrader):
                 timeout=self.timeout,
                 check=False,
             )
-        except TimeoutError:
+        except subprocess.TimeoutExpired:
             return GraderResult(
                 grader_id=self.grader_id,
                 grader_version=self.grader_version,
@@ -266,7 +266,7 @@ class TestRunGrader(EndStateGrader):
                 score=0.0,
                 evidence=[f"timeout after {self.timeout}s"],
             )
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, OSError) as exc:
             return GraderResult(
                 grader_id=self.grader_id,
                 grader_version=self.grader_version,
@@ -335,7 +335,7 @@ class HiddenTestGrader(EndStateGrader):
                 env={"HIDDEN_DIR": str(self.hidden_dir), "PATH": "/usr/bin:/bin"},
                 check=False,
             )
-        except TimeoutError:
+        except subprocess.TimeoutExpired:
             return GraderResult(
                 grader_id=self.grader_id,
                 grader_version=self.grader_version,
@@ -343,7 +343,7 @@ class HiddenTestGrader(EndStateGrader):
                 score=0.0,
                 evidence=[f"timeout after {self.timeout}s"],
             )
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, OSError) as exc:
             return GraderResult(
                 grader_id=self.grader_id,
                 grader_version=self.grader_version,
@@ -398,7 +398,7 @@ class ScriptGrader(EndStateGrader):
                 timeout=self.timeout,
                 check=False,
             )
-        except TimeoutError:
+        except subprocess.TimeoutExpired:
             return GraderResult(
                 grader_id=self.grader_id,
                 grader_version=self.grader_version,
@@ -406,7 +406,7 @@ class ScriptGrader(EndStateGrader):
                 score=0.0,
                 evidence=[f"timeout after {self.timeout}s"],
             )
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, OSError) as exc:
             return GraderResult(
                 grader_id=self.grader_id,
                 grader_version=self.grader_version,
@@ -468,7 +468,7 @@ def _compute_diff_stats(
             timeout=30,
             check=False,
         )
-    except (FileNotFoundError, TimeoutError):
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return 0, 0, []
     if proc.returncode != 0:
         return 0, 0, []

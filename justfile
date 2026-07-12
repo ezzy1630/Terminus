@@ -39,12 +39,16 @@ build:
     cd python && uv run build || true
 
 # Fast lint/type/unit checks.
-check:
+check: boundary-check
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     bun run lint
     bun run typecheck
     cd python && uv run ruff check . && uv run mypy forge_evals || true
+
+# Architecture boundary checks (SPEC §42.5).
+boundary-check:
+    bun run tools/boundary-check.ts
 
 # Full local validation.
 check-all: check codegen-check unit integration security
@@ -68,27 +72,27 @@ codegen-proto:
 
 # Public API codegen (OpenAPI → TS/Rust/Python clients).
 codegen-public-api:
-    echo "[codegen-public-api] TODO: generate OpenAPI clients from packages/public-api"
+    bun run tools/codegen/public-api.ts
 
 # Event catalog codegen (TS/Rust types, JSON schemas, docs, fixtures).
 codegen-events:
-    echo "[codegen-events] TODO: generate event types from schemas/events/catalog.yaml"
+    bun run tools/codegen/events.ts
 
 # Tool schema codegen (provider dialects, validators, docs).
 codegen-tools:
-    echo "[codegen-tools] TODO: generate tool schemas from schemas/tools/*.json"
+    bun run tools/codegen/tools.ts
 
 # Config codegen (JSON Schema, docs, sample config).
 codegen-config:
-    echo "[codegen-config] TODO: generate config schemas"
+    bun run tools/codegen/config.ts
 
 # SQLx offline query metadata.
 codegen-sqlx:
-    echo "[codegen-sqlx] TODO: generate SQLx offline metadata from migrations/sqlite/"
+    bun run tools/codegen/sqlx.ts
 
 # Generated docs (ADR index, event catalog markdown, API docs).
 codegen-docs:
-    echo "[codegen-docs] TODO: generate docs index"
+    bun run tools/codegen/docs.ts
 
 # All unit tests.
 unit:
@@ -162,53 +166,25 @@ run-tui:
 
 # Scaffolding helpers (SPEC §45.7).
 new-ts-package name:
-    echo "[new-ts-package] TODO: scaffold packages/{{name}} with README, AGENTS, tests, lint"
+    bun run tools/scaffold/new-ts-package.ts {{name}}
 
 new-rust-crate name:
-    echo "[new-rust-crate] TODO: scaffold crates/{{name}} with Cargo.toml, lib.rs, AGENTS"
+    bun run tools/scaffold/new-rust-crate.ts {{name}}
 
 new-tool id:
-    echo "[new-tool] TODO: scaffold schemas/tools/{{id}}.json and codegen"
+    bun run tools/scaffold/new-tool.ts {{id}}
 
 new-event type:
-    echo "[new-event] TODO: add {{type}} to schemas/events/catalog.yaml and codegen"
+    bun run tools/scaffold/new-event.ts {{type}}
 
 new-capability id:
-    echo "[new-capability] TODO: scaffold capability descriptor"
+    bun run tools/scaffold/new-capability.ts {{id}}
 
 new-adapter id:
-    echo "[new-adapter] TODO: scaffold adapters/{{id}} with adapter.yaml and README"
+    bun run tools/scaffold/new-adapter.ts {{id}}
 
 new-eval suite task:
-    echo "[new-eval] TODO: scaffold evals/tasks/{{suite}}/{{task}} with task.yaml, prompt.md, grader/"
+    bun run tools/scaffold/new-eval.ts {{suite}} {{task}}
 
 new-adr title:
-    #!/usr/bin/env bash
-    set -eu
-    next=$(ls docs/decisions/ADR-*.md 2>/dev/null | sort -V | tail -1 | sed 's/.*ADR-//;s/-.*//' || echo 0)
-    next=$(printf "%04d" $((10#${next} + 1)))
-    path="docs/decisions/ADR-${next}-{{title}}.md"
-    cat > "$path" <<'EOF'
-# ADR-{next}: {title}
-
-- **Status:** PROPOSED
-- **Date:** $(date +%Y-%m-%d)
-- **Decision owner:** (name)
-
-## Context
-
-## Decision
-
-## Alternatives
-
-## Consequences
-
-## Security Impact
-
-## Evaluation Plan
-
-## Migration
-
-## Rollback
-EOF
-    echo "[new-adr] created $path"
+    bun run tools/scaffold/new-adr.ts "{{title}}"

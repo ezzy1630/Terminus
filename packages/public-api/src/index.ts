@@ -367,12 +367,55 @@ export const GetArtifact = {
 };
 
 // /approvals
+/**
+ * Approval decision enum. Per SPEC §32.4, the canonical names are
+ * `allow_for_action` / `allow_for_task` (matching `@forge/domain`'s
+ * `ApprovalDecision`). For backwards compatibility with older clients, the
+ * aliases `allow_exact` / `allow_task_scope` are also accepted and are
+ * normalized to the canonical names via a zod transform.
+ */
+export const ApprovalDecisionParam = z
+  .enum([
+    "allow_once",
+    "allow_for_action",
+    "allow_for_task",
+    "allow_exact",
+    "allow_task_scope",
+    "deny_once",
+    "deny_and_add_task_rule",
+    "deny_and_rule",
+    "stop_task",
+  ])
+  .transform((v): "allow_once" | "allow_for_action" | "allow_for_task" | "deny_once" | "deny_and_add_task_rule" | "stop_task" => {
+    switch (v) {
+      case "allow_exact":
+        return "allow_for_action";
+      case "allow_task_scope":
+        return "allow_for_task";
+      case "deny_and_rule":
+        return "deny_and_add_task_rule";
+      case "allow_once":
+      case "allow_for_action":
+      case "allow_for_task":
+      case "deny_once":
+      case "deny_and_add_task_rule":
+      case "stop_task":
+        return v;
+      default: {
+        const _exhaustive: never = v;
+        void _exhaustive;
+        return v;
+      }
+    }
+  });
+export type ApprovalDecisionParam = z.infer<typeof ApprovalDecisionParam>;
+
 export const ResolveApproval = {
   method: "POST" as const,
   path: "/v1/approvals/{id}/resolve",
   request: z.object({
     id: z.string(),
-    decision: z.enum(["allow_once", "allow_exact", "allow_task_scope", "deny_once", "deny_and_rule", "stop_task"]),
+    decision: ApprovalDecisionParam,
     rationale: z.string().nullable().default(null),
   }),
   response: ApprovalSnapshot,
@@ -423,6 +466,180 @@ export const GetVerificationPlan = {
   }),
 };
 
+// ────────────────────────── Additional resource groups (§32.1) ───────────────
+// /tools /agents /memory /evals /configuration /policies — list endpoints.
+
+// /tools — list registered tools (capability registry).
+export const ToolSnapshot = z.object({
+  id: z.string(),
+  version: z.string(),
+  trust_level: z.enum(["builtin", "first_party", "verified_third_party", "untrusted"]),
+  summary: z.string(),
+  input_schema: z.record(z.string(), z.unknown()),
+  deprecated: z.boolean().default(false),
+});
+export type ToolSnapshot = z.infer<typeof ToolSnapshot>;
+
+export const ListTools = {
+  method: "GET" as const,
+  path: "/v1/tools",
+  request: z.object({
+    trust_level: z.enum(["builtin", "first_party", "verified_third_party", "untrusted"]).nullable().default(null),
+    include_deprecated: z.boolean().default(false),
+  }),
+  response: z.object({
+    tools: z.array(ToolSnapshot).default([]),
+    next_cursor: z.string().nullable().default(null),
+  }),
+};
+
+// /agents — list registered agents / harnesses.
+export const AgentSnapshot = z.object({
+  id: z.string(),
+  display_name: z.string(),
+  kind: z.enum(["implementer", "scout", "reviewer", "specialist"]),
+  model_profile: z.string(),
+  trust_level: z.enum(["builtin", "first_party", "verified_third_party", "untrusted"]),
+  enabled: z.boolean().default(true),
+});
+export type AgentSnapshot = z.infer<typeof AgentSnapshot>;
+
+export const ListAgents = {
+  method: "GET" as const,
+  path: "/v1/agents",
+  request: z.object({
+    enabled_only: z.boolean().default(true),
+  }),
+  response: z.object({
+    agents: z.array(AgentSnapshot).default([]),
+  }),
+};
+
+// /memory — list memory claims.
+export const MemoryClaimSnapshot = z.object({
+  id: z.string(),
+  kind: z.enum([
+    "fact",
+    "convention",
+    "preference",
+    "pitfall",
+    "command",
+    "architecture",
+    "procedure",
+    "failure_resolution",
+  ]),
+  statement: z.string(),
+  status: z.enum(["candidate", "active", "disputed", "expired", "rejected"]),
+  confidence_ppm: z.number().int().min(0).max(1_000_000),
+  created_at: z.string(),
+  last_used_at: z.string().nullable(),
+});
+export type MemoryClaimSnapshot = z.infer<typeof MemoryClaimSnapshot>;
+
+export const ListMemory = {
+  method: "GET" as const,
+  path: "/v1/memory",
+  request: z.object({
+    status: z
+      .enum(["candidate", "active", "disputed", "expired", "rejected"])
+      .nullable()
+      .default(null),
+    kind: z
+      .enum([
+        "fact",
+        "convention",
+        "preference",
+        "pitfall",
+        "command",
+        "architecture",
+        "procedure",
+        "failure_resolution",
+      ])
+      .nullable()
+      .default(null),
+  }),
+  response: z.object({
+    claims: z.array(MemoryClaimSnapshot).default([]),
+    next_cursor: z.string().nullable().default(null),
+  }),
+};
+
+// /evals — list eval runs.
+export const EvalRunSnapshot = z.object({
+  run_id: z.string(),
+  suite: z.string(),
+  task: z.string(),
+  harness: z.string(),
+  harness_commit: z.string(),
+  started_at: z.string(),
+  ended_at: z.string().nullable(),
+  outcome: z.enum(["pass", "fail", "error", "missing"]),
+});
+export type EvalRunSnapshot = z.infer<typeof EvalRunSnapshot>;
+
+export const ListEvals = {
+  method: "GET" as const,
+  path: "/v1/evals",
+  request: z.object({
+    suite: z.string().nullable().default(null),
+    harness: z.string().nullable().default(null),
+    since: z.string().nullable().default(null),
+  }),
+  response: z.object({
+    runs: z.array(EvalRunSnapshot).default([]),
+    next_cursor: z.string().nullable().default(null),
+  }),
+};
+
+// /configuration — list configuration profiles.
+export const ConfigurationSnapshot = z.object({
+  id: z.string(),
+  kind: z.enum(["model_profile", "permission_profile", "policy_profile", "runtime_profile"]),
+  display_name: z.string(),
+  summary: z.string(),
+  enabled: z.boolean().default(true),
+  mutable: z.boolean().default(false),
+});
+export type ConfigurationSnapshot = z.infer<typeof ConfigurationSnapshot>;
+
+export const ListConfiguration = {
+  method: "GET" as const,
+  path: "/v1/configuration",
+  request: z.object({
+    kind: z
+      .enum(["model_profile", "permission_profile", "policy_profile", "runtime_profile"])
+      .nullable()
+      .default(null),
+  }),
+  response: z.object({
+    configurations: z.array(ConfigurationSnapshot).default([]),
+  }),
+};
+
+// /policies — list policy rules.
+export const PolicySnapshot = z.object({
+  id: z.string(),
+  profile_id: z.string(),
+  kind: z.enum(["allow", "deny", "prompt", "rate_limit"]),
+  effect_type: z.string(),
+  selector: z.string(),
+  rationale: z.string().nullable().default(null),
+  enabled: z.boolean().default(true),
+});
+export type PolicySnapshot = z.infer<typeof PolicySnapshot>;
+
+export const ListPolicies = {
+  method: "GET" as const,
+  path: "/v1/policies",
+  request: z.object({
+    profile_id: z.string().nullable().default(null),
+    enabled_only: z.boolean().default(true),
+  }),
+  response: z.object({
+    policies: z.array(PolicySnapshot).default([]),
+  }),
+};
+
 // ────────────────────────── Endpoint registry ──────────────────────────────
 
 export const ENDPOINTS = {
@@ -444,6 +661,12 @@ export const ENDPOINTS = {
   GetJob,
   StopJob,
   GetVerificationPlan,
+  ListTools,
+  ListAgents,
+  ListMemory,
+  ListEvals,
+  ListConfiguration,
+  ListPolicies,
 } as const;
 
 export type EndpointName = keyof typeof ENDPOINTS;

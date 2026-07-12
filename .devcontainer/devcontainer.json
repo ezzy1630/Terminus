@@ -1,0 +1,50 @@
+{
+  "name": "Forge",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": false,
+      "username": "vscode"
+    },
+    "ghcr.io/jdx/mise-feature-devcontainer:latest": {}
+  },
+  "postCreateCommand": "mise install -y && just bootstrap",
+  "forwardPorts": [3000, 3040, 3050, 81],
+  "portsAttributes": {
+    "3000": { "label": "Next.js dashboard", "onAutoForward": "notify" },
+    "3040": { "label": "Forge kernel (Rust)", "onAutoForward": "notify" },
+    "3050": { "label": "Forge control (TS)", "onAutoForward": "notify" },
+    "81": { "label": "Caddy admin", "onAutoForward": "silent" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "bradlc.vscode-tailwindcss",
+        "tamasfe.even-better-toml",
+        "ms-azuretools.vscode-docker",
+        "ms-python.python",
+        "ms-python.black-formatter"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "rust-analyzer.check.command": "clippy",
+        "eslint.format.enable": true,
+        "tailwindCSS.experimental.classRegex": [
+          ["cva\\(([^)]*)\\)", "[\"'`]([^\"'`]*).*?[\"'`]"]
+        ]
+      }
+    }
+  },
+  "remoteEnv": {
+    "FORGE_ROOT": "${containerWorkspaceFolder}",
+    "RUST_BACKTRACE": "1"
+  },
+  "remoteUser": "vscode"
+}

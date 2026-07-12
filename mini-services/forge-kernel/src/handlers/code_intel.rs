@@ -5,11 +5,13 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::Extension;
 use axum::Json;
 use forge_code_intel::{DiagnoseResult, InspectResult, ReferenceResult};
 use serde::Deserialize;
 
 use crate::api::Envelope;
+use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
 use crate::state::AppState;
 use crate::trace_id::TraceId;
@@ -24,11 +26,13 @@ pub struct InspectRequest {
 
 pub async fn inspect_symbol(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<InspectResult>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: InspectRequest =
+    let mut req: InspectRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
+    req.envelope.inject_capability_token(&cap_token);
     let result = state
         .kernel
         .code_intel
@@ -37,7 +41,7 @@ pub async fn inspect_symbol(
             &req.envelope.effect_intent,
             &req.symbol,
         )
-        .map_err(|e| ApiError::internal(format!("{e}"), &trace_id.0))?;
+        .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
     Ok(Json(result))
 }
 

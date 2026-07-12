@@ -35,6 +35,7 @@ from .harness_runner import (
     RunRequest,
     make_default_cost,
 )
+from .mini_swe_adapter import MiniSweAgentAdapter, MiniSweAgentTurn
 from .trajectory_recorder import TrajectoryEvent, TrajectoryRecorder
 
 __all__ = [
@@ -54,6 +55,8 @@ __all__ = [
     "HarnessResult",
     "HarnessRunner",
     "HarnessSpec",
+    "MiniSweAgentAdapter",
+    "MiniSweAgentTurn",
     "ModelCapabilitySnapshot",
     "RunRequest",
     "ScriptStep",

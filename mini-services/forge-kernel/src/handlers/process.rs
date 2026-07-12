@@ -2,6 +2,7 @@
 //! and `GET /v1/process/:id/output?cursor=N`.
 
 use axum::extract::{Path, Query, State};
+use axum::Extension;
 use axum::Json;
 use forge_kernel_protocol::{CommandSpec, OutputChunk, ProcessEvent};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use crate::api::Envelope;
+use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
 use crate::state::AppState;
 use crate::trace_id::TraceId;
@@ -30,11 +32,13 @@ pub struct StartProcessResponse {
 
 pub async fn start(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<StartProcessResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: StartProcessRequest =
+    let mut req: StartProcessRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
+    req.envelope.inject_capability_token(&cap_token);
 
     // The kernel's ProcessService.start returns a Receiver<ProcessEvent>. We
     // spawn the process, take the Started event to get the process_id, then
@@ -119,11 +123,13 @@ pub struct CancelProcessResponse {
 pub async fn cancel(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<CancelProcessResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: CancelProcessRequest =
+    let mut req: CancelProcessRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
+    req.envelope.inject_capability_token(&cap_token);
     let reason = if req.reason.is_empty() { "cancelled" } else { &req.reason };
     let status = state
         .kernel

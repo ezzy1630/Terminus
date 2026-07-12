@@ -15,18 +15,46 @@
  *
  * The service uses Prisma (SQLite) for operational state, the kernel HTTP
  * API for effects, and the @forge/* packages for domain logic.
+ *
+ * Security (SPEC §30.5/§30.6/§30.8):
+ *   - Every request except `GET /v1/system/health` MUST present a bearer
+ *     token matching `FORGE_CONTROL_TOKEN`.
+ *   - CORS is locked to the configured gateway origin
+ *     (`FORGE_CONTROL_CORS_ORIGIN`, default `http://127.0.0.1:81`).
+ *   - Mutating requests accept an `x-idempotency-key` header; replays with
+ *     the same key+body return the cached response, replays with a
+ *     different body return `IDEMPOTENCY_KEY_CONFLICT`.
+ *   - SSE event IDs are monotonic (timestamp-prefixed) so `cursor` replay
+ *     is ordered; stale cursors emit a `cursor_expired` event.
+ *   - Before any mutating handler executes, an `authorized` audit record
+ *     is logged with method, path, actor, task_id, trace_id, timestamp.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
-import { z } from "zod";
 
 // ────────────────────────── Configuration ──────────────────────────────────
 
 const PORT = 3050;
 const KERNEL_PORT = 3040;
 const KERNEL_TOKEN = process.env.FORGE_KERNEL_TOKEN ?? "forge-kernel-dev-token";
+const CONTROL_TOKEN = process.env.FORGE_CONTROL_TOKEN ?? "forge-control-dev-token";
+const CONTROL_CORS_ORIGIN = process.env.FORGE_CONTROL_CORS_ORIGIN ?? "http://127.0.0.1:81";
 const DATABASE_URL = process.env.DATABASE_URL ?? "file:/home/z/my-project/db/custom.db";
+const SERVER_PRINCIPAL = "forge-control-bearer";
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+
+const CORS_ALLOW_HEADERS =
+  "authorization, content-type, x-idempotency-key, x-trace-id, traceparent, last-event-id, x-capability-token";
+const CORS_ALLOW_METHODS = "GET, POST, PATCH, PUT, DELETE, OPTIONS";
+
+const SUPPORTED_CAPABILITIES = [
+  "sse_resume",
+  "rich_approvals",
+  "artifact_streaming",
+  "idempotency",
+  "tools_direct",
+] as const;
 
 const db = new PrismaClient({
   datasources: { db: { url: DATABASE_URL } },
@@ -95,6 +123,19 @@ interface StoredEvent {
 class EventBus {
   private subscriptions = new Map<string, EventBusSubscription>();
   private cursor = 0;
+  private monotonicSeq = 0;
+
+  /**
+   * Monotonic, lexicographically-comparable event ID. SPEC §30.6 requires
+   * `Last-Event-ID` replay to return a contiguous, ordered slice, so the
+   * ID is `<16-digit-ms>-<8-digit-seq>` (zero-padded). String comparison
+   * of two such IDs therefore yields chronological order.
+   */
+  nextEventId(): string {
+    const ms = Date.now().toString().padStart(16, "0");
+    const seq = (this.monotonicSeq++).toString().padStart(8, "0");
+    return `${ms}-${seq}`;
+  }
 
   async publish(ev: StoredEvent): Promise<void> {
     // Persist to SQLite (semantic_events table).
@@ -113,14 +154,46 @@ class EventBus {
     return () => { this.subscriptions.delete(id); };
   }
 
+  /**
+   * Replay events with `eventId > sinceEventId`, ordered by occurredAt then
+   * aggregateSequence. Because event IDs are monotonic by timestamp, the
+   * `gt` filter yields a chronologically-ordered tail (SPEC §30.6).
+   */
   async replay(sinceEventId: string | null, filter: (ev: StoredEvent) => boolean): Promise<StoredEvent[]> {
     if (!sinceEventId) return [];
     const rows = await db.semanticEvent.findMany({
       where: { eventId: { gt: sinceEventId } },
-      orderBy: { aggregateSequence: "asc" },
+      orderBy: [{ occurredAt: "asc" }, { aggregateSequence: "asc" }],
       take: 1000,
     });
     return rows as unknown as StoredEvent[];
+  }
+
+  /**
+   * Return the event ID of the oldest retained event, or null if none.
+   * Used to detect stale SSE cursors (SPEC §30.6 CURSOR_EXPIRED).
+   */
+  async oldestEventId(): Promise<string | null> {
+    const oldest = await db.semanticEvent.findFirst({
+      orderBy: [{ occurredAt: "asc" }, { aggregateSequence: "asc" }],
+      select: { eventId: true },
+    });
+    return oldest?.eventId ?? null;
+  }
+
+  /**
+   * Persist the last-sent event ID for a stream so the server can
+   * reconstruct per-subscriber progress (SPEC §30.6, §45.5
+   * EventStreamCursor table).
+   */
+  async persistCursor(streamName: string, lastEventId: string, lastSequence: number): Promise<void> {
+    await db.eventStreamCursor.upsert({
+      where: { streamName },
+      create: { streamName, lastEventId, lastSequence },
+      update: { lastEventId, lastSequence },
+    }).catch(() => {
+      // best-effort; cursor persistence must not break the stream.
+    });
   }
 }
 
@@ -134,12 +207,13 @@ async function emit(params: {
   actor?: { kind: string; id: string };
   correlationId?: string | undefined;
   causationId?: string | null | undefined;
+  idempotencyKey?: string | null | undefined;
   payload: unknown;
   artifactRefs?: string[] | undefined;
   traceId?: string | null | undefined;
 }): Promise<void> {
   const ev: StoredEvent = {
-    eventId: randomUUID(),
+    eventId: bus.nextEventId(),
     schemaVersion: 1,
     eventType: params.eventType,
     aggregateType: params.aggregateType,
@@ -149,7 +223,7 @@ async function emit(params: {
     actorJson: JSON.stringify(params.actor ?? { kind: "system", id: "forge-control" }),
     correlationId: params.correlationId ?? randomUUID(),
     causationId: params.causationId ?? null,
-    idempotencyKey: null,
+    idempotencyKey: params.idempotencyKey ?? null,
     payloadJson: JSON.stringify(params.payload),
     artifactRefsJson: JSON.stringify(params.artifactRefs ?? []),
     traceId: params.traceId ?? null,
@@ -162,43 +236,361 @@ async function emit(params: {
 function now(): string { return new Date().toISOString(); }
 function uuid(): string { return randomUUID(); }
 
-function jsonBody(req: IncomingMessage): Promise<unknown> {
+/** Per-request raw body cache so auth/idempotency/handler can all read it. */
+const bodyCache = new WeakMap<IncomingMessage, Buffer>();
+
+function readRawBody(req: IncomingMessage): Promise<Buffer> {
+  const cached = bodyCache.get(req);
+  if (cached) return Promise.resolve(cached);
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("error", reject);
     req.on("end", () => {
       const buf = Buffer.concat(chunks);
-      if (buf.length === 0) { resolve({}); return; }
-      try { resolve(JSON.parse(buf.toString("utf8"))); } catch (e) { reject(e); }
+      bodyCache.set(req, buf);
+      resolve(buf);
     });
   });
 }
 
+function jsonBody(req: IncomingMessage): Promise<unknown> {
+  return readRawBody(req).then((buf) => {
+    if (buf.length === 0) return {};
+    try { return JSON.parse(buf.toString("utf8")); } catch (e) { throw e; }
+  });
+}
+
+function sha256Hex(buf: Buffer): string {
+  return "sha256:" + createHash("sha256").update(buf).digest("hex");
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+function getTraceId(req: IncomingMessage): string {
+  const tp = req.headers["traceparent"];
+  if (typeof tp === "string" && tp.length > 0) return tp;
+  const tid = req.headers["x-trace-id"];
+  if (typeof tid === "string" && tid.length > 0) return tid;
+  return randomUUID();
+}
+
+function checkAuth(req: IncomingMessage): boolean {
+  const auth = req.headers.authorization;
+  if (typeof auth !== "string") return false;
+  if (!auth.startsWith("Bearer ")) return false;
+  const token = auth.slice("Bearer ".length);
+  return constantTimeEqual(token, CONTROL_TOKEN);
+}
+
+function isMutating(method: string | undefined): boolean {
+  return method === "POST" || method === "PATCH" || method === "PUT" || method === "DELETE";
+}
+
+function auditAuthorized(
+  req: IncomingMessage,
+  url: URL,
+  params: Record<string, string>,
+  traceId: string,
+): void {
+  // SPEC §31.3 step 10 — log an `authorized` audit event before any effect.
+  // `task_id` is only populated when the route is under /v1/tasks/:id (so
+  // the value is genuinely a task ID, not a session/turn/job ID).
+  const taskId = url.pathname.startsWith("/v1/tasks/") ? (params.id ?? null) : null;
+  const log = {
+    event: "authorized",
+    method: req.method ?? "GET",
+    path: url.pathname,
+    actor: SERVER_PRINCIPAL,
+    task_id: taskId,
+    trace_id: traceId,
+    timestamp: new Date().toISOString(),
+  };
+  console.log(JSON.stringify(log));
+}
+
+// ────────────────────────── Idempotency ────────────────────────────────────
+
+/**
+ * Per-response capture so the idempotency wrapper can store the exact
+ * bytes the handler produced. Only attached for mutating routes.
+ */
+interface CapturedResponse {
+  status: number;
+  body: Buffer;
+}
+
+const captureMap = new WeakMap<ServerResponse, CapturedResponse>();
+
+function attachCapture(res: ServerResponse): void {
+  captureMap.set(res, { status: 0, body: Buffer.alloc(0) });
+}
+
+function recordCapture(res: ServerResponse, status: number, body: Buffer): void {
+  const cap = captureMap.get(res);
+  if (!cap) return;
+  cap.status = status;
+  cap.body = body;
+}
+
+function popCapture(res: ServerResponse): CapturedResponse | null {
+  const cap = captureMap.get(res);
+  if (!cap) return null;
+  captureMap.delete(res);
+  return cap;
+}
+
+/**
+ * SPEC §30.5. For mutating requests with an `x-idempotency-key` header:
+ *   - same key + same body → return cached response
+ *   - same key + different body → return 409 IDEMPOTENCY_KEY_CONFLICT
+ *   - new key → insert `pending`, run handler, store result as `completed`
+ *
+ * Returns `true` if the handler should run, `false` if a response has
+ * already been sent (replay, conflict, or in-flight).
+ *
+ * When returning `true`, a capture is attached to `res`; the caller MUST
+ * invoke `commitIdempotency(...)` after the handler completes.
+ */
+async function withIdempotency(
+  req: IncomingMessage,
+  res: ServerResponse,
+  method: string,
+  traceId: string,
+): Promise<boolean> {
+  const keyHeader = req.headers["x-idempotency-key"];
+  const key = Array.isArray(keyHeader) ? (keyHeader[0] ?? null) : keyHeader;
+  if (typeof key !== "string" || key.length === 0) {
+    console.warn(JSON.stringify({
+      event: "idempotency_key_absent",
+      method,
+      path: req.url ?? "",
+      trace_id: traceId,
+      timestamp: new Date().toISOString(),
+    }));
+    return true;
+  }
+  const buf = await readRawBody(req);
+  const hash = sha256Hex(buf);
+
+  const existing = await db.idempotencyRecord.findUnique({
+    where: {
+      principal_method_idempotencyKey: {
+        principal: SERVER_PRINCIPAL,
+        method,
+        idempotencyKey: key,
+      },
+    },
+  }).catch((err: unknown) => {
+    console.warn(JSON.stringify({
+      event: "idempotency_lookup_failed",
+      method,
+      idempotency_key: key,
+      error: String(err),
+      timestamp: new Date().toISOString(),
+    }));
+    return null;
+  });
+
+  if (existing) {
+    if (existing.requestHash !== hash) {
+      sendError(
+        res,
+        409,
+        "IDEMPOTENCY_KEY_CONFLICT",
+        "idempotency key reused with a different request body",
+        "conflict",
+        { idempotency_key: key },
+      );
+      return false;
+    }
+    // Same key + same body → replay the stored response.
+    if (existing.state === "completed") {
+      if (existing.errorJson) {
+        try {
+          const err = JSON.parse(existing.errorJson) as {
+            status: number; code: string; message: string; category: string;
+            details?: Record<string, unknown>;
+          };
+          sendError(res, err.status, err.code, err.message, err.category, err.details ?? {});
+        } catch {
+          sendJson(res, 200, null);
+        }
+      } else {
+        try {
+          const artifact = existing.responseArtifact
+            ? (JSON.parse(existing.responseArtifact) as unknown)
+            : null;
+          sendJson(res, 200, artifact);
+        } catch {
+          sendJson(res, 200, null);
+        }
+      }
+      return false;
+    }
+    // Still in-flight — ask the client to retry.
+    sendError(
+      res,
+      409,
+      "IDEMPOTENCY_IN_PROGRESS",
+      "a request with the same idempotency key is still in-flight",
+      "conflict",
+      { idempotency_key: key, retry_after_ms: 500 },
+    );
+    return false;
+  }
+
+  // No prior record — insert pending, attach capture, let caller run handler.
+  await db.idempotencyRecord.create({
+    data: {
+      principal: SERVER_PRINCIPAL,
+      method,
+      idempotencyKey: key,
+      requestHash: hash,
+      state: "pending",
+      responseArtifact: null,
+      errorJson: null,
+      expiresAt: new Date(Date.now() + IDEMPOTENCY_TTL_MS),
+    },
+  }).catch((err: unknown) => {
+    console.warn(JSON.stringify({
+      event: "idempotency_insert_failed",
+      method,
+      idempotency_key: key,
+      error: String(err),
+      timestamp: new Date().toISOString(),
+    }));
+  });
+  attachCapture(res);
+  return true;
+}
+
+async function commitIdempotency(
+  res: ServerResponse,
+  method: string,
+  key: string,
+): Promise<void> {
+  const cap = popCapture(res);
+  if (!cap) return;
+  const status = cap.status || 200;
+  let bodyJson: unknown = null;
+  try {
+    bodyJson = JSON.parse(cap.body.toString("utf8"));
+  } catch {
+    bodyJson = cap.body.toString("utf8");
+  }
+  const isError =
+    status >= 400 &&
+    typeof bodyJson === "object" &&
+    bodyJson !== null &&
+    "error" in bodyJson;
+  await db.idempotencyRecord.update({
+    where: {
+      principal_method_idempotencyKey: {
+        principal: SERVER_PRINCIPAL,
+        method,
+        idempotencyKey: key,
+      },
+    },
+    data: isError
+      ? {
+          state: "completed",
+          errorJson: JSON.stringify({
+            ...(bodyJson as { error: Record<string, unknown> }).error,
+            status,
+          }),
+        }
+      : {
+          state: "completed",
+          responseArtifact: JSON.stringify(bodyJson),
+        },
+  }).catch((err: unknown) => {
+    console.warn(JSON.stringify({
+      event: "idempotency_commit_failed",
+      method,
+      idempotency_key: key,
+      error: String(err),
+      timestamp: new Date().toISOString(),
+    }));
+  });
+}
+
+// ────────────────────────── HTTP response helpers ─────────────────────────
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const buf = Buffer.from(JSON.stringify(body), "utf8");
-  res.writeHead(status, {
+  const headers = {
     "content-type": "application/json",
     "content-length": String(buf.length),
-    "access-control-allow-origin": "*",
-    "access-control-allow-headers": "*",
-    "access-control-allow-methods": "*",
-  });
+    "access-control-allow-origin": CONTROL_CORS_ORIGIN,
+    "access-control-allow-headers": CORS_ALLOW_HEADERS,
+    "access-control-allow-methods": CORS_ALLOW_METHODS,
+    "vary": "origin",
+  };
+  recordCapture(res, status, buf);
+  res.writeHead(status, headers);
   res.end(buf);
 }
 
-function sendError(res: ServerResponse, status: number, code: string, message: string, category: string, details: Record<string, unknown> = {}): void {
+function sendError(
+  res: ServerResponse,
+  status: number,
+  code: string,
+  message: string,
+  category: string,
+  details: Record<string, unknown> = {},
+): void {
   sendJson(res, status, {
     error: {
       code,
       message,
-      retryable: category === "timeout" || category === "external_dependency" || category === "internal",
+      retryable:
+        category === "timeout" ||
+        category === "external_dependency" ||
+        category === "internal",
       category,
       details,
       suggested_action: null,
       trace_id: randomUUID(),
     },
   });
+}
+
+// ────────────────────────── Approval decision reconciliation ───────────────
+
+/**
+ * SPEC §32.4. Accept BOTH naming conventions used across the codebase:
+ *   - public-api: allow_once | allow_exact | allow_task_scope | deny_once |
+ *                 deny_and_rule | stop_task
+ *   - domain:     allow_once | allow_for_action | allow_for_task | deny_once |
+ *                 deny_and_add_task_rule | stop_task
+ * and map them to the canonical domain names. Unknown values return null.
+ */
+function normalizeApprovalDecision(raw: string): string | null {
+  switch (raw) {
+    case "allow_once":
+    case "allow_exact":
+      return "allow_once";
+    case "allow_for_action":
+    case "allow_task_scope":
+      return "allow_for_action";
+    case "allow_for_task":
+      return "allow_for_task";
+    case "deny_once":
+      return "deny_once";
+    case "deny_and_rule":
+    case "deny_and_add_task_rule":
+      return "deny_and_add_task_rule";
+    case "stop_task":
+      return "stop_task";
+    default:
+      return null;
+  }
 }
 
 // ────────────────────────── Route handlers ─────────────────────────────────
@@ -233,13 +625,29 @@ const routes: Route[] = [
     });
   }),
   route("POST", "/v1/system/initialize", async (req, res) => {
-    const body = await jsonBody(req) as { client?: unknown };
+    // SPEC §30.3 — parse ClientHello, echo the intersection of supported
+    // capabilities back as ServerHello.
+    const body = await jsonBody(req) as {
+      client?: { name?: string; version?: string } | undefined;
+      protocol?: { major?: number; minor?: number } | undefined;
+      capabilities?: string[] | undefined;
+      experimental?: string[] | undefined;
+    };
+    const clientCaps = body.capabilities ?? [];
+    const experimental = body.experimental ?? [];
+    const supported = new Set<string>(SUPPORTED_CAPABILITIES);
+    const intersection =
+      clientCaps.length === 0
+        ? [...SUPPORTED_CAPABILITIES]
+        : clientCaps.filter((c) => supported.has(c));
     sendJson(res, 200, {
       server: { version: "0.1.0", build_commit: "dev", instance_id: "forge-control-dev" },
       protocol: { major: 1, minor: 0 },
+      client: body.client ?? null,
       capabilities: {
-        supported: ["sse_resume", "rich_approvals", "artifact_streaming"],
-        experimental: [],
+        supported: [...SUPPORTED_CAPABILITIES],
+        intersection,
+        experimental,
       },
       limits: { max_request_bytes: 1_048_576, max_sse_backlog: 10_000 },
     });
@@ -288,7 +696,7 @@ const routes: Route[] = [
       data: {
         id,
         workspaceId: body.workspace_id,
-        ownerPrincipal: "user@local",
+        ownerPrincipal: SERVER_PRINCIPAL,
         title: body.title,
         status: "active",
         defaultModelProfile: body.default_model_profile ?? "implementer",
@@ -345,6 +753,30 @@ const routes: Route[] = [
       })),
     });
   }),
+  // SPEC §32.2 — pause a session (liveness preserved; turns blocked).
+  route("POST", "/v1/sessions/:id/pause", async (_req, res, params) => {
+    const s = await db.session.findUnique({ where: { id: String(params.id) } });
+    if (!s) return sendError(res, 404, "SESSION_NOT_FOUND", "session not found", "not_found");
+    const updated = await db.session.update({
+      where: { id: s.id },
+      data: { status: "paused" },
+    });
+    await emit({
+      eventType: "session.paused",
+      aggregateType: "session",
+      aggregateId: updated.id,
+      aggregateSequence: 2,
+      payload: { previous_status: s.status, new_status: updated.status },
+    });
+    sendJson(res, 200, {
+      id: updated.id, workspace_id: updated.workspaceId, owner_principal: updated.ownerPrincipal,
+      title: updated.title, status: updated.status,
+      default_model_profile: updated.defaultModelProfile,
+      default_permission_profile: updated.defaultPermissionProfile,
+      active_thread_id: updated.activeThreadId,
+      created_at: updated.createdAt.toISOString(), updated_at: updated.updatedAt.toISOString(),
+    });
+  }),
 
   // ────────────────────────── /threads ───────────────────────────────────
   route("POST", "/v1/threads", async (req, res) => {
@@ -363,6 +795,37 @@ const routes: Route[] = [
       orderBy: { createdAt: "asc" },
     });
     sendJson(res, 200, { threads });
+  }),
+  // SPEC §32.2 — fork a thread from an existing one (optionally from a
+  // specific turn). The child thread shares the session and records its
+  // parent + fork point.
+  route("POST", "/v1/threads/:id/fork", async (req, res, params) => {
+    const body = await jsonBody(req) as { from_turn_id?: string | null };
+    const parent = await db.thread.findUnique({ where: { id: String(params.id) } });
+    if (!parent) return sendError(res, 404, "THREAD_NOT_FOUND", "thread not found", "not_found");
+    const fromTurn = body.from_turn_id ?? parent.headTurnId ?? null;
+    const child = await db.thread.create({
+      data: {
+        id: uuid(),
+        sessionId: parent.sessionId,
+        parentThreadId: parent.id,
+        forkedFromTurnId: fromTurn,
+        status: "active",
+      },
+    });
+    await emit({
+      eventType: "thread.forked",
+      aggregateType: "thread",
+      aggregateId: child.id,
+      aggregateSequence: 1,
+      correlationId: parent.id,
+      payload: { parent_thread_id: parent.id, from_turn_id: fromTurn },
+    });
+    sendJson(res, 201, {
+      id: child.id, session_id: child.sessionId, parent_thread_id: child.parentThreadId,
+      forked_from_turn_id: child.forkedFromTurnId, status: child.status,
+      created_at: child.createdAt.toISOString(),
+    });
   }),
 
   // ────────────────────────── /tasks ─────────────────────────────────────
@@ -396,7 +859,7 @@ const routes: Route[] = [
         allowedScopeJson: JSON.stringify(scope),
         changePolicyJson: JSON.stringify({ mayExpandScope: false, scopeExpansionRequiresUser: true }),
         contentHash: uuid(),
-        createdBy: "user@local",
+        createdBy: SERVER_PRINCIPAL,
       },
     });
     // Acceptance criteria.
@@ -435,7 +898,7 @@ const routes: Route[] = [
     });
     sendJson(res, 200, {
       task_id: t.id, status: t.status,
-      event_cursor: uuid(),
+      event_cursor: bus.nextEventId(),
       links: {
         events: `/v1/events?task_id=${t.id}`,
         task: `/v1/tasks/${t.id}`,
@@ -459,6 +922,76 @@ const routes: Route[] = [
       risk_class: t.riskClass,
       created_at: t.createdAt.toISOString(), updated_at: t.updatedAt.toISOString(),
       completed_at: t.completedAt?.toISOString() ?? null,
+    });
+  }),
+  // SPEC §32.2 — amend the task contract. Creates a new
+  // TaskContractVersion and bumps `activeContractVersion` so consumers
+  // always read the live contract.
+  route("PATCH", "/v1/tasks/:id/contract", async (req, res, params) => {
+    const body = await jsonBody(req) as {
+      objective?: string;
+      non_goals?: string[];
+      allowed_scope?: { read_paths?: string[]; write_paths?: string[]; external_systems?: string[] };
+      constraints?: unknown[];
+      assumptions?: unknown[];
+      unknowns?: unknown[];
+      change_policy?: { mayExpandScope?: boolean; scopeExpansionRequiresUser?: boolean };
+      rationale?: string | null;
+    };
+    const task = await db.task.findUnique({ where: { id: String(params.id) } });
+    if (!task) return sendError(res, 404, "TASK_NOT_FOUND", "task not found", "not_found");
+    const prevVersion = task.activeContractVersion;
+    const nextVersion = prevVersion + 1;
+    const prevContract = await db.taskContractVersion.findUnique({
+      where: { task_id_version: { task_id: task.id, version: prevVersion } },
+    });
+    const prevScope = prevContract ? safeParse(prevContract.allowedScopeJson, {}) : {};
+    const prevNonGoals = prevContract ? safeParse(prevContract.nonGoalsJson, []) : [];
+    const prevConstraints = prevContract ? safeParse(prevContract.constraintsJson, []) : [];
+    const prevAssumptions = prevContract ? safeParse(prevContract.assumptionsJson, []) : [];
+    const prevUnknowns = prevContract ? safeParse(prevContract.unknownsJson, []) : [];
+    const prevChangePolicy = prevContract
+      ? safeParse(prevContract.changePolicyJson, { mayExpandScope: false, scopeExpansionRequiresUser: true })
+      : { mayExpandScope: false, scopeExpansionRequiresUser: true };
+    const newContract = await db.taskContractVersion.create({
+      data: {
+        task_id: task.id,
+        version: nextVersion,
+        objective: body.objective ?? prevContract?.objective ?? "",
+        userOutcome: null,
+        nonGoalsJson: JSON.stringify(body.non_goals ?? prevNonGoals),
+        constraintsJson: JSON.stringify(body.constraints ?? prevConstraints),
+        assumptionsJson: JSON.stringify(body.assumptions ?? prevAssumptions),
+        unknownsJson: JSON.stringify(body.unknowns ?? prevUnknowns),
+        allowedScopeJson: JSON.stringify(body.allowed_scope ?? prevScope),
+        changePolicyJson: JSON.stringify(body.change_policy ?? prevChangePolicy),
+        contentHash: uuid(),
+        createdBy: SERVER_PRINCIPAL,
+      },
+    });
+    await db.task.update({
+      where: { id: task.id },
+      data: { activeContractVersion: nextVersion },
+    });
+    await emit({
+      eventType: "task.contract_amended",
+      aggregateType: "task_contract_version",
+      aggregateId: `${task.id}@${nextVersion}`,
+      aggregateSequence: nextVersion,
+      correlationId: task.id,
+      payload: {
+        task_id: task.id, previous_version: prevVersion, new_version: nextVersion,
+        objective: newContract.objective, rationale: body.rationale ?? null,
+      },
+    });
+    sendJson(res, 200, {
+      task_id: task.id, version: newContract.version, objective: newContract.objective,
+      non_goals: safeParse(newContract.nonGoalsJson, []),
+      allowed_scope: safeParse(newContract.allowedScopeJson, {}),
+      change_policy: safeParse(newContract.changePolicyJson, {}),
+      content_hash: newContract.contentHash,
+      created_by: newContract.createdBy,
+      created_at: newContract.createdAt.toISOString(),
     });
   }),
   route("GET", "/v1/tasks/:id", async (_req, res, params) => {
@@ -511,7 +1044,7 @@ const routes: Route[] = [
       data: {
         id, threadId: body.thread_id, taskId: body.task_id,
         sequence: seq, state: "PENDING",
-        initiatingActor: "user",
+        initiatingActor: SERVER_PRINCIPAL,
       },
     });
     await emit({
@@ -532,20 +1065,51 @@ const routes: Route[] = [
       completed_at: turn.completedAt?.toISOString() ?? null,
     });
   }),
+  // SPEC §32.2 — interrupt a running turn. The agent loop checks turn
+  // state between phases and stops at the next safe point.
+  route("POST", "/v1/turns/:id/interrupt", async (req, res, params) => {
+    const body = await jsonBody(req) as { reason?: string | null };
+    const turn = await db.turn.findUnique({ where: { id: String(params.id) } });
+    if (!turn) return sendError(res, 404, "TURN_NOT_FOUND", "turn not found", "not_found");
+    const updated = await db.turn.update({
+      where: { id: turn.id },
+      data: {
+        state: "INTERRUPTED",
+        completedAt: new Date(),
+        terminalErrorJson: JSON.stringify({ reason: body.reason ?? "user_interrupted" }),
+      },
+    });
+    await emit({
+      eventType: "turn.interrupted",
+      aggregateType: "turn", aggregateId: updated.id, aggregateSequence: 99,
+      correlationId: turn.taskId ?? undefined,
+      payload: { reason: body.reason ?? "user_interrupted" },
+    });
+    sendJson(res, 200, {
+      id: updated.id, thread_id: updated.threadId, task_id: updated.taskId,
+      sequence: updated.sequence, state: updated.state,
+      initiating_actor: updated.initiatingActor,
+      started_at: updated.startedAt?.toISOString() ?? null,
+      completed_at: updated.completedAt?.toISOString() ?? null,
+    });
+  }),
 
   // ────────────────────────── /events (SSE) ──────────────────────────────
-  route("GET", "/v1/events", async (req, res, _params) => {
+  route("GET", "/v1/events", async (req, res) => {
     res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
       "connection": "keep-alive",
-      "access-control-allow-origin": "*",
+      "access-control-allow-origin": CONTROL_CORS_ORIGIN,
+      "access-control-allow-headers": CORS_ALLOW_HEADERS,
       "x-accel-buffering": "no",
     });
     const url = new URL(req.url ?? "", "http://x");
     const cursor = url.searchParams.get("cursor");
     const taskId = url.searchParams.get("task_id");
     const sessionId = url.searchParams.get("session_id");
+
+    const streamName = taskId ? `task:${taskId}` : sessionId ? `session:${sessionId}` : "global";
 
     const filter = (ev: StoredEvent) => {
       if (taskId && ev.payloadJson && ev.payloadJson.includes(taskId)) return true;
@@ -554,17 +1118,44 @@ const routes: Route[] = [
       return false;
     };
 
-    // Replay missed events.
+    let lastEventId: string | null = cursor ?? null;
+    let lastSequence = 0;
+
+    // Cursor validation + cursor_expired event (SPEC §30.6).
     if (cursor) {
-      const replayed = await bus.replay(cursor, filter);
-      for (const ev of replayed) {
-        res.write(`id: ${ev.eventId}\nevent: ${ev.eventType}\ndata: ${ev.payloadJson}\n\n`);
+      const oldest = await bus.oldestEventId();
+      if (oldest && cursor < oldest) {
+        const snapshotUrl = taskId
+          ? `/v1/tasks/${taskId}`
+          : sessionId
+            ? `/v1/sessions/${sessionId}`
+            : "/v1/sessions";
+        const expiredPayload = JSON.stringify({
+          type: "cursor_expired",
+          cursor,
+          oldest_retained_event_id: oldest,
+          snapshot_url: snapshotUrl,
+          message:
+            "the requested cursor is older than the oldest retained event; " +
+            "use the snapshot endpoint to reconcile state before resuming",
+        });
+        res.write(`event: cursor_expired\ndata: ${expiredPayload}\n\n`);
+      } else {
+        // Replay missed events in chronological order.
+        const replayed = await bus.replay(cursor, filter);
+        for (const ev of replayed) {
+          res.write(`id: ${ev.eventId}\nevent: ${ev.eventType}\ndata: ${ev.payloadJson}\n\n`);
+          lastEventId = ev.eventId;
+          lastSequence = ev.aggregateSequence;
+        }
       }
     }
 
     // Subscribe to live events.
     const unsubscribe = bus.subscribe(filter, (ev) => {
       res.write(`id: ${ev.eventId}\nevent: ${ev.eventType}\ndata: ${ev.payloadJson}\n\n`);
+      lastEventId = ev.eventId;
+      lastSequence = ev.aggregateSequence;
     });
 
     // Heartbeat every 15s.
@@ -575,6 +1166,9 @@ const routes: Route[] = [
     req.on("close", () => {
       clearInterval(heartbeat);
       unsubscribe();
+      if (lastEventId) {
+        void bus.persistCursor(streamName, lastEventId, lastSequence);
+      }
     });
   }),
 
@@ -613,7 +1207,8 @@ const routes: Route[] = [
       res.writeHead(200, {
         "content-type": "application/octet-stream",
         "content-length": String(buf.length),
-        "access-control-allow-origin": "*",
+        "access-control-allow-origin": CONTROL_CORS_ORIGIN,
+        "access-control-allow-headers": CORS_ALLOW_HEADERS,
       });
       res.end(buf);
     } catch (err) {
@@ -640,22 +1235,60 @@ const routes: Route[] = [
   }),
   route("POST", "/v1/approvals/:id/resolve", async (req, res, params) => {
     const body = await jsonBody(req) as {
-      decision: "allow_once" | "allow_exact" | "allow_task_scope" | "deny_once" | "deny_and_rule" | "stop_task";
+      decision: string;
       rationale?: string | null;
     };
-    const status = body.decision.startsWith("allow") ? "allowed" : body.decision === "stop_task" ? "revoked" : "denied";
+    // SPEC §32.4 — accept BOTH naming conventions (public-api vs domain)
+    // and map to canonical domain names.
+    const canonical = normalizeApprovalDecision(body.decision);
+    if (!canonical) {
+      return sendError(
+        res,
+        400,
+        "INVALID_APPROVAL_DECISION",
+        `unsupported approval decision: ${body.decision}`,
+        "validation",
+        {
+          accepted: [
+            "allow_once", "allow_exact", "allow_for_action",
+            "allow_task_scope", "allow_for_task",
+            "deny_once", "deny_and_rule", "deny_and_add_task_rule",
+            "stop_task",
+          ],
+          canonical_names: [
+            "allow_once", "allow_for_action", "allow_for_task",
+            "deny_once", "deny_and_add_task_rule", "stop_task",
+          ],
+        },
+      );
+    }
+    const status =
+      canonical.startsWith("allow")
+        ? "allowed"
+        : canonical === "stop_task"
+          ? "revoked"
+          : "denied";
     const a = await db.approval.update({
       where: { id: String(params.id) },
-      data: { status, resolvedAt: new Date(), resolvedBy: "user@local", rationale: body.rationale ?? null },
+      data: { status, resolvedAt: new Date(), resolvedBy: SERVER_PRINCIPAL, rationale: body.rationale ?? null },
     });
     await emit({
       eventType: "approval.resolved",
       aggregateType: "approval", aggregateId: a.id, aggregateSequence: 2,
       correlationId: a.taskId,
-      payload: { decision: body.decision, status: a.status },
+      payload: { decision: canonical, raw_decision: body.decision, status: a.status },
     });
     sendJson(res, 200, {
       id: a.id, task_id: a.taskId, operation_hash: a.operationHash, status: a.status,
+      decision: canonical,
+      decision_aliases: {
+        allow_once: ["allow_once", "allow_exact"],
+        allow_for_action: ["allow_for_action", "allow_task_scope"],
+        allow_for_task: ["allow_for_task"],
+        deny_once: ["deny_once"],
+        deny_and_add_task_rule: ["deny_and_rule", "deny_and_add_task_rule"],
+        stop_task: ["stop_task"],
+      },
       risk: JSON.parse(a.riskJson), requested_at: a.requestedAt.toISOString(),
       resolved_at: a.resolvedAt?.toISOString() ?? null, rationale: a.rationale,
     });
@@ -681,6 +1314,20 @@ const routes: Route[] = [
       sendError(res, 500, "JOB_STOP_FAILED", String(err), "internal");
     }
   }),
+  // SPEC §32.2 — send input to a job's PTY. Forwards to the kernel
+  // (POST /v1/jobs/:id/input) which owns the PTY.
+  route("POST", "/v1/jobs/:id/input", async (req, res, params) => {
+    const body = await jsonBody(req) as { input?: string; eof?: boolean };
+    try {
+      const r = await kernel(`/v1/jobs/${encodeURIComponent(String(params.id))}/input`, {
+        input: body.input ?? "",
+        eof: body.eof ?? false,
+      });
+      sendJson(res, 200, r);
+    } catch (err) {
+      sendError(res, 500, "JOB_INPUT_FAILED", String(err), "internal");
+    }
+  }),
 
   // ────────────────────────── /verification ──────────────────────────────
   route("GET", "/v1/verification/plans/:id", async (_req, res, params) => {
@@ -696,12 +1343,29 @@ const routes: Route[] = [
     });
   }),
 
-  // ────────────────────────── /tools (direct invocation for IDE/test) ────
+  // ────────────────────────── /tools (SPEC §32.1 resource group) ────────
+  // List the ACI tool vocabulary (read, search, patch, exec, job, inspect,
+  // capability). Direct invocation endpoints (/v1/tools/read, /v1/tools/exec)
+  // are kept below for IDE/test use.
+  route("GET", "/v1/tools", async (_req, res) => {
+    sendJson(res, 200, {
+      tools: [
+        { id: "read", version: "v1", kind: "read", description: "Read a file from the workspace" },
+        { id: "search", version: "v1", kind: "search", description: "Search code via FTS5/regex" },
+        { id: "patch", version: "v1", kind: "patch", description: "Apply a structured patch" },
+        { id: "exec", version: "v1", kind: "exec", description: "Run a sandboxed command" },
+        { id: "job", version: "v1", kind: "job", description: "Start/stop/inspect a long-running job" },
+        { id: "inspect", version: "v1", kind: "inspect", description: "Inspect workspace state" },
+        { id: "capability", version: "v1", kind: "capability", description: "Activate or list capabilities" },
+      ],
+      default_profile: "secure-local-default",
+    });
+  }),
   route("POST", "/v1/tools/read", async (req, res) => {
     const body = await jsonBody(req) as { workspace_id: string; path: string };
     try {
       const r = await kernel("/v1/files/read", {
-        context: { request_id: uuid(), session_id: "dev", task_id: "dev", turn_id: "dev", actor_id: "user", traceparent: null, capability_token: null },
+        context: { request_id: uuid(), session_id: "dev", task_id: "dev", turn_id: "dev", actor_id: SERVER_PRINCIPAL, traceparent: null, capability_token: null },
         intent: { user_intent_ref: null, task_contract_hash: null, trust_label: "trusted", confidentiality_label: "workspace", taint_sources: [], policy_profile_id: "secure-local-default" },
         path: { workspace_id: body.workspace_id, relative_path: body.path },
         mode: "full", max_bytes: 32768, expected_sha256: null,
@@ -715,7 +1379,7 @@ const routes: Route[] = [
     const body = await jsonBody(req) as { program: string; args?: string[]; cwd?: string };
     try {
       const r = await kernel("/v1/process/start", {
-        context: { request_id: uuid(), session_id: "dev", task_id: "dev", turn_id: "dev", actor_id: "user", traceparent: null, capability_token: null },
+        context: { request_id: uuid(), session_id: "dev", task_id: "dev", turn_id: "dev", actor_id: SERVER_PRINCIPAL, traceparent: null, capability_token: null },
         intent: { user_intent_ref: null, task_contract_hash: null, trust_label: "trusted", confidentiality_label: "workspace", taint_sources: [], policy_profile_id: "secure-local-default" },
         command: { program: body.program, args: body.args ?? [], cwd: { workspace_id: "dev", relative_path: body.cwd ?? "." }, public_env: {}, secret_capability_uris: [], timeout: "30s", allocate_pty: false },
         sandbox_profile_id: "secure-local-default",
@@ -778,9 +1442,271 @@ const routes: Route[] = [
       aci: { default_tools: ["read", "search", "patch", "exec", "job", "inspect", "capability"] },
       sandbox: { profile: "secure-local-default", backend: "local-restrictive" },
       orchestration: { default: "single_agent", scouts: { enabled: true, read_only: true }, writers: { enabled: true, max_parallel: 2 }, reviewer: { risk_triggered: true } },
+      security: {
+        control_plane_auth: "bearer_token",
+        cors_origin: CONTROL_CORS_ORIGIN,
+        idempotency: { enabled: true, ttl_seconds: IDEMPOTENCY_TTL_MS / 1000 },
+        sse_cursors: { monotonic_event_ids: true, cursor_expired_events: true },
+      },
     });
   }),
+
+  // ────────────────────────── /policies (SPEC §32.1 resource group) ─────
+  // List sandbox profiles + command rules so clients can render the
+  // policy surface without reading config files.
+  route("GET", "/v1/policies", async (_req, res) => {
+    sendJson(res, 200, {
+      active: "secure-local-default",
+      profiles: [
+        {
+          id: "secure-local-default",
+          description: "Secure local development profile (SPEC §3.7 default).",
+          sandbox: { backend: "local-restrictive", network: "deny_outbound", fs: "workspace_only" },
+          command_rules: [
+            { pattern: "rg", decision: "allow", scope: "read" },
+            { pattern: "git status", decision: "allow", scope: "read" },
+            { pattern: "git diff", decision: "allow", scope: "read" },
+            { pattern: "git commit", decision: "prompt", scope: "write" },
+            { pattern: "rm", decision: "deny" },
+            { pattern: "curl", decision: "deny" },
+            { pattern: "wget", decision: "deny" },
+          ],
+          secret_access: "prompt",
+          network: "deny_outbound_by_default",
+        },
+        {
+          id: "trusted-local-full",
+          description: "Trusted local workspace with broader tool access (requires explicit trust).",
+          sandbox: { backend: "local-permissive", network: "allow_loopback", fs: "workspace_only" },
+          command_rules: [
+            { pattern: "*", decision: "allow", scope: "read_write" },
+          ],
+          secret_access: "allow_with_audit",
+          network: "allow_loopback",
+        },
+      ],
+    });
+  }),
+
+  // ────────────────────────── /checkpoints (§29.5) ──────────────────────
+  route("POST", "/v1/checkpoints", async (req, res) => {
+    const body = await jsonBody(req) as { session_id: string; thread_id: string; task_id?: string; workspace_revision?: string; dirty_state_digest?: string };
+    const id = uuid();
+    const checkpoint = await db.checkpoint.create({
+      data: {
+        id,
+        sessionId: body.session_id,
+        threadId: body.thread_id,
+        taskId: body.task_id ?? null,
+        checkpointArtifact: `artifact://sha256/${uuid().replace(/-/g, "").slice(0, 64)}`,
+        schemaVersion: 1,
+        lastCommittedSequencesJson: JSON.stringify({ task: 0, turn: 0 }),
+        activeContextEpochId: null,
+        promotedInputCursor: null,
+        unsettledToolCallsJson: "[]",
+        activeJobsJson: "[]",
+        workspaceRevision: body.workspace_revision ?? null,
+        dirtyStateDigest: body.dirty_state_digest ?? null,
+        unsettledEffectsJson: "[]",
+        artifactRefsJson: "[]",
+        continuationJson: null,
+      },
+    });
+    await emit({
+      eventType: "checkpoint.created",
+      aggregateType: "checkpoint", aggregateId: id, aggregateSequence: 1,
+      correlationId: body.task_id,
+      payload: { thread_id: body.thread_id, task_id: body.task_id },
+    });
+    sendJson(res, 201, {
+      id: checkpoint.id,
+      session_id: checkpoint.sessionId,
+      thread_id: checkpoint.threadId,
+      task_id: checkpoint.taskId,
+      checkpoint_artifact: checkpoint.checkpointArtifact,
+      schema_version: checkpoint.schemaVersion,
+      created_at: checkpoint.createdAt.toISOString(),
+    });
+  }),
+  route("GET", "/v1/checkpoints/:id", async (_req, res, params) => {
+    const cp = await db.checkpoint.findUnique({ where: { id: String(params.id) } });
+    if (!cp) return sendError(res, 404, "CHECKPOINT_NOT_FOUND", "checkpoint not found", "not_found");
+    sendJson(res, 200, {
+      id: cp.id, session_id: cp.sessionId, thread_id: cp.threadId, task_id: cp.taskId,
+      checkpoint_artifact: cp.checkpointArtifact, schema_version: cp.schemaVersion,
+      last_committed_sequences: JSON.parse(cp.lastCommittedSequencesJson),
+      active_context_epoch_id: cp.activeContextEpochId,
+      promoted_input_cursor: cp.promotedInputCursor,
+      unsettled_tool_calls: JSON.parse(cp.unsettledToolCallsJson),
+      active_jobs: JSON.parse(cp.activeJobsJson),
+      workspace_revision: cp.workspaceRevision,
+      dirty_state_digest: cp.dirtyStateDigest,
+      unsettled_effects: JSON.parse(cp.unsettledEffectsJson),
+      artifact_refs: JSON.parse(cp.artifactRefsJson),
+      continuation: cp.continuationJson ? JSON.parse(cp.continuationJson) : null,
+      created_at: cp.createdAt.toISOString(),
+    });
+  }),
+  route("GET", "/v1/sessions/:id/checkpoints", async (_req, res, params) => {
+    const cps = await db.checkpoint.findMany({
+      where: { sessionId: String(params.id) },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    });
+    sendJson(res, 200, { checkpoints: cps.map((c) => ({ id: c.id, thread_id: c.threadId, task_id: c.taskId, created_at: c.createdAt.toISOString() })) });
+  }),
+
+  // ────────────────────────── /recovery (§29.5) ─────────────────────────
+  route("POST", "/v1/system/recover", async (_req, res) => {
+    // SPEC §29.5 startup recovery procedure:
+    // 1. acquire the instance lease
+    // 2. verify database integrity and migration state
+    // 3. load non-terminal tasks and turns
+    // 4. reconcile jobs with OS process/cgroup/job-object state
+    // 5. reconcile write journals and patch transactions
+    // 6. reconcile external side effects in STARTED or UNKNOWN
+    // 7. mark provider attempts interrupted before a complete response
+    // 8. restore active context epochs
+    // 9. expose tasks as resumable, blocked, or requiring manual review
+    // 10. emit a recovery report artifact
+    const reportId = uuid();
+    const startedAt = new Date();
+
+    // Count non-terminal tasks and turns
+    const nonTerminalTasks = await db.task.count({
+      where: { status: { in: ["ACTIVE", "NEEDS_USER_DECISION", "BLOCKED", "VERIFYING", "DRAFT"] } },
+    });
+    const nonTerminalTurns = await db.turn.count({
+      where: { state: { in: ["PENDING", "CONTEXT_COMPILING", "PROVIDER_RUNNING", "RESPONSE_VALIDATING", "TOOL_SETTLEMENT", "FINALIZING"] } },
+    });
+
+    // Reconcile jobs: mark RUNNING jobs as LOST (we can't reach the OS process after restart)
+    const lostJobs = await db.job.count({ where: { state: "RUNNING" } });
+    if (lostJobs > 0) {
+      await db.job.updateMany({ where: { state: "RUNNING" }, data: { state: "LOST" } });
+    }
+
+    // Reconcile external side effects in STARTED or UNKNOWN
+    const unsettledEffects = await db.sideEffect.count({
+      where: { state: { in: ["STARTED", "UNKNOWN"] } },
+    });
+    if (unsettledEffects > 0) {
+      await db.sideEffect.updateMany({
+        where: { state: { in: ["STARTED", "UNKNOWN"] } },
+        data: { state: "MANUAL_REVIEW" },
+      });
+    }
+
+    // Mark provider attempts as interrupted
+    const interruptedAttempts = await db.providerAttempt.count({ where: { status: "running" } });
+    if (interruptedAttempts > 0) {
+      await db.providerAttempt.updateMany({
+        where: { status: "running" },
+        data: { status: "interrupted", errorJson: JSON.stringify({ reason: "process restart" }) },
+      });
+    }
+
+    // Verify integrity
+    let integrityOk = true;
+    try {
+      const result = await db.$queryRaw<{ quick_check: string }[]>`PRAGMA quick_check`;
+      integrityOk = result[0]?.quick_check === "ok";
+    } catch { integrityOk = false; }
+
+    const report = await db.recoveryReport.create({
+      data: {
+        id: reportId,
+        startedAt,
+        completedAt: new Date(),
+        instanceId: "forge-control-dev",
+        schemaVersion: 1,
+        nonTerminalTasks,
+        nonTerminalTurns,
+        reconciledJobs: 0,
+        lostJobs,
+        reconciledEffects: 0,
+        manualReviewEffects: unsettledEffects,
+        integrityOk,
+        detailsJson: JSON.stringify({ interruptedAttempts }),
+      },
+    });
+
+    sendJson(res, 200, {
+      id: report.id,
+      started_at: report.startedAt.toISOString(),
+      completed_at: report.completedAt?.toISOString() ?? null,
+      instance_id: report.instanceId,
+      non_terminal_tasks: report.nonTerminalTasks,
+      non_terminal_turns: report.nonTerminalTurns,
+      lost_jobs: report.lostJobs,
+      manual_review_effects: report.manualReviewEffects,
+      integrity_ok: report.integrityOk,
+      interrupted_attempts: interruptedAttempts,
+    });
+  }),
+
+  // ────────────────────────── /export (§29.6) ───────────────────────────
+  route("POST", "/v1/system/export", async (req, res) => {
+    const body = await jsonBody(req) as { include_artifacts?: boolean; include_events?: boolean };
+    // SPEC §29.6 portable export: manifest.json, state.sqlite.snapshot,
+    // semantic-events.jsonl, artifacts/, workspace-manifest.json,
+    // context-manifests/, verification/, README.md
+    const exportId = uuid();
+    const sessions = await db.session.findMany({ where: { status: { not: "deleted" } } });
+    const tasks = await db.task.findMany({ where: { status: { not: "ABORTED" } }, include: { contractVersions: { orderBy: { version: "desc" }, take: 1 } } });
+    const events = body.include_events === false ? [] : await db.semanticEvent.findMany({ orderBy: { occurredAt: "asc" }, take: 10000 });
+    const manifests = await db.contextManifest.findMany({ take: 1000, include: { fragments: true } });
+    const verifications = await db.verificationPlan.findMany({ take: 500, include: { nodes: true, results: true } });
+
+    const exportPayload = {
+      manifest: {
+        format: "forge-export-v1",
+        exported_at: new Date().toISOString(),
+        export_id: exportId,
+        version: "0.1.0",
+        counts: {
+          sessions: sessions.length,
+          tasks: tasks.length,
+          events: events.length,
+          manifests: manifests.length,
+          verifications: verifications.length,
+        },
+      },
+      sessions: sessions.map((s) => ({
+        id: s.id, workspace_id: s.workspaceId, title: s.title, status: s.status,
+        created_at: s.createdAt.toISOString(), updated_at: s.updatedAt.toISOString(),
+      })),
+      tasks: tasks.map((t) => ({
+        id: t.id, session_id: t.sessionId, status: t.status, phase: t.phase,
+        objective: t.contractVersions[0]?.objective ?? null,
+        created_at: t.createdAt.toISOString(), completed_at: t.completedAt?.toISOString() ?? null,
+      })),
+      events: events.map((e) => ({
+        event_id: e.eventId, event_type: e.eventType, schema_version: e.schemaVersion,
+        aggregate_type: e.aggregateType, aggregate_id: e.aggregateId,
+        aggregate_sequence: e.aggregateSequence, occurred_at: e.occurredAt.toISOString(),
+        payload: JSON.parse(e.payloadJson),
+      })),
+      context_manifests: manifests.map((m) => ({
+        id: m.id, provider_key: m.providerKey, model_key: m.modelKey,
+        compiler_version: m.compilerVersion, created_at: m.createdAt.toISOString(),
+        fragments: m.fragments.map((f) => ({ kind: f.kind, selected: f.selected, authority: f.authority })),
+      })),
+      verification_plans: verifications.map((p) => ({
+        id: p.id, task_id: p.taskId, completion_expression: p.completionExpression,
+        nodes: p.nodes.map((n) => ({ id: n.id, kind: n.kind, required: n.required })),
+        results: p.results.map((r) => ({ node_id: r.nodeId, status: r.status })),
+      })),
+    };
+
+    sendJson(res, 200, exportPayload);
+  }),
 ];
+
+/** JSON.parse with a fallback so a corrupt stored value never crashes the API. */
+function safeParse<T>(text: string, fallback: T): T {
+  try { return JSON.parse(text) as T; } catch { return fallback; }
+}
 
 // ────────────────────────── Agent loop ─────────────────────────────────────
 
@@ -796,7 +1722,6 @@ const routes: Route[] = [
 async function agentLoop(turnId: string, userInput: string): Promise<void> {
   const turn = await db.turn.findUnique({ where: { id: turnId } });
   if (!turn) return;
-
   try {
     // 1. CONTEXT_COMPILING
     await db.turn.update({ where: { id: turnId }, data: { state: "CONTEXT_COMPILING", startedAt: new Date() } });
@@ -870,6 +1795,10 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
 
     // Simulate provider latency.
     await new Promise((r) => setTimeout(r, 400));
+
+    // Check for interruption between phases.
+    const midTurn = await db.turn.findUnique({ where: { id: turnId } });
+    if (midTurn && midTurn.state === "INTERRUPTED") return;
 
     // 3. RESPONSE_VALIDATING
     await db.turn.update({ where: { id: turnId }, data: { state: "RESPONSE_VALIDATING" } });
@@ -1050,38 +1979,118 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
 
 // ────────────────────────── HTTP server ────────────────────────────────────
 
+/**
+ * Request dispatch pipeline:
+ *   1. CORS preflight (OPTIONS) → 204.
+ *   2. Public health endpoint (GET /v1/system/health) → no auth.
+ *   3. Bearer-token auth check (SPEC §30.8) → 401 on mismatch.
+ *   4. Route lookup.
+ *   5. Audit log `authorized` event before mutating handlers (SPEC §31.3 step 10).
+ *   6. Idempotency wrap for mutating methods (SPEC §30.5).
+ *   7. Handler execution.
+ *   8. Idempotency commit (persist response artifact).
+ */
 const server = createServer(async (req, res) => {
-  // CORS preflight.
+  const url = new URL(req.url ?? "/", "http://x");
+
+  // 1. CORS preflight.
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
-      "access-control-allow-origin": "*",
-      "access-control-allow-headers": "*",
-      "access-control-allow-methods": "*",
+      "access-control-allow-origin": CONTROL_CORS_ORIGIN,
+      "access-control-allow-headers": CORS_ALLOW_HEADERS,
+      "access-control-allow-methods": CORS_ALLOW_METHODS,
+      "access-control-max-age": "600",
+      "vary": "origin",
     });
     res.end();
     return;
   }
-  const url = new URL(req.url ?? "/", "http://x");
+
+  // 2. Public health endpoint.
+  if (req.method === "GET" && url.pathname === "/v1/system/health") {
+    try {
+      const kernelHealth = await kernel<{ status: string; ready: boolean }>("/v1/health", {});
+      sendJson(res, 200, {
+        status: kernelHealth.ready ? "ok" : "degraded",
+        version: "0.1.0",
+        build_commit: "dev",
+        instance_id: "forge-control-dev",
+        uptime_seconds: process.uptime(),
+        ready: kernelHealth.ready,
+        kernel: kernelHealth,
+      });
+    } catch (err) {
+      console.error("health handler error", err);
+      if (!res.headersSent) {
+        sendError(res, 500, "INTERNAL", String(err), "internal");
+      }
+    }
+    return;
+  }
+
+  // 3. Auth check.
+  if (!checkAuth(req)) {
+    sendError(res, 401, "UNAUTHENTICATED", "missing or invalid bearer token", "auth", {
+      hint: "send 'Authorization: Bearer <FORGE_CONTROL_TOKEN>'",
+    });
+    return;
+  }
+
+  const traceId = getTraceId(req);
+
+  // 4. Route lookup.
+  let matchedRoute: Route | null = null;
+  const matchedParams: Record<string, string> = {};
   for (const r of routes) {
     if (r.method !== req.method) continue;
     const m = r.pattern.exec(url.pathname);
     if (!m) continue;
-    const params: Record<string, string> = {};
-    r.paramNames.forEach((n, i) => { params[n] = decodeURIComponent(m[i + 1] ?? ""); });
-    try {
-      await r.handler(req, res, params);
-    } catch (err) {
-      console.error("handler error", err);
-      sendError(res, 500, "INTERNAL", String(err), "internal");
-    }
+    matchedRoute = r;
+    r.paramNames.forEach((n, i) => { matchedParams[n] = decodeURIComponent(m[i + 1] ?? ""); });
+    break;
+  }
+
+  if (!matchedRoute) {
+    sendError(res, 404, "NOT_FOUND", `no route for ${req.method} ${url.pathname}`, "not_found");
     return;
   }
-  sendError(res, 404, "NOT_FOUND", `no route for ${req.method} ${url.pathname}`, "not_found");
+
+  // 5. Audit log before effects.
+  if (isMutating(req.method)) {
+    auditAuthorized(req, url, matchedParams, traceId);
+  }
+
+  // 6. Idempotency wrap (mutating only).
+  const mut = isMutating(req.method);
+  let idempotencyKey: string | null = null;
+  if (mut) {
+    const keyHeader = req.headers["x-idempotency-key"];
+    idempotencyKey = Array.isArray(keyHeader) ? (keyHeader[0] ?? null) : (keyHeader ?? null);
+    const proceed = await withIdempotency(req, res, matchedRoute.method, traceId);
+    if (!proceed) return;
+  }
+
+  // 7. Handler execution.
+  try {
+    await matchedRoute.handler(req, res, matchedParams);
+  } catch (err) {
+    console.error("handler error", err);
+    if (!res.headersSent) {
+      sendError(res, 500, "INTERNAL", String(err), "internal");
+    }
+  }
+
+  // 8. Commit idempotency record.
+  if (mut && idempotencyKey) {
+    await commitIdempotency(res, matchedRoute.method, idempotencyKey);
+  }
 });
 
 server.listen(PORT, () => {
   console.log(`[forge-control] listening on http://localhost:${PORT}`);
   console.log(`[forge-control] kernel at http://localhost:${KERNEL_PORT} (via ?XTransformPort=${KERNEL_PORT})`);
+  console.log(`[forge-control] CORS origin: ${CONTROL_CORS_ORIGIN}`);
+  console.log(`[forge-control] auth: bearer token (FORGE_CONTROL_TOKEN)`);
 });
 
 process.on("SIGINT", () => { void db.$disconnect(); process.exit(0); });

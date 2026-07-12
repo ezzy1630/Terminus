@@ -202,12 +202,23 @@ function renderMessages(input: CanonicalRenderInput): readonly OpenAiChatMessage
     const cacheBreakpoint = input.cachePlan.breakpoints.includes(messages.length);
     messages.push({
       role,
-      content: frag.contentRef.uri,
+      content: fragmentText(frag),
       ...(cacheBreakpoint && firstUserBlock ? { cache_control: "ephemeral" as const } : {}),
     });
     if (role === "user") firstUserBlock = false;
   }
   return messages;
+}
+
+/**
+ * Resolve the fragment's renderable text. Prefers in-band `textContent`
+ * (the pragmatic shortcut for package-layer callers that already have the
+ * rendered text); falls back to the artifact URI for callers that wire in a
+ * real artifact store at a higher layer (e.g. the kernel renderer will
+ * dereference the URI before sending to the provider).
+ */
+function fragmentText(frag: { readonly textContent?: string | undefined; readonly contentRef: { readonly uri: string } }): string {
+  return frag.textContent ?? frag.contentRef.uri;
 }
 
 function fragmentRole(kind: string): OpenAiChatMessage["role"] {
@@ -245,7 +256,7 @@ function toProviderRequest(input: CanonicalRenderInput, providerId: string): Pro
     model: input.model.modelKey,
     blocks: input.fragments.map((f) => ({
       role: fragmentRole(f.kind) as "system" | "user" | "assistant" | "tool" | "developer",
-      content: f.contentRef.uri,
+      content: fragmentText(f),
       artifactHash: f.contentRef.hash,
       cacheBreakpoint: false,
       confidentiality: f.confidentiality,

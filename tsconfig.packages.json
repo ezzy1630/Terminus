@@ -10,6 +10,7 @@
     "rootDir": ".",
     "baseUrl": ".",
     "paths": {
+      "bun:test": ["./node_modules/bun-types/test.d.ts"],
       "@forge/domain": ["./packages/domain/src/index.ts"],
       "@forge/runtime-protocol": ["./packages/runtime-protocol/src/index.ts"],
       "@forge/context-ir": ["./packages/context-ir/src/index.ts"],
@@ -35,7 +36,8 @@
       "@forge/testkit": ["./packages/testkit/src/index.ts"],
       "@forge/public-api": ["./packages/public-api/src/index.ts"],
       "@forge/public-client": ["./packages/public-client/src/index.ts"],
-      "@forge/open-code-bridge": ["./packages/open-code-bridge/src/index.ts"]
+      "@forge/open-code-bridge": ["./packages/open-code-bridge/src/index.ts"],
+      "@forge/aci": ["./packages/aci/src/index.ts"]
     }
   },
   "include": [

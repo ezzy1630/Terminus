@@ -107,6 +107,18 @@ export interface RouterInputs {
   readonly previousAttemptModel: ModelKey | null;
   readonly implementerModel: ModelKey | null;
   readonly riskClass: RiskClass;
+  /**
+   * Optional rate-limit / circuit-breaker / concurrency controls (§38.15).
+   * If present, the router will skip providers whose circuit breaker is open,
+   * whose rate limit is exhausted, or whose concurrency limit is reached.
+   */  readonly controls?: RouterControls | undefined;
+}
+
+/** Optional controls the router consults to skip unhealthy providers. */
+export interface RouterControls {
+  readonly rateLimiter: RateLimiter;
+  readonly circuitBreaker: CircuitBreaker;
+  readonly concurrencyLimiter: ConcurrencyLimiter;
 }
 
 export class Router {
@@ -130,15 +142,25 @@ export class Router {
         input.profile.policy.allowedProviders.includes(model.providerId);
       const health = input.health[model.modelKey];
       const healthOk = health ? health.available && !health.circuitOpen : true;
+      // §38.15 controls: skip providers with open circuit breakers, exhausted
+      // rate limits, or saturated concurrency limits.
+      const controls = input.controls;
+      const circuitOpen = controls ? controls.circuitBreaker.isOpen(model.providerId) : false;
+      const rateAvailable = controls ? controls.rateLimiter.canAcquire(model.providerId, 1) : true;
+      const concurrencyAvailable = controls ? controls.concurrencyLimiter.available(model.providerId) : true;
+      const controlsOk = !circuitOpen && rateAvailable && concurrencyAvailable;
       const reasons: string[] = [];
       if (!meetsMin) reasons.push("does not meet minimum capability requirements");
       if (!confOk) reasons.push(`confidentiality '${input.profile.policy.confidentiality}' not allowed for provider '${model.providerId}'`);
       if (!allowedProvider) reasons.push(`provider '${model.providerId}' not in allowed list`);
       if (!healthOk) reasons.push(`model '${model.modelKey}' unavailable or circuit open`);
-      const score = meetsMin && confOk && allowedProvider && healthOk
+      if (circuitOpen) reasons.push(`circuit breaker open for provider '${model.providerId}'`);
+      if (!rateAvailable) reasons.push(`rate limit exhausted for provider '${model.providerId}'`);
+      if (!concurrencyAvailable) reasons.push(`concurrency limit reached for provider '${model.providerId}'`);
+      const score = meetsMin && confOk && allowedProvider && healthOk && controlsOk
         ? scoreModel(model, input)
         : -Infinity;
-      eligible.push({ model, score, meetsMinimum: meetsMin && confOk && allowedProvider && healthOk, reasons });
+      eligible.push({ model, score, meetsMinimum: meetsMin && confOk && allowedProvider && healthOk && controlsOk, reasons });
     }
     const sorted = [...eligible].sort((a, b) => b.score - a.score);
     const chosen = sorted.length > 0 && sorted[0]!.meetsMinimum && sorted[0]!.score > -Infinity
@@ -320,3 +342,390 @@ export function recordFallback(
 }
 
 export type { ConfidentialityLabel, ModelKey, ProviderCapabilitySnapshot };
+
+// ────────────────────────── Rate limiting & fairness (§38.15) ────────────────
+
+/**
+ * Token-bucket rate limiter per provider (§38.15). Each provider has an
+ * independent bucket with a capacity and a steady-state refill rate. Tokens
+ * are consumed by `acquire()`; the bucket refills over time. Probing via
+ * `canAcquire()` does not consume.
+ */
+export interface RateLimiterConfig {
+  /** Bucket capacity (max burst). */
+  readonly capacity: number;
+  /** Tokens added per second. */
+  readonly refillPerSecond: number;
+}
+
+export const DEFAULT_RATE_LIMITER_CONFIG: RateLimiterConfig = {
+  capacity: 10,
+  refillPerSecond: 2,
+};
+
+interface TokenBucket {
+  tokens: number;
+  lastRefillMs: number;
+}
+
+/**
+ * Token-bucket rate limiter. One bucket per provider. Thread-unsafe — callers
+ * must serialize access if used from concurrent contexts (the broker does
+ * this by routing on a single task queue).
+ */
+export class RateLimiter {
+  private readonly buckets: Map<string, TokenBucket> = new Map();
+  private readonly configs: Map<string, RateLimiterConfig> = new Map();
+  private readonly clock: () => number;
+
+  constructor(
+    defaultConfig: RateLimiterConfig = DEFAULT_RATE_LIMITER_CONFIG,
+    clock: () => number = () => Date.now(),
+  ) {
+    this.defaultConfig = defaultConfig;
+    this.clock = clock;
+  }
+
+  private readonly defaultConfig: RateLimiterConfig;
+
+  /** Configure the bucket for a specific provider. */
+  configure(provider: string, config: RateLimiterConfig): void {
+    this.configs.set(provider, config);
+    // Reset the bucket so the new capacity takes effect immediately.
+    const existing = this.buckets.get(provider);
+    this.buckets.set(provider, {
+      tokens: config.capacity,
+      lastRefillMs: this.clock(),
+    });
+    void existing;
+  }
+
+  /** Probe whether `cost` tokens are available. Does NOT consume. */
+  canAcquire(provider: string, cost = 1): boolean {
+    const bucket = this.getOrCreateBucket(provider);
+    this.refill(provider, bucket);
+    return bucket.tokens >= cost;
+  }
+
+  /**
+   * Consume `cost` tokens. Returns true if the tokens were available and
+   * consumed; false if the bucket was empty (no consumption in that case).
+   */
+  acquire(provider: string, cost = 1): boolean {
+    const bucket = this.getOrCreateBucket(provider);
+    this.refill(provider, bucket);
+    if (bucket.tokens < cost) return false;
+    bucket.tokens -= cost;
+    return true;
+  }
+
+  /**
+   * Return tokens to the bucket (e.g., a request was served from cache and
+   * didn't actually consume provider capacity). Will not exceed capacity.
+   */
+  release(provider: string, cost = 1): void {
+    const bucket = this.getOrCreateBucket(provider);
+    const config = this.configs.get(provider) ?? this.defaultConfig;
+    bucket.tokens = Math.min(config.capacity, bucket.tokens + cost);
+  }
+
+  /** Current token count for a provider (after refill). */
+  availableTokens(provider: string): number {
+    const bucket = this.getOrCreateBucket(provider);
+    this.refill(provider, bucket);
+    return bucket.tokens;
+  }
+
+  private getOrCreateBucket(provider: string): TokenBucket {
+    let bucket = this.buckets.get(provider);
+    if (!bucket) {
+      const config = this.configs.get(provider) ?? this.defaultConfig;
+      bucket = { tokens: config.capacity, lastRefillMs: this.clock() };
+      this.buckets.set(provider, bucket);
+    }
+    return bucket;
+  }
+
+  private refill(provider: string, bucket: TokenBucket): void {
+    const config = this.configs.get(provider) ?? this.defaultConfig;
+    const now = this.clock();
+    const elapsedMs = Math.max(0, now - bucket.lastRefillMs);
+    const refill = (elapsedMs / 1000) * config.refillPerSecond;
+    bucket.tokens = Math.min(config.capacity, bucket.tokens + refill);
+    bucket.lastRefillMs = now;
+  }
+}
+
+/**
+ * Per-provider circuit breaker (§38.15). Opens after `failureThreshold`
+ * consecutive failures; transitions to half-open after `cooldownMs`; closes
+ * again after `successThreshold` consecutive successes in half-open state.
+ */
+export interface CircuitBreakerConfig {
+  readonly failureThreshold: number;
+  readonly successThreshold: number;
+  readonly cooldownMs: number;
+}
+
+export const DEFAULT_CIRCUIT_BREAKER_CONFIG: CircuitBreakerConfig = {
+  failureThreshold: 5,
+  successThreshold: 2,
+  cooldownMs: 30_000,
+};
+
+type CircuitState = "closed" | "open" | "half_open";
+
+interface CircuitEntry {
+  state: CircuitState;
+  consecutiveFailures: number;
+  consecutiveSuccesses: number;
+  openedAtMs: number | null;
+}
+
+/**
+ * Circuit breaker tracking failures per provider. `isOpen()` returns true
+ * only when the breaker is fully open (not half-open). Half-open allows a
+ * limited probe request through; successes close the breaker, failures
+ * re-open it.
+ */
+export class CircuitBreaker {
+  private readonly entries: Map<string, CircuitEntry> = new Map();
+  private readonly configs: Map<string, CircuitBreakerConfig> = new Map();
+  private readonly clock: () => number;
+
+  constructor(
+    defaultConfig: CircuitBreakerConfig = DEFAULT_CIRCUIT_BREAKER_CONFIG,
+    clock: () => number = () => Date.now(),
+  ) {
+    this.defaultConfig = defaultConfig;
+    this.clock = clock;
+  }
+
+  private readonly defaultConfig: CircuitBreakerConfig;
+
+  configure(provider: string, config: CircuitBreakerConfig): void {
+    this.configs.set(provider, config);
+  }
+
+  /** True if the breaker is fully open (requests should be rejected). */
+  isOpen(provider: string): boolean {
+    const entry = this.getOrCreateEntry(provider);
+    this.maybeTransitionToHalfOpen(provider, entry);
+    return entry.state === "open";
+  }
+
+  /** True if the breaker is in half-open state (limited probes allowed). */
+  isHalfOpen(provider: string): boolean {
+    const entry = this.getOrCreateEntry(provider);
+    this.maybeTransitionToHalfOpen(provider, entry);
+    return entry.state === "half_open";
+  }
+
+  /** Record a successful request. Closes the breaker after enough successes. */
+  recordSuccess(provider: string): void {
+    const entry = this.getOrCreateEntry(provider);
+    this.maybeTransitionToHalfOpen(provider, entry);
+    entry.consecutiveFailures = 0;
+    entry.consecutiveSuccesses++;
+    if (entry.state === "half_open") {
+      const config = this.configs.get(provider) ?? this.defaultConfig;
+      if (entry.consecutiveSuccesses >= config.successThreshold) {
+        entry.state = "closed";
+        entry.openedAtMs = null;
+      }
+    }
+  }
+
+  /** Record a failed request. Opens the breaker after enough failures. */
+  recordFailure(provider: string): void {
+    const entry = this.getOrCreateEntry(provider);
+    this.maybeTransitionToHalfOpen(provider, entry);
+    entry.consecutiveSuccesses = 0;
+    entry.consecutiveFailures++;
+    if (entry.state === "half_open") {
+      // A failure in half-open re-opens the breaker immediately.
+      entry.state = "open";
+      entry.openedAtMs = this.clock();
+      return;
+    }
+    const config = this.configs.get(provider) ?? this.defaultConfig;
+    if (entry.consecutiveFailures >= config.failureThreshold) {
+      entry.state = "open";
+      entry.openedAtMs = this.clock();
+    }
+  }
+
+  /** Force-reset the breaker to closed (e.g., after operator intervention). */
+  reset(provider: string): void {
+    this.entries.set(provider, {
+      state: "closed",
+      consecutiveFailures: 0,
+      consecutiveSuccesses: 0,
+      openedAtMs: null,
+    });
+  }
+
+  /** Current state snapshot for telemetry. */
+  state(provider: string): CircuitState {
+    const entry = this.getOrCreateEntry(provider);
+    this.maybeTransitionToHalfOpen(provider, entry);
+    return entry.state;
+  }
+
+  private getOrCreateEntry(provider: string): CircuitEntry {
+    let entry = this.entries.get(provider);
+    if (!entry) {
+      entry = {
+        state: "closed",
+        consecutiveFailures: 0,
+        consecutiveSuccesses: 0,
+        openedAtMs: null,
+      };
+      this.entries.set(provider, entry);
+    }
+    return entry;
+  }
+
+  private maybeTransitionToHalfOpen(provider: string, entry: CircuitEntry): void {
+    if (entry.state !== "open" || entry.openedAtMs === null) return;
+    const config = this.configs.get(provider) ?? this.defaultConfig;
+    if (this.clock() - entry.openedAtMs >= config.cooldownMs) {
+      entry.state = "half_open";
+      entry.consecutiveSuccesses = 0;
+    }
+  }
+}
+
+/**
+ * Per-provider concurrency limiter (§38.15). Tracks the number of in-flight
+ * requests per provider and rejects new ones beyond the limit.
+ */
+export class ConcurrencyLimiter {
+  private readonly limits: Map<string, number> = new Map();
+  private readonly counts: Map<string, number> = new Map();
+
+  /** Set the concurrency limit for a provider. */
+  setLimit(provider: string, limit: number): void {
+    if (limit < 0) {
+      throw new RangeError(`concurrency limit must be non-negative: ${limit}`);
+    }
+    this.limits.set(provider, limit);
+  }
+
+  /** Get the configured limit (default 1). */
+  limit(provider: string): number {
+    return this.limits.get(provider) ?? 1;
+  }
+
+  /** Current in-flight count for a provider. */
+  count(provider: string): number {
+    return this.counts.get(provider) ?? 0;
+  }
+
+  /** True if a new request can be admitted without exceeding the limit. */
+  available(provider: string): boolean {
+    return this.count(provider) < this.limit(provider);
+  }
+
+  /**
+   * Try to admit a new request. Returns true if admitted (count incremented);
+   * false if the limit would be exceeded (no change).
+   */
+  acquire(provider: string): boolean {
+    if (!this.available(provider)) return false;
+    this.counts.set(provider, this.count(provider) + 1);
+    return true;
+  }
+
+  /**
+   * Release a previously acquired slot. Idempotent: releasing more times than
+   * acquired is a no-op (count is clamped at 0).
+   */
+  release(provider: string): void {
+    const c = this.count(provider);
+    this.counts.set(provider, Math.max(0, c - 1));
+  }
+}
+
+/**
+ * Combines rate-limiter, circuit-breaker, and concurrency-limiter signals
+ * into a {@link ModelHealth} record per model key. The router consumes this
+ * to skip unhealthy models.
+ */
+export class ModelHealthMonitor {
+  constructor(
+    private readonly rateLimiter: RateLimiter,
+    private readonly circuitBreaker: CircuitBreaker,
+    private readonly concurrencyLimiter: ConcurrencyLimiter,
+    private readonly clock: () => number = () => Date.now(),
+  ) {}
+
+  /**
+   * Build a ModelHealth record for a model key hosted by the given provider.
+   * `available` is true iff the circuit breaker is not open, the rate limiter
+   * can admit a request, and the concurrency limiter has a slot.
+   */
+  snapshot(modelKey: ModelKey, provider: string): ModelHealth {
+    const circuitOpen = this.circuitBreaker.isOpen(provider);
+    const rateLimited = !this.rateLimiter.canAcquire(provider, 1);
+    const concurrencyFull = !this.concurrencyLimiter.available(provider);
+    const available = !circuitOpen && !rateLimited && !concurrencyFull;
+    let lastError: string | null = null;
+    if (circuitOpen) lastError = "circuit breaker open";
+    else if (rateLimited) lastError = "rate limited";
+    else if (concurrencyFull) lastError = "concurrency limit reached";
+    return {
+      modelKey,
+      available,
+      rateLimitedUntil: rateLimited ? this.clock() + 1000 : null,
+      circuitOpen,
+      lastError,
+    };
+  }
+
+  /**
+   * Build a ModelHealth map for every (modelKey, provider) pair. Useful as
+   * the `health` input to {@link Router.route}.
+   */
+  snapshotsFor(
+    models: readonly ModelCapabilitySnapshot[],
+  ): Readonly<Record<ModelKey, ModelHealth>> {
+    const out: Record<string, ModelHealth> = {};
+    for (const m of models) {
+      out[m.modelKey] = this.snapshot(m.modelKey, m.providerId);
+    }
+    return out as Readonly<Record<ModelKey, ModelHealth>>;
+  }
+
+  /** Record a successful request to the provider (closes the breaker). */
+  recordSuccess(provider: string): void {
+    this.circuitBreaker.recordSuccess(provider);
+  }
+
+  /** Record a failed request to the provider (may open the breaker). */
+  recordFailure(provider: string): void {
+    this.circuitBreaker.recordFailure(provider);
+  }
+
+  /**
+   * Admit a request: consume a rate-limit token and a concurrency slot.
+   * Returns true if admitted; false otherwise. On failure the caller must
+   * call `release(provider)` when the request finishes (success or failure).
+   */
+  admit(provider: string): boolean {
+    if (!this.circuitBreaker.isOpen(provider) && this.rateLimiter.acquire(provider, 1)) {
+      if (this.concurrencyLimiter.acquire(provider)) {
+        return true;
+      }
+      // Concurrency full — return the rate-limit token.
+      this.rateLimiter.release(provider, 1);
+    }
+    return false;
+  }
+
+  /** Release a previously admitted request's rate-limit + concurrency slot. */
+  release(provider: string): void {
+    this.rateLimiter.release(provider, 1);
+    this.concurrencyLimiter.release(provider);
+  }
+}

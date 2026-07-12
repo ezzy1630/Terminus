@@ -183,7 +183,14 @@ class ChangeManifest:
         self.decision_reason = reason
 
     def should_rollback(self) -> bool:
-        """True iff the rollback condition is set and matches observed deltas."""
+        """True iff the rollback condition is set and *not* satisfied by observed deltas.
+
+        The rollback ``threshold`` is interpreted as the *minimum acceptable*
+        boundary: ``">= -0.05"`` means "the metric must be ≥ -0.05 to avoid
+        rollback". If the observed metric fails to satisfy the threshold,
+        rollback is triggered. (Audit A3 fix — previously the match logic
+        was inverted, so the rollback gate never fired.)
+        """
         if self.rollback_condition is None or self.observed is None:
             return False
         observed_map: dict[str, float] = {}
@@ -191,10 +198,10 @@ class ChangeManifest:
             observed_map["primary"] = self.observed.primary_metric_delta
         observed_map.update(self.observed.secondary_metric_deltas)
         observed_map.update(self.observed.cost_guardrail_results)
-        # Substitute the configured metric name back into a flat lookup.
-        return self.rollback_condition.matches(
-            {"primary": observed_map.get("primary", 0.0), **observed_map}
-        )
+        flat = {"primary": observed_map.get("primary", 0.0), **observed_map}
+        # Rollback iff the threshold is NOT satisfied (the threshold is the
+        # acceptable boundary; failing it triggers rollback).
+        return not self.rollback_condition.matches(flat)
 
     def to_yaml(self) -> str:
         """Serialize to a YAML string matching the SPEC §18.6 schema."""
@@ -210,12 +217,18 @@ class ChangeManifest:
 
     @classmethod
     def from_yaml(cls, text_or_path: str | Path) -> ChangeManifest:
-        """Read from a YAML string or path."""
-        if isinstance(text_or_path, Path):
-            text = text_or_path.read_text(encoding="utf-8")
-        else:
-            p = Path(text_or_path)
-            text = p.read_text(encoding="utf-8") if p.exists() else text_or_path
+        """Read from a YAML string or path.
+
+        If ``text_or_path`` is a :class:`Path`, the file at that path is
+        read. If it is a string, we treat it as YAML *unless* it is a
+        short single-line string that names an existing file (so callers
+        can pass either inline YAML or a path-as-string). Long strings
+        that obviously contain YAML (multi-line, or containing ``:``) are
+        always parsed as YAML directly — this avoids the
+        ``File name too long`` error from trying to ``stat()`` a long
+        YAML document as a path (audit A3 fix).
+        """
+        text = _coerce_yaml_input(text_or_path)
         data = yaml.safe_load(text) or {}
         return cls._from_dict(data)
 
@@ -304,12 +317,8 @@ class ExperimentManifest:
 
     @classmethod
     def from_yaml(cls, text_or_path: str | Path) -> ExperimentManifest:
-        """Read from a YAML string or path."""
-        if isinstance(text_or_path, Path):
-            text = text_or_path.read_text(encoding="utf-8")
-        else:
-            p = Path(text_or_path)
-            text = p.read_text(encoding="utf-8") if p.exists() else text_or_path
+        """Read from a YAML string or path (see :func:`_coerce_yaml_input`)."""
+        text = _coerce_yaml_input(text_or_path)
         data = yaml.safe_load(text) or {}
         return cls._from_dict(data)
 
@@ -382,6 +391,33 @@ def _to_plain_dict(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_to_plain_dict(v) for v in obj]
     return obj
+
+
+def _coerce_yaml_input(text_or_path: str | Path) -> str:
+    """Coerce ``text_or_path`` into a YAML string.
+
+    - If it is a :class:`Path`, the file at that path is read.
+    - If it is a string, we treat it as YAML directly when it is multi-line
+      or contains a YAML key marker (``:``). Otherwise we try to read it
+      as a path; if the path doesn't exist (or is too long to be a valid
+      path), we fall back to parsing the string as YAML. This avoids the
+      ``File name too long`` error from trying to ``stat()`` a long YAML
+      document as a path (audit A3 fix).
+    """
+    if isinstance(text_or_path, Path):
+        return text_or_path.read_text(encoding="utf-8")
+    s = text_or_path
+    # Multi-line string or YAML key:value → parse as YAML directly.
+    if "\n" in s or ":" in s:
+        return s
+    # Single short string — try as a path.
+    try:
+        p = Path(s)
+        if p.exists():
+            return p.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+    return s
 
 
 def to_json(manifest: ChangeManifest | ExperimentManifest) -> str:

@@ -422,6 +422,15 @@ export interface ContextFragment {
   readonly id: string;
   readonly kind: ContextKind;
   readonly contentRef: ArtifactRef;
+  /**
+   * Optional in-band text content for the fragment. When present, renderers
+   * use this text directly instead of dereferencing `contentRef.uri`. This is
+   * a pragmatic shortcut for the common case where the package layer already
+   * has the text in hand and cannot reach a live artifact store. When absent,
+   * renderers fall back to the URI (which is what the kernel will later
+   * resolve at the wire boundary if a real artifact store is wired in).
+   */
+  readonly textContent?: string | undefined;
   readonly source: SourceDescriptor;
   readonly sourceVersion: string | null;
   readonly authority: number;

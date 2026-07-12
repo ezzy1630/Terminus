@@ -12,6 +12,15 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use crate::trace_id::TraceId;
 
+/// A typed extension carrying the validated capability-token string. Set by
+/// `require_capability_for_path` after the token has been signature/expiry/
+/// audience/operation-class checked. Mutating handlers read this extension
+/// and inject it into the envelope's `request_context.capability_token`
+/// before calling the kernel, so the kernel's own §31.3 step-3 capability
+/// validation can re-verify the token against the requested operation.
+#[derive(Debug, Clone)]
+pub struct ValidatedCapabilityToken(pub String);
+
 /// Validate the bearer token from the `Authorization` header. Always
 /// required for every request.
 pub async fn require_bearer(
@@ -71,7 +80,7 @@ pub async fn require_capability_for_path(
         .get("x-capability-token")
         .and_then(|h| h.to_str().ok());
     let token_str = match token_str {
-        Some(s) if !s.is_empty() => s,
+        Some(s) if !s.is_empty() => s.to_string(),
         _ => {
             return Err(ApiError::new(
                 forge_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
@@ -84,7 +93,7 @@ pub async fn require_capability_for_path(
             ));
         }
     };
-    let token = match state.token_issuer.validate(token_str) {
+    let token = match state.token_issuer.validate(&token_str) {
         Ok(t) => t,
         Err(e) => {
             let code = match e {
@@ -123,6 +132,8 @@ pub async fn require_capability_for_path(
     let mut req = req;
     req.extensions_mut().insert(TraceId::new(trace_id.clone()));
     req.extensions_mut().insert(TokenClaims::clone(&token.claims));
+    req.extensions_mut()
+        .insert(ValidatedCapabilityToken(token_str));
     Ok(next.run(req).await)
 }
 

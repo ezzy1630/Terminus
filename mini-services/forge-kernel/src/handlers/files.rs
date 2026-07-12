@@ -2,12 +2,14 @@
 //!
 //! The kernel's `FileService::read` returns the file bytes plus an
 //! `ArtifactRef` after ingesting them into the CAS. `list` walks a
-//! directory under the data dir and returns entries with their sha256
-//! hashes; the kernel does not yet expose a public `list` method, so we
-//! implement it directly using `std::fs::read_dir` over paths resolved by
-//! the kernel's `PathResolver`.
+//! directory under the workspace root and returns entries with their
+//! sha256 hashes; the kernel does not yet expose a public `list` method,
+//! so we implement it directly using `std::fs::read_dir` over paths
+//! resolved by the kernel's `PathResolver` (so absolute paths, `..`
+//! traversal, symlink escapes, and protected prefixes are rejected).
 
 use axum::extract::State;
+use axum::Extension;
 use axum::Json;
 use forge_kernel_protocol::WorkspacePath;
 use serde::{Deserialize, Serialize};
@@ -15,6 +17,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::api::Envelope;
+use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
 use crate::state::AppState;
 use crate::trace_id::{sha256_hex, TraceId};
@@ -39,11 +42,13 @@ pub struct ReadFileResponse {
 
 pub async fn read(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<ReadFileResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: ReadFileRequest =
+    let mut req: ReadFileRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
+    req.envelope.inject_capability_token(&cap_token);
     let (bytes, artifact) = state
         .kernel
         .files
@@ -89,15 +94,26 @@ pub struct ListFilesResponse {
 
 pub async fn list(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<ListFilesResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: ListFilesRequest =
+    let mut req: ListFilesRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
-    // Resolve the directory under the data dir.
-    let base = state.data_dir.join(&req.path.relative_path);
+    req.envelope.inject_capability_token(&cap_token);
+    // §31.3 step 5: canonicalize paths and reject traversal/symlink escape
+    // before listing. We reuse the kernel's PathResolver so the same
+    // safety guarantees apply to `list` as to `read`.
+    let resolver = state.kernel.files.resolver();
+    let safe = forge_fs::SafePath::new(&req.path.relative_path).map_err(|e| {
+        ApiError::validation(format!("path rejected by SafePath: {e}"), &trace_id.0)
+    })?;
+    let resolved = resolver.resolve_strict(&safe).map_err(|e| {
+        ApiError::validation(format!("path rejected by PathResolver: {e}"), &trace_id.0)
+    })?;
+    let base = &resolved.host.host_path;
     let mut entries = Vec::new();
-    let read_dir = match std::fs::read_dir(&base) {
+    let read_dir = match std::fs::read_dir(base) {
         Ok(rd) => rd,
         Err(e) => {
             return Err(ApiError::new(
@@ -120,7 +136,7 @@ pub async fn list(
         };
         let rel = entry
             .path()
-            .strip_prefix(&base)
+            .strip_prefix(base)
             .unwrap_or(&entry.path())
             .to_string_lossy()
             .to_string();

@@ -13,7 +13,7 @@
     "noFallthroughCasesInSwitch": true,
     "useUnknownInCatchVariables": true,
     "isolatedModules": true,
-    "verbatimModuleSyntax": false,
+    "verbatimModuleSyntax": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,

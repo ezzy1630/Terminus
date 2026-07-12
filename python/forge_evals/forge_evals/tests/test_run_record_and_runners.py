@@ -29,6 +29,7 @@ from forge_evals.runners import (
 
 def _make_task_dir(d: Path) -> Path:
     """Build a minimal task package dir."""
+    d.mkdir(parents=True, exist_ok=True)
     (d / "task.yaml").write_text("source_commit: abc\nimage_digest: sha:img\n", encoding="utf-8")
     (d / "setup.sh").write_text("echo hi\n", encoding="utf-8")
     (d / "environment.lock").write_text("python=3.12\n", encoding="utf-8")
@@ -60,13 +61,12 @@ def test_run_record_end_before_start_raises() -> None:
     from datetime import datetime, timedelta, timezone
 
     now = datetime.now(timezone.utc)
-    r = RunRecord(
-        run_id="x", suite="s", task="t", harness="h", harness_commit="c",
-        model_capability_snapshot={}, environment_digest="d", random_seed=1,
-        budgets={}, start=now, end=now - timedelta(seconds=1),
-    )
     with pytest.raises(RunRecordError):
-        r.__post_init__()
+        RunRecord(
+            run_id="x", suite="s", task="t", harness="h", harness_commit="c",
+            model_capability_snapshot={}, environment_digest="d", random_seed=1,
+            budgets={}, start=now, end=now - timedelta(seconds=1),
+        )
 
 
 def test_run_record_json_round_trip(tmp_path: Path) -> None:

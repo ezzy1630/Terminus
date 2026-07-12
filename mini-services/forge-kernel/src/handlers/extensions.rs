@@ -9,11 +9,13 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::Extension;
 use axum::Json;
 use forge_extension_runtime::ExtensionManifest;
 use serde::{Deserialize, Serialize};
 
 use crate::api::Envelope;
+use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
 use crate::state::AppState;
 use crate::trace_id::TraceId;
@@ -35,16 +37,18 @@ pub struct LoadResponse {
 
 pub async fn load(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<LoadResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: LoadRequest =
+    let mut req: LoadRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
+    req.envelope.inject_capability_token(&cap_token);
     state
         .kernel
         .extensions
         .validate_manifest(&req.envelope.request_context, &req.manifest)
-        .map_err(|e| ApiError::validation(format!("{e}"), &trace_id.0))?;
+        .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
     let report = state.kernel.extensions.report();
     Ok(Json(LoadResponse {
         loaded: true,

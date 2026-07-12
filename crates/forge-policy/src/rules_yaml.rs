@@ -112,6 +112,15 @@ pub fn default_rule_set() -> RuleSet {
 
 /// A representative default rule set YAML string. In production this is read
 /// from `policies/command/default.yaml`.
+///
+/// NOTE: The policy engine's `RuleMatch::matches` uses OR semantics within
+/// a rule — a rule matches if ANY of its non-empty match fields matches.
+/// This means `effects_any` on a rule with other match fields makes the
+/// rule overly broad (it matches every command with that effect type,
+/// regardless of executable/argv). We therefore omit `effects_any` from
+/// rules that already match on executable/argv/working_directory, and
+/// reserve `effects_any` for rules that match ONLY on effect type (e.g.
+/// `deny-external-state-write-default`).
 pub fn sample_rule_set_yaml() -> String {
     r#"
 rules:
@@ -120,7 +129,6 @@ rules:
     priority: 10
     match:
       executable_any: ["pnpm", "pytest", "cargo", "go", "npm", "yarn", "bun"]
-      effects_any: ["EXECUTE_LOCAL"]
     effect:
       kind: allow_with_constraints
       constraint:
@@ -133,7 +141,6 @@ rules:
     priority: 10
     match:
       executable_any: ["ls", "cat", "grep", "rg", "fd", "find", "git"]
-      effects_any: ["READ_LOCAL"]
     effect:
       kind: allow
 
@@ -143,7 +150,6 @@ rules:
     match:
       executable_any: ["git"]
       argv_contains_any: ["push"]
-      effects_any: ["NETWORK_WRITE"]
     effect:
       kind: prompt
 
@@ -153,7 +159,6 @@ rules:
     match:
       executable_any: ["curl", "wget"]
       argv_contains_any: ["|", "bash", "sh", "python", "perl"]
-      effects_any: ["NETWORK_READ", "EXECUTE_LOCAL"]
     effect:
       kind: deny
 
@@ -161,7 +166,6 @@ rules:
     description: Deny writes to .git, .forge, credentials, .env
     priority: 50
     match:
-      effects_any: ["WRITE_LOCAL"]
       working_directory_glob: ["**/.git/**", "**/.forge/**", "**/credentials/**", "**/.env*"]
     effect:
       kind: deny

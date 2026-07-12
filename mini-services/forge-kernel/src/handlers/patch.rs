@@ -2,12 +2,14 @@
 //! and `POST /v1/patch/reconcile`.
 
 use axum::extract::State;
+use axum::Extension;
 use axum::Json;
 use forge_kernel_protocol::{PatchCommitMode, PatchEdit, PatchResponse, WorkspaceBaseline};
 use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::api::Envelope;
+use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
 use crate::state::AppState;
 use crate::trace_id::TraceId;
@@ -24,11 +26,13 @@ pub struct PatchRequest {
 
 pub async fn preview(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<PatchResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: PatchRequest =
+    let mut req: PatchRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
+    req.envelope.inject_capability_token(&cap_token);
     let response = state
         .kernel
         .patches
@@ -46,11 +50,13 @@ pub async fn preview(
 
 pub async fn apply(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<PatchResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: PatchRequest =
+    let mut req: PatchRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
+    req.envelope.inject_capability_token(&cap_token);
     let response = state
         .kernel
         .patches

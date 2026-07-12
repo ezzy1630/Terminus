@@ -9,6 +9,7 @@
  * Pure data — no I/O.
  */
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import type {
   ArtifactRef,
   ContentHash,
@@ -119,6 +120,7 @@ export const contextFragmentSchema = z.object({
   id: z.string(),
   kind: contextKindSchema,
   contentRef: artifactRefSchema,
+  textContent: z.string().optional(),
   source: sourceDescriptorSchema,
   sourceVersion: z.string().nullable(),
   authority: z.number().int().min(0).max(100),
@@ -363,21 +365,12 @@ export function isFreshAgainst(
 /**
  * Computes a deterministic stable-prefix hash from a list of stable fragments.
  * The result is content-addressed: identical input lists produce identical
- * hashes.
+ * hashes. Uses the real SHA-256 algorithm via `node:crypto` per SPEC §28.1
+ * (content identities MUST use `sha256:<hex>`).
  */
 export function computeStablePrefixHash(stableFragments: readonly ContextFragment[]): ContentHash {
   const lines = stableFragments.map((f) => `${f.id}:${f.contentRef.hash}`).sort();
   const joined = lines.join("\n");
-  // FNV-1a 64-bit-ish approximation for determinism. Real sha256 lives in the
-  // kernel; here we expose a deterministic key that the kernel can re-hash.
-  let h1 = 0x811c9dc5;
-  let h2 = 0x1000193;
-  for (let i = 0; i < joined.length; i++) {
-    const c = joined.charCodeAt(i);
-    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
-    h2 = Math.imul(h2 ^ c, 0x85ebca77) >>> 0;
-  }
-  const hex = (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0");
-  // Pad to 64 hex chars with a stable pattern (zero-extension).
-  return `sha256:00000000000000000000000000000000${hex}` as ContentHash;
+  const hex = createHash("sha256").update(joined, "utf8").digest("hex");
+  return `sha256:${hex}` as ContentHash;
 }

@@ -46,7 +46,14 @@ class AdjustedPValues:
 
 
 def bonferroni(p_values: Sequence[float], alpha: float = 0.05) -> AdjustedPValues:
-    """Bonferroni correction: multiply each p-value by the family size."""
+    """Bonferroni correction: multiply each p-value by the family size.
+
+    The adjusted p-value is ``min(1.0, p * n)``. By convention, when a
+    single p-value is supplied (``n == 1``) the family-size multiplier
+    is 1, so the adjusted p-value is the original p-value (not capped at
+    1 unless the original exceeds 1). The cap at 1.0 only kicks in when
+    ``p * n > 1``.
+    """
     n = len(p_values)
     adjusted = [min(1.0, p * n) for p in p_values]
     rejected = [a < alpha for a in adjusted]
@@ -109,8 +116,9 @@ def benjamini_hochberg(p_values: Sequence[float], alpha: float = 0.05) -> Adjust
         running_min = min(running_min, candidate)
         adjusted[orig_idx] = min(1.0, running_min)
     # Find the largest rank where p_i <= (i/n) * alpha; reject all <= that rank.
+    # If no rank satisfies the threshold, no hypotheses are rejected.
     rejected = [False] * n
-    threshold_rank = 0
+    threshold_rank = -1  # sentinel: no rejections yet
     for rank, (orig_idx, p) in enumerate(indexed):
         i = rank + 1
         if p <= (i / n) * alpha:

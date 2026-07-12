@@ -208,7 +208,7 @@ function renderSystemInstruction(
 ): { readonly parts: readonly { readonly text: string }[] } | null {
   const systemFrags = input.fragments.filter((f) => isSystemKind(f.kind));
   if (systemFrags.length === 0) return null;
-  return { parts: systemFrags.map((f) => ({ text: f.contentRef.uri })) };
+  return { parts: systemFrags.map((f) => ({ text: fragmentText(f) })) };
 }
 
 function renderContents(input: CanonicalRenderInput): readonly GeminiContent[] {
@@ -217,9 +217,18 @@ function renderContents(input: CanonicalRenderInput): readonly GeminiContent[] {
     if (isSystemKind(f.kind)) continue;
     const role: "user" | "model" | "function" =
       f.kind === "recent_episode" ? "model" : f.kind === "tool_result" ? "function" : "user";
-    contents.push({ role, parts: [{ text: f.contentRef.uri }] });
+    contents.push({ role, parts: [{ text: fragmentText(f) }] });
   }
   return contents;
+}
+
+/**
+ * Resolve the fragment's renderable text. Prefers in-band `textContent`;
+ * falls back to the artifact URI when no in-band text is supplied (the
+ * kernel renderer dereferences URIs at the wire boundary).
+ */
+function fragmentText(frag: { readonly textContent?: string | undefined; readonly contentRef: { readonly uri: string } }): string {
+  return frag.textContent ?? frag.contentRef.uri;
 }
 
 function isSystemKind(kind: string): boolean {
@@ -240,7 +249,7 @@ function toProviderRequest(input: CanonicalRenderInput, providerId: string): Pro
     model: input.model.modelKey,
     blocks: input.fragments.map((f) => ({
       role: (isSystemKind(f.kind) ? "system" : f.kind === "recent_episode" ? "assistant" : "user") as "system" | "user" | "assistant" | "tool" | "developer",
-      content: f.contentRef.uri,
+      content: fragmentText(f),
       artifactHash: f.contentRef.hash,
       cacheBreakpoint: false,
       confidentiality: f.confidentiality,

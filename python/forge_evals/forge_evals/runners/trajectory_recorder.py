@@ -20,7 +20,7 @@ ends. Re-analysis reads them back from Parquet/JSONL.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -31,6 +31,10 @@ __all__ = [
     "TrajectoryEvent",
     "TrajectoryEventType",
     "TrajectoryRecorder",
+    "decode_trajectory_payloads",
+    "load_trajectory_jsonl",
+    "load_trajectory_parquet",
+    "trajectory_to_dicts",
 ]
 
 
@@ -79,6 +83,8 @@ EVENT_TYPES: tuple[str, ...] = (
     "job.state_changed",
     "agent.delegated",
     "agent.reviewed",
+    "turn.finalizing",
+    "turn.completed",
     "error.uncaught",
 )
 
@@ -104,12 +110,23 @@ class TrajectoryEvent:
             raise ValueError("event_type is required")
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to a JSON-safe dict."""
+        """Convert to a JSON-safe dict.
+
+        The ``payload`` is kept as a plain ``dict`` (not JSON-encoded) so
+        that graders consuming trajectory events can do
+        ``isinstance(payload, dict)`` checks directly. The on-disk JSONL
+        writer (:meth:`TrajectoryRecorder.to_jsonl`) serializes the whole
+        dict (including the nested payload) to a single JSON line; the
+        loader (:func:`load_trajectory_jsonl`) yields events whose
+        ``payload`` is again a dict. Parquet storage keeps ``payload`` as
+        a JSON string column for type-stability, and
+        :func:`load_trajectory_parquet` decodes it back to a dict.
+        """
         return {
             "seq": self.seq,
             "ts": self.ts.isoformat(),
             "event_type": self.event_type,
-            "payload": json.dumps(self.payload, sort_keys=True, default=str),
+            "payload": dict(self.payload),
         }
 
 
@@ -317,12 +334,50 @@ class TrajectoryRecorder:
 
 
 def load_trajectory_parquet(path: Path | str) -> pl.DataFrame:
-    """Load a trajectory Parquet file written by :meth:`TrajectoryRecorder.to_parquet`."""
+    """Load a trajectory Parquet file written by :meth:`TrajectoryRecorder.to_parquet`.
+
+    The ``payload`` column is stored as a JSON string for type-stability
+    across Polars/Arrow versions; callers that need a dict can use
+    :func:`decode_trajectory_payloads`.
+    """
     return pl.read_parquet(Path(path))
 
 
+def decode_trajectory_payloads(df: pl.DataFrame) -> list[dict[str, Any]]:
+    """Decode a Parquet-loaded trajectory DataFrame into a list of dicts.
+
+    Each dict has ``seq``, ``ts``, ``event_type``, and ``payload`` (decoded
+    back to a ``dict`` from the JSON string column).
+    """
+    out: list[dict[str, Any]] = []
+    if df.height == 0:
+        return out
+    for row in df.to_dicts():
+        payload = row.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        out.append(
+            {
+                "seq": int(row.get("seq", 0)),
+                "ts": row.get("ts"),
+                "event_type": str(row.get("event_type", "")),
+                "payload": payload,
+            }
+        )
+    return out
+
+
 def load_trajectory_jsonl(path: Path | str) -> list[TrajectoryEvent]:
-    """Load a JSONL trajectory file into a list of :class:`TrajectoryEvent`."""
+    """Load a JSONL trajectory file into a list of :class:`TrajectoryEvent`.
+
+    The ``payload`` field is always returned as a ``dict``. If the stored
+    payload is a JSON string (legacy records), it is decoded back to a dict.
+    """
     p = Path(path)
     events: list[TrajectoryEvent] = []
     for line in p.read_text(encoding="utf-8").splitlines():
@@ -330,17 +385,40 @@ def load_trajectory_jsonl(path: Path | str) -> list[TrajectoryEvent]:
             continue
         d = json.loads(line)
         ts = datetime.fromisoformat(d["ts"])
+        payload = d.get("payload")
+        if isinstance(payload, str):
+            # Legacy records stored payload as a JSON-encoded string.
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
         events.append(
             TrajectoryEvent(
                 seq=int(d["seq"]),
                 ts=ts,
                 event_type=d["event_type"],
-                payload=json.loads(d["payload"]) if d.get("payload") else {},
+                payload=payload,
             )
         )
     return events
 
 
 def trajectory_to_dicts(events: list[TrajectoryEvent]) -> list[dict[str, Any]]:
-    """Convert a list of events to plain dicts (for run record trajectory field)."""
-    return [asdict(e) | {"ts": e.ts.isoformat()} for e in events]
+    """Convert a list of events to plain dicts (for run record trajectory field).
+
+    ``payload`` is preserved as a plain ``dict`` so graders can use
+    ``isinstance(payload, dict)`` checks directly.
+    """
+    out: list[dict[str, Any]] = []
+    for e in events:
+        out.append(
+            {
+                "seq": e.seq,
+                "ts": e.ts.isoformat(),
+                "event_type": e.event_type,
+                "payload": dict(e.payload),
+            }
+        )
+    return out

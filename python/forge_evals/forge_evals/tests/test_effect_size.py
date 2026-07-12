@@ -118,9 +118,10 @@ def test_cliffs_delta_magnitude_classification() -> None:
     # Large effect.
     d = cliffs_delta([10.0, 20.0], [1.0, 2.0])
     assert d.magnitude == "large"
-    # Negligible.
-    d2 = cliffs_delta([1.0, 1.001], [1.0, 1.0])
+    # Negligible: identical samples → delta = 0.0.
+    d2 = cliffs_delta([1.0, 1.001], [1.0, 1.001])
     assert d2.magnitude == "negligible"
+    assert d2.value == 0.0
 
 
 def test_effect_size_magnitude_for_d() -> None:

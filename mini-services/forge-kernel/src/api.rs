@@ -3,6 +3,8 @@
 use forge_kernel_protocol::{EffectIntent, RequestContext};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::ValidatedCapabilityToken;
+
 /// The envelope every POST request body MUST conform to. `request_context`
 /// and `effect_intent` are required by the SPEC §31 contract; the payload
 /// fields are flattened alongside.
@@ -22,6 +24,17 @@ impl Envelope {
     /// Extract an `Envelope` from a `serde_json::Value`, filling in defaults.
     pub fn from_value(v: &serde_json::Value) -> Result<Self, serde_json::Error> {
         serde_json::from_value(v.clone())
+    }
+
+    /// Inject the validated capability-token string (set by the auth
+    /// middleware on request extensions) into `request_context.capability_token`.
+    /// This lets the kernel's own §31.3 step-3 capability validation
+    /// re-verify the token against the requested operation class + scope.
+    ///
+    /// No-op if the extension is absent (e.g. for read-only endpoints that
+    /// skip the capability-token middleware).
+    pub fn inject_capability_token(&mut self, token: &ValidatedCapabilityToken) {
+        self.request_context.capability_token = token.0.clone();
     }
 }
 

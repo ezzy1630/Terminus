@@ -469,17 +469,26 @@ class PairedMeanDelta:
 def paired_mean_delta(
     seq: PairedSequence,
     confidence_level: float = 0.95,
-    bootstrap_samples: int = 10000,
+    n_bootstrap: int = 10000,
     rng_seed: int = 0,
+    *,
+    bootstrap_samples: int | None = None,
 ) -> PairedMeanDelta:
     """Mean and median delta with a bootstrap CI on the mean.
 
     Uses the non-parametric bootstrap: resample the deltas with replacement,
     compute the mean of each resample, and take the empirical quantiles of
     the bootstrap distribution as the CI bounds.
+
+    The number of bootstrap resamples can be set via ``n_bootstrap`` (the
+    preferred parameter name). The legacy ``bootstrap_samples`` keyword is
+    also accepted as an alias for backwards compatibility.
     """
     from .bootstrap import bootstrap_ci
 
+    if bootstrap_samples is not None:
+        # Legacy alias — prefer ``n_bootstrap`` going forward.
+        n_bootstrap = bootstrap_samples
     deltas = seq.values
     n = len(deltas)
     if n == 0:
@@ -491,7 +500,7 @@ def paired_mean_delta(
         sample=deltas,
         statistic=lambda s: sum(s) / len(s) if s else 0.0,
         confidence_level=confidence_level,
-        n_resamples=bootstrap_samples,
+        n_resamples=n_bootstrap,
         rng_seed=rng_seed,
     )
     return PairedMeanDelta(
@@ -501,5 +510,5 @@ def paired_mean_delta(
         ci_high=ci_high,
         n=n,
         confidence_level=confidence_level,
-        bootstrap_samples=bootstrap_samples,
+        bootstrap_samples=n_bootstrap,
     )

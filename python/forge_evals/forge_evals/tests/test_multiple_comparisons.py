@@ -24,10 +24,12 @@ def test_bonferroni_multiplies_by_n() -> None:
 
 
 def test_bonferroni_caps_at_one() -> None:
-    """Bonferroni caps adjusted p-values at 1.0."""
-    pvals = [0.5]
+    """Bonferroni caps adjusted p-values at 1.0 when ``p * n > 1``."""
+    # With n=3 p-values of 0.5, the Bonferroni-adjusted value is
+    # min(1.0, 0.5 * 3) = 1.0 for each.
+    pvals = [0.5, 0.5, 0.5]
     res = bonferroni(pvals, alpha=0.05)
-    assert res.adjusted == [1.0]
+    assert res.adjusted == [1.0, 1.0, 1.0]
 
 
 def test_holm_bonferroni_step_down() -> None:

@@ -5,6 +5,12 @@
  * consolidate() (lease-protected), retrieve(query, scope), invalidate(fileHash),
  * quarantine(claimId), disable(), export(), reset(). Includes provenance,
  * confidence (ppm), expiry rules, contradiction detection. Disabled by default.
+ *
+ * Also exposes a `WorkingMemoryService` (§16.1 / §39.2) that produces a
+ * read-only `WorkingMemorySnapshot` projection of deterministic task state:
+ * active objective/contract version, progress by acceptance criterion,
+ * decisions, failed approaches, modified files, test/diagnostic state,
+ * current phase, running jobs, budget consumption, blockers.
  */
 import type {
   MemoryClaim,
@@ -22,7 +28,10 @@ import type {
   ModelKey,
   PrincipalId,
   Task,
+  TaskPhase,
+  AcceptanceCriterion,
   InvalidationRule,
+  Micros,
 } from "@forge/domain";
 import { ValidationError, ConflictError } from "@forge/domain";
 
@@ -311,3 +320,204 @@ export type {
   Task,
   PrincipalId,
 };
+
+// ────────────────────────── Working memory (§16.1, §39.2) ────────────────────
+
+/**
+ * Deterministic task-state projection. Per SPEC §16.1: "working memory is a
+ * read-only projection of task state, not inferred from prose." The
+ * `WorkingMemoryService` builds this snapshot from authoritative sources
+ * (task aggregate, scope ledger, verification DAG, job registry, budget
+ * ledger) — never from LLM-generated text.
+ */
+export interface WorkingMemorySnapshot {
+  readonly taskId: Uuid7;
+  readonly capturedAt: Rfc3339Timestamp;
+  /** Active task phase (INTAKE/CONTRACT/DISCOVER/PLAN/IMPLEMENT/VERIFY/REVIEW/COMPLETE). */
+  readonly phase: TaskPhase;
+  /** Active contract id and version (immutable once recorded). */
+  readonly contractVersion: number;
+  /** The task objective verbatim from the active contract. */
+  readonly objective: string;
+  /** Per-criterion progress (PASS / FAIL / UNKNOWN / NOT_RUN). */
+  readonly acceptanceCriteria: readonly WorkingMemoryCriterion[];
+  /** Decision log entries (user/model decisions, scope expansions, etc.). */
+  readonly decisions: readonly WorkingMemoryDecision[];
+  /** Approaches that have been tried and failed (with reason). */
+  readonly failedApproaches: readonly WorkingMemoryFailedApproach[];
+  /** Files modified under the task scope, with the latest observed version. */
+  readonly modifiedFiles: readonly WorkingMemoryFileChange[];
+  /** Latest test/diagnostic state observed for the task. */
+  readonly diagnosticState: WorkingMemoryDiagnosticState;
+  /** Currently running jobs (sandboxed commands, side effects, etc.). */
+  readonly runningJobs: readonly WorkingMemoryJobRef[];
+  /** Budget consumed so far. */
+  readonly budgetConsumption: WorkingMemoryBudgetConsumption;
+  /** Active blockers (awaiting user input, missing dependency, etc.). */
+  readonly blockers: readonly WorkingMemoryBlocker[];
+}
+
+export interface WorkingMemoryCriterion {
+  readonly id: string;
+  readonly statement: string;
+  readonly required: boolean;
+  readonly status: "PASS" | "FAIL" | "UNKNOWN" | "NOT_RUN";
+  readonly lastObservedAt: Rfc3339Timestamp | null;
+  readonly evidence: readonly string[];
+}
+
+export interface WorkingMemoryDecision {
+  readonly id: Uuid7;
+  readonly kind: "user_decision" | "model_decision" | "scope_expansion" | "policy_override";
+  readonly summary: string;
+  readonly decidedAt: Rfc3339Timestamp;
+  readonly decidedBy: PrincipalId | null;
+}
+
+export interface WorkingMemoryFailedApproach {
+  readonly id: Uuid7;
+  readonly summary: string;
+  readonly reason: string;
+  readonly attemptedAt: Rfc3339Timestamp;
+  readonly evidenceRefs: readonly ContentHash[];
+}
+
+export interface WorkingMemoryFileChange {
+  readonly path: string;
+  readonly changeKind: "created" | "modified" | "deleted";
+  readonly sourceVersion: string | null;
+  readonly observedAt: Rfc3339Timestamp;
+}
+
+export interface WorkingMemoryDiagnosticState {
+  readonly failingTests: readonly string[];
+  readonly errors: readonly WorkingMemoryDiagnostic[];
+  readonly warnings: readonly WorkingMemoryDiagnostic[];
+  readonly observedAt: Rfc3339Timestamp;
+}
+
+export interface WorkingMemoryDiagnostic {
+  readonly path: string;
+  readonly message: string;
+  readonly severity: "error" | "warning";
+  readonly observedAt: Rfc3339Timestamp;
+}
+
+export interface WorkingMemoryJobRef {
+  readonly jobId: Uuid7;
+  readonly label: string;
+  readonly startedAt: Rfc3339Timestamp;
+}
+
+export interface WorkingMemoryBudgetConsumption {
+  readonly modelMicros: Micros;
+  readonly modelMicrosLimit: Micros;
+  readonly computeSeconds: number;
+  readonly computeSecondsLimit: number;
+  readonly wallClockSeconds: number;
+  readonly wallClockSecondsLimit: number;
+  readonly humanApprovals: number;
+  readonly humanApprovalsLimit: number;
+}
+
+export interface WorkingMemoryBlocker {
+  readonly id: Uuid7;
+  readonly kind: "awaiting_user" | "missing_dependency" | "policy_denied" | "budget_exhausted" | "other";
+  readonly summary: string;
+  readonly raisedAt: Rfc3339Timestamp;
+}
+
+// ────────────────────────── Working memory repository ────────────────────────
+
+/**
+ * Read-side projections that the `WorkingMemoryService` consults. Each method
+ * returns deterministic, authoritative data — never LLM-inferred.
+ */
+export interface WorkingMemoryRepository {
+  getTask(taskId: Uuid7): Promise<Task | null>;
+  listDecisions(taskId: Uuid7): Promise<readonly WorkingMemoryDecision[]>;
+  listFailedApproaches(taskId: Uuid7): Promise<readonly WorkingMemoryFailedApproach[]>;
+  listModifiedFiles(taskId: Uuid7): Promise<readonly WorkingMemoryFileChange[]>;
+  getDiagnosticState(taskId: Uuid7): Promise<WorkingMemoryDiagnosticState>;
+  listRunningJobs(taskId: Uuid7): Promise<readonly WorkingMemoryJobRef[]>;
+  getBudgetConsumption(taskId: Uuid7): Promise<WorkingMemoryBudgetConsumption>;
+  listBlockers(taskId: Uuid7): Promise<readonly WorkingMemoryBlocker[]>;
+  /** Per-criterion status; defaults to UNKNOWN when not yet observed. */
+  listCriterionStatuses(taskId: Uuid7): Promise<ReadonlyMap<string, WorkingMemoryCriterion>>;
+}
+
+export interface WorkingMemoryServiceDeps {
+  readonly repo: WorkingMemoryRepository;
+  readonly clock: () => Rfc3339Timestamp;
+}
+
+/**
+ * Read-only projection service for deterministic task state per SPEC §16.1 /
+ * §39.2. The snapshot is rebuilt on every call (no caching) so callers
+ * always see the latest authoritative state. The service never writes.
+ */
+export class WorkingMemoryService {
+  constructor(private readonly deps: WorkingMemoryServiceDeps) {}
+
+  /**
+   * Build a `WorkingMemorySnapshot` for a task. Throws `ValidationError`
+   * when the task does not exist (so callers can distinguish "no task" from
+   * "task with empty working memory").
+   */
+  async getWorkingMemory(taskId: Uuid7): Promise<WorkingMemorySnapshot> {
+    const task = await this.deps.repo.getTask(taskId);
+    if (task === null) {
+      throw new ValidationError("task not found", { taskId });
+    }
+    const [
+      decisions,
+      failedApproaches,
+      modifiedFiles,
+      diagnosticState,
+      runningJobs,
+      budgetConsumption,
+      blockers,
+      criterionStatuses,
+    ] = await Promise.all([
+      this.deps.repo.listDecisions(taskId),
+      this.deps.repo.listFailedApproaches(taskId),
+      this.deps.repo.listModifiedFiles(taskId),
+      this.deps.repo.getDiagnosticState(taskId),
+      this.deps.repo.listRunningJobs(taskId),
+      this.deps.repo.getBudgetConsumption(taskId),
+      this.deps.repo.listBlockers(taskId),
+      this.deps.repo.listCriterionStatuses(taskId),
+    ]);
+
+    const acceptanceCriteria: WorkingMemoryCriterion[] = task.contract.acceptanceCriteria.map(
+      (ac: AcceptanceCriterion): WorkingMemoryCriterion => {
+        const observed = criterionStatuses.get(ac.id);
+        if (observed !== undefined) return observed;
+        return {
+          id: ac.id,
+          statement: ac.statement,
+          required: ac.required,
+          status: "UNKNOWN",
+          lastObservedAt: null,
+          evidence: [],
+        };
+      },
+    );
+
+    return {
+      taskId,
+      capturedAt: this.deps.clock(),
+      phase: task.phase,
+      contractVersion: task.contract.version,
+      objective: task.contract.objective,
+      acceptanceCriteria,
+      decisions,
+      failedApproaches,
+      modifiedFiles,
+      diagnosticState,
+      runningJobs,
+      budgetConsumption,
+      blockers,
+    };
+  }
+}

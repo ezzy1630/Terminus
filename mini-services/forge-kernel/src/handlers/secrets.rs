@@ -9,11 +9,13 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::Extension;
 use axum::Json;
 use forge_secrets::{Redactor, SecretMetadata};
 use serde::{Deserialize, Serialize};
 
 use crate::api::Envelope;
+use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
 use crate::state::AppState;
 use crate::trace_id::TraceId;
@@ -39,19 +41,36 @@ pub struct SecretRequestResponse {
 
 pub async fn request(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<SecretRequestResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: SecretRequest =
+    let mut req: SecretRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
+    req.envelope.inject_capability_token(&cap_token);
     let requested_by = if req.requested_by.is_empty() {
         req.envelope.request_context.actor_id.clone()
     } else {
         req.requested_by
     };
-    // The kernel's SecretService.request currently returns Ok(()); we call
-    // the broker directly to obtain a handle, extract metadata, then drop
-    // the handle (which wipes the value on Drop).
+    // §31.3 step 3: the kernel validates the capability token's `Secret`
+    // operation class + secret-URI scope. We call the kernel's
+    // `SecretService::request` (which validates) instead of the broker
+    // directly so the token is enforced.
+    state
+        .kernel
+        .secrets
+        .request(
+            &req.envelope.request_context,
+            &req.envelope.effect_intent,
+            &req.uri,
+            &requested_by,
+        )
+        .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
+    // The kernel's SecretService::request returned Ok(()) — it has validated
+    // capability and recorded the audit event. We still fetch a handle from
+    // the broker so we can return metadata to the caller (the value is
+    // never serialized).
     let handle = state
         .kernel
         .secrets

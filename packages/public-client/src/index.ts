@@ -15,6 +15,12 @@ import type {
   TurnSnapshot,
   ContextManifestSnapshot,
   ApprovalSnapshot,
+  ToolSnapshot,
+  AgentSnapshot,
+  MemoryClaimSnapshot,
+  EvalRunSnapshot,
+  ConfigurationSnapshot,
+  PolicySnapshot,
   SseEvent,
 } from "@forge/public-api";
 import { createSseDecoder, IDEMPOTENCY_HEADER, requireIdempotency } from "@forge/public-api";
@@ -44,7 +50,7 @@ export class ForgeClient {
     };
   }
 
-  private url(path: string, query?: Record<string, string | number | null | undefined>): string {
+  private url(path: string, query?: Record<string, string | number | boolean | null | undefined>): string {
     const q = new URLSearchParams();
     if (this.xformPort !== null) q.set("XTransformPort", String(this.xformPort));
     if (query) {
@@ -74,7 +80,7 @@ export class ForgeClient {
     path: string,
     opts: {
       body?: unknown | undefined;
-      query?: Record<string, string | number | null | undefined> | undefined;
+      query?: Record<string, string | number | boolean | null | undefined> | undefined;
       idempotencyKey?: string | undefined;
       signal?: AbortSignal | null | undefined;
     } = {},
@@ -235,13 +241,22 @@ export class ForgeClient {
 
   // ────────────────────────── /approvals ───────────────────────────────
 
+  /**
+   * Resolve a pending approval. Accepts both the canonical domain names
+   * (`allow_for_action`, `allow_for_task`, `deny_and_add_task_rule`) and
+   * the legacy aliases (`allow_exact`, `allow_task_scope`, `deny_and_rule`).
+   * The server normalizes aliases to canonical names before persisting.
+   */
   async resolveApproval(
     id: string,
     decision:
       | "allow_once"
+      | "allow_for_action"
+      | "allow_for_task"
       | "allow_exact"
       | "allow_task_scope"
       | "deny_once"
+      | "deny_and_add_task_rule"
       | "deny_and_rule"
       | "stop_task",
     rationale?: string | null,
@@ -306,6 +321,97 @@ export class ForgeClient {
     } finally {
       reader.releaseLock();
     }
+  }
+
+  // ────────────────────────── /tools ───────────────────────────────────
+
+  async listTools(
+    opts: {
+      trust_level?: "builtin" | "first_party" | "verified_third_party" | "untrusted";
+      include_deprecated?: boolean;
+    } = {},
+    signal?: AbortSignal | null,
+  ): Promise<{ tools: ToolSnapshot[]; next_cursor: string | null }> {
+    return this.request("GET", "/v1/tools", {
+      query: {
+        trust_level: opts.trust_level ?? null,
+        include_deprecated: opts.include_deprecated ?? false,
+      },
+      signal,
+    });
+  }
+
+  // ────────────────────────── /agents ──────────────────────────────────
+
+  async listAgents(
+    opts: { enabled_only?: boolean } = {},
+    signal?: AbortSignal | null,
+  ): Promise<{ agents: AgentSnapshot[] }> {
+    return this.request("GET", "/v1/agents", {
+      query: { enabled_only: opts.enabled_only ?? true },
+      signal,
+    });
+  }
+
+  // ────────────────────────── /memory ──────────────────────────────────
+
+  async listMemory(
+    opts: {
+      status?: "candidate" | "active" | "disputed" | "expired" | "rejected";
+      kind?:
+        | "fact"
+        | "convention"
+        | "preference"
+        | "pitfall"
+        | "command"
+        | "architecture"
+        | "procedure"
+        | "failure_resolution";
+    } = {},
+    signal?: AbortSignal | null,
+  ): Promise<{ claims: MemoryClaimSnapshot[]; next_cursor: string | null }> {
+    return this.request("GET", "/v1/memory", {
+      query: { status: opts.status ?? null, kind: opts.kind ?? null },
+      signal,
+    });
+  }
+
+  // ────────────────────────── /evals ───────────────────────────────────
+
+  async listEvals(
+    opts: { suite?: string; harness?: string; since?: string } = {},
+    signal?: AbortSignal | null,
+  ): Promise<{ runs: EvalRunSnapshot[]; next_cursor: string | null }> {
+    return this.request("GET", "/v1/evals", {
+      query: { suite: opts.suite ?? null, harness: opts.harness ?? null, since: opts.since ?? null },
+      signal,
+    });
+  }
+
+  // ────────────────────────── /configuration ───────────────────────────
+
+  async listConfiguration(
+    opts: {
+      kind?: "model_profile" | "permission_profile" | "policy_profile" | "runtime_profile";
+    } = {},
+    signal?: AbortSignal | null,
+  ): Promise<{ configurations: ConfigurationSnapshot[] }> {
+    return this.request("GET", "/v1/configuration", {
+      query: { kind: opts.kind ?? null },
+      signal,
+    });
+  }
+
+  // ────────────────────────── /policies ────────────────────────────────
+
+  async listPolicies(
+    opts: { profile_id?: string; enabled_only?: boolean } = {},
+    signal?: AbortSignal | null,
+  ): Promise<{ policies: PolicySnapshot[] }> {
+    return this.request("GET", "/v1/policies", {
+      query: { profile_id: opts.profile_id ?? null, enabled_only: opts.enabled_only ?? true },
+      signal,
+    });
   }
 }
 

@@ -172,7 +172,7 @@ def records_to_dataframe(records: list[RunRecord]) -> pl.DataFrame:
             row["reasoning_tokens"] = r.cost.reasoning_tokens
             row["cache_write_tokens"] = r.cost.cache_write_tokens
             row["cache_read_tokens"] = r.cost.cache_read_tokens
-            row["cost_reconciliation_flagged"] = r.cost.reconciliation_flagled
+            row["cost_reconciliation_flagged"] = r.cost.reconciliation_flagged
         else:
             row["provider_reported_usd"] = None
             row["computed_usd"] = None

@@ -1,0 +1,285 @@
+# Forge reference configuration (SPEC Appendix F).
+#
+# This file is the canonical, fully-commented Forge configuration. It is
+# loaded by `packages/config` after the compiled-secure defaults layer.
+# Per SPEC Appendix F, configuration is layered in the order:
+#
+#   compiled secure defaults
+#   < organization policy
+#   < user configuration
+#   < workspace configuration
+#   < session/task configuration
+#
+# Lower layers cannot weaken non-overridable controls (sandbox.deny,
+# secrets.directEnvironment, extensions.thirdParty.execution, etc.).
+#
+# Every section below corresponds to a section of SPEC Appendix F. Values
+# shown here match the compiled-secure defaults; deployments override
+# only the fields they need to change.
+
+forge:
+  version: 1
+  data_dir: ~/.local/share/forge
+  runtime_dir: ~/.local/run/forge
+  log_level: info  # trace | debug | info | warn | error
+
+# Telemetry — local-only by default. Exporting telemetry requires
+# explicit opt-in and a destination that does not receive model-visible
+# content (includeContent defaults to false).
+telemetry:
+  mode: local_only  # local_only | export
+  export_endpoint: null
+  include_content: false
+
+# Public API surface (SPEC §8). Either a Unix-domain socket (loopback
+# only), a loopback HTTP listener, or a remote listener (TLS-terminating
+# reverse proxy in front).
+public_api:
+  listen:
+    unix_socket: null  # e.g. /run/forge/api.sock for loopback-only
+    loopback_http: null  # e.g. 127.0.0.1:8080
+    remote: null  # e.g. 0.0.0.0:8443 (only behind a TLS-terminating proxy)
+  authentication:
+    local_token_file: null  # path to a token file for loopback auth
+  event_retention:
+    max_events: 100000
+    max_age_days: 30
+
+# Rust privileged effect kernel (SPEC §5, §27). Runs as a separate
+# process; the control plane talks to it over a Unix-domain socket.
+kernel:
+  socket: /run/forge/kernel.sock
+  binary: forge-kernel
+  required_protocol: 1.x
+  capability_token_ttl_seconds: 60
+  max_message_bytes: 4194304  # 4 MiB
+
+# Storage (SPEC §29). SQLite in WAL mode for the event log; content-
+# addressed artifact store on disk. Garbage collection runs daily by
+# default.
+storage:
+  sqlite: ~/.local/share/forge/forge.db
+  artifacts: ~/.local/share/forge/artifacts
+  wal_checkpoint_interval_seconds: 60
+  artifact_compression: zstd  # none | zstd | gzip | br
+  garbage_collection:
+    enabled: true
+    dry_run: false
+    interval_hours: 24
+
+# OpenCode upstream fork tracking (SPEC §4, §48). The pinned commit and
+# content_sha256 live in upstream/opencode.lock.json; this section names
+# the lockfile and the divergence budget so the control plane can
+# surface drift in the dashboard.
+upstream:
+  lock_file: upstream/opencode.lock.json
+  divergence_budget: upstream/divergence-budget.yaml
+  patches_dir: upstream/patches
+  sync_mode: fork_assisted  # fork_assisted | rebase | subtree
+  auto_merge: false  # never auto-merge upstream changes; always require review
+
+# Provider accounts (SPEC §15). Each account is keyed by an opaque id
+# and references an adapter by name. Credentials are never stored in
+# config; they are brokered as short-lived, destination-scoped tokens by
+# the secret broker (packages/forge-secrets).
+providers:
+  policy:
+    allowed_confidentiality:
+      workspace: []  # providers allowed when workspace is at confidentiality "workspace"
+      secret_adjacent: []  # providers allowed when workspace is at "secret_adjacent"
+  accounts: {}
+    # example:
+    # openai-prod:
+    #   adapter: openai
+    #   credential: secret://providers/openai-prod/api_key
+    #   retention_mode: ephemeral
+    #   region: us-east-1
+    #   base_url: null
+
+# Model profiles (SPEC §16). Records map an opaque profile id to a
+# requirements/preferences bundle. The model router (packages/model-router)
+# resolves each profile to a concrete (provider, model) pair using the
+# deterministic router first; the learned router is opt-in.
+model_profiles: {}
+  # example:
+  # implementer-balanced:
+  #   requirements:
+  #     coding_quality: high
+  #     tool_reliability: high
+  #     structured_output: required
+  #     context: large
+  #     security_reasoning: high
+  #     high_recall: false
+  #   preferences:
+  #     latency: medium
+  #     cost: medium
+  #     provider_diversity: neutral
+  #     different_family_from_implementer: false
+  #   hard_input_tokens: 100000
+
+# Routing (SPEC §17, ADR-0022). Deterministic by default; the learned
+# router is shadow-only until the precision/harm gate (ADR-0022 §6) passes.
+routing:
+  mode: deterministic  # deterministic | learned
+  max_provider_attempts_per_turn: 3
+  escalate_after:
+    repeated_tool_failures: 2
+    verification_repairs: 2
+    explicit_low_confidence: true
+  learned_router:
+    enabled: false
+
+# Context compiler (SPEC §18, §19, ADR-0009, ADR-0010, ADR-0024).
+context:
+  compiler_version: v1
+  hard_safety_margin_tokens: 8192
+  evidence_coverage: true
+  recent_episode_policy:
+    mode: adaptive  # fixed | adaptive
+    minimum_complete_episodes: 2
+    maximum_complete_episodes: 10
+  retrieval:
+    lexical: true
+    tree_sitter: true
+    lsp: true
+    dependency_graph: true
+    semantic:
+      enabled: false  # semantic index is opt-in (ADR-0028)
+  compaction:
+    semantic_boundaries: true
+    projected_context_threshold: 0.72
+    validate_checkpoint: true
+  memory:
+    enabled: false  # durable memory is disabled until the precision/harm gate passes (ADR-0023)
+  external_compression:
+    enabled: false  # external compression is shadow-only by default (ADR-0024)
+    provider: null
+    shadow_mode: true
+
+# Agent-Computer Interface (SPEC §11, §12, ADR-0012). The seven default
+# tools, byte limits, and per-tool defaults.
+aci:
+  default_tools:
+    - read
+    - search
+    - patch
+    - exec
+    - job
+    - inspect
+    - capability
+  maximum_model_result_bytes: 32768
+  maximum_raw_tool_artifact_bytes: 268435456  # 256 MiB
+  exec:
+    default_timeout_ms: 30000
+    shell_requires_prompt: true
+  patch:
+    default_validation_profile: language_fast  # language_fast | language_full | syntax_only
+    allow_transient_invalid_state: isolated_only  # never | isolated_only | always
+  search:
+    default_limit: 20
+    hard_limit: 100
+
+# Sandbox profiles (SPEC §13, ADR-0014, ADR-0027). The secure-local-default
+# profile is mandatory; deployments may add additional profiles. Lower
+# layers cannot weaken a deny into allow or remove deny-list entries.
+sandbox_profiles:
+  secure-local-default:
+    backend: auto  # auto | linux | macos | windows | container | microvm
+    require_full_enforcement: true
+    filesystem:
+      read: []
+      write: []
+      deny: []
+    network:
+      direct: deny  # allow | deny
+      proxy: required  # required | optional | deny
+      allow: []
+    process:
+      max_pids: 256
+      memory_bytes: 2147483648  # 2 GiB
+      cpu_seconds: 600
+      open_files: 1024
+    secrets:
+      direct_environment: deny  # allow | deny
+
+# Policies (SPEC §13.7). Each policy file is loaded by the policy
+# coordinator (packages/policy-coordinator) and applied at the
+# appropriate decision point.
+policies:
+  command: policies/command/default.yaml
+  network: policies/network/default.yaml
+  secrets: policies/secrets/default.yaml
+  approval:
+    external_state: prompt  # prompt | deny | allow
+    secret_use: prompt_unless_pregranted  # prompt_unless_pregranted | prompt | deny
+    scope_expansion: prompt  # prompt | deny | allow
+
+# Orchestration (SPEC §20, ADR-0020). Single-agent by default; parallel
+# writers are opt-in and require positive expected value.
+orchestration:
+  default: single_agent  # single_agent | parallel_writers
+  scouts:
+    enabled: true
+    read_only: true
+  writers:
+    enabled: true
+    require_positive_expected_value: true
+    max_parallel: 2
+  reviewer:
+    risk_triggered: true
+  loop_protection:
+    repeated_identical_failure: 3
+    edit_revert_cycles: 2
+    turns_without_progress: 8
+    maximum_turns: 50
+
+# Verification (SPEC §21, ADR-0021). Profiles bundle which verification
+# nodes are required vs optional for a given task class.
+verification:
+  profiles: {}
+    # example:
+    # refactor:
+    #   required: [parse, narrow_tests, acceptance]
+    #   optional: [broad_tests, integration]
+
+# Extensions (SPEC §12, ADR-0018, ADR-0019). Lifecycle scripts are
+# denied; third-party code runs out-of-process (WASI or subprocess).
+extensions:
+  installation:
+    lifecycle_scripts: deny  # allow | deny
+    require_lockfile: true
+    require_signature_for_verified: true
+  third_party:
+    execution: wasi_or_process  # wasi_or_process | in_process | deny
+    in_process: deny  # allow | deny
+  mcp:
+    descriptor_change: require_reauthorization  # require_reauthorization | allow | deny
+    default_network: deny  # allow | deny
+
+# Budgets (SPEC §22, ADR-0001). Soft budgets trigger escalation; hard
+# budgets terminate the task. All amounts are in model micros (USD × 1e6).
+budgets:
+  task:
+    model_micros_soft: 5000000  # $5
+    model_micros_hard: 20000000  # $20
+    wall_clock_seconds_hard: 3600
+    human_approvals_hard: 20
+  session:
+    model_micros_hard: 100000000  # $100
+
+# Evaluation laboratory (SPEC §41). The control plane does not load
+# these — they are consumed by the Python eval harness in python/forge_evals.
+# They are listed here so a single forge.config.yaml is a complete
+# description of how a deployment evaluates itself.
+evals:
+  suites_dir: evals/suites
+  tasks_dir: evals/tasks
+  baselines_dir: evals/baselines
+  environments_dir: evals/environments
+  security_dir: evals/security
+  default_baseline: forge-minimal
+  promotion_gate:
+    required_effect_size: 0.2  # Cohen's h; ADR-0025 promotion gate
+    required_precision_advantage: 0.0
+    max_acceptable_harm_delta: 0.0
+    min_runs: 30

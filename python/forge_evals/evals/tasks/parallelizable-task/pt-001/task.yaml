@@ -1,0 +1,16 @@
+suite: parallelizable-task
+task: pt-001
+cohort: parallelizable_task
+title: Add type annotations to 5 independent modules
+source_commit: 0000000000000000000000000000000000000000
+image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+timeout: 600
+budget:
+  max_cost_usd: 1.0
+  max_wall_seconds: 600
+  max_tool_calls: 50
+  max_turns: 20
+allowed_network: []
+secrets: {}
+grader_version: 0.1.0
+risk_class: normal

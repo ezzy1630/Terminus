@@ -85,6 +85,15 @@
         "typescript": "^5",
       },
     },
+    "packages/aci": {
+      "name": "@forge/aci",
+      "version": "0.1.0",
+      "dependencies": {
+        "@forge/domain": "workspace:*",
+        "@forge/provider-core": "workspace:*",
+        "zod": "^4.0.2",
+      },
+    },
     "packages/adapter-sdk": {
       "name": "@forge/adapter-sdk",
       "version": "0.1.0",
@@ -463,6 +472,8 @@
     "@floating-ui/react-dom": ["@floating-ui/react-dom@2.1.6", "https://registry.npmjs.com/@floating-ui/react-dom/-/react-dom-2.1.6.tgz", { "dependencies": { "@floating-ui/dom": "^1.7.4" }, "peerDependencies": { "react": ">=16.8.0", "react-dom": ">=16.8.0" } }, "sha512-4JX6rEatQEvlmgU80wZyq9RT96HZJa88q8hp0pBd+LrczeDI4o6uA2M+uvxngVHo4Ihr8uibXxH6+70zhAFrVw=="],
 
     "@floating-ui/utils": ["@floating-ui/utils@0.2.10", "https://registry.npmjs.com/@floating-ui/utils/-/utils-0.2.10.tgz", {}, "sha512-aGTxbpbg8/b5JfU1HXSrbH3wXZuLPJcNEcZQFMxLs3oSzgtVu6nFPkbbGGUvBcUjKV2YyB9Wxxabo+HEH9tcRQ=="],
+
+    "@forge/aci": ["@forge/aci@workspace:packages/aci"],
 
     "@forge/adapter-sdk": ["@forge/adapter-sdk@workspace:packages/adapter-sdk"],
 

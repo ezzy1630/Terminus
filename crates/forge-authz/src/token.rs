@@ -306,6 +306,171 @@ impl TokenIssuer {
     pub fn revoke(&self, token_id: &str) {
         self.revocation.revoke(token_id);
     }
+
+    /// Validate a token string AND check that the token grants the requested
+    /// `operation_class` and that the requested `scope` is contained within
+    /// the token's `max_scope`.
+    ///
+    /// An empty `max_scope` (i.e. `Scope::default()`) means "no scope
+    /// restriction" — the token grants any scope. This matches the dev
+    /// capability token convention. A non-empty `max_scope` requires every
+    /// entry of the requested scope to match at least one glob in the
+    /// corresponding list of `max_scope`.
+    ///
+    /// Returns the validated token on success, or an `AuthzError` indicating
+    /// the first failure (signature, expiry, audience, operation class, or
+    /// scope).
+    pub fn validate_capability(
+        &self,
+        token_str: &str,
+        operation_class: OperationClass,
+        requested_scope: &Scope,
+    ) -> Result<CapabilityToken, AuthzError> {
+        let token = self.validate(token_str)?;
+        // Operation-class check: the token MUST carry the requested class or
+        // the `Admin` class (which is a superuser class).
+        let has_class = token
+            .claims
+            .operation_classes
+            .iter()
+            .any(|op| *op == operation_class || *op == OperationClass::Admin);
+        if !has_class {
+            return Err(AuthzError::OperationNotPermitted);
+        }
+        // Scope check.
+        if !scope_contained(&token.claims.max_scope, requested_scope) {
+            return Err(AuthzError::ScopeExceeded);
+        }
+        Ok(token)
+    }
+}
+
+/// True iff `requested` is fully contained within `max_scope`. An empty
+/// `max_scope` (the default) means "unlimited" — every requested scope is
+/// contained.
+///
+/// For each resource kind (`workspace_paths`, `network_destinations`,
+/// `secret_capabilities`):
+/// - if `max_scope.<kind>` is empty, the kind is unrestricted;
+/// - otherwise every entry in `requested.<kind>` MUST match at least one glob
+///   in `max_scope.<kind>`.
+fn scope_contained(max_scope: &Scope, requested: &Scope) -> bool {
+    if max_scope.workspace_paths.is_empty()
+        && max_scope.network_destinations.is_empty()
+        && max_scope.secret_capabilities.is_empty()
+    {
+        return true;
+    }
+    all_match_or_unrestricted(&max_scope.workspace_paths, &requested.workspace_paths, glob_match)
+        && all_match_or_unrestricted(
+            &max_scope.network_destinations,
+            &requested.network_destinations,
+            network_match,
+        )
+        && all_match_or_unrestricted(
+            &max_scope.secret_capabilities,
+            &requested.secret_capabilities,
+            prefix_match,
+        )
+}
+
+fn all_match_or_unrestricted(
+    maxes: &[String],
+    requested: &[String],
+    matcher: fn(&str, &str) -> bool,
+) -> bool {
+    // If maxes is empty for this kind, the kind is unrestricted.
+    if maxes.is_empty() {
+        return true;
+    }
+    // Every requested entry must match at least one max.
+    for r in requested {
+        if !maxes.iter().any(|m| matcher(m, r)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Simple glob matcher supporting `*` (any non-slash) and `**` (any).
+fn glob_match(pattern: &str, value: &str) -> bool {
+    if pattern == "**" || pattern == "*" {
+        return true;
+    }
+    // Tiny glob: split on `**`.
+    if let Some(idx) = pattern.find("**") {
+        let prefix = &pattern[..idx];
+        let suffix = &pattern[idx + 2..];
+        if !value.starts_with(prefix) {
+            return false;
+        }
+        let rest = &value[prefix.len()..];
+        if suffix.is_empty() {
+            return true;
+        }
+        return rest.ends_with(suffix);
+    }
+    // Otherwise: literal `*` matches any non-slash characters.
+    glob_star(pattern, value)
+}
+
+fn glob_star(pattern: &str, value: &str) -> bool {
+    let mut pi = 0usize;
+    let mut vi = 0usize;
+    let p_bytes = pattern.as_bytes();
+    let v_bytes = value.as_bytes();
+    let mut star_p: Option<usize> = None;
+    let mut star_v: usize = 0;
+    while vi < v_bytes.len() {
+        if pi < p_bytes.len() && (p_bytes[pi] == v_bytes[vi] || p_bytes[pi] == b'?') {
+            pi += 1;
+            vi += 1;
+        } else if pi < p_bytes.len() && p_bytes[pi] == b'*' {
+            star_p = Some(pi);
+            star_v = vi;
+            pi += 1;
+        } else if let Some(sp) = star_p {
+            pi = sp + 1;
+            star_v += 1;
+            vi = star_v;
+        } else {
+            return false;
+        }
+    }
+    while pi < p_bytes.len() && p_bytes[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p_bytes.len()
+}
+
+/// Network destination matcher: host suffix match (with optional `:port`).
+fn network_match(pattern: &str, value: &str) -> bool {
+    if let Some((host, port)) = pattern.split_once(':') {
+        if let Some((vhost, vport)) = value.split_once(':') {
+            if let Ok(p) = port.parse::<u16>() {
+                if let Ok(vp) = vport.parse::<u16>() {
+                    return vhost.ends_with(host) && p == vp;
+                }
+            }
+        }
+        // Pattern had a port but value didn't (or vice versa) — fall back to
+        // host-suffix match.
+        return value.ends_with(host);
+    }
+    // No port in pattern: match the host part only.
+    let value_host = value.split_once(':').map(|(h, _)| h).unwrap_or(value);
+    value_host.ends_with(pattern)
+}
+
+/// Prefix match for secret capability URIs (e.g. `secret://github/*`).
+fn prefix_match(pattern: &str, value: &str) -> bool {
+    if let Some(stripped) = pattern.strip_suffix("/*") {
+        return value.starts_with(stripped) || value == stripped;
+    }
+    if let Some(stripped) = pattern.strip_suffix('*') {
+        return value.starts_with(stripped);
+    }
+    value == pattern
 }
 
 /// A wrapper for revoking tokens without holding the issuer.
@@ -502,5 +667,161 @@ mod tests {
         let encoded = token.encode().unwrap();
         let err = issuer_b.validate(&encoded).unwrap_err();
         assert!(matches!(err, AuthzError::InvalidAudience));
+    }
+
+    #[test]
+    fn validate_capability_rejects_missing_operation_class() {
+        let issuer = issuer();
+        let binder = TokenBinder::default();
+        // Mint a token with ONLY Read class.
+        let token = issuer
+            .mint(
+                binder,
+                vec![OperationClass::Read],
+                Scope::default(),
+                None,
+                "n-cap-1",
+            )
+            .unwrap();
+        let encoded = token.encode().unwrap();
+        // Requesting Exec should fail (token has Read only).
+        let err = issuer
+            .validate_capability(&encoded, OperationClass::Exec, &Scope::default())
+            .unwrap_err();
+        assert!(matches!(err, AuthzError::OperationNotPermitted));
+    }
+
+    #[test]
+    fn validate_capability_accepts_admin_class_for_any_op() {
+        let issuer = issuer();
+        let binder = TokenBinder::default();
+        let token = issuer
+            .mint(
+                binder,
+                vec![OperationClass::Admin],
+                Scope::default(),
+                None,
+                "n-cap-2",
+            )
+            .unwrap();
+        let encoded = token.encode().unwrap();
+        // Admin can do anything.
+        let res = issuer.validate_capability(&encoded, OperationClass::Exec, &Scope::default());
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn validate_capability_rejects_scope_exceeded() {
+        let issuer = issuer();
+        let binder = TokenBinder::default();
+        // Mint a token whose max_scope allows only `/repo/src/**`.
+        let max_scope = Scope {
+            workspace_paths: vec!["src/**".to_string()],
+            network_destinations: vec![],
+            secret_capabilities: vec![],
+        };
+        let token = issuer
+            .mint(
+                binder,
+                vec![OperationClass::Read, OperationClass::Exec],
+                max_scope,
+                None,
+                "n-cap-3",
+            )
+            .unwrap();
+        let encoded = token.encode().unwrap();
+        // Requesting `/repo/src/main.rs` — should be allowed.
+        let ok_req = Scope {
+            workspace_paths: vec!["src/main.rs".to_string()],
+            network_destinations: vec![],
+            secret_capabilities: vec![],
+        };
+        assert!(issuer
+            .validate_capability(&encoded, OperationClass::Read, &ok_req)
+            .is_ok());
+        // Requesting `/repo/etc/passwd` — should be denied (out of scope).
+        let bad_req = Scope {
+            workspace_paths: vec!["etc/passwd".to_string()],
+            network_destinations: vec![],
+            secret_capabilities: vec![],
+        };
+        let err = issuer
+            .validate_capability(&encoded, OperationClass::Read, &bad_req)
+            .unwrap_err();
+        assert!(matches!(err, AuthzError::ScopeExceeded));
+    }
+
+    #[test]
+    fn validate_capability_rejects_secret_scope_exceeded() {
+        let issuer = issuer();
+        let binder = TokenBinder::default();
+        let max_scope = Scope {
+            workspace_paths: vec![],
+            network_destinations: vec![],
+            secret_capabilities: vec!["secret://github/*".to_string()],
+        };
+        let token = issuer
+            .mint(
+                binder,
+                vec![OperationClass::Secret],
+                max_scope,
+                None,
+                "n-cap-4",
+            )
+            .unwrap();
+        let encoded = token.encode().unwrap();
+        // Within scope.
+        let ok_req = Scope {
+            workspace_paths: vec![],
+            network_destinations: vec![],
+            secret_capabilities: vec!["secret://github/repo-read".to_string()],
+        };
+        assert!(issuer
+            .validate_capability(&encoded, OperationClass::Secret, &ok_req)
+            .is_ok());
+        // Out of scope — different provider.
+        let bad_req = Scope {
+            workspace_paths: vec![],
+            network_destinations: vec![],
+            secret_capabilities: vec!["secret://aws/creds".to_string()],
+        };
+        let err = issuer
+            .validate_capability(&encoded, OperationClass::Secret, &bad_req)
+            .unwrap_err();
+        assert!(matches!(err, AuthzError::ScopeExceeded));
+    }
+
+    #[test]
+    fn validate_capability_rejects_network_scope_exceeded() {
+        let issuer = issuer();
+        let binder = TokenBinder::default();
+        let max_scope = Scope {
+            workspace_paths: vec![],
+            network_destinations: vec!["api.github.com:443".to_string()],
+            secret_capabilities: vec![],
+        };
+        let token = issuer
+            .mint(binder, vec![OperationClass::Network], max_scope, None, "n-cap-5")
+            .unwrap();
+        let encoded = token.encode().unwrap();
+        // Within scope.
+        let ok_req = Scope {
+            workspace_paths: vec![],
+            network_destinations: vec!["api.github.com:443".to_string()],
+            secret_capabilities: vec![],
+        };
+        assert!(issuer
+            .validate_capability(&encoded, OperationClass::Network, &ok_req)
+            .is_ok());
+        // Out of scope — different host.
+        let bad_req = Scope {
+            workspace_paths: vec![],
+            network_destinations: vec!["evil.example:443".to_string()],
+            secret_capabilities: vec![],
+        };
+        let err = issuer
+            .validate_capability(&encoded, OperationClass::Network, &bad_req)
+            .unwrap_err();
+        assert!(matches!(err, AuthzError::ScopeExceeded));
     }
 }

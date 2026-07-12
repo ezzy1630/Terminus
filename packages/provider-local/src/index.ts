@@ -192,8 +192,17 @@ function renderMessages(
 ): readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string }[] {
   return input.fragments.map((f) => ({
     role: fragmentRole(f.kind),
-    content: f.contentRef.uri,
+    content: fragmentText(f),
   }));
+}
+
+/**
+ * Resolve the fragment's renderable text. Prefers in-band `textContent`;
+ * falls back to the artifact URI when no in-band text is supplied (the
+ * kernel renderer dereferences URIs at the wire boundary).
+ */
+function fragmentText(frag: { readonly textContent?: string | undefined; readonly contentRef: { readonly uri: string } }): string {
+  return frag.textContent ?? frag.contentRef.uri;
 }
 
 function fragmentRole(kind: string): "system" | "user" | "assistant" | "tool" {
@@ -229,7 +238,7 @@ function toProviderRequest(input: CanonicalRenderInput, providerId: string): Pro
     model: input.model.modelKey,
     blocks: input.fragments.map((f) => ({
       role: fragmentRole(f.kind) as "system" | "user" | "assistant" | "tool" | "developer",
-      content: f.contentRef.uri,
+      content: fragmentText(f),
       artifactHash: f.contentRef.hash,
       cacheBreakpoint: false,
       confidentiality: f.confidentiality,

@@ -71,20 +71,34 @@ export interface PolicyCoordinatorDeps {
   readonly clock: () => Rfc3339Timestamp;
 }
 
+/**
+ * Result of `authorizeEffect`. Per SPEC §31.6 / §13.2, authorized effects
+ * MUST carry a capability token; the coordinator mints one via the kernel
+ * and returns it alongside the persisted decision so the caller can pass it
+ * to the kernel effect dispatcher.
+ */
+export interface AuthorizeEffectResult {
+  readonly decision: PolicyDecision;
+  /** Minted capability token; null only when the decision is not `allow`. */
+  readonly capabilityToken: string;
+}
+
 export class PolicyCoordinator {
   constructor(private readonly deps: PolicyCoordinatorDeps) {}
 
   /**
-   * Authorize an effect against policy. Returns a PolicyDecision. If policy
-   * returns `prompt`, throws `ApprovalRequiredError` with the pending approval
-   * id so the caller can surface it to the user.
+   * Authorize an effect against policy. Returns the persisted PolicyDecision
+   * and the minted capability token (SPEC §31.6 / §13.2) so the caller can
+   * pass it to the kernel effect. If policy returns `prompt`, throws
+   * `ApprovalRequiredError` with the pending approval id so the caller can
+   * surface it to the user.
    */
   async authorizeEffect(
     intent: EffectIntent,
     taskId: Uuid7,
     scope: AllowedScope,
     principal: PrincipalId,
-  ): Promise<PolicyDecision> {
+  ): Promise<AuthorizeEffectResult> {
     const kernelDecision = await this.deps.kernel.authorize(
       intent,
       scope,
@@ -122,10 +136,11 @@ export class PolicyCoordinator {
         { approvalId: approval.id, decisionId: saved.id },
       );
     }
-    // Mint a capability token for the kernel.
-    const token = await this.deps.kernel.mintCapabilityToken(intent, saved);
-    void token;
-    return saved;
+    // Mint a capability token for the kernel. SPEC §31.6 / §13.2 require
+    // that authorized effects carry the token; we return it so the caller
+    // can forward it to the kernel effect dispatcher.
+    const capabilityToken = await this.deps.kernel.mintCapabilityToken(intent, saved);
+    return { decision: saved, capabilityToken };
   }
 
   /** Request approval for an operation. */

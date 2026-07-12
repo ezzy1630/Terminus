@@ -212,7 +212,7 @@ function renderSystemBlocks(input: CanonicalRenderInput): readonly AnthropicSyst
     if (isSystemKind(f.kind)) {
       blocks.push({
         type: "text",
-        text: f.contentRef.uri,
+        text: fragmentText(f),
         ...(input.cachePlan.breakpoints.includes(blocks.length)
           ? { cache_control: { type: "ephemeral" as const } }
           : {}),
@@ -229,10 +229,19 @@ function renderMessages(input: CanonicalRenderInput): readonly AnthropicMessage[
     const role: "user" | "assistant" = f.kind === "recent_episode" ? "assistant" : "user";
     messages.push({
       role,
-      content: f.contentRef.uri,
+      content: fragmentText(f),
     });
   }
   return messages;
+}
+
+/**
+ * Resolve the fragment's renderable text. Prefers in-band `textContent`;
+ * falls back to the artifact URI when no in-band text is supplied (the
+ * kernel renderer dereferences URIs at the wire boundary).
+ */
+function fragmentText(frag: { readonly textContent?: string | undefined; readonly contentRef: { readonly uri: string } }): string {
+  return frag.textContent ?? frag.contentRef.uri;
 }
 
 function isSystemKind(kind: string): boolean {
@@ -253,7 +262,7 @@ function toProviderRequest(input: CanonicalRenderInput, providerId: string): Pro
     model: input.model.modelKey,
     blocks: input.fragments.map((f) => ({
       role: (isSystemKind(f.kind) ? "system" : f.kind === "recent_episode" ? "assistant" : "user") as "system" | "user" | "assistant" | "tool" | "developer",
-      content: f.contentRef.uri,
+      content: fragmentText(f),
       artifactHash: f.contentRef.hash,
       cacheBreakpoint: false,
       confidentiality: f.confidentiality,

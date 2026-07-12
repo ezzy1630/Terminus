@@ -685,3 +685,44 @@ model EventStreamCursor {
   lastSequence  Int
   updatedAt     DateTime @updatedAt
 }
+
+// --- Checkpoints and recovery (SPEC §29.5) -------------------------------
+
+model Checkpoint {
+  id                        String   @id
+  sessionId                 String
+  threadId                  String
+  taskId                    String?
+  checkpointArtifact        String
+  schemaVersion             Int
+  lastCommittedSequencesJson String
+  activeContextEpochId      String?
+  promotedInputCursor       String?
+  unsettledToolCallsJson    String   @default("[]")
+  activeJobsJson            String   @default("[]")
+  workspaceRevision         String?
+  dirtyStateDigest          String?
+  unsettledEffectsJson      String   @default("[]")
+  artifactRefsJson          String   @default("[]")
+  continuationJson          String?
+  createdAt                 DateTime @default(now())
+
+  @@index([threadId, createdAt])
+}
+
+model RecoveryReport {
+  id                      String   @id
+  startedAt               DateTime @default(now())
+  completedAt             DateTime?
+  instanceId              String
+  schemaVersion           Int
+  nonTerminalTasks        Int      @default(0)
+  nonTerminalTurns        Int      @default(0)
+  reconciledJobs          Int      @default(0)
+  lostJobs                Int      @default(0)
+  reconciledEffects       Int      @default(0)
+  manualReviewEffects     Int      @default(0)
+  integrityOk             Boolean  @default(true)
+  reportArtifact          String?
+  detailsJson             String   @default("{}")
+}

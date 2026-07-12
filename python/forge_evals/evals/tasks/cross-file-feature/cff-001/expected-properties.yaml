@@ -1,0 +1,4 @@
+risk_class: normal
+primary_score_band: 0.0-1.0
+max_cost_usd: 1.0
+max_wall_seconds: 600
