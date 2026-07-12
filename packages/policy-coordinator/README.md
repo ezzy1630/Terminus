@@ -1,4 +1,4 @@
-# @forge/policy-coordinator
+# @terminus/policy-coordinator
 
 High-level policy coordinator that translates task contracts into kernel
 capability requests. Per SPEC §13, §36.

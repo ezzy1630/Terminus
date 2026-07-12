@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
-use forge_sandbox::SandboxProfile;
+use terminus_sandbox::SandboxProfile;
 use serde::{Deserialize, Serialize};
 
 use crate::api::Envelope;
@@ -64,17 +64,21 @@ pub async fn select(
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     let req: SelectRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
-    let profile = req.profile.unwrap_or_else(SandboxProfile::default_restrictive);
+    let profile = req
+        .profile
+        .unwrap_or_else(SandboxProfile::default_restrictive);
     let backend = state
         .kernel
         .sandboxes
         .select_public(&profile)
-        .map_err(|e| ApiError::new(
-            forge_kernel_protocol::ErrorCode::SandboxUnavailable,
-            forge_kernel_protocol::ErrorCategory::SandboxUnavailable,
-            format!("{e}"),
-            &trace_id.0,
-        ))?;
+        .map_err(|e| {
+            ApiError::new(
+                terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
+                terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+                format!("{e}"),
+                &trace_id.0,
+            )
+        })?;
     let report = backend.enforcement_report();
     Ok(Json(SelectResponse {
         selected_backend: report.backend_id,

@@ -1,4 +1,4 @@
-# @forge/context-compiler
+# @terminus/context-compiler
 
 The Context Compiler (SPEC §8, §33). The principal intelligence layer that
 decides, before every provider attempt: what authority/task/policy applies,

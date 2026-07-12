@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Root App component.
+ * Terminus Desktop — Root App component.
  *
  * Wires the layout shell to the sidebar / main / inspector regions,
  * boots the initial data fetch + SSE stream, and routes the main
@@ -20,8 +20,8 @@
  * bundles load." The main route switch is plain conditional rendering
  * — no React.lazy / Suspense boundaries yet.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Monitor, Moon, Sun } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Command, Monitor, Moon, Rows3, Sun } from "lucide-react";
 import { Layout } from "./components/Layout";
 import { Sidebar } from "./components/Sidebar";
 import { Inspector } from "./components/Inspector";
@@ -29,13 +29,27 @@ import { Conversation } from "./components/Conversation";
 import { Composer } from "./components/Composer";
 import { NewTaskScreen } from "./components/NewTaskScreen";
 import { CommandPalette, buildDefaultCommands } from "./components/CommandPalette";
-import { Settings } from "./components/Settings";
-import { Onboarding } from "./components/Onboarding";
-import { useForgeStore } from "./hooks/use-forge";
+import { useForgeStore, useSelectedTask, useSelectedTaskEvents } from "./hooks/use-terminus";
 import { useThemeStore } from "./hooks/use-theme";
+import { useViewport } from "./hooks/use-viewport";
 import type { Theme } from "./types";
 
-const ONBOARDING_KEY = "forge-desktop.onboarding.completed.v1";
+const Settings = lazy(async () => {
+  const module = await import("./components/Settings");
+  return { default: module.Settings };
+});
+
+const Onboarding = lazy(async () => {
+  const module = await import("./components/Onboarding");
+  return { default: module.Onboarding };
+});
+
+const ReviewPane = lazy(async () => {
+  const module = await import("./components/ReviewPane");
+  return { default: module.ReviewPane };
+});
+
+const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
 
 function shouldShowOnboarding(): boolean {
   if (typeof window === "undefined") return false;
@@ -61,6 +75,10 @@ export function App(): JSX.Element {
   const selectTask = useForgeStore((s) => s.selectTask);
   const healthReady = useForgeStore((s) => s.healthReady);
   const lastError = useForgeStore((s) => s.lastError);
+  const setDraft = useForgeStore((s) => s.setDraft);
+  const selectedTask = useSelectedTask();
+  const selectedTaskEvents = useSelectedTaskEvents();
+  const viewport = useViewport();
 
   const theme = useThemeStore((s) => s.theme);
   const setTheme = useThemeStore((s) => s.setTheme);
@@ -78,6 +96,19 @@ export function App(): JSX.Element {
   const [computerUseActive, setComputerUseActive] = useState(false);
   const [computerUseExpanded, setComputerUseExpanded] = useState(false);
   const [computerUseHidden, setComputerUseHidden] = useState(false);
+  const [changesOpen, setChangesOpen] = useState(false);
+  const [inspectorVisible, setInspectorVisible] = useState(true);
+  const [inspectorPinned, setInspectorPinned] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+
+  const toggleInspector = useCallback((): void => {
+    if (viewport.inspectorOverlay && !inspectorPinned) {
+      setInspectorPinned(true);
+      setInspectorVisible(true);
+      return;
+    }
+    setInspectorVisible((visible) => !visible);
+  }, [inspectorPinned, viewport.inspectorOverlay]);
 
   // Initial data load.
   useEffect(() => {
@@ -98,6 +129,16 @@ export function App(): JSX.Element {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen((o) => !o);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        selectTask(null);
+        setChangesOpen(false);
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d" && selectedTaskId) {
+        e.preventDefault();
+        setChangesOpen((open) => !open);
+      } else if ((e.metaKey || e.ctrlKey) && e.key === "]") {
+        e.preventDefault();
+        toggleInspector();
       } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
         setSettingsOpen((o) => !o);
@@ -110,7 +151,7 @@ export function App(): JSX.Element {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [selectedTaskId, selectTask, toggleInspector]);
 
   // Build the command catalog. Memoized so the palette doesn't re-rank
   // on every App re-render.
@@ -118,17 +159,18 @@ export function App(): JSX.Element {
     () =>
       buildDefaultCommands({
         newTask: () => selectTask(null),
+        showChanges: selectedTaskId ? () => setChangesOpen(true) : undefined,
+        openTerminal: () => setTerminalOpen(true),
+        toggleInspector,
+        pinInspector: () => {
+          setInspectorPinned((pinned) => !pinned);
+          setInspectorVisible(true);
+        },
         switchTheme: () => cycleTheme(),
         switchDensity: () => toggleDensity(),
         openSettings: () => setSettingsOpen(true),
-        // The remaining actions are no-ops until the host wires them to
-        // the diff/terminal/git surfaces (Phase 5 follow-up).
         openProject: undefined,
         openTask: undefined,
-        showChanges: undefined,
-        openTerminal: undefined,
-        toggleInspector: undefined,
-        pinInspector: undefined,
         switchModel: undefined,
         startSubagent: undefined,
         commit: undefined,
@@ -140,7 +182,7 @@ export function App(): JSX.Element {
         revealInFinder: undefined,
         viewShortcuts: undefined,
       }),
-    [cycleTheme, selectTask, toggleDensity],
+    [cycleTheme, selectTask, selectedTaskId, toggleDensity, toggleInspector],
   );
 
   const showNewTask = selectedTaskId === null;
@@ -150,10 +192,29 @@ export function App(): JSX.Element {
     setOnboardingOpen(false);
   }, []);
 
+  const draftReviewRevision = useCallback((instruction: string): void => {
+    if (!selectedTaskId) return;
+    setDraft(selectedTaskId, instruction);
+    setChangesOpen(false);
+    window.requestAnimationFrame(() => {
+      window.dispatchEvent(new Event("terminus:focus-composer"));
+    });
+  }, [selectedTaskId, setDraft]);
+
   return (
     <>
       <Layout
         sidebar={<Sidebar />}
+        inspectorVisible={inspectorVisible && (!changesOpen || inspectorPinned) && (!viewport.inspectorOverlay || inspectorPinned)}
+        terminalOpen={terminalOpen}
+        onTerminalOpenChange={setTerminalOpen}
+        center={
+          selectedTask ? (
+            <div className="min-w-0 max-w-[460px] truncate text-secondary" style={{ fontSize: "var(--font-size-xs)" }}>
+              {selectedTask.contract?.objective ?? "Task"}
+            </div>
+          ) : undefined
+        }
         inspector={
           <Inspector
             computerUseSession={{
@@ -168,11 +229,24 @@ export function App(): JSX.Element {
               setComputerUseHidden(false);
             }}
             onComputerUseToggleExpanded={(expanded) => setComputerUseExpanded(expanded)}
+            onShowChanges={() => setChangesOpen(true)}
           />
         }
         main={
           showNewTask ? (
             <NewTaskScreen />
+          ) : changesOpen ? (
+            <div className="flex h-full min-w-0">
+              <div className="flex min-w-[360px] flex-[0.9] flex-col border-r border-default">
+                <div className="min-h-0 flex-1"><Conversation /></div>
+                <div className="border-t border-subtle" style={{ background: "var(--bg-canvas)", padding: "10px 20px 14px" }}>
+                  <Composer />
+                </div>
+              </div>
+              <Suspense fallback={<div className="flex min-w-[360px] flex-1 items-center justify-center bg-diff text-tertiary" style={{ fontSize: "var(--font-size-sm)" }}>Loading review…</div>}>
+                <ReviewPane events={selectedTaskEvents} onClose={() => setChangesOpen(false)} onDraftRevision={draftReviewRevision} />
+              </Suspense>
+            </div>
           ) : (
             <div className="flex h-full flex-col">
               <div className="min-h-0 flex-1">
@@ -205,10 +279,9 @@ export function App(): JSX.Element {
               onClick={toggleDensity}
               aria-label={`Density: ${density}`}
               title={`Density: ${density}`}
-              className="flex h-7 items-center gap-1 rounded-md px-2 text-xs text-secondary hover:bg-hover hover:text-primary"
-              style={{ fontSize: "var(--font-size-xs)" }}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
             >
-              <span>{density === "spacious" ? "Spacious" : "Compact"}</span>
+              <Rows3 size={14} />
             </button>
             {/* Command palette trigger (small icon — main entry is ⌘K). */}
             <button
@@ -216,11 +289,9 @@ export function App(): JSX.Element {
               onClick={() => setPaletteOpen(true)}
               aria-label="Open command palette"
               title="Command palette (⌘K)"
-              className="flex h-7 items-center gap-1 rounded-md px-2 text-secondary hover:bg-hover hover:text-primary"
-              style={{ fontSize: "var(--font-size-xs)" }}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
             >
-              <span>Commands</span>
-              <kbd className="font-mono text-tertiary">⌘K</kbd>
+              <Command size={14} />
             </button>
             {/* Health indicator — a single restrained dot. */}
             <span
@@ -237,9 +308,15 @@ export function App(): JSX.Element {
         onClose={() => setPaletteOpen(false)}
         commands={commands}
       />
-      <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {settingsOpen ? (
+        <Suspense fallback={null}>
+          <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+        </Suspense>
+      ) : null}
       {onboardingOpen ? (
-        <Onboarding onComplete={onCompleteOnboarding} />
+        <Suspense fallback={null}>
+          <Onboarding onComplete={onCompleteOnboarding} />
+        </Suspense>
       ) : null}
     </>
   );

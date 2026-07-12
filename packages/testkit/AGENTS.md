@@ -1,4 +1,4 @@
-# @forge/testkit — local rules
+# @terminus/testkit — local rules
 
 ## Non-negotiable
 

@@ -1,5 +1,5 @@
 /**
- * @forge/domain — canonical error classes.
+ * @terminus/domain — canonical error classes.
  *
  * Per SPEC §30.4 and §44.5: errors include stable code, category, retryability,
  * suggested action, trace ID, structured details.
@@ -149,7 +149,7 @@ export const RETRYABLE_BY_DEFAULT: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
 ]);
 
 /**
- * Base class for all Forge domain errors. Carries a stable code, category,
+ * Base class for all Terminus domain errors. Carries a stable code, category,
  * retryability, structured details, a suggested recovery action, and a trace id.
  */
 export class ForgeError extends Error {

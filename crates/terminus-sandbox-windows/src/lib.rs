@@ -10,7 +10,7 @@
 //!
 //! - This build does NOT yet invoke the AppContainer API. The backend
 //!   reports `Degraded` with a clear note about what's missing. Callers
-//!   should prefer `forge-sandbox-container` for a fully-enforced backend.
+//!   should prefer `terminus-sandbox-container` for a fully-enforced backend.
 //! - When running on a non-Windows host (or when the AppContainer API is
 //!   unavailable), the backend reports `Unsupported` and rejects profiles
 //!   that require namespace isolation.
@@ -20,11 +20,12 @@
 //! `CREATE_UNICODE_ENVIRONMENT` + `EXTENDED_STARTUPINFO_PRESENT` +
 //! `PROC_THREAD_ATTRIBUTE_JOB_LIST`, then flip the enforced/degraded lists.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
-use forge_sandbox::profile::{NetworkAccess, SandboxProfile};
-use forge_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
-use forge_sandbox::{SandboxBackend, SandboxError};
+use terminus_sandbox::profile::{NetworkAccess, SandboxProfile};
+use terminus_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
+use terminus_sandbox::{SandboxBackend, SandboxError};
 
 #[derive(Debug, Clone, Default)]
 pub struct WindowsSandboxBackend {
@@ -90,9 +91,9 @@ impl SandboxBackend for WindowsSandboxBackend {
                         .to_string(),
                     "filesystem/network: degraded — AppContainer capability mapping is a stub"
                         .to_string(),
-                    "pid/mount/user namespaces: unsupported on Windows (use forge-sandbox-container or WSL2)"
+                    "pid/mount/user namespaces: unsupported on Windows (use terminus-sandbox-container or WSL2)"
                         .to_string(),
-                    "fail closed: prefer forge-sandbox-container for full enforcement"
+                    "fail closed: prefer terminus-sandbox-container for full enforcement"
                         .to_string(),
                 ],
             };
@@ -116,10 +117,10 @@ impl SandboxBackend for WindowsSandboxBackend {
             notes: vec![
                 "AppContainer/Job Object backend not implemented in this build".to_string(),
                 "host is not Windows or AppContainer API is unavailable".to_string(),
-                "fail closed: prefer forge-sandbox-container or WSL2".to_string(),
-                "filesystem traversal/symlink protection still enforced by forge-fs PathResolver"
+                "fail closed: prefer terminus-sandbox-container or WSL2".to_string(),
+                "filesystem traversal/symlink protection still enforced by terminus-fs PathResolver"
                     .to_string(),
-                "egress allowlist still enforced by forge-egress EgressProxy".to_string(),
+                "egress allowlist still enforced by terminus-egress EgressProxy".to_string(),
             ],
         }
     }
@@ -128,7 +129,7 @@ impl SandboxBackend for WindowsSandboxBackend {
         // Security refusal: ambient secrets are never permitted.
         if matches!(
             profile.secrets,
-            forge_sandbox::SecretsAccess::AmbientEnvironment
+            terminus_sandbox::SecretsAccess::AmbientEnvironment
         ) {
             return Err(SandboxError::Misconfigured(
                 "ambient secrets not permitted".into(),
@@ -142,8 +143,7 @@ impl SandboxBackend for WindowsSandboxBackend {
         if !self.appcontainer_available {
             if matches!(profile.network, NetworkAccess::Deny) {
                 return Err(SandboxError::Unsupported(
-                    "profile requires network isolation but AppContainer is not available"
-                        .into(),
+                    "profile requires network isolation but AppContainer is not available".into(),
                 ));
             }
             return Err(SandboxError::Unsupported(
@@ -159,7 +159,7 @@ impl SandboxBackend for WindowsSandboxBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_sandbox::SandboxProfile;
+    use terminus_sandbox::SandboxProfile;
 
     #[test]
     fn windows_backend_fails_closed_when_appcontainer_unavailable() {
@@ -191,8 +191,10 @@ mod tests {
     fn windows_backend_rejects_ambient_secrets() {
         let backend = WindowsSandboxBackend::with_mocked_appcontainer(true);
         let mut profile = SandboxProfile::default_restrictive();
-        profile.secrets = forge_sandbox::SecretsAccess::AmbientEnvironment;
-        let err = backend.supports_profile(&profile).expect_err("ambient secrets must be rejected");
+        profile.secrets = terminus_sandbox::SecretsAccess::AmbientEnvironment;
+        let err = backend
+            .supports_profile(&profile)
+            .expect_err("ambient secrets must be rejected");
         assert!(matches!(err, SandboxError::Misconfigured(_)));
     }
 
@@ -201,6 +203,8 @@ mod tests {
         let backend = WindowsSandboxBackend::with_mocked_appcontainer(true);
         backend
             .supports_profile(&SandboxProfile::default_restrictive())
-            .expect("restrictive profile should be accepted (degraded) when AppContainer is present");
+            .expect(
+                "restrictive profile should be accepted (degraded) when AppContainer is present",
+            );
     }
 }

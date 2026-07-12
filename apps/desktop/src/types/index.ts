@@ -1,8 +1,8 @@
 /**
- * Forge Desktop — Type definitions.
+ * Terminus Desktop — Type definitions.
  *
  * Per SPEC §30.4 and §32: API responses use snake_case JSON. These types
- * mirror the control-plane (mini-services/forge-control) wire format
+ * mirror the control-plane (mini-services/terminus-control) wire format
  * exactly. All boundaries use `unknown` + decoding (see lib/api.ts).
  *
  * Per SPEC §7.2: Task statuses are minimal semantic states (working,
@@ -321,7 +321,7 @@ export interface ActivityBlock {
   entries: ActivityEntry[];
 }
 
-// ────────────────────────── Forge Desktop bridge ───────────────────────────
+// ────────────────────────── Terminus Desktop bridge ───────────────────────────
 // Exposed by Electron preload (electron/preload.ts). The runtime `window`
 // augmentation lives in `src/types/global.d.ts` (alongside the
 // `forgeTerminal` bridge); the interfaces here are for code that imports

@@ -1,4 +1,4 @@
-# forge-secrets
+# terminus-secrets
 
 Secret broker with redaction and audit logging.
 

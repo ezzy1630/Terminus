@@ -4,6 +4,7 @@
 //! not available" and validates manifests only. Real WASM execution is a
 //! future task (M9).
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 mod error;
@@ -14,4 +15,4 @@ pub use error::ExtensionError;
 pub use host::{WasiExtensionHost, WasiExtensionHostReport};
 pub use manifest::{ExtensionManifest, ExtensionTrustLevel};
 
-pub use forge_kernel_protocol::WorkspacePath;
+pub use terminus_kernel_protocol::WorkspacePath;

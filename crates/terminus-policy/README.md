@@ -1,4 +1,4 @@
-# forge-policy
+# terminus-policy
 
 Command and effect policy engine.
 

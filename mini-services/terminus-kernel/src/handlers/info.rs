@@ -20,10 +20,13 @@ pub struct InfoResponse {
     pub services: Vec<String>,
 }
 
-pub async fn info(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Result<Json<InfoResponse>, ApiError> {
+pub async fn info(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<InfoResponse>, ApiError> {
     let _trace = TraceId::from_request_or_new(&axum::extract::Request::default());
-    let _envelope: Envelope = serde_json::from_slice::<Envelope>(&body)
-        .map_err(|e| json_error(e, "info"))?;
+    let _envelope: Envelope =
+        serde_json::from_slice::<Envelope>(&body).map_err(|e| json_error(e, "info"))?;
     let info = state.kernel.info.info();
     let services = info
         .get("services")
@@ -57,8 +60,8 @@ pub async fn health(
     State(state): State<Arc<AppState>>,
     body: axum::body::Bytes,
 ) -> Result<Json<HealthResponse>, ApiError> {
-    let _envelope: Envelope = serde_json::from_slice::<Envelope>(&body)
-        .map_err(|e| json_error(e, "health"))?;
+    let _envelope: Envelope =
+        serde_json::from_slice::<Envelope>(&body).map_err(|e| json_error(e, "health"))?;
     let enforcement = state.kernel.sandboxes.enforcement_report();
     let supported_backends = vec!["local-restrictive".to_string()];
     Ok(Json(HealthResponse {

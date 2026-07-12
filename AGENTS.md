@@ -1,4 +1,4 @@
-# Forge repository instructions
+# Terminus repository instructions
 
 ## Mission
 
@@ -15,7 +15,7 @@ Build a provider-neutral coding-agent operating system with a non-bypassable Rus
 
 ## Non-negotiable rules
 
-- Do not add direct process spawn, filesystem mutation, socket, or secret access to TypeScript code. Route through the kernel RPC (`forge.kernel.v1` over UDS).
+- Do not add direct process spawn, filesystem mutation, socket, or secret access to TypeScript code. Route through the kernel RPC (`terminus.kernel.v1` over UDS).
 - Do not place provider-specific request bodies or model concepts in canonical domain packages. Provider code lives in `packages/provider-*` only.
 - Do not mark a task complete without verification evidence linked to acceptance criteria.
 - Do not silently truncate tool output. Every bounded result states truncation and exposes a continuation or immutable artifact reference.

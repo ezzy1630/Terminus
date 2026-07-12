@@ -1,6 +1,6 @@
 # Product modes
 
-Forge supports eight product modes (SPEC §26.2). Each mode is a **policy profile** over the same domain model; it is not a separate implementation. A client MUST display the effective mode, sandbox backend, network policy, active worktree, budget, and whether enforcement is degraded.
+Terminus supports eight product modes (SPEC §26.2). Each mode is a **policy profile** over the same domain model; it is not a separate implementation. A client MUST display the effective mode, sandbox backend, network policy, active worktree, budget, and whether enforcement is degraded.
 
 ## Mode table (SPEC §26.2)
 
@@ -56,7 +56,7 @@ Explicitly privileged maintenance. Used for: database migrations, sandbox backen
 - The default mode for a new session is `edit` (for coding) or `explain` (for read-only questions).
 - The user can switch modes via the client UI.
 - `admin` mode requires explicit user action (it is never the default).
-- `eval` mode is entered only via the eval lab (`forge-eval` CLI).
+- `eval` mode is entered only via the eval lab (`terminus-eval` CLI).
 - Mode changes are recorded in the audit log.
 
 ## Enforcement

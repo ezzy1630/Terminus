@@ -1,4 +1,4 @@
-# @forge/memory — local rules
+# @terminus/memory — local rules
 
 ## Non-negotiable
 

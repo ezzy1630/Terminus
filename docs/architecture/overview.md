@@ -1,6 +1,6 @@
 # Architecture overview
 
-This document is the entry point for Forge's architecture. It summarizes the layered design from SPEC §5 and links to the per-subsystem deep dives. The normative source is `SPEC.md` §5–§47; this document is a navigation aid.
+This document is the entry point for Terminus's architecture. It summarizes the layered design from SPEC §5 and links to the per-subsystem deep dives. The normative source is `SPEC.md` §5–§47; this document is a navigation aid.
 
 ## Layered architecture (SPEC §5)
 
@@ -78,24 +78,24 @@ Different responsibilities have different change rates and trust requirements:
 ## Process topology (SPEC §27.1)
 
 ```
-forge client(s)
+terminus client(s)
     │ HTTPS/UDS HTTP + SSE
     ▼
-forge-control (TypeScript, port 3050)
+terminus-control (TypeScript, port 3050)
     │ gRPC over Unix domain socket (or JSON-over-HTTP in mini-service bootstrap)
     ▼
-forge-kernel (Rust, port 3040, privileged effect boundary)
+terminus-kernel (Rust, port 3040, privileged effect boundary)
     ├── sandboxed command/job processes
     ├── LSP/DAP/index workers
     ├── plugin/WASI workers
     ├── MCP server processes
     └── external harness adapter processes
 
-forge-eval (Python, offline or isolated)
+terminus-eval (Python, offline or isolated)
     └── reads exported traces/artifacts; never owns production effects
 ```
 
-`forge-control` owns cognition and product state. `forge-kernel` owns authority to affect the host or external systems. Clients own presentation and user interaction. Python owns offline analysis only.
+`terminus-control` owns cognition and product state. `terminus-kernel` owns authority to affect the host or external systems. Clients own presentation and user interaction. Python owns offline analysis only.
 
 ## Decisions governing this architecture
 

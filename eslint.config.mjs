@@ -57,7 +57,7 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "target/**",
     "python/**/.venv/**",
     "python/**/*.venv/**",
-    ".forge-data/**",
+    ".terminus-data/**",
   ]
 }];
 

@@ -1,11 +1,12 @@
 //! Container sandbox backend. Requires runtime configuration (OCI runtime,
 //! image digest, resource limits) that is not yet wired up; fails closed.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
-use forge_sandbox::profile::SandboxProfile;
-use forge_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
-use forge_sandbox::{SandboxBackend, SandboxError};
+use terminus_sandbox::profile::SandboxProfile;
+use terminus_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
+use terminus_sandbox::{SandboxBackend, SandboxError};
 
 #[derive(Debug, Clone, Default)]
 pub struct ContainerSandboxBackend {

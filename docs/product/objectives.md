@@ -1,12 +1,12 @@
 # Product objectives
 
-This document states Forge's product objective, derived from SPEC §1 and §26. The normative source is `SPEC.md`; this document is a summary for product, design, and engineering reference.
+This document states Terminus's product objective, derived from SPEC §1 and §26. The normative source is `SPEC.md`; this document is a summary for product, design, and engineering reference.
 
 ## Product definition (SPEC §26.1)
 
-Forge is a **local-first coding-agent operating system** that can inspect, modify, execute, test, review, and explain software changes while preserving an exact record of model inputs, environmental effects, security decisions, evidence, cost, and uncertainty.
+Terminus is a **local-first coding-agent operating system** that can inspect, modify, execute, test, review, and explain software changes while preserving an exact record of model inputs, environmental effects, security decisions, evidence, cost, and uncertainty.
 
-Forge is not merely a conversational CLI. The durable product is the combination of:
+Terminus is not merely a conversational CLI. The durable product is the combination of:
 
 - a task and session runtime;
 - a canonical Context Compiler;
@@ -40,7 +40,7 @@ The denominator is reported as separate components as well as any composite. No 
 
 ## Goals (SPEC §26.4)
 
-Forge SHALL:
+Terminus SHALL:
 
 - maximize verified task success subject to cost, latency, security, and maintainability constraints;
 - support multiple model providers and local models without leaking provider concepts into the canonical domain;
@@ -89,7 +89,7 @@ These are release blockers. See `docs/architecture/trust-boundaries.md` for enfo
 
 ## Why this matters
 
-Most coding-agent harnesses optimize for raw task success on a single benchmark, hide cost behind "tokens" without breaking out compute/wall-clock/human attention, or aggregate everything into one number that conceals safety regressions. Forge's objective is different: verified completion (not model-asserted), full cost transparency, and safety regressions visible separately. The architecture (Rust kernel + TS control plane + Python eval lab + permanent minimal baseline + feature promotion gates) exists to serve this objective.
+Most coding-agent harnesses optimize for raw task success on a single benchmark, hide cost behind "tokens" without breaking out compute/wall-clock/human attention, or aggregate everything into one number that conceals safety regressions. Terminus's objective is different: verified completion (not model-asserted), full cost transparency, and safety regressions visible separately. The architecture (Rust kernel + TS control plane + Python eval lab + permanent minimal baseline + feature promotion gates) exists to serve this objective.
 
 ## Related
 

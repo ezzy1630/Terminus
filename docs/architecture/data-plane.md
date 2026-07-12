@@ -123,7 +123,7 @@ Each event has: type, version, aggregate, payload schema, PII classification, re
 
 ## Git (SPEC §7.3, ADR-0013)
 
-- `crates/forge-git` provides protected worktree/commit/merge operations.
+- `crates/terminus-git` provides protected worktree/commit/merge operations.
 - Worktrees are isolated per writer (ADR-0020).
 - Git hooks and filters from untrusted sources are disabled.
 - `.git` is in the deny list of the default policy (`policies/sandbox/secure-local-default.yaml`).

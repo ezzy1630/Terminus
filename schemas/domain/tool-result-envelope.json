@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/domain/tool-result-envelope.json",
+  "$id": "https://terminus.dev/schemas/domain/tool-result-envelope.json",
   "title": "ToolResultEnvelope",
   "description": "Tool result envelope (SPEC §11.3, Appendix E.3). Every tool returns this envelope; the model never sees raw tool output.",
   "type": "object",

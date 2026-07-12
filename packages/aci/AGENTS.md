@@ -1,4 +1,4 @@
-# @forge/aci — local rules
+# @terminus/aci — local rules
 
 ## Non-negotiable
 

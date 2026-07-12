@@ -1,12 +1,12 @@
 # OpenAI System Prompt Renderer
 
-Forge renders the compiled context into an OpenAI Chat Completions or
+Terminus renders the compiled context into an OpenAI Chat Completions or
 Responses API request. The renderer MUST follow these rules.
 
 ## Message ordering and cache prefixes
 
 OpenAI caches a stable prefix of system + tool definitions + initial
-messages. Forge preserves cache hits by emitting:
+messages. Terminus preserves cache hits by emitting:
 
 1. `system` message — the authority layer (system.md + safety-rules.md),
    concatenated and never modified between turns of the same task.
@@ -57,10 +57,10 @@ For `o1`-class models, the renderer:
 
 ## Continuation and compaction
 
-OpenAI does not expose native continuation. Forge emulates continuation by
+OpenAI does not expose native continuation. Terminus emulates continuation by
 appending a synthesized assistant turn ending with a continuation marker,
 then a user turn instructing the model to continue. Native compaction is
-not used; Forge checkpoints and rebuilds the context.
+not used; Terminus checkpoints and rebuilds the context.
 
 ## Streaming
 

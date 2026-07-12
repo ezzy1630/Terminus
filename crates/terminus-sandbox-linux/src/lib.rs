@@ -20,21 +20,22 @@
 //!   by claiming `Enforced` for features it cannot actually enforce. Profiles
 //!   that require namespace isolation (e.g. `network: Deny`) are rejected
 //!   with `SandboxError::Unsupported` so the caller can fall back to a
-//!   stronger backend (e.g. `forge-sandbox-container`).
+//!   stronger backend (e.g. `terminus-sandbox-container`).
 //!
 //! This module does not link `bubblewrap` directly; it invokes the binary
 //! on PATH through `std::process::Command` at construction time to verify
 //! availability, and constructs the bwrap argv from the sandbox profile
 //! when `spawn_in_sandbox` is called.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
-use forge_sandbox::profile::{FilesystemAccess, NetworkAccess, SandboxProfile};
-use forge_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
-use forge_sandbox::{SandboxBackend, SandboxError};
-use forge_kernel_protocol::CommandSpec;
 use std::path::PathBuf;
 use std::process::Command;
+use terminus_kernel_protocol::CommandSpec;
+use terminus_sandbox::profile::{FilesystemAccess, NetworkAccess, SandboxProfile};
+use terminus_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
+use terminus_sandbox::{SandboxBackend, SandboxError};
 
 #[derive(Debug, Clone, Default)]
 pub struct LinuxSandboxBackend {
@@ -73,7 +74,9 @@ impl LinuxSandboxBackend {
     /// (the backend reports `Degraded` until an absolute path is provided).
     pub fn with_bwrap_path(path: PathBuf) -> Self {
         if path.is_absolute() && std::fs::metadata(&path).is_ok() {
-            Self { bwrap_path: Some(path) }
+            Self {
+                bwrap_path: Some(path),
+            }
         } else {
             Self::default()
         }
@@ -115,7 +118,7 @@ impl LinuxSandboxBackend {
     /// - Per-rule `--ro-bind` / `--bind` for filesystem rules whose path is
     ///   an absolute host path. Workspace-URI rules
     ///   (`workspace://...`) are skipped — they are logical and resolved
-    ///   by `forge_fs::PathResolver`, not by bwrap.
+    ///   by `terminus_fs::PathResolver`, not by bwrap.
     /// - `--die-with-parent`, `--new-session` — lifecycle isolation.
     /// - `--cap-drop ALL` — drop all Linux capabilities.
     /// - `--chdir <cwd>` — set the working directory.
@@ -141,7 +144,7 @@ impl LinuxSandboxBackend {
         argv.push("/dev".to_string());
 
         // Per-rule bind mounts. Skip workspace:// URIs — they are logical
-        // and resolved by forge_fs::PathResolver, not by bwrap.
+        // and resolved by terminus_fs::PathResolver, not by bwrap.
         for rule in &profile.filesystem {
             if !rule.path.starts_with('/') {
                 continue;
@@ -193,11 +196,6 @@ impl LinuxSandboxBackend {
     /// Returns the captured `std::process::Output` (stdout, stderr, exit
     /// code). Returns `SandboxError::Unsupported` if `bwrap` was not
     /// available at construction time.
-    ///
-    /// This method is NOT yet integrated with `ProcessService` — it is a
-    /// real, callable method that constructs the right bwrap argv and runs
-    /// it. The kernel's `ProcessService` still spawns processes directly;
-    /// wiring `spawn_in_sandbox` into the process pipeline is a follow-up.
     pub fn spawn_in_sandbox(
         &self,
         command: &CommandSpec,
@@ -232,6 +230,24 @@ impl SandboxBackend for LinuxSandboxBackend {
         "linux"
     }
 
+    /// SPEC §13.4 / §34.11: when bwrap is available, return the wrapper
+    /// binary + full bwrap argv (including `-- <program> <args...>`) so
+    /// `ProcessManager` can spawn the process inside the sandbox with
+    /// streaming output. When bwrap is unavailable, return `None` (the
+    /// caller spawns directly; the enforcement report already says
+    /// Degraded).
+    fn spawn_wrapper(
+        &self,
+        command: &CommandSpec,
+        profile: &SandboxProfile,
+    ) -> Option<(std::path::PathBuf, Vec<String>)> {
+        let bwrap_path = self.bwrap_path.as_ref()?;
+        if !bwrap_path.is_absolute() {
+            return None;
+        }
+        Some((bwrap_path.clone(), Self::build_bwrap_argv(command, profile)))
+    }
+
     fn enforcement_report(&self) -> EnforcementReport {
         if let Some(path) = &self.bwrap_path {
             // bwrap is available. Report Enforced for the namespace-backed
@@ -240,7 +256,10 @@ impl SandboxBackend for LinuxSandboxBackend {
             // CgroupResourceLimits (bwrap does not manage cgroups).
             return EnforcementReport {
                 backend_id: self.id().to_string(),
-                status: EnforcementStatus::Enforced,
+                // A backend with missing mandatory controls is degraded as a
+                // whole; callers must never infer full enforcement merely
+                // because the namespace subset is active.
+                status: EnforcementStatus::Degraded,
                 enforced: vec![
                     EnforcementFeature::FilesystemIsolation,
                     EnforcementFeature::NetworkIsolation,
@@ -264,8 +283,7 @@ impl SandboxBackend for LinuxSandboxBackend {
                     ),
                     "seccomp filter: degraded (bwrap does not install a seccomp filter by default)"
                         .to_string(),
-                    "cgroup resource limits: degraded (bwrap does not manage cgroups)"
-                        .to_string(),
+                    "cgroup resource limits: degraded (bwrap does not manage cgroups)".to_string(),
                     "spawn_in_sandbox() constructs the bwrap argv from the profile".to_string(),
                 ],
             };
@@ -293,9 +311,9 @@ impl SandboxBackend for LinuxSandboxBackend {
                     .to_string(),
                 "cgroup-style resource limits via setrlimit where available (degraded — not wired in this build)"
                     .to_string(),
-                "filesystem traversal/symlink protection still enforced by forge-fs PathResolver"
+                "filesystem traversal/symlink protection still enforced by terminus-fs PathResolver"
                     .to_string(),
-                "egress allowlist still enforced by forge-egress EgressProxy".to_string(),
+                "egress allowlist still enforced by terminus-egress EgressProxy".to_string(),
                 "profiles requiring namespace isolation (network: Deny) will be rejected with Unsupported"
                     .to_string(),
             ],
@@ -306,7 +324,7 @@ impl SandboxBackend for LinuxSandboxBackend {
         // Security refusal: ambient secrets are never permitted.
         if matches!(
             profile.secrets,
-            forge_sandbox::SecretsAccess::AmbientEnvironment
+            terminus_sandbox::SecretsAccess::AmbientEnvironment
         ) {
             return Err(SandboxError::Misconfigured(
                 "ambient secrets not permitted".into(),
@@ -317,20 +335,18 @@ impl SandboxBackend for LinuxSandboxBackend {
                 "ambient plugin authority not permitted".into(),
             ));
         }
-        // If bwrap is unavailable, profiles that REQUIRE namespace
-        // isolation are rejected with Unsupported so the caller can fall
-        // back to a stronger backend (e.g. forge-sandbox-container).
-        // Network Deny requires --unshare-net, which requires bwrap.
-        if self.bwrap_path.is_none() {
-            if matches!(profile.network, NetworkAccess::Deny) {
-                return Err(SandboxError::Unsupported(
-                    "profile requires network isolation (--unshare-net) but bwrap is not available"
-                        .into(),
-                ));
-            }
-            // Filesystem Deny rules can be partially enforced via forge-fs
-            // path policy, so we do not reject them here. The enforcement
-            // report shows Degraded for FilesystemIsolation.
+        // If bwrap is unavailable, profiles that REQUIRE namespace isolation
+        // are rejected with Unsupported so the caller can fall back to a
+        // stronger backend (e.g. terminus-sandbox-container). Network Deny
+        // requires --unshare-net, which requires bwrap. Filesystem Deny rules
+        // can be partially enforced via terminus-fs path policy, so we do not
+        // reject them here; the enforcement report shows Degraded for
+        // FilesystemIsolation.
+        if self.bwrap_path.is_none() && matches!(profile.network, NetworkAccess::Deny) {
+            return Err(SandboxError::Unsupported(
+                "profile requires network isolation (--unshare-net) but bwrap is not available"
+                    .into(),
+            ));
         }
         Ok(())
     }
@@ -342,7 +358,7 @@ impl SandboxBackend for LinuxSandboxBackend {
 /// In this build we do not link libc directly; the function returns
 /// `Err(SandboxError::Degraded)` so callers can record the gap honestly.
 pub fn apply_resource_limits(
-    _limits: &forge_sandbox::ResourceLimits,
+    _limits: &terminus_sandbox::ResourceLimits,
 ) -> Result<(), SandboxError> {
     Err(SandboxError::Degraded(
         "setrlimit binding unavailable in this build".into(),
@@ -384,8 +400,8 @@ fn which_bwrap() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_kernel_protocol::WorkspacePath;
-    use forge_sandbox::profile::{
+    use terminus_kernel_protocol::WorkspacePath;
+    use terminus_sandbox::profile::{
         FilesystemAccess, FilesystemRule, NetworkAccess, ProcessAccess, ResourceLimits,
         SandboxProfile, SecretsAccess,
     };
@@ -431,15 +447,11 @@ mod tests {
         assert!(!report
             .enforced
             .contains(&EnforcementFeature::FilesystemIsolation));
-        assert!(!report
-            .enforced
-            .contains(&EnforcementFeature::PidNamespace));
+        assert!(!report.enforced.contains(&EnforcementFeature::PidNamespace));
         assert!(!report
             .enforced
             .contains(&EnforcementFeature::MountNamespace));
-        assert!(!report
-            .enforced
-            .contains(&EnforcementFeature::UserNamespace));
+        assert!(!report.enforced.contains(&EnforcementFeature::UserNamespace));
     }
 
     #[test]
@@ -466,8 +478,7 @@ mod tests {
 
     #[test]
     fn with_bwrap_path_rejects_nonexistent() {
-        let backend =
-            LinuxSandboxBackend::with_bwrap_path(PathBuf::from("/nonexistent/bwrap-xyz"));
+        let backend = LinuxSandboxBackend::with_bwrap_path(PathBuf::from("/nonexistent/bwrap-xyz"));
         assert!(!backend.is_bubblewrap_available());
         let report = backend.enforcement_report();
         assert_eq!(report.status, EnforcementStatus::Degraded);
@@ -481,7 +492,7 @@ mod tests {
         let backend = LinuxSandboxBackend::with_bwrap_path(PathBuf::from("/bin/sh"));
         assert!(backend.is_bubblewrap_available());
         let report = backend.enforcement_report();
-        assert_eq!(report.status, EnforcementStatus::Enforced);
+        assert_eq!(report.status, EnforcementStatus::Degraded);
     }
 
     #[test]
@@ -495,16 +506,18 @@ mod tests {
             .enforced
             .iter()
             .copied()
-            .filter(|f| matches!(
-                f,
-                EnforcementFeature::FilesystemIsolation
-                    | EnforcementFeature::NetworkIsolation
-                    | EnforcementFeature::PidNamespace
-                    | EnforcementFeature::MountNamespace
-                    | EnforcementFeature::UserNamespace
-                    | EnforcementFeature::SeccompFilter
-                    | EnforcementFeature::NoNewPrivs
-            ))
+            .filter(|f| {
+                matches!(
+                    f,
+                    EnforcementFeature::FilesystemIsolation
+                        | EnforcementFeature::NetworkIsolation
+                        | EnforcementFeature::PidNamespace
+                        | EnforcementFeature::MountNamespace
+                        | EnforcementFeature::UserNamespace
+                        | EnforcementFeature::SeccompFilter
+                        | EnforcementFeature::NoNewPrivs
+                )
+            })
             .collect();
         assert!(
             claimed_namespace_features.is_empty(),
@@ -530,11 +543,8 @@ mod tests {
 
         let with_bwrap = LinuxSandboxBackend::with_mocked_bwrap(true);
         let report_with = with_bwrap.enforcement_report();
-        assert_eq!(report_with.status, EnforcementStatus::Enforced);
+        assert_eq!(report_with.status, EnforcementStatus::Degraded);
         assert!(with_bwrap.bwrap_path.is_some());
-
-        // The two reports MUST differ in status.
-        assert_ne!(report_without.status, report_with.status);
 
         // The enforced feature list MUST be strictly larger when bwrap is
         // available.
@@ -602,10 +612,14 @@ mod tests {
         let mut p = restrictive_profile();
         p.secrets = SecretsAccess::AmbientEnvironment;
         let with_bwrap = LinuxSandboxBackend::with_mocked_bwrap(true);
-        let err = with_bwrap.supports_profile(&p).expect_err("ambient secrets must be rejected");
+        let err = with_bwrap
+            .supports_profile(&p)
+            .expect_err("ambient secrets must be rejected");
         assert!(matches!(err, SandboxError::Misconfigured(_)));
         let without_bwrap = LinuxSandboxBackend::with_mocked_bwrap(false);
-        let err = without_bwrap.supports_profile(&p).expect_err("ambient secrets must be rejected");
+        let err = without_bwrap
+            .supports_profile(&p)
+            .expect_err("ambient secrets must be rejected");
         assert!(matches!(err, SandboxError::Misconfigured(_)));
     }
 

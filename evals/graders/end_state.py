@@ -1,4 +1,4 @@
-"""End-state grader for Forge eval tasks.
+"""End-state grader for Terminus eval tasks.
 
 This module provides the canonical end-state grader used by the eval
 harness. It runs the task-specific grader (grader/run.py) inside the

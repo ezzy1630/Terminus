@@ -24,16 +24,17 @@
 //! harness adapter) are exercised in `tests/security/bypass/` (TypeScript
 //! test runner) — this file is the Rust kernel-side mirror.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(test)]
 
-use forge_authz::{OperationClass, Scope, TokenBinder};
-use forge_kernel::KernelHandle;
-use forge_kernel_protocol::{
-    CommandSpec, EffectIntent, ErrorCode, ErrorCategory, RequestContext, WorkspacePath,
-};
-use forge_policy::{Decision, NetworkDestination, NormalizedCommand, PolicyEngine};
 use std::path::PathBuf;
 use tempfile::tempdir;
+use terminus_authz::{OperationClass, Scope, TokenBinder};
+use terminus_kernel::KernelHandle;
+use terminus_kernel_protocol::{
+    CommandSpec, EffectIntent, ErrorCategory, ErrorCode, RequestContext, WorkspacePath,
+};
+use terminus_policy::{Decision, NetworkDestination, NormalizedCommand, PolicyEngine};
 
 fn ctx_with_token(token: &str) -> RequestContext {
     let mut ctx = RequestContext::new("test-request");
@@ -237,7 +238,7 @@ fn nb_egress_policy_default_denies_unknown_hosts() {
     // The policy engine's default rule set denies network access to
     // unknown hosts. Verify this by constructing a NormalizedCommand that
     // targets an arbitrary external host and asserting Decision::Deny.
-    let engine = PolicyEngine::new(forge_policy::default_rule_set());
+    let engine = PolicyEngine::new(terminus_policy::default_rule_set());
     let mut cmd = NormalizedCommand::new("curl");
     cmd.argv = vec!["https://unknown.example/foo".into()];
     cmd.network_destinations.push(NetworkDestination {
@@ -245,7 +246,8 @@ fn nb_egress_policy_default_denies_unknown_hosts() {
         port: 443,
         scheme: "https".to_string(),
     });
-    cmd.effect_types.insert(forge_policy::EffectType::NetworkRead);
+    cmd.effect_types
+        .insert(terminus_policy::EffectType::NetworkRead);
     let report = engine.evaluate(&cmd);
     // No matching allow rule → default-deny.
     assert_eq!(report.decision, Decision::Deny);
@@ -265,25 +267,22 @@ async fn nb_normalized_spawn_clears_env_to_prevent_secret_leak() {
     let (_dir, kernel) = make_kernel();
     let token = mint_admin_token(&kernel);
     let ctx = ctx_with_token(&token);
-    std::env::set_var("FORGE_NB_TEST_LEAK", "leaked-value");
+    std::env::set_var("TERMINUS_NB_TEST_LEAK", "leaked-value");
     // `echo` matches `allow-read-tools`? No — our heuristic classifies it
     // as EXECUTE_LOCAL only. Let's use `pnpm` so we hit `allow-local-tests`.
     let command = CommandSpec {
         program: "pnpm".to_string(),
         args: vec!["test".to_string()],
         cwd: WorkspacePath::new("ws-1", "."),
-        // Explicitly do NOT pass FORGE_NB_TEST_LEAK — it should not be
+        // Explicitly do NOT pass TERMINUS_NB_TEST_LEAK — it should not be
         // inherited from the ambient env.
         public_env: std::collections::BTreeMap::new(),
         timeout_ms: 1_000,
         ..Default::default()
     };
     // Just verify the spawn reaches the OS (no policy denial).
-    let result = kernel
-        .processes
-        .start(&ctx, &empty_intent(), command)
-        .await;
-    std::env::remove_var("FORGE_NB_TEST_LEAK");
+    let result = kernel.processes.start(&ctx, &empty_intent(), command).await;
+    std::env::remove_var("TERMINUS_NB_TEST_LEAK");
     match result {
         Ok(_) => { /* spawned successfully */ }
         Err(e) => {
@@ -324,10 +323,7 @@ async fn nb_disallowed_env_vars_stripped_by_policy_constraints() {
     // The spawn should reach the OS (not be policy-denied), and the
     // AWS_SECRET_ACCESS_KEY env var should be stripped by the
     // AllowWithConstraints application.
-    let result = kernel
-        .processes
-        .start(&ctx, &empty_intent(), command)
-        .await;
+    let result = kernel.processes.start(&ctx, &empty_intent(), command).await;
     match result {
         Ok(_) => { /* spawned successfully — env was stripped */ }
         Err(e) => {
@@ -374,7 +370,13 @@ async fn nb_process_start_with_read_only_token_is_rejected() {
     };
     let token = kernel
         .token_issuer
-        .mint(binder, vec![OperationClass::Read], Scope::default(), None, "nb-n1")
+        .mint(
+            binder,
+            vec![OperationClass::Read],
+            Scope::default(),
+            None,
+            "nb-n1",
+        )
         .and_then(|t| t.encode())
         .expect("mint");
     let ctx = ctx_with_token(&token);
@@ -442,14 +444,20 @@ async fn nb_token_from_other_kernel_audience_is_rejected() {
     // `TokenIssuer::validate`.
     let (_dir, kernel) = make_kernel();
     // Mint a token using a different issuer (different kernel_instance_id).
-    let other_issuer = forge_authz::TokenIssuer::new(
+    let other_issuer = terminus_authz::TokenIssuer::new(
         b"kernel-default-secret-please-rotate".to_vec(),
         "other-kernel-instance".to_string(),
         3600,
     );
     let binder = TokenBinder::default();
     let token = other_issuer
-        .mint(binder, vec![OperationClass::Admin], Scope::default(), None, "nb-n2")
+        .mint(
+            binder,
+            vec![OperationClass::Admin],
+            Scope::default(),
+            None,
+            "nb-n2",
+        )
         .and_then(|t| t.encode())
         .expect("mint");
     let ctx = ctx_with_token(&token);

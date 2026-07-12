@@ -1,15 +1,23 @@
-# Forge OpenCode divergence budget (SPEC §6.1, ADR-0002).
+# Terminus OpenCode divergence budget (SPEC §6.1, ADR-0002).
 #
 # Tracks modifications to inherited OpenCode files and merge-conflict hours.
 # A maximum divergence budget per release is enforced at the release gate
 # (SPEC §46.18). Generic fixes are proposed upstream.
+#
+# HONESTY NOTE (2026-07-12 audit): the previous version listed six
+# modified_files entries pointing at packages/open-code-bridge/src/inherited/*.ts.
+# Those files did not exist — the OpenCode fork had not been imported (see
+# upstream/opencode.lock.json, status `pending`). The entries were removed
+# because they tracked modifications to files that were not present. This
+# budget now reflects reality: zero inherited files have been modified yet.
+# When the OpenCode fork is imported, every Terminus-side modification to an
+# inherited file MUST be recorded here with reason, owner, upstream PR,
+# removal milestone, and conflict-hour estimate.
 
 version: 1
-last_updated: "2025-07-11"
+last_updated: "2026-07-12"
 owner: upstream-team
 
-# Per-release divergence budget. The release gate (SPEC §46.18) checks that
-# the current divergence is within budget.
 budget:
   per_release:
     max_modified_files: 25
@@ -17,71 +25,29 @@ budget:
     max_bypass_register_open: 0  # SPEC §27.5: no unknown entries; all contained
   review_cadence: per-release
 
-# Modified inherited files. Each entry is a Forge-owned change to an inherited
-# OpenCode file. Generic fixes are proposed upstream; Forge-side changes are
-# temporary until the package is replaced behind a Forge interface (ADR-0002
-# exit strategy).
-modified_files:
-  - path: packages/open-code-bridge/src/inherited/exec.ts
-    reason: "Route subprocess spawn through kernel RPC (BYPASS-0001)"
-    owner: upstream-team
-    upstream_pr: null
-    removal_milestone: M3
-    last_conflict_hours: 0.5
-
-  - path: packages/open-code-bridge/src/inherited/fs.ts
-    reason: "Route file writes through forge-fs (BYPASS-0002)"
-    owner: upstream-team
-    upstream_pr: null
-    removal_milestone: M2
-    last_conflict_hours: 0.25
-
-  - path: packages/open-code-bridge/src/inherited/network.ts
-    reason: "Route provider calls through forge-egress proxy (BYPASS-0003)"
-    owner: upstream-team
-    upstream_pr: null
-    removal_milestone: M4
-    last_conflict_hours: 1.0
-
-  - path: packages/open-code-bridge/src/inherited/secrets.ts
-    reason: "Route secret access through forge-secrets broker (BYPASS-0004)"
-    owner: upstream-team
-    upstream_pr: null
-    removal_milestone: M4
-    last_conflict_hours: 0.75
-
-  - path: packages/open-code-bridge/src/inherited/plugins.ts
-    reason: "Disable in-process plugin execution in secure profile (BYPASS-0005)"
-    owner: ecosystem-team
-    upstream_pr: "https://github.com/anomalyco/opencode/pull/0001"
-    removal_milestone: M9
-    last_conflict_hours: 1.5
-
-  - path: packages/open-code-bridge/src/inherited/git.ts
-    reason: "Route git operations through forge-git (BYPASS-0006)"
-    owner: upstream-team
-    upstream_pr: null
-    removal_milestone: M4
-    last_conflict_hours: 0.5
+modified_files: []
 
 # Summary (auto-computed by tools/upstream-sync):
-#   total_modified_files: 6
-#   total_last_conflict_hours: 4.5
-#   within_budget: true (6 <= 25, 4.5 <= 8)
-#   bypass_register_open: 0 (all 6 entries contained)
+#   total_modified_files: 0
+#   total_last_conflict_hours: 0
+#   within_budget: true (0 <= 25, 0 <= 8)
+#   bypass_register_open: 0
 
-# Upstream PRs proposed by Forge (generic fixes).
-upstream_prs:
-  - pr: "https://github.com/anomalyco/opencode/pull/0001"
-    title: "Add option to disable in-process plugin execution"
-    status: open
-    owner: ecosystem-team
-    submitted_at: "2025-07-11T00:00:00Z"
+# Upstream PRs proposed by Terminus (generic fixes).
+upstream_prs: []
 
 # Sync log (most recent first).
 sync_log:
+  - date: "2026-07-12"
+    action: "audit-correction"
+    commit: "6601c2b36a6d8bc4a40cd75985f0dd0c802e7b0d"
+    conflicts: 0
+    notes: >
+      Removed fabricated modified_files entries that referenced non-existent
+      inherited/*.ts paths. No OpenCode fork has been imported yet; the
+      divergence budget is zero until the fork is established (M1).
   - date: "2025-07-11"
     action: "initial-pin"
     commit: "0000000000000000000000000000000000000000"
     conflicts: 0
-    notes: "Initial pin per M0 (SPEC §48.3)."
+    notes: "Initial pin record (placeholder; real pin pending M1)."

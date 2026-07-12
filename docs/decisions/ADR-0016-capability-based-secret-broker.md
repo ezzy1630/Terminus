@@ -17,14 +17,14 @@ OpenCode's upstream uses environment-based secrets. Claude Code's hooks and perm
 Adopt a **capability-based secret broker** per SPEC §13.6 and §36.13:
 
 1. **No ambient secrets** — `secrets.direct_environment: deny` in the default policy (SPEC §36.4). No secret values in env vars, files visible to the sandbox, or prompts/tool arguments.
-2. **Brokered capabilities** — secrets are issued as short-lived capability URIs (e.g., `secret://github/token/<capability-id>`) by the secret broker (`crates/forge-secrets`). The model sees only the URI; the broker injects the actual value into the child process environment at `exec` time.
+2. **Brokered capabilities** — secrets are issued as short-lived capability URIs (e.g., `secret://github/token/<capability-id>`) by the secret broker (`crates/terminus-secrets`). The model sees only the URI; the broker injects the actual value into the child process environment at `exec` time.
 3. **Per-task scoping** — capabilities are scoped to a task/session and revoked when the task ends. The broker tracks issuance, use, and revocation.
 4. **Model-invisible** — `secrets.model_visibility: deny`. The model receives capability handles and redacted metadata, never secret values (SPEC §26.3 #6).
-5. **Output redaction** — tool output is scanned for secret patterns and redacted before being shown to the model or persisted (SPEC §36.13, `crates/forge-secrets/src/redact.rs`).
+5. **Output redaction** — tool output is scanned for secret patterns and redacted before being shown to the model or persisted (SPEC §36.13, `crates/terminus-secrets/src/redact.rs`).
 6. **Audit** — every secret use is audited: capability URI, task, tool, timestamp, redaction events.
 7. **Provider scopes** — `policies/secrets/default.yaml` declares brokered capabilities for github, gitlab, database, aws, and other providers with TTLs and redaction patterns.
 
-Implementation: `crates/forge-secrets` (broker, redact, audit). Default secrets policy: `policies/secrets/default.yaml`.
+Implementation: `crates/terminus-secrets` (broker, redact, audit). Default secrets policy: `policies/secrets/default.yaml`.
 
 ## Alternatives
 

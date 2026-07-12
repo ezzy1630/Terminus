@@ -1,31 +1,31 @@
 [package]
-name = "forge-kernel"
+name = "terminus-kernel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "The privileged Forge kernel assembly — service groups."
+description = "The privileged Terminus kernel assembly — service groups."
 
 [lints]
 workspace = true
 
 [dependencies]
-forge-kernel-protocol = { workspace = true }
-forge-fs = { workspace = true }
-forge-artifacts = { workspace = true }
-forge-policy = { workspace = true }
-forge-sandbox = { workspace = true }
-forge-sandbox-linux = { workspace = true }
-forge-sandbox-container = { workspace = true }
-forge-process = { workspace = true }
-forge-jobs = { workspace = true }
-forge-patch = { workspace = true }
-forge-secrets = { workspace = true }
-forge-egress = { workspace = true }
-forge-code-intel = { workspace = true }
-forge-extension-runtime = { workspace = true }
-forge-git = { workspace = true }
-forge-authz = { workspace = true }
+terminus-kernel-protocol = { workspace = true }
+terminus-fs = { workspace = true }
+terminus-artifacts = { workspace = true }
+terminus-policy = { workspace = true }
+terminus-sandbox = { workspace = true }
+terminus-sandbox-linux = { workspace = true }
+terminus-sandbox-container = { workspace = true }
+terminus-process = { workspace = true }
+terminus-jobs = { workspace = true }
+terminus-patch = { workspace = true }
+terminus-secrets = { workspace = true }
+terminus-egress = { workspace = true }
+terminus-code-intel = { workspace = true }
+terminus-extension-runtime = { workspace = true }
+terminus-git = { workspace = true }
+terminus-authz = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -36,4 +36,4 @@ hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-forge-kernel-testkit = { workspace = true }
+terminus-kernel-testkit = { workspace = true }

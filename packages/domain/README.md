@@ -1,9 +1,9 @@
-# @forge/domain
+# @terminus/domain
 
-Canonical Forge domain types, identifiers, state machine enums, and typed error classes.
+Canonical Terminus domain types, identifiers, state machine enums, and typed error classes.
 
 Pure types and zod schemas — no I/O, no side effects. This is the lowest layer
-of the Forge control plane. Per SPEC §28.1 identifiers use UUIDv7 strings,
+of the Terminus control plane. Per SPEC §28.1 identifiers use UUIDv7 strings,
 content hashes use `sha256:<hex>`, artifact URIs use `artifact://sha256/<hex>`,
 and resource URIs use `workspace://`, `session://`, `task://`, `turn://`,
 `job://`, `agent://`, `memory://`, `tool://`, `rule://`, `verification://`.

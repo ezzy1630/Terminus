@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * new-tool — scaffold a new Forge tool schema under schemas/tools/<id>.json.
+ * new-tool — scaffold a new Terminus tool schema under schemas/tools/<id>.json.
  *
  * SPEC §45.7 mandates scaffolds include README, AGENTS, tests, ownership,
  * lint config, observability placeholders, and CI registration. This script
@@ -32,7 +32,7 @@ if (existsSync(schemaPath)) {
 
 const schema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: `https://forge.dev/schemas/tools/${id}.json`,
+  $id: `https://terminus.dev/schemas/tools/${id}.json`,
   title: id,
   description: `TODO: one-paragraph description of the ${id} tool. Reference the SPEC section that mandates it.`,
   type: "object",

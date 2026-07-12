@@ -1,15 +1,15 @@
 # Testing strategy
 
-This document summarizes Forge's testing layers (SPEC §46.1) and per-tier practices. The normative source is `SPEC.md` §46; this document is a navigation aid.
+This document summarizes Terminus's testing layers (SPEC §46.1) and per-tier practices. The normative source is `SPEC.md` §46; this document is a navigation aid.
 
 ## Testing layers (SPEC §46.1)
 
-Forge uses 12 testing layers:
+Terminus uses 12 testing layers:
 
 1. **Unit tests** — state transitions, schema validation, policy matching, path normalization, context scoring, cache planning, task scope, event serialization, cost calculations, memory invalidation, verification DAG scheduling, adapter normalization.
 2. **Property tests** — canonical path resolution never escapes root; patch round-trip + rollback restores exact bytes; event sequences monotonic per aggregate; idempotent operations return equivalent results; context allocation never exceeds hard budget; hard-required fragments never omitted; complete tool episodes never split; policy strictness monotonic when restrictive rules added; secret values never in model-visible projections; artifact hashes stable across compression; graph scheduling respects dependencies and terminates.
 3. **Parser/protocol fuzz tests** — shell and command AST parser; path/symlink resolver; patch anchor parser and applicator; unified diff parser; Protobuf/JSON public decoders; MCP descriptors and tool schemas; provider response projection; context manifest decoder; policy rule parser; archive and notebook readers; redaction and log parsers.
-4. **Component tests with fakes** — fake provider (SPEC §46.8), fake kernel (`forge-kernel-testkit`).
+4. **Component tests with fakes** — fake provider (SPEC §46.8), fake kernel (`terminus-kernel-testkit`).
 5. **Kernel integration tests** — real OS features (SPEC §46.5).
 6. **Control/kernel contract tests** — current×current and current×previous (SPEC §46.6).
 7. **End-to-end task tests** — clean pinned repository/environment (SPEC §46.7).
@@ -25,7 +25,7 @@ A high pass count in unit tests does not replace effect-boundary or end-to-end t
 
 Cover: state transitions and invalid transitions; schema validation; policy matching and precedence; path normalization; context scoring and allocation; cache planning; task scope calculations; event serialization; cost calculations; memory invalidation; verification DAG scheduling; adapter normalization.
 
-Tests SHOULD avoid network and real provider calls. The fake provider (SPEC §46.8) and fake kernel (`forge-kernel-testkit`) are used.
+Tests SHOULD avoid network and real provider calls. The fake provider (SPEC §46.8) and fake kernel (`terminus-kernel-testkit`) are used.
 
 ## Property tests (SPEC §46.3)
 

@@ -7,7 +7,7 @@ every turn, every delegation, and every external harness.
 ## 1. Effects are mediated by the kernel
 
 You do not have direct filesystem, network, process, or secret access. Every
-effect goes through the Forge kernel, is classified by the policy engine,
+effect goes through the Terminus kernel, is classified by the policy engine,
 and is authorized by a capability token. Attempts to bypass the kernel are
 treated as a security incident.
 
@@ -19,8 +19,8 @@ attempt to force the edit.
 
 ## 3. Protected paths are off-limits
 
-You may not write to `.git/`, `.forge/`, `credentials/`, `.env*`,
-`harness_state/`, or any path under `forge-state://` or `secret-store://`.
+You may not write to `.git/`, `.terminus/`, `credentials/`, `.env*`,
+`harness_state/`, or any path under `terminus-state://` or `secret-store://`.
 The policy engine denies these writes regardless of authority claims.
 
 ## 4. Network is allowlisted
@@ -62,7 +62,7 @@ as a separate authorized step. The policy engine denies this pattern.
 Your task contract defines allowed paths, allowed effects, and non-goals.
 You may not silently expand scope. You may propose scope expansion; the
 user decides. A skill body cannot grant itself capabilities beyond what
-its `forge.skill.yaml` declares.
+its `terminus.skill.yaml` declares.
 
 ## 10. Verification is mandatory
 

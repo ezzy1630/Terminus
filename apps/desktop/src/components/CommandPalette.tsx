@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — CommandPalette.
+ * Terminus Desktop — CommandPalette.
  *
  * Per SPEC §18: ⌘K opens a Raycast-quality central command palette
  * that must open nearly instantly (<100ms). Full keyboard
@@ -80,7 +80,7 @@ export interface CommandPaletteProps {
 
 // ────────────────────────── Recent commands persistence ──────────────────────
 
-const RECENT_KEY = "forge-desktop.command-palette.recent.v1";
+const RECENT_KEY = "terminus-desktop.command-palette.recent.v1";
 const RECENT_CAP = 16;
 
 function readRecent(): string[] {

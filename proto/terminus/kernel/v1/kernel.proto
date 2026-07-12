@@ -1,4 +1,4 @@
-// Forge kernel RPC protocol — canonical source of truth (SPEC §7.1, §31, Appendix D).
+// Terminus kernel RPC protocol — canonical source of truth (SPEC §7.1, §31, Appendix D).
 //
 // This .proto is the source of truth for the kernel protocol even though the
 // mini-service implementation uses JSON-over-HTTP during bootstrap. Buf
@@ -15,7 +15,7 @@
 
 syntax = "proto3";
 
-package forge.kernel.v1;
+package terminus.kernel.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
@@ -414,7 +414,7 @@ message JobState {
 
 message KernelInfo {
   string version = 1;
-  string protocol_version = 2;           // e.g. "forge.kernel.v1"
+  string protocol_version = 2;           // e.g. "terminus.kernel.v1"
   string build_revision = 3;
   repeated string supported_backends = 4;  // linux-bwrap | macos-sandbox | windows | container | microvm
   repeated string supported_services = 5;
@@ -458,6 +458,213 @@ service JobService {
   rpc Get(JobGetRequest) returns (JobState);
 }
 
-// The full protocol adds sandbox, policy, secrets, network, Git,
-// code-intelligence, extension, and artifact-ingest services. The descriptor
-// set is published with each kernel build (SPEC §31.1, Appendix D).
+// =============================================================================
+// Workspace service (SPEC §31.1)
+// =============================================================================
+
+message RegisterWorkspaceRequest {
+  RequestContext context = 1;
+  string root_uri = 2;
+  string canonical_root = 3;
+  string trust = 4;             // trusted | untrusted | restricted
+}
+
+message WorkspaceEntryMessage {
+  string id = 1;
+  string root_uri = 2;
+  string canonical_root = 3;
+  string trust = 4;
+}
+
+message GetWorkspaceRequest {
+  RequestContext context = 1;
+  string workspace_id = 2;
+}
+
+service WorkspaceService {
+  rpc Register(RegisterWorkspaceRequest) returns (WorkspaceEntryMessage);
+  rpc Get(GetWorkspaceRequest) returns (WorkspaceEntryMessage);
+}
+
+// =============================================================================
+// Sandbox service (SPEC §13, §31.1)
+// =============================================================================
+
+enum EnforcementStatusProto {
+  ENFORCEMENT_STATUS_UNSPECIFIED = 0;
+  ENFORCED_STATUS = 1;
+  DEGRADED_STATUS = 2;
+  UNSUPPORTED_STATUS = 3;
+}
+
+message EnforcementReportMessage {
+  string backend_id = 1;
+  EnforcementStatusProto status = 2;
+  repeated string enforced = 3;
+  repeated string degraded = 4;
+  repeated string unsupported = 5;
+  repeated string notes = 6;
+}
+
+message SandboxReportRequest {
+  RequestContext context = 1;
+  string profile_id = 2;
+}
+
+service SandboxService {
+  rpc Report(SandboxReportRequest) returns (EnforcementReportMessage);
+}
+
+// =============================================================================
+// Policy service (SPEC §13.5, §31.1)
+// =============================================================================
+
+enum DecisionProto {
+  DECISION_UNSPECIFIED = 0;
+  DECISION_ALLOW = 1;
+  DECISION_ALLOW_WITH_CONSTRAINTS = 2;
+  DECISION_PROMPT = 3;
+  DECISION_DENY = 4;
+}
+
+message NormalizedCommandMessage {
+  string resolved_executable = 1;
+  repeated string argv = 2;
+  string working_directory = 3;
+  repeated string effect_types = 4;
+  repeated string taint_sources = 5;
+}
+
+message ConstraintMessage {
+  optional uint64 max_runtime_ms = 1;
+  optional uint64 max_output_bytes = 2;
+  repeated string disallowed_env = 3;
+}
+
+message DecisionReportMessage {
+  DecisionProto decision = 1;
+  repeated string rule_ids = 2;
+  string explanation = 3;
+  string decision_id = 4;
+  ConstraintMessage constraints = 5;
+}
+
+message EvaluatePolicyRequest {
+  RequestContext context = 1;
+  NormalizedCommandMessage command = 2;
+}
+
+service PolicyService {
+  rpc Evaluate(EvaluatePolicyRequest) returns (DecisionReportMessage);
+}
+
+// =============================================================================
+// Secret service (SPEC §13.6, §31.1)
+// =============================================================================
+
+message MintSecretRequest {
+  RequestContext context = 1;
+  string capability_uri = 2;    // e.g. secret://providers/openai/api_key
+  uint64 ttl_seconds = 3;
+}
+
+message SecretCapabilityMessage {
+  string capability_uri = 1;
+  string handle = 2;            // opaque, model-visible handle (never the value)
+  uint64 expires_at_unix = 3;
+}
+
+service SecretService {
+  rpc Mint(MintSecretRequest) returns (SecretCapabilityMessage);
+}
+
+// =============================================================================
+// Network egress service (SPEC §13.3, §31.1, ADR-0015)
+// =============================================================================
+
+message EgressRequest {
+  RequestContext context = 1;
+  string destination = 2;       // host:port
+  string method = 3;
+}
+
+message EgressDecisionMessage {
+  bool allowed = 1;
+  string reason = 2;
+}
+
+service NetworkService {
+  rpc Decide(EgressRequest) returns (EgressDecisionMessage);
+}
+
+// =============================================================================
+// Code intelligence service (SPEC §11.8, §31.1)
+// =============================================================================
+
+message CodeSearchRequest {
+  RequestContext context = 1;
+  string workspace_id = 2;
+  string query = 3;
+  uint32 limit = 4;
+}
+
+message CodeSearchResult {
+  string path = 1;
+  uint32 line = 2;
+  string symbol = 3;
+  string method = 4;            // lexical_bm25 | tree_sitter | lsp | graph
+}
+
+message CodeSearchResponse {
+  repeated CodeSearchResult results = 1;
+  bool truncated = 2;
+  optional string continuation = 3;
+}
+
+service CodeIntelligenceService {
+  rpc Search(CodeSearchRequest) returns (CodeSearchResponse);
+}
+
+// =============================================================================
+// Extension runtime service (SPEC §12, §35, ADR-0019)
+// =============================================================================
+
+message ExtensionInvokeRequest {
+  RequestContext context = 1;
+  string capability_id = 2;
+  string operation = 3;
+  bytes input = 4;
+}
+
+message ExtensionInvokeResponse {
+  bytes output = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+service ExtensionRuntimeService {
+  rpc Invoke(ExtensionInvokeRequest) returns (ExtensionInvokeResponse);
+}
+
+// =============================================================================
+// Artifact ingest service (SPEC §29.3, §31.1)
+// =============================================================================
+
+message IngestArtifactRequest {
+  RequestContext context = 1;
+  bytes content = 2;
+  string media_type = 3;
+}
+
+message IngestArtifactResponse {
+  ArtifactRef artifact = 1;
+  bool already_present = 2;
+}
+
+service ArtifactIngestService {
+  rpc Ingest(IngestArtifactRequest) returns (IngestArtifactResponse);
+}
+
+// The descriptor set is published with each kernel build (SPEC §31.1,
+// Appendix D). All services carry a RequestContext and are subject to the
+// §31.3 14-step validation pipeline.

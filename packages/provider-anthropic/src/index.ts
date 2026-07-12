@@ -1,5 +1,5 @@
 /**
- * @forge/provider-anthropic — Anthropic Messages API renderer.
+ * @terminus/provider-anthropic — Anthropic Messages API renderer.
  *
  * Maps canonical context to the Anthropic Messages API with system blocks,
  * tool_use/tool_result content blocks, cache_control breakpoints, and the
@@ -20,9 +20,9 @@ import type {
   ContinuationInput,
   ContinuationDecision,
   ProviderToolSchema,
-} from "@forge/provider-core";
-import { BaseProviderRenderer } from "@forge/provider-core";
-import type { TokenCount } from "@forge/domain";
+} from "@terminus/provider-core";
+import { BaseProviderRenderer } from "@terminus/provider-core";
+import type { TokenCount } from "@terminus/domain";
 
 // ────────────────────────── Anthropic wire shapes ────────────────────────────
 

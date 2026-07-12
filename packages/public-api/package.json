@@ -1,10 +1,10 @@
 {
-  "name": "@forge/public-api",
+  "name": "@terminus/public-api",
   "version": "0.1.0",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": { ".": "./src/index.ts" },
   "scripts": { "build": "tsc -p tsconfig.json", "lint": "eslint src" },
-  "dependencies": { "zod": "^4.0.2", "@forge/domain": "workspace:*" }
+  "dependencies": { "zod": "^4.0.2", "@terminus/domain": "workspace:*" }
 }

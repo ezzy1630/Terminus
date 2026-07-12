@@ -2,7 +2,7 @@
 
 ## When to use
 
-Use this runbook when the kernel reports that the requested sandbox backend cannot be enforced (e.g., Bubblewrap not installed on Linux, macOS/Windows backend in degraded mode, container runtime unavailable). Per SPEC §26.3 #11, Forge MUST fail closed or require explicit user selection of a named degraded profile.
+Use this runbook when the kernel reports that the requested sandbox backend cannot be enforced (e.g., Bubblewrap not installed on Linux, macOS/Windows backend in degraded mode, container runtime unavailable). Per SPEC §26.3 #11, Terminus MUST fail closed or require explicit user selection of a named degraded profile.
 
 ## Symptoms
 
@@ -18,7 +18,7 @@ Use this runbook when the kernel reports that the requested sandbox backend cann
 
 1. Check kernel health:
    ```bash
-   grpcurl -plaintext -unix /var/run/forge-kernel.sock forge.kernel.v1.KernelInfoService/Health
+   grpcurl -plaintext -unix /var/run/terminus-kernel.sock terminus.kernel.v1.KernelInfoService/Health
    ```
 2. Check sandbox backend availability:
    ```bash
@@ -37,7 +37,7 @@ Use this runbook when the kernel reports that the requested sandbox backend cann
 
 ## Immediate actions
 
-1. **Do not silently fall back to no sandbox** (SPEC §26.3 #11). Forge must fail closed or require explicit degraded-profile selection.
+1. **Do not silently fall back to no sandbox** (SPEC §26.3 #11). Terminus must fail closed or require explicit degraded-profile selection.
 2. **For Linux Bubblewrap missing:**
    ```bash
    # Debian/Ubuntu
@@ -52,7 +52,7 @@ Use this runbook when the kernel reports that the requested sandbox backend cann
      ```bash
      sudo sysctl -w kernel.unprivileged_userns_clone=1
      ```
-   - Or run Forge with `--sandbox=degraded-local` (named degraded profile) — but only if the user explicitly accepts the risk.
+   - Or run Terminus with `--sandbox=degraded-local` (named degraded profile) — but only if the user explicitly accepts the risk.
 4. **For macOS degraded:** the macOS backend honestly reports degraded capability. Accept degraded mode or move to Linux.
 5. **For Windows degraded:** the Windows backend honestly reports degraded capability. Accept degraded mode or move to Linux.
 6. **For container backend missing:** install Podman or Docker, or use a different backend (ADR-0027).

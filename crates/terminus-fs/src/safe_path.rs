@@ -130,9 +130,7 @@ pub(crate) fn validate_lexical(path: &str) -> Result<(), PathError> {
 fn is_windows_device_name(component: &str) -> bool {
     let lower = component.to_ascii_lowercase();
     let stem = lower.split('.').next().unwrap_or(&lower);
-    matches!(
-        stem,
-        "con" | "prn" | "aux" | "nul"
-    ) || (stem.starts_with("com") && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit())
+    matches!(stem, "con" | "prn" | "aux" | "nul")
+        || (stem.starts_with("com") && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit())
         || (stem.starts_with("lpt") && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit())
 }

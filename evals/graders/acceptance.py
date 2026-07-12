@@ -1,4 +1,4 @@
-"""Acceptance grader for Forge eval tasks.
+"""Acceptance grader for Terminus eval tasks.
 
 The acceptance grader maps the task's declared `acceptance_criteria`
 (see task.yaml) to evidence produced during the run, and decides whether

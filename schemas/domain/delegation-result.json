@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/delegation-result-v1.json",
+  "$id": "https://terminus.dev/schemas/delegation-result-v1.json",
   "title": "DelegationResult",
   "description": "Delegation result envelope (SPEC Appendix E.4). Returned by auxiliary agents (scout, implementer, reviewer, verifier, external harness).",
   "type": "object",

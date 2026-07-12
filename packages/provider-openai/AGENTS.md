@@ -1,4 +1,4 @@
-# @forge/provider-openai — local rules
+# @terminus/provider-openai — local rules
 
 ## Non-negotiable
 

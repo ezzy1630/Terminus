@@ -1,6 +1,6 @@
-use forge_artifacts::{ArtifactError, ArtifactMetadata, ArtifactStore};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use terminus_artifacts::{ArtifactError, ArtifactMetadata, ArtifactStore};
 
 /// An in-memory artifact store. Useful for tests that do not want to touch
 /// the filesystem. Implements a subset of the `ArtifactStore` API by
@@ -17,7 +17,10 @@ impl InMemoryArtifactStore {
         Self::default()
     }
 
-    pub fn ingest(&self, bytes: &[u8]) -> Result<(ArtifactMetadata, forge_kernel_protocol::ArtifactRef), ArtifactError> {
+    pub fn ingest(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(ArtifactMetadata, terminus_kernel_protocol::ArtifactRef), ArtifactError> {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(bytes);
@@ -29,7 +32,8 @@ impl InMemoryArtifactStore {
             };
             g.insert(hash.clone(), bytes.to_vec());
         }
-        let metadata = ArtifactMetadata::new(hash.clone(), bytes.len() as u64, "application/octet-stream");
+        let metadata =
+            ArtifactMetadata::new(hash.clone(), bytes.len() as u64, "application/octet-stream");
         {
             let mut g = match self.metadata.lock() {
                 Ok(g) => g,
@@ -37,7 +41,7 @@ impl InMemoryArtifactStore {
             };
             g.insert(hash.clone(), metadata.clone());
         }
-        let artifact = forge_kernel_protocol::ArtifactRef::new(
+        let artifact = terminus_kernel_protocol::ArtifactRef::new(
             hash,
             bytes.len() as u64,
             metadata.media_type.clone(),
@@ -79,6 +83,9 @@ impl InMemoryArtifactStore {
 /// Note: production tests should prefer `ArtifactStore::open(tempdir())`
 /// which exercises the real CAS layout. `InMemoryArtifactStore` is provided
 /// for very fast unit tests where the on-disk layout is irrelevant.
+#[allow(clippy::expect_used)] // testkit convenience helper: a tempdir/open
+                              // failure means the test cannot run; surfacing
+                              // it immediately is correct (not a runtime path).
 pub fn real_store_in_tempdir() -> (tempfile::TempDir, ArtifactStore) {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = ArtifactStore::open(dir.path()).expect("open store");

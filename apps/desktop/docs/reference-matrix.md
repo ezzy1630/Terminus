@@ -1,16 +1,16 @@
-# Forge Desktop — Reference-Pattern Matrix
+# Terminus Desktop — Reference-Pattern Matrix
 
 This matrix records the patterns observed in the reference products
 listed in SPEC §3 (Codex, Cursor, Apple macOS, T3 Code, OpenCode,
 Omnigent, OpenChamber, AiderDesk, Goose, and other open-source
-coding-agent desktop apps) and the disposition chosen for Forge.
+coding-agent desktop apps) and the disposition chosen for Terminus.
 
 The dispositions are:
 
 - **Adopt** — copy the pattern essentially as-is.
-- **Modify** — keep the core idea but adapt it to Forge's visual
+- **Modify** — keep the core idea but adapt it to Terminus's visual
   direction or architecture.
-- **Reject** — do not implement; the pattern conflicts with Forge's
+- **Reject** — do not implement; the pattern conflicts with Terminus's
   constraints (SPEC §4.1 forbidden visual patterns, near-monochrome
   mandate, or the "calm" personality in SPEC §23).
 
@@ -91,7 +91,7 @@ Each row also notes where in the app the pattern belongs.
 | Search (⌘F) with match-count badge               | VS Code      | Works: scoped search without leaving the terminal. | Adopt (SPEC §15) | `TerminalDrawer.tsx` |
 | Suspend rendering when hidden (`content-visibility: hidden`) | SPEC §25.1 | Works: zero CPU when the drawer is closed. | Adopt | `TerminalDrawer.tsx` |
 | Output cap (8000 lines) to prevent unbounded growth | tmux        | Works: bounds memory; user can clear explicitly. | Adopt | `TerminalDrawer.tsx` |
-| Always-on terminal pane (no drawer)              | tmux, VS Code integrated | Fails for Forge: claims vertical space the conversation needs. | Reject — drawer is hidden by default (SPEC §15) | — |
+| Always-on terminal pane (no drawer)              | tmux, VS Code integrated | Fails for Terminus: claims vertical space the conversation needs. | Reject — drawer is hidden by default (SPEC §15) | — |
 
 ## 8. Approvals
 
@@ -178,7 +178,7 @@ Each row also notes where in the app the pattern belongs.
 
 ## Synthesis
 
-Forge synthesizes these patterns into one coherent system by holding
+Terminus synthesizes these patterns into one coherent system by holding
 to three principles:
 
 1. **Calm by default.** Every adopted pattern is rendered in the

@@ -18,6 +18,10 @@ pub struct RegisterRequest {
     pub root_uri: String,
     #[serde(default)]
     pub canonical_root: String,
+    /// SPEC §28.2: `trusted | untrusted | restricted`. Omitting it defaults
+    /// to `untrusted` (fail-safe) inside the kernel.
+    #[serde(default)]
+    pub trust: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -45,6 +49,7 @@ pub async fn register(
             &req.envelope.effect_intent,
             req.root_uri,
             canonical,
+            &req.trust,
         )
         .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
     Ok(Json(RegisterResponse { workspace_id: id }))
@@ -54,7 +59,7 @@ pub async fn get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     body: axum::body::Bytes,
-) -> Result<Json<forge_kernel::WorkspaceEntry>, ApiError> {
+) -> Result<Json<terminus_kernel::WorkspaceEntry>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     // Body is allowed to be `{}` or contain an envelope; we ignore it.
     let _ = body;

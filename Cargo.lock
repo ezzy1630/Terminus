@@ -167,289 +167,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "forge-artifacts"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "forge-kernel-protocol",
- "hex",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "forge-authz"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "hex",
- "hmac",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "forge-code-intel"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "forge-egress"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "forge-extension-runtime"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "forge-fs"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "forge-git"
-version = "0.1.0"
-dependencies = [
- "forge-artifacts",
- "forge-kernel-protocol",
- "forge-process",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "forge-jobs"
-version = "0.1.0"
-dependencies = [
- "forge-artifacts",
- "forge-kernel-protocol",
- "forge-process",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "forge-kernel"
-version = "0.1.0"
-dependencies = [
- "forge-artifacts",
- "forge-authz",
- "forge-code-intel",
- "forge-egress",
- "forge-extension-runtime",
- "forge-fs",
- "forge-git",
- "forge-jobs",
- "forge-kernel-protocol",
- "forge-kernel-testkit",
- "forge-patch",
- "forge-policy",
- "forge-process",
- "forge-sandbox",
- "forge-sandbox-container",
- "forge-sandbox-linux",
- "forge-secrets",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "forge-kernel-protocol"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "forge-kernel-testkit"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "forge-artifacts",
- "forge-authz",
- "forge-fs",
- "forge-kernel-protocol",
- "forge-policy",
- "forge-sandbox",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "forge-patch"
-version = "0.1.0"
-dependencies = [
- "forge-artifacts",
- "forge-fs",
- "forge-kernel-protocol",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "forge-policy"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "forge-process"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "forge-artifacts",
- "forge-kernel-protocol",
- "forge-sandbox",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "forge-sandbox"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "forge-sandbox-container"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "forge-sandbox",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "forge-sandbox-linux"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "forge-sandbox",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "forge-sandbox-macos"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "forge-sandbox",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "forge-sandbox-windows"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "forge-sandbox",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "forge-secrets"
-version = "0.1.0"
-dependencies = [
- "forge-kernel-protocol",
- "hex",
- "hmac",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -900,6 +617,289 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "terminus-artifacts"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "terminus-kernel-protocol",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-authz"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
+ "terminus-kernel-protocol",
+ "thiserror",
+]
+
+[[package]]
+name = "terminus-code-intel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "terminus-kernel-protocol",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-egress"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "terminus-kernel-protocol",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-extension-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "terminus-kernel-protocol",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-fs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "terminus-kernel-protocol",
+ "thiserror",
+]
+
+[[package]]
+name = "terminus-git"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "terminus-artifacts",
+ "terminus-kernel-protocol",
+ "terminus-process",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-jobs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "terminus-artifacts",
+ "terminus-kernel-protocol",
+ "terminus-process",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-kernel"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "terminus-artifacts",
+ "terminus-authz",
+ "terminus-code-intel",
+ "terminus-egress",
+ "terminus-extension-runtime",
+ "terminus-fs",
+ "terminus-git",
+ "terminus-jobs",
+ "terminus-kernel-protocol",
+ "terminus-kernel-testkit",
+ "terminus-patch",
+ "terminus-policy",
+ "terminus-process",
+ "terminus-sandbox",
+ "terminus-sandbox-container",
+ "terminus-sandbox-linux",
+ "terminus-secrets",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-kernel-protocol"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "terminus-kernel-testkit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "terminus-artifacts",
+ "terminus-authz",
+ "terminus-fs",
+ "terminus-kernel-protocol",
+ "terminus-policy",
+ "terminus-sandbox",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "terminus-patch"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "terminus-artifacts",
+ "terminus-fs",
+ "terminus-kernel-protocol",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "terminus-kernel-protocol",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-process"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "terminus-artifacts",
+ "terminus-kernel-protocol",
+ "terminus-sandbox",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-sandbox"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "terminus-kernel-protocol",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "terminus-sandbox-container"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "terminus-kernel-protocol",
+ "terminus-sandbox",
+ "thiserror",
+]
+
+[[package]]
+name = "terminus-sandbox-linux"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "terminus-kernel-protocol",
+ "terminus-sandbox",
+ "thiserror",
+]
+
+[[package]]
+name = "terminus-sandbox-macos"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "terminus-kernel-protocol",
+ "terminus-sandbox",
+ "thiserror",
+]
+
+[[package]]
+name = "terminus-sandbox-windows"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "terminus-kernel-protocol",
+ "terminus-sandbox",
+ "thiserror",
+]
+
+[[package]]
+name = "terminus-secrets"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "terminus-kernel-protocol",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

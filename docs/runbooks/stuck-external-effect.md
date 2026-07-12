@@ -15,12 +15,12 @@ Use this runbook when an external effect (network write, external-state mutation
 
 1. Identify the side-effect record:
    ```bash
-   sqlite3 db/forge.db "SELECT id, task_id, effect_class, resource_identity, settlement_state, attempted_at, last_checked_at FROM side_effects WHERE settlement_state = 'unknown' ORDER BY attempted_at;"
+   sqlite3 db/terminus.db "SELECT id, task_id, effect_class, resource_identity, settlement_state, attempted_at, last_checked_at FROM side_effects WHERE settlement_state = 'unknown' ORDER BY attempted_at;"
    ```
 2. Check the effect class:
    - `NETWORK_WRITE` — HTTP POST/PUT, webhook, API call.
    - `EXTERNAL_STATE_WRITE` — deploy, database migration, infrastructure change.
-   - `git push` (via `forge-git`) — push to remote.
+   - `git push` (via `terminus-git`) — push to remote.
 3. Check the external system's state:
    ```bash
    # For an HTTP call: re-read (GET) the resource to see if the write landed
@@ -54,7 +54,7 @@ Use this runbook when an external effect (network write, external-state mutation
 - File an incident report.
 - Add the external system's ambiguous-response pattern to the reconciliation logic.
 - If the external system was down, monitor its recovery.
-- Review idempotency: if the effect was non-idempotent and the system doesn't support idempotency keys, consider wrapping future calls in a Forge-level idempotency layer.
+- Review idempotency: if the effect was non-idempotent and the system doesn't support idempotency keys, consider wrapping future calls in a Terminus-level idempotency layer.
 
 ## Prevention
 

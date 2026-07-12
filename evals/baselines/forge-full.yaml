@@ -1,14 +1,14 @@
 baseline:
-  id: forge-full
+  id: terminus-full
   version: 1
   description: |
-    Forge full mode baseline (SPEC §18.1, §41.2). The strongest
-    supported Forge configuration: scout + implementer + reviewer
+    Terminus full mode baseline (SPEC §18.1, §41.2). The strongest
+    supported Terminus configuration: scout + implementer + reviewer
     topology, adaptive context with provenance DAG, memory on, native
     compaction, deterministic routing with escalation. Used as the
     upper-bound reference and the default comparison point for new
     features.
-  harness: forge
+  harness: terminus
   harness_commit: 0000000000000000000000000000000000000000
   configuration:
     orchestration:

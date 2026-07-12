@@ -1,18 +1,18 @@
 [package]
-name = "forge-process"
+name = "terminus-process"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Async child-process manager for the Forge kernel."
+description = "Async child-process manager for the Terminus kernel."
 
 [lints]
 workspace = true
 
 [dependencies]
-forge-kernel-protocol = { workspace = true }
-forge-artifacts = { workspace = true }
-forge-sandbox = { workspace = true }
+terminus-kernel-protocol = { workspace = true }
+terminus-artifacts = { workspace = true }
+terminus-sandbox = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -41,19 +41,19 @@ policy:
   # denied, even if the URL is otherwise valid.
   allowlist:
     - pattern: "https://api.github.com/**"
-      capability: forge/github
+      capability: terminus/github
     - pattern: "https://gitlab.com/api/v4/**"
-      capability: forge/gitlab
+      capability: terminus/gitlab
     - pattern: "https://lambda.*.amazonaws.com/**"
-      capability: forge/cloud-deploy
+      capability: terminus/cloud-deploy
     - pattern: "https://run.googleapis.com/**"
-      capability: forge/cloud-deploy
+      capability: terminus/cloud-deploy
     - pattern: "https://management.azure.com/**"
-      capability: forge/cloud-deploy
+      capability: terminus/cloud-deploy
     - pattern: "https://image-gen.example.com/**"
-      capability: forge/images
+      capability: terminus/images
     - pattern: "https://vision.example.com/**"
-      capability: forge/images
+      capability: terminus/images
 
   # The proxy records every request: capability, destination, byte count,
   # and latency. Redaction is applied before logging.

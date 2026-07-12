@@ -1,5 +1,5 @@
 /**
- * @forge/extension-host — isolated extension control.
+ * @terminus/extension-host — isolated extension control.
  *
  * Per SPEC §35.9, §35.10: stub `WasiExtensionHost` and `ProcessExtensionHost`.
  * Hook semantics (observe_only, propose_annotation, propose_policy_input,
@@ -10,8 +10,8 @@ import type {
   Uuid7,
   Rfc3339Timestamp,
   ContentHash,
-} from "@forge/domain";
-import { ValidationError, TimeoutError } from "@forge/domain";
+} from "@terminus/domain";
+import { ValidationError, TimeoutError } from "@terminus/domain";
 
 // ────────────────────────── Hooks ────────────────────────────────────────────
 

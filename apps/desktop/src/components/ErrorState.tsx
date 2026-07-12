@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — ErrorState.
+ * Terminus Desktop — ErrorState.
  *
  * Per SPEC §27: required error states include "failed task", "offline
  * runtime", "reconnecting", "missing model", "missing editor", "missing
@@ -205,12 +205,12 @@ const PRESETS: Record<string, ErrorPreset> = {
   offlineRuntime: {
     title: "Control plane offline",
     description:
-      "Forge cannot reach the control plane at the configured address. Make sure the local service is running.",
+      "Terminus cannot reach the control plane at the configured address. Make sure the local service is running.",
     severity: "error",
   },
   reconnecting: {
     title: "Reconnecting",
-    description: "The live stream dropped. Forge is reconnecting and will resume from the last event.",
+    description: "The live stream dropped. Terminus is reconnecting and will resume from the last event.",
     severity: "warning",
   },
   missingModel: {

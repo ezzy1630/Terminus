@@ -1,4 +1,4 @@
-# @forge/capability-registry — local rules
+# @terminus/capability-registry — local rules
 
 ## Non-negotiable
 

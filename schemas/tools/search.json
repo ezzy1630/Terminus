@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/tools/search.json",
+  "$id": "https://terminus.dev/schemas/tools/search.json",
   "title": "search",
   "description": "Search the workspace for symbols, paths, or text. Composes lexical (ripgrep), structural (Tree-sitter), and LSP channels; reranks by intent, path proximity, freshness, authority, and graph centrality. Returns up to aci.search.default_limit (default 20); never exceeds aci.search.hard_limit (default 100).",
   "type": "object",

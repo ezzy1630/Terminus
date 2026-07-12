@@ -53,7 +53,7 @@ Medium. HTTPS enforces transport security. Idempotency keys prevent duplicate ef
 
 ## Migration
 
-OpenCode-compatible HTTP/OpenAPI is retained during bootstrap (ADR-0002). The Forge public API is layered above it; the OpenCode facade is removed once all clients migrate (M11+).
+OpenCode-compatible HTTP/OpenAPI is retained during bootstrap (ADR-0002). The Terminus public API is layered above it; the OpenCode facade is removed once all clients migrate (M11+).
 
 ## Rollback
 

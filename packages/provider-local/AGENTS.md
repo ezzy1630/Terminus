@@ -1,4 +1,4 @@
-# @forge/provider-local — local rules
+# @terminus/provider-local — local rules
 
 ## Non-negotiable
 

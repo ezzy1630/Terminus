@@ -18,9 +18,9 @@ if (!name) {
   console.error("Usage: bun run tools/scaffold/new-rust-crate.ts <name>");
   process.exit(1);
 }
-if (!/^forge-[a-z0-9-]+$/.test(name)) {
-  console.error(`Invalid crate name "${name}": must start with "forge-" and be kebab-case.`);
-  console.error("Examples: forge-tracing, forge-quota, forge-http-server.");
+if (!/^terminus-[a-z0-9-]+$/.test(name)) {
+  console.error(`Invalid crate name "${name}": must start with "terminus-" and be kebab-case.`);
+  console.error("Examples: terminus-tracing, terminus-quota, terminus-http-server.");
   process.exit(1);
 }
 
@@ -92,7 +92,7 @@ fn crate_links() {
 
 writeFileSync(
   join(crateDir, "README.md"),
-  `# ${name}\n\nTODO: one-paragraph description of what this crate does and which Forge components consume it.\n\n## Public API\n\nTODO: list the public types, traits, and functions.\n\n## Invariants\n\nTODO: list the invariants this crate enforces.\n`,
+  `# ${name}\n\nTODO: one-paragraph description of what this crate does and which Terminus components consume it.\n\n## Public API\n\nTODO: list the public types, traits, and functions.\n\n## Invariants\n\nTODO: list the invariants this crate enforces.\n`,
 );
 
 writeFileSync(

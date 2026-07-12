@@ -1,4 +1,4 @@
-use forge_kernel_protocol::{
+use terminus_kernel_protocol::{
     ArtifactRef, CommandSpec, EffectIntent, KernelError, KernelResult, PatchEdit, PatchResponse,
     ProcessEvent, RequestContext, WorkspaceBaseline, WorkspacePath,
 };
@@ -52,13 +52,13 @@ impl FakeKernel {
     ) -> KernelResult<PatchResponse> {
         self.record("patch.apply");
         Ok(PatchResponse {
-            transaction_id: forge_kernel_protocol::new_id(),
+            transaction_id: terminus_kernel_protocol::new_id(),
             state: "applied".to_string(),
             final_repository_revision: String::new(),
             final_dirty_digest: String::new(),
             changed_files: edits
                 .iter()
-                .map(|_| forge_kernel_protocol::ChangedFile {
+                .map(|_| terminus_kernel_protocol::ChangedFile {
                     path: WorkspacePath::new("ws-1", "fake"),
                     old_sha256: String::new(),
                     new_sha256: String::new(),
@@ -84,8 +84,8 @@ impl FakeKernel {
     pub fn deny_everything(&self, _ctx: &RequestContext) -> KernelResult<()> {
         self.record("deny");
         Err(KernelError::new(
-            forge_kernel_protocol::ErrorCode::PolicyDenied,
-            forge_kernel_protocol::ErrorCategory::PolicyDenied,
+            terminus_kernel_protocol::ErrorCode::PolicyDenied,
+            terminus_kernel_protocol::ErrorCategory::PolicyDenied,
             "fake kernel configured to deny",
             false,
         ))

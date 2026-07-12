@@ -1,4 +1,4 @@
-# AGENTS.md — forge-git
+# AGENTS.md — terminus-git
 
 ## Local rules
 

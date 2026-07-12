@@ -5,6 +5,7 @@
 //! overrides an Allow; a Prompt overrides an Allow but is overridden by a
 //! Deny; an `AllowWithConstraints` is weaker than a `Prompt`.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 mod command;
@@ -14,17 +15,13 @@ mod error;
 mod rule;
 mod rules_yaml;
 
-pub use command::{
-    NetworkDestination, NormalizedCommand, Redirection, ShellAst, TaintSource,
-};
+pub use command::EffectType;
+pub use command::{NetworkDestination, NormalizedCommand, Redirection, ShellAst, TaintSource};
 pub use decision::{Constraint, Decision, DecisionReport};
 pub use engine::PolicyEngine;
 pub use error::PolicyError;
-pub use command::EffectType;
 pub use rule::{MatchKind, Rule, RuleEffect, RuleMatch, RuleSet};
-pub use rules_yaml::{
-    default_rule_set, sample_rule_set_yaml, RuleFile, RuleSetFile,
-};
+pub use rules_yaml::{default_rule_set, sample_rule_set_yaml, RuleFile, RuleSetFile};
 
 /// Re-export the protocol error code so callers can build typed errors.
-pub use forge_kernel_protocol::{ErrorCode, KernelError};
+pub use terminus_kernel_protocol::{ErrorCode, KernelError};

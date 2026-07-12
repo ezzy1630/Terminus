@@ -104,6 +104,9 @@ impl RuleSetFile {
 
 /// The default rule set used when no policy profile is configured. Mirrors
 /// `policies/command/default.yaml`.
+#[allow(clippy::expect_used)] // the YAML is a hardcoded constant; a parse
+                              // failure is a programmer error, not a runtime
+                              // condition — surfacing it immediately is correct.
 pub fn default_rule_set() -> RuleSet {
     let yaml = sample_rule_set_yaml();
     let file: RuleSetFile = serde_yaml::from_str(&yaml).expect("default rule set parses");
@@ -163,10 +166,10 @@ rules:
       kind: deny
 
   - id: deny-protected-path-write
-    description: Deny writes to .git, .forge, credentials, .env
+    description: Deny writes to .git, .terminus, credentials, .env
     priority: 50
     match:
-      working_directory_glob: ["**/.git/**", "**/.forge/**", "**/credentials/**", "**/.env*"]
+      working_directory_glob: ["**/.git/**", "**/.terminus/**", "**/credentials/**", "**/.env*"]
     effect:
       kind: deny
 

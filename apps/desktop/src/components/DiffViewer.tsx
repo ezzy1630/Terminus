@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — DiffViewer.
+ * Terminus Desktop — DiffViewer.
  *
  * Per SPEC §13: a resizable split beside the conversation, or an
  * overlay. Review-first, editor-capable. Surfaces:
@@ -321,7 +321,7 @@ function countChanges(file: DiffFile): { additions: number; deletions: number } 
   return { additions, deletions };
 }
 
-const VIEW_MODE_STORAGE = "forge-desktop.diff.view-mode.v1";
+const VIEW_MODE_STORAGE = "terminus-desktop.diff.view-mode.v1";
 
 function readStoredViewMode(): DiffViewMode | null {
   if (typeof window === "undefined") return null;
@@ -619,9 +619,16 @@ function FileNav({
               const dirPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
               return (
                 <div key={path}>
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => onSelect(path)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onSelect(path);
+                      }
+                    }}
                     aria-current={isSel}
                     className={cn(
                       "flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left hover:bg-hover",
@@ -675,7 +682,7 @@ function FileNav({
                     >
                       {isCollapsed ? <ChevronRight size={10} /> : <ChevronDown size={10} />}
                     </button>
-                  </button>
+                  </div>
                 </div>
               );
             })}

@@ -1,16 +1,16 @@
 [package]
-name = "forge-sandbox"
+name = "terminus-sandbox"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Sandbox backend trait and manager for the Forge kernel."
+description = "Sandbox backend trait and manager for the Terminus kernel."
 
 [lints]
 workspace = true
 
 [dependencies]
-forge-kernel-protocol = { workspace = true }
+terminus-kernel-protocol = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,6 +1,6 @@
-use forge_sandbox::profile::SandboxProfile;
-use forge_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
-use forge_sandbox::{SandboxBackend, SandboxError};
+use terminus_sandbox::profile::SandboxProfile;
+use terminus_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
+use terminus_sandbox::{SandboxBackend, SandboxError};
 
 /// A mock sandbox for tests. Always reports `Enforced` and supports any
 /// profile that does not request ambient secrets.
@@ -54,7 +54,7 @@ impl SandboxBackend for MockSandbox {
     fn supports_profile(&self, profile: &SandboxProfile) -> Result<(), SandboxError> {
         if matches!(
             profile.secrets,
-            forge_sandbox::SecretsAccess::AmbientEnvironment
+            terminus_sandbox::SecretsAccess::AmbientEnvironment
         ) {
             return Err(SandboxError::Misconfigured(
                 "mock sandbox rejects ambient secrets".into(),

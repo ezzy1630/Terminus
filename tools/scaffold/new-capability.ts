@@ -35,13 +35,13 @@ mkdirSync(packDir, { recursive: true });
 writeFileSync(
   join(packDir, "pack.yaml"),
   `pack:
-  id: forge/${id}
+  id: terminus/${id}
   version: 1.0.0
   name: ${id}
   description: |
     TODO: one-paragraph description of the ${id} capability pack. Reference
     the SPEC section that mandates it.
-  publisher: forge
+  publisher: terminus
   trust_level: first_party
   operations:
     - id: TODO_op_1
@@ -57,7 +57,7 @@ writeFileSync(
 
 writeFileSync(
   join(packDir, "README.md"),
-  `# forge/${id}\n\nTODO: describe what this capability pack provides and how it is invoked.\n\n## Operations\n\nTODO: list the operations declared in pack.yaml.\n\n## Approval policy\n\nTODO: describe which operations require human approval.\n`,
+  `# terminus/${id}\n\nTODO: describe what this capability pack provides and how it is invoked.\n\n## Operations\n\nTODO: list the operations declared in pack.yaml.\n\n## Approval policy\n\nTODO: describe which operations require human approval.\n`,
 );
 
 console.log(`[new-capability] created capability-packs/${id}/`);

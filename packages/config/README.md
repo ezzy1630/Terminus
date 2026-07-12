@@ -1,6 +1,6 @@
-# @forge/config
+# @terminus/config
 
-Layered typed configuration for Forge.
+Layered typed configuration for Terminus.
 
 Per SPEC Appendix F, configuration is layered in the order:
 compiled secure defaults < organization policy < user configuration <
@@ -9,7 +9,7 @@ weaken non-overridable controls.
 
 ## Public API
 
-- `forgeConfigSchema`: the zod schema for the entire Forge config (Appendix F).
+- `forgeConfigSchema`: the zod schema for the entire Terminus config (Appendix F).
 - `ForgeConfig`: the parsed config type.
 - `compiledDefaults()`: returns the layer-0 defaults.
 - `mergeConfigLayers(sources)`: merges layers, recording provenance and

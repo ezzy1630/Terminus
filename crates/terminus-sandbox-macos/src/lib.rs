@@ -12,7 +12,7 @@
 //!   platform-agnostic `SandboxProfile`. Even when `sandbox-exec` is on
 //!   `$PATH`, the backend reports `Degraded` with a note explaining that
 //!   profile generation is not implemented. Callers should prefer
-//!   `forge-sandbox-container` for a fully-enforced backend.
+//!   `terminus-sandbox-container` for a fully-enforced backend.
 //! - When `sandbox-exec` is NOT on `$PATH`, the backend reports `Unsupported`
 //!   and rejects profiles that require namespace isolation.
 //!
@@ -21,13 +21,14 @@
 //! `Enforced` for the features Seatbelt actually provides (filesystem,
 //! network, process, NoNewPrivs via `seatbelt-profile`).
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
-use forge_sandbox::profile::{NetworkAccess, SandboxProfile};
-use forge_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
-use forge_sandbox::{SandboxBackend, SandboxError};
 use std::path::PathBuf;
 use std::process::Command;
+use terminus_sandbox::profile::{NetworkAccess, SandboxProfile};
+use terminus_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
+use terminus_sandbox::{SandboxBackend, SandboxError};
 
 #[derive(Debug, Clone, Default)]
 pub struct MacOsSandboxBackend {
@@ -98,10 +99,9 @@ impl SandboxBackend for MacOsSandboxBackend {
                     ),
                     "filesystem/network: degraded — Seatbelt profile generation is a stub"
                         .to_string(),
-                    "pid/mount/user namespaces: unsupported on macOS (use forge-sandbox-container)"
+                    "pid/mount/user namespaces: unsupported on macOS (use terminus-sandbox-container)"
                         .to_string(),
-                    "fail closed: prefer forge-sandbox-container for full enforcement"
-                        .to_string(),
+                    "fail closed: prefer terminus-sandbox-container for full enforcement".to_string(),
                 ],
             };
         }
@@ -123,10 +123,10 @@ impl SandboxBackend for MacOsSandboxBackend {
             ],
             notes: vec![
                 "seatbelt CLI (sandbox-exec) not found on PATH".to_string(),
-                "fail closed: prefer forge-sandbox-container".to_string(),
-                "filesystem traversal/symlink protection still enforced by forge-fs PathResolver"
+                "fail closed: prefer terminus-sandbox-container".to_string(),
+                "filesystem traversal/symlink protection still enforced by terminus-fs PathResolver"
                     .to_string(),
-                "egress allowlist still enforced by forge-egress EgressProxy".to_string(),
+                "egress allowlist still enforced by terminus-egress EgressProxy".to_string(),
             ],
         }
     }
@@ -135,7 +135,7 @@ impl SandboxBackend for MacOsSandboxBackend {
         // Security refusal: ambient secrets are never permitted.
         if matches!(
             profile.secrets,
-            forge_sandbox::SecretsAccess::AmbientEnvironment
+            terminus_sandbox::SecretsAccess::AmbientEnvironment
         ) {
             return Err(SandboxError::Misconfigured(
                 "ambient secrets not permitted".into(),
@@ -152,8 +152,7 @@ impl SandboxBackend for MacOsSandboxBackend {
         if self.sandbox_exec_path.is_none() {
             if matches!(profile.network, NetworkAccess::Deny) {
                 return Err(SandboxError::Unsupported(
-                    "profile requires network isolation but sandbox-exec is not available"
-                        .into(),
+                    "profile requires network isolation but sandbox-exec is not available".into(),
                 ));
             }
             return Err(SandboxError::Unsupported(
@@ -194,7 +193,7 @@ fn which_sandbox_exec() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_sandbox::SandboxProfile;
+    use terminus_sandbox::SandboxProfile;
 
     #[test]
     fn macos_backend_fails_closed_when_sandbox_exec_missing() {
@@ -226,8 +225,10 @@ mod tests {
     fn macos_backend_rejects_ambient_secrets() {
         let backend = MacOsSandboxBackend::with_mocked_sandbox_exec(true);
         let mut profile = SandboxProfile::default_restrictive();
-        profile.secrets = forge_sandbox::SecretsAccess::AmbientEnvironment;
-        let err = backend.supports_profile(&profile).expect_err("ambient secrets must be rejected");
+        profile.secrets = terminus_sandbox::SecretsAccess::AmbientEnvironment;
+        let err = backend
+            .supports_profile(&profile)
+            .expect_err("ambient secrets must be rejected");
         assert!(matches!(err, SandboxError::Misconfigured(_)));
     }
 
@@ -236,6 +237,8 @@ mod tests {
         let backend = MacOsSandboxBackend::with_mocked_sandbox_exec(true);
         backend
             .supports_profile(&SandboxProfile::default_restrictive())
-            .expect("restrictive profile should be accepted (degraded) when sandbox-exec is present");
+            .expect(
+                "restrictive profile should be accepted (degraded) when sandbox-exec is present",
+            );
     }
 }

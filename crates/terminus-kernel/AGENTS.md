@@ -1,9 +1,9 @@
-# AGENTS.md — forge-kernel
+# AGENTS.md — terminus-kernel
 
 ## Local rules
 
 - **Library only.** The kernel is a library. The HTTP server lives in
-  `mini-services/forge-kernel`. Do not add an HTTP server here.
+  `mini-services/terminus-kernel`. Do not add an HTTP server here.
 - **Every effect takes a RequestContext + EffectIntent.** No exceptions.
   Production paths MUST go through the service methods so policy and audit
   apply.

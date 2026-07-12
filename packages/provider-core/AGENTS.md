@@ -1,9 +1,9 @@
-# @forge/provider-core — local rules
+# @terminus/provider-core — local rules
 
 ## Non-negotiable
 
 - No network calls. Adapters implement `ProviderTransport`.
-- No provider-specific request bodies. Those live in `@forge/provider-*`.
+- No provider-specific request bodies. Those live in `@terminus/provider-*`.
 - Never silently downgrade privacy class.
 - Cost anomalies MUST be surfaced.
 

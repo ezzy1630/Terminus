@@ -1,4 +1,4 @@
-# @forge/extension-host
+# @terminus/extension-host
 
 Isolated extension control. Per SPEC §35.9, §35.10.
 

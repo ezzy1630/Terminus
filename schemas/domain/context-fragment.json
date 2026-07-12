@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/domain/context-fragment.json",
+  "$id": "https://terminus.dev/schemas/domain/context-fragment.json",
   "title": "ContextFragment",
   "description": "Context Compiler IR fragment (SPEC §8.1, Appendix E.2). Fragments are the unit of context compilation, selection, and invalidation.",
   "type": "object",

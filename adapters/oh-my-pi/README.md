@@ -9,7 +9,7 @@ permanent baseline (SPEC §41.2) for comparison against Pi.
 Oh My Pi improves on Pi with partial tool interception, emulated
 session resume, and native compaction. Its context visibility remains
 opaque and its filesystem/network/secret enforcement is still weaker
-than Forge's. Forge supplies outer sandbox, brokered network, and
+than Terminus's. Terminus supplies outer sandbox, brokered network, and
 brokered secrets.
 
 ## When to use
@@ -24,5 +24,5 @@ harness.
 The Pi vs Oh My Pi comparison is one of the "minimal harness"
 experiments in SPEC §3.7. Oh My Pi's native compaction is a key
 differentiator: it lets the harness survive longer tasks without
-Forge's outer checkpointing, which is a useful signal in long-horizon
+Terminus's outer checkpointing, which is a useful signal in long-horizon
 evaluations.

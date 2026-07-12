@@ -1,8 +1,8 @@
 {
-  "name": "@forge/desktop",
+  "name": "@terminus/desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Forge desktop application — the calm, fast, focused macOS-native UI for the Forge coding-agent harness.",
+  "description": "Terminus desktop application — the calm, fast, focused macOS-native UI for the Terminus coding-agent harness.",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,7 @@
     "build": "tsc -b && vite build",
     "build:electron": "tsc -p electron/tsconfig.json && vite build",
     "preview": "vite preview",
-    "lint": "eslint src electron",
+    "lint": "eslint --no-ignore --ext .ts,.tsx src electron",
     "test": "vitest run",
     "test:watch": "vitest",
     "package": "electron-builder --mac --arm64",
@@ -52,8 +52,8 @@
     "wait-on": "^8.0.0"
   },
   "build": {
-    "appId": "dev.forge.desktop",
-    "productName": "Forge",
+    "appId": "dev.terminus.desktop",
+    "productName": "Terminus",
     "directories": {
       "output": "release"
     },

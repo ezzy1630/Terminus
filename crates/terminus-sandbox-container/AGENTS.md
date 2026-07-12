@@ -1,4 +1,4 @@
-# AGENTS.md — forge-sandbox-container
+# AGENTS.md — terminus-sandbox-container
 
 ## Local rules
 

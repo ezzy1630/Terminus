@@ -1,4 +1,4 @@
-# @forge/session-runtime
+# @terminus/session-runtime
 
 Session/thread/turn lifecycle: `SessionService` with `openWorkspace`,
 `createSession`, `pause`, `archive`. `ThreadService` with `create`, `fork`,

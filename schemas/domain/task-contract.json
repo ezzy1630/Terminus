@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/domain/task-contract.json",
+  "$id": "https://terminus.dev/schemas/domain/task-contract.json",
   "title": "TaskContract",
-  "description": "Forge task contract (SPEC §14.3, Appendix E.1). The contract is the user's binding intent; scope expansion requires a new authorization.",
+  "description": "Terminus task contract (SPEC §14.3, Appendix E.1). The contract is the user's binding intent; scope expansion requires a new authorization.",
   "type": "object",
   "additionalProperties": false,
   "required": [

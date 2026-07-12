@@ -1,4 +1,4 @@
-# @forge/runtime-protocol — local rules
+# @terminus/runtime-protocol — local rules
 
 ## Non-negotiable
 
@@ -16,6 +16,6 @@
 ## What NOT to add
 
 - I/O. The sink is an interface; concrete persistence lives in
-  `@forge/task-runtime`/`@forge/session-runtime`.
+  `@terminus/task-runtime`/`@terminus/session-runtime`.
 - Provider-specific shapes.
 - Direct persistence layer.

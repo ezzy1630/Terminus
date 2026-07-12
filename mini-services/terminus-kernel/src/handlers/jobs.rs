@@ -10,8 +10,8 @@ use axum::extract::{Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
-use forge_jobs::{JobRecord, JobState};
-use forge_kernel_protocol::CommandSpec;
+use terminus_jobs::{JobRecord, JobState};
+use terminus_kernel_protocol::CommandSpec;
 use serde::{Deserialize, Serialize};
 
 use crate::api::Envelope;
@@ -45,7 +45,7 @@ pub async fn start(
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     let req: StartJobRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
-    let job_id = forge_kernel_protocol::new_id();
+    let job_id = terminus_kernel_protocol::new_id();
     let command_str = if req.command_str.is_empty() {
         format!("{} {}", req.command.program, req.command.args.join(" "))
     } else {
@@ -67,16 +67,13 @@ pub async fn start(
         .create(record)
         .await
         .map_err(|e| ApiError::internal(format!("job create: {e}"), &trace_id.0))?;
-    let spawn = forge_process::NormalizedSpawn::from_spec(&req.command)
+    let spawn = terminus_process::NormalizedSpawn::from_spec(&req.command)
         .map_err(|e| ApiError::validation(format!("command spec: {e}"), &trace_id.0))?;
     manager
         .start(&job_id, spawn)
         .await
         .map_err(|e| ApiError::internal(format!("job start: {e}"), &trace_id.0))?;
-    let state_now = manager
-        .state(&job_id)
-        .await
-        .unwrap_or(JobState::Running);
+    let state_now = manager.state(&job_id).await.unwrap_or(JobState::Running);
     Ok(Json(StartJobResponse {
         job_id,
         state: state_now.as_str().to_string(),
@@ -96,9 +93,10 @@ pub async fn get(
 ) -> Result<Json<JobStateResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     let manager = state.kernel.jobs.manager().clone();
-    let record = manager.get(&id).await.ok_or_else(|| {
-        ApiError::not_found(format!("job {id} not found"), &trace_id.0)
-    })?;
+    let record = manager
+        .get(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
     Ok(Json(JobStateResponse {
         job_id: id,
         state: record.state.as_str().to_string(),
@@ -118,7 +116,10 @@ pub async fn stream(
     let manager = state.kernel.jobs.manager().clone();
     // Verify the job exists.
     if manager.get(&id).await.is_none() {
-        return Err(ApiError::not_found(format!("job {id} not found"), &trace_id.0));
+        return Err(ApiError::not_found(
+            format!("job {id} not found"),
+            &trace_id.0,
+        ));
     }
 
     let stream = async_stream::stream! {
@@ -171,9 +172,10 @@ pub async fn input(
     let req: JobInputRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
     let manager = state.kernel.jobs.manager().clone();
-    let record = manager.get(&id).await.ok_or_else(|| {
-        ApiError::not_found(format!("job {id} not found"), &trace_id.0)
-    })?;
+    let record = manager
+        .get(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
     let _ = req.input; // The kernel does not yet pipe stdin to running jobs.
     Ok(Json(JobStateResponse {
         job_id: id,
@@ -199,9 +201,10 @@ pub async fn signal(
     let req: JobSignalRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
     let manager = state.kernel.jobs.manager().clone();
-    let record = manager.get(&id).await.ok_or_else(|| {
-        ApiError::not_found(format!("job {id} not found"), &trace_id.0)
-    })?;
+    let record = manager
+        .get(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
     // The kernel does not yet route arbitrary signals; we record the request
     // and return the current state.
     let _ = req.signal;
@@ -228,7 +231,11 @@ pub async fn stop(
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     let req: JobStopRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
-    let reason = if req.reason.is_empty() { "stopped" } else { &req.reason };
+    let reason = if req.reason.is_empty() {
+        "stopped"
+    } else {
+        &req.reason
+    };
     let manager = state.kernel.jobs.manager().clone();
     let final_state = manager
         .stop(&id, reason)

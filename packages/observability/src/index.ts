@@ -1,5 +1,5 @@
 /**
- * @forge/observability — OpenTelemetry-style span helpers, structured logging,
+ * @terminus/observability — OpenTelemetry-style span helpers, structured logging,
  * and metric definitions.
  *
  * Privacy-aware: never logs raw prompts, source, secrets; uses IDs and hashes
@@ -11,7 +11,7 @@
  * supplies a backend via `setTelemetryBackend`.
  */
 import { z } from "zod";
-import type { TraceId, PrincipalId, Uuid7 } from "@forge/domain";
+import type { TraceId, PrincipalId, Uuid7 } from "@terminus/domain";
 
 // ────────────────────────── Span model ───────────────────────────────────────
 
@@ -286,7 +286,7 @@ class InMemoryBackend implements TelemetryBackend {
 // ────────────────────────── Backend registry ─────────────────────────────────
 
 let _backend: TelemetryBackend = new InMemoryBackend();
-let _resource: ResourceContext = { service: "forge", component: "unknown" };
+let _resource: ResourceContext = { service: "terminus", component: "unknown" };
 
 /** Override the global telemetry backend. Returns the previous one. */
 export function setTelemetryBackend(b: TelemetryBackend): TelemetryBackend {
@@ -486,29 +486,29 @@ export function redactFields(
 
 /** Standard metric names used across the control plane. */
 export const Metrics = {
-  PROVIDER_REQUEST_TOTAL: "forge.provider.request.total",
-  PROVIDER_REQUEST_DURATION_MS: "forge.provider.request.duration_ms",
-  PROVIDER_INPUT_TOKENS: "forge.provider.tokens.input",
-  PROVIDER_OUTPUT_TOKENS: "forge.provider.tokens.output",
-  PROVIDER_CACHED_TOKENS: "forge.provider.tokens.cached",
-  PROVIDER_COST_MICROS: "forge.provider.cost.micros",
-  PROVIDER_RATE_LIMITED_TOTAL: "forge.provider.rate_limited.total",
-  CONTEXT_FRAGMENT_SELECTED: "forge.context.fragment.selected",
-  CONTEXT_FRAGMENT_OMITTED: "forge.context.fragment.omitted",
-  CONTEXT_ESTIMATED_TOKENS: "forge.context.tokens.estimated",
-  CONTEXT_OBSERVED_TOKENS: "forge.context.tokens.observed",
-  TOOL_CALL_TOTAL: "forge.tool.call.total",
-  TOOL_CALL_DURATION_MS: "forge.tool.call.duration_ms",
-  TOOL_CALL_DENIED_TOTAL: "forge.tool.call.denied.total",
-  TASK_ACTIVE: "forge.task.active",
-  TASK_DURATION_S: "forge.task.duration_s",
-  TURN_DURATION_MS: "forge.turn.duration_ms",
-  VERIFICATION_NODE_TOTAL: "forge.verification.node.total",
-  VERIFICATION_NODE_PASSED: "forge.verification.node.passed",
-  VERIFICATION_NODE_FAILED: "forge.verification.node.failed",
-  MEMORY_CANDIDATES_TOTAL: "forge.memory.candidates.total",
-  MEMORY_RETRIEVAL_HITS: "forge.memory.retrieval.hits",
-  EVENT_DROPPED: "forge.event.dropped",
+  PROVIDER_REQUEST_TOTAL: "terminus.provider.request.total",
+  PROVIDER_REQUEST_DURATION_MS: "terminus.provider.request.duration_ms",
+  PROVIDER_INPUT_TOKENS: "terminus.provider.tokens.input",
+  PROVIDER_OUTPUT_TOKENS: "terminus.provider.tokens.output",
+  PROVIDER_CACHED_TOKENS: "terminus.provider.tokens.cached",
+  PROVIDER_COST_MICROS: "terminus.provider.cost.micros",
+  PROVIDER_RATE_LIMITED_TOTAL: "terminus.provider.rate_limited.total",
+  CONTEXT_FRAGMENT_SELECTED: "terminus.context.fragment.selected",
+  CONTEXT_FRAGMENT_OMITTED: "terminus.context.fragment.omitted",
+  CONTEXT_ESTIMATED_TOKENS: "terminus.context.tokens.estimated",
+  CONTEXT_OBSERVED_TOKENS: "terminus.context.tokens.observed",
+  TOOL_CALL_TOTAL: "terminus.tool.call.total",
+  TOOL_CALL_DURATION_MS: "terminus.tool.call.duration_ms",
+  TOOL_CALL_DENIED_TOTAL: "terminus.tool.call.denied.total",
+  TASK_ACTIVE: "terminus.task.active",
+  TASK_DURATION_S: "terminus.task.duration_s",
+  TURN_DURATION_MS: "terminus.turn.duration_ms",
+  VERIFICATION_NODE_TOTAL: "terminus.verification.node.total",
+  VERIFICATION_NODE_PASSED: "terminus.verification.node.passed",
+  VERIFICATION_NODE_FAILED: "terminus.verification.node.failed",
+  MEMORY_CANDIDATES_TOTAL: "terminus.memory.candidates.total",
+  MEMORY_RETRIEVAL_HITS: "terminus.memory.retrieval.hits",
+  EVENT_DROPPED: "terminus.event.dropped",
 } as const;
 export type MetricName = (typeof Metrics)[keyof typeof Metrics];
 

@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — global ambient declarations.
+ * Terminus Desktop — global ambient declarations.
  *
  * Re-exports the React 19 JSX namespace globally so existing
  * `JSX.Element` return-type annotations continue to work after the

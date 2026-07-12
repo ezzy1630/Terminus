@@ -1,4 +1,4 @@
-# forge-egress
+# terminus-egress
 
 Egress proxy with destination allowlist and private-IP denial.
 

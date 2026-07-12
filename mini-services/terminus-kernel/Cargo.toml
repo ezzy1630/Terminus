@@ -1,32 +1,48 @@
 [package]
-name = "forge-kernel-mini"
+name = "terminus-kernel-mini"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Forge kernel HTTP mini-service (port 3040) — the non-bypassable effect boundary."
+description = "Terminus kernel HTTP mini-service (port 3040) — the non-bypassable effect boundary."
 
 # This crate is intentionally NOT a member of the root workspace; it has its
 # own (empty) [workspace] table so `cargo build` inside this directory does
 # not compile the entire crate graph every time.
 [workspace]
 
+# Lint levels mirror the root workspace (SPEC §44.2). This crate is outside
+# the root workspace, so it carries its own [lints] table rather than
+# inheriting. `clippy::all`, `unwrap_used`/`expect_used`/`panic`, `unsafe_code`,
+# and `unused_must_use` are denied; pedantic/nursery are advisory (warn).
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = "deny"
+pedantic = "warn"
+nursery = "warn"
+unwrap_used = { level = "deny", priority = 1 }
+expect_used = { level = "deny", priority = 1 }
+panic = { level = "deny", priority = 1 }
+
 [dependencies]
-# Forge kernel crates (path deps to the workspace crates).
-forge-kernel = { path = "../../crates/forge-kernel" }
-forge-kernel-protocol = { path = "../../crates/forge-kernel-protocol" }
-forge-artifacts = { path = "../../crates/forge-artifacts" }
-forge-fs = { path = "../../crates/forge-fs" }
-forge-policy = { path = "../../crates/forge-policy" }
-forge-sandbox = { path = "../../crates/forge-sandbox" }
-forge-process = { path = "../../crates/forge-process" }
-forge-jobs = { path = "../../crates/forge-jobs" }
-forge-patch = { path = "../../crates/forge-patch" }
-forge-secrets = { path = "../../crates/forge-secrets" }
-forge-egress = { path = "../../crates/forge-egress" }
-forge-code-intel = { path = "../../crates/forge-code-intel" }
-forge-extension-runtime = { path = "../../crates/forge-extension-runtime" }
-forge-git = { path = "../../crates/forge-git" }
-forge-authz = { path = "../../crates/forge-authz" }
+# Terminus kernel crates (path deps to the workspace crates).
+terminus-kernel = { path = "../../crates/terminus-kernel" }
+terminus-kernel-protocol = { path = "../../crates/terminus-kernel-protocol" }
+terminus-artifacts = { path = "../../crates/terminus-artifacts" }
+terminus-fs = { path = "../../crates/terminus-fs" }
+terminus-policy = { path = "../../crates/terminus-policy" }
+terminus-sandbox = { path = "../../crates/terminus-sandbox" }
+terminus-process = { path = "../../crates/terminus-process" }
+terminus-jobs = { path = "../../crates/terminus-jobs" }
+terminus-patch = { path = "../../crates/terminus-patch" }
+terminus-secrets = { path = "../../crates/terminus-secrets" }
+terminus-egress = { path = "../../crates/terminus-egress" }
+terminus-code-intel = { path = "../../crates/terminus-code-intel" }
+terminus-extension-runtime = { path = "../../crates/terminus-extension-runtime" }
+terminus-git = { path = "../../crates/terminus-git" }
+terminus-authz = { path = "../../crates/terminus-authz" }
 
 # HTTP stack.
 axum = { version = "0.7", features = ["json", "http1", "tokio"] }
@@ -48,6 +64,23 @@ hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 url = "2"
+
+# gRPC-over-UDS transport (ADR-0007, SPEC §30.1 Boundary B). The .proto is
+# canonical; these hand-written prost messages mirror it as a bootstrap
+# bridge until prost-build codegen via buf is wired in CI (M3 completion).
+# The UDS binding + tonic server + capability-token RequestContext here prove
+# the transport contract; the HTTP bootstrap remains the default path.
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+[build-dependencies]
+tonic-build = "0.12"
+protoc-bin-vendored = "3"
+
+[dev-dependencies]
+tempfile = "3"
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 [profile.release]
 opt-level = 3

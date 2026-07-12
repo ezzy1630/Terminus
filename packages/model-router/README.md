@@ -1,4 +1,4 @@
-# @forge/model-router
+# @terminus/model-router
 
 Deterministic routing + escalation. Tasks request capabilities rather than
 model names; the router ranks eligible models by cohort performance, health,

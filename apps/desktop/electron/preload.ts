@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Electron preload script.
+ * Terminus Desktop — Electron preload script.
  *
  * Per SPEC §2: "The renderer must consume the harness through the repository's
  * existing typed interfaces. Do not move harness logic into React components
@@ -7,7 +7,7 @@
  *
  * The preload exposes three IPC bridges so the renderer can:
  *
- *   1. `forgeDesktop` — read the Forge API base URL, platform info, send
+ *   1. `forgeDesktop` — read the Terminus API base URL, platform info, send
  *      native notifications, control the window, and read/set the theme.
  *
  *   2. `forgeTerminal` — spawn/write/resize/kill PTY sessions and receive
@@ -19,21 +19,21 @@
  *      the computer-use PiP (SPEC §16).
  *
  * All harness logic stays in the Rust kernel + TS control plane. The renderer
- * uses @forge/public-client to talk to the control plane over HTTP/SSE.
+ * uses @terminus/public-client to talk to the control plane over HTTP/SSE.
  */
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
-const FORGE_API_BASE = process.env.FORGE_API_BASE ?? "http://127.0.0.1:3050";
-const FORGE_GATEWAY = process.env.FORGE_GATEWAY ?? "http://127.0.0.1:81";
-const FORGE_TOKEN = process.env.FORGE_TOKEN ?? "forge-control-dev-token";
+const TERMINUS_API_BASE = process.env.TERMINUS_API_BASE ?? "http://127.0.0.1:3050";
+const TERMINUS_GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
+const TERMINUS_TOKEN = process.env.TERMINUS_TOKEN ?? "terminus-control-dev-token";
 const PLATFORM = process.platform;
 
 // ────────────────────────── forgeDesktop ─────────────────────────────────────
 
 contextBridge.exposeInMainWorld("forgeDesktop", {
-  apiBase: FORGE_API_BASE,
-  gateway: FORGE_GATEWAY,
-  token: FORGE_TOKEN,
+  apiBase: TERMINUS_API_BASE,
+  gateway: TERMINUS_GATEWAY,
+  token: TERMINUS_TOKEN,
   platform: PLATFORM,
   isMac: PLATFORM === "darwin",
   // Native notification bridge (SPEC §5: "Use native notifications only when

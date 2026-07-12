@@ -8,7 +8,7 @@
 
 ## Context
 
-The Forge product is a coding-agent operating system, not a benchmark entry or a research demo. Many existing harnesses optimize for raw task success on a single benchmark, hide cost behind "tokens" without breaking out compute/wall-clock/human attention, or aggregate everything into one number that conceals safety regressions. We need a primary metric that:
+The Terminus product is a coding-agent operating system, not a benchmark entry or a research demo. Many existing harnesses optimize for raw task success on a single benchmark, hide cost behind "tokens" without breaking out compute/wall-clock/human attention, or aggregate everything into one number that conceals safety regressions. We need a primary metric that:
 
 - rewards verified completion, not model-asserted completion;
 - penalizes cost (model, compute, wall-clock, and human attention) so sophisticated features must earn their place;

@@ -32,21 +32,21 @@ Use this runbook when syncing with the pinned OpenCode upstream produces merge c
    ```bash
    git diff --name-only --diff-filter=U
    ```
-5. For each conflict, determine: is this a Forge-owned change (intentional divergence) or an accidental edit?
+5. For each conflict, determine: is this a Terminus-owned change (intentional divergence) or an accidental edit?
 
 ## Immediate actions
 
 1. **Do not force-push or abandon the merge.** The conflicts need to be resolved deliberately.
 2. **Categorize each conflict:**
-   - **Accidental edit to an inherited file:** revert the Forge-side edit; take the upstream version. Update `docs/security/effect-bypass-register.yaml` if the edit was a bypass.
-   - **Intentional Forge-owned change (in an inherited file):** resolve the conflict manually, preserving the Forge-side semantics. Update `upstream/divergence-budget.yaml` with the file and the reason.
+   - **Accidental edit to an inherited file:** revert the Terminus-side edit; take the upstream version. Update `docs/security/effect-bypass-register.yaml` if the edit was a bypass.
+   - **Intentional Terminus-owned change (in an inherited file):** resolve the conflict manually, preserving the Terminus-side semantics. Update `upstream/divergence-budget.yaml` with the file and the reason.
    - **Generic fix that should go upstream:** extract the fix, propose it upstream via PR, then take the upstream version once merged.
 3. **Re-run parity tests after each resolution:**
    ```bash
    just upstream-check
    ```
 4. **If the divergence budget is exceeded:** escalate to the upstream owner. Either:
-   - Accelerate replacement of the affected package behind a Forge interface (ADR-0002 exit strategy), OR
+   - Accelerate replacement of the affected package behind a Terminus interface (ADR-0002 exit strategy), OR
    - Accept a temporary budget increase with a documented remediation plan.
 
 ## Recovery
@@ -65,7 +65,7 @@ Use this runbook when syncing with the pinned OpenCode upstream produces merge c
 ## Post-incident
 
 - File an incident report if the sync blocked a release.
-- Add high-conflict files to the "replace behind Forge interface" list (ADR-0002 exit strategy).
+- Add high-conflict files to the "replace behind Terminus interface" list (ADR-0002 exit strategy).
 - Propose generic fixes upstream to reduce future conflicts.
 - Review the divergence budget — is it realistic? Adjust if needed.
 - If a conflict introduced a regression, add a parity test for the affected behavior.

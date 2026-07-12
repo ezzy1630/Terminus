@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Computer Use placeholder (empty state).
+ * Terminus Desktop — Computer Use placeholder (empty state).
  *
  * Per SPEC §11: "Do not show Computer Use before computer use has
  * occurred." When no computer-use session is active, the inspector

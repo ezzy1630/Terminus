@@ -42,8 +42,8 @@ The selection will be made via a new ADR (this one promoted to ADOPTED with the 
 
 ## Consequences (once a backend is chosen)
 
-- The chosen backend(s) implement the `SandboxBackend` trait in `crates/forge-sandbox`.
-- `crates/forge-sandbox-container` already exists as a scaffold.
+- The chosen backend(s) implement the `SandboxBackend` trait in `crates/terminus-sandbox`.
+- `crates/terminus-sandbox-container` already exists as a scaffold.
 - Digest-pinned container images are required (SPEC §36.8).
 - The container-untrusted policy profile (`policies/sandbox/container-untrusted.yaml`) is the default for untrusted repos.
 - The non-bypassability tests (SPEC §27.4) must pass on the chosen backend.

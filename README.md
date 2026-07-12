@@ -1,8 +1,8 @@
-# Forge
+# Terminus
 
 > A provider-neutral coding-agent operating system with a non-bypassable Rust effect kernel, an inspectable Context Compiler, evidence-based completion, and an eval gate for complexity.
 
-Forge is built from the [complete product, architecture, security, and implementation specification](SPEC.md) (9,550 lines, 50 sections, 11 appendices). The system uses a fork-assisted strangler architecture: the durable contracts, evidence, context manifests, and Rust effect boundary survive any component replacement.
+Terminus is built from the [complete product, architecture, security, and implementation specification](SPEC.md) (9,550 lines, 50 sections, 11 appendices). The system uses a fork-assisted strangler architecture: the durable contracts, evidence, context manifests, and Rust effect boundary survive any component replacement.
 
 ---
 
@@ -65,7 +65,7 @@ All effects cross the Rust kernel boundary. The control plane has no ambient aut
 ## Repository structure
 
 ```
-forge/
+terminus/
 ├── apps/
 │   ├── desktop/              # Electron + React + TypeScript macOS app
 │   ├── tui/                  # Terminal client (primary per SPEC §43.4)
@@ -74,8 +74,8 @@ forge/
 ├── packages/                 # 27 TypeScript packages (domain, context, providers, ...)
 ├── crates/                   # 19 Rust crates (kernel, sandbox, process, patch, ...)
 ├── mini-services/
-│   ├── forge-kernel/         # Rust kernel HTTP service (port 3040)
-│   └── forge-control/        # TS control plane HTTP service (port 3050)
+│   ├── terminus-kernel/         # Rust kernel HTTP service (port 3040)
+│   └── terminus-control/        # TS control plane HTTP service (port 3050)
 ├── python/forge_evals/       # Python evaluation laboratory
 ├── adapters/                 # External harness adapters (codex, claude-code, pi, ...)
 ├── skills/                   # Agent Skills (builtin + fixtures)
@@ -128,39 +128,39 @@ cd apps/desktop && bun install && bun run dev:electron
 ```bash
 # Kernel health
 curl -sS http://127.0.0.1:3040/v1/health \
-  -X POST -H "Authorization: Bearer forge-kernel-dev-token" -d '{}'
+  -X POST -H "Authorization: Bearer terminus-kernel-dev-token" -d '{}'
 
 # Control plane health
 curl -sS http://127.0.0.1:3050/v1/system/health \
-  -H "Authorization: Bearer forge-control-dev-token"
+  -H "Authorization: Bearer terminus-control-dev-token"
 
 # End-to-end: create workspace → session → task → turn → COMPLETED
 W=$(curl -sS -X POST http://127.0.0.1:3050/v1/workspaces/open \
-  -d '{"root_uri":"/tmp/forge-demo"}' \
-  -H "Authorization: Bearer forge-control-dev-token" | jq -r .id)
+  -d '{"root_uri":"/tmp/terminus-demo"}' \
+  -H "Authorization: Bearer terminus-control-dev-token" | jq -r .id)
 
 S=$(curl -sS -X POST http://127.0.0.1:3050/v1/sessions \
   -d "{\"workspace_id\":\"$W\",\"title\":\"demo\"}" \
-  -H "Authorization: Bearer forge-control-dev-token" \
+  -H "Authorization: Bearer terminus-control-dev-token" \
   | jq -r '.id,.active_thread_id')
 SID=$(echo "$S" | head -1); TID=$(echo "$S" | tail -1)
 
 T=$(curl -sS -X POST http://127.0.0.1:3050/v1/tasks \
   -d "{\"session_id\":\"$SID\",\"thread_id\":\"$TID\",\"objective\":\"demo\"}" \
-  -H "Authorization: Bearer forge-control-dev-token" | jq -r .id)
+  -H "Authorization: Bearer terminus-control-dev-token" | jq -r .id)
 
 curl -sS -X POST "http://127.0.0.1:3050/v1/tasks/$T/start" \
-  -H "Authorization: Bearer forge-control-dev-token" > /dev/null
+  -H "Authorization: Bearer terminus-control-dev-token" > /dev/null
 
 curl -sS -X POST http://127.0.0.1:3050/v1/turns \
-  -d "{\"thread_id\":\"$TID\",\"task_id\":\"$T\",\"user_input\":\"hello forge\"}" \
-  -H "Authorization: Bearer forge-control-dev-token" > /dev/null
+  -d "{\"thread_id\":\"$TID\",\"task_id\":\"$T\",\"user_input\":\"hello terminus\"}" \
+  -H "Authorization: Bearer terminus-control-dev-token" > /dev/null
 
 sleep 5
 
 # Task should be COMPLETED with verification DAG passed
 curl -sS "http://127.0.0.1:3050/v1/tasks/$T" \
-  -H "Authorization: Bearer forge-control-dev-token" | jq '{status,phase}'
+  -H "Authorization: Bearer terminus-control-dev-token" | jq '{status,phase}'
 ```
 
 ### Use the clients
@@ -190,26 +190,26 @@ The non-bypassable effect kernel. All process, filesystem, network, secret, and 
 
 | Crate | Responsibility | Tests |
 |---|---|---:|
-| `forge-kernel` | Service assembly (13 service groups) | 0 |
-| `forge-kernel-protocol` | Request/response types, error codes | 13 |
-| `forge-authz` | Capability tokens (HMAC, audience, nonce, revocation) | 5 |
-| `forge-policy` | Command policy engine (strictest-wins rule evaluation) | 8 |
-| `forge-sandbox` | Sandbox backend trait + `LocalRestrictive` | 3 |
-| `forge-sandbox-linux` | Bubblewrap backend (real bwrap argv construction) | 18 |
-| `forge-sandbox-macos` | Seatbelt detection + honest reporting | 4 |
-| `forge-sandbox-windows` | AppContainer detection + honest reporting | 4 |
-| `forge-sandbox-container` | Container/micro-VM backend stub | 2 |
-| `forge-process` | Process manager (env_clear, PTY, process groups, timeout) | 6 |
-| `forge-jobs` | Durable job state machine + recovery | 12 |
-| `forge-fs` | Safe path resolution (traversal/symlink rejection) | 13 |
-| `forge-patch` | Transactional edit engine (journal, snapshots, rollback) | 10 |
-| `forge-artifacts` | CAS (sha256/ab/cd layout, atomic rename, SQLite metadata) | 25 |
-| `forge-secrets` | Secret broker (short-lived handles, redaction) | 11 |
-| `forge-egress` | Network egress proxy (allowlist, DNS, private-address denial) | 7 |
-| `forge-code-intel` | Tree-sitter symbol index | 4 |
-| `forge-extension-runtime` | WASI extension host stub | 4 |
-| `forge-git` | Protected worktree/commit/merge operations | 3 |
-| `forge-kernel-testkit` | Fakes, builders, in-memory stores | 7 |
+| `terminus-kernel` | Service assembly (13 service groups) | 0 |
+| `terminus-kernel-protocol` | Request/response types, error codes | 13 |
+| `terminus-authz` | Capability tokens (HMAC, audience, nonce, revocation) | 5 |
+| `terminus-policy` | Command policy engine (strictest-wins rule evaluation) | 8 |
+| `terminus-sandbox` | Sandbox backend trait + `LocalRestrictive` | 3 |
+| `terminus-sandbox-linux` | Bubblewrap backend (real bwrap argv construction) | 18 |
+| `terminus-sandbox-macos` | Seatbelt detection + honest reporting | 4 |
+| `terminus-sandbox-windows` | AppContainer detection + honest reporting | 4 |
+| `terminus-sandbox-container` | Container/micro-VM backend stub | 2 |
+| `terminus-process` | Process manager (env_clear, PTY, process groups, timeout) | 6 |
+| `terminus-jobs` | Durable job state machine + recovery | 12 |
+| `terminus-fs` | Safe path resolution (traversal/symlink rejection) | 13 |
+| `terminus-patch` | Transactional edit engine (journal, snapshots, rollback) | 10 |
+| `terminus-artifacts` | CAS (sha256/ab/cd layout, atomic rename, SQLite metadata) | 25 |
+| `terminus-secrets` | Secret broker (short-lived handles, redaction) | 11 |
+| `terminus-egress` | Network egress proxy (allowlist, DNS, private-address denial) | 7 |
+| `terminus-code-intel` | Tree-sitter symbol index | 4 |
+| `terminus-extension-runtime` | WASI extension host stub | 4 |
+| `terminus-git` | Protected worktree/commit/merge operations | 3 |
+| `terminus-kernel-testkit` | Fakes, builders, in-memory stores | 7 |
 | **Total** | | **205** |
 
 ### TypeScript — rapidly changing product/cognition (SPEC §43.2)
@@ -218,30 +218,30 @@ The control plane. Owns sessions, tasks, context compiler, providers, orchestrat
 
 | Package | Responsibility |
 |---|---|
-| `@forge/domain` | Canonical types, state machines, typed errors (2,032 lines) |
-| `@forge/runtime-protocol` | 40+ semantic event types, SSE encoder/decoder |
-| `@forge/context-ir` | Context fragments, source descriptors, exactness classes |
-| `@forge/context-compiler` | 16-step assembly algorithm, retrieval pipeline, budget allocator |
-| `@forge/provider-core` | Provider-neutral broker, capability snapshots, cost accounting |
-| `@forge/provider-{openai,anthropic,google,local}` | Provider-specific renderers |
-| `@forge/model-router` | Deterministic routing, rate limiting, circuit breaker |
-| `@forge/task-runtime` | Task lifecycle, contract versioning, scope ledger |
-| `@forge/session-runtime` | Session/thread/turn services, context epoch lifecycle |
-| `@forge/orchestration` | Scheduler, delegation, worktree ownership, loop detection (10 signals), budget control, cancellation |
-| `@forge/verification` | DAG engine (parallel execution), 17 predicate types, changed-code invalidation, flaky-test policy |
-| `@forge/memory` | Candidate extraction, consolidation, retrieval, working memory |
-| `@forge/capability-registry` | Skills, MCP, plugins, activation lifecycle |
-| `@forge/extension-host` | WASI/Process hosts, hook semantics |
-| `@forge/adapter-sdk` | External harness adapter SDK |
-| `@forge/policy-coordinator` | Bridges task contracts and kernel capability requests |
-| `@forge/artifact-client` | Artifact ingest/get/link/gc |
-| `@forge/observability` | OTel spans, structured logging, metrics |
-| `@forge/config` | Layered typed configuration (defaults < org < user < workspace < task) |
-| `@forge/testkit` | Fake provider, fake kernel, builders |
-| `@forge/public-api` | HTTP API definitions, error envelope, SSE, 18 resource groups |
-| `@forge/public-client` | Generated-style TypeScript client with SSE subscription |
-| `@forge/open-code-bridge` | OpenCode compatibility facade, bypass register, divergence budget |
-| `@forge/aci` | Agent-Computer Interface (7 tools, ToolRegistry, ProgressiveDisclosure) |
+| `@terminus/domain` | Canonical types, state machines, typed errors (2,032 lines) |
+| `@terminus/runtime-protocol` | 40+ semantic event types, SSE encoder/decoder |
+| `@terminus/context-ir` | Context fragments, source descriptors, exactness classes |
+| `@terminus/context-compiler` | 16-step assembly algorithm, retrieval pipeline, budget allocator |
+| `@terminus/provider-core` | Provider-neutral broker, capability snapshots, cost accounting |
+| `@terminus/provider-{openai,anthropic,google,local}` | Provider-specific renderers |
+| `@terminus/model-router` | Deterministic routing, rate limiting, circuit breaker |
+| `@terminus/task-runtime` | Task lifecycle, contract versioning, scope ledger |
+| `@terminus/session-runtime` | Session/thread/turn services, context epoch lifecycle |
+| `@terminus/orchestration` | Scheduler, delegation, worktree ownership, loop detection (10 signals), budget control, cancellation |
+| `@terminus/verification` | DAG engine (parallel execution), 17 predicate types, changed-code invalidation, flaky-test policy |
+| `@terminus/memory` | Candidate extraction, consolidation, retrieval, working memory |
+| `@terminus/capability-registry` | Skills, MCP, plugins, activation lifecycle |
+| `@terminus/extension-host` | WASI/Process hosts, hook semantics |
+| `@terminus/adapter-sdk` | External harness adapter SDK |
+| `@terminus/policy-coordinator` | Bridges task contracts and kernel capability requests |
+| `@terminus/artifact-client` | Artifact ingest/get/link/gc |
+| `@terminus/observability` | OTel spans, structured logging, metrics |
+| `@terminus/config` | Layered typed configuration (defaults < org < user < workspace < task) |
+| `@terminus/testkit` | Fake provider, fake kernel, builders |
+| `@terminus/public-api` | HTTP API definitions, error envelope, SSE, 18 resource groups |
+| `@terminus/public-client` | Generated-style TypeScript client with SSE subscription |
+| `@terminus/open-code-bridge` | OpenCode compatibility facade, bypass register, divergence budget |
+| `@terminus/aci` | Agent-Computer Interface (7 tools, ToolRegistry, ProgressiveDisclosure) |
 | **Total** | **27 packages, 12,000+ lines, 0 typecheck errors** |
 
 ### Python — offline/non-privileged research (SPEC §43.3)
@@ -291,7 +291,7 @@ A production-quality Electron + Vite + React + TypeScript macOS-native desktop a
 cd apps/desktop
 bun install
 bun run dev:electron    # Vite + Electron concurrently
-bun run package         # Produces release/Forge-0.1.0-arm64.dmg
+bun run package         # Produces release/Terminus-0.1.0-arm64.dmg
 ```
 
 ### TUI (SPEC §43.4 primary client)
@@ -432,7 +432,7 @@ Completion is evidence-based, not assertion-based. The model cannot produce `COM
 
 ### Baselines (SPEC §18.2)
 
-`forge-minimal` (Bash-only permanent baseline), `forge-full`, upstream OpenCode, Codex, Claude Code, Pi, Oh My Pi, mini-SWE-agent.
+`terminus-minimal` (Bash-only permanent baseline), `terminus-full`, upstream OpenCode, Codex, Claude Code, Pi, Oh My Pi, mini-SWE-agent.
 
 ### Cohorts (SPEC §18.2, §41.3)
 
@@ -493,7 +493,7 @@ just run            # Run control plane and kernel locally
 just boundary-check
 # Checks: no packages/* imports child_process/fs/net/crypto (except allow-listed)
 #         no packages/* imports from mini-services/ or apps/
-#         no crates/forge-kernel imports UI or provider code
+#         no crates/terminus-kernel imports UI or provider code
 #         no packages/domain imports provider SDKs
 #         no raw SQL outside prisma/ and migrations/
 ```

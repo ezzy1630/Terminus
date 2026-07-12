@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — single conversation message.
+ * Terminus Desktop — single conversation message.
  *
  * Per SPEC §9.2: "Use a document-style feed. User messages may use
  * restrained low-contrast rounded surfaces. Agent responses should
@@ -160,7 +160,7 @@ function MessageImpl({ message }: MessageProps): JSX.Element {
         className="mb-2 text-xs uppercase tracking-wide text-tertiary"
         style={{ fontSize: "var(--font-size-xs)" }}
       >
-        Forge
+        Terminus
       </div>
       {segments.map((seg, i) => {
         if (seg.kind === "code") {

@@ -4,7 +4,7 @@
 use axum::extract::{Path, Query, State};
 use axum::Extension;
 use axum::Json;
-use forge_kernel_protocol::{CommandSpec, OutputChunk, ProcessEvent};
+use terminus_kernel_protocol::{CommandSpec, OutputChunk, ProcessEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,6 +21,10 @@ pub struct StartProcessRequest {
     #[serde(flatten)]
     pub envelope: Envelope,
     pub command: CommandSpec,
+    /// SPEC §13.3 sandbox profile id (e.g. `secure-local-default`). Empty
+    /// defaults to `secure-local-default` inside the handler.
+    #[serde(default)]
+    pub sandbox_profile_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,17 +50,23 @@ pub async fn start(
     let mut rx = state
         .kernel
         .processes
-        .start(
+        .start_in_profile(
             &req.envelope.request_context,
             &req.envelope.effect_intent,
             req.command.clone(),
+            if req.sandbox_profile_id.is_empty() {
+                "secure-local-default"
+            } else {
+                &req.sandbox_profile_id
+            },
         )
         .await
         .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
 
     // The first event MUST be ProcessEvent::Started; we wait for it (with a
     // short timeout) to get the ids.
-    let first = match tokio::time::timeout(std::time::Duration::from_millis(2_000), rx.recv()).await {
+    let first = match tokio::time::timeout(std::time::Duration::from_millis(2_000), rx.recv()).await
+    {
         Ok(Some(ev)) => ev,
         _ => {
             return Err(ApiError::internal(
@@ -130,15 +140,15 @@ pub async fn cancel(
     let mut req: CancelProcessRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
     req.envelope.inject_capability_token(&cap_token);
-    let reason = if req.reason.is_empty() { "cancelled" } else { &req.reason };
+    let reason = if req.reason.is_empty() {
+        "cancelled"
+    } else {
+        &req.reason
+    };
     let status = state
         .kernel
         .processes
-        .cancel(
-            &req.envelope.request_context,
-            &id,
-            reason,
-        )
+        .cancel(&req.envelope.request_context, &id, reason)
         .await
         .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
     Ok(Json(CancelProcessResponse {
@@ -158,7 +168,7 @@ pub struct OutputResponse {
     pub process_id: String,
     pub cursor: u64,
     pub chunks: Vec<OutputChunk>,
-    pub exited: Option<forge_kernel_protocol::ProcessExited>,
+    pub exited: Option<terminus_kernel_protocol::ProcessExited>,
 }
 
 pub async fn output(

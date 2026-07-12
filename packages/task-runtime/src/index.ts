@@ -1,5 +1,5 @@
 /**
- * @forge/task-runtime — task lifecycle.
+ * @terminus/task-runtime — task lifecycle.
  *
  * Per SPEC §28.3, §37.1, §37.3: TaskService with createTask, activate,
  * updateContract (versioned), transition (state machine), addAcceptanceCriterion,
@@ -19,7 +19,7 @@ import type {
   Uuid7,
   Rfc3339Timestamp,
   PrincipalId,
-} from "@forge/domain";
+} from "@terminus/domain";
 import {
   StateTransitionError,
   ScopeViolationError,
@@ -28,8 +28,8 @@ import {
   isTaskTerminal,
   TaskStatus as TS,
   TASK_TRANSITIONS,
-} from "@forge/domain";
-import type { EventSink } from "@forge/runtime-protocol";
+} from "@terminus/domain";
+import type { EventSink } from "@terminus/runtime-protocol";
 
 // ────────────────────────── Repository ───────────────────────────────────────
 

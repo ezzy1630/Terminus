@@ -10,6 +10,7 @@
 //!
 //! The model never receives the raw secret.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 mod audit;

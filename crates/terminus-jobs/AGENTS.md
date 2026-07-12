@@ -1,4 +1,4 @@
-# AGENTS.md — forge-jobs
+# AGENTS.md — terminus-jobs
 
 ## Local rules
 

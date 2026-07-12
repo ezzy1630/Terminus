@@ -10,7 +10,7 @@
 
 Lexical search (FTS5, BM25) is the default retrieval mechanism (SPEC §34.6). It is fast, deterministic, and token-efficient. But for some queries — "find the function that handles authentication failures" — lexical search may miss semantically relevant but lexically different results.
 
-Semantic search (embeddings + vector index) could improve retrieval, but: (1) universal semantic embeddings of every repository file is a non-goal for the first production release (SPEC §26.5), (2) embeddings add a dependency, storage cost, and privacy concern (sending code to an embedding service), (3) the value of semantic search over lexical+AST is unproven for Forge's cohorts, (4) SPEC §49.5 lists "semantic embedding index" as deliberately experimental.
+Semantic search (embeddings + vector index) could improve retrieval, but: (1) universal semantic embeddings of every repository file is a non-goal for the first production release (SPEC §26.5), (2) embeddings add a dependency, storage cost, and privacy concern (sending code to an embedding service), (3) the value of semantic search over lexical+AST is unproven for Terminus's cohorts, (4) SPEC §49.5 lists "semantic embedding index" as deliberately experimental.
 
 We need to decide: which (if any) semantic index to support, when to use it, how to integrate it with the retrieval pipeline, and how to evaluate it.
 
@@ -42,7 +42,7 @@ The semantic index, if chosen, would be behind a flag (not default) until its ga
 
 ## Consequences (once an implementation is chosen)
 
-- The chosen implementation lives in `crates/forge-code-intel` (or a new crate).
+- The chosen implementation lives in `crates/terminus-code-intel` (or a new crate).
 - The retrieval pipeline (`packages/retrieval`) integrates it as a candidate source alongside lexical and AST.
 - The vector index (if any) is stored separately from SQLite (e.g., LanceDB, Qdrant, or in-process HNSW).
 - The flag-gated feature is benchmarked against lexical+AST only (ADR-0025).

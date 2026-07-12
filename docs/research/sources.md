@@ -1,6 +1,6 @@
 # Research sources
 
-This document maps the primary sources (SPEC Appendix B) and research interpretation rules (Appendix J.2) that inform Forge's design. Research snapshots used to justify a default MUST be archived by URL, retrieval date, content hash where licensing permits, and a short interpretation note (SPEC Appendix J.4).
+This document maps the primary sources (SPEC Appendix B) and research interpretation rules (Appendix J.2) that inform Terminus's design. Research snapshots used to justify a default MUST be archived by URL, retrieval date, content hash where licensing permits, and a short interpretation note (SPEC Appendix J.4).
 
 ## Current primary product and protocol sources
 
@@ -50,7 +50,7 @@ This document maps the primary sources (SPEC Appendix B) and research interpreta
 
 - https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 
-**Interpretation:** Prompt-cache effectiveness depends on stable prefixes (SPEC J.3). Forge enforces immutable epochs (ADR-0010).
+**Interpretation:** Prompt-cache effectiveness depends on stable prefixes (SPEC J.3). Terminus enforces immutable epochs (ADR-0010).
 
 ### Google Gemini context caching
 
@@ -90,7 +90,7 @@ This document maps the primary sources (SPEC Appendix B) and research interpreta
 - https://agentskills.io/client-implementation/adding-skills-support
 - https://agentskills.io/skill-creation/evaluating-skills
 
-**Interpretation:** Agent Skills compatibility with Forge manifest extension (ADR-0017). Permission-checked body loading; hash pinning.
+**Interpretation:** Agent Skills compatibility with Terminus manifest extension (ADR-0017). Permission-checked body loading; hash pinning.
 
 ### The Token Company
 
@@ -124,7 +124,7 @@ This document maps the primary sources (SPEC Appendix B) and research interpreta
 - MCP tool-poisoning and distributed-tool-poisoning papers (reviewed in the research trace).
 - "Dive into Claude Code" (2026 independent architecture analysis, reviewed in the research trace).
 
-**Interpretation (Appendix J.2):** A paper's result applies directly only to its tested models, tasks, interfaces, and date. Security papers demonstrate plausible attack classes; production controls are validated against concrete Forge threat fixtures.
+**Interpretation (Appendix J.2):** A paper's result applies directly only to its tested models, tasks, interfaces, and date. Security papers demonstrate plausible attack classes; production controls are validated against concrete Terminus threat fixtures.
 
 ## Key evidence translated into requirements (Appendix J.3)
 
@@ -136,7 +136,7 @@ This document maps the primary sources (SPEC Appendix B) and research interpreta
 | SWE-agent ACI ablations show file-view/edit/search feedback matters | ACI treated as first-order, benchmarked subsystem |
 | OpenCode typed context sources and epochs provide useful implemented substrate | reuse/bridge rather than greenfield rewrite |
 | Codex app-server and Linux sandbox demonstrate typed runtime and OS enforcement patterns | generated protocols, bounded queues, Bubblewrap-class kernel |
-| OpenCode plugins can auto-install packages and receive shell access in the upstream model | secure Forge profile isolates installation and removes ambient plugin authority |
+| OpenCode plugins can auto-install packages and receive shell access in the upstream model | secure Terminus profile isolates installation and removes ambient plugin authority |
 | MCP permits powerful tool interoperability while security remains implementation responsibility | descriptor pinning, isolation, per-tool scopes, reauthorization |
 | Multi-agent systems can be token intensive and coding work often overlaps | one-agent default and expected-value scheduler |
 | Aider repo maps/edit formats show model-specific ACI value | graph-ranked map and edit-dialect experiments |

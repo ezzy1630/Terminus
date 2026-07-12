@@ -61,7 +61,7 @@ impl DecisionReport {
             explanation: explanation.into(),
             effects: Vec::new(),
             constraints: Constraint::default(),
-            decision_id: forge_kernel_protocol::new_id(),
+            decision_id: terminus_kernel_protocol::new_id(),
         }
     }
 
@@ -72,7 +72,7 @@ impl DecisionReport {
             explanation: explanation.into(),
             effects: Vec::new(),
             constraints: Constraint::default(),
-            decision_id: forge_kernel_protocol::new_id(),
+            decision_id: terminus_kernel_protocol::new_id(),
         }
     }
 }

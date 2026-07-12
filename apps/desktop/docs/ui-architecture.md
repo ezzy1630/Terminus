@@ -1,9 +1,9 @@
-# Forge Desktop — UI Architecture
+# Terminus Desktop — UI Architecture
 
 This document describes the application routes, layout states, component
 hierarchy, state management, API client architecture, SSE event
 handling, progressive disclosure strategy, and responsive breakpoints
-for the Forge desktop app at `apps/desktop/`.
+for the Terminus desktop app at `apps/desktop/`.
 
 ## 1. Application routes and layout states
 
@@ -40,7 +40,7 @@ Layout states (driven by `useViewport`):
 App
 ├── Layout                                  (SPEC §6 — three-region shell)
 │   ├── TitleBar
-│   │   ├── center slot (default: "Forge" product name)
+│   │   ├── center slot (default: "Terminus" product name)
 │   │   └── right slot (theme, density, ⌘K, health dot)
 │   ├── Sidebar                             (SPEC §7)
 │   │   ├── SidebarItem (Pinned tasks)
@@ -52,7 +52,9 @@ App
 │   │   │     ├── ActivityBlock (collapsed/expanded)
 │   │   │     ├── ApprovalCard (inline, SPEC §17)
 │   │   │     └── Composer (send/steer/queue/stop)
-│   │   └── Inspector                       (SPEC §11 — Environment / Activity / Approvals)
+│   │   └── ReviewPane (on demand, alongside conversation)
+│   │       └── DiffViewer (patch evidence from task events)
+│   └── Inspector                           (SPEC §11 — contextual sections)
 │   └── LayoutTerminalDrawer
 │       └── TerminalDrawer                  (SPEC §15 — tabs, search, copy, clear)
 ├── CommandPalette (overlay)                (SPEC §18)
@@ -60,11 +62,12 @@ App
 └── Onboarding (overlay, first launch)      (SPEC §19)
 ```
 
-The `DiffViewer` (SPEC §13) is not yet mounted in the main layout —
-it's available as a standalone component that the host renders in a
-split pane when "Show changes" is invoked. The same applies to
-`Message` and `ActivityBlock`, which are pure primitives composed by
-`Conversation`.
+`ReviewPane` mounts when the user invokes **Show changes** (⌘D). It hides the
+inspector unless the user has pinned it, so a 13-inch window retains useful
+space for both the conversation and review panes. The current control-plane
+event protocol has no standalone diff-artifact event; the pane only renders
+files when a patch tool event carries explicit unified diff evidence. It never
+fabricates a diff from file names or summaries.
 
 ## 3. State management (Zustand stores)
 
@@ -78,12 +81,12 @@ factory and persisted to `localStorage` where appropriate.
 - Side effects: applies CSS variables from `styles/tokens.ts` to
   `document.documentElement.style` on every setter call, and at module
   load so first paint is correct.
-- Persistence key: `forge-desktop.theme.v1`.
+- Persistence key: `terminus-desktop.theme.v1`.
 - Listens to `prefers-color-scheme` changes when `theme === "system"`.
 - Actions: `setTheme`, `setDensity`, `toggleDensity`, `cycleTheme`,
   `refresh`.
 
-### `useForgeStore` (`hooks/use-forge.ts`)
+### `useForgeStore` (`hooks/use-terminus.ts`)
 
 - State: `sessions`, `tasksBySession`, `taskById`, `selectedSessionId`,
   `selectedTaskId`, `pinnedTaskIds`, `draftsByTask`, `eventsByTask`
@@ -91,7 +94,7 @@ factory and persisted to `localStorage` where appropriate.
 - Actions: `refreshAll`, `refreshSessions`, `refreshTasks`,
   `selectSession`, `selectTask`, `togglePin`, `setDraft`, `clearDraft`,
   `_attachStream`, `_appendEvent`, `_updateTaskFromEvent`.
-- Persistence keys: `forge-desktop.pinned-tasks.v1`.
+- Persistence keys: `terminus-desktop.pinned-tasks.v1`.
 - The `_attachStream(taskId)` action opens a `ForgeEventStream` (see
   §5) and resumes from the last-seen event id (SPEC §30.6 — durable
   cursor).
@@ -106,7 +109,7 @@ factory and persisted to `localStorage` where appropriate.
   `"terminal.shell"`, `"editor.tab-size"`).
 - Actions: `get(id, fallback)`, `set(id, value)`, `reset(id)`,
   `resetCategory(cat)`, `resetAll()`.
-- Persistence key: `forge-desktop.settings.v1`.
+- Persistence key: `terminus-desktop.settings.v1`.
 - The `Settings` component reads setting descriptors (id, label,
   control kind, default value, validation, restart-required) and
   renders the appropriate control. Appearance settings call into
@@ -155,16 +158,16 @@ distinguishable from 5xx responses without a separate error class.
 The client resolves `baseUrl` and `token` in this order:
 
 1. `window.forgeDesktop.apiBase` / `.token` (Electron preload bridge).
-2. `import.meta.env.VITE_FORGE_API_BASE` / `VITE_FORGE_TOKEN` (Vite env).
+2. `import.meta.env.VITE_TERMINUS_API_BASE` / `VITE_TERMINUS_TOKEN` (Vite env).
 3. Hard-coded defaults: `http://127.0.0.1:3050` and
-   `forge-control-dev-token`.
+   `terminus-control-dev-token`.
 
 ## 5. SSE event handling
 
 The control plane's `/v1/events` endpoint requires bearer auth, which
 the browser's native `EventSource` cannot send. We therefore use
 `fetch` + a `ReadableStream` reader + the SSE decoder from
-`@forge/public-api` (`createSseDecoder`), and surface an
+`@terminus/public-api` (`createSseDecoder`), and surface an
 `EventSource`-like object via `subscribeEvents(opts)`:
 
 ```ts
@@ -210,7 +213,7 @@ The same principle is applied throughout:
 | Surface           | Empty state                                  | Progressive reveal |
 | ----------------- | -------------------------------------------- | ------------------ |
 | Sidebar           | "No projects yet." (search-aware)            | Pinned section appears only when ≥ 1 task pinned |
-| Inspector         | "No task selected" placeholder               | Environment (always), Activity (≥ 1 event), Approvals (approval event observed) |
+| Inspector         | "No task selected" placeholder               | Environment (always), Changes (patch evidence), Subagents (agent events), Verification (verification events), Approvals (pending approval events) |
 | Conversation      | (placeholder before first event)             | Messages + ActivityBlocks emerge as the agent emits events |
 | TerminalDrawer    | `EmptyState` ("No terminal session")         | Tabs appear as the user opens terminals |
 | DiffViewer        | `EmptyState` ("No changes yet")              | File list collapses/expands per file; hunk actions appear on hover |

@@ -1,4 +1,4 @@
-# AGENTS.md — forge-kernel-testkit
+# AGENTS.md — terminus-kernel-testkit
 
 ## Local rules
 

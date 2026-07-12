@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — React entry point.
+ * Terminus Desktop — React entry point.
  *
  * Mounts <App />, imports global styles, and runs the initial theme
  * refresh so tokens are installed before first paint (the theme store

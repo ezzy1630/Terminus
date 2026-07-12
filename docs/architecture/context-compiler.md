@@ -35,7 +35,7 @@ Each fragment carries (Appendix E.2):
 
 The Context Compiler assembles fragments in layers:
 
-1. **Authority** — system prompt, safety rules, project rules (`.forge/`, AGENTS.md).
+1. **Authority** — system prompt, safety rules, project rules (`.terminus/`, AGENTS.md).
 2. **Task contract** — objective, acceptance criteria, scope, budget, constraints.
 3. **World state** — current diagnostics, test status, git state, jobs (recomputed at safe turn boundaries).
 4. **Code** — files, ranges, symbols (via `read`, `search`).

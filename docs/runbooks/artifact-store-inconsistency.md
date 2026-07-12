@@ -17,7 +17,7 @@ Use this runbook when the content-addressed artifact store has missing blobs, ha
 1. Run artifact integrity check:
    ```bash
    # For each artifact_link in SQLite, verify the file exists and hashes match
-   sqlite3 db/forge.db "SELECT sha256, size_bytes, media_type FROM artifacts LIMIT 100;" | while read row; do
+   sqlite3 db/terminus.db "SELECT sha256, size_bytes, media_type FROM artifacts LIMIT 100;" | while read row; do
      sha=$(echo "$row" | cut -d'|' -f1)
      # Path: <artifact-root>/sha256/<aa>/<bb>/<64-hex>/content
      path="<artifact-root>/sha256/${sha:0:2}/${sha:2:2}/${sha}/content"
@@ -37,7 +37,7 @@ Use this runbook when the content-addressed artifact store has missing blobs, ha
 
 ## Immediate actions
 
-1. **Stop Forge processes.**
+1. **Stop Terminus processes.**
 2. **Back up the artifact directory** (or snapshot the filesystem).
 3. **For missing blobs:** attempt to recover from backup. If unrecoverable, mark the referencing records as `artifact_missing` in SQLite and quarantine the affected sessions/tasks.
 4. **For hash mismatches:** treat as a security incident (`docs/runbooks/security-incident.md`). A hash mismatch suggests tampering or disk corruption.
@@ -53,7 +53,7 @@ Use this runbook when the content-addressed artifact store has missing blobs, ha
 1. Restore missing blobs from backup.
 2. Verify all `artifact_link` rows resolve.
 3. Run the artifact corruption test suite (SPEC §50.2).
-4. Restart Forge and verify the startup recovery report.
+4. Restart Terminus and verify the startup recovery report.
 5. For quarantined sessions/tasks, decide: re-run (if eval), restore from backup (if production), or mark as lost.
 
 ## Post-incident

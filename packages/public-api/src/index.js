@@ -1,0 +1,649 @@
+/**
+ * @terminus/public-api — HTTP API definitions and SSE event stream.
+ *
+ * Per SPEC §30, §32: Public product API served over HTTPS/loopback/UDS with
+ * JSON request/response and SSE for ordered product events. Source of truth
+ * for generated clients. Additive within a major version; explicit
+ * deprecation windows.
+ *
+ * Resource groups (SPEC §32.1):
+ *   /system /workspaces /sessions /threads /tasks /turns /events /context
+ *   /artifacts /tools /jobs /approvals /agents /verification /memory
+ *   /evals /configuration
+ */
+import { z } from "zod";
+// ────────────────────────── Error envelope ─────────────────────────────────
+export const ErrorCategory = z.enum([
+    "validation",
+    "not_found",
+    "conflict",
+    "permission",
+    "policy_denied",
+    "approval_required",
+    "sandbox_unavailable",
+    "resource_exhausted",
+    "budget_exhausted",
+    "timeout",
+    "cancelled",
+    "provider",
+    "external_dependency",
+    "integrity",
+    "internal",
+    "unknown_settlement",
+]);
+export const ForgeError = z.object({
+    code: z.string(),
+    message: z.string(),
+    retryable: z.boolean(),
+    category: ErrorCategory,
+    details: z.record(z.string(), z.unknown()).default({}),
+    suggested_action: z.string().nullable().default(null),
+    trace_id: z.string().nullable().default(null),
+});
+export const ErrorResponse = z.object({ error: ForgeError });
+// ────────────────────────── Initialization handshake ───────────────────────
+export const ClientHello = z.object({
+    client: z.object({
+        name: z.string(),
+        version: z.string(),
+        instance_id: z.string(),
+    }),
+    protocol: z.object({ major: z.number().int(), minor: z.number().int() }),
+    capabilities: z
+        .object({
+        sse_resume: z.boolean().default(false),
+        rich_approvals: z.boolean().default(false),
+        artifact_streaming: z.boolean().default(false),
+        acp_bridge: z.boolean().default(false),
+    })
+        .passthrough(),
+});
+export const ServerHello = z.object({
+    server: z.object({
+        version: z.string(),
+        build_commit: z.string(),
+        instance_id: z.string(),
+    }),
+    protocol: z.object({ major: z.number().int(), minor: z.number().int() }),
+    capabilities: z.object({
+        supported: z.array(z.string()),
+        experimental: z.array(z.string()).default([]),
+    }),
+    limits: z.object({
+        max_request_bytes: z.number().int(),
+        max_sse_backlog: z.number().int(),
+    }),
+});
+// ────────────────────────── Resource snapshots ─────────────────────────────
+export const WorkspaceSnapshot = z.object({
+    id: z.string(),
+    kind: z.enum(["local_git", "local_directory", "container", "microvm", "remote"]),
+    root_uri: z.string(),
+    canonical_root: z.string(),
+    trust: z.enum(["trusted", "untrusted", "restricted"]),
+    policy_profile_id: z.string(),
+    created_at: z.string(),
+    last_opened_at: z.string(),
+});
+export const SessionSnapshot = z.object({
+    id: z.string(),
+    workspace_id: z.string(),
+    owner_principal: z.string(),
+    title: z.string(),
+    status: z.enum(["active", "paused", "archived", "deleted"]),
+    default_model_profile: z.string(),
+    default_permission_profile: z.string(),
+    active_thread_id: z.string().nullable(),
+    created_at: z.string(),
+    updated_at: z.string(),
+});
+export const TaskSnapshot = z.object({
+    id: z.string(),
+    session_id: z.string(),
+    thread_id: z.string(),
+    status: z.string(),
+    phase: z.string(),
+    active_contract_version: z.number().int(),
+    risk_class: z.string(),
+    created_at: z.string(),
+    updated_at: z.string(),
+    completed_at: z.string().nullable(),
+});
+export const TurnSnapshot = z.object({
+    id: z.string(),
+    thread_id: z.string(),
+    task_id: z.string().nullable(),
+    sequence: z.number().int(),
+    state: z.string(),
+    initiating_actor: z.string(),
+    started_at: z.string().nullable(),
+    completed_at: z.string().nullable(),
+});
+export const ToolCallSnapshot = z.object({
+    id: z.string(),
+    turn_id: z.string(),
+    tool_id: z.string(),
+    tool_version: z.string(),
+    state: z.string(),
+    result_status: z.string().nullable(),
+    proposed_at: z.string(),
+    settled_at: z.string().nullable(),
+});
+export const ContextManifestSnapshot = z.object({
+    id: z.string(),
+    provider_attempt_id: z.string().nullable(),
+    compiler_version: z.string(),
+    policy_version: z.string(),
+    epoch_id: z.string().nullable(),
+    provider_key: z.string(),
+    model_key: z.string(),
+    rendered_request_hash: z.string(),
+    estimated_tokens: z.record(z.string(), z.number().int()),
+    created_at: z.string(),
+});
+export const ArtifactSnapshot = z.object({
+    hash: z.string(),
+    size_bytes: z.number().int(),
+    media_type: z.string(),
+    content_encoding: z.enum(["identity", "zstd"]),
+    confidentiality: z.string(),
+    trust: z.string(),
+    retention_class: z.string(),
+    created_at: z.string(),
+});
+export const ApprovalSnapshot = z.object({
+    id: z.string(),
+    task_id: z.string(),
+    operation_hash: z.string(),
+    status: z.enum(["pending", "allowed", "denied", "expired", "revoked"]),
+    risk: z.string(),
+    requested_at: z.string(),
+    resolved_at: z.string().nullable(),
+    rationale: z.string().nullable(),
+});
+// /system
+export const SystemHealth = {
+    method: "GET",
+    path: "/v1/system/health",
+    request: z.void(),
+    response: z.object({
+        status: z.enum(["ok", "degraded", "down"]),
+        version: z.string(),
+        build_commit: z.string(),
+        instance_id: z.string(),
+        uptime_seconds: z.number().int(),
+        ready: z.boolean(),
+    }),
+};
+// /workspaces
+export const OpenWorkspace = {
+    method: "POST",
+    path: "/v1/workspaces/open",
+    request: z.object({
+        root_uri: z.string(),
+        kind: z.enum(["local_git", "local_directory", "container", "microvm", "remote"]).default("local_directory"),
+        trust: z.enum(["trusted", "untrusted", "restricted"]).default("trusted"),
+        policy_profile_id: z.string().default("secure-local-default"),
+    }),
+    response: WorkspaceSnapshot,
+};
+export const GetWorkspace = {
+    method: "GET",
+    path: "/v1/workspaces/{id}",
+    request: z.object({ id: z.string() }),
+    response: WorkspaceSnapshot,
+};
+// /sessions
+export const CreateSession = {
+    method: "POST",
+    path: "/v1/sessions",
+    request: z.object({
+        workspace_id: z.string(),
+        title: z.string(),
+        default_model_profile: z.string().default("implementer"),
+        default_permission_profile: z.string().default("secure-local-default"),
+    }),
+    response: SessionSnapshot,
+};
+export const GetSession = {
+    method: "GET",
+    path: "/v1/sessions/{id}",
+    request: z.object({ id: z.string() }),
+    response: SessionSnapshot,
+};
+// /threads
+export const CreateThread = {
+    method: "POST",
+    path: "/v1/threads",
+    request: z.object({
+        session_id: z.string(),
+        parent_thread_id: z.string().nullable().default(null),
+    }),
+    response: z.object({ id: z.string(), session_id: z.string(), created_at: z.string() }),
+};
+// /tasks
+export const CreateTask = {
+    method: "POST",
+    path: "/v1/tasks",
+    request: z.object({
+        session_id: z.string(),
+        thread_id: z.string(),
+        objective: z.string(),
+        non_goals: z.array(z.string()).default([]),
+        acceptance_criteria: z
+            .array(z.object({
+            id: z.string(),
+            statement: z.string(),
+            verification_hint: z.string().nullable().default(null),
+            required: z.boolean().default(true),
+        }))
+            .default([]),
+        allowed_scope: z
+            .object({
+            read_paths: z.array(z.string()).default([]),
+            write_paths: z.array(z.string()).default([]),
+            external_systems: z.array(z.string()).default([]),
+        })
+            .default({ read_paths: [], write_paths: [], external_systems: [] }),
+        risk_class: z.enum(["low", "normal", "high", "critical"]).default("normal"),
+    }),
+    response: TaskSnapshot,
+};
+export const StartTask = {
+    method: "POST",
+    path: "/v1/tasks/{id}/start",
+    request: z.object({ id: z.string() }),
+    response: z.object({
+        task_id: z.string(),
+        status: z.string(),
+        event_cursor: z.string(),
+        links: z.object({
+            events: z.string(),
+            task: z.string(),
+        }),
+    }),
+};
+export const CancelTask = {
+    method: "POST",
+    path: "/v1/tasks/{id}/cancel",
+    request: z.object({ id: z.string(), reason: z.string().nullable().default(null) }),
+    response: TaskSnapshot,
+};
+// /turns
+export const StartTurn = {
+    method: "POST",
+    path: "/v1/turns",
+    request: z.object({
+        thread_id: z.string(),
+        task_id: z.string(),
+        user_input: z.string(),
+    }),
+    response: TurnSnapshot,
+};
+export const InterruptTurn = {
+    method: "POST",
+    path: "/v1/turns/{id}/interrupt",
+    request: z.object({ id: z.string() }),
+    response: TurnSnapshot,
+};
+// /events (SSE)
+export const SubscribeEvents = {
+    method: "GET",
+    path: "/v1/events",
+    request: z.object({
+        cursor: z.string().nullable().default(null),
+        task_id: z.string().nullable().default(null),
+        session_id: z.string().nullable().default(null),
+    }),
+    response: z.never(), // SSE stream
+};
+// /context
+export const GetContextManifest = {
+    method: "GET",
+    path: "/v1/context/manifests/{id}",
+    request: z.object({ id: z.string() }),
+    response: ContextManifestSnapshot,
+};
+// /artifacts
+export const GetArtifact = {
+    method: "GET",
+    path: "/v1/artifacts/{hash}",
+    request: z.object({ hash: z.string() }),
+    response: z.instanceof(Uint8Array),
+};
+// /approvals
+/**
+ * Approval decision enum. Per SPEC §32.4, the canonical names are
+ * `allow_for_action` / `allow_for_task` (matching `@terminus/domain`'s
+ * `ApprovalDecision`). For backwards compatibility with older clients, the
+ * aliases `allow_exact` / `allow_task_scope` are also accepted and are
+ * normalized to the canonical names via a zod transform.
+ */
+export const ApprovalDecisionParam = z
+    .enum([
+    "allow_once",
+    "allow_for_action",
+    "allow_for_task",
+    "allow_exact",
+    "allow_task_scope",
+    "deny_once",
+    "deny_and_add_task_rule",
+    "deny_and_rule",
+    "stop_task",
+])
+    .transform((v) => {
+    switch (v) {
+        case "allow_exact":
+            return "allow_for_action";
+        case "allow_task_scope":
+            return "allow_for_task";
+        case "deny_and_rule":
+            return "deny_and_add_task_rule";
+        case "allow_once":
+        case "allow_for_action":
+        case "allow_for_task":
+        case "deny_once":
+        case "deny_and_add_task_rule":
+        case "stop_task":
+            return v;
+        default: {
+            const _exhaustive = v;
+            void _exhaustive;
+            return v;
+        }
+    }
+});
+export const ResolveApproval = {
+    method: "POST",
+    path: "/v1/approvals/{id}/resolve",
+    request: z.object({
+        id: z.string(),
+        decision: ApprovalDecisionParam,
+        rationale: z.string().nullable().default(null),
+    }),
+    response: ApprovalSnapshot,
+};
+// /jobs
+export const GetJob = {
+    method: "GET",
+    path: "/v1/jobs/{id}",
+    request: z.object({ id: z.string() }),
+    response: z.object({
+        id: z.string(),
+        state: z.string(),
+        started_at: z.string().nullable(),
+        settled_at: z.string().nullable(),
+        output_cursor: z.number().int(),
+    }),
+};
+export const StopJob = {
+    method: "POST",
+    path: "/v1/jobs/{id}/stop",
+    request: z.object({ id: z.string(), reason: z.string().nullable().default(null) }),
+    response: z.object({ id: z.string(), state: z.string() }),
+};
+// /verification
+export const GetVerificationPlan = {
+    method: "GET",
+    path: "/v1/verification/plans/{id}",
+    request: z.object({ id: z.string() }),
+    response: z.object({
+        id: z.string(),
+        task_id: z.string(),
+        contract_version: z.number().int(),
+        source_revision: z.string(),
+        completion_expression: z.string(),
+        nodes: z
+            .array(z.object({
+            id: z.string(),
+            kind: z.string(),
+            required: z.boolean(),
+            depends_on: z.array(z.string()),
+        }))
+            .default([]),
+    }),
+};
+// ────────────────────────── Additional resource groups (§32.1) ───────────────
+// /tools /agents /memory /evals /configuration /policies — list endpoints.
+// /tools — list registered tools (capability registry).
+export const ToolSnapshot = z.object({
+    id: z.string(),
+    version: z.string(),
+    trust_level: z.enum(["builtin", "first_party", "verified_third_party", "untrusted"]),
+    summary: z.string(),
+    input_schema: z.record(z.string(), z.unknown()),
+    deprecated: z.boolean().default(false),
+});
+export const ListTools = {
+    method: "GET",
+    path: "/v1/tools",
+    request: z.object({
+        trust_level: z.enum(["builtin", "first_party", "verified_third_party", "untrusted"]).nullable().default(null),
+        include_deprecated: z.boolean().default(false),
+    }),
+    response: z.object({
+        tools: z.array(ToolSnapshot).default([]),
+        next_cursor: z.string().nullable().default(null),
+    }),
+};
+// /agents — list registered agents / harnesses.
+export const AgentSnapshot = z.object({
+    id: z.string(),
+    display_name: z.string(),
+    kind: z.enum(["implementer", "scout", "reviewer", "specialist"]),
+    model_profile: z.string(),
+    trust_level: z.enum(["builtin", "first_party", "verified_third_party", "untrusted"]),
+    enabled: z.boolean().default(true),
+});
+export const ListAgents = {
+    method: "GET",
+    path: "/v1/agents",
+    request: z.object({
+        enabled_only: z.boolean().default(true),
+    }),
+    response: z.object({
+        agents: z.array(AgentSnapshot).default([]),
+    }),
+};
+// /memory — list memory claims.
+export const MemoryClaimSnapshot = z.object({
+    id: z.string(),
+    kind: z.enum([
+        "fact",
+        "convention",
+        "preference",
+        "pitfall",
+        "command",
+        "architecture",
+        "procedure",
+        "failure_resolution",
+    ]),
+    statement: z.string(),
+    status: z.enum(["candidate", "active", "disputed", "expired", "rejected"]),
+    confidence_ppm: z.number().int().min(0).max(1_000_000),
+    created_at: z.string(),
+    last_used_at: z.string().nullable(),
+});
+export const ListMemory = {
+    method: "GET",
+    path: "/v1/memory",
+    request: z.object({
+        status: z
+            .enum(["candidate", "active", "disputed", "expired", "rejected"])
+            .nullable()
+            .default(null),
+        kind: z
+            .enum([
+            "fact",
+            "convention",
+            "preference",
+            "pitfall",
+            "command",
+            "architecture",
+            "procedure",
+            "failure_resolution",
+        ])
+            .nullable()
+            .default(null),
+    }),
+    response: z.object({
+        claims: z.array(MemoryClaimSnapshot).default([]),
+        next_cursor: z.string().nullable().default(null),
+    }),
+};
+// /evals — list eval runs.
+export const EvalRunSnapshot = z.object({
+    run_id: z.string(),
+    suite: z.string(),
+    task: z.string(),
+    harness: z.string(),
+    harness_commit: z.string(),
+    started_at: z.string(),
+    ended_at: z.string().nullable(),
+    outcome: z.enum(["pass", "fail", "error", "missing"]),
+});
+export const ListEvals = {
+    method: "GET",
+    path: "/v1/evals",
+    request: z.object({
+        suite: z.string().nullable().default(null),
+        harness: z.string().nullable().default(null),
+        since: z.string().nullable().default(null),
+    }),
+    response: z.object({
+        runs: z.array(EvalRunSnapshot).default([]),
+        next_cursor: z.string().nullable().default(null),
+    }),
+};
+// /configuration — list configuration profiles.
+export const ConfigurationSnapshot = z.object({
+    id: z.string(),
+    kind: z.enum(["model_profile", "permission_profile", "policy_profile", "runtime_profile"]),
+    display_name: z.string(),
+    summary: z.string(),
+    enabled: z.boolean().default(true),
+    mutable: z.boolean().default(false),
+});
+export const ListConfiguration = {
+    method: "GET",
+    path: "/v1/configuration",
+    request: z.object({
+        kind: z
+            .enum(["model_profile", "permission_profile", "policy_profile", "runtime_profile"])
+            .nullable()
+            .default(null),
+    }),
+    response: z.object({
+        configurations: z.array(ConfigurationSnapshot).default([]),
+    }),
+};
+// /policies — list policy rules.
+export const PolicySnapshot = z.object({
+    id: z.string(),
+    profile_id: z.string(),
+    kind: z.enum(["allow", "deny", "prompt", "rate_limit"]),
+    effect_type: z.string(),
+    selector: z.string(),
+    rationale: z.string().nullable().default(null),
+    enabled: z.boolean().default(true),
+});
+export const ListPolicies = {
+    method: "GET",
+    path: "/v1/policies",
+    request: z.object({
+        profile_id: z.string().nullable().default(null),
+        enabled_only: z.boolean().default(true),
+    }),
+    response: z.object({
+        policies: z.array(PolicySnapshot).default([]),
+    }),
+};
+// ────────────────────────── Endpoint registry ──────────────────────────────
+export const ENDPOINTS = {
+    SystemHealth,
+    OpenWorkspace,
+    GetWorkspace,
+    CreateSession,
+    GetSession,
+    CreateThread,
+    CreateTask,
+    StartTask,
+    CancelTask,
+    StartTurn,
+    InterruptTurn,
+    SubscribeEvents,
+    GetContextManifest,
+    GetArtifact,
+    ResolveApproval,
+    GetJob,
+    StopJob,
+    GetVerificationPlan,
+    ListTools,
+    ListAgents,
+    ListMemory,
+    ListEvals,
+    ListConfiguration,
+    ListPolicies,
+};
+export function encodeSseEvent(ev) {
+    const lines = [];
+    if (ev.id)
+        lines.push(`id: ${ev.id}`);
+    if (ev.event)
+        lines.push(`event: ${ev.event}`);
+    if (typeof ev.retry === "number")
+        lines.push(`retry: ${ev.retry}`);
+    // Data may contain newlines — split and prefix each.
+    for (const line of ev.data.split("\n"))
+        lines.push(`data: ${line}`);
+    return lines.join("\n") + "\n\n";
+}
+export function createSseDecoder() {
+    let buffer = "";
+    let pendingId = "";
+    let pendingEvent = "";
+    let pendingData = [];
+    return {
+        feed(chunk) {
+            buffer += chunk;
+            const out = [];
+            while (true) {
+                const idx = buffer.indexOf("\n\n");
+                if (idx < 0)
+                    break;
+                const block = buffer.slice(0, idx);
+                buffer = buffer.slice(idx + 2);
+                for (const line of block.split("\n")) {
+                    if (line.startsWith("id:"))
+                        pendingId = line.slice(3).trim();
+                    else if (line.startsWith("event:"))
+                        pendingEvent = line.slice(6).trim();
+                    else if (line.startsWith("data:"))
+                        pendingData.push(line.slice(5).replace(/^ /, ""));
+                    else if (line.startsWith("retry:")) {
+                        // ignore for now
+                    }
+                    else if (line === "") {
+                        // dispatch
+                    }
+                }
+                if (pendingData.length > 0) {
+                    out.push({
+                        id: pendingId,
+                        event: pendingEvent || "message",
+                        data: pendingData.join("\n"),
+                    });
+                }
+                pendingId = "";
+                pendingEvent = "";
+                pendingData = [];
+            }
+            return out;
+        },
+    };
+}
+// ────────────────────────── Idempotency ────────────────────────────────────
+export const IDEMPOTENCY_HEADER = "x-idempotency-key";
+export function requireIdempotency(method) {
+    return method !== "GET" && method !== "HEAD";
+}

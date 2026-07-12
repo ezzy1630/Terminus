@@ -1,11 +1,11 @@
-# Forge Desktop — VoiceOver Test Plan
+# Terminus Desktop — VoiceOver Test Plan
 
-This document defines **20 specific VoiceOver test scenarios** for the Forge
+This document defines **20 specific VoiceOver test scenarios** for the Terminus
 desktop application, with step-by-step instructions, expected announcements,
 and setup notes. VoiceOver only runs on macOS, so this plan must be executed
-on a Mac with the Forge desktop app installed (see `packaging.md`).
+on a Mac with the Terminus desktop app installed (see `packaging.md`).
 
-Per SPEC §28 ("Accessibility"), Forge must be **fully usable with VoiceOver**:
+Per SPEC §28 ("Accessibility"), Terminus must be **fully usable with VoiceOver**:
 every interactive surface must have a sensible accessible name, every dynamic
 update must be announced politely, and every keyboard shortcut must have a
 screen-reader-friendly description.
@@ -30,10 +30,10 @@ Open **VoiceOver Utility** (**⌘⌥F9** when VoiceOver is on, or
 - **Navigation → Keyboard navigation**: Allow Quick Nav (**← + →** to toggle).
 - **Web → Navigation**: Enable "Group items by type" (this affects list
   navigation in command palette and diff viewer).
-- **Sound → Audio ducking**: ✓ (so Forge audio fades when VoiceOver speaks).
+- **Sound → Audio ducking**: ✓ (so Terminus audio fades when VoiceOver speaks).
 
-### Forge launch
-1. Launch the Forge app.
+### Terminus launch
+1. Launch the Terminus app.
 2. If first-run onboarding appears, complete it or skip it.
 3. Select a project + task so the conversation surface is populated.
 
@@ -64,7 +64,7 @@ tasks as a list. Each row exposes its title, status, selected state.
 4. Press **VO + ↓** repeatedly to walk down the list.
 
 **Expected announcements** (one per row):
-- *"Forge, heading"* (app name at the top).
+- *"Terminus, heading"* (app name at the top).
 - *"New task, button"*.
 - *"Search tasks, search text field"*.
 - *"Pinned, group"* then *"Pinned, list"*.
@@ -96,13 +96,13 @@ are distinguished, streaming updates are announced politely.
 - *"Task, heading"* — the task objective is read as the page title.
 - *"Created <relative time>, risk <class>"* — the metadata below the title.
 - *"You, group"* then the user message text.
-- *"Forge, group"* then the agent message text.
+- *"Terminus, group"* then the agent message text.
 - When a new agent message arrives while you're reading: an aria-live
-  region politely announces *"Forge is responding"* (and *"Forge responded"*
+  region politely announces *"Terminus is responding"* (and *"Terminus responded"*
   when the stream completes).
 
 **Pass criteria**:
-- Each message is announced with its author first ("You" or "Forge") so the
+- Each message is announced with its author first ("You" or "Terminus") so the
   user can follow the turn-taking.
 - New streaming messages do NOT interrupt reading; the polite live region
   queues the announcement.
@@ -348,14 +348,14 @@ keyboard.
 is fully navigable.
 
 **Steps**:
-1. Reset onboarding: delete `forge-desktop.onboarding.completed.v1` from
+1. Reset onboarding: delete `terminus-desktop.onboarding.completed.v1` from
    localStorage (via devtools) and restart.
 2. The Welcome step appears.
 3. Press **Tab** to move between "Continue" and "Skip".
 4. Complete the flow.
 
 **Expected announcements**:
-- Each step's title: *"Welcome to Forge, heading"*.
+- Each step's title: *"Welcome to Terminus, heading"*.
 - Step indicator: *"Step 1 of 4"*.
 - Buttons: *"Continue, button"*, *"Skip, button"*.
 
@@ -467,7 +467,7 @@ session.
 4. Press **Enter**.
 
 **Expected announcements**:
-- The conversation live region announces: *"Forge stopped"*.
+- The conversation live region announces: *"Terminus stopped"*.
 - The send button reverts to *"Send, button"*.
 - The streaming cursor (aria-label "streaming") is removed.
 
@@ -504,7 +504,7 @@ communicates the metric.
 ErrorState appears with a recovery action.
 
 **Steps**:
-1. Stop the control plane (`mini-services/forge-control`).
+1. Stop the control plane (`mini-services/terminus-control`).
 2. Wait for the next health check, or trigger a refresh.
 3. An ErrorState appears.
 
@@ -566,7 +566,7 @@ Date: <YYYY-MM-DD>
 Tester: <name>
 VoiceOver version: <version>
 macOS version: <version>
-Forge version: <version>
+Terminus version: <version>
 Result: PASS / FAIL / PARTIAL
 Notes: <observations, unexpected announcements, suggestions>
 ```

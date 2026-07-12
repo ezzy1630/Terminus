@@ -1,13 +1,13 @@
-# Forge security policy
+# Terminus security policy
 
 ## Trust zones (SPEC §27.2)
 
-Forge enforces a strict trust-zone model. Data may move from a lower-trust zone to a higher-trust decision only through validation and policy. Text originating in Z5 MUST NOT become authority merely because a model repeats it.
+Terminus enforces a strict trust-zone model. Data may move from a lower-trust zone to a higher-trust decision only through validation and policy. Text originating in Z5 MUST NOT become authority merely because a model repeats it.
 
 | Zone | Examples | Trust | Ambient authority |
 |---|---|---|---|
 | **Z0** | Kernel policy engine, secret broker, sandbox broker | Highest | Narrowly defined host capabilities |
-| **Z1** | Control plane (`forge-control`), signed first-party clients, Next.js dashboard | Trusted but non-privileged | No raw process/filesystem/network authority |
+| **Z1** | Control plane (`terminus-control`), signed first-party clients, Next.js dashboard | Trusted but non-privileged | No raw process/filesystem/network authority |
 | **Z2** | Built-in tools (read/search/patch/exec/inspect/job/capability), code-intelligence workers, LSP/DAP/index | Constrained | Explicit kernel grants only |
 | **Z3** | First-party plugins and external harness adapters | Partially trusted | Declared capabilities only |
 | **Z4** | Third-party plugins, MCP servers, external harnesses (Codex/Claude Code/Pi/OpenHands) | Untrusted | Isolated capability grants only |
@@ -30,19 +30,19 @@ Bypass attempts are tested continuously by `tests/security/bypass/` per SPEC §2
 
 ## Threat model (SPEC §36.2, Appendix I.1)
 
-Forge assumes the following may be malicious or compromised:
+Terminus assumes the following may be malicious or compromised:
 
 - Model output (Z5).
 - Prompt injection in source, issues, documentation, web pages, logs, images, or tool descriptions.
 - A malicious repository author.
 - A compromised npm/PyPI/crate/MCP/skill package.
 - A malicious plugin or external harness.
-- An attacker with access to a remote Forge endpoint.
+- An attacker with access to a remote Terminus endpoint.
 - Another tenant in a shared execution environment.
 - Accidental user approval or misconfiguration.
 - A compromised provider or leaked provider response.
 
-**Out of scope:** Forge does not claim to defend a user from a fully compromised host administrator. This boundary is stated explicitly at startup when remote multi-tenant mode is enabled.
+**Out of scope:** Terminus does not claim to defend a user from a fully compromised host administrator. This boundary is stated explicitly at startup when remote multi-tenant mode is enabled.
 
 Threat/control mappings are normative in `docs/security/threat-model.md` and Appendix I.1.
 
@@ -80,7 +80,7 @@ During the first migration stage, inherited OpenCode code may still contain dire
 
 **Do not open public GitHub issues for security vulnerabilities.**
 
-Email: `security@forge.local` (replace with the project's security contact before public release).
+Email: `security@terminus.local` (replace with the project's security contact before public release).
 
 Please include:
 

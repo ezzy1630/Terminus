@@ -1,4 +1,4 @@
-# AGENTS.md — forge-process
+# AGENTS.md — terminus-process
 
 ## Local rules
 

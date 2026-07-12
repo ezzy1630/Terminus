@@ -24,15 +24,16 @@
 //! validation, so each test sees the token error before any policy/path/spawn
 //! side effects.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(test)]
 
-use forge_authz::{OperationClass, Scope, TokenBinder};
-use forge_kernel::KernelHandle;
-use forge_kernel_protocol::{
-    CommandSpec, EffectIntent, ErrorCode, ErrorCategory, RequestContext, WorkspacePath,
-};
 use std::path::PathBuf;
 use tempfile::tempdir;
+use terminus_authz::{OperationClass, Scope, TokenBinder};
+use terminus_kernel::KernelHandle;
+use terminus_kernel_protocol::{
+    CommandSpec, EffectIntent, ErrorCategory, ErrorCode, RequestContext, WorkspacePath,
+};
 
 // ---------- helpers ----------
 
@@ -85,7 +86,7 @@ fn mint_and_encode(
         .expect("mint+encode")
 }
 
-fn is_capability_or_permission_error(err: &forge_kernel_protocol::KernelError) -> bool {
+fn is_capability_or_permission_error(err: &terminus_kernel_protocol::KernelError) -> bool {
     matches!(
         err.code(),
         ErrorCode::CapabilityTokenInvalid
@@ -148,10 +149,7 @@ async fn cap_e2e_exec_token_accepted_for_exec() {
         timeout_ms: 1_000,
         ..Default::default()
     };
-    let result = kernel
-        .processes
-        .start(&ctx, &empty_intent(), command)
-        .await;
+    let result = kernel.processes.start(&ctx, &empty_intent(), command).await;
     match result {
         Ok(_rx) => { /* token accepted, process spawned */ }
         Err(e) => {
@@ -249,14 +247,7 @@ fn cap_e2e_network_scope_rejects_unauthorized_host() {
     let ip: std::net::IpAddr = "93.184.216.34".parse().expect("parse ip");
     let err = kernel
         .network
-        .authorize(
-            &ctx,
-            &empty_intent(),
-            "evil.com",
-            443,
-            "https",
-            &[ip],
-        )
+        .authorize(&ctx, &empty_intent(), "evil.com", 443, "https", &[ip])
         .expect_err("out-of-scope host must be rejected");
     assert_eq!(err.code(), ErrorCode::PermissionDenied);
     assert_eq!(err.category(), ErrorCategory::Permission);
@@ -363,7 +354,7 @@ async fn cap_e2e_wrong_audience_token_rejected() {
     // Mint a token using a different issuer (different kernel_instance_id)
     // but the SAME signing secret. The signature verifies, but the audience
     // check inside `validate` fails.
-    let other_issuer = forge_authz::TokenIssuer::new(
+    let other_issuer = terminus_authz::TokenIssuer::new(
         b"kernel-default-secret-please-rotate".to_vec(),
         "other-kernel-instance".to_string(),
         3600,

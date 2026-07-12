@@ -1,7 +1,7 @@
-# Forge Desktop — Design Tokens
+# Terminus Desktop — Design Tokens
 
 This document describes the color, typography, spacing/density, motion,
-and surface-language tokens used by the Forge desktop app. Tokens are
+and surface-language tokens used by the Terminus desktop app. Tokens are
 defined in `apps/desktop/src/styles/tokens.ts` and applied to
 `document.documentElement` at module load by
 `apps/desktop/src/hooks/use-theme.ts`.

@@ -1,4 +1,4 @@
-# AGENTS.md — forge-secrets
+# AGENTS.md — terminus-secrets
 
 ## Local rules
 

@@ -15,13 +15,14 @@
     "verbatimModuleSyntax": false,
     "esModuleInterop": true,
     "resolveJsonModule": true,
+    "noEmit": true,
     "skipLibCheck": true,
     "jsx": "react-jsx",
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
-      "@forge/public-api": ["../../packages/public-api/src/index.ts"],
-      "@forge/public-client": ["../../packages/public-client/src/index.ts"]
+      "@terminus/public-api": ["../../packages/public-api/src/index.ts"],
+      "@terminus/public-client": ["../../packages/public-client/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "electron/**/*.ts", "tests/**/*.ts", "tests/**/*.tsx"],

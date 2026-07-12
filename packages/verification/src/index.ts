@@ -1,5 +1,5 @@
 /**
- * @forge/verification — verification DAG engine.
+ * @terminus/verification — verification DAG engine.
  *
  * Per SPEC §17, §40: VerificationPlan builder, VerificationNode types
  * (command/diagnostic/diff_rule/human/external_query), VerificationEngine with
@@ -20,8 +20,8 @@ import type {
   Rfc3339Timestamp,
   ContentHash,
   Micros,
-} from "@forge/domain";
-import { ValidationError } from "@forge/domain";
+} from "@terminus/domain";
+import { ValidationError } from "@terminus/domain";
 
 // ────────────────────────── Plan builder ─────────────────────────────────────
 

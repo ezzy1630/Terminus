@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/capabilities/plugin.json",
+  "$id": "https://terminus.dev/schemas/capabilities/plugin.json",
   "title": "PluginCapability",
-  "description": "Capability descriptor for a Forge plugin (SPEC §12.3, §35.8). Plugin tiers: core built-in, first-party, verified third-party, unverified. Third-party plugins run in WASI, isolated process, container, or micro-VM with hard resource limits and revocable capability grants.",
+  "description": "Capability descriptor for a Terminus plugin (SPEC §12.3, §35.8). Plugin tiers: core built-in, first-party, verified third-party, unverified. Third-party plugins run in WASI, isolated process, container, or micro-VM with hard resource limits and revocable capability grants.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "version", "kind", "source", "content_hash", "trust_level", "operations", "tier", "runtime", "hooks"],

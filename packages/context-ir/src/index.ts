@@ -1,5 +1,5 @@
 /**
- * @forge/context-ir — Context IR types and zod schemas.
+ * @terminus/context-ir — Context IR types and zod schemas.
  *
  * Per SPEC §8 and §33: context fragment types, source descriptors,
  * exactness classes, trust/confidentiality/injection labels, freshness,
@@ -31,7 +31,7 @@ import type {
   SelectionFeatures,
   SourceDescriptor,
   ContextCachePlan,
-} from "@forge/domain";
+} from "@terminus/domain";
 import {
   artifactRefSchema,
   confidentialityLabelSchema,
@@ -39,7 +39,7 @@ import {
   injectionRiskSchema,
   exactnessSchema,
   contextKindSchema,
-} from "@forge/domain";
+} from "@terminus/domain";
 
 // Re-export canonical context types from domain for convenience.
 export type {

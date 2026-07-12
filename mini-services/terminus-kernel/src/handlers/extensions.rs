@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use forge_extension_runtime::ExtensionManifest;
+use terminus_extension_runtime::ExtensionManifest;
 use serde::{Deserialize, Serialize};
 
 use crate::api::Envelope;

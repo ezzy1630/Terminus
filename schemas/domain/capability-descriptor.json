@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/capability-v1.json",
+  "$id": "https://terminus.dev/schemas/capability-v1.json",
   "title": "CapabilityDescriptor",
   "description": "Capability descriptor (SPEC §35.1, Appendix E.5). Describes a skill, tool pack, MCP server, plugin, external harness, or environment.",
   "type": "object",

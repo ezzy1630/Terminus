@@ -1,4 +1,4 @@
-# @forge/provider-anthropic
+# @terminus/provider-anthropic
 
 Anthropic Messages API renderer. Maps canonical context to Anthropic Messages
 API with system blocks, tool_use/tool_result content blocks, cache_control

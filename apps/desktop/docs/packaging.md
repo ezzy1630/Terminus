@@ -1,7 +1,7 @@
-# Forge Desktop — Packaging Guide
+# Terminus Desktop — Packaging Guide
 
 This document describes how to build, sign, notarize, and package the
-Forge desktop application for macOS.
+Terminus desktop application for macOS.
 
 ## 1. Prerequisites
 
@@ -59,7 +59,7 @@ Outputs:
 ```bash
 cd apps/desktop
 
-# Produce release/Forge-0.1.0-arm64.dmg and release/Forge-0.1.0-arm64.zip
+# Produce release/Terminus-0.1.0-arm64.dmg and release/Terminus-0.1.0-arm64.zip
 bun run package
 
 # Or produce just the .app bundle (faster, no DMG):
@@ -78,8 +78,8 @@ key:
 ```json
 {
   "build": {
-    "appId": "dev.forge.desktop",
-    "productName": "Forge",
+    "appId": "dev.terminus.desktop",
+    "productName": "Terminus",
     "directories": { "output": "release" },
     "mac": {
       "category": "public.app-category.developer-tools",
@@ -106,15 +106,15 @@ bunx electron-builder --mac --arm64 --dir
 
 Outputs (under `release/`):
 
-- `mac-arm64/Forge.app` — the app bundle.
-- `Forge-0.1.0-arm64.dmg` — the disk image installer.
-- `Forge-0.1.0-arm64-mac.zip` — the zipped app bundle (used for
+- `mac-arm64/Terminus.app` — the app bundle.
+- `Terminus-0.1.0-arm64.dmg` — the disk image installer.
+- `Terminus-0.1.0-arm64-mac.zip` — the zipped app bundle (used for
   notarization).
 
 ## 4. Entitlements
 
 The entitlements file at `electron/entitlements.mac.plist` requests
-the minimum set of capabilities needed by Forge:
+the minimum set of capabilities needed by Terminus:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -140,8 +140,8 @@ the minimum set of capabilities needed by Forge:
 | `cs.allow-jit` | Electron's V8 uses JIT compilation for JavaScript. Required. |
 | `cs.allow-unsigned-executable-memory` | Electron loads unsigned native modules (e.g. context isolation bridge). Required. |
 | `cs.disable-libsystem-validation` | Allows Electron to load its own bundled libraries without per-library signature checks. Required. |
-| `network.client` | Forge talks to the control plane at `http://127.0.0.1:3050` and the kernel at `:3040`. Required. |
-| `network.server` | Forge does not listen on any port. Explicitly `false`. |
+| `network.client` | Terminus talks to the control plane at `http://127.0.0.1:3050` and the kernel at `:3040`. Required. |
+| `network.server` | Terminus does not listen on any port. Explicitly `false`. |
 
 The app does **not** request:
 
@@ -149,7 +149,7 @@ The app does **not** request:
   validation where possible).
 - `files.user-selected.read-write` (the desktop app doesn't directly
   read user-selected files; the harness does that via the kernel).
-- `device.audio-input` / `device.camera` (not used by Forge).
+- `device.audio-input` / `device.camera` (not used by Terminus).
 - `apple-events` (not used).
 
 ## 5. Code signing
@@ -182,22 +182,22 @@ bun run package
 The output should include:
 
 ```
-signing         file=release/mac-arm64/Forge.app
+signing         file=release/mac-arm64/Terminus.app
 ```
 
 To verify the signature:
 
 ```bash
-codesign --verify --deep --strict --verbose=2 release/mac-arm64/Forge.app
+codesign --verify --deep --strict --verbose=2 release/mac-arm64/Terminus.app
 ```
 
-Expected: `Forge.app: valid on disk` and `Forge.app: satisfies its
+Expected: `Terminus.app: valid on disk` and `Terminus.app: satisfies its
 Designated Requirement`.
 
 To inspect the entitlements:
 
 ```bash
-codesign -d --entitlements - release/mac-arm64/Forge.app
+codesign -d --entitlements - release/mac-arm64/Terminus.app
 ```
 
 ## 6. Notarization
@@ -208,15 +208,15 @@ After signing, submit the zipped app bundle to Apple's notary service:
 
 ```bash
 # Submit the zip via notarytool (recommended — uses App Store Connect API key).
-xcrun notarytool submit release/Forge-0.1.0-arm64-mac.zip \
-  --keychain-profile "forge-notarize" \
+xcrun notarytool submit release/Terminus-0.1.0-arm64-mac.zip \
+  --keychain-profile "terminus-notarize" \
   --wait
 ```
 
 The `--keychain-profile` is created once via:
 
 ```bash
-xcrun notarytool store-credentials "forge-notarize" \
+xcrun notarytool store-credentials "terminus-notarize" \
   --apple-id "you@example.com" \
   --team-id "ABC1234567" \
   --password "app-specific-password"
@@ -228,8 +228,8 @@ The `--wait` flag blocks until notarization completes (typically
 ### 6.2 Staple the notarization ticket
 
 ```bash
-xcrun stapler staple release/mac-arm64/Forge.app
-xcrun stapler verify release/mac-arm64/Forge.app
+xcrun stapler staple release/mac-arm64/Terminus.app
+xcrun stapler verify release/mac-arm64/Terminus.app
 ```
 
 Expected: `The validate action worked!`.
@@ -237,10 +237,10 @@ Expected: `The validate action worked!`.
 ### 6.3 Verify the full chain
 
 ```bash
-spctl --assess --type execute --verbose release/mac-arm64/Forge.app
+spctl --assess --type execute --verbose release/mac-arm64/Terminus.app
 ```
 
-Expected: `release/mac-arm64/Forge.app: accepted` with
+Expected: `release/mac-arm64/Terminus.app: accepted` with
 `source=Notarized Developer ID`.
 
 ### 6.4 Automate via electron-builder
@@ -272,7 +272,7 @@ customize the DMG layout (background, icon positions), add to
 {
   "build": {
     "dmg": {
-      "title": "Forge ${version}",
+      "title": "Terminus ${version}",
       "contents": [
         { "x": 130, "y": 220 },
         { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
@@ -288,7 +288,7 @@ The default DMG is fine for most uses.
 
 ```bash
 # Open the packaged app (it will use the production Electron binary).
-open release/mac-arm64/Forge.app
+open release/mac-arm64/Terminus.app
 ```
 
 Verify:
@@ -308,7 +308,7 @@ Verify:
 
 ### Direct download
 
-Upload `release/Forge-0.1.0-arm64.dmg` to your distribution URL
+Upload `release/Terminus-0.1.0-arm64.dmg` to your distribution URL
 (e.g. GitHub Releases). Users on Apple Silicon download the `-arm64`
 DMG; users on Intel download the `-x64` DMG. A universal DMG can be
 produced by passing `--arch universal` but doubles the size.
@@ -351,7 +351,7 @@ malicious software"
 
 - This usually means Gatekeeper quarantined the app. Run:
   ```bash
-  xattr -d com.apple.quarantine release/mac-arm64/Forge.app
+  xattr -d com.apple.quarantine release/mac-arm64/Terminus.app
   ```
   This is only for local testing — the quarantine flag is removed by
   notarization for end users.
@@ -406,7 +406,7 @@ jobs:
         run: cd apps/desktop && bun run package
       - uses: actions/upload-artifact@v4
         with:
-          name: Forge-macos
+          name: Terminus-macos
           path: apps/desktop/release/*.dmg
 ```
 
@@ -420,6 +420,6 @@ The app version lives in `apps/desktop/package.json` as `"version":
 - Major (`0.1.0` → `1.0.0`): breaking changes (UI rework, API
   contract changes).
 
-The DMG filename is `Forge-<version>-<arch>.dmg` (e.g.
-`Forge-0.1.0-arm64.dmg`). The notarization ticket is bound to the
+The DMG filename is `Terminus-<version>-<arch>.dmg` (e.g.
+`Terminus-0.1.0-arm64.dmg`). The notarization ticket is bound to the
 version — re-notarize after every bump.

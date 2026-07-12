@@ -1,12 +1,12 @@
 /**
- * Forge CLI — non-interactive client for CI and automation (SPEC §42.1).
+ * Terminus CLI — non-interactive client for CI and automation (SPEC §42.1).
  *
  * Per SPEC §32.3: starting a task returns immediately with an event cursor;
  * clients subscribe to events. Long-running HTTP requests MUST NOT own
  * durable execution.
  *
  * Usage:
- *   forge <command> [options]
+ *   terminus <command> [options]
  *
  * Commands:
  *   health                          Print system + kernel health as JSON
@@ -32,8 +32,8 @@
  *   config                          Print effective configuration as JSON
  *
  * Options:
- *   --gateway <url>    Gateway base URL (default: http://127.0.0.1:81, env: FORGE_GATEWAY)
- *   --token <t>        Bearer token (env: FORGE_TOKEN)
+ *   --gateway <url>    Gateway base URL (default: http://127.0.0.1:81, env: TERMINUS_GATEWAY)
+ *   --token <t>        Bearer token (env: TERMINUS_TOKEN)
  *   --idempotency <k>  Idempotency key for mutating requests
  *   --help, -h         Show help
  *
@@ -43,7 +43,7 @@
  *   2   usage error
  *   3   timeout
  */
-const GATEWAY = process.env.FORGE_GATEWAY ?? "http://127.0.0.1:81";
+const GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
 const PORT_PARAM = "XTransformPort=3050";
 
 interface Args {
@@ -195,7 +195,7 @@ async function streamEvents(taskId?: string, cursor?: string): Promise<void> {
 
 function showHelp(): void {
   process.stdout.write(`
-Forge CLI — non-interactive client for CI and automation (SPEC §42.1).
+Terminus CLI — non-interactive client for CI and automation (SPEC §42.1).
 
 Commands:
   health                          System + kernel health (JSON)
@@ -219,8 +219,8 @@ Commands:
   config                          Effective configuration (JSON)
 
 Options:
-  --gateway <url>    Gateway base URL (env: FORGE_GATEWAY, default: http://127.0.0.1:81)
-  --token <t>        Bearer token (env: FORGE_TOKEN)
+  --gateway <url>    Gateway base URL (env: TERMINUS_GATEWAY, default: http://127.0.0.1:81)
+  --token <t>        Bearer token (env: TERMINUS_TOKEN)
   --idempotency <k>  Idempotency key for mutating requests
   --help, -h         Show this help
 

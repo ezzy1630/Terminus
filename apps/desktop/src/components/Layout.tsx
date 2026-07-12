@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Layout shell.
+ * Terminus Desktop — Layout shell.
  *
  * Per SPEC §6: adaptive three-region structure with native integrated
  * title bar, persistent left sidebar, primary conversation/working
@@ -36,15 +36,20 @@ interface LayoutProps {
   sidebar: ReactNode;
   main: ReactNode;
   inspector: ReactNode;
+  /** Hides the contextual inspector when a technical split needs the width. */
+  inspectorVisible?: boolean;
   /** Optional content for the right side of the title bar (theme, density, etc.). */
   right?: ReactNode;
   /** Optional content for the center of the title bar. */
   center?: ReactNode;
   /** Initial terminal drawer open state. SPEC: "hidden by default." */
   terminalInitiallyOpen?: boolean;
+  /** Optional controlled terminal state for command-palette integration. */
+  terminalOpen?: boolean;
+  onTerminalOpenChange?: (open: boolean) => void;
 }
 
-const TITLEBAR_HEIGHT = 44;
+const TITLEBAR_HEIGHT = 48;
 const TRAFFIC_LIGHTS_PAD = 80;
 const TERMINAL_MIN_HEIGHT = 120;
 const TERMINAL_DEFAULT_HEIGHT = 240;
@@ -69,8 +74,8 @@ const TitleBar = memo(function TitleBar({
       style={{
         height: TITLEBAR_HEIGHT,
         // Leave space for macOS traffic lights on the left.
-        paddingLeft: TRAFFIC_LIGHTS_PAD,
-        paddingRight: 12,
+        paddingLeft: TRAFFIC_LIGHTS_PAD + 4,
+        paddingRight: 14,
         WebkitAppRegion: "drag",
       } as React.CSSProperties}
     >
@@ -176,15 +181,23 @@ function LayoutImpl({
   sidebar,
   main,
   inspector,
+  inspectorVisible = true,
   right,
   center,
   terminalInitiallyOpen = false,
+  terminalOpen: terminalOpenProp,
+  onTerminalOpenChange,
 }: LayoutProps): JSX.Element {
   const vp = useViewport();
   const density = useThemeStore((s) => s.density);
 
-  const [terminalOpen, setTerminalOpen] = useState(terminalInitiallyOpen);
+  const [uncontrolledTerminalOpen, setUncontrolledTerminalOpen] = useState(terminalInitiallyOpen);
   const [terminalHeight, setTerminalHeight] = useState(TERMINAL_DEFAULT_HEIGHT);
+  const terminalOpen = terminalOpenProp ?? uncontrolledTerminalOpen;
+  const setTerminalOpen = useCallback((open: boolean): void => {
+    if (terminalOpenProp === undefined) setUncontrolledTerminalOpen(open);
+    onTerminalOpenChange?.(open);
+  }, [onTerminalOpenChange, terminalOpenProp]);
 
   // Sidebar width: rail (56px) at < 700, compact token at < 1100, full token otherwise.
   const sidebarWidth = vp.sidebarRail
@@ -194,20 +207,20 @@ function LayoutImpl({
       : "var(--sidebar-width)";
 
   const toggleTerminal = useCallback(() => {
-    setTerminalOpen((o) => !o);
-  }, []);
+    setTerminalOpen(!terminalOpen);
+  }, [setTerminalOpen, terminalOpen]);
 
   // Keyboard: Cmd/Ctrl + ` toggles terminal (common macOS convention).
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if ((e.metaKey || e.ctrlKey) && e.key === "`") {
         e.preventDefault();
-        setTerminalOpen((o) => !o);
+        setTerminalOpen(!terminalOpen);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [setTerminalOpen, terminalOpen]);
 
   return (
     <div
@@ -220,7 +233,7 @@ function LayoutImpl({
         center={
           center ?? (
             <div className="flex items-center gap-2 text-xs text-tertiary">
-              <span className="font-medium tracking-tight text-secondary">Forge</span>
+              <span className="font-medium tracking-tight text-secondary">Terminus</span>
             </div>
           )
         }
@@ -253,7 +266,7 @@ function LayoutImpl({
 
           {/* Inspector.
               At < 900px, becomes an absolutely-positioned floating overlay. */}
-          {vp.inspectorOverlay ? (
+          {inspectorVisible && vp.inspectorOverlay ? (
             <div
               className="pointer-events-none absolute"
               style={{
@@ -268,16 +281,16 @@ function LayoutImpl({
                 {inspector}
               </div>
             </div>
-          ) : (
+          ) : inspectorVisible ? (
             <aside
-              className="h-full flex-shrink-0 p-3"
+              className="h-full flex-shrink-0 border-l border-subtle p-3"
               style={{ width: "var(--inspector-width)" }}
             >
-              <div className="h-full overflow-hidden rounded-lg border border-default bg-inspector shadow-md">
+              <div className="h-full overflow-hidden rounded-lg border border-subtle bg-inspector shadow-sm">
                 {inspector}
               </div>
             </aside>
-          )}
+          ) : null}
         </main>
       </div>
 

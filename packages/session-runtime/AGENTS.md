@@ -1,4 +1,4 @@
-# @forge/session-runtime — local rules
+# @terminus/session-runtime — local rules
 
 ## Non-negotiable
 

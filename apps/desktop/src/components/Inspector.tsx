@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Dynamic right inspector.
+ * Terminus Desktop — Dynamic right inspector.
  *
  * Per SPEC §11: "The inspector must not be a fixed list of empty
  * sections. Sections appear only after relevant information exists."
@@ -22,9 +22,10 @@
  * session is active — we don't render an empty placeholder.
  */
 import { memo, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, GitBranch, Monitor, ShieldAlert, Workflow } from "lucide-react";
+import { ChevronDown, ChevronRight, FileDiff, GitBranch, Monitor, ShieldAlert, Sparkles, UsersRound, Workflow } from "lucide-react";
 import { cn } from "../lib/cn";
-import { useSelectedTask, useSelectedTaskEvents, normalizeTaskStatus } from "../hooks/use-forge";
+import { useSelectedTask, useSelectedTaskEvents, normalizeTaskStatus } from "../hooks/use-terminus";
+import { derivePendingApprovals, deriveSubagentActivity, deriveVerificationActivity, extractUnifiedDiffs } from "../lib/task-surface";
 import { statusLabel, StatusIndicator } from "./StatusIndicator";
 import { ComputerUsePiP, type ComputerUseState } from "./ComputerUsePiP";
 import { ComputerUsePlaceholder } from "./ComputerUsePlaceholder";
@@ -45,6 +46,8 @@ interface InspectorProps {
   onComputerUseStop?: () => void;
   /** Called when the user toggles expanded mode. */
   onComputerUseToggleExpanded?: (expanded: boolean) => void;
+  /** Opens the review split when the task has patch evidence. */
+  onShowChanges?: () => void;
 }
 
 interface InspectorSectionProps {
@@ -87,13 +90,19 @@ function InspectorSection({
 function NoSelection(): JSX.Element {
   return (
     <div
-      className="flex h-full flex-col items-center justify-center px-6 py-8 text-center text-tertiary"
+      className="flex h-full flex-col px-4 py-4 text-tertiary"
       style={{ fontSize: "var(--font-size-xs)" }}
     >
-      <div className="mb-1 text-secondary" style={{ fontSize: "var(--font-size-sm)" }}>
-        No task selected
+      <div className="flex items-center gap-2 border-b border-subtle pb-3 text-secondary">
+        <Sparkles size={14} strokeWidth={1.7} />
+        <span className="font-medium" style={{ fontSize: "var(--font-size-sm)" }}>Task context</span>
       </div>
-      <div>Inspector sections appear when relevant information exists.</div>
+      <div className="pt-4" style={{ lineHeight: 1.55 }}>
+        Select a task to inspect its environment, activity, changes, and approvals.
+      </div>
+      <div className="mt-5 border-l-2 border-default pl-3" style={{ lineHeight: 1.5 }}>
+        This space stays quiet until the current task has something useful to show.
+      </div>
     </div>
   );
 }
@@ -104,6 +113,7 @@ function InspectorImpl({
   onComputerUseHide,
   onComputerUseStop,
   onComputerUseToggleExpanded,
+  onShowChanges,
 }: InspectorProps): JSX.Element {
   const task = useSelectedTask();
   const events = useSelectedTaskEvents();
@@ -111,11 +121,10 @@ function InspectorImpl({
   // Derive a simple activity summary (last 5 events).
   const recentEvents = useMemo(() => events.slice(-5).reverse(), [events]);
 
-  // Look for any approval-related events in the log.
-  const hasApproval = useMemo(
-    () => events.some((ev) => ev.event.startsWith("approval.") || ev.event === "tool.authorized"),
-    [events],
-  );
+  const approvals = useMemo(() => derivePendingApprovals(events), [events]);
+  const subagents = useMemo(() => deriveSubagentActivity(events), [events]);
+  const verification = useMemo(() => deriveVerificationActivity(events), [events]);
+  const hasPatchEvidence = useMemo(() => extractUnifiedDiffs(events).length > 0, [events]);
 
   // Local state for "Take over" — the host can override via props.
   const [controlState, setControlState] = useState<ComputerUseState>("agent-controlled");
@@ -138,11 +147,11 @@ function InspectorImpl({
           <StatusIndicator status={statusKind} size={12} label={statusLabel(statusKind)} />
         </div>
         <div
-          className="mt-1.5 truncate font-mono text-tertiary"
-          style={{ fontSize: "var(--font-size-xs)" }}
-          title={task.id}
+          className="mt-1.5 truncate text-primary"
+          style={{ fontSize: "var(--font-size-sm)", fontWeight: 600 }}
+          title={task.contract?.objective ?? task.id}
         >
-          {task.id}
+          {task.contract?.objective ?? task.id}
         </div>
         <div
           className="mt-0.5 text-tertiary"
@@ -181,6 +190,53 @@ function InspectorImpl({
         </div>
       </InspectorSection>
 
+      {hasPatchEvidence ? (
+        <InspectorSection title="Changes" icon={<FileDiff size={12} />} defaultOpen>
+          <button
+            type="button"
+            onClick={onShowChanges}
+            className="flex w-full items-center justify-between rounded-sm border border-subtle px-2.5 py-2 text-left hover:border-default hover:bg-hover"
+            style={{ fontSize: "var(--font-size-xs)" }}
+          >
+            <span className="text-secondary">Patch evidence is ready for review</span>
+            <span className="font-mono text-tertiary">Open</span>
+          </button>
+        </InspectorSection>
+      ) : null}
+
+      {subagents.length > 0 ? (
+        <InspectorSection title="Subagents" icon={<UsersRound size={12} />} defaultOpen>
+          <ul className="flex flex-col gap-2" style={{ fontSize: "var(--font-size-xs)" }}>
+            {subagents.map((subagent) => (
+              <li key={subagent.id} className="flex items-start gap-2">
+                <StatusIndicator
+                  status={subagent.state === "working" ? "working" : subagent.state === "failed" ? "failed" : "done"}
+                  size={11}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-secondary">{subagent.role}</span>
+                  <span className="block truncate font-mono text-tertiary">{subagent.worktreeId ?? subagent.id}</span>
+                </span>
+                <span className="text-tertiary">{subagent.state}</span>
+              </li>
+            ))}
+          </ul>
+        </InspectorSection>
+      ) : null}
+
+      {verification.length > 0 ? (
+        <InspectorSection title="Verification" icon={<Workflow size={12} />} defaultOpen>
+          <ul className="flex flex-col gap-1.5" style={{ fontSize: "var(--font-size-xs)" }}>
+            {verification.slice(-5).reverse().map((check) => (
+              <li key={check.id} className="flex items-start gap-2">
+                <StatusIndicator status={check.state === "passed" ? "done" : check.state === "failed" ? "failed" : "working"} size={11} />
+                <span className="min-w-0 flex-1 text-secondary">{check.detail}</span>
+              </li>
+            ))}
+          </ul>
+        </InspectorSection>
+      ) : null}
+
       {/* Activity section — only when events exist. */}
       {recentEvents.length > 0 ? (
         <InspectorSection title="Activity" icon={<Workflow size={12} />} defaultOpen>
@@ -214,14 +270,16 @@ function InspectorImpl({
       ) : null}
 
       {/* Approvals section — only when relevant. */}
-      {hasApproval ? (
+      {approvals.length > 0 ? (
         <InspectorSection title="Approvals" icon={<ShieldAlert size={12} />} defaultOpen>
-          <div
-            className="text-secondary"
-            style={{ fontSize: "var(--font-size-xs)" }}
-          >
-            Approval requests will appear here when the agent asks for permission.
-          </div>
+          <ul className="flex flex-col gap-2" style={{ fontSize: "var(--font-size-xs)" }}>
+            {approvals.map((approval) => (
+              <li key={approval.id} className="border-l-2 border-l-[var(--color-approval-risk)] pl-2 text-secondary">
+                <span className="block truncate text-primary">{approval.action}</span>
+                <span className="text-tertiary">{approval.risk} risk{approval.reversibility ? ` · ${approval.reversibility}` : ""}</span>
+              </li>
+            ))}
+          </ul>
         </InspectorSection>
       ) : null}
 

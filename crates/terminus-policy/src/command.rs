@@ -81,20 +81,10 @@ impl NormalizedCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ShellAst {
-    Pipeline {
-        stages: Vec<String>,
-    },
-    SingleCommand {
-        program: String,
-        args: Vec<String>,
-    },
-    Script {
-        dialect: String,
-        script: String,
-    },
-    Unknown {
-        raw: String,
-    },
+    Pipeline { stages: Vec<String> },
+    SingleCommand { program: String, args: Vec<String> },
+    Script { dialect: String, script: String },
+    Unknown { raw: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

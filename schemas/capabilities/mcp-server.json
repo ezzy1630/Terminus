@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/capabilities/mcp-server.json",
+  "$id": "https://terminus.dev/schemas/capabilities/mcp-server.json",
   "title": "McpServerCapability",
   "description": "Capability descriptor for an MCP server (SPEC §12.2, §35.4). MCP servers run as untrusted extension processes; admission requires identity, pinning, descriptor hashing, effect classification, organization policy, conformance tests, and approval.",
   "type": "object",

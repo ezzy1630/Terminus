@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Sidebar.
+ * Terminus Desktop — Sidebar.
  *
  * Per SPEC §7:
  *   Application name
@@ -24,11 +24,12 @@
  * Per SPEC §24: compact mode = icons only.
  */
 import { memo, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Plus, Search, Settings, User } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, Search, Settings, TerminalSquare, TriangleAlert, User } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
-import { useForgeStore, usePinnedTasks, normalizeTaskStatus } from "../hooks/use-forge";
+import { useForgeStore, usePinnedTasks, normalizeTaskStatus } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
+import { useViewport } from "../hooks/use-viewport";
 import { SidebarItem } from "./SidebarItem";
 import type { Session, Task } from "../types";
 
@@ -37,8 +38,8 @@ interface SidebarProps {
 }
 
 function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
-  const density = useThemeStore((s) => s.density);
-  const compact = compactProp ?? density === "compact";
+  const viewport = useViewport();
+  const compact = compactProp ?? viewport.sidebarRail;
 
   const sessions = useForgeStore((s) => s.sessions);
   const tasksBySession = useForgeStore((s) => s.tasksBySession);
@@ -46,10 +47,13 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
   const selectedTaskId = useForgeStore((s) => s.selectedTaskId);
   const pinnedTaskIds = useForgeStore((s) => s.pinnedTaskIds);
   const loadingSessions = useForgeStore((s) => s.loadingSessions);
+  const healthReady = useForgeStore((s) => s.healthReady);
+  const lastError = useForgeStore((s) => s.lastError);
 
   const selectSession = useForgeStore((s) => s.selectSession);
   const selectTask = useForgeStore((s) => s.selectTask);
   const togglePin = useForgeStore((s) => s.togglePin);
+  const refreshAll = useForgeStore((s) => s.refreshAll);
 
   const pinnedTasks = usePinnedTasks();
 
@@ -87,10 +91,10 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
       <div className="flex h-full flex-col items-center gap-2 py-3">
         <div
           className="flex h-7 w-7 items-center justify-center rounded-md text-primary"
-          aria-label="Forge"
-          title="Forge"
+          aria-label="Terminus"
+          title="Terminus"
         >
-          <span className="text-sm font-semibold" style={{ fontSize: "var(--font-size-md)" }}>F</span>
+          <TerminalSquare size={16} strokeWidth={1.8} />
         </div>
         <button
           type="button"
@@ -122,14 +126,23 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
   return (
     <div className="flex h-full flex-col">
       {/* Application name + new task. */}
-      <div className="flex flex-col gap-2 px-3 pb-2 pt-3">
+      <div className="flex flex-col gap-2 px-3 pb-3 pt-3">
         <div className="flex items-center justify-between">
-          <span
-            className="font-semibold tracking-tight text-primary"
-            style={{ fontSize: "var(--font-size-md)" }}
-          >
-            Forge
-          </span>
+          <div className="flex items-center gap-2">
+            <span
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-subtle text-secondary"
+              style={{ background: "var(--bg-elevated)" }}
+              aria-hidden
+            >
+              <TerminalSquare size={15} strokeWidth={1.8} />
+            </span>
+            <span
+              className="font-semibold tracking-tight text-primary"
+              style={{ fontSize: "var(--font-size-md)" }}
+            >
+              Terminus
+            </span>
+          </div>
           <button
             type="button"
             onClick={onNewTask}
@@ -141,6 +154,17 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
             <span>New task</span>
           </button>
         </div>
+
+        <button
+          type="button"
+          onClick={onNewTask}
+          className="flex h-9 items-center gap-2 rounded-md border border-subtle px-2.5 text-left text-secondary hover:border-default hover:bg-hover hover:text-primary"
+          style={{ background: "var(--bg-elevated)", fontSize: "var(--font-size-sm)" }}
+        >
+          <Plus size={14} />
+          <span className="font-medium">Start a task</span>
+          <span className="ml-auto text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>⌘ N</span>
+        </button>
 
         {/* Search. */}
         <div className="relative">
@@ -165,6 +189,21 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
             aria-label="Search tasks"
           />
         </div>
+
+        {!healthReady && lastError ? (
+          <button
+            type="button"
+            onClick={() => void refreshAll()}
+            className="flex min-h-8 items-center gap-2 rounded-sm border border-subtle px-2 text-left text-tertiary hover:border-default hover:bg-hover hover:text-secondary"
+            role="alert"
+            title={lastError}
+            style={{ fontSize: "var(--font-size-xs)" }}
+          >
+            <TriangleAlert size={13} className="flex-shrink-0 text-warning" />
+            <span className="min-w-0 flex-1 truncate">Control plane unavailable</span>
+            <span className="font-medium">Retry</span>
+          </button>
+        ) : null}
       </div>
 
       {/* Scrollable projects/tasks list. */}
@@ -285,7 +324,7 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
             className="truncate text-tertiary"
             style={{ fontSize: "var(--font-size-xs)" }}
           >
-            Local · forge-control-dev-token
+            Local control plane
           </div>
         </div>
         <button

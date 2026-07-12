@@ -1,5 +1,5 @@
 /**
- * @forge/domain — state machine enumerations.
+ * @terminus/domain — state machine enumerations.
  *
  * Per SPEC §28.3-§28.8 and Appendix C.
  */

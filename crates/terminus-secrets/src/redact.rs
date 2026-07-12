@@ -76,9 +76,8 @@ mod tests {
         let mut r = Redactor::new();
         r.add_literal("aws-key", "AKIAEXAMPLEKEY");
         r.add_literal("aws-secret", "wJalrXUtnFEMI/K7MDENG/bPxRfiCY");
-        let (out, count) = r.redact(
-            b"AWS_KEY=AKIAEXAMPLEKEY AWS_SECRET=wJalrXUtnFEMI/K7MDENG/bPxRfiCY",
-        );
+        let (out, count) =
+            r.redact(b"AWS_KEY=AKIAEXAMPLEKEY AWS_SECRET=wJalrXUtnFEMI/K7MDENG/bPxRfiCY");
         assert_eq!(count, 2);
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("***REDACTED:aws-key***"));
@@ -101,7 +100,10 @@ mod tests {
         let (out, count) = r.redact(b"TOKEN TOKEN TOKEN");
         assert_eq!(count, 3);
         let s = String::from_utf8(out).unwrap();
-        assert_eq!(s, "***REDACTED:token*** ***REDACTED:token*** ***REDACTED:token***");
+        assert_eq!(
+            s,
+            "***REDACTED:token*** ***REDACTED:token*** ***REDACTED:token***"
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 use crate::error::GitError;
-use forge_process::{NormalizedSpawn, ProcessManager};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use terminus_process::{NormalizedSpawn, ProcessManager};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeCreate {
@@ -75,10 +75,10 @@ impl GitOps {
         let mut exit_code: i32 = -1;
         while let Some(ev) = rx.recv().await {
             match ev {
-                forge_kernel_protocol::ProcessEvent::Stdout(c) => {
+                terminus_kernel_protocol::ProcessEvent::Stdout(c) => {
                     stdout.extend_from_slice(&c.bytes);
                 }
-                forge_kernel_protocol::ProcessEvent::Exited(e) => {
+                terminus_kernel_protocol::ProcessEvent::Exited(e) => {
                     exit_code = e.exit_code;
                 }
                 _ => {}
@@ -96,7 +96,9 @@ impl GitOps {
 
     /// Get the current HEAD revision.
     pub async fn head_revision(&self, working_dir: PathBuf) -> Result<String, GitError> {
-        let out = self.run_git(Some(working_dir), &["rev-parse", "HEAD"]).await?;
+        let out = self
+            .run_git(Some(working_dir), &["rev-parse", "HEAD"])
+            .await?;
         let s = String::from_utf8_lossy(&out).trim().to_string();
         if s.is_empty() {
             return Err(GitError::InvalidRef("HEAD is empty".into()));
@@ -107,18 +109,19 @@ impl GitOps {
     /// Create a worktree at `path` on `branch` based on `base_ref`.
     pub async fn create_worktree(&self, request: WorktreeCreate) -> Result<(), GitError> {
         let path_str = request.path.to_string_lossy().to_string();
-        let branch_arg = format!("{}:{}", request.base_ref, request.branch);
         let _ = self
             .run_git(
                 None,
-                &["worktree", "add", "-b", &request.branch, &path_str, &request.base_ref],
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &request.branch,
+                    &path_str,
+                    &request.base_ref,
+                ],
             )
-            .await
-            .map_err(|e| {
-                // The branch_arg form is unused; remove it.
-                let _ = branch_arg;
-                e
-            })?;
+            .await?;
         Ok(())
     }
 
@@ -138,14 +141,13 @@ impl GitOps {
         )
         .await?;
         let revision = self.head_revision(working_dir.clone()).await?;
-        let branch =
-            String::from_utf8_lossy(
-                &self
-                    .run_git(Some(working_dir), &["rev-parse", "--abbrev-ref", "HEAD"])
-                    .await?,
-            )
-            .trim()
-            .to_string();
+        let branch = String::from_utf8_lossy(
+            &self
+                .run_git(Some(working_dir), &["rev-parse", "--abbrev-ref", "HEAD"])
+                .await?,
+        )
+        .trim()
+        .to_string();
         Ok(CommitResult {
             revision,
             branch,
@@ -164,8 +166,8 @@ impl GitOps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_artifacts::ArtifactStore;
     use tempfile::tempdir;
+    use terminus_artifacts::ArtifactStore;
 
     fn mgr() -> (tempfile::TempDir, Arc<ProcessManager>) {
         let dir = tempdir().unwrap();
@@ -191,10 +193,7 @@ mod tests {
         let (_o, mut rx) = mgr.spawn(init_spawn).await.unwrap();
         while rx.recv().await.is_some() {}
         // Configure user locally (the kernel sanitizes global config).
-        for (k, v) in [
-            ("user.name", "Test"),
-            ("user.email", "test@example.com"),
-        ] {
+        for (k, v) in [("user.name", "Test"), ("user.email", "test@example.com")] {
             let spawn = NormalizedSpawn {
                 program: "git".into(),
                 args: vec!["config".into(), k.into(), v.into()],
@@ -213,7 +212,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.revision.is_empty());
-        assert!(result.branch == "main" || result.branch == "master", "unexpected branch: {}", result.branch);
+        assert!(
+            result.branch == "main" || result.branch == "master",
+            "unexpected branch: {}",
+            result.branch
+        );
         let head = ops.head_revision(repo).await.unwrap();
         assert_eq!(head, result.revision);
     }
@@ -232,8 +235,17 @@ mod tests {
         let (_dir, mgr) = mgr();
         let ops = GitOps::new(mgr, "git");
         let env = ops.sanitized_env();
-        assert_eq!(env.get("GIT_CONFIG_NOSYSTEM").map(String::as_str), Some("1"));
-        assert_eq!(env.get("GIT_CONFIG_GLOBAL").map(String::as_str), Some("/dev/null"));
-        assert_eq!(env.get("GIT_TERMINAL_PROMPT").map(String::as_str), Some("0"));
+        assert_eq!(
+            env.get("GIT_CONFIG_NOSYSTEM").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            env.get("GIT_CONFIG_GLOBAL").map(String::as_str),
+            Some("/dev/null")
+        );
+        assert_eq!(
+            env.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
     }
 }

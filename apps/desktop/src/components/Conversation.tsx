@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Conversation feed.
+ * Terminus Desktop — Conversation feed.
  *
  * Per SPEC §9: document-style feed (not chat bubbles). User messages
  * use restrained low-contrast rounded surfaces; agent responses appear
@@ -33,7 +33,9 @@ import { formatDistanceToNowStrict } from "date-fns";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Message } from "./Message";
 import { ActivityBlock } from "./ActivityBlock";
-import { useSelectedTask, useSelectedTaskEvents } from "../hooks/use-forge";
+import { ApprovalCard } from "./ApprovalCard";
+import { useSelectedTask, useSelectedTaskEvents } from "../hooks/use-terminus";
+import { derivePendingApprovals } from "../lib/task-surface";
 import type {
   ActivityBlock as ActivityBlockData,
   ActivityEntry,
@@ -66,7 +68,7 @@ interface PendingToolGroup {
  * Decode the SSE event log into a list of messages + activity blocks.
  *
  * Event taxonomy (from the control plane agent loop, mini-services/
- * forge-control/src/index.ts):
+ * terminus-control/src/index.ts):
  *   - turn.started        { user_input, task_id, sequence }
  *   - turn.completed      { ... }
  *   - tool.proposed       { tool, args_summary }
@@ -79,7 +81,7 @@ interface PendingToolGroup {
  * Anything unrecognized is ignored (defensive). A `provider_running`
  * event with a `delta` field is appended to the streaming agent message.
  */
-function decodeFeed(events: ForgeSseEvent[], taskCreatedAt: string): DecodedFeed {
+export function decodeFeed(events: ForgeSseEvent[], taskCreatedAt: string): DecodedFeed {
   const messages: ConversationMessage[] = [];
   const blocks: ActivityBlockData[] = [];
 
@@ -147,15 +149,27 @@ function decodeFeed(events: ForgeSseEvent[], taskCreatedAt: string): DecodedFeed
         });
         break;
       }
-      case "turn.response_validating":
       case "turn.completed": {
-        // Mark the streaming agent message as complete.
+        // The control plane's current adapter returns its concise final
+        // response on turn.completed rather than streaming deltas. Preserve
+        // streamed content when present, but never leave a completed turn
+        // with an empty assistant message.
         if (streamingMessageId) {
           const m = messages.find((x) => x.id === streamingMessageId);
-          if (m) m.streaming = false;
+          const summary = typeof p.summary === "string" ? p.summary : null;
+          if (m) {
+            if (m.content.length === 0 && summary) m.content = summary;
+            m.streaming = false;
+          }
         }
         streamingMessageId = null;
         flushGroup(ev.id);
+        break;
+      }
+      case "turn.response_validating": {
+        // Keep the response live through tool settlement. The final summary
+        // is emitted with turn.completed by the existing control-plane
+        // contract.
         break;
       }
       case "turn.provider_running": {
@@ -229,7 +243,10 @@ function summarizeToolPayload(eventName: string, p: Record<string, unknown>): st
     case "tool.proposed": return "proposed";
     case "tool.authorized": return "authorized";
     case "tool.settled": {
-      const status = p.result_status;
+      const summary = p.summary;
+      const status = p.result_status ?? p.status;
+      if (typeof summary === "string" && typeof status === "string") return `${status}: ${summary}`;
+      if (typeof summary === "string") return summary;
       return typeof status === "string" ? status : "settled";
     }
     default: return eventName;
@@ -314,6 +331,7 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
     // Recompute when the events list grows OR the task changes. The last
     // event id is included so streaming appends trigger a re-decode.
   }, [events, task?.id, events.length, events[events.length - 1]?.id]);
+  const approvals = useMemo(() => derivePendingApprovals(events), [events]);
 
   // Build the flattened feed items list.
   const items = useMemo<FeedItem[]>(() => {
@@ -374,8 +392,8 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
       return m.role === "user"
         ? `You sent a message`
         : m.streaming
-          ? `Forge is responding`
-          : `Forge responded`;
+          ? `Terminus is responding`
+          : `Terminus responded`;
     }
     return `Activity: ${last.block.title}`;
   }, [items]);
@@ -499,6 +517,22 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
             );
           })}
         </div>
+
+        {approvals.length > 0 ? (
+          <div className="mt-4 flex flex-col gap-3" aria-label="Pending approvals">
+            {approvals.map((approval) => (
+              <ApprovalCard
+                key={approval.id}
+                id={approval.id}
+                action={approval.action}
+                reason="The task needs your permission before this effect can continue."
+                risk={approval.risk}
+                affectedEnvironment="Current task environment"
+                canPersist
+              />
+            ))}
+          </div>
+        ) : null}
       </div>
     </div>
   );

@@ -89,7 +89,7 @@ Each delegation has a typed result schema (Appendix E.4).
 
 ## Worktree ownership (SPEC §14.5, §37.9)
 
-Managed writers get isolated Git worktrees (protected by `forge-git`). The integration coordinator merges worktrees back to the main branch. Worktree ownership prevents concurrent conflicting edits.
+Managed writers get isolated Git worktrees (protected by `terminus-git`). The integration coordinator merges worktrees back to the main branch. Worktree ownership prevents concurrent conflicting edits.
 
 ## Merge and integration (SPEC §37.10)
 

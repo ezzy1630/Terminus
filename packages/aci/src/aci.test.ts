@@ -1,9 +1,9 @@
 /**
- * @forge/aci — tests for ToolRegistry, ProgressiveDisclosure, FakeToolExecutor,
+ * @terminus/aci — tests for ToolRegistry, ProgressiveDisclosure, FakeToolExecutor,
  * default tool definitions, and the ToolResult envelope.
  */
 import { describe, test, expect } from "bun:test";
-import type { Uuid7, ContentHash } from "@forge/domain";
+import type { Uuid7, ContentHash } from "@terminus/domain";
 import {
   ToolRegistry,
   ProgressiveDisclosure,

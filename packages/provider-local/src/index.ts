@@ -1,5 +1,5 @@
 /**
- * @forge/provider-local — local-model renderer.
+ * @terminus/provider-local — local-model renderer.
  *
  * Chat-template-aware, tokenizer-aware. Same Transport pattern as other
  * providers (OpenAI-compatible local endpoint).
@@ -19,9 +19,9 @@ import type {
   ContinuationInput,
   ContinuationDecision,
   ProviderToolSchema,
-} from "@forge/provider-core";
-import { BaseProviderRenderer } from "@forge/provider-core";
-import type { TokenCount } from "@forge/domain";
+} from "@terminus/provider-core";
+import { BaseProviderRenderer } from "@terminus/provider-core";
+import type { TokenCount } from "@terminus/domain";
 
 // ────────────────────────── Local wire shapes ────────────────────────────────
 

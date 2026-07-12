@@ -8,7 +8,7 @@
 
 ## Context
 
-Forge is local-first (SPEC §26.1). The first production release is single-user. But there is product pressure to expose a shared daemon for teams, CI, and remote execution. SPEC §26.5 explicitly lists "full enterprise multi-tenancy before single-user isolation and recovery are proven" as a non-goal. Risk R12 (SPEC §49.4) calls out "Remote multi-tenancy is added prematurely" as a critical-impact risk.
+Terminus is local-first (SPEC §26.1). The first production release is single-user. But there is product pressure to expose a shared daemon for teams, CI, and remote execution. SPEC §26.5 explicitly lists "full enterprise multi-tenancy before single-user isolation and recovery are proven" as a non-goal. Risk R12 (SPEC §49.4) calls out "Remote multi-tenancy is added prematurely" as a critical-impact risk.
 
 Multi-tenancy introduces: cross-tenant data access risk, quota/admission control, per-tenant encryption keys, per-tenant audit, tenant isolation in execution and storage, and a much larger attack surface. None of this can be added safely before single-user isolation, recovery, and the non-bypassability suite are proven.
 
@@ -18,7 +18,7 @@ This ADR is OPEN. The decision owner is the release owner. The decision will be 
 
 Candidate models under evaluation:
 
-1. **Single-tenant remote** — one Forge instance per tenant. Simplest; strongest isolation; highest operational cost. The baseline.
+1. **Single-tenant remote** — one Terminus instance per tenant. Simplest; strongest isolation; highest operational cost. The baseline.
 2. **Multi-tenant with isolated execution** — shared control plane, isolated kernel per tenant (container/micro-VM per tenant). Medium complexity; strong isolation.
 3. **Multi-tenant with shared kernel** — shared control plane and kernel, with per-tenant quotas, keys, and audit. Lowest cost; weakest isolation; highest risk.
 4. **No multi-tenancy** — single-tenant only. The safest baseline.
@@ -58,7 +58,7 @@ The multi-tenant model, if chosen, requires:
 
 ## Security Impact
 
-Critical. Multi-tenancy is the highest-risk feature in Forge (Risk R12). Cross-tenant data access is a release blocker. The threat model (SPEC §36.2) includes "another tenant in a shared execution environment" as a threat actor. The chosen model must demonstrate isolation against this threat.
+Critical. Multi-tenancy is the highest-risk feature in Terminus (Risk R12). Cross-tenant data access is a release blocker. The threat model (SPEC §36.2) includes "another tenant in a shared execution environment" as a threat actor. The chosen model must demonstrate isolation against this threat.
 
 ## Evaluation Plan
 

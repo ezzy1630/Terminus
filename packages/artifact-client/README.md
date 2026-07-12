@@ -1,4 +1,4 @@
-# @forge/artifact-client
+# @terminus/artifact-client
 
 Client for the kernel's ArtifactIngestService. Per SPEC §29.3, §31.1.
 

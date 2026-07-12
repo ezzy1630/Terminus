@@ -125,7 +125,10 @@ pub struct SecretBroker {
 impl std::fmt::Debug for SecretBroker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretBroker")
-            .field("providers_count", &self.providers.lock().map(|g| g.len()).unwrap_or(0))
+            .field(
+                "providers_count",
+                &self.providers.lock().map(|g| g.len()).unwrap_or(0),
+            )
             .field("audit", &self.audit)
             .finish()
     }
@@ -139,7 +142,11 @@ impl SecretBroker {
         }
     }
 
-    pub fn register_provider(&self, provider_name: &str, provider: std::sync::Arc<dyn SecretProvider>) {
+    pub fn register_provider(
+        &self,
+        provider_name: &str,
+        provider: std::sync::Arc<dyn SecretProvider>,
+    ) {
         if let Ok(mut g) = self.providers.lock() {
             g.insert(provider_name.to_string(), provider);
         }

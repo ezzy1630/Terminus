@@ -1,6 +1,6 @@
 # Non-bypassability tests (SPEC §27.4)
 
-This document specifies the test plan that MUST pass before any release may call the Forge effect boundary "non-bypassable." The tests deliberately attempt to bypass the kernel from every zone and every entry point.
+This document specifies the test plan that MUST pass before any release may call the Terminus effect boundary "non-bypassable." The tests deliberately attempt to bypass the kernel from every zone and every entry point.
 
 ## Test inventory (SPEC §27.4)
 
@@ -37,7 +37,7 @@ A supported configuration passes only when each attempt is **denied or routed th
 
 ### T3: Local project plugin bypass
 
-- **Attempt:** A plugin in `.forge/plugins/` attempts to write to `~/.ssh/authorized_keys`.
+- **Attempt:** A plugin in `.terminus/plugins/` attempts to write to `~/.ssh/authorized_keys`.
 - **Expected:** Kernel denies the write (path outside worktree; `.git` and host paths denied).
 - **Test:** `tests/security/bypass/T03-local-plugin.test.ts` — verify the write is denied.
 
@@ -130,7 +130,7 @@ A supported configuration passes only when:
 
 - **Any failure blocks the release** (SPEC §26.3 #1).
 - File a security incident (`docs/runbooks/security-incident.md`).
-- The bypass is added to `docs/security/effect-bypass-register.yaml` if it's an inherited path, or fixed immediately if it's a Forge-owned path.
+- The bypass is added to `docs/security/effect-bypass-register.yaml` if it's an inherited path, or fixed immediately if it's a Terminus-owned path.
 
 ## Related
 

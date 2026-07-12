@@ -53,7 +53,7 @@ Return a structured delegation result (per SPEC Appendix E.4) with:
   unverified `completed` is not.
 - Do not paraphrase failure output. Include the artifact reference.
 - Do not commit to the main branch. Commit to your delegated branch.
-- Do not touch `.git/`, `.forge/`, `credentials/`, or `.env*`.
+- Do not touch `.git/`, `.terminus/`, `credentials/`, or `.env*`.
 
 ## Failure modes
 

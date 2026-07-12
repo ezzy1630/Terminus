@@ -19,7 +19,7 @@ adapter:
     model_selection: opaque
     native_compaction: true
   observed_by_probe:
-    probe_version: forge-probe-1.0
+    probe_version: terminus-probe-1.0
     probed_at: "2025-01-15T00:00:00Z"
     probed_capabilities:
       exact_context_visibility: opaque
@@ -34,11 +34,11 @@ adapter:
       model_selection: opaque
       native_compaction: true
   discrepancies:
-    - "filesystem_enforcement: declared outer_sandbox, observed none — Forge MUST supply outer sandbox"
-    - "network_enforcement: declared outer_sandbox, observed none — Forge MUST supply outer sandbox"
-    - "secret_isolation: declared outer_broker, observed none — Forge MUST broker secrets"
+    - "filesystem_enforcement: declared outer_sandbox, observed none — Terminus MUST supply outer sandbox"
+    - "network_enforcement: declared outer_sandbox, observed none — Terminus MUST supply outer sandbox"
+    - "secret_isolation: declared outer_broker, observed none — Terminus MUST broker secrets"
   last_verified: "2025-01-15T00:00:00Z"
-  result_schema: forge.worker.v1
+  result_schema: terminus.worker.v1
   notes: |
     Oh My Pi is selected as a baseline. Its partial tool interception
     and native compaction differentiate it from Pi in cohort

@@ -16,7 +16,7 @@ We need: (1) a permanent minimal baseline that is always runnable, (2) feature p
 
 Adopt a **permanent minimal baseline and feature promotion gates** per SPEC §3.7, §18.7, §41.12, §50, Appendix I.2:
 
-1. **Permanent minimal baseline** (SPEC §3.7) — a minimal shell-oriented mode with one model, Bash-like execution, linear history, no advanced retrieval, no memory, no subagents. Always runnable. Always benchmarked. Defined in `evals/baselines/forge-minimal.yaml`.
+1. **Permanent minimal baseline** (SPEC §3.7) — a minimal shell-oriented mode with one model, Bash-like execution, linear history, no advanced retrieval, no memory, no subagents. Always runnable. Always benchmarked. Defined in `evals/baselines/terminus-minimal.yaml`.
 2. **Feature promotion gates** (SPEC §18.7, §41.12) — a feature affecting context, tools, routing, compression, memory, or orchestration MUST carry a version and an evaluation record before becoming default. Promotion requires:
    - non-inferiority on safety sub-metrics (no safety regression hidden);
    - improvement on the primary metric (ADR-0001) on its target cohort;
@@ -36,8 +36,8 @@ Adopt a **permanent minimal baseline and feature promotion gates** per SPEC §3.
 
 ## Consequences
 
-- The minimal baseline (`evals/baselines/forge-minimal.yaml`) is always runnable.
-- The full baseline (`evals/baselines/forge-full.yaml`) is the configured default with all promoted features.
+- The minimal baseline (`evals/baselines/terminus-minimal.yaml`) is always runnable.
+- The full baseline (`evals/baselines/terminus-full.yaml`) is the configured default with all promoted features.
 - Every feature ADR references its promotion gate and cohort.
 - The promotion gate (SPEC §18.7, §41.12) is the contract for default status.
 - Features that fail their gate remain opt-in (or are not shipped).

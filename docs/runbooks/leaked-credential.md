@@ -2,7 +2,7 @@
 
 ## When to use
 
-Use this runbook when a secret (API token, SSH key, database password, cloud credential) is suspected to have leaked (visible in logs, artifacts, model-visible context, or commits), or when a credential has been revoked externally and active Forge sessions still hold capabilities for it. This is a security incident — see also `docs/runbooks/security-incident.md`.
+Use this runbook when a secret (API token, SSH key, database password, cloud credential) is suspected to have leaked (visible in logs, artifacts, model-visible context, or commits), or when a credential has been revoked externally and active Terminus sessions still hold capabilities for it. This is a security incident — see also `docs/runbooks/security-incident.md`.
 
 ## Symptoms
 
@@ -16,10 +16,10 @@ Use this runbook when a secret (API token, SSH key, database password, cloud cre
 ## Diagnosis
 
 1. **Contain immediately** (see Immediate actions below) before diagnosing.
-2. Search for the secret in all Forge-managed stores:
+2. Search for the secret in all Terminus-managed stores:
    ```bash
    # SQLite (should never contain raw secrets, but verify)
-   sqlite3 db/forge.db "SELECT id FROM artifacts WHERE sha256 = '<sha256 of the secret>';"
+   sqlite3 db/terminus.db "SELECT id FROM artifacts WHERE sha256 = '<sha256 of the secret>';"
    # Artifact store
    grep -r "<secret-pattern>" <artifact-root>/  # Use a pattern, not the raw secret
    # Logs
@@ -29,22 +29,22 @@ Use this runbook when a secret (API token, SSH key, database password, cloud cre
    ```
 3. Check the secret broker audit log:
    ```bash
-   sqlite3 db/forge.db "SELECT * FROM secret_audit WHERE capability_uri LIKE '%<provider>%' ORDER BY used_at DESC LIMIT 50;"
+   sqlite3 db/terminus.db "SELECT * FROM secret_audit WHERE capability_uri LIKE '%<provider>%' ORDER BY used_at DESC LIMIT 50;"
    ```
 4. Identify which sessions/tasks used the credential.
 
 ## Immediate actions
 
 1. **Revoke the credential at the source** (GitHub settings, cloud provider console, etc.). This is the most important step — do it before anything else.
-2. **Revoke the Forge-issued capability:**
+2. **Revoke the Terminus-issued capability:**
    ```bash
    # The kernel SecretService supports revocation
-   grpcurl -plaintext -unix /var/run/forge-kernel.sock forge.kernel.v1.SecretService/Revoke '{"capability_uri": "secret://<provider>/<id>"}'
+   grpcurl -plaintext -unix /var/run/terminus-kernel.sock terminus.kernel.v1.SecretService/Revoke '{"capability_uri": "secret://<provider>/<id>"}'
    ```
 3. **Kill affected processes** (capabilities are short-lived but already-running processes may hold the secret in their environment):
    ```bash
    # Identify and cancel affected jobs
-   sqlite3 db/forge.db "SELECT job_id FROM jobs WHERE secret_capability_uris LIKE '%<capability-id>%' AND state = 'running';"
+   sqlite3 db/terminus.db "SELECT job_id FROM jobs WHERE secret_capability_uris LIKE '%<capability-id>%' AND state = 'running';"
    ```
 4. **Quarantine affected artifacts** (move to a quarantine directory; do not delete — they're evidence):
    ```bash
@@ -57,7 +57,7 @@ Use this runbook when a secret (API token, SSH key, database password, cloud cre
 ## Recovery
 
 1. Issue a new credential at the source.
-2. Update the Forge secret broker with the new credential (do not reuse the old capability URI).
+2. Update the Terminus secret broker with the new credential (do not reuse the old capability URI).
 3. Restart affected sessions/tasks with the new capability.
 4. Verify the old capability is revoked and unusable.
 5. Run the secret redaction test suite (`evals/security/secret-extraction.yaml`).
@@ -78,7 +78,7 @@ Use this runbook when a secret (API token, SSH key, database password, cloud cre
 
 - No ambient secrets (`secrets.direct_environment: deny`, SPEC §36.4, ADR-0016).
 - Model-invisible (`secrets.model_visibility: deny`, SPEC §26.3 #6).
-- Output redaction (`crates/forge-secrets/src/redact.rs`).
+- Output redaction (`crates/terminus-secrets/src/redact.rs`).
 - Short-lived capabilities with TTLs (SPEC §13.6).
 - Per-task scoping (SPEC §13.6).
 - Audit log for every secret use (SPEC §36.13).

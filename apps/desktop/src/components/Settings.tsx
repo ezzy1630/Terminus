@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Settings.
+ * Terminus Desktop — Settings.
  *
  * Per SPEC §20: a full-screen overlay (or separate route) organized
  * into clear categories. Search, clear descriptions, sensible
@@ -608,7 +608,7 @@ function buildCatalog(): SettingCategory[] {
         {
           id: "advanced.api-base",
           label: "Control plane URL",
-          description: "Base URL of the Forge control plane service.",
+          description: "Base URL of the Terminus control plane service.",
           control: { kind: "text", placeholder: "http://127.0.0.1:3050" },
           defaultValue: "http://127.0.0.1:3050",
           restartRequired: true,
@@ -648,9 +648,9 @@ function buildCatalog(): SettingCategory[] {
         {
           id: "diagnostics.open-logs",
           label: "Log directory",
-          description: "Where Forge writes session and error logs.",
-          control: { kind: "text", placeholder: "~/Library/Logs/Forge" },
-          defaultValue: "~/Library/Logs/Forge",
+          description: "Where Terminus writes session and error logs.",
+          control: { kind: "text", placeholder: "~/Library/Logs/Terminus" },
+          defaultValue: "~/Library/Logs/Terminus",
         },
         {
           id: "diagnostics.cache-size",
@@ -662,7 +662,7 @@ function buildCatalog(): SettingCategory[] {
         {
           id: "diagnostics.clear-cache-on-quit",
           label: "Clear cache on quit",
-          description: "Delete cached artifacts when Forge exits.",
+          description: "Delete cached artifacts when Terminus exits.",
           control: { kind: "toggle" },
           defaultValue: false,
         },
@@ -676,7 +676,7 @@ const CATEGORIES = CATALOG;
 
 // ────────────────────────── Settings store ──────────────────────────────────
 
-const SETTINGS_KEY = "forge-desktop.settings.v1";
+const SETTINGS_KEY = "terminus-desktop.settings.v1";
 
 type SettingValue = string | number | boolean;
 type SettingValueMap = Record<string, SettingValue>;

@@ -1,6 +1,6 @@
-# @forge/aci
+# @terminus/aci
 
-Agent Control Interface for Forge. Per SPEC §11 and §34.
+Agent Control Interface for Terminus. Per SPEC §11 and §34.
 
 Exports:
 

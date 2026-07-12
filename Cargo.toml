@@ -17,9 +17,13 @@ unused_must_use = "deny"
 all = "deny"
 pedantic = "warn"
 nursery = "warn"
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
+# `unwrap_used`/`expect_used`/`panic` are members of the `pedantic` group;
+# giving them a higher priority than the group avoids clippy's "lint group
+# has the same priority as a lint" config error while preserving the SPEC
+# §44.2 intent (these three are denied even though pedantic is advisory).
+unwrap_used = { level = "deny", priority = 1 }
+expect_used = { level = "deny", priority = 1 }
+panic = { level = "deny", priority = 1 }
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -39,23 +43,23 @@ hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 libc = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
-forge-kernel-protocol = { path = "crates/forge-kernel-protocol" }
-forge-fs = { path = "crates/forge-fs" }
-forge-artifacts = { path = "crates/forge-artifacts" }
-forge-policy = { path = "crates/forge-policy" }
-forge-sandbox = { path = "crates/forge-sandbox" }
-forge-sandbox-linux = { path = "crates/forge-sandbox-linux" }
-forge-sandbox-macos = { path = "crates/forge-sandbox-macos" }
-forge-sandbox-windows = { path = "crates/forge-sandbox-windows" }
-forge-sandbox-container = { path = "crates/forge-sandbox-container" }
-forge-process = { path = "crates/forge-process" }
-forge-jobs = { path = "crates/forge-jobs" }
-forge-patch = { path = "crates/forge-patch" }
-forge-secrets = { path = "crates/forge-secrets" }
-forge-egress = { path = "crates/forge-egress" }
-forge-code-intel = { path = "crates/forge-code-intel" }
-forge-extension-runtime = { path = "crates/forge-extension-runtime" }
-forge-git = { path = "crates/forge-git" }
-forge-authz = { path = "crates/forge-authz" }
-forge-kernel = { path = "crates/forge-kernel" }
-forge-kernel-testkit = { path = "crates/forge-kernel-testkit" }
+terminus-kernel-protocol = { path = "crates/terminus-kernel-protocol" }
+terminus-fs = { path = "crates/terminus-fs" }
+terminus-artifacts = { path = "crates/terminus-artifacts" }
+terminus-policy = { path = "crates/terminus-policy" }
+terminus-sandbox = { path = "crates/terminus-sandbox" }
+terminus-sandbox-linux = { path = "crates/terminus-sandbox-linux" }
+terminus-sandbox-macos = { path = "crates/terminus-sandbox-macos" }
+terminus-sandbox-windows = { path = "crates/terminus-sandbox-windows" }
+terminus-sandbox-container = { path = "crates/terminus-sandbox-container" }
+terminus-process = { path = "crates/terminus-process" }
+terminus-jobs = { path = "crates/terminus-jobs" }
+terminus-patch = { path = "crates/terminus-patch" }
+terminus-secrets = { path = "crates/terminus-secrets" }
+terminus-egress = { path = "crates/terminus-egress" }
+terminus-code-intel = { path = "crates/terminus-code-intel" }
+terminus-extension-runtime = { path = "crates/terminus-extension-runtime" }
+terminus-git = { path = "crates/terminus-git" }
+terminus-authz = { path = "crates/terminus-authz" }
+terminus-kernel = { path = "crates/terminus-kernel" }
+terminus-kernel-testkit = { path = "crates/terminus-kernel-testkit" }

@@ -11,7 +11,7 @@ use axum::http::header;
 use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use forge_artifacts::ArtifactMetadata;
+use terminus_artifacts::ArtifactMetadata;
 use serde::{Deserialize, Serialize};
 
 use crate::api::Envelope;
@@ -24,7 +24,7 @@ use crate::trace_id::TraceId;
 pub async fn ingest(
     State(state): State<Arc<AppState>>,
     body: Bytes,
-) -> Result<Json<forge_kernel_protocol::ArtifactRef>, ApiError> {
+) -> Result<Json<terminus_kernel_protocol::ArtifactRef>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     // For the dev mini-service, the body IS the artifact bytes; no envelope
     // is required (and we cannot parse an envelope from binary content).
@@ -46,8 +46,8 @@ pub async fn get(
     let store = state.kernel.artifact_ingest.store();
     let bytes = store.get(&hash).map_err(|e| {
         ApiError::new(
-            forge_kernel_protocol::ErrorCode::ArtifactNotFound,
-            forge_kernel_protocol::ErrorCategory::NotFound,
+            terminus_kernel_protocol::ErrorCode::ArtifactNotFound,
+            terminus_kernel_protocol::ErrorCategory::NotFound,
             format!("{e}"),
             &trace_id.0,
         )
@@ -60,9 +60,8 @@ pub async fn get(
     let mut resp = bytes.into_response();
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&media_type).unwrap_or(HeaderValue::from_static(
-            "application/octet-stream",
-        )),
+        HeaderValue::from_str(&media_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
     Ok(resp)
 }
@@ -76,8 +75,8 @@ pub async fn metadata(
     let store = state.kernel.artifact_ingest.store();
     let meta = store.metadata(&hash).map_err(|e| {
         ApiError::new(
-            forge_kernel_protocol::ErrorCode::ArtifactNotFound,
-            forge_kernel_protocol::ErrorCategory::NotFound,
+            terminus_kernel_protocol::ErrorCode::ArtifactNotFound,
+            terminus_kernel_protocol::ErrorCategory::NotFound,
             format!("{e}"),
             &trace_id.0,
         )
@@ -117,9 +116,9 @@ pub async fn gc(
     let store = state.kernel.artifact_ingest.store();
     let live: HashSet<String> = req.live.into_iter().collect();
     if req.dry_run {
-        let report = store.gc_dry_run(&live).map_err(|e| {
-            ApiError::internal(format!("gc dry-run: {e}"), &trace_id.0)
-        })?;
+        let report = store
+            .gc_dry_run(&live)
+            .map_err(|e| ApiError::internal(format!("gc dry-run: {e}"), &trace_id.0))?;
         Ok(Json(GcResponse {
             dry_run: true,
             scanned: report.scanned,
@@ -130,9 +129,9 @@ pub async fn gc(
             errors: Vec::new(),
         }))
     } else {
-        let report = store.gc_collect(&live).map_err(|e| {
-            ApiError::internal(format!("gc collect: {e}"), &trace_id.0)
-        })?;
+        let report = store
+            .gc_collect(&live)
+            .map_err(|e| ApiError::internal(format!("gc collect: {e}"), &trace_id.0))?;
         Ok(Json(GcResponse {
             dry_run: false,
             scanned: report.dry_run.scanned,

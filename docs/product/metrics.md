@@ -1,6 +1,6 @@
 # Product success metrics
 
-This document specifies the Forge product success metrics dashboard (SPEC §1, §26.6, ADR-0001). The primary metric is verified successful tasks per dollar-hour; the dashboard MUST include the full breakdown so no single aggregate score can conceal a safety regression.
+This document specifies the Terminus product success metrics dashboard (SPEC §1, §26.6, ADR-0001). The primary metric is verified successful tasks per dollar-hour; the dashboard MUST include the full breakdown so no single aggregate score can conceal a safety regression.
 
 ## Primary metric (ADR-0001)
 

@@ -1,4 +1,4 @@
-# @forge/policy-coordinator — local rules
+# @terminus/policy-coordinator — local rules
 
 ## Non-negotiable
 

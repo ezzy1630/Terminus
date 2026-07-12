@@ -1,5 +1,5 @@
 {
-  "name": "@forge/context-compiler",
+  "name": "@terminus/context-compiler",
   "version": "0.1.0",
   "type": "module",
   "main": "./src/index.ts",
@@ -7,9 +7,9 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": { "build": "tsc -p tsconfig.json", "lint": "eslint src", "test": "bun test" },
   "dependencies": {
-    "@forge/domain": "workspace:*",
-    "@forge/context-ir": "workspace:*",
-    "@forge/provider-core": "workspace:*",
+    "@terminus/domain": "workspace:*",
+    "@terminus/context-ir": "workspace:*",
+    "@terminus/provider-core": "workspace:*",
     "zod": "^4.0.2"
   }
 }

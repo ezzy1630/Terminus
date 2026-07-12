@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/tools/read.json",
+  "$id": "https://terminus.dev/schemas/tools/read.json",
   "title": "read",
   "description": "Read a file or artifact from the workspace. Small files return full content; large files return an outline plus relevant ranges with elision markers. Never silently truncates.",
   "type": "object",

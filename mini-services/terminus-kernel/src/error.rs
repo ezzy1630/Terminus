@@ -6,7 +6,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use forge_kernel_protocol::{ErrorCategory, ErrorCode, KernelError};
+use terminus_kernel_protocol::{ErrorCategory, ErrorCode, KernelError};
 use serde_json::json;
 
 /// A structured API error that serializes to the SPEC §30.4 envelope.
@@ -79,7 +79,12 @@ impl ApiError {
     }
 
     pub fn validation(msg: impl Into<String>, trace_id: impl Into<String>) -> Self {
-        Self::new(ErrorCode::InvalidArgument, ErrorCategory::Validation, msg, trace_id)
+        Self::new(
+            ErrorCode::InvalidArgument,
+            ErrorCategory::Validation,
+            msg,
+            trace_id,
+        )
     }
 
     pub fn not_found(msg: impl Into<String>, trace_id: impl Into<String>) -> Self {

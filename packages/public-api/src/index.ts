@@ -1,5 +1,5 @@
 /**
- * @forge/public-api — HTTP API definitions and SSE event stream.
+ * @terminus/public-api — HTTP API definitions and SSE event stream.
  *
  * Per SPEC §30, §32: Public product API served over HTTPS/loopback/UDS with
  * JSON request/response and SSE for ordered product events. Source of truth
@@ -369,7 +369,7 @@ export const GetArtifact = {
 // /approvals
 /**
  * Approval decision enum. Per SPEC §32.4, the canonical names are
- * `allow_for_action` / `allow_for_task` (matching `@forge/domain`'s
+ * `allow_for_action` / `allow_for_task` (matching `@terminus/domain`'s
  * `ApprovalDecision`). For backwards compatibility with older clients, the
  * aliases `allow_exact` / `allow_task_scope` are also accepted and are
  * normalized to the canonical names via a zod transform.

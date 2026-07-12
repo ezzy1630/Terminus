@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — New Task screen.
+ * Terminus Desktop — New Task screen.
  *
  * Per SPEC §8: focused Codex-style start screen. When a project is
  * selected (or when "New Task" is clicked), show:
@@ -18,10 +18,10 @@
  * immediately."
  */
 import { memo, useCallback, useState } from "react";
-import { Bug, Code2, FileSearch, Hammer } from "lucide-react";
+import { Bug, Code2, FileSearch, Hammer, TerminalSquare } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, ForgeApiError } from "../lib/api";
-import { useForgeStore } from "../hooks/use-forge";
+import { useForgeStore } from "../hooks/use-terminus";
 import { Composer } from "./Composer";
 import type { Session } from "../types";
 
@@ -33,6 +33,7 @@ interface Suggestion {
   id: string;
   icon: React.ReactNode;
   label: string;
+  detail: string;
   prompt: string;
 }
 
@@ -41,6 +42,7 @@ const SUGGESTIONS: Suggestion[] = [
     id: "explore",
     icon: <FileSearch size={14} />,
     label: "Explore and understand code",
+    detail: "Map the system before making a change",
     prompt:
       "Explore the codebase and give me a clear map of the main modules, entry points, and how they fit together. Note anything that looks risky or unusual.",
   },
@@ -48,6 +50,7 @@ const SUGGESTIONS: Suggestion[] = [
     id: "build",
     icon: <Hammer size={14} />,
     label: "Build a feature",
+    detail: "Plan the smallest complete vertical slice",
     prompt:
       "I want to build a new feature. Before writing code, propose a small plan, identify the files you'll touch, and call out anything you're uncertain about.",
   },
@@ -55,6 +58,7 @@ const SUGGESTIONS: Suggestion[] = [
     id: "review",
     icon: <Code2 size={14} />,
     label: "Review code",
+    detail: "Find correctness and clarity issues",
     prompt:
       "Review the most recent changes in this workspace. Focus on correctness, then on clarity. Suggest concrete edits with rationale.",
   },
@@ -62,6 +66,7 @@ const SUGGESTIONS: Suggestion[] = [
     id: "fix",
     icon: <Bug size={14} />,
     label: "Fix failures",
+    detail: "Reproduce, isolate, then verify the fix",
     prompt:
       "Find the most recent failing tests or build errors in this workspace. Reproduce, isolate, propose a fix, and verify before reporting done.",
   },
@@ -81,6 +86,7 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
 
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const createDisabled = creating || draft.trim().length === 0;
 
   const pickSuggestion = useCallback(
     (s: Suggestion) => {
@@ -135,37 +141,32 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
   return (
     <div
       className={cn("flex h-full w-full flex-col overflow-y-auto", className)}
-      style={{ padding: "48px 32px 32px" }}
+      style={{ padding: "56px 42px 36px" }}
     >
       {/* Centered column matching the conversation reading column. */}
-      <div style={{ maxWidth: "var(--conversation-max-width)", margin: "0 auto", width: "100%" }}>
+      <div style={{ maxWidth: "760px", margin: "0 auto", width: "100%" }}>
         {/* Restrained product mark. */}
-        <div className="mb-2 flex items-center gap-2 text-tertiary">
+        <div className="mb-4 flex items-center gap-2 text-tertiary">
           <span
-            className="flex h-7 w-7 items-center justify-center rounded-md border border-subtle"
+            className="flex h-9 w-9 items-center justify-center rounded-md border border-subtle"
             style={{ background: "var(--bg-elevated)" }}
             aria-hidden
           >
-            <span
-              className="font-semibold text-secondary"
-              style={{ fontSize: "var(--font-size-md)" }}
-            >
-              F
+            <TerminalSquare size={18} className="text-secondary" strokeWidth={1.7} />
+          </span>
+          <div className="flex flex-col">
+            <span className="uppercase tracking-wide" style={{ fontSize: "var(--font-size-xs)", fontWeight: 600 }}>
+              Terminus
             </span>
-          </span>
-          <span
-            className="uppercase tracking-wide"
-            style={{ fontSize: "var(--font-size-xs)", fontWeight: 500 }}
-          >
-            Forge
-          </span>
+            <span style={{ fontSize: "var(--font-size-xs)" }}>New task</span>
+          </div>
         </div>
 
         {/* Contextual heading. */}
         <h1
           className="text-primary"
           style={{
-            fontSize: "var(--font-size-2xl)",
+            fontSize: "var(--font-size-3xl)",
             fontWeight: 600,
             lineHeight: "var(--line-height-tight)" as unknown as string,
             letterSpacing: "-0.01em",
@@ -173,33 +174,43 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
         >
           {session ? `What should we build in ${session.title}?` : "What should we build?"}
         </h1>
-        <p
-          className="mt-2 text-secondary"
-          style={{ fontSize: "var(--font-size-md)", lineHeight: "var(--line-height-relaxed)" as unknown as string }}
-        >
-          Describe the work, or start from one of the suggestions below. The agent will plan, act, verify, and report back.
+        <p className="mt-3 max-w-[620px] text-secondary" style={{ fontSize: "var(--font-size-md)", lineHeight: "var(--line-height-relaxed)" as unknown as string }}>
+          Give the harness a concrete outcome. It will plan, work through the changes, verify them, and return evidence.
         </p>
 
+        {session ? (
+          <div className="mt-5 flex items-center gap-2 border-l-2 border-default pl-3 text-secondary" style={{ fontSize: "var(--font-size-xs)" }}>
+            <span className="font-medium text-primary">{session.title}</span>
+            <span className="text-tertiary">·</span>
+            <span>{session.default_model_profile ?? "implementer"}</span>
+            <span className="text-tertiary">·</span>
+            <span className="font-mono">{session.active_thread_id?.slice(0, 8) ?? "no active thread"}</span>
+          </div>
+        ) : null}
+
         {/* Action suggestions. */}
-        <div className="mt-6 grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+        <div className="mt-7 grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
           {SUGGESTIONS.map((s) => (
             <button
               key={s.id}
               type="button"
               onClick={() => pickSuggestion(s)}
               className={cn(
-                "flex items-start gap-2 rounded-md border border-subtle px-3 py-2.5 text-left",
+                "flex min-h-16 items-start gap-3 rounded-md border border-subtle px-3.5 py-3 text-left",
                 "hover:border-default hover:bg-hover",
               )}
               style={{ background: "var(--bg-elevated)" }}
             >
-              <span className="mt-0.5 flex-shrink-0 text-secondary">{s.icon}</span>
-              <span className="flex flex-col gap-0.5">
+              <span className="mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-sm bg-canvas text-secondary">{s.icon}</span>
+              <span className="flex flex-col gap-1">
                 <span
                   className="text-primary"
                   style={{ fontSize: "var(--font-size-sm)", fontWeight: 500 }}
                 >
                   {s.label}
+                </span>
+                <span className="text-tertiary" style={{ fontSize: "var(--font-size-xs)", lineHeight: 1.35 }}>
+                  {s.detail}
                 </span>
               </span>
             </button>
@@ -207,7 +218,7 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
         </div>
 
         {/* Composer. */}
-        <div className="mt-6">
+        <div className="mt-7">
           <Composer />
         </div>
 
@@ -217,15 +228,15 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
           <button
             type="button"
             onClick={() => void createTask()}
-            disabled={creating || draft.trim().length === 0}
+            disabled={createDisabled}
             className={cn(
               "flex h-8 items-center gap-2 rounded-md px-4 text-xs font-medium",
               "transition-opacity",
-              (creating || draft.trim().length === 0) ? "opacity-50" : "hover:opacity-90",
+              createDisabled ? "opacity-50" : "hover:opacity-90",
             )}
             style={{
-              background: "var(--color-primary)",
-              color: "var(--text-inverse)",
+              background: createDisabled ? "var(--bg-hover)" : "var(--color-primary)",
+              color: createDisabled ? "var(--text-tertiary)" : "var(--text-inverse)",
               fontSize: "var(--font-size-sm)",
             }}
           >
@@ -244,7 +255,7 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
 
         {/* Current project / environment metadata. */}
         <div
-          className="mt-8 border-t border-subtle pt-3 text-tertiary"
+          className="mt-9 border-t border-subtle pt-3 text-tertiary"
           style={{ fontSize: "var(--font-size-xs)" }}
         >
           {session ? (

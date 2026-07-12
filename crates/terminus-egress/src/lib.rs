@@ -6,6 +6,7 @@
 //! limits. The actual TCP relay is a stub that respects the allowlist; no
 //! real TLS interception is performed.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 mod error;

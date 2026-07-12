@@ -1,5 +1,5 @@
 /**
- * @forge/adapter-sdk — external harness adapter SDK.
+ * @terminus/adapter-sdk — external harness adapter SDK.
  *
  * Per SPEC §12.4, §35.11: `ExternalAdapter` interface with launch(contract,
  * worktree, budgets), streamEvents(), cancel(), collectResult(). Capability
@@ -12,8 +12,8 @@ import type {
   Rfc3339Timestamp,
   ContentHash,
   ArtifactRef,
-} from "@forge/domain";
-import { ValidationError } from "@forge/domain";
+} from "@terminus/domain";
+import { ValidationError } from "@terminus/domain";
 
 // ────────────────────────── Capability profile (§35.11) ──────────────────────
 

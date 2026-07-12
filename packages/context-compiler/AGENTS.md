@@ -1,4 +1,4 @@
-# @forge/context-compiler — local rules
+# @terminus/context-compiler — local rules
 
 ## Non-negotiable
 

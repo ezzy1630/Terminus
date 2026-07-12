@@ -1,5 +1,5 @@
 /**
- * @forge/provider-core — provider-neutral broker contracts.
+ * @terminus/provider-core — provider-neutral broker contracts.
  *
  * Per SPEC §15 and §38: `Provider`, `ProviderRenderer`, capability snapshots,
  * request/response shapes, usage/cost records, continuation decisions,
@@ -14,8 +14,8 @@ import type {
   Micros,
   TokenCount,
   Uuid7,
-} from "@forge/domain";
-import type { ContextFragment, ContextManifest } from "@forge/context-ir";
+} from "@terminus/domain";
+import type { ContextFragment, ContextManifest } from "@terminus/context-ir";
 
 // ────────────────────────── Capability snapshots (§38.2) ─────────────────────
 

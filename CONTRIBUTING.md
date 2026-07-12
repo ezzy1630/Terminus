@@ -1,6 +1,6 @@
-# Contributing to Forge
+# Contributing to Terminus
 
-Thanks for your interest in contributing to Forge. This guide covers setup, code style, the pull-request template, ownership, and review requirements.
+Thanks for your interest in contributing to Terminus. This guide covers setup, code style, the pull-request template, ownership, and review requirements.
 
 ## Setup
 

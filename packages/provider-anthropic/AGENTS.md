@@ -1,4 +1,4 @@
-# @forge/provider-anthropic — local rules
+# @terminus/provider-anthropic — local rules
 
 ## Non-negotiable
 

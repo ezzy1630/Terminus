@@ -42,7 +42,7 @@ profile:
       - worktree://active/**
     deny:
       - worktree://active/.git/**
-      - forge-state://**
+      - terminus-state://**
       - secret-store://**
       - host://**
       - credentials://**

@@ -1,5 +1,5 @@
 /**
- * @forge/orchestration — expected-value scheduler, delegation, integration,
+ * @terminus/orchestration — expected-value scheduler, delegation, integration,
  * reviewer triggers, loop detection, budget control, hierarchical
  * cancellation, plan artifact.
  *
@@ -18,8 +18,8 @@ import type {
   AllowedScope,
   PrincipalId,
   Micros,
-} from "@forge/domain";
-import { ValidationError, BudgetExhaustedError } from "@forge/domain";
+} from "@terminus/domain";
+import { ValidationError, BudgetExhaustedError } from "@terminus/domain";
 
 // ────────────────────────── Scheduler (§37.5) ────────────────────────────────
 

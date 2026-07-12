@@ -1,4 +1,4 @@
-# @forge/orchestration — local rules
+# @terminus/orchestration — local rules
 
 ## Non-negotiable
 

@@ -10,39 +10,48 @@
 //!   4. resolve workspace and sandbox lease (out of scope for the in-process
 //!      kernel; the mini-service wires this);
 //!   5. canonicalize paths and reject traversal/symlink escape
-//!      (`forge_fs::PathResolver::resolve_strict`);
-//!   6. classify effect and taint (TODO — for now we delegate to policy);
+//!      (`terminus_fs::PathResolver::resolve_strict`);
+//!   6. classify effect and taint (propagate `EffectIntent.taint_sources`
+//!      and `trust_label` onto the `NormalizedCommand`; elevate untrusted
+//!      privileged effects to `Prompt`);
 //!   7. evaluate command/resource policy (`PolicyEngine::evaluate`);
 //!   8. resolve approval record if required (`ApprovalStore::consume`);
-//!   9. reserve budgets and resource limits (TODO);
+//!   9. reserve budgets and resource limits (apply the sandbox profile's
+//!      `ResourceLimits` wall-clock cap and the policy `max_runtime_ms`;
+//!      emit a `budget_reserved` audit event);
 //!   10. persist `AUTHORIZED` state (`tracing::info!` structured event
 //!       BEFORE the effect is taken);
-//!   11. execute inside the selected backend;
+//!   11. select the sandbox backend for the profile and fail closed when
+//!       the backend is `Unsupported`, or `Degraded` under strict mode
+//!       (`TERMINUS_STRICT_SANDBOX=1`); otherwise audit the degraded
+//!       enforcement and proceed (SPEC §13.4);
 //!   12. stream bounded observations (`mpsc::channel(64)`);
-//!   13. settle and persist evidence (TODO — artifact store records output);
+//!   13. settle and persist evidence (`effect_started` audit emitted here;
+//!       exit-time stdout/stderr artifacts are ingested by `ProcessManager`
+//!       into the content-addressed store);
 //!   14. release leases and resources (Drop).
 
 use crate::approvals::ApprovalStore;
 use crate::error::KernelAssemblyError;
-use forge_artifacts::ArtifactStore;
-use forge_authz::{OperationClass, Scope, TokenIssuer, TokenRevoker};
-use forge_code_intel::CodeIntelService;
-use forge_egress::EgressProxy;
-use forge_extension_runtime::WasiExtensionHost;
-use forge_fs::PathResolver;
-use forge_git::GitOps;
-use forge_jobs::JobManager;
-use forge_kernel_protocol::{
+use std::path::PathBuf;
+use std::sync::Arc;
+use terminus_artifacts::ArtifactStore;
+use terminus_authz::{OperationClass, Scope, TokenIssuer, TokenRevoker};
+use terminus_code_intel::CodeIntelService;
+use terminus_egress::EgressProxy;
+use terminus_extension_runtime::WasiExtensionHost;
+use terminus_fs::PathResolver;
+use terminus_git::GitOps;
+use terminus_jobs::JobManager;
+use terminus_kernel_protocol::{
     ArtifactRef, CommandSpec, EffectIntent, KernelError, KernelResult, PatchEdit, PatchResponse,
     ProcessEvent, RequestContext, WorkspaceBaseline, WorkspacePath,
 };
-use forge_patch::PatchEngine;
-use forge_policy::{Constraint, Decision, NormalizedCommand, PolicyEngine};
-use forge_process::ProcessManager;
-use forge_sandbox::SandboxManager;
-use forge_secrets::SecretBroker;
-use std::path::PathBuf;
-use std::sync::Arc;
+use terminus_patch::PatchEngine;
+use terminus_policy::{Constraint, Decision, NormalizedCommand, PolicyEngine, TaintSource};
+use terminus_process::ProcessManager;
+use terminus_sandbox::{EnforcementStatus, SandboxManager, SandboxProfile};
+use terminus_secrets::SecretBroker;
 
 /// The top-level kernel handle. Cloning is cheap — everything behind `Arc`.
 #[derive(Clone)]
@@ -82,8 +91,32 @@ impl KernelHandle {
         let artifact_store = Arc::new(ArtifactStore::open(data_dir.join("artifacts"))?);
         let process_manager = Arc::new(ProcessManager::new(Arc::clone(&artifact_store)));
         let job_manager = Arc::new(JobManager::new(Arc::clone(&process_manager)));
-        let policy_engine = Arc::new(PolicyEngine::new(forge_policy::default_rule_set()));
-        let sandbox_manager = Arc::new(SandboxManager::new());
+        let policy_engine = Arc::new(PolicyEngine::new(terminus_policy::default_rule_set()));
+        // SPEC §13.4 / §36.5: on Linux, prefer the Bubblewrap backend (real
+        // namespace isolation) when bwrap is on PATH; fall back to the
+        // local-restrictive backend (process groups + env sanitization, no
+        // namespace isolation). On other platforms, local-restrictive is the
+        // default and honestly reports Degraded. The selected backend's
+        // `spawn_wrapper` decides whether spawns run inside bwrap.
+        let sandbox_manager = {
+            #[cfg(target_os = "linux")]
+            {
+                // Linux: Bubblewrap backend as default (Enforced when bwrap
+                // present), local-restrictive as fallback.
+                let linux = std::sync::Arc::new(terminus_sandbox_linux::LinuxSandboxBackend::new())
+                    as std::sync::Arc<dyn terminus_sandbox::SandboxBackend>;
+                let local = std::sync::Arc::new(terminus_sandbox::LocalRestrictiveBackend::new())
+                    as std::sync::Arc<dyn terminus_sandbox::SandboxBackend>;
+                SandboxManager::new()
+                    .with_default(linux)
+                    .with_fallback(local)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                SandboxManager::new()
+            }
+        };
+        let sandbox_manager = Arc::new(sandbox_manager);
         let secret_broker = Arc::new(SecretBroker::new());
         let token_issuer = Arc::new(TokenIssuer::new(
             b"kernel-default-secret-please-rotate".to_vec(),
@@ -93,12 +126,12 @@ impl KernelHandle {
         let revocation = token_issuer.revocation_list();
         let _revoker = Arc::new(TokenRevoker::new(revocation));
         let code_intel = Arc::new(CodeIntelService::new(Arc::new(
-            forge_code_intel::InMemorySymbolIndex::new(),
+            terminus_code_intel::InMemorySymbolIndex::new(),
         )));
         let extension_host = Arc::new(WasiExtensionHost::new());
         let egress = Arc::new(EgressProxy::new(
-            forge_egress::EgressPolicy::default(),
-            forge_egress::RateLimit::default(),
+            terminus_egress::EgressPolicy::default(),
+            terminus_egress::RateLimit::default(),
         ));
         let workspace_resolver = Arc::new(PathResolver::new(&data_dir)?);
         let patch_engine = PatchEngine::new(
@@ -126,7 +159,8 @@ impl KernelHandle {
                 Arc::clone(&policy_engine),
                 Arc::clone(&token_issuer),
                 Arc::clone(&approvals),
-            ),
+            )
+            .with_sandbox(Arc::clone(&sandbox_manager)),
             jobs: JobService::new(job_manager, Arc::clone(&token_issuer)),
             sandboxes: SandboxService::new(sandbox_manager),
             policies: PolicyService::new(policy_engine),
@@ -168,11 +202,11 @@ pub fn validate_capability_for_op(
     ctx: &RequestContext,
     op_class: OperationClass,
     requested_scope: &Scope,
-) -> KernelResult<forge_authz::CapabilityToken> {
+) -> KernelResult<terminus_authz::CapabilityToken> {
     if ctx.capability_token.is_empty() {
         return Err(KernelError::new(
-            forge_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
-            forge_kernel_protocol::ErrorCategory::Permission,
+            terminus_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
+            terminus_kernel_protocol::ErrorCategory::Permission,
             "capability token required for this operation but none was supplied",
             false,
         ));
@@ -181,40 +215,45 @@ pub fn validate_capability_for_op(
         .validate_capability(&ctx.capability_token, op_class, requested_scope)
         .map_err(|e| {
             let (code, msg) = match e {
-                forge_authz::AuthzError::Expired => (
-                    forge_kernel_protocol::ErrorCode::CapabilityTokenExpired,
+                terminus_authz::AuthzError::Expired => (
+                    terminus_kernel_protocol::ErrorCode::CapabilityTokenExpired,
                     "capability token expired".to_string(),
                 ),
-                forge_authz::AuthzError::Revoked => (
-                    forge_kernel_protocol::ErrorCode::CapabilityTokenRevoked,
+                terminus_authz::AuthzError::Revoked => (
+                    terminus_kernel_protocol::ErrorCode::CapabilityTokenRevoked,
                     "capability token revoked".to_string(),
                 ),
-                forge_authz::AuthzError::InvalidAudience
-                | forge_authz::AuthzError::WrongAudience => (
-                    forge_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
+                terminus_authz::AuthzError::InvalidAudience
+                | terminus_authz::AuthzError::WrongAudience => (
+                    terminus_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
                     "capability token audience mismatch".to_string(),
                 ),
-                forge_authz::AuthzError::InvalidSignature => (
-                    forge_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
+                terminus_authz::AuthzError::InvalidSignature => (
+                    terminus_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
                     "capability token signature invalid".to_string(),
                 ),
-                forge_authz::AuthzError::OperationNotPermitted => (
-                    forge_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_authz::AuthzError::OperationNotPermitted => (
+                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
                     format!(
                         "capability token does not grant operation class `{:?}`",
                         op_class
                     ),
                 ),
-                forge_authz::AuthzError::ScopeExceeded => (
-                    forge_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_authz::AuthzError::ScopeExceeded => (
+                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
                     "capability token scope exceeded".to_string(),
                 ),
                 other => (
-                    forge_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
+                    terminus_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
                     format!("capability token rejected: {other}"),
                 ),
             };
-            KernelError::new(code, forge_kernel_protocol::ErrorCategory::Permission, msg, false)
+            KernelError::new(
+                code,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                msg,
+                false,
+            )
         })
 }
 
@@ -228,7 +267,7 @@ pub struct KernelInfoService {
 impl KernelInfoService {
     pub fn new() -> Self {
         Self {
-            instance_id: forge_kernel_protocol::new_id(),
+            instance_id: terminus_kernel_protocol::new_id(),
         }
     }
 
@@ -239,7 +278,7 @@ impl KernelInfoService {
     pub fn info(&self) -> serde_json::Value {
         serde_json::json!({
             "instance_id": self.instance_id,
-            "implementation": "forge-kernel-rs",
+            "implementation": "terminus-kernel-rs",
             "version": env!("CARGO_PKG_VERSION"),
             "services": [
                 "KernelInfoService", "WorkspaceService", "FileService", "PatchService",
@@ -284,12 +323,23 @@ impl WorkspaceService {
         _intent: &EffectIntent,
         root_uri: impl Into<String>,
         canonical_root: impl Into<String>,
+        trust: &str,
     ) -> KernelResult<String> {
+        // SPEC §28.2 / §13: workspace trust MUST be one of
+        // trusted | untrusted | restricted and is caller-supplied. Default
+        // to `untrusted` (fail-safe) for any unrecognized value — never
+        // silently upgrade an unknown workspace to `trusted`.
+        let trust = match trust {
+            "trusted" => "trusted",
+            "restricted" => "restricted",
+            _ => "untrusted",
+        }
+        .to_string();
         let entry = WorkspaceEntry {
-            id: forge_kernel_protocol::new_id(),
+            id: terminus_kernel_protocol::new_id(),
             root_uri: root_uri.into(),
             canonical_root: canonical_root.into(),
-            trust: "trusted".to_string(),
+            trust,
         };
         let id = entry.id.clone();
         let mut guard = match self.registered.lock() {
@@ -306,17 +356,14 @@ impl WorkspaceService {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        guard
-            .get(workspace_id)
-            .cloned()
-            .ok_or_else(|| {
-                KernelError::new(
-                    forge_kernel_protocol::ErrorCode::WorkspaceNotFound,
-                    forge_kernel_protocol::ErrorCategory::NotFound,
-                    format!("workspace {workspace_id} not found"),
-                    false,
-                )
-            })
+        guard.get(workspace_id).cloned().ok_or_else(|| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::WorkspaceNotFound,
+                terminus_kernel_protocol::ErrorCategory::NotFound,
+                format!("workspace {workspace_id} not found"),
+                false,
+            )
+        })
     }
 }
 
@@ -401,26 +448,26 @@ impl FileService {
             let _ = validate_capability_for_op(iss, ctx, OperationClass::Read, &requested_scope)?;
         }
         // §31.3 step 5: canonicalize paths and reject traversal/symlink escape.
-        let safe = forge_fs::SafePath::new(&path.relative_path).map_err(|e| {
+        let safe = terminus_fs::SafePath::new(&path.relative_path).map_err(|e| {
             KernelError::new(
-                forge_kernel_protocol::ErrorCode::InvalidArgument,
-                forge_kernel_protocol::ErrorCategory::Validation,
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
                 format!("path rejected by SafePath: {e}"),
                 false,
             )
         })?;
         let resolved = self.resolver.resolve_strict(&safe).map_err(|e| {
             KernelError::new(
-                forge_kernel_protocol::ErrorCode::InvalidArgument,
-                forge_kernel_protocol::ErrorCategory::Validation,
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
                 format!("path rejected by PathResolver: {e}"),
                 false,
             )
         })?;
         if !resolved.host.exists {
             return Err(KernelError::new(
-                forge_kernel_protocol::ErrorCode::PathNotFound,
-                forge_kernel_protocol::ErrorCategory::NotFound,
+                terminus_kernel_protocol::ErrorCode::PathNotFound,
+                terminus_kernel_protocol::ErrorCategory::NotFound,
                 format!(
                     "read {}: path does not exist",
                     resolved.host.host_path.display()
@@ -430,7 +477,7 @@ impl FileService {
         }
         // §31.3 step 10: persist AUTHORIZED state BEFORE the effect.
         tracing::info!(
-            target: "forge_kernel_audit",
+            target: "terminus_kernel_audit",
             event = "authorized",
             service = "files.read",
             request_id = %ctx.request_id,
@@ -443,23 +490,20 @@ impl FileService {
         );
         let bytes = std::fs::read(&resolved.host.host_path).map_err(|e| {
             KernelError::new(
-                forge_kernel_protocol::ErrorCode::PathNotFound,
-                forge_kernel_protocol::ErrorCategory::NotFound,
+                terminus_kernel_protocol::ErrorCode::PathNotFound,
+                terminus_kernel_protocol::ErrorCategory::NotFound,
                 format!("read {}: {e}", resolved.host.host_path.display()),
                 false,
             )
         })?;
-        let (_, artifact) = self
-            .artifact_store
-            .ingest(&bytes)
-            .map_err(|e| {
-                KernelError::new(
-                    forge_kernel_protocol::ErrorCode::Internal,
-                    forge_kernel_protocol::ErrorCategory::Internal,
-                    format!("ingest failed: {e}"),
-                    false,
-                )
-            })?;
+        let (_, artifact) = self.artifact_store.ingest(&bytes).map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::Internal,
+                terminus_kernel_protocol::ErrorCategory::Internal,
+                format!("ingest failed: {e}"),
+                false,
+            )
+        })?;
         Ok((bytes, artifact))
     }
 }
@@ -502,7 +546,7 @@ impl PatchService {
             transaction_id,
             baseline,
             edits,
-            forge_kernel_protocol::PatchCommitMode::ApplyToWorktree,
+            terminus_kernel_protocol::PatchCommitMode::ApplyToWorktree,
         )
     }
 
@@ -515,7 +559,7 @@ impl PatchService {
         transaction_id: &str,
         baseline: &WorkspaceBaseline,
         edits: &[PatchEdit],
-        commit_mode: forge_kernel_protocol::PatchCommitMode,
+        commit_mode: terminus_kernel_protocol::PatchCommitMode,
     ) -> KernelResult<PatchResponse> {
         // §31.3 step 3: capability-token validation.
         let requested_scope = Scope::default();
@@ -527,7 +571,7 @@ impl PatchService {
         )?;
         // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
-            target: "forge_kernel_audit",
+            target: "terminus_kernel_audit",
             event = "authorized",
             service = "patch.apply",
             request_id = %ctx.request_id,
@@ -544,16 +588,39 @@ impl PatchService {
                 baseline,
                 edits,
                 commit_mode,
-                forge_patch::ValidationProfile::TaskDefault,
+                terminus_patch::ValidationProfile::TaskDefault,
             )
             .map_err(|e| {
                 KernelError::new(
-                    forge_kernel_protocol::ErrorCode::StaleSourceVersion,
-                    forge_kernel_protocol::ErrorCategory::Conflict,
+                    terminus_kernel_protocol::ErrorCode::StaleSourceVersion,
+                    terminus_kernel_protocol::ErrorCategory::Conflict,
                     format!("{e}"),
                     true,
                 )
             })
+    }
+}
+
+/// Resolve a sandbox profile id to a `SandboxProfile`. The kernel currently
+/// ships one enforced profile (`default-restrictive`); `secure-local-default`
+/// (the config profile name) maps to it. Unknown ids fall back to the
+/// restrictive default so a stale or attacker-supplied id never widens
+/// permissions (SPEC §13.3: a named secure profile MUST exist and be the
+/// default). When multiple profiles are added, this MUST consult a profile
+/// registry keyed by id.
+fn resolve_sandbox_profile(profile_id: &str) -> KernelResult<SandboxProfile> {
+    match profile_id {
+        "secure-local-default" | "default-restrictive" | "degraded-local" => {
+            let mut profile = SandboxProfile::default_restrictive();
+            profile.id = profile_id.to_string();
+            Ok(profile)
+        }
+        _ => Err(KernelError::new(
+            terminus_kernel_protocol::ErrorCode::InvalidArgument,
+            terminus_kernel_protocol::ErrorCategory::Validation,
+            format!("unknown sandbox profile `{profile_id}`"),
+            false,
+        )),
     }
 }
 
@@ -565,6 +632,11 @@ pub struct ProcessService {
     policy: Arc<PolicyEngine>,
     token_issuer: Arc<TokenIssuer>,
     approvals: Arc<ApprovalStore>,
+    /// Sandbox manager used to select and validate the enforcement backend
+    /// for each process start (SPEC §13, §31.3 step 11). `None` when a unit
+    /// test constructs `ProcessService` directly; the production
+    /// `KernelHandle` wires a real manager via `with_sandbox`.
+    sandbox: Option<Arc<SandboxManager>>,
 }
 
 impl std::fmt::Debug for ProcessService {
@@ -588,7 +660,15 @@ impl ProcessService {
             policy,
             token_issuer,
             approvals,
+            sandbox: None,
         }
+    }
+
+    /// Attach the sandbox manager so `start` can select and validate the
+    /// enforcement backend (SPEC §31.3 step 11). Used by `KernelHandle::new`.
+    pub fn with_sandbox(mut self, sandbox: Arc<SandboxManager>) -> Self {
+        self.sandbox = Some(sandbox);
+        self
     }
 
     /// Build a `NormalizedCommand` from a `CommandSpec`. The command is
@@ -596,7 +676,7 @@ impl ProcessService {
     /// whose program is a known network client (`curl`, `wget`, `git`) get
     /// the appropriate network effect type.
     fn build_normalized(command: &CommandSpec) -> NormalizedCommand {
-        use forge_policy::EffectType;
+        use terminus_policy::EffectType;
         let mut normalized = NormalizedCommand::new(&command.program);
         normalized.argv = command.args.clone();
         normalized.working_directory = command.cwd.relative_path.clone();
@@ -606,7 +686,7 @@ impl ProcessService {
         // binaries get extra effect types so the policy engine can match on
         // them.
         if command.shell.enabled {
-            normalized.shell_ast = Some(forge_policy::ShellAst::Script {
+            normalized.shell_ast = Some(terminus_policy::ShellAst::Script {
                 dialect: if command.shell.dialect.is_empty() {
                     "sh".to_string()
                 } else {
@@ -646,9 +726,9 @@ impl ProcessService {
     /// - `redact_patterns`: recorded in the audit log; not applied here
     ///   because the process manager does not yet support runtime redaction.
     fn apply_constraints(
-        spawn: forge_process::NormalizedSpawn,
+        spawn: terminus_process::NormalizedSpawn,
         constraints: &Constraint,
-    ) -> forge_process::NormalizedSpawn {
+    ) -> terminus_process::NormalizedSpawn {
         let mut s = spawn;
         if let Some(max_rt) = constraints.max_runtime_ms {
             if max_rt > 0 && (s.timeout_ms == 0 || max_rt < s.timeout_ms) {
@@ -656,19 +736,36 @@ impl ProcessService {
             }
         }
         if !constraints.disallowed_env.is_empty() {
-            s.env.retain(|k, _| !constraints.disallowed_env.iter().any(|d| d == k));
+            s.env
+                .retain(|k, _| !constraints.disallowed_env.iter().any(|d| d == k));
         }
         s
     }
 
-    /// Start a process. Enforces the SPEC §31.3 14-step validation order:
-    /// capability token → policy evaluation → approval resolution →
-    /// audit (AUTHORIZED) → spawn.
+    /// Start a process under the default restrictive sandbox profile.
+    /// Enforces the SPEC §31.3 14-step validation order: capability token →
+    /// effect/taint classification → policy evaluation → approval resolution
+    /// → sandbox selection → budget reservation → audit (AUTHORIZED) →
+    /// spawn → evidence audit.
     pub async fn start(
         &self,
         ctx: &RequestContext,
-        _intent: &EffectIntent,
+        intent: &EffectIntent,
         command: CommandSpec,
+    ) -> KernelResult<tokio::sync::mpsc::Receiver<ProcessEvent>> {
+        self.start_in_profile(ctx, intent, command, "default-restrictive")
+            .await
+    }
+
+    /// Start a process under a named sandbox profile. This is the full
+    /// §31.3 14-step entry point used by the HTTP mini-service, which passes
+    /// the request's `sandbox_profile_id`.
+    pub async fn start_in_profile(
+        &self,
+        ctx: &RequestContext,
+        intent: &EffectIntent,
+        command: CommandSpec,
+        sandbox_profile_id: &str,
     ) -> KernelResult<tokio::sync::mpsc::Receiver<ProcessEvent>> {
         // §31.3 step 3: capability-token validation. Process start requires
         // the `Exec` operation class. The requested scope is the cwd path
@@ -685,17 +782,63 @@ impl ProcessService {
             &requested_scope,
         )?;
 
-        // §31.3 step 6 + 7: classify effect and evaluate policy.
-        let normalized = Self::build_normalized(&command);
-        let report = self.policy.evaluate(&normalized);
+        // §31.3 step 6: classify effect and taint. Propagate untrusted
+        // provenance from the EffectIntent onto the normalized command so
+        // the policy engine and downstream audit can see it (SPEC §13.7,
+        // §27.3, §36.15). A tainted command carrying a privileged effect
+        // (network write / external state write / secret use / local write)
+        // is elevated to Prompt so a human must approve untrusted-driven
+        // privileged effects.
+        let mut normalized = Self::build_normalized(&command);
+        let is_untrusted = intent.trust_label == "untrusted" || intent.trust_label == "derived";
+        if is_untrusted {
+            normalized.taint_sources.push(TaintSource {
+                kind: intent.trust_label.clone(),
+                uri: if intent.user_intent_ref.is_empty() {
+                    "untrusted-intent".to_string()
+                } else {
+                    intent.user_intent_ref.clone()
+                },
+            });
+        }
+        for src in &intent.taint_sources {
+            normalized.taint_sources.push(TaintSource {
+                kind: "intent".to_string(),
+                uri: src.clone(),
+            });
+        }
+        let tainted = !normalized.taint_sources.is_empty();
+
+        // §31.3 step 7: evaluate command/resource policy.
+        let mut report = self.policy.evaluate(&normalized);
+
+        // Taint elevation: a tainted privileged effect must not auto-allow.
+        if tainted
+            && matches!(report.decision, Decision::Allow)
+            && normalized.effect_types.iter().any(|e| {
+                matches!(
+                    e,
+                    terminus_policy::EffectType::NetworkWrite
+                        | terminus_policy::EffectType::ExternalStateWrite
+                        | terminus_policy::EffectType::SecretUse
+                        | terminus_policy::EffectType::WriteLocal
+                )
+            })
+        {
+            report.decision = Decision::Prompt;
+            report.explanation = format!(
+                "elevated to prompt: effect is tainted by untrusted provenance ({})",
+                intent.trust_label
+            );
+        }
 
         // §31.3 step 8: approval resolution (only when the policy says
         // Prompt).
         match report.decision {
             Decision::Deny => {
                 return Err(KernelError::new(
-                    forge_kernel_protocol::ErrorCode::PolicyDenied,
-                    forge_kernel_protocol::ErrorCategory::PolicyDenied,
+                    terminus_kernel_protocol::ErrorCode::PolicyDenied,
+                    terminus_kernel_protocol::ErrorCategory::PolicyDenied,
                     format!(
                         "policy denied: rules=[{}] explanation={}",
                         report.rule_ids.join(","),
@@ -724,8 +867,8 @@ impl ProcessService {
                     // Approval granted — fall through to spawn.
                 } else {
                     return Err(KernelError::new(
-                        forge_kernel_protocol::ErrorCode::ApprovalRequired,
-                        forge_kernel_protocol::ErrorCategory::ApprovalRequired,
+                        terminus_kernel_protocol::ErrorCode::ApprovalRequired,
+                        terminus_kernel_protocol::ErrorCategory::ApprovalRequired,
                         format!(
                             "policy requires approval: rules=[{}] explanation={}",
                             report.rule_ids.join(","),
@@ -751,23 +894,141 @@ impl ProcessService {
         }
 
         // Build the NormalizedSpawn and apply constraints if any.
-        let spawn = forge_process::NormalizedSpawn::from_spec(&command).map_err(|e| {
+        let mut spawn = terminus_process::NormalizedSpawn::from_spec(&command).map_err(|e| {
             KernelError::new(
-                forge_kernel_protocol::ErrorCode::InvalidArgument,
-                forge_kernel_protocol::ErrorCategory::Validation,
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
                 format!("{e}"),
                 false,
             )
         })?;
-        let spawn = if matches!(report.decision, Decision::AllowWithConstraints) {
-            Self::apply_constraints(spawn, &report.constraints)
+        if matches!(report.decision, Decision::AllowWithConstraints) {
+            spawn = Self::apply_constraints(spawn, &report.constraints);
+        }
+
+        // §31.3 step 11 (前置): select the sandbox backend for the named
+        // profile and verify enforcement. SPEC §13.4: fail closed when the
+        // backend is Unsupported, or when it is Degraded and strict mode is
+        // enabled (`TERMINUS_STRICT_SANDBOX=1`). Otherwise audit the effective
+        // (degraded) enforcement and proceed — degraded is an explicit,
+        // audited state, never a silent downgrade.
+        let profile = resolve_sandbox_profile(sandbox_profile_id)?;
+        let (enforcement, sandbox_wrapper) = if let Some(mgr) = &self.sandbox {
+            match mgr.select(&profile) {
+                Ok(backend) => {
+                    // SPEC §34.11: if the backend can wrap the spawn in an
+                    // OS sandbox (e.g. bwrap), capture the wrapper argv so
+                    // we spawn inside it. `spawn_wrapper` returns None when
+                    // the backend has no OS isolation (LocalRestrictive) or
+                    // when the wrapper binary is unavailable.
+                    let wrapper = backend.spawn_wrapper(&command, &profile);
+                    (backend.enforcement_report(), wrapper)
+                }
+                Err(e) => {
+                    return Err(KernelError::new(
+                        terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
+                        terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+                        format!("sandbox profile `{sandbox_profile_id}` rejected: {e}"),
+                        false,
+                    ));
+                }
+            }
         } else {
-            spawn
+            // No sandbox manager attached (e.g. a direct unit test): there
+            // is no enforcement, so fail closed rather than spawn unsandboxed.
+            (
+                terminus_sandbox::EnforcementReport {
+                    backend_id: "none".to_string(),
+                    status: EnforcementStatus::Unsupported,
+                    enforced: Vec::new(),
+                    degraded: Vec::new(),
+                    unsupported: Vec::new(),
+                    notes: vec!["no sandbox manager attached".to_string()],
+                },
+                None,
+            )
         };
+        // Degraded execution is an explicit profile choice. The secure
+        // default fails closed without relying on an opt-in environment
+        // variable (SPEC §36.5).
+        let allow_degraded = sandbox_profile_id == "degraded-local";
+        match enforcement.status {
+            EnforcementStatus::Unsupported => {
+                return Err(KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
+                    terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+                    format!(
+                        "sandbox backend `{}` cannot enforce profile `{}` (unsupported); \
+                         failing closed (SPEC §13.4). Run on a platform with a real backend \
+                         (e.g. Linux + terminus-sandbox-linux) or attach a sandbox manager.",
+                        enforcement.backend_id, sandbox_profile_id
+                    ),
+                    false,
+                )
+                .with_details(serde_json::json!({
+                    "backend": enforcement.backend_id,
+                    "unsupported": enforcement.unsupported.iter().map(|f| format!("{f:?}")).collect::<Vec<_>>(),
+                    "notes": enforcement.notes,
+                })));
+            }
+            EnforcementStatus::Degraded if !allow_degraded => {
+                return Err(KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::SandboxDegraded,
+                    terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+                    format!(
+                        "sandbox backend `{}` is degraded for secure profile `{}`; \
+                         failing closed (select `degraded-local` explicitly to proceed)",
+                        enforcement.backend_id
+                        , sandbox_profile_id
+                    ),
+                    false,
+                )
+                .with_details(serde_json::json!({
+                    "backend": enforcement.backend_id,
+                    "degraded": enforcement.degraded.iter().map(|f| format!("{f:?}")).collect::<Vec<_>>(),
+                    "notes": enforcement.notes,
+                })));
+            }
+            EnforcementStatus::Degraded => {
+                tracing::warn!(
+                    target: "terminus_kernel_audit",
+                    event = "sandbox_degraded",
+                    service = "process.start",
+                    request_id = %ctx.request_id,
+                    backend = %enforcement.backend_id,
+                    profile = %sandbox_profile_id,
+                    degraded = ?enforcement.degraded,
+                    notes = ?enforcement.notes,
+                    "process start proceeding under degraded sandbox enforcement (audited)"
+                );
+            }
+            EnforcementStatus::Enforced => {}
+        }
+
+        // §31.3 step 9: reserve budgets and resource limits. Cap the
+        // timeout at the tightest of: the requested timeout, the policy
+        // constraint, and the sandbox profile's wall-clock limit. Emit a
+        // budget_reserved audit event.
+        if let Some(wall) = profile.resources.wall_clock_ms {
+            if wall > 0 && (spawn.timeout_ms == 0 || wall < spawn.timeout_ms) {
+                spawn.timeout_ms = wall;
+            }
+        }
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "budget_reserved",
+            service = "process.start",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            timeout_ms = spawn.timeout_ms,
+            pids_limit = ?profile.resources.pids,
+            memory_bytes_limit = ?profile.resources.memory_bytes,
+            "budget and resource limits reserved"
+        );
 
         // §31.3 step 10: persist AUTHORIZED state BEFORE the effect.
         tracing::info!(
-            target: "forge_kernel_audit",
+            target: "terminus_kernel_audit",
             event = "authorized",
             service = "process.start",
             request_id = %ctx.request_id,
@@ -779,25 +1040,64 @@ impl ProcessService {
             decision = ?report.decision,
             rule_ids = ?report.rule_ids,
             decision_id = %report.decision_id,
+            sandbox_backend = %enforcement.backend_id,
+            sandbox_status = ?enforcement.status,
+            taint_sources = ?normalized.taint_sources,
             "process start authorized",
         );
 
-        // §31.3 step 11: execute inside the selected backend.
-        // Apply max_output_bytes if the constraint specifies it.
+        // §31.3 step 11: execute. Apply max_output_bytes if the constraint
+        // specifies it.
         let process_manager: Arc<ProcessManager> =
             if let Some(max_bytes) = report.constraints.max_output_bytes {
-                Arc::new((*self.process).clone().with_max_inline_bytes(max_bytes.max(1) as usize))
+                Arc::new(
+                    (*self.process)
+                        .clone()
+                        .with_max_inline_bytes(max_bytes.max(1) as usize),
+                )
             } else {
                 Arc::clone(&self.process)
             };
-        let (_outcome, rx) = process_manager.spawn(spawn).await.map_err(|e| {
+        let (_outcome, rx) = if let Some((wrapper_bin, wrapper_argv)) = sandbox_wrapper {
+            // SPEC §34.11: spawn inside the OS sandbox wrapper (bwrap).
+            // ProcessManager still owns the process group, timeout, output
+            // streaming, and tree-kill on cancel.
+            tracing::info!(
+                target: "terminus_kernel_audit",
+                event = "sandbox_spawn_wrapped",
+                service = "process.start",
+                request_id = %ctx.request_id,
+                wrapper = %wrapper_bin.display(),
+                "spawning process inside OS sandbox wrapper"
+            );
+            process_manager
+                .spawn_wrapped(wrapper_bin, wrapper_argv, spawn)
+                .await
+        } else {
+            process_manager.spawn(spawn).await
+        }
+        .map_err(|e| {
             KernelError::new(
-                forge_kernel_protocol::ErrorCode::Internal,
-                forge_kernel_protocol::ErrorCategory::Internal,
+                terminus_kernel_protocol::ErrorCode::Internal,
+                terminus_kernel_protocol::ErrorCategory::Internal,
                 format!("{e}"),
                 false,
             )
         })?;
+
+        // §31.3 step 13: settle and persist evidence. The start is recorded
+        // as an audited effect; exit-time stdout/stderr artifacts are ingested
+        // by `ProcessManager` into the content-addressed store, so the
+        // evidence chain reaches raw output by artifact reference.
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "effect_started",
+            service = "process.start",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            program = %command.program,
+            "process effect started; exit artifacts recorded by ProcessManager"
+        );
         Ok(rx)
     }
 
@@ -818,7 +1118,7 @@ impl ProcessService {
         )?;
         // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
-            target: "forge_kernel_audit",
+            target: "terminus_kernel_audit",
             event = "authorized",
             service = "process.cancel",
             request_id = %ctx.request_id,
@@ -830,8 +1130,8 @@ impl ProcessService {
         );
         self.process.cancel(process_id, reason).await.map_err(|e| {
             KernelError::new(
-                forge_kernel_protocol::ErrorCode::ProcessNotFound,
-                forge_kernel_protocol::ErrorCategory::NotFound,
+                terminus_kernel_protocol::ErrorCode::ProcessNotFound,
+                terminus_kernel_protocol::ErrorCategory::NotFound,
                 format!("{e}"),
                 false,
             )
@@ -887,7 +1187,7 @@ impl SandboxService {
         Self { manager }
     }
 
-    pub fn enforcement_report(&self) -> forge_sandbox::EnforcementReport {
+    pub fn enforcement_report(&self) -> terminus_sandbox::EnforcementReport {
         self.manager.enforcement_report()
     }
 
@@ -895,8 +1195,8 @@ impl SandboxService {
     /// `SandboxBackend` trait object.
     pub fn select_public(
         &self,
-        profile: &forge_sandbox::SandboxProfile,
-    ) -> Result<std::sync::Arc<dyn forge_sandbox::SandboxBackend>, forge_sandbox::SandboxError>
+        profile: &terminus_sandbox::SandboxProfile,
+    ) -> Result<std::sync::Arc<dyn terminus_sandbox::SandboxBackend>, terminus_sandbox::SandboxError>
     {
         self.manager.select(profile)
     }
@@ -919,7 +1219,7 @@ impl PolicyService {
         _ctx: &RequestContext,
         _intent: &EffectIntent,
         command: &NormalizedCommand,
-    ) -> forge_policy::DecisionReport {
+    ) -> terminus_policy::DecisionReport {
         self.engine.evaluate(command)
     }
 }
@@ -978,7 +1278,7 @@ impl SecretService {
         )?;
         // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
-            target: "forge_kernel_audit",
+            target: "terminus_kernel_audit",
             event = "authorized",
             service = "secret.request",
             request_id = %ctx.request_id,
@@ -993,8 +1293,8 @@ impl SecretService {
             .map(|_| ())
             .map_err(|e| {
                 KernelError::new(
-                    forge_kernel_protocol::ErrorCode::PermissionDenied,
-                    forge_kernel_protocol::ErrorCategory::Permission,
+                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                    terminus_kernel_protocol::ErrorCategory::Permission,
                     format!("{e}"),
                     false,
                 )
@@ -1033,7 +1333,7 @@ impl NetworkService {
     }
 
     /// Convenience accessor for the egress policy.
-    pub fn policy(&self) -> &forge_egress::EgressPolicy {
+    pub fn policy(&self) -> &terminus_egress::EgressPolicy {
         self.proxy.policy()
     }
 
@@ -1063,7 +1363,7 @@ impl NetworkService {
         )?;
         // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
-            target: "forge_kernel_audit",
+            target: "terminus_kernel_audit",
             event = "authorized",
             service = "network.authorize",
             request_id = %ctx.request_id,
@@ -1078,8 +1378,8 @@ impl NetworkService {
             .authorize(host, port, scheme, resolved_ips)
             .map_err(|e| {
                 KernelError::new(
-                    forge_kernel_protocol::ErrorCode::PolicyDenied,
-                    forge_kernel_protocol::ErrorCategory::PolicyDenied,
+                    terminus_kernel_protocol::ErrorCode::PolicyDenied,
+                    terminus_kernel_protocol::ErrorCategory::PolicyDenied,
                     format!("{e}"),
                     false,
                 )
@@ -1122,7 +1422,7 @@ impl CodeIntelligenceService {
         ctx: &RequestContext,
         _intent: &EffectIntent,
         symbol: &str,
-    ) -> KernelResult<forge_code_intel::InspectResult> {
+    ) -> KernelResult<terminus_code_intel::InspectResult> {
         // §31.3 step 3: capability-token validation. Inspect requires the
         // `CodeIntel` operation class.
         let _ = validate_capability_for_op(
@@ -1133,7 +1433,7 @@ impl CodeIntelligenceService {
         )?;
         // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
-            target: "forge_kernel_audit",
+            target: "terminus_kernel_audit",
             event = "authorized",
             service = "code_intel.inspect",
             request_id = %ctx.request_id,
@@ -1142,16 +1442,14 @@ impl CodeIntelligenceService {
             symbol = %symbol,
             "code-intel inspect authorized",
         );
-        self.inner
-            .inspect_symbol(symbol)
-            .map_err(|e| {
-                KernelError::new(
-                    forge_kernel_protocol::ErrorCode::Internal,
-                    forge_kernel_protocol::ErrorCategory::Internal,
-                    format!("{e}"),
-                    false,
-                )
-            })
+        self.inner.inspect_symbol(symbol).map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::Internal,
+                terminus_kernel_protocol::ErrorCategory::Internal,
+                format!("{e}"),
+                false,
+            )
+        })
     }
 }
 
@@ -1173,20 +1471,17 @@ impl std::fmt::Debug for ExtensionRuntimeService {
 
 impl ExtensionRuntimeService {
     pub fn new(host: Arc<WasiExtensionHost>, token_issuer: Arc<TokenIssuer>) -> Self {
-        Self {
-            host,
-            token_issuer,
-        }
+        Self { host, token_issuer }
     }
 
-    pub fn report(&self) -> forge_extension_runtime::WasiExtensionHostReport {
+    pub fn report(&self) -> terminus_extension_runtime::WasiExtensionHostReport {
         self.host.report()
     }
 
     pub fn validate_manifest(
         &self,
         ctx: &RequestContext,
-        manifest: &forge_extension_runtime::ExtensionManifest,
+        manifest: &terminus_extension_runtime::ExtensionManifest,
     ) -> KernelResult<()> {
         // §31.3 step 3: capability-token validation. Extension admin
         // requires the `Extension` operation class.
@@ -1198,7 +1493,7 @@ impl ExtensionRuntimeService {
         )?;
         // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
-            target: "forge_kernel_audit",
+            target: "terminus_kernel_audit",
             event = "authorized",
             service = "extension.validate_manifest",
             request_id = %ctx.request_id,
@@ -1208,16 +1503,14 @@ impl ExtensionRuntimeService {
             extension_version = %manifest.version,
             "extension manifest validation authorized",
         );
-        self.host
-            .validate_manifest(manifest)
-            .map_err(|e| {
-                KernelError::new(
-                    forge_kernel_protocol::ErrorCode::InvalidArgument,
-                    forge_kernel_protocol::ErrorCategory::Validation,
-                    format!("{e}"),
-                    false,
-                )
-            })
+        self.host.validate_manifest(manifest).map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                format!("{e}"),
+                false,
+            )
+        })
     }
 }
 
@@ -1267,7 +1560,7 @@ impl ArtifactIngestService {
         )?;
         // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
-            target: "forge_kernel_audit",
+            target: "terminus_kernel_audit",
             event = "authorized",
             service = "artifact.ingest",
             request_id = %ctx.request_id,
@@ -1283,17 +1576,14 @@ impl ArtifactIngestService {
     /// mini-service's binary `POST /v1/artifacts/ingest` endpoint where the
     /// body IS the artifact bytes (not a JSON envelope).
     pub fn ingest_with_bytes(&self, bytes: &[u8]) -> KernelResult<ArtifactRef> {
-        let (_, artifact) = self
-            .store
-            .ingest(bytes)
-            .map_err(|e| {
-                KernelError::new(
-                    forge_kernel_protocol::ErrorCode::Internal,
-                    forge_kernel_protocol::ErrorCategory::Internal,
-                    format!("{e}"),
-                    false,
-                )
-            })?;
+        let (_, artifact) = self.store.ingest(bytes).map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::Internal,
+                terminus_kernel_protocol::ErrorCategory::Internal,
+                format!("{e}"),
+                false,
+            )
+        })?;
         Ok(artifact)
     }
 }

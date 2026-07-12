@@ -9,18 +9,19 @@
 //!
 //! No ambient environment is inherited; the caller supplies an explicit
 //! `public_env` map and any secret capability URIs are routed through
-//! `forge-secrets` (the process manager itself does not dereference them).
+//! `terminus-secrets` (the process manager itself does not dereference them).
 //!
 //! ## `unsafe` policy
 //!
 //! This crate contains exactly one `unsafe` block, in
 //! `manager::kill_process_group`, to call `libc::kill(-pgid, SIGKILL)`. The
-//! rationale is recorded in `docs/adr/ADR-0001-process-tree-kill.md` (see
-//! worklog): there is no safe Rust API in std for `killpg(2)`, and the
+//! rationale is recorded in `docs/decisions/ADR-0031-controlled-unsafe-killpg.md`:
+//! there is no safe Rust API in std for `killpg(2)`, and the
 //! alternative — leaking orphan processes — is worse than a contained,
 //! well-documented `unsafe` block. The block is the smallest possible and
 //! touches only signal dispatch.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![deny(unsafe_code)]
 
 mod error;

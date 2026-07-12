@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/capabilities/external-harness.json",
+  "$id": "https://terminus.dev/schemas/capabilities/external-harness.json",
   "title": "ExternalHarnessCapability",
-  "description": "Capability descriptor for an external harness adapter (SPEC §12.4, §35.11, §35.12). Adapters run as separate processes with an observed capability profile; Forge independently inspects the final workspace, collects artifacts, and runs verification. Inner-harness self-report is not sufficient evidence.",
+  "description": "Capability descriptor for an external harness adapter (SPEC §12.4, §35.11, §35.12). Adapters run as separate processes with an observed capability profile; Terminus independently inspects the final workspace, collects artifacts, and runs verification. Inner-harness self-report is not sufficient evidence.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "version", "kind", "source", "content_hash", "trust_level", "operations", "inner_harness_version", "capabilities", "observed_by_probe", "last_verified"],
@@ -48,6 +48,6 @@
     "observed_by_probe": { "type": ["object", "null"] },
     "last_verified": { "type": "string", "format": "date-time" },
     "discrepancies": { "type": "array", "items": { "type": "string" } },
-    "result_schema": { "type": "string", "description": "Normalization schema for results, e.g., forge.worker.v1" }
+    "result_schema": { "type": "string", "description": "Normalization schema for results, e.g., terminus.worker.v1" }
   }
 }

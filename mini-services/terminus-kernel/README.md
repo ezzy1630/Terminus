@@ -1,6 +1,6 @@
-# forge-kernel mini-service
+# terminus-kernel mini-service
 
-The **Rust privileged effect boundary** for Forge (SPEC §5.2, §13, §27, §31). This
+The **Rust privileged effect boundary** for Terminus (SPEC §5.2, §13, §27, §31). This
 is a standalone Rust binary crate that exposes the kernel services over HTTP on
 port 3040. The TypeScript control plane and Next.js UI call it via the Caddy
 gateway using `?XTransformPort=3040`.
@@ -8,11 +8,11 @@ gateway using `?XTransformPort=3040`.
 ## Build & run
 
 ```bash
-cd mini-services/forge-kernel
+cd mini-services/terminus-kernel
 cargo build --release
-FORGE_DATA=/home/z/my-project/.forge-data \
-FORGE_KERNEL_TOKEN=forge-kernel-dev-token \
-./target/release/forge-kernel-mini
+TERMINUS_DATA=/home/z/my-project/.terminus-data \
+TERMINUS_KERNEL_TOKEN=terminus-kernel-dev-token \
+./target/release/terminus-kernel-mini
 ```
 
 Or use the start script from the project root:
@@ -41,8 +41,8 @@ bash scripts/start-mini-services.sh
 
 ## Auth
 
-- **Bearer token**: `Authorization: Bearer <FORGE_KERNEL_TOKEN>` (default
-  `forge-kernel-dev-token`).
+- **Bearer token**: `Authorization: Bearer <TERMINUS_KERNEL_TOKEN>` (default
+  `terminus-kernel-dev-token`).
 - **Capability token**: mutating endpoints require `x-capability-token`
   validated via `forge_authz::TokenIssuer::validate()`. A long-lived dev token
   is minted at startup and logged.

@@ -1,5 +1,5 @@
 /**
- * @forge/artifact-client — client for the kernel's ArtifactIngestService.
+ * @terminus/artifact-client — client for the kernel's ArtifactIngestService.
  *
  * Per SPEC §29.3, §31.1: `ArtifactClient` with `ingest(bytes, metadata)`,
  * `get(hash)`, `metadata(hash)`, `link(hash, ownerType, ownerId, purpose)`,
@@ -12,8 +12,8 @@ import type {
   Rfc3339Timestamp,
   Uuid7,
   ArtifactRef,
-} from "@forge/domain";
-import { ValidationError, NotFoundError } from "@forge/domain";
+} from "@terminus/domain";
+import { ValidationError, NotFoundError } from "@terminus/domain";
 
 // ────────────────────────── Kernel client ────────────────────────────────────
 

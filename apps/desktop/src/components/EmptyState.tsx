@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — EmptyState.
+ * Terminus Desktop — EmptyState.
  *
  * Per SPEC §27: required states include "no projects", "empty project",
  * "no changes", "no subagents", "no verification", "no terminal", etc.

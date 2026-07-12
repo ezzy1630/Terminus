@@ -1,21 +1,21 @@
 [package]
-name = "forge-kernel-testkit"
+name = "terminus-kernel-testkit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Test helpers for the Forge kernel."
+description = "Test helpers for the Terminus kernel."
 
 [lints]
 workspace = true
 
 [dependencies]
-forge-kernel-protocol = { workspace = true }
-forge-fs = { workspace = true }
-forge-artifacts = { workspace = true }
-forge-sandbox = { workspace = true }
-forge-policy = { workspace = true }
-forge-authz = { workspace = true }
+terminus-kernel-protocol = { workspace = true }
+terminus-fs = { workspace = true }
+terminus-artifacts = { workspace = true }
+terminus-sandbox = { workspace = true }
+terminus-policy = { workspace = true }
+terminus-authz = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

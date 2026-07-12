@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Onboarding.
+ * Terminus Desktop — Onboarding.
  *
  * Per SPEC §19: a minimal Codex-style onboarding flow shown on first
  * launch:
@@ -40,7 +40,7 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, ForgeApiError } from "../lib/api";
-import { useForgeStore } from "../hooks/use-forge";
+import { useForgeStore } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
 import type { Session } from "../types";
 
@@ -62,7 +62,7 @@ export interface OnboardingResult {
   projectPath: string | null;
   /** Initial prompt entered in step 4 (may be empty). */
   initialPrompt: string;
-  /** Created Forge session (if any). */
+  /** Created Terminus session (if any). */
   session: Session | null;
   /** Whether the user skipped the flow. */
   skipped: boolean;
@@ -211,7 +211,7 @@ function OnboardingImpl({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Welcome to Forge"
+      aria-label="Welcome to Terminus"
       className={cn("fixed inset-0 z-50 flex flex-col bg-canvas", className)}
       style={{ animation: "fade-in var(--duration-normal) var(--easing-default)" }}
     >
@@ -222,7 +222,7 @@ function OnboardingImpl({
       >
         <div className="titlebar-no-drag flex items-center gap-2 text-secondary">
           <span className="font-medium tracking-tight text-primary" style={{ fontSize: "var(--font-size-md)" }}>
-            Forge
+            Terminus
           </span>
         </div>
         <button
@@ -345,11 +345,11 @@ function WelcomeStep({ onNext }: { onNext: () => void }): JSX.Element {
             fontWeight: 700,
           }}
         >
-          F
+          <TerminalIcon size={18} strokeWidth={1.7} />
         </div>
         <div>
           <h1 className="text-primary" style={{ fontSize: "var(--font-size-2xl)", fontWeight: 600 }}>
-            Welcome to Forge
+            Welcome to Terminus
           </h1>
           <p className="text-secondary" style={{ fontSize: "var(--font-size-sm)", marginTop: 2 }}>
             A calm, focused way to operate coding agents.
@@ -360,7 +360,7 @@ function WelcomeStep({ onNext }: { onNext: () => void }): JSX.Element {
         className="text-secondary"
         style={{ fontSize: "var(--font-size-sm)", lineHeight: "var(--line-height-relaxed)" }}
       >
-        Forge runs long-running tasks, branches, terminals, and code review in one window.
+        Terminus runs long-running tasks, branches, terminals, and code review in one window.
         We've set sensible defaults for a 13-inch MacBook Air — you can change anything later in Settings.
       </p>
       <div className="flex items-center justify-end" style={{ marginTop: 8 }}>
@@ -412,7 +412,7 @@ function ProjectStep({
           Open a project
         </h1>
         <p className="text-secondary" style={{ fontSize: "var(--font-size-sm)", marginTop: 4 }}>
-          Choose a local directory. Forge will treat it as the workspace root.
+          Choose a local directory. Terminus will treat it as the workspace root.
         </p>
       </div>
       <div className="flex flex-col" style={{ gap: 8 }}>
@@ -466,7 +466,7 @@ function ToolsStep({ onNext, onBack }: { onNext: () => void; onBack: () => void 
           Confirm detected tools
         </h1>
         <p className="text-secondary" style={{ fontSize: "var(--font-size-sm)", marginTop: 4 }}>
-          Forge looked for common editors and runtimes. Adjust paths later in Settings → Integrations.
+          Terminus looked for common editors and runtimes. Adjust paths later in Settings → Integrations.
         </p>
       </div>
       <ul className="flex flex-col" style={{ gap: 6 }}>

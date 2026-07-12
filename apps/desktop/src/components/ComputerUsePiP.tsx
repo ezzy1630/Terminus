@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Computer Use picture-in-picture (SPEC §16).
+ * Terminus Desktop — Computer Use picture-in-picture (SPEC §16).
  *
  * A floating, draggable, resizable window-within-a-window that shows a
  * live preview of the agent's computer-use session. The agent's screen
@@ -118,7 +118,7 @@ function ComputerUsePiPImpl({
   // resumes from a paused/hidden state).
   const acquireStream = useCallback(async (): Promise<void> => {
     if (!window.forgeDesktop?.getScreenSources) {
-      setSourceError("Screen capture requires the Forge desktop runtime.");
+      setSourceError("Screen capture requires the Terminus desktop runtime.");
       return;
     }
     try {

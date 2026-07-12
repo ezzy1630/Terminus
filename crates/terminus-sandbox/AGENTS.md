@@ -1,4 +1,4 @@
-# AGENTS.md — forge-sandbox
+# AGENTS.md — terminus-sandbox
 
 ## Local rules
 
@@ -11,6 +11,6 @@
   `SecretsAccess::AmbientEnvironment`.
 - **No namespace magic in the default backend.** `LocalRestrictiveBackend`
   is intentionally process-group + env + cwd-jail only. Full namespace
-  isolation lives in `forge-sandbox-linux`.
+  isolation lives in `terminus-sandbox-linux`.
 - **No `unsafe`.**
 - **No panics.**

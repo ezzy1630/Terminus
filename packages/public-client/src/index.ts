@@ -1,5 +1,5 @@
 /**
- * @forge/public-client — Generated-style TypeScript client for the public API.
+ * @terminus/public-client — Generated-style TypeScript client for the public API.
  *
  * Per SPEC §32.5: A client reconnects by authenticating, fetching the
  * task/session snapshot, resuming events from the last durable cursor,
@@ -22,15 +22,15 @@ import type {
   ConfigurationSnapshot,
   PolicySnapshot,
   SseEvent,
-} from "@forge/public-api";
-import { createSseDecoder, IDEMPOTENCY_HEADER, requireIdempotency } from "@forge/public-api";
+} from "@terminus/public-api";
+import { createSseDecoder, IDEMPOTENCY_HEADER, requireIdempotency } from "@terminus/public-api";
 
 export interface ForgeClientConfig {
-  /** Base URL of the Forge control plane. Use "" for same-origin. */
+  /** Base URL of the Terminus control plane. Use "" for same-origin. */
   baseUrl: string;
   /** Optional XTransformPort query parameter for gateway routing. */
   xformPort?: number;
-  /** Authentication token (Forge local token). */
+  /** Authentication token (Terminus local token). */
   token?: string;
   /** Fetch implementation (defaults to global fetch). */
   fetchImpl?: typeof fetch;

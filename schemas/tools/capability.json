@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/tools/capability.json",
+  "$id": "https://terminus.dev/schemas/tools/capability.json",
   "title": "capability",
   "description": "List, activate, or deactivate capabilities (SPEC §11.2, §35). Progressive disclosure: capability cards are always visible; full schemas become visible on activation. Activation changes the tool-layer hash and is logged as a cache event.",
   "type": "object",

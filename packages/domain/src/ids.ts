@@ -1,5 +1,5 @@
 /**
- * @forge/domain — canonical domain identifiers.
+ * @terminus/domain — canonical domain identifiers.
  *
  * Per SPEC §28.1:
  * - Public domain identifiers MUST use UUIDv7 encoded as lowercase canonical strings.

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/tools/inspect.json",
+  "$id": "https://terminus.dev/schemas/tools/inspect.json",
   "title": "inspect",
   "description": "High-level LSP/DAP operations (SPEC §11.8). Composes LSP calls and degrades gracefully when a server is unavailable. Operations: inspect_symbol, find_references, diagnose_files, rename_symbol, debug_test, trace_function, inspect_failure.",
   "type": "object",

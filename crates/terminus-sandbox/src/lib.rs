@@ -6,6 +6,7 @@
 //! "Unsupported/degraded: fail closed in production. The UI must display
 //! effective enforcement, never silently downgrade.").
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 pub mod backend;
@@ -18,7 +19,7 @@ pub use backend::{LocalRestrictiveBackend, SandboxBackend};
 pub use error::SandboxError;
 pub use manager::SandboxManager;
 pub use profile::{
-    FilesystemAccess, FilesystemRule, NetworkAccess, ProcessAccess, ResourceLimits,
-    SandboxProfile, SecretsAccess,
+    FilesystemAccess, FilesystemRule, NetworkAccess, ProcessAccess, ResourceLimits, SandboxProfile,
+    SecretsAccess,
 };
 pub use report::{EnforcementFeature, EnforcementReport, EnforcementStatus};

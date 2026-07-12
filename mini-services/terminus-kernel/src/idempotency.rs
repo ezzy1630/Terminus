@@ -4,10 +4,10 @@
 //! in-flight requests with the same key + normalized body hash and returns
 //! the same response.
 
+use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use sha2::Digest;
 use tokio::sync::Mutex;
 
 /// An entry in the idempotency map.
@@ -42,9 +42,7 @@ impl IdempotencyMap {
         // Evict expired entries opportunistically.
         guard.retain(|_, e| e.created_at.elapsed() < self.ttl);
         match guard.get(key) {
-            Some(entry) if entry.request_hash != request_hash => {
-                IdempotencyLookup::Conflict
-            }
+            Some(entry) if entry.request_hash != request_hash => IdempotencyLookup::Conflict,
             Some(entry) => IdempotencyLookup::Hit(entry.response.clone()),
             None => IdempotencyLookup::Miss,
         }

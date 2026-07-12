@@ -8,7 +8,7 @@
 
 ## Context
 
-Forge needs durable storage for: workspace/session/thread/task/turn state, semantic events, content-addressed artifacts (tool output, diffs, traces, evidence), Git state, FTS5/full-text search, and optional vector indexes. A single store cannot serve all of these well: relational state needs transactions; events need append-only semantics with cursors; artifacts need content addressing and GC; FTS5 needs SQLite's extension; vectors need a separate index.
+Terminus needs durable storage for: workspace/session/thread/task/turn state, semantic events, content-addressed artifacts (tool output, diffs, traces, evidence), Git state, FTS5/full-text search, and optional vector indexes. A single store cannot serve all of these well: relational state needs transactions; events need append-only semantics with cursors; artifacts need content addressing and GC; FTS5 needs SQLite's extension; vectors need a separate index.
 
 Pure event sourcing would force a rebuild on every restart and complicate ad-hoc queries. Pure relational would lose the audit/event-stream properties. Pure object storage would lose transactions.
 
@@ -19,7 +19,7 @@ Adopt a **hybrid persistence model** per SPEC §7.3 and §29:
 1. **SQLite/WAL** for relational state (workspaces, sessions, threads, tasks, turns, contracts, scope ledger, provider attempts, context epochs/manifests/fragments, artifact links, tool calls, policy decisions, approvals, side effects, jobs, agents, delegations, verification plans/nodes/edges/results, memory claims/relations, capabilities/activations, idempotency records, leases, event stream cursors). STRICT tables, foreign keys, schema migrations under `migrations/sqlite/`.
 2. **Semantic event log** (SQLite table + JSONL export) for the append-only event stream. Event types from `schemas/events/catalog.yaml` (31 types). SSE consumers read via opaque cursors.
 3. **Content-addressed artifact store** (`artifact://sha256/<hex>`) for tool output, diffs, traces, evidence, full provider responses. Layout per SPEC §29.3. Atomic ingest; GC with dry-run.
-4. **Git/worktrees** for repository state. Protected operations through `forge-git` crate.
+4. **Git/worktrees** for repository state. Protected operations through `terminus-git` crate.
 5. **FTS5** (SQLite extension) for lexical search. Optional vector index behind a flag (ADR-0028 OPEN).
 
 PRAGMAs: `journal_mode=WAL`, `foreign_keys=ON`, `synchronous=NORMAL`, `busy_timeout=5000`.

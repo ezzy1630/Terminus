@@ -1,5 +1,5 @@
 /**
- * @forge/config — layered typed configuration.
+ * @terminus/config — layered typed configuration.
  *
  * Per SPEC Appendix F: configuration is layered in the order:
  *   compiled secure defaults
@@ -14,7 +14,7 @@ import { z } from "zod";
 import {
   ForgeError,
   ValidationError,
-} from "@forge/domain";
+} from "@terminus/domain";
 
 // ────────────────────────── Layer tags ───────────────────────────────────────
 
@@ -70,7 +70,7 @@ export const publicApiConfigSchema = z.object({
 
 export const kernelConfigSchema = z.object({
   socket: z.string(),
-  binary: z.string().default("forge-kernel"),
+  binary: z.string().default("terminus-kernel"),
   requiredProtocol: z.string().default("1.x"),
   capabilityTokenTtlSeconds: z.number().int().positive().default(60),
   maxMessageBytes: z.number().int().positive().default(4_194_304),
@@ -292,8 +292,8 @@ export const budgetsConfigSchema = z.object({
 
 export const forgeConfigSchema = z.object({
   version: z.literal(1).default(1),
-  dataDir: z.string().default("~/.local/share/forge"),
-  runtimeDir: z.string().default("~/.local/run/forge"),
+  dataDir: z.string().default("~/.local/share/terminus"),
+  runtimeDir: z.string().default("~/.local/run/terminus"),
   logLevel: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
   telemetry: telemetryConfigSchema,
   publicApi: publicApiConfigSchema,

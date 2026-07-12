@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Composer.
+ * Terminus Desktop — Composer.
  *
  * Per SPEC §10: "The composer is one intelligent input surface. It
  * remains fully available while work is running."
@@ -49,9 +49,9 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, ForgeApiError } from "../lib/api";
-import { useForgeStore, useSelectedTask } from "../hooks/use-forge";
+import { useForgeStore, useSelectedTask } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
-import { normalizeTaskStatus } from "../hooks/use-forge";
+import { normalizeTaskStatus } from "../hooks/use-terminus";
 import type { AccessLevel, ComposerSendMode } from "../types";
 
 interface ComposerProps {
@@ -121,6 +121,12 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
   useEffect(() => {
     textareaRef.current?.focus();
   }, [taskId]);
+
+  useEffect(() => {
+    const focusComposer = (): void => textareaRef.current?.focus();
+    window.addEventListener("terminus:focus-composer", focusComposer);
+    return () => window.removeEventListener("terminus:focus-composer", focusComposer);
+  }, []);
 
   // Persist draft on idle so streaming renders never block keystrokes.
   const writeDraft = useCallback(
@@ -265,6 +271,7 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
 
   const selectedAccess = ACCESS_LEVELS.find((a) => a.id === accessLevel) ?? ACCESS_LEVELS[1]!;
   const selectedAgent = AGENT_OPTIONS.find((a) => a.id === agentId) ?? AGENT_OPTIONS[0]!;
+  const sendDisabled = sending || (sendButtonContent.mode !== "stop" && draft.trim().length === 0);
 
   return (
     <div className={cn("relative", className)}>
@@ -467,7 +474,7 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
               <button
                 type="button"
                 onClick={() => void onSubmit(sendButtonContent.mode)}
-                disabled={sending || (sendButtonContent.mode !== "stop" && draft.trim().length === 0)}
+                disabled={sendDisabled}
                 aria-label={sendButtonContent.label}
                 title={sendButtonContent.label}
                 className={cn(
@@ -475,14 +482,22 @@ function ComposerImpl({ className }: ComposerProps): JSX.Element {
                   sendButtonContent.mode === "stop"
                     ? "bg-hover text-error"
                     : "text-primary",
-                  (sending || (sendButtonContent.mode !== "stop" && draft.trim().length === 0))
+                  sendDisabled
                     ? "opacity-50"
                     : "hover:opacity-90",
                 )}
                 style={{
                   fontSize: "var(--font-size-xs)",
-                  background: sendButtonContent.mode === "stop" ? "var(--bg-hover)" : "var(--color-primary)",
-                  color: sendButtonContent.mode === "stop" ? "var(--color-error)" : "var(--text-inverse)",
+                  background: sendButtonContent.mode === "stop"
+                    ? "var(--bg-hover)"
+                    : sendDisabled
+                      ? "var(--bg-hover)"
+                      : "var(--color-primary)",
+                  color: sendButtonContent.mode === "stop"
+                    ? "var(--color-error)"
+                    : sendDisabled
+                      ? "var(--text-tertiary)"
+                      : "var(--text-inverse)",
                 }}
               >
                 {sendButtonContent.icon}

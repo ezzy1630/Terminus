@@ -10,7 +10,7 @@
 
 A single JSON-RPC protocol for everything is unnecessarily constraining. The public product API, the internal privileged RPC, and the external-agent adapter surface have different change rates, trust levels, transport requirements, and consumer populations. Conflating them produces either a leaky privileged surface (security risk) or an over-constrained public surface (productivity risk).
 
-OpenCode uses one JSON-RPC protocol for client/server and inherits that for plugins/MCP. Forge needs three distinct boundaries.
+OpenCode uses one JSON-RPC protocol for client/server and inherits that for plugins/MCP. Terminus needs three distinct boundaries.
 
 ## Decision
 
@@ -32,7 +32,7 @@ Each protocol has its own source of truth, code generator, version, and compatib
 
 - Three code generators: `buf` for kernel proto, OpenAPI generator for public API, adapter SDK for external harnesses (SPEC §45.3).
 - Three compatibility windows: public API versioned before release; kernel protocol has buf breaking-change checks; adapter protocol tracks ACP + per-harness versions.
-- The `packages/public-client`, `packages/forge-kernel-client` (generated), and `packages/adapter-sdk` are separate packages.
+- The `packages/public-client`, `packages/terminus-kernel-client` (generated), and `packages/adapter-sdk` are separate packages.
 - Contract tests run current×current and current×previous for each boundary (SPEC §46.6).
 
 ## Security Impact

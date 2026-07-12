@@ -9,15 +9,15 @@
  * Checks implemented:
  *  1. No `packages/*` source file imports `child_process`, `node:fs`,
  *     `node:net`, or `node:crypto` — except the documented allow-list
- *     (`@forge/artifact-client` for content hashing; `@forge/context-ir`
+ *     (`@terminus/artifact-client` for content hashing; `@terminus/context-ir`
  *     for SHA-256 content-addressed IR hashes per SPEC §28.1).
  *  2. No `packages/*` source file imports from `mini-services/` or `apps/`
  *     (packages must not depend on deployables).
- *  3. `crates/forge-kernel` source files do not import from UI or provider
+ *  3. `crates/terminus-kernel` source files do not import from UI or provider
  *     crates (provider crates are `provider-*`; UI lives under `apps/`).
  *  4. `packages/domain` does not import any provider SDK
- *     (`@forge/provider-openai`, `@forge/provider-anthropic`,
- *     `@forge/provider-google`, `@forge/provider-local`, or third-party
+ *     (`@terminus/provider-openai`, `@terminus/provider-anthropic`,
+ *     `@terminus/provider-google`, `@terminus/provider-local`, or third-party
  *     provider SDKs).
  *  5. No raw SQL strings outside `prisma/` and `migrations/`. A "raw SQL
  *     string" is a template literal containing `SELECT`, `INSERT`,
@@ -37,7 +37,7 @@ const MINI_SERVICES_DIR = join(ROOT, "mini-services");
 const APPS_DIR = join(ROOT, "apps");
 
 // Packages that may import `node:crypto` for content hashing. SPEC §42.5
-// names `@forge/artifact-client`. We additionally allow `@forge/context-ir`
+// names `@terminus/artifact-client`. We additionally allow `@terminus/context-ir`
 // because its SHA-256 hashes are content-addressed IR fingerprints
 // (SPEC §28.1) — the same architectural justification.
 const CRYPTO_ALLOW = new Set(["artifact-client", "context-ir"]);
@@ -130,7 +130,7 @@ function checkPackagesForbiddenImports(): void {
             rule: "R1: forbidden TS import in packages/*",
             file: relative(ROOT, file),
             line: i + 1,
-            detail: `import of \`${name}\` is forbidden in packages/* (only ${[...CRYPTO_ALLOW].map((p) => `@forge/${p}`).join(", ")} may use crypto for hashing)`,
+            detail: `import of \`${name}\` is forbidden in packages/* (only ${[...CRYPTO_ALLOW].map((p) => `@terminus/${p}`).join(", ")} may use crypto for hashing)`,
           });
         }
       }
@@ -142,7 +142,7 @@ function checkPackagesForbiddenImports(): void {
 // Rule 2: packages must not import from mini-services/ or apps/
 // ───────────────────────────────────────────────────────────────────────────
 
-const FORBIDDEN_DEP_RE = /\bfrom\s+["'](\.\.?\/)+mini-services\/|\bfrom\s+["'](\.\.?\/)+apps\/|\bfrom\s+["']@forge\/(forge-kernel|forge-control|forge-tui|forge-cli|ide-acp)["']/;
+const FORBIDDEN_DEP_RE = /\bfrom\s+["'](\.\.?\/)+mini-services\/|\bfrom\s+["'](\.\.?\/)+apps\/|\bfrom\s+["']@terminus\/(terminus-kernel|terminus-control|terminus-tui|terminus-cli|ide-acp)["']/;
 
 function checkPackagesNoDeployableDeps(): void {
   for (const pkg of listPackages()) {
@@ -166,14 +166,14 @@ function checkPackagesNoDeployableDeps(): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Rule 3: crates/forge-kernel must not import from UI or provider code
+// Rule 3: crates/terminus-kernel must not import from UI or provider code
 // ───────────────────────────────────────────────────────────────────────────
 
 const KERNEL_FORBIDDEN_USE_RE = /\buse\s+(forge_provider_|crate::provider_|crate::ui_|super::ui_|super::provider_)/;
 const KERNEL_FORBIDDEN_CRATE_RE = /\buse\s+(forge_provider_|provider_openai|provider_anthropic|provider_google|provider_local)/;
 
 function checkKernelNoUIOrProvider(): void {
-  const kernelDir = join(CRATES_DIR, "forge-kernel");
+  const kernelDir = join(CRATES_DIR, "terminus-kernel");
   if (!existsSync(kernelDir)) return;
   for (const file of walk(kernelDir)) {
     if (!file.endsWith(".rs")) continue;
@@ -186,7 +186,7 @@ function checkKernelNoUIOrProvider(): void {
           rule: "R3: kernel imports UI/provider code",
           file: relative(ROOT, file),
           line: i + 1,
-          detail: `crates/forge-kernel must not import from UI or provider crates`,
+          detail: `crates/terminus-kernel must not import from UI or provider crates`,
         });
       }
     }
@@ -198,10 +198,10 @@ function checkKernelNoUIOrProvider(): void {
 // ───────────────────────────────────────────────────────────────────────────
 
 const PROVIDER_SDK_RES = [
-  /\bfrom\s+["']@forge\/provider-openai["']/,
-  /\bfrom\s+["']@forge\/provider-anthropic["']/,
-  /\bfrom\s+["']@forge\/provider-google["']/,
-  /\bfrom\s+["']@forge\/provider-local["']/,
+  /\bfrom\s+["']@terminus\/provider-openai["']/,
+  /\bfrom\s+["']@terminus\/provider-anthropic["']/,
+  /\bfrom\s+["']@terminus\/provider-google["']/,
+  /\bfrom\s+["']@terminus\/provider-local["']/,
   /\bfrom\s+["']openai["']/,
   /\bfrom\s+["']@anthropic-ai\/sdk["']/,
   /\bfrom\s+["']@google\/generative-ai["']/,
@@ -261,6 +261,11 @@ const SQL_ALLOWED_FILES = new Set([
 
 function isSqlAllowedPath(p: string): boolean {
   const rel = relative(ROOT, p);
+  // Rust crates (e.g. terminus-artifacts) implement the SQLite storage layer via
+  // `rusqlite`, which requires SQL strings — there is no Prisma for Rust. R5
+  // governs the TypeScript control plane (no raw SQL outside Prisma); Rust
+  // storage crates are the legitimate low-level layer, so .rs files are exempt.
+  if (rel.endsWith(".rs")) return true;
   if (SQL_ALLOWED_FILES.has(rel)) return true;
   if (rel.endsWith(".test.ts") || rel.endsWith(".spec.ts") || rel.endsWith(".test.tsx") || rel.endsWith(".spec.tsx")) return true;
   if (rel.endsWith("_test.py") || rel.endsWith(".test.py")) return true;

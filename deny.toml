@@ -43,7 +43,7 @@ wildcards = "deny"
 highlight = "all"
 allow = []
 deny = [
-    # Forbidden crates per Forge policy.
+    # Forbidden crates per Terminus policy.
     { name = "openssl", use-instead = "rustls" },
     { name = "openssl-sys", use-instead = "rustls" },
 ]

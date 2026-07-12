@@ -25,7 +25,7 @@ pub enum PatchError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("path error: {0}")]
-    Path(#[from] forge_fs::PathError),
+    Path(#[from] terminus_fs::PathError),
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("transaction aborted: {0}")]

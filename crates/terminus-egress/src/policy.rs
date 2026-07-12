@@ -49,7 +49,7 @@ impl EgressPolicy {
             if !d.allowed_schemes.is_empty() && !d.allowed_schemes.iter().any(|s| s == scheme) {
                 continue;
             }
-            if !d.allowed_ports.is_empty() && !d.allowed_ports.iter().any(|p| *p == port) {
+            if !d.allowed_ports.is_empty() && !d.allowed_ports.contains(&port) {
                 continue;
             }
             for suffix in &d.allowed_host_suffixes {
@@ -68,15 +68,18 @@ impl EgressPolicy {
                 v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
             }
             IpAddr::V6(v6) => {
-                v6.is_loopback() || v6.is_unspecified() || {
-                    let segs = v6.segments();
-                    // fc00::/7 unique local address
-                    (segs[0] & 0xfe00) == 0xfc00
-                } || {
-                    let segs = v6.segments();
-                    // fe80::/10 link-local
-                    (segs[0] & 0xffc0) == 0xfe80
-                }
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || {
+                        let segs = v6.segments();
+                        // fc00::/7 unique local address
+                        (segs[0] & 0xfe00) == 0xfc00
+                    }
+                    || {
+                        let segs = v6.segments();
+                        // fe80::/10 link-local
+                        (segs[0] & 0xffc0) == 0xfe80
+                    }
             }
         }
     }
@@ -129,6 +132,8 @@ mod tests {
         assert!(EgressPolicy::is_private_ip("fe80::1".parse().unwrap()));
         assert!(EgressPolicy::is_private_ip("fc00::1".parse().unwrap()));
         assert!(!EgressPolicy::is_private_ip("8.8.8.8".parse().unwrap()));
-        assert!(!EgressPolicy::is_private_ip("2606:4700:4700::1111".parse().unwrap()));
+        assert!(!EgressPolicy::is_private_ip(
+            "2606:4700:4700::1111".parse().unwrap()
+        ));
     }
 }

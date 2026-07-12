@@ -1,4 +1,4 @@
-# @forge/artifact-client — local rules
+# @terminus/artifact-client — local rules
 
 ## Non-negotiable
 

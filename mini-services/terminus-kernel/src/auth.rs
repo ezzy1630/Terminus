@@ -5,7 +5,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
-use forge_authz::{OperationClass, TokenClaims};
+use terminus_authz::{OperationClass, TokenClaims};
 use std::sync::Arc;
 
 use crate::error::ApiError;
@@ -37,8 +37,8 @@ pub async fn require_bearer(
         Some(s) if s.starts_with("Bearer ") => &s["Bearer ".len()..],
         _ => {
             return Err(ApiError::new(
-                forge_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
-                forge_kernel_protocol::ErrorCategory::Permission,
+                terminus_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
+                terminus_kernel_protocol::ErrorCategory::Permission,
                 "missing or malformed Authorization header (expected `Bearer <token>`)",
                 trace_id,
             ));
@@ -46,8 +46,8 @@ pub async fn require_bearer(
     };
     if bearer != state.bearer_token {
         return Err(ApiError::new(
-            forge_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
-            forge_kernel_protocol::ErrorCategory::Permission,
+            terminus_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
+            terminus_kernel_protocol::ErrorCategory::Permission,
             "invalid bearer token",
             trace_id,
         ));
@@ -83,8 +83,8 @@ pub async fn require_capability_for_path(
         Some(s) if !s.is_empty() => s.to_string(),
         _ => {
             return Err(ApiError::new(
-                forge_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
-                forge_kernel_protocol::ErrorCategory::Permission,
+                terminus_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
+                terminus_kernel_protocol::ErrorCategory::Permission,
                 "missing x-capability-token header",
                 trace_id,
             )
@@ -97,17 +97,17 @@ pub async fn require_capability_for_path(
         Ok(t) => t,
         Err(e) => {
             let code = match e {
-                forge_authz::AuthzError::Expired => {
-                    forge_kernel_protocol::ErrorCode::CapabilityTokenExpired
+                terminus_authz::AuthzError::Expired => {
+                    terminus_kernel_protocol::ErrorCode::CapabilityTokenExpired
                 }
-                forge_authz::AuthzError::Revoked => {
-                    forge_kernel_protocol::ErrorCode::CapabilityTokenRevoked
+                terminus_authz::AuthzError::Revoked => {
+                    terminus_kernel_protocol::ErrorCode::CapabilityTokenRevoked
                 }
-                _ => forge_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
+                _ => terminus_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
             };
             return Err(ApiError::new(
                 code,
-                forge_kernel_protocol::ErrorCategory::Permission,
+                terminus_kernel_protocol::ErrorCategory::Permission,
                 format!("capability token rejected: {e}"),
                 trace_id,
             ));
@@ -120,8 +120,8 @@ pub async fn require_capability_for_path(
         .any(|op| *op == required_op || *op == OperationClass::Admin)
     {
         return Err(ApiError::new(
-            forge_kernel_protocol::ErrorCode::PermissionDenied,
-            forge_kernel_protocol::ErrorCategory::Permission,
+            terminus_kernel_protocol::ErrorCode::PermissionDenied,
+            terminus_kernel_protocol::ErrorCategory::Permission,
             format!(
                 "capability token does not grant operation class `{:?}`",
                 required_op
@@ -131,7 +131,8 @@ pub async fn require_capability_for_path(
     }
     let mut req = req;
     req.extensions_mut().insert(TraceId::new(trace_id.clone()));
-    req.extensions_mut().insert(TokenClaims::clone(&token.claims));
+    req.extensions_mut()
+        .insert(TokenClaims::clone(&token.claims));
     req.extensions_mut()
         .insert(ValidatedCapabilityToken(token_str));
     Ok(next.run(req).await)
@@ -170,9 +171,7 @@ fn required_operation_class(method: &axum::http::Method, path: &str) -> Option<O
         OperationClass::CodeIntel
     } else if path.starts_with("/v1/extensions") {
         OperationClass::Extension
-    } else if path.starts_with("/v1/artifacts/ingest")
-        || path.starts_with("/v1/artifacts/gc")
-    {
+    } else if path.starts_with("/v1/artifacts/ingest") || path.starts_with("/v1/artifacts/gc") {
         OperationClass::ArtifactIngest
     } else {
         return None;

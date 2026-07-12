@@ -1,5 +1,5 @@
 /**
- * @forge/session-runtime — session/thread/turn lifecycle.
+ * @terminus/session-runtime — session/thread/turn lifecycle.
  *
  * Per SPEC §28.4: SessionService, ThreadService, TurnService. Uses a
  * `SessionRepository` interface (no direct Prisma import). Also exposes a
@@ -18,14 +18,14 @@ import type {
   ContextEpochState,
   ContentHash,
   ModelKey,
-} from "@forge/domain";
+} from "@terminus/domain";
 import {
   StateTransitionError,
   ValidationError,
   isTurnTransitionAllowed,
   TURN_TRANSITIONS,
-} from "@forge/domain";
-import type { EventSink } from "@forge/runtime-protocol";
+} from "@terminus/domain";
+import type { EventSink } from "@terminus/runtime-protocol";
 
 // ────────────────────────── Repository ───────────────────────────────────────
 

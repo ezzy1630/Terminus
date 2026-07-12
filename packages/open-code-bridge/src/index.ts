@@ -1,12 +1,12 @@
 /**
- * @forge/open-code-bridge — Compatibility facade for inherited OpenCode clients.
+ * @terminus/open-code-bridge — Compatibility facade for inherited OpenCode clients.
  *
- * Per SPEC §6, §42.2: Forge is bootstrapped from a pinned OpenCode fork.
+ * Per SPEC §6, §42.2: Terminus is bootstrapped from a pinned OpenCode fork.
  * This package documents which OpenCode paths are still in use and provides
- * adapters that translate OpenCode-shaped requests into Forge domain objects.
+ * adapters that translate OpenCode-shaped requests into Terminus domain objects.
  *
- * The bridge is a one-way adapter: OpenCode clients may call into Forge, but
- * Forge-owned code MUST NOT depend on OpenCode internals. New privileged
+ * The bridge is a one-way adapter: OpenCode clients may call into Terminus, but
+ * Terminus-owned code MUST NOT depend on OpenCode internals. New privileged
  * behavior never goes directly into an inherited plugin hook.
  */
 
@@ -57,7 +57,7 @@ export const DEFAULT_BYPASS_REGISTER: readonly BypassEntry[] = [
     source: "packages/open-code-bridge/src/legacy-fs.ts",
     effect: "WRITE_LOCAL",
     reason: "inherited OpenCode file writer",
-    containment: "restricted to active worktree; .git and forge-state protected",
+    containment: "restricted to active worktree; .git and terminus-state protected",
     removal_milestone: "M3",
     test: "tests/security/bypass/BYPASS-0002.test.ts",
     status: "contained",
@@ -66,7 +66,7 @@ export const DEFAULT_BYPASS_REGISTER: readonly BypassEntry[] = [
 
 /**
  * An OpenCode compatibility request shape. The bridge validates and translates
- * these into Forge public-API calls. Unsupported fields are dropped with a
+ * these into Terminus public-API calls. Unsupported fields are dropped with a
  * warning, never silently.
  */
 export interface OpenCodeLegacyRequest {
@@ -81,11 +81,11 @@ export interface OpenCodeLegacyResponse {
 
 /**
  * The OpenCode bridge. Accepts legacy OpenCode-compatible requests and routes
- * them through the Forge public API. This preserves the subset needed by
+ * them through the Terminus public API. This preserves the subset needed by
  * inherited clients during the migration period.
  */
 export interface OpenCodeBridge {
-  /** Handle a legacy request, returning a Forge-shaped response. */
+  /** Handle a legacy request, returning a Terminus-shaped response. */
   handle(req: OpenCodeLegacyRequest): Promise<OpenCodeLegacyResponse>;
   /** List the bypass entries currently in effect. */
   bypassRegister(): readonly BypassEntry[];
@@ -93,14 +93,14 @@ export interface OpenCodeBridge {
 
 /**
  * A no-op bridge used when the OpenCode compatibility facade is disabled. It
- * rejects all legacy requests so callers know they must use the Forge API.
+ * rejects all legacy requests so callers know they must use the Terminus API.
  */
 export class DisabledBridge implements OpenCodeBridge {
   async handle(req: OpenCodeLegacyRequest): Promise<OpenCodeLegacyResponse> {
     return {
       result: null,
       warnings: [
-        `OpenCode compatibility facade is disabled; method ${req.method} not forwarded. Use the Forge public API directly.`,
+        `OpenCode compatibility facade is disabled; method ${req.method} not forwarded. Use the Terminus public API directly.`,
       ],
     };
   }

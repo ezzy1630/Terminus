@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Theme + density tests (SPEC §29 — required test scenarios).
+ * Terminus Desktop — Theme + density tests (SPEC §29 — required test scenarios).
  *
  * Coverage:
  *   1. Theme switching (system / light / dark) installs the correct CSS
@@ -218,7 +218,7 @@ describe("useThemeStore — localStorage persistence", () => {
   test("the chosen theme + density round-trip through localStorage", () => {
     useThemeStore.getState().setTheme("dark");
     useThemeStore.getState().setDensity("compact");
-    const raw = window.localStorage.getItem("forge-desktop.theme.v1");
+    const raw = window.localStorage.getItem("terminus-desktop.theme.v1");
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw!) as { theme: string; density: string };
     expect(parsed.theme).toBe("dark");
@@ -226,7 +226,7 @@ describe("useThemeStore — localStorage persistence", () => {
   });
 
   test("corrupt localStorage is silently ignored (falls back to defaults)", () => {
-    window.localStorage.setItem("forge-desktop.theme.v1", "{not json");
+    window.localStorage.setItem("terminus-desktop.theme.v1", "{not json");
     // Re-importing isn't trivial here, so we simulate the parse-fail path
     // by clearing the store and reading from a corrupted entry. The
     // store's readPersisted() is called at module load — here we verify

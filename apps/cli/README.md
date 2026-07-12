@@ -1,4 +1,4 @@
-# @forge/cli — Non-Interactive CLI
+# @terminus/cli — Non-Interactive CLI
 
 The **non-interactive client** for CI and automation (SPEC §42.1). Speaks JSON
 to stdout; errors to stderr; exit codes 0=ok, 1=error, 2=usage, 3=timeout.
@@ -14,7 +14,7 @@ execution.
 bun apps/cli/src/index.ts health
 
 # Create a workspace + session + task + turn, then wait for completion
-W=$(bun apps/cli/src/index.ts new-workspace --root /tmp/forge-demo | jq -r .id)
+W=$(bun apps/cli/src/index.ts new-workspace --root /tmp/terminus-demo | jq -r .id)
 S=$(bun apps/cli/src/index.ts new-session --workspace $W --title "ci" | jq -r .id)
 T=$(bun apps/cli/src/index.ts new-task \
   --session $S --thread $(... active_thread_id ...) --objective "fix the bug" \
@@ -41,5 +41,5 @@ Run `bun apps/cli/src/index.ts help` for the full list.
 
 ## Environment
 
-- `FORGE_GATEWAY` — Gateway base URL (default: `http://127.0.0.1:81`)
-- `FORGE_TOKEN` — Bearer token
+- `TERMINUS_GATEWAY` — Gateway base URL (default: `http://127.0.0.1:81`)
+- `TERMINUS_TOKEN` — Bearer token

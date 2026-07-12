@@ -1,6 +1,6 @@
-# Forge Desktop — Keyboard Shortcuts
+# Terminus Desktop — Keyboard Shortcuts
 
-This is the complete keyboard map for the Forge desktop app. All
+This is the complete keyboard map for the Terminus desktop app. All
 shortcuts work with either ⌘ (macOS) or Ctrl (Linux/Windows) unless
 noted. Where a shortcut has a UI affordance, the affordance is listed.
 
@@ -8,21 +8,21 @@ noted. Where a shortcut has a UI affordance, the affordance is listed.
 
 | Shortcut       | Action                                | Affordance | SPEC § |
 | -------------- | ------------------------------------- | ---------- | ------ |
-| `⌘K`           | Open / close the command palette      | "Commands ⌘K" button in the title bar | 18 |
+| `⌘K`           | Open / close the command palette      | Command icon in the title bar | 18 |
 | `⌘,`           | Open / close Settings                 | —          | 20     |
 | `⌘\``          | Toggle the terminal drawer            | Panel-bottom icon in the title bar | 6, 15 |
 | `⌘N`           | New task (clears the selected task → NewTaskScreen) | "New task" button in the sidebar | 7, 8 |
-| `⌘]`           | Toggle the inspector                  | —          | 11     |
+| `⌘D`           | Open / close the changes review split | Command palette → Show changes | 13 |
+| `⌘]`           | Toggle the inspector                  | Command palette → Toggle inspector | 11 |
 | `⌘\`           | Toggle the sidebar                    | —          | 7      |
 | `⌘1` … `⌘9`    | Switch to task N (1-indexed)          | —          | 7      |
 | `⌘Enter`       | Send (or steer if work is running)    | "Send" / "Steer" button in the composer | 10 |
 | `⇧⌘Enter`      | Queue a follow-up                     | "Queue" pill in the composer (visible when applicable) | 10 |
 | `Esc`          | Interrupt the active turn / close the active overlay | — | 10, 18, 20 |
 
-> ⌘1–⌘9 and ⌘]/⌘\ are reserved in the keyboard map but not yet wired
-> in `App.tsx`. They land in a follow-up hardening patch that adds
-> per-task navigation. The Command Palette surfaces "Toggle inspector"
-> and "Open task" today via fuzzy search.
+> ⌘1–⌘9 and ⌘\ remain reserved for task-number navigation and sidebar
+> collapse. ⌘D and ⌘] are wired in `App.tsx`; at narrow widths ⌘] opens the
+> otherwise-hidden inspector overlay deliberately.
 
 ## Composer-specific shortcuts
 
@@ -59,7 +59,7 @@ Active only while the diff viewer has focus.
 | `[`       | Jump to the previous file                             |
 | `]`       | Jump to the next file                                 |
 | `u`       | Toggle unified / split view mode                      |
-| `⌘D`      | Toggle the diff view mode (alias of `u`)              |
+| `⌘D`      | Open / close the changes review split                  |
 
 ## Terminal drawer shortcuts
 
@@ -98,7 +98,6 @@ follow-up wiring patch:
 | -------------- | ------------------------------------- |
 | `⌘O`           | Open an existing project              |
 | `⌘T`           | Open an existing task                 |
-| `⌘D`           | Show changes (diff viewer)            |
 | `⌘/`           | View keyboard shortcuts (cheat sheet) |
 
 ## Modifier-key conventions

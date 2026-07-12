@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — StatusIndicator.
+ * Terminus Desktop — StatusIndicator.
  *
  * Per SPEC §7.2 "Task statuses": minimal semantic status representation.
  * No large colorful badges. The eight kinds are:

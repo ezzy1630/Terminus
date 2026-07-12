@@ -17,7 +17,7 @@ OpenCode's upstream uses a permissions model that is insufficient as a security 
 Adopt a **Linux Bubblewrap secure backend** per SPEC §13.4 and §36.5:
 
 - **New user and PID namespaces** — sandboxed processes cannot see or signal host processes.
-- **New mount namespace** — read-only root, writable worktree, denied paths (`.git`, Forge state, secret store, host).
+- **New mount namespace** — read-only root, writable worktree, denied paths (`.git`, Terminus state, secret store, host).
 - **No-new-privileges** — `setuid`/`setgid` cannot escalate.
 - **Seccomp filter** — system calls restricted to a deny-by-default allowlist.
 - **Cgroup v2** — memory, CPU, PID, and open-file limits enforced (SPEC §36.4 defaults: 2 GiB memory, 600 CPU seconds, 256 PIDs, 1024 open files).
@@ -25,7 +25,7 @@ Adopt a **Linux Bubblewrap secure backend** per SPEC §13.4 and §36.5:
 - **Symlink containment** — `symlinks: contained_only` in the default policy (SPEC §36.4).
 - **Process-tree ownership** — all forked children are tracked and killed on cancellation (SPEC §36.5).
 
-Implementation: `crates/forge-sandbox-linux`. macOS and Windows backends are scaffolded with honest capability reporting (SPEC §36.6, §36.7).
+Implementation: `crates/terminus-sandbox-linux`. macOS and Windows backends are scaffolded with honest capability reporting (SPEC §36.6, §36.7).
 
 ## Alternatives
 
@@ -62,4 +62,4 @@ The Linux backend is introduced in M4 (SPEC §48.7). OpenCode's direct effect pa
 
 ## Rollback
 
-If Bubblewrap is unavailable on a host, Forge fails closed or requires explicit user selection of a named degraded profile (SPEC §26.3 #11). Do not silently fall back to no sandbox.
+If Bubblewrap is unavailable on a host, Terminus fails closed or requires explicit user selection of a named degraded profile (SPEC §26.3 #11). Do not silently fall back to no sandbox.

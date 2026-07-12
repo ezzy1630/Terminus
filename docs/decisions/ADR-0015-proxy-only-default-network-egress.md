@@ -17,18 +17,18 @@ OpenCode's upstream does not enforce this. Codex's Linux sandbox does (network n
 Adopt **proxy-only default network egress** per SPEC §13.6 and §36.12:
 
 1. **No direct sockets** — sandboxed processes have no network namespace interfaces (Linux) or equivalent denial on macOS/Windows. `network.direct_sockets: deny` in the default policy (SPEC §36.4).
-2. **Proxy required** — all egress goes through the Forge egress proxy (`crates/forge-egress`). `network.proxy_required: true`.
+2. **Proxy required** — all egress goes through the Terminus egress proxy (`crates/terminus-egress`). `network.proxy_required: true`.
 3. **Destination allowlist** — `network.destinations: []` by default (deny all). Capability-scoped allowlists grant specific destinations (e.g., `github.com`, `pypi.org`) per ADR-0016.
 4. **Brokered DNS** — `network.dns: brokered`. DNS resolution happens in the proxy, not in the sandbox, preventing DNS rebinding and private-address SSRF.
 5. **Private-address denial** — the proxy denies RFC 1918, loopback, link-local, and other private ranges unless an explicit capability grants them.
 6. **Rate limits** — per-destination rate limits prevent abuse.
 7. **Fail-closed** — if the proxy is unavailable, egress fails closed (no fallthrough to direct sockets).
 
-Implementation: `crates/forge-egress` (proxy, policy, destination allowlist). The default network policy is `policies/network/default.yaml`.
+Implementation: `crates/terminus-egress` (proxy, policy, destination allowlist). The default network policy is `policies/network/default.yaml`.
 
 ## Alternatives
 
-- **Direct sockets with firewall rules.** Rejected: host firewall is outside Forge's control; cannot enforce per-task allowlists; harder to audit.
+- **Direct sockets with firewall rules.** Rejected: host firewall is outside Terminus's control; cannot enforce per-task allowlists; harder to audit.
 - **Allow direct sockets by default.** Rejected (SPEC §49.6): violates non-bypassability; enables exfiltration.
 - **Proxy with DNS in sandbox.** Rejected: DNS rebinding; private-address SSRF.
 - **No network at all by default.** Rejected: too restrictive for legitimate research/web-fetch capabilities; the proxy model allows scoped grants.

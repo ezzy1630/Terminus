@@ -1,26 +1,27 @@
-# Forge Desktop — Performance Report
+# Terminus Desktop — Performance Report
 
 This document records the bundle size, lazy-loading strategy,
-virtualization plan, and performance targets for the Forge desktop
+virtualization plan, and performance targets for the Terminus desktop
 app, per SPEC §25.
 
 ## 1. Measured bundle size
 
-Build command: `cd apps/desktop && bun run build` (which runs
+Build command: `cd apps/desktop && npm run build` (which runs
 `tsc -b && vite build`).
 
 | Metric              | Value          |
 | ------------------- | -------------- |
-| JS bundle (raw)     | 457 KB         |
-| JS bundle (gzip)    | 133 KB         |
-| CSS bundle (raw)    | 23 KB          |
-| CSS bundle (gzip)   | 5 KB           |
-| Module count        | 2,053          |
-| Build time          | ~6s on M4 MacBook Air |
+| Initial app JS (raw)     | 476.63 KB |
+| Initial app JS (gzip)    | 139.76 KB |
+| CSS (raw / gzip)         | 27.93 KB / 6.31 KB |
+| Deferred ReviewPane      | 30.14 KB / 8.18 KB gzip |
+| Deferred Settings        | 26.44 KB / 7.93 KB gzip |
+| Deferred Onboarding      | 14.00 KB / 4.14 KB gzip |
+| Build time               | 5.99s |
 
-The bundle is a single `index-<hash>.js` plus a single
-`index-<hash>.css`, loaded synchronously from `index.html`. There are
-no dynamic imports yet — the entire app loads upfront.
+The initial shell ships as `index-<hash>.js` and `index-<hash>.css`.
+Review, Settings, and Onboarding are loaded only when their surface is
+opened. The terminal's xterm runtime is emitted as a separate chunk.
 
 ### Composition (approximate)
 
@@ -29,14 +30,13 @@ no dynamic imports yet — the entire app loads upfront.
 | React 19 + react-dom            | ~140 KB (raw) / ~45 KB (gzip) |
 | lucide-react (icons)            | ~80 KB (raw) / ~25 KB (gzip)  |
 | Application code (src/)         | ~120 KB (raw) / ~35 KB (gzip) |
-| @forge/public-api (zod + decoders) | ~60 KB (raw) / ~18 KB (gzip) |
+| @terminus/public-api (zod + decoders) | ~60 KB (raw) / ~18 KB (gzip) |
 | zustand + clsx + tailwind-merge + date-fns | ~30 KB (raw) / ~10 KB (gzip) |
 | Other (Vite helpers, source maps) | ~27 KB |
 
-The lucide-react share reflects that the secondary surfaces (DiffViewer,
-Settings, Onboarding) pull in many icons. Each icon is a separate ESM
-module that Vite tree-shakes, so only the icons actually imported are
-in the bundle.
+The secondary surface chunks keep uncommon review and configuration code out
+of the initial route. Each lucide icon is an ESM module, so Vite includes only
+the icons exercised by a loaded surface.
 
 ## 2. Performance targets (SPEC §25.2)
 
@@ -47,33 +47,24 @@ in the bundle.
 | Command palette opens < 100ms | Met | Palette renders a single fragment when closed; open path is one state flip + a 0ms `setTimeout(focus)`. Measured at ~12ms in dev. |
 | Sidebar navigation responds immediately | Met | Click handler is synchronous; Zustand setState is O(1); Sidebar is `React.memo`'d. |
 | Composer input never lags during streaming | Met | Drafts written via `requestIdleCallback`; textarea is controlled by a Zustand selector that subscribes only to `draftsByTask[selectedTaskId]`. |
-| Scrolling smooth through long conversations | Partially met | CSS `content-visibility: auto` is applied to message wrappers; full windowing is planned. |
+| Scrolling smooth through long conversations | Met | `@tanstack/react-virtual` windows the conversation with measured dynamic rows and bounded overscan. |
 | Thousands of events remain usable | Met | `eventsByTask` capped at 2000; conversation decoding is `useMemo`'d on `events.length + lastEventId`. |
-| Large diffs don't freeze the app | Partially met | DiffViewer renders hunks without windowing; > 5,000 lines shows jank. Virtualization planned. |
+| Large diffs don't freeze the app | Partially met | Review is deferred until opened. The current per-file renderer remains the limiting surface for very large hunks. |
 | Hidden terminal / PiP don't render | Met | `content-visibility: hidden` on the terminal body when the drawer is closed; stub adapter is no-op. |
-| Initial shell appears before heavy bundles | Met (today) | Bundle is 133KB gzip — well under the threshold where lazy loading would help. |
+| Initial shell appears before heavy bundles | Met | Review, Settings, and Onboarding are route-level lazy chunks. |
 | No memory growth from open/close cycles | Met | `URL.revokeObjectURL` called on attachment removal; SSE stream `close()` is called on task switch. |
 | Resizing smooth | Met | Viewport hook debounces via rAF; sidebar width transition is 150ms. |
 
 ## 3. Lazy-loading strategy
 
-The bundle is currently eager — 133KB gzip is small enough that lazy
-loading would add Suspense boundary overhead without meaningful wins.
-The plan as the bundle grows:
+Review, Settings, and Onboarding now use `React.lazy` with narrowly scoped
+`Suspense` boundaries. The shell remains interactive while those chunks load.
+The next lazy-loading threshold is the terminal drawer if its renderer grows:
 
-- **Threshold**: introduce `React.lazy` when the JS bundle crosses
-  ~200KB gzip. Based on the trajectory (D3: 117KB → D4: 133KB), this
-  is ~6–8 components away.
-- **First candidates** (heaviest + least-used):
-  - `DiffViewer.tsx` (1,510 lines, ~30KB raw) — only mounted when
-    "Show changes" is invoked.
-  - `Settings.tsx` (1,275 lines, ~25KB raw) — only mounted when ⌘,
-    is pressed.
-  - `Onboarding.tsx` (675 lines, ~12KB raw) — only shown on first
-    launch (localStorage flag).
-  - `TerminalDrawer.tsx` (645 lines, ~12KB raw) — only mounted when
-    the drawer is opened (currently always mounted; will move to
-    conditional mount).
+- **Current lazy surfaces:** `ReviewPane` (and its `DiffViewer`),
+  `Settings`, and `Onboarding`.
+- **Next candidate:** `TerminalDrawer.tsx` once its PTY-factory seam is
+  separated from the layout shell.
 - **Implementation pattern**:
   ```tsx
   const DiffViewer = React.lazy(() => import("./DiffViewer"));

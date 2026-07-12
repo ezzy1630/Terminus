@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/capabilities/skill.json",
+  "$id": "https://terminus.dev/schemas/capabilities/skill.json",
   "title": "SkillCapability",
-  "description": "Capability descriptor for an Agent Skills format skill with the Forge forge.skill.yaml extension (SPEC §12.1, §35.2).",
+  "description": "Capability descriptor for an Agent Skills format skill with the Terminus terminus.skill.yaml extension (SPEC §12.1, §35.2).",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "version", "kind", "source", "content_hash", "trust_level", "operations", "skill_md_hash", "compatible_harness", "required_capabilities", "tests", "provenance"],

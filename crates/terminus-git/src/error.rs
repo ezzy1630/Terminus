@@ -11,7 +11,7 @@ pub enum GitError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("process error: {0}")]
-    Process(#[from] forge_process::ProcessError),
+    Process(#[from] terminus_process::ProcessError),
     #[error("invalid ref: {0}")]
     InvalidRef(String),
 }

@@ -1,9 +1,9 @@
 use crate::error::JobError;
 use crate::record::JobRecord;
 use crate::state::JobState;
-use forge_process::{NormalizedSpawn, ProcessManager};
 use std::collections::HashMap;
 use std::sync::Arc;
+use terminus_process::{NormalizedSpawn, ProcessManager};
 use tokio::sync::Mutex;
 
 /// JobManager owns the durable job state and reuses a `ProcessManager`.
@@ -30,11 +30,7 @@ impl JobManager {
 
     /// Start a job. Transitions Created → Starting → Running (when the
     /// process actually starts streaming events).
-    pub async fn start(
-        &self,
-        job_id: &str,
-        spawn: NormalizedSpawn,
-    ) -> Result<(), JobError> {
+    pub async fn start(&self, job_id: &str, spawn: NormalizedSpawn) -> Result<(), JobError> {
         let mut jobs = self.jobs.lock().await;
         let record = jobs
             .get_mut(job_id)
@@ -115,7 +111,10 @@ impl JobManager {
                 let record = jobs
                     .get_mut(job_id)
                     .ok_or_else(|| JobError::NotFound(job_id.to_string()))?;
-                if matches!(record.state, JobState::Orphaned | JobState::Running | JobState::Starting) {
+                if matches!(
+                    record.state,
+                    JobState::Orphaned | JobState::Running | JobState::Starting
+                ) {
                     record.state = if record.state == JobState::Orphaned {
                         record.state.transition(JobState::Lost)?
                     } else {
@@ -155,10 +154,10 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_artifacts::ArtifactStore;
-    use forge_process::ProcessManager;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
+    use terminus_artifacts::ArtifactStore;
+    use terminus_process::ProcessManager;
 
     fn mgr() -> (tempfile::TempDir, JobManager) {
         let dir = tempdir().unwrap();
@@ -192,7 +191,7 @@ mod tests {
     #[tokio::test]
     async fn create_start_stop_state_machine() {
         let (_dir, mgr) = mgr();
-        let id = forge_kernel_protocol::new_id();
+        let id = terminus_kernel_protocol::new_id();
         let record = JobRecord::new(id.clone(), "sess", "task", "sleep 30");
         mgr.create(record).await.unwrap();
         assert_eq!(mgr.state(&id).await.unwrap(), JobState::Created);
@@ -205,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_marks_lost_when_process_gone() {
         let (_dir, mgr) = mgr();
-        let id = forge_kernel_protocol::new_id();
+        let id = terminus_kernel_protocol::new_id();
         let record = JobRecord::new(id.clone(), "sess", "task", "echo done");
         mgr.create(record).await.unwrap();
         mgr.start(&id, echo_spawn()).await.unwrap();
@@ -218,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_keeps_running_job() {
         let (_dir, mgr) = mgr();
-        let id = forge_kernel_protocol::new_id();
+        let id = terminus_kernel_protocol::new_id();
         let record = JobRecord::new(id.clone(), "sess", "task", "sleep 30");
         mgr.create(record).await.unwrap();
         mgr.start(&id, sleep_spawn(30)).await.unwrap();
@@ -231,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn double_start_rejected() {
         let (_dir, mgr) = mgr();
-        let id = forge_kernel_protocol::new_id();
+        let id = terminus_kernel_protocol::new_id();
         let record = JobRecord::new(id.clone(), "sess", "task", "sleep 30");
         mgr.create(record).await.unwrap();
         mgr.start(&id, sleep_spawn(30)).await.unwrap();
@@ -243,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn orphaned_can_become_lost() {
         let (_dir, mgr) = mgr();
-        let id = forge_kernel_protocol::new_id();
+        let id = terminus_kernel_protocol::new_id();
         let record = JobRecord::new(id.clone(), "sess", "task", "sleep 30");
         mgr.create(record).await.unwrap();
         mgr.start(&id, sleep_spawn(30)).await.unwrap();

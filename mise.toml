@@ -1,4 +1,4 @@
-# Forge toolchain pinning (SPEC §43.5).
+# Terminus toolchain pinning (SPEC §43.5).
 # Versions are updated through dependency PRs. The spec does not freeze July
 # 2026 versions forever; bump these in dedicated toolchain PRs.
 

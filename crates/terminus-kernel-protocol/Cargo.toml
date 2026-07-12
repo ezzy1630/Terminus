@@ -1,10 +1,10 @@
 [package]
-name = "forge-kernel-protocol"
+name = "terminus-kernel-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Shared protocol types for the Forge effect kernel."
+description = "Shared protocol types for the Terminus effect kernel."
 
 [lints]
 workspace = true

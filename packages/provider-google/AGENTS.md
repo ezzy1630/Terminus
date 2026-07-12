@@ -1,4 +1,4 @@
-# @forge/provider-google — local rules
+# @terminus/provider-google — local rules
 
 ## Non-negotiable
 

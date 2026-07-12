@@ -1,5 +1,5 @@
 # pnpm workspace manifest (SPEC §42.1, §43.2).
-# Forge-owned packages use pnpm workspaces. Bun is only used for the upstream
+# Terminus-owned packages use pnpm workspaces. Bun is only used for the upstream
 # OpenCode bridge (see ADR-0026). This manifest documents the workspace
 # structure; the actual install is `bun install` against bun.lock during
 # development.
@@ -7,4 +7,4 @@
 packages:
   - "packages/*"
   - "apps/*"
-  - "mini-services/forge-control"
+  - "mini-services/terminus-control"

@@ -1,0 +1,39 @@
+{
+  "name": "@terminus/control-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "start": "bun src/index.ts",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@terminus/domain": "workspace:*",
+    "@terminus/runtime-protocol": "workspace:*",
+    "@terminus/context-ir": "workspace:*",
+    "@terminus/context-compiler": "workspace:*",
+    "@terminus/provider-core": "workspace:*",
+    "@terminus/provider-openai": "workspace:*",
+    "@terminus/provider-anthropic": "workspace:*",
+    "@terminus/provider-google": "workspace:*",
+    "@terminus/provider-local": "workspace:*",
+    "@terminus/model-router": "workspace:*",
+    "@terminus/task-runtime": "workspace:*",
+    "@terminus/session-runtime": "workspace:*",
+    "@terminus/orchestration": "workspace:*",
+    "@terminus/verification": "workspace:*",
+    "@terminus/memory": "workspace:*",
+    "@terminus/capability-registry": "workspace:*",
+    "@terminus/policy-coordinator": "workspace:*",
+    "@terminus/artifact-client": "workspace:*",
+    "@terminus/observability": "workspace:*",
+    "@terminus/config": "workspace:*",
+    "@terminus/testkit": "workspace:*",
+    "@terminus/public-api": "workspace:*",
+    "@terminus/public-client": "workspace:*",
+    "@prisma/client": "^6.11.1",
+    "zod": "^4.0.2",
+    "z-ai-web-dev-sdk": "^0.0.18"
+  }
+}

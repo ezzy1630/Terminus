@@ -20,7 +20,7 @@ Candidate designs under evaluation:
 
 1. **WebSocket as complement to SSE** — SSE for server-to-client events; WebSocket for bidirectional cases (interactive approvals, tool input). Two transports, same events.
 2. **WebSocket as replacement for SSE** — single bidirectional transport. Simpler client; loses SSE's HTTP/2 streaming benefits.
-3. **WebSocket with subprotocols** — `forge.v1.events` and `forge.v1.rpc` subprotocols on the same connection.
+3. **WebSocket with subprotocols** — `terminus.v1.events` and `terminus.v1.rpc` subprotocols on the same connection.
 4. **No WebSocket** — SSE+POST only. The baseline.
 
 Selection criteria:

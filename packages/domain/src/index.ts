@@ -1,5 +1,5 @@
 /**
- * @forge/domain — public API surface.
+ * @terminus/domain — public API surface.
  *
  * Pure types, zod schemas, and enums. No I/O.
  */

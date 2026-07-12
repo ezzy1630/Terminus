@@ -2,7 +2,7 @@
 
 ## When to use
 
-Use this runbook when Forge's SQLite database (`db/forge.db` or configured path) reports corruption, when a migration fails to apply, or when `PRAGMA integrity_check` returns errors. Database corruption is a release blocker and a recovery drill candidate (SPEC §50.2).
+Use this runbook when Terminus's SQLite database (`db/terminus.db` or configured path) reports corruption, when a migration fails to apply, or when `PRAGMA integrity_check` returns errors. Database corruption is a release blocker and a recovery drill candidate (SPEC §50.2).
 
 ## Symptoms
 
@@ -15,34 +15,34 @@ Use this runbook when Forge's SQLite database (`db/forge.db` or configured path)
 
 ## Diagnosis
 
-1. **Stop Forge processes** (`just run` is not running).
+1. **Stop Terminus processes** (`just run` is not running).
 2. Run integrity check:
    ```bash
-   sqlite3 db/forge.db "PRAGMA integrity_check;"
-   sqlite3 db/forge.db "PRAGMA foreign_key_check;"
-   sqlite3 db/forge.db "PRAGMA journal_mode;"
+   sqlite3 db/terminus.db "PRAGMA integrity_check;"
+   sqlite3 db/terminus.db "PRAGMA foreign_key_check;"
+   sqlite3 db/terminus.db "PRAGMA journal_mode;"
    ```
 3. Inspect the migration log:
    ```bash
-   sqlite3 db/forge.db "SELECT * FROM schema_migrations ORDER BY version DESC LIMIT 5;"
+   sqlite3 db/terminus.db "SELECT * FROM schema_migrations ORDER BY version DESC LIMIT 5;"
    ```
 4. Check disk space and filesystem health (`df -h`, `dmesg | tail -50`).
-5. Check for concurrent writers (other Forge processes, IDE extensions, manual `sqlite3` sessions).
+5. Check for concurrent writers (other Terminus processes, IDE extensions, manual `sqlite3` sessions).
 
 ## Immediate actions
 
 1. **Do not retry writes.** Retrying can compound corruption.
 2. **Back up the corrupted database before any recovery:**
    ```bash
-   cp db/forge.db db/forge.db.corrupt.$(date +%s)
-   cp db/forge.db-wal db/forge.db-wal.corrupt.$(date +%s) 2>/dev/null || true
-   cp db/forge.db-shm db/forge.db-shm.corrupt.$(date +%s) 2>/dev/null || true
+   cp db/terminus.db db/terminus.db.corrupt.$(date +%s)
+   cp db/terminus.db-wal db/terminus.db-wal.corrupt.$(date +%s) 2>/dev/null || true
+   cp db/terminus.db-shm db/terminus.db-shm.corrupt.$(date +%s) 2>/dev/null || true
    ```
 3. **Try `.recover`:**
    ```bash
-   sqlite3 db/forge.db.corrupt.<ts> ".recover" > recovered.sql
-   sqlite3 db/forge.recovered.db < recovered.sql
-   sqlite3 db/forge.recovered.db "PRAGMA integrity_check;"
+   sqlite3 db/terminus.db.corrupt.<ts> ".recover" > recovered.sql
+   sqlite3 db/terminus.recovered.db < recovered.sql
+   sqlite3 db/terminus.recovered.db "PRAGMA integrity_check;"
    ```
 4. **If `.recover` fails or data is missing:** restore from the most recent backup (SPEC §29.6).
 5. **If no backup exists:** escalate to the persistence owner. Treat as a data-loss incident.
@@ -51,9 +51,9 @@ Use this runbook when Forge's SQLite database (`db/forge.db` or configured path)
 
 1. Replace the corrupted database with the recovered/restored one:
    ```bash
-   mv db/forge.db db/forge.db.lost.$(date +%s)
-   mv db/forge.recovered.db db/forge.db
-   rm -f db/forge.db-wal db/forge.db-shm
+   mv db/terminus.db db/terminus.db.lost.$(date +%s)
+   mv db/terminus.recovered.db db/terminus.db
+   rm -f db/terminus.db-wal db/terminus.db-shm
    ```
 2. Run all migrations to bring the schema up to date:
    ```bash
@@ -82,7 +82,7 @@ Use this runbook when Forge's SQLite database (`db/forge.db` or configured path)
 - Maintain a rollback strategy for every migration (SPEC §46.17).
 - Backup before irreversible migrations (SPEC §46.17).
 - Use WAL mode and `synchronous=NORMAL` (not `OFF`) (SPEC §29.2).
-- Avoid concurrent writers (Forge uses a single writer).
+- Avoid concurrent writers (Terminus uses a single writer).
 
 ## Related
 

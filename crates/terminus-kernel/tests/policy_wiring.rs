@@ -9,15 +9,16 @@
 //! - Fix #3: Capability-token `operation_classes` and `max_scope` are
 //!   enforced on every mutating kernel service handler.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![cfg(test)]
 
-use forge_authz::{OperationClass, Scope, TokenBinder, TokenIssuer};
-use forge_kernel::KernelHandle;
-use forge_kernel_protocol::{
-    CommandSpec, EffectIntent, ErrorCode, ErrorCategory, RequestContext, WorkspacePath,
-};
 use std::path::PathBuf;
 use tempfile::tempdir;
+use terminus_authz::{OperationClass, Scope, TokenBinder, TokenIssuer};
+use terminus_kernel::KernelHandle;
+use terminus_kernel_protocol::{
+    CommandSpec, EffectIntent, ErrorCategory, ErrorCode, RequestContext, WorkspacePath,
+};
 
 fn ctx_with_token(token: &str) -> RequestContext {
     let mut ctx = RequestContext::new("test-request");
@@ -80,7 +81,7 @@ fn mint_token_with_classes(issuer: &TokenIssuer, classes: &[OperationClass]) -> 
             classes.to_vec(),
             Scope::default(),
             None,
-            &format!("test-nonce-{:?}", classes),
+            format!("test-nonce-{:?}", classes),
         )
         .and_then(|t| t.encode())
         .expect("mint token")
@@ -92,7 +93,7 @@ fn make_kernel() -> (tempfile::TempDir, KernelHandle) {
     (dir, kernel)
 }
 
-// ---------- Fix #1: ProcessService::start wires forge-policy ----------
+// ---------- Fix #1: ProcessService::start wires terminus-policy ----------
 
 #[tokio::test]
 async fn process_start_denies_curl_pipe_bash() {
@@ -161,9 +162,11 @@ async fn process_start_allows_local_tests_via_pnpm() {
     // GITHUB_TOKEN]). The spawn should succeed (we use a 5s timeout to keep
     // the test fast; even if `pnpm` isn't installed, the spawn error comes
     // from the OS, not the policy).
+    // This policy-only test intentionally opts into the named degraded
+    // profile so it can exercise local process spawning on non-Linux hosts.
     let result = kernel
         .processes
-        .start(&ctx, &empty_intent(), command)
+        .start_in_profile(&ctx, &empty_intent(), command, "degraded-local")
         .await;
     // Either the spawn succeeds (pnpm exists) or it fails with an Internal
     // error (pnpm not found). Either way, the policy MUST NOT deny or prompt.
@@ -383,7 +386,13 @@ fn file_read_denies_when_path_exceeds_token_scope() {
     };
     let token = kernel
         .token_issuer
-        .mint(binder, vec![OperationClass::Read], max_scope, None, "n-scope-1")
+        .mint(
+            binder,
+            vec![OperationClass::Read],
+            max_scope,
+            None,
+            "n-scope-1",
+        )
         .and_then(|t| t.encode())
         .expect("mint");
     let ctx = ctx_with_token(&token);
@@ -419,19 +428,19 @@ async fn process_start_git_push_succeeds_after_approval_granted() {
     assert_eq!(err.code(), ErrorCode::ApprovalRequired);
 
     // Mint an approval for this operation hash and resolve it.
-    let op_hash = forge_kernel::operation_hash(
+    let op_hash = terminus_kernel::operation_hash(
         &command.program,
         &command.args,
         &command.cwd.relative_path,
         "",
         &command.secret_capability_uris,
     );
-    let req = forge_kernel::ApprovalRequest {
+    let req = terminus_kernel::ApprovalRequest {
         task_id: ctx.task_id.clone(),
         tool_call_id: "test-call".to_string(),
         operation_hash: op_hash.clone(),
-        scope: forge_kernel::ApprovalScope::default(),
-        risk: forge_kernel::ApprovalRisk::Medium,
+        scope: terminus_kernel::ApprovalScope::default(),
+        risk: terminus_kernel::ApprovalRisk::Medium,
         use_limit: 1,
         ttl_seconds: 60,
     };
@@ -443,10 +452,7 @@ async fn process_start_git_push_succeeds_after_approval_granted() {
 
     // Second attempt: should now proceed (or fail at spawn time because
     // `git` doesn't exist in the test env, but NOT with ApprovalRequired).
-    let result = kernel
-        .processes
-        .start(&ctx, &empty_intent(), command)
-        .await;
+    let result = kernel.processes.start(&ctx, &empty_intent(), command).await;
     match result {
         Ok(_rx) => { /* spawned successfully */ }
         Err(e) => {
@@ -487,10 +493,7 @@ async fn process_start_strips_disallowed_env_from_token_constraints() {
     };
     // Spawn — may fail because pnpm isn't installed, but that's OK. We just
     // want to verify the spawn reaches the OS, not the policy layer.
-    let _ = kernel
-        .processes
-        .start(&ctx, &empty_intent(), command)
-        .await;
+    let _ = kernel.processes.start(&ctx, &empty_intent(), command).await;
     // No assertion — this test confirms the code path doesn't panic when
     // disallowed_env constraints are applied.
 }
@@ -520,10 +523,7 @@ async fn process_start_emits_authorized_audit_event_before_spawn() {
         timeout_ms: 1_000,
         ..Default::default()
     };
-    let result = kernel
-        .processes
-        .start(&ctx, &empty_intent(), command)
-        .await;
+    let result = kernel.processes.start(&ctx, &empty_intent(), command).await;
     if let Err(e) = result {
         // The audit event fired (otherwise we wouldn't reach spawn), so
         // the error is NOT Permission/Approval/Policy.

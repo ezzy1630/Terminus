@@ -1,7 +1,7 @@
-# Forge Semantic Event Catalog (SPEC §45.5).
+# Terminus Semantic Event Catalog (SPEC §45.5).
 #
 # This is the source-of-truth catalog of semantic events emitted by the
-# Forge control plane and kernel. The codegen-events generator produces:
+# Terminus control plane and kernel. The codegen-events generator produces:
 #   - runtime validators (TS zod, Rust serde);
 #   - event type unions;
 #   - JSON Schemas (in schemas/generated/);

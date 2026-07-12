@@ -8,7 +8,7 @@
 
 ## Context
 
-The control plane (`forge-control`, TypeScript) must call the privileged effect kernel (`forge-kernel`, Rust) for every process spawn, file mutation, network connection, secret use, and extension execution. This is the most security-critical boundary in Forge: it must enforce capability tokens, deadlines, cancellation, idempotency, and typed errors. It must not provide a "generic execute arbitrary JSON" escape hatch (SPEC §7.1).
+The control plane (`terminus-control`, TypeScript) must call the privileged effect kernel (`terminus-kernel`, Rust) for every process spawn, file mutation, network connection, secret use, and extension execution. This is the most security-critical boundary in Terminus: it must enforce capability tokens, deadlines, cancellation, idempotency, and typed errors. It must not provide a "generic execute arbitrary JSON" escape hatch (SPEC §7.1).
 
 The mini-service implementation currently uses JSON-over-HTTP for bootstrap convenience, but the .proto is the canonical source of truth (SPEC §45.4, Appendix D).
 
@@ -17,12 +17,18 @@ The mini-service implementation currently uses JSON-over-HTTP for bootstrap conv
 Adopt **gRPC/Protobuf over Unix-domain socket (UDS)** for the kernel RPC per SPEC §7.1 and §31:
 
 - **Transport:** UDS locally; mutually authenticated TLS remotely (M11+).
-- **Schema:** Protobuf3 in `proto/forge/kernel/v1/kernel.proto` (Appendix D). Generated types via prost (Rust) and buf (TS clients).
+- **Schema:** Protobuf3 in `proto/terminus/kernel/v1/kernel.proto` (Appendix D). Generated types via prost (Rust) and buf (TS clients).
 - **Compatibility:** Buf breaking-change checks run in CI (SPEC §45.4). Never reuse field numbers; removed fields are `reserved`; enums reserve `UNSPECIFIED = 0`.
 - **Services:** `KernelInfoService`, `FileService`, `PatchService`, `ProcessService`, `JobService`. Future services: sandbox, policy, secrets, network, Git, code-intelligence, extension, artifact-ingest.
 - **Auth:** Kernel instance identity + short-lived capability tokens (SPEC §31.6). Every RPC carries a `RequestContext` with `capability_token`.
 - **Streaming:** `ProcessService.Start` and `JobService.Stream` return server-streaming responses (`ProcessEvent` / `JobEvent`).
 - **Idempotency:** `RequestContext.idempotency_key` enables safe retry of mutating RPCs.
+
+The canonical protocol namespace is **`terminus.kernel.v1`**. The former
+`forge.kernel.v1` spelling is not a supported descriptor or compatibility
+alias; any future compatibility adapter must be explicit, versioned, and
+covered by Buf breaking checks. This namespace decision is part of the v1
+contract and is independent of the eventual local gRPC binding choice.
 
 Status is PROVISIONAL because ConnectRPC vs. tonic vs. raw gRPC is subject to a replacement gate during M3. The .proto is stable; the wire binding may be amended.
 
@@ -37,7 +43,7 @@ Status is PROVISIONAL because ConnectRPC vs. tonic vs. raw gRPC is subject to a 
 ## Consequences
 
 - The Rust kernel links tonic/prost; the TS control plane links a generated gRPC client.
-- A fake kernel (`forge-kernel-testkit`) implements the same proto for TS-side development.
+- A fake kernel (`terminus-kernel-testkit`) implements the same proto for TS-side development.
 - Contract tests run current control × current kernel and current control × previous kernel (SPEC §46.6).
 - Load/backpressure tests run before each release (SPEC §48.6 exit gate).
 - The descriptor set is published with each kernel build.

@@ -1,4 +1,4 @@
-# AGENTS.md — forge-extension-runtime
+# AGENTS.md — terminus-extension-runtime
 
 ## Local rules
 

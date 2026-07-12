@@ -1,4 +1,6 @@
-use forge_kernel_protocol::{CommandSpec, EffectIntent, RequestContext, ShellSpec, WorkspacePath};
+use terminus_kernel_protocol::{
+    CommandSpec, EffectIntent, RequestContext, ShellSpec, WorkspacePath,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct RequestContextBuilder {
@@ -37,8 +39,8 @@ impl RequestContextBuilder {
         RequestContext {
             request_id: self
                 .request_id
-                .unwrap_or_else(forge_kernel_protocol::new_id),
-            idempotency_key: forge_kernel_protocol::new_id(),
+                .unwrap_or_else(terminus_kernel_protocol::new_id),
+            idempotency_key: terminus_kernel_protocol::new_id(),
             session_id: self.session_id.unwrap_or_default(),
             task_id: self.task_id.unwrap_or_default(),
             turn_id: String::new(),

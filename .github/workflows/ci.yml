@@ -59,10 +59,12 @@ jobs:
         run: |
           cargo fmt --all -- --check
           bun run lint
-      - name: Clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: TypeScript typecheck
-        run: bun run typecheck
+      - name: Clippy (deny clippy::all per SPEC §44.2)
+        run: cargo clippy --workspace --all-targets
+      - name: Kernel mini-service lint + test (outside workspace)
+        run: just kernel-mini-check
+      - name: TypeScript typecheck (Terminus packages + dashboard)
+        run: bun run typecheck:all
       - name: Python lint (ruff + mypy)
         run: |
           cd python
@@ -104,7 +106,7 @@ jobs:
       - name: Build Rust workspace (${{ matrix.target }})
         shell: bash
         run: |
-          rustup target add ${{ matrix.target }} || true
+          rustup target add ${{ matrix.target }}
           cargo build --workspace --all-targets --locked
       - name: Build TypeScript workspace
         run: bun run build
@@ -182,7 +184,7 @@ jobs:
       - uses: jdx/mise-action@v2
       - run: just bootstrap
       - run: cargo test --workspace --test '*' --locked
-      - run: bun run test:integration || true
+      - run: bun run test:integration
 
   # ---------- Security ----------
   security:
@@ -199,9 +201,9 @@ jobs:
       - name: cargo deny (license + advisories + bans)
         run: cargo deny check
       - name: Bun audit
-        run: bun audit --production || true
+        run: bun audit --production
       - name: Python audit (pip-audit)
-        run: cd python && uv run pip-audit --strict || true
+        run: cd python && uv run pip-audit --strict
       - name: Path traversal / secret redaction tests
         run: cargo test --workspace --test security
 
@@ -240,4 +242,4 @@ jobs:
       - uses: jdx/mise-action@v2
       - run: just bootstrap
       - name: buf breaking (against main)
-        run: buf breaking proto --against "https://github.com/${{ github.repository }}.git#branch=main,subdir=proto" || true
+        run: buf breaking proto --against "https://github.com/${{ github.repository }}.git#branch=main,subdir=proto"

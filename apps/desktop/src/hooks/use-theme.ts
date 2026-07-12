@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Theme + density store.
+ * Terminus Desktop — Theme + density store.
  *
  * Per SPEC §24: "Support System theme, Light theme, Dark theme, Spacious
  * density, Compact density. Spacious mode is the default. Theme and
@@ -23,7 +23,7 @@ import {
 } from "../styles/tokens";
 import type { Density, Theme } from "../types";
 
-const STORAGE_KEY = "forge-desktop.theme.v1";
+const STORAGE_KEY = "terminus-desktop.theme.v1";
 
 interface PersistedTheme {
   theme: Theme;

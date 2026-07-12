@@ -18,7 +18,7 @@ This runbook coordinates with the more specific runbooks (`leaked-credential.md`
 ## Immediate actions (SEV1/SEV2)
 
 1. **Contain:**
-   - Stop affected Forge processes (`just run` is not running).
+   - Stop affected Terminus processes (`just run` is not running).
    - Revoke compromised capabilities (see `docs/runbooks/leaked-credential.md`, `docs/runbooks/compromised-extension.md`).
    - Kill affected jobs/processes.
    - Quarantine affected artifacts (do not delete — they're evidence).
@@ -69,16 +69,16 @@ Export the full trace for forensic analysis:
 curl http://localhost:3050/admin/trace/<task_id> > trace-<task_id>.json
 
 # Export the context manifest for each provider attempt in the affected turn
-sqlite3 db/forge.db "SELECT id FROM context_manifests WHERE task_id = '<task_id>' ORDER BY persisted_at;" > manifest-ids.txt
+sqlite3 db/terminus.db "SELECT id FROM context_manifests WHERE task_id = '<task_id>' ORDER BY persisted_at;" > manifest-ids.txt
 # For each manifest ID, export the full manifest and its fragments
 
 # Export the artifact directory listing
 find <artifact-root> -type f > artifacts-listing.txt
 
 # Export the audit log for the affected period
-sqlite3 db/forge.db "SELECT * FROM secret_audit WHERE used_at > datetime('now', '-24 hours');" > secret-audit.csv
-sqlite3 db/forge.db "SELECT * FROM capability_audit WHERE occurred_at > datetime('now', '-24 hours');" > capability-audit.csv
-sqlite3 db/forge.db "SELECT * FROM policy_decisions WHERE decided_at > datetime('now', '-24 hours');" > policy-decisions.csv
+sqlite3 db/terminus.db "SELECT * FROM secret_audit WHERE used_at > datetime('now', '-24 hours');" > secret-audit.csv
+sqlite3 db/terminus.db "SELECT * FROM capability_audit WHERE occurred_at > datetime('now', '-24 hours');" > capability-audit.csv
+sqlite3 db/terminus.db "SELECT * FROM policy_decisions WHERE decided_at > datetime('now', '-24 hours');" > policy-decisions.csv
 
 # Export the bypass register
 cp docs/security/effect-bypass-register.yaml bypass-register-<date>.yaml
@@ -91,7 +91,7 @@ cp docs/security/effect-bypass-register.yaml bypass-register-<date>.yaml
 3. Run the affected security evals (`evals/security/*.yaml`).
 4. Run the non-bypassability tests (`docs/security/non-bypassability-tests.md`).
 5. Verify the invariant is restored.
-6. Restart Forge processes.
+6. Restart Terminus processes.
 7. Notify affected users that the incident is resolved.
 
 ## Post-incident

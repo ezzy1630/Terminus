@@ -18,15 +18,15 @@ Use this runbook when a third-party plugin, MCP server, or external harness adap
 1. **Quarantine immediately** (see Immediate actions) before diagnosing.
 2. Check the extension's descriptor hash against the pinned hash:
    ```bash
-   sqlite3 db/forge.db "SELECT id, name, version, descriptor_hash, pinned_hash, status FROM capabilities WHERE type IN ('mcp_server', 'plugin') AND status = 'active';"
+   sqlite3 db/terminus.db "SELECT id, name, version, descriptor_hash, pinned_hash, status FROM capabilities WHERE type IN ('mcp_server', 'plugin') AND status = 'active';"
    ```
 3. Check the audit log for the extension's recent activity:
    ```bash
-   sqlite3 db/forge.db "SELECT * FROM capability_audit WHERE capability_id = '<id>' ORDER BY occurred_at DESC LIMIT 100;"
+   sqlite3 db/terminus.db "SELECT * FROM capability_audit WHERE capability_id = '<id>' ORDER BY occurred_at DESC LIMIT 100;"
    ```
 4. Check for taint-tracked output from the extension:
    ```bash
-   sqlite3 db/forge.db "SELECT * FROM tool_calls WHERE capability_id = '<id>' AND taint_sources IS NOT NULL ORDER BY started_at DESC LIMIT 50;"
+   sqlite3 db/terminus.db "SELECT * FROM tool_calls WHERE capability_id = '<id>' AND taint_sources IS NOT NULL ORDER BY started_at DESC LIMIT 50;"
    ```
 5. Check the extension's process for unexpected behavior (network connections, file access).
 
@@ -34,7 +34,7 @@ Use this runbook when a third-party plugin, MCP server, or external harness adap
 
 1. **Revoke the extension's capability:**
    ```bash
-   grpcurl -plaintext -unix /var/run/forge-kernel.sock forge.kernel.v1.CapabilityService/Revoke '{"capability_id": "<id>"}'
+   grpcurl -plaintext -unix /var/run/terminus-kernel.sock terminus.kernel.v1.CapabilityService/Revoke '{"capability_id": "<id>"}'
    ```
 2. **Kill the extension's process:**
    ```bash
@@ -49,7 +49,7 @@ Use this runbook when a third-party plugin, MCP server, or external harness adap
    ```
 4. **Mark the extension as `quarantined` in the registry:**
    ```bash
-   sqlite3 db/forge.db "UPDATE capabilities SET status = 'quarantined', quarantined_at = datetime('now'), quarantine_reason = 'suspected compromise' WHERE id = '<id>';"
+   sqlite3 db/terminus.db "UPDATE capabilities SET status = 'quarantined', quarantined_at = datetime('now'), quarantine_reason = 'suspected compromise' WHERE id = '<id>';"
    ```
 5. **Notify affected sessions/tasks** — they may have used the extension's tainted output.
 6. **Review taint propagation** — did the extension's output reach a privileged effect? If so, that effect may need to be rolled back or re-reviewed.

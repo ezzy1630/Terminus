@@ -1,4 +1,4 @@
-# AGENTS.md — forge-patch
+# AGENTS.md — terminus-patch
 
 ## Local rules
 

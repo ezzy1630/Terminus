@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Layout tests (SPEC §29 — required test scenarios).
+ * Terminus Desktop — Layout tests (SPEC §29 — required test scenarios).
  *
  * Coverage:
  *   1. Layout renders sidebar, main, inspector, and terminal drawer.
@@ -73,8 +73,8 @@ describe("Layout — three-region render", () => {
 
   test("renders a native title bar with the application name in the center", () => {
     renderLayout();
-    // The default center slot shows the "Forge" product name.
-    expect(screen.getByText("Forge")).toBeInTheDocument();
+    // The default center slot shows the "Terminus" product name.
+    expect(screen.getByText("Terminus")).toBeInTheDocument();
   });
 
   test("renders a terminal toggle button in the title bar", () => {

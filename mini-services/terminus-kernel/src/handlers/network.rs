@@ -14,7 +14,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use forge_egress::EgressPolicy;
+use terminus_egress::EgressPolicy;
 use serde::{Deserialize, Serialize};
 use std::net::ToSocketAddrs;
 
@@ -76,8 +76,7 @@ pub async fn request(
         Ok(iter) => iter.map(|sa| sa.ip()).collect(),
         Err(_) => Vec::new(),
     };
-    let resolved_ip_strings: Vec<String> =
-        resolved_ips.iter().map(|ip| ip.to_string()).collect();
+    let resolved_ip_strings: Vec<String> = resolved_ips.iter().map(|ip| ip.to_string()).collect();
 
     // Authorize via the kernel's egress proxy.
     let auth_result = state.kernel.network.authorize(

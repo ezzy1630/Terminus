@@ -1,6 +1,6 @@
 # Fixture Agent Adapter
 
-The fixture-agent adapter profile describes Forge's deterministic
+The fixture-agent adapter profile describes Terminus's deterministic
 no-model test double (SPEC §35.11, §41.2). The fixture agent is NOT a
 real coding agent; it is a test fixture used by the eval lab to
 regression-test the harness itself.
@@ -30,5 +30,23 @@ The fixture agent replays a recorded trajectory. There is no model
 call. This makes eval runs deterministic, free, and fast — ideal for
 regression testing. The trade-off is that the fixture agent cannot
 exercise model-dependent behavior (prompt sensitivity, tool-call
-discipline); for those, use the real baselines (forge-minimal,
-forge-full, Codex, Claude Code, Pi, Oh My Pi, OpenHands).
+discipline); for those, use the real baselines (terminus-minimal,
+terminus-full, Codex, Claude Code, Pi, Oh My Pi, OpenHands).
+
+## Runner
+
+The adapter is implemented as a JSON-RPC 2.0-over-stdio process in
+`runner.ts` (SPEC §30.1 Boundary C). Launch it with Bun:
+
+```bash
+bun run adapters/fixture-agent/runner.ts
+```
+
+Lifecycle methods: `initialize` (returns the capability profile), `run`
+(streams `adapter/event` notifications then returns an `AdapterResult`),
+`cancel`, and `shutdown`. `run` accepts an optional `trajectoryPath` to
+replay a recorded trajectory; without one it performs a deterministic no-op
+run. A `--selftest` flag runs a canned `initialize` exchange and exits 0.
+
+The runner uses only `node:readline` and read-only `node:fs` (for the
+trajectory); it is intended to run inside an outer Terminus sandbox.

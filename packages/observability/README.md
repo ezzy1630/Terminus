@@ -1,4 +1,4 @@
-# @forge/observability
+# @terminus/observability
 
 OpenTelemetry-style span helpers, structured logging, and metric definitions.
 Privacy-aware: never logs raw prompts, source, secrets; uses IDs and hashes.

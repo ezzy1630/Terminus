@@ -1,6 +1,6 @@
-# @forge/testkit
+# @terminus/testkit
 
-Fixtures and builders for Forge tests. Used by all other packages' tests.
+Fixtures and builders for Terminus tests. Used by all other packages' tests.
 
 ## Public API
 

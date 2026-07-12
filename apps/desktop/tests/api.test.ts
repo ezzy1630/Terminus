@@ -1,11 +1,11 @@
 /**
- * Forge Desktop — API client tests (SPEC §29 — required test scenarios).
+ * Terminus Desktop — API client tests (SPEC §29 — required test scenarios).
  *
  * Coverage:
  *   1. ForgeApiClient URL builder + header construction (unit, offline).
  *   2. ForgeApiError envelope shape (unit, offline — driven via fetch mock).
  *   3. Live integration tests against the control plane at
- *      http://127.0.0.1:3050 with bearer `forge-control-dev-token`:
+ *      http://127.0.0.1:3050 with bearer `terminus-control-dev-token`:
  *        - health()
  *        - listSessions()
  *        - createSession(input)
@@ -37,7 +37,7 @@ import type { CreateSessionInput, CreateTaskInput } from "../src/types";
 // ────────────────────────── Configuration ───────────────────────────────────
 
 const API_BASE = "http://127.0.0.1:3050";
-const TOKEN = "forge-control-dev-token";
+const TOKEN = "terminus-control-dev-token";
 
 // ────────────────────────── Live-server probe ───────────────────────────────
 
@@ -216,7 +216,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
    * one. The workspace_id is then reused for createSession.
    */
   async function openWorkspace(c: ForgeApiClient): Promise<string> {
-    const rootUri = `file:///tmp/forge-desktop-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const rootUri = `file:///tmp/terminus-desktop-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const res = await fetch(`${API_BASE}/v1/workspaces/open`, {
       method: "POST",
       headers: c.buildHeaders(),
@@ -264,7 +264,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
     const workspaceId = await openWorkspace(c);
     const input: CreateSessionInput = {
       workspace_id: workspaceId,
-      title: `Forge Desktop test session ${new Date().toISOString()}`,
+      title: `Terminus Desktop test session ${new Date().toISOString()}`,
     };
     const s = await c.createSession(input);
     expect(s.id).toMatch(/[0-9a-f-]{20,}/);
@@ -281,7 +281,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
     const workspaceId = await openWorkspace(c);
     const session = await c.createSession({
       workspace_id: workspaceId,
-      title: `Forge Desktop listTasks test ${new Date().toISOString()}`,
+      title: `Terminus Desktop listTasks test ${new Date().toISOString()}`,
     });
     const res = await c.listTasks(session.id);
     expect(Array.isArray(res.tasks)).toBe(true);
@@ -294,12 +294,12 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
     const workspaceId = await openWorkspace(c);
     const session = await c.createSession({
       workspace_id: workspaceId,
-      title: `Forge Desktop createTask test ${new Date().toISOString()}`,
+      title: `Terminus Desktop createTask test ${new Date().toISOString()}`,
     });
     const input: CreateTaskInput = {
       session_id: session.id,
       thread_id: session.active_thread_id!,
-      objective: "Test objective from the Forge Desktop test suite.",
+      objective: "Test objective from the Terminus Desktop test suite.",
       non_goals: ["Touching production systems"],
       risk_class: "low",
     };
@@ -327,7 +327,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
     const workspaceId = await openWorkspace(c);
     const session = await c.createSession({
       workspace_id: workspaceId,
-      title: `Forge Desktop startTask test ${new Date().toISOString()}`,
+      title: `Terminus Desktop startTask test ${new Date().toISOString()}`,
     });
     const task = await c.createTask({
       session_id: session.id,
@@ -350,7 +350,7 @@ describeLive("ForgeApiClient — live control plane (http://127.0.0.1:3050)", ()
     const workspaceId = await openWorkspace(c);
     const session = await c.createSession({
       workspace_id: workspaceId,
-      title: `Forge Desktop startTurn test ${new Date().toISOString()}`,
+      title: `Terminus Desktop startTurn test ${new Date().toISOString()}`,
     });
     const task = await c.createTask({
       session_id: session.id,

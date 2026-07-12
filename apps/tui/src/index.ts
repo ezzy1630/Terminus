@@ -1,5 +1,5 @@
 /**
- * Forge TUI — terminal client (SPEC §43.4 primary client).
+ * Terminus TUI — terminal client (SPEC §43.4 primary client).
  *
  * Per SPEC §43.4: "TUI: reuse or adapt the inherited OpenCode TUI initially."
  * Per SPEC §32.5: clients reconnect by authenticating, fetching the
@@ -19,7 +19,7 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 
-const GATEWAY = process.env.FORGE_GATEWAY ?? "http://127.0.0.1:81";
+const GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
 const PORT_PARAM = "XTransformPort=3050";
 
 interface HealthResponse {
@@ -207,7 +207,7 @@ async function subscribeEvents(filter?: string): Promise<void> {
 async function createTask(): Promise<void> {
   const rl = createInterface({ input: stdin, output: stdout });
   try {
-    const workspaceUri = await rl.question("Workspace root URI (e.g. /tmp/forge-demo): ");
+    const workspaceUri = await rl.question("Workspace root URI (e.g. /tmp/terminus-demo): ");
     const title = await rl.question("Session title: ");
     const objective = await rl.question("Task objective: ");
     const userInput = await rl.question("First turn user input: ");
@@ -216,7 +216,7 @@ async function createTask(): Promise<void> {
     const wRes = await fetch(forgeUrl("/v1/workspaces/open"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ root_uri: workspaceUri || "/tmp/forge-demo" }),
+      body: JSON.stringify({ root_uri: workspaceUri || "/tmp/terminus-demo" }),
     });
     if (!wRes.ok) throw new Error(`workspace: HTTP ${wRes.status}`);
     const w = (await wRes.json()) as { id: string };
@@ -273,7 +273,7 @@ async function createTask(): Promise<void> {
 
 function showHelp(): void {
   console.log(`
-Forge TUI — commands:
+Terminus TUI — commands:
   health              Show system + kernel health
   sessions            List recent sessions
   tasks <session-id>  List tasks in a session
@@ -283,7 +283,7 @@ Forge TUI — commands:
   exit                Quit
 
 Environment:
-  FORGE_GATEWAY       Gateway base URL (default: http://127.0.0.1:81)
+  TERMINUS_GATEWAY       Gateway base URL (default: http://127.0.0.1:81)
 `);
 }
 

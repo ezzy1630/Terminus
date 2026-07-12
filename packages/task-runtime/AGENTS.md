@@ -1,4 +1,4 @@
-# @forge/task-runtime — local rules
+# @terminus/task-runtime — local rules
 
 ## Non-negotiable
 

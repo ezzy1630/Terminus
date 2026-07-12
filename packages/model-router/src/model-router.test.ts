@@ -1,15 +1,15 @@
 /**
- * @forge/model-router — tests for RateLimiter, CircuitBreaker,
+ * @terminus/model-router — tests for RateLimiter, CircuitBreaker,
  * ConcurrencyLimiter, ModelHealthMonitor (§38.15), and router integration.
  */
 import { describe, test, expect } from "bun:test";
-import type { ModelKey, RiskClass, Micros } from "@forge/domain";
-import { micros } from "@forge/domain";
+import type { ModelKey, RiskClass, Micros } from "@terminus/domain";
+import { micros } from "@terminus/domain";
 import type {
   ModelCapabilitySnapshot,
   ProviderCapabilitySnapshot,
   ConfidentialityPolicy,
-} from "@forge/provider-core";
+} from "@terminus/provider-core";
 import {
   Router,
   RateLimiter,

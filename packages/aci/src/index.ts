@@ -1,5 +1,5 @@
 /**
- * @forge/aci — Agent Control Interface.
+ * @terminus/aci — Agent Control Interface.
  *
  * Per SPEC §11, §34:
  * - 7 default always-visible tools (read, search, patch, exec, job, inspect, capability).
@@ -19,9 +19,9 @@ import type {
   TraceId,
   ContentHash,
   Micros,
-} from "@forge/domain";
-import { ValidationError, NotFoundError } from "@forge/domain";
-import type { ConfidentialityLabel } from "@forge/provider-core";
+} from "@terminus/domain";
+import { ValidationError, NotFoundError } from "@terminus/domain";
+import type { ConfidentialityLabel } from "@terminus/provider-core";
 
 // ────────────────────────── Tool definition contract (§34.3) ─────────────────
 

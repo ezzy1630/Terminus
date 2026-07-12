@@ -1,5 +1,5 @@
 {
-  "name": "@forge/testkit",
+  "name": "@terminus/testkit",
   "version": "0.1.0",
   "type": "module",
   "main": "./src/index.ts",
@@ -7,9 +7,9 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": { "build": "tsc -p tsconfig.json", "lint": "eslint src", "test": "bun test" },
   "dependencies": {
-    "@forge/domain": "workspace:*",
-    "@forge/runtime-protocol": "workspace:*",
-    "@forge/context-ir": "workspace:*",
+    "@terminus/domain": "workspace:*",
+    "@terminus/runtime-protocol": "workspace:*",
+    "@terminus/context-ir": "workspace:*",
     "zod": "^4.0.2"
   }
 }

@@ -1,10 +1,11 @@
-//! Shared protocol types for the Forge effect kernel.
+//! Shared protocol types for the Terminus effect kernel.
 //!
 //! This crate contains pure serde-friendly data structures that mirror the
 //! kernel RPC contract described in `SPEC.md` Appendix D. It performs no I/O
 //! and depends only on serde + uuid + chrono so it can be reused by every
 //! other kernel crate and the testkit.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,7 @@ use thiserror::Error;
 pub mod error_codes;
 pub use error_codes::{ErrorCategory, ErrorCode};
 
-/// RequestContext mirrors `forge.kernel.v1.RequestContext`.
+/// RequestContext mirrors `terminus.kernel.v1.RequestContext`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestContext {
     pub request_id: String,
@@ -42,7 +43,7 @@ impl RequestContext {
     }
 }
 
-/// EffectIntent mirrors `forge.kernel.v1.EffectIntent`.
+/// EffectIntent mirrors `terminus.kernel.v1.EffectIntent`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EffectIntent {
     pub user_intent_ref: String,
@@ -213,19 +214,14 @@ pub struct WorkspaceBaseline {
 }
 
 /// Patch commit mode mirrors `PatchCommitMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PatchCommitMode {
+    #[default]
     Unspecified,
     PreviewOnly,
     StageOnly,
     ApplyToWorktree,
-}
-
-impl Default for PatchCommitMode {
-    fn default() -> Self {
-        Self::Unspecified
-    }
 }
 
 /// A single edit in a patch transaction.
@@ -332,7 +328,7 @@ pub struct ValidationResult {
     pub evidence: Option<ArtifactRef>,
 }
 
-/// PatchResponse mirrors `forge.kernel.v1.PatchResponse`.
+/// PatchResponse mirrors `terminus.kernel.v1.PatchResponse`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PatchResponse {
     pub transaction_id: String,

@@ -1,16 +1,16 @@
 [package]
-name = "forge-policy"
+name = "terminus-policy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Command and effect policy engine for the Forge kernel."
+description = "Command and effect policy engine for the Terminus kernel."
 
 [lints]
 workspace = true
 
 [dependencies]
-forge-kernel-protocol = { workspace = true }
+terminus-kernel-protocol = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

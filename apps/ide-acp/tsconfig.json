@@ -8,8 +8,8 @@
     "rootDir": ".",
     "baseUrl": "..",
     "paths": {
-      "@forge/public-api": ["./packages/public-api/src/index.ts"],
-      "@forge/public-client": ["./packages/public-client/src/index.ts"]
+      "@terminus/public-api": ["./packages/public-api/src/index.ts"],
+      "@terminus/public-client": ["./packages/public-client/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts"]

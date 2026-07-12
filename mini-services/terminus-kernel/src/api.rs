@@ -1,6 +1,6 @@
 //! Shared API envelope types used by handlers.
 
-use forge_kernel_protocol::{EffectIntent, RequestContext};
+use terminus_kernel_protocol::{EffectIntent, RequestContext};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::ValidatedCapabilityToken;

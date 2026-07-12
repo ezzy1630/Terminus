@@ -2,15 +2,15 @@
 
 use crate::error::ProcessError;
 use crate::spec::{NormalizedSpawn, SpawnOutcome};
-use forge_artifacts::ArtifactStore;
-use forge_kernel_protocol::{
-    ArtifactRef, OutputChunk, ProcessEvent, ProcessExited, ProcessStarted,
-};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::SystemTime;
+use terminus_artifacts::ArtifactStore;
+use terminus_kernel_protocol::{
+    ArtifactRef, OutputChunk, ProcessEvent, ProcessExited, ProcessStarted,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
@@ -54,9 +54,6 @@ impl ProcessManager {
         &self,
         spawn: NormalizedSpawn,
     ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
-        let process_id = forge_kernel_protocol::new_id();
-        let job_id = forge_kernel_protocol::new_id();
-
         let mut command = Command::new(&spawn.program);
         command.args(&spawn.args);
         command.env_clear();
@@ -64,17 +61,59 @@ impl ProcessManager {
         if let Some(cwd) = &spawn.working_dir {
             command.current_dir(cwd);
         }
+        let resolved_executable = spawn.program.clone();
+        self.spawn_command(command, resolved_executable, spawn.timeout_ms)
+            .await
+    }
+
+    /// Spawn a process wrapped in a sandbox binary (e.g. `bwrap`) with a
+    /// pre-built argv prefix. `wrapper_argv` MUST already contain the full
+    /// sandbox argv INCLUDING the trailing `-- <program> <args...>` (as
+    /// produced by `LinuxSandboxBackend::build_bwrap_argv`). The wrapper
+    /// binary owns namespace isolation; `ProcessManager` still owns the
+    /// process group, timeout, output streaming, and tree-kill on cancel.
+    /// SPEC §13.4 / §34.11.
+    pub async fn spawn_wrapped(
+        &self,
+        wrapper: std::path::PathBuf,
+        wrapper_argv: Vec<String>,
+        spawn: NormalizedSpawn,
+    ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
+        let mut command = Command::new(&wrapper);
+        command.args(&wrapper_argv);
+        command.env_clear();
+        command.envs(&spawn.env);
+        // Working directory is set via the wrapper argv (bwrap --chdir); do
+        // not also set current_dir or the wrapper may fail to chdir inside
+        // the new mount namespace.
+        let resolved_executable =
+            format!("{} (sandboxed via {})", spawn.program, wrapper.display());
+        self.spawn_command(command, resolved_executable, spawn.timeout_ms)
+            .await
+    }
+
+    /// Shared spawn core: take a fully-configured `Command`, spawn it, and
+    /// run the streaming supervisor. Used by `spawn` (direct) and
+    /// `spawn_wrapped` (sandboxed).
+    async fn spawn_command(
+        &self,
+        mut command: Command,
+        resolved_executable: String,
+        timeout_ms: u64,
+    ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
+        let process_id = terminus_kernel_protocol::new_id();
+        let job_id = terminus_kernel_protocol::new_id();
+
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
-        // Process group on unix.
+        // Process group on unix so tree-kill reaches sandbox descendants.
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
 
-        let resolved_executable = spawn.program.clone();
         let mut child = command
             .spawn()
             .map_err(|e| ProcessError::Spawn(format!("{e}")))?;
@@ -103,8 +142,16 @@ impl ProcessManager {
         let max_inline = self.max_inline_bytes;
         let pid = process_id.clone();
         let tx_clone = tx.clone();
-        let timeout_ms = spawn.timeout_ms;
+        // `timeout_ms` is a parameter of `spawn_command`.
 
+        // SPEC §44.2 ownership: this supervisor task owns the child's
+        // lifetime. It is not detached — ownership is implicit via the
+        // `mpsc::Receiver` held by the caller (`rx`): when the caller drops
+        // `rx` or the process exits, this task drains stdout/stderr, captures
+        // exit status, ingests output artifacts, and completes. The child is
+        // also registered in `self.children` so `cancel()` can kill the
+        // process group. Cancellation propagates: dropping the receiver
+        // cancels the stream tasks; `kill_process_group` reaps the tree.
         tokio::spawn(async move {
             // Pull child out of the managed wrapper so we can take stdout/stderr.
             let mut child_guard = managed.lock().await;
@@ -333,7 +380,7 @@ async fn capture_stream<R: tokio::io::AsyncRead + Unpin>(
 #[cfg(unix)]
 #[allow(unsafe_code)]
 fn kill_process_group(pid: u32) {
-    // ADR-0001: `killpg(2)` has no safe Rust binding in std. We use the
+    // ADR-0031: `killpg(2)` has no safe Rust binding in std. We use the
     // smallest possible `unsafe` block to call `libc::kill(-pgid, SIGKILL)`
     // and dispatch SIGKILL to the entire process group. The argument is a
     // negative pid which POSIX defines as "the process group whose ID is the
@@ -473,10 +520,10 @@ mod tests {
         let (_dir, store) = store();
         let mgr = ProcessManager::new(store);
         let mut env = std::collections::BTreeMap::new();
-        env.insert("FORGE_TEST_VAR".to_string(), "value-123".to_string());
+        env.insert("TERMINUS_TEST_VAR".to_string(), "value-123".to_string());
         let spawn = NormalizedSpawn {
             program: "sh".into(),
-            args: vec!["-c".into(), "echo $FORGE_TEST_VAR".into()],
+            args: vec!["-c".into(), "echo $TERMINUS_TEST_VAR".into()],
             env,
             working_dir: None,
             timeout_ms: 5_000,
@@ -497,17 +544,17 @@ mod tests {
     #[tokio::test]
     async fn no_ambient_env_inherited() {
         // Ensure no ambient env is leaked: an explicit env var we set IS
-        // visible, but an ambient var (FORGE_TEST_LEAK) is NOT.
-        std::env::set_var("FORGE_TEST_LEAK", "leaked");
+        // visible, but an ambient var (TERMINUS_TEST_LEAK) is NOT.
+        std::env::set_var("TERMINUS_TEST_LEAK", "leaked");
         let (_dir, store) = store();
         let mgr = ProcessManager::new(store);
         let mut env = std::collections::BTreeMap::new();
-        env.insert("FORGE_TEST_MARKER".to_string(), "present".to_string());
+        env.insert("TERMINUS_TEST_MARKER".to_string(), "present".to_string());
         let spawn = NormalizedSpawn {
             program: "sh".into(),
             args: vec![
                 "-c".into(),
-                "echo \"marker=$FORGE_TEST_MARKER leak=$FORGE_TEST_LEAK\"".into(),
+                "echo \"marker=$TERMINUS_TEST_MARKER leak=$TERMINUS_TEST_LEAK\"".into(),
             ],
             env,
             working_dir: None,
@@ -521,8 +568,8 @@ mod tests {
                 line.push_str(&String::from_utf8_lossy(&c.bytes));
             }
         }
-        std::env::remove_var("FORGE_TEST_LEAK");
-        // Explicit env propagates; ambient FORGE_TEST_LEAK does NOT.
+        std::env::remove_var("TERMINUS_TEST_LEAK");
+        // Explicit env propagates; ambient TERMINUS_TEST_LEAK does NOT.
         assert_eq!(line.trim(), "marker=present leak=");
     }
 

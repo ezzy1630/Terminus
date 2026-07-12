@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/tools/patch.json",
+  "$id": "https://terminus.dev/schemas/tools/patch.json",
   "title": "patch",
   "description": "Apply one or more edit operations atomically inside an isolated transaction. Each operation references an observed source hash; stale anchors are rejected. The transaction commits atomically or rolls back to baseline. Supports ReplaceSymbol, Range, ExactText, Insert, Delete, CreateFile, MoveFile, DeleteFile, and UnifiedDiff operations.",
   "type": "object",

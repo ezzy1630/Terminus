@@ -4,6 +4,13 @@ This document specifies the release gate criteria (SPEC §46.18) and the product
 
 ## Release gate (SPEC §46.18)
 
+The dedicated Linux sandbox runner must publish an immutable, line-oriented
+evidence manifest and expose its path as `TERMINUS_LINUX_EVIDENCE` when the
+release gate runs. The manifest must contain `platform: linux`,
+`profile: secure-local-default`, `enforcement: enforced`, `seccomp: active`,
+`cgroup_v2: active`, `network: proxy-only`, and `status: passed`. Missing,
+skipped, placeholder, unavailable, or degraded evidence is a release failure.
+
 Stable release requires:
 
 - [ ] All supported platform checks green (SPEC §46.13).
@@ -69,7 +76,7 @@ Stable release requires:
 - [ ] Direct network sockets are blocked where claimed (ADR-0015).
 - [ ] Secret values do not enter model-visible context (ADR-0016).
 - [ ] Policy and approval binding tests pass.
-- [ ] Git metadata and Forge state are protected.
+- [ ] Git metadata and Terminus state are protected.
 - [ ] Malicious plugin/MCP/descriptor tests pass (ADR-0018, ADR-0019).
 - [ ] Prompt-injection tasks cannot cause unauthorized effects.
 - [ ] Supply-chain scans and SBOM are complete.

@@ -1,4 +1,4 @@
-# @forge/provider-openai
+# @terminus/provider-openai
 
 OpenAI chat-completions renderer. Maps canonical context → OpenAI Chat
 Completions API format. Handles tool schemas (function calling), system

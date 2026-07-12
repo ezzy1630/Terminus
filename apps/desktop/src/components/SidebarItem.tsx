@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Sidebar item (single project/task row).
+ * Terminus Desktop — Sidebar item (single project/task row).
  *
  * Per SPEC §7.1:
  *   - Task rows must be easy to scan.
@@ -18,7 +18,7 @@ import { Pin, PinOff } from "lucide-react";
 import { formatDistanceToNowStrict } from "date-fns";
 import { cn } from "../lib/cn";
 import { StatusIndicator } from "./StatusIndicator";
-import { normalizeTaskStatus } from "../hooks/use-forge";
+import { normalizeTaskStatus } from "../hooks/use-terminus";
 import type { TaskStatusKind } from "../types";
 
 interface SidebarItemProps {

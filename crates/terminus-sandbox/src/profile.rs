@@ -94,7 +94,7 @@ impl SandboxProfile {
                     access: FilesystemAccess::Deny,
                 },
                 FilesystemRule {
-                    path: "workspace://.forge".to_string(),
+                    path: "workspace://.terminus".to_string(),
                     access: FilesystemAccess::Deny,
                 },
                 FilesystemRule {

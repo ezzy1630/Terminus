@@ -1,4 +1,4 @@
-# @forge/runtime-protocol
+# @terminus/runtime-protocol
 
 Defines the Agent Runtime Protocol (ARP): the typed semantic-event union,
 envelope shape, emitter/observer interfaces, and SSE encoder/decoder.
@@ -21,7 +21,7 @@ Per SPEC §28.9 every semantic audit event carries an immutable envelope with
 
 ## Dependencies
 
-`@forge/domain`, `zod`.
+`@terminus/domain`, `zod`.
 
 ## Invariants
 

@@ -1,8 +1,8 @@
 use crate::error::EgressError;
 use crate::policy::EgressPolicy;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Per-task rate limit.
 #[derive(Debug, Clone)]
@@ -120,12 +120,7 @@ mod tests {
     fn allowlisted_destination_authorized() {
         let proxy = EgressProxy::new(policy(), RateLimit::default());
         proxy
-            .authorize(
-                "api.github.com",
-                443,
-                "https",
-                &[ip("140.82.121.6")],
-            )
+            .authorize("api.github.com", 443, "https", &[ip("140.82.121.6")])
             .unwrap();
     }
 

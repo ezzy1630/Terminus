@@ -20,9 +20,9 @@ A monolithic single-language design either bloats the trusted base (all-TypeScri
 
 Adopt a **three-language architecture**:
 
-- **TypeScript** owns the control plane (`forge-control`): sessions, tasks, threads, turns, episodes, context compiler, provider renderers, orchestration, verification, capability registry, public API, clients. TypeScript has **no ambient effect authority** — all privileged operations route through the kernel RPC (ADR-0007).
-- **Rust** owns the privileged effect kernel (`forge-kernel`): sandbox broker, process/PTY/job manager, filesystem snapshot/edit transactions, network egress proxy, secret broker, resource/cgroup limits, LSP/DAP/Tree-sitter services, extension runtime. Rust is the **non-bypassable trust boundary** (SPEC §5.2).
-- **Python** owns the offline evaluation laboratory (`forge-eval`): runners, graders, analysis, statistics, dashboards, research. Python reads exported traces/artifacts; it never owns production effects.
+- **TypeScript** owns the control plane (`terminus-control`): sessions, tasks, threads, turns, episodes, context compiler, provider renderers, orchestration, verification, capability registry, public API, clients. TypeScript has **no ambient effect authority** — all privileged operations route through the kernel RPC (ADR-0007).
+- **Rust** owns the privileged effect kernel (`terminus-kernel`): sandbox broker, process/PTY/job manager, filesystem snapshot/edit transactions, network egress proxy, secret broker, resource/cgroup limits, LSP/DAP/Tree-sitter services, extension runtime. Rust is the **non-bypassable trust boundary** (SPEC §5.2).
+- **Python** owns the offline evaluation laboratory (`terminus-eval`): runners, graders, analysis, statistics, dashboards, research. Python reads exported traces/artifacts; it never owns production effects.
 
 SPEC §43.1–§43.3 define the per-language stacks. SPEC §42.4 defines the dependency direction (UI packages do not import kernel internals; provider packages do not import orchestration; Python eval code never becomes a production runtime dependency).
 
@@ -37,7 +37,7 @@ SPEC §43.1–§43.3 define the per-language stacks. SPEC §42.4 defines the dep
 
 - Three toolchains must be pinned and bootstrapped (`mise.toml`).
 - Cross-language contracts are Protobuf (kernel RPC), JSON Schema (domain/events/tools), and TypeScript runtime schemas (public API) per SPEC §45.1.
-- The `forge-kernel-testkit` crate provides a fake kernel for TS-side development.
+- The `terminus-kernel-testkit` crate provides a fake kernel for TS-side development.
 - The Python eval lab consumes Parquet/JSONL exports; it does not call the kernel RPC directly.
 - Architecture-boundary checks (SPEC §42.5) forbid forbidden imports across languages.
 

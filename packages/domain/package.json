@@ -1,5 +1,5 @@
 {
-  "name": "@forge/domain",
+  "name": "@terminus/domain",
   "version": "0.1.0",
   "type": "module",
   "main": "./src/index.ts",

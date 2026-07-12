@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Component tests (SPEC §29 — required test scenarios).
+ * Terminus Desktop — Component tests (SPEC §29 — required test scenarios).
  *
  * Coverage:
  *   1. StatusIndicator renders the correct glyph + aria-label for each
@@ -32,7 +32,7 @@ import { CommandPalette, type Command } from "../src/components/CommandPalette";
 import { Composer } from "../src/components/Composer";
 import { SidebarItem } from "../src/components/SidebarItem";
 
-import { useForgeStore } from "../src/hooks/use-forge";
+import { useForgeStore } from "../src/hooks/use-terminus";
 import { useThemeStore } from "../src/hooks/use-theme";
 
 // ────────────────────────── 1. StatusIndicator ──────────────────────────────

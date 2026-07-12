@@ -1,4 +1,4 @@
-# @forge/domain — local rules
+# @terminus/domain — local rules
 
 ## Non-negotiable
 
@@ -30,4 +30,4 @@
 - Database access (`PrismaClient`, raw SQL).
 - HTTP handlers or middleware.
 - Logging side effects.
-- Provider request/response shapes (those live in `@forge/provider-core`).
+- Provider request/response shapes (those live in `@terminus/provider-core`).

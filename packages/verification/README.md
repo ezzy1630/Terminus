@@ -1,4 +1,4 @@
-# @forge/verification
+# @terminus/verification
 
 Verification DAG engine: `VerificationPlan` builder, `VerificationNode` types
 (command/diagnostic/diff_rule/human/external_query), `VerificationEngine` with

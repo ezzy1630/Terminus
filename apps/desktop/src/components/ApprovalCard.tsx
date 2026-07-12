@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — ApprovalCard.
+ * Terminus Desktop — ApprovalCard.
  *
  * Per SPEC §17: "Render approvals inline at the point where they occur."
  * Not a modal. The card shows:

@@ -1,4 +1,4 @@
-# @forge/provider-core
+# @terminus/provider-core
 
 Provider-neutral broker contracts: `Provider`, `ProviderRenderer`, capability
 snapshots, request/response shapes, usage/cost records, continuation decisions,
@@ -25,6 +25,6 @@ Per SPEC §15 and §38. No network calls — adapters handle the wire.
 ## Invariants
 
 - The canonical domain MUST NOT contain provider-specific request bodies. This
-  package exposes interfaces; concrete bodies live in `@forge/provider-*`.
+  package exposes interfaces; concrete bodies live in `@terminus/provider-*`.
 - Never silently downgrade a high-risk reviewer or change privacy class.
 - Cost anomalies are surfaced, not silently swallowed.

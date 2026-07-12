@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
-use forge_policy::{DecisionReport, NormalizedCommand};
+use terminus_policy::{DecisionReport, NormalizedCommand};
 use serde::Deserialize;
 
 use crate::api::Envelope;

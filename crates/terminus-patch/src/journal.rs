@@ -1,6 +1,6 @@
-use forge_kernel_protocol::PatchEdit;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use terminus_kernel_protocol::PatchEdit;
 
 /// A single journal entry recording one atomic step of a transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

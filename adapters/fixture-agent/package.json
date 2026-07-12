@@ -1,0 +1,14 @@
+{
+  "name": "@terminus/adapter-fixture-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Terminus fixture-agent external-harness adapter (SPEC §35.11) — deterministic no-model test double speaking JSON-RPC over stdio.",
+  "bin": {
+    "terminus-fixture-agent": "./runner.ts"
+  },
+  "scripts": {
+    "start": "bun run runner.ts",
+    "selftest": "bun run runner.ts --selftest",
+    "typecheck": "tsc --noEmit --strict --noUncheckedIndexedAccess runner.ts"
+  }
+}

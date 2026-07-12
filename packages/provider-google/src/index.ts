@@ -1,5 +1,5 @@
 /**
- * @forge/provider-google — Google Gemini renderer.
+ * @terminus/provider-google — Google Gemini renderer.
  *
  * Maps to `generateContent` with `systemInstruction`, `functionDeclarations`,
  * and `cachedContent`. Same Transport pattern as other providers.
@@ -19,9 +19,9 @@ import type {
   ContinuationInput,
   ContinuationDecision,
   ProviderToolSchema,
-} from "@forge/provider-core";
-import { BaseProviderRenderer } from "@forge/provider-core";
-import type { TokenCount } from "@forge/domain";
+} from "@terminus/provider-core";
+import { BaseProviderRenderer } from "@terminus/provider-core";
+import type { TokenCount } from "@terminus/domain";
 
 // ────────────────────────── Google wire shapes ───────────────────────────────
 

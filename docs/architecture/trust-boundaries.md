@@ -20,7 +20,7 @@ This is the most important architectural invariant. It is enforced structurally:
 | Zone | Examples | Trust | Ambient authority |
 |---|---|---|---|
 | **Z0** | Kernel policy engine, secret broker, sandbox broker | Highest | Narrowly defined host capabilities |
-| **Z1** | Control plane (`forge-control`), signed first-party clients, Next.js dashboard | Trusted but non-privileged | No raw process/filesystem/network authority |
+| **Z1** | Control plane (`terminus-control`), signed first-party clients, Next.js dashboard | Trusted but non-privileged | No raw process/filesystem/network authority |
 | **Z2** | Built-in tools (read/search/patch/exec/inspect/job/capability), code-intelligence workers, LSP/DAP/index | Constrained | Explicit kernel grants only |
 | **Z3** | First-party plugins and external harness adapters | Partially trusted | Declared capabilities only |
 | **Z4** | Third-party plugins, MCP servers, external harnesses (Codex/Claude Code/Pi/OpenHands) | Untrusted | Isolated capability grants only |
@@ -31,20 +31,20 @@ This is the most important architectural invariant. It is enforced structurally:
 ## Process topology (SPEC §27.1)
 
 ```
-forge client(s)                                [Z1, presentation only]
+terminus client(s)                                [Z1, presentation only]
     │ HTTPS/UDS HTTP + SSE
     ▼
-forge-control (TypeScript, Z1)                 [trusted, non-privileged]
+terminus-control (TypeScript, Z1)                 [trusted, non-privileged]
     │ gRPC over Unix domain socket
     ▼
-forge-kernel (Rust, Z0)                        [privileged, non-bypassable]
+terminus-kernel (Rust, Z0)                        [privileged, non-bypassable]
     ├── sandboxed command/job processes        [Z2, kernel grants]
     ├── LSP/DAP/index workers                  [Z2, kernel grants]
     ├── plugin/WASI workers                    [Z3/Z4, declared capabilities]
     ├── MCP server processes                   [Z4, isolated grants]
     └── external harness adapter processes     [Z4, isolated grants]
 
-forge-eval (Python)                            [offline, reads exports only]
+terminus-eval (Python)                            [offline, reads exports only]
 ```
 
 ## Effect taxonomy (SPEC §27.3)

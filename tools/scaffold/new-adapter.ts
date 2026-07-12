@@ -38,7 +38,7 @@ writeFileSync(
   version: 0.1.0
   inner_harness_version: pinned
   description: |
-    TODO: one-paragraph description of the ${id} adapter. Note which Forge
+    TODO: one-paragraph description of the ${id} adapter. Note which Terminus
     sandbox/broker layers wrap the inner harness.
   capabilities:
     exact_context_visibility: unknown
@@ -55,7 +55,7 @@ writeFileSync(
 
 writeFileSync(
   join(adapterDir, "README.md"),
-  `# ${id} adapter\n\nTODO: describe the inner harness, what it does well, what it does poorly, and how Forge wraps it.\n\n## Capability probing\n\nTODO: describe how the adapter's claimed capabilities are cross-checked by live probes (SPEC §12.4).\n`,
+  `# ${id} adapter\n\nTODO: describe the inner harness, what it does well, what it does poorly, and how Terminus wraps it.\n\n## Capability probing\n\nTODO: describe how the adapter's claimed capabilities are cross-checked by live probes (SPEC §12.4).\n`,
 );
 
 console.log(`[new-adapter] created adapters/${id}/`);

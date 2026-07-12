@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationProfile {
     SyntaxOnly,
     SyntaxFormat,
     LanguageFast,
     PackageNarrow,
+    #[default]
     TaskDefault,
     MigrationTransaction,
 }
@@ -21,12 +22,6 @@ impl ValidationProfile {
             Self::TaskDefault => "task_default",
             Self::MigrationTransaction => "migration_transaction",
         }
-    }
-}
-
-impl Default for ValidationProfile {
-    fn default() -> Self {
-        Self::TaskDefault
     }
 }
 

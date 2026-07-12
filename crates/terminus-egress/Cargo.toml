@@ -1,5 +1,5 @@
 [package]
-name = "forge-egress"
+name = "terminus-egress"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ description = "Egress proxy with destination allowlist and private-IP denial."
 workspace = true
 
 [dependencies]
-forge-kernel-protocol = { workspace = true }
+terminus-kernel-protocol = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

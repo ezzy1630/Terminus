@@ -22,8 +22,8 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": resolve(__dirname, "src"),
-      "@forge/public-api": resolve(__dirname, "../../packages/public-api/src/index.ts"),
-      "@forge/public-client": resolve(__dirname, "../../packages/public-client/src/index.ts"),
+      "@terminus/public-api": resolve(__dirname, "../../packages/public-api/src/index.ts"),
+      "@terminus/public-client": resolve(__dirname, "../../packages/public-client/src/index.ts"),
     },
   },
   server: {

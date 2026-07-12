@@ -5,16 +5,16 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use forge_authz::{OperationClass, Scope, TokenBinder, TokenIssuer};
-use forge_kernel::KernelHandle;
-use forge_kernel_protocol::OutputChunk;
+use terminus_authz::{OperationClass, Scope, TokenBinder, TokenIssuer};
+use terminus_kernel::KernelHandle;
+use terminus_kernel_protocol::OutputChunk;
 use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::idempotency::IdempotencyMap;
 
-/// Default bearer token if `FORGE_KERNEL_TOKEN` is unset.
-pub const DEFAULT_BEARER_TOKEN: &str = "forge-kernel-dev-token";
+/// Default bearer token if `TERMINUS_KERNEL_TOKEN` is unset.
+pub const DEFAULT_BEARER_TOKEN: &str = "terminus-kernel-dev-token";
 
 /// The shared application state.
 #[derive(Clone)]
@@ -35,7 +35,7 @@ pub struct AppState {
     /// background task that consumes the ProcessEvent stream.
     pub process_outputs: Arc<Mutex<HashMap<String, Vec<OutputChunk>>>>,
     /// Final ProcessEvent per process, used to expose exit status.
-    pub process_exits: Arc<Mutex<HashMap<String, forge_kernel_protocol::ProcessExited>>>,
+    pub process_exits: Arc<Mutex<HashMap<String, terminus_kernel_protocol::ProcessExited>>>,
     /// RFC3339 timestamp captured at startup.
     pub started_at: String,
     /// Build commit (best-effort, from env or "dev").
@@ -48,7 +48,10 @@ impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
             .field("bearer_token_set", &!self.bearer_token.is_empty())
-            .field("dev_capability_token_set", &!self.dev_capability_token.is_empty())
+            .field(
+                "dev_capability_token_set",
+                &!self.dev_capability_token.is_empty(),
+            )
             .field("started_at", &self.started_at)
             .field("build_commit", &self.build_commit)
             .field("data_dir", &self.data_dir)
@@ -59,23 +62,32 @@ impl std::fmt::Debug for AppState {
 impl AppState {
     /// Build the app state from environment variables.
     pub fn from_env() -> Result<Self, std::io::Error> {
-        let data_dir = env::var("FORGE_DATA")
-            .unwrap_or_else(|_| ".forge-data".to_string());
+        let data_dir = env::var("TERMINUS_DATA").unwrap_or_else(|_| ".terminus-data".to_string());
         let data_dir = PathBuf::from(&data_dir);
         std::fs::create_dir_all(&data_dir)?;
 
-        let kernel = KernelHandle::new(data_dir.clone()).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("kernel assembly: {e}"))
-        })?;
+        // SPEC §13.6 / §31.6: well-known dev tokens/secrets are permitted
+        // ONLY when TERMINUS_DEV=1. Without it, the kernel fails closed if no
+        // real token/secret is configured. Never set TERMINUS_DEV=1 in prod.
+        let dev_mode = env::var("TERMINUS_DEV").map(|v| v == "1").unwrap_or(false);
+
+        let kernel = KernelHandle::new(data_dir.clone())
+            .map_err(|e| std::io::Error::other(format!("kernel assembly: {e}")))?;
 
         // Token issuer with a dev secret. In production this secret is loaded
         // from a sealed config and the kernel instance id matches the
         // KernelHandle's info service instance id.
         let kernel_instance_id = kernel.info.instance_id().to_string();
-        let issuer_secret =
-            env::var("FORGE_KERNEL_CAPABILITY_SECRET").unwrap_or_else(|_| {
-                "forge-kernel-dev-capability-secret-please-rotate".to_string()
-            });
+        let issuer_secret = match env::var("TERMINUS_KERNEL_CAPABILITY_SECRET") {
+            Ok(s) if !s.is_empty() => s,
+            _ if dev_mode => "terminus-kernel-dev-capability-secret-please-rotate".to_string(),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "TERMINUS_KERNEL_CAPABILITY_SECRET is required (or set TERMINUS_DEV=1 for local dev)",
+                ));
+            }
+        };
         let token_issuer = Arc::new(TokenIssuer::new(
             issuer_secret.into_bytes(),
             kernel_instance_id,
@@ -85,7 +97,7 @@ impl AppState {
 
         // Mint a long-lived dev capability token with all operation classes.
         let binder = TokenBinder {
-            principal: "forge-dev".to_string(),
+            principal: "terminus-dev".to_string(),
             session_id: "dev-session".to_string(),
             task_id: "dev-task".to_string(),
             workspace_id: "dev-workspace".to_string(),
@@ -106,19 +118,54 @@ impl AppState {
             OperationClass::ArtifactIngest,
             OperationClass::Admin,
         ];
-        let dev_capability_token = token_issuer
-            .mint(binder, ops, Scope::default(), None, "dev-capability-nonce")
-            .and_then(|t| t.encode())
-            .unwrap_or_else(|_| "<dev-token-mint-failed>".to_string());
+        // The all-operations dev capability token is minted ONLY in dev mode.
+        // In production the control plane mints short-lived, scoped capability
+        // tokens after approval; the kernel does not vend a god token.
+        let dev_capability_token = if dev_mode {
+            token_issuer
+                .mint(binder, ops, Scope::default(), None, "dev-capability-nonce")
+                .and_then(|t| t.encode())
+                .unwrap_or_else(|_| "<dev-token-mint-failed>".to_string())
+        } else {
+            String::new()
+        };
 
-        let bearer_token =
-            env::var("FORGE_KERNEL_TOKEN").unwrap_or_else(|_| DEFAULT_BEARER_TOKEN.to_string());
+        // Test harnesses must not scrape bearer capabilities from logs. When
+        // explicitly requested in development, publish the short-lived test
+        // capability through a private file instead. Production never sets
+        // this path and therefore has no file-based capability handoff.
+        if dev_mode {
+            if let Ok(path) = env::var("TERMINUS_KERNEL_CAP_TOKEN_FILE") {
+                if !path.is_empty() {
+                    std::fs::write(&path, &dev_capability_token)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+                    }
+                }
+            }
+        }
+
+        let bearer_token = match env::var("TERMINUS_KERNEL_TOKEN") {
+            Ok(t) if !t.is_empty() => t,
+            _ if dev_mode => DEFAULT_BEARER_TOKEN.to_string(),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "TERMINUS_KERNEL_TOKEN is required (or set TERMINUS_DEV=1 for local dev)",
+                ));
+            }
+        };
 
         let started_at = chrono::Utc::now().to_rfc3339();
-        let build_commit = env::var("FORGE_BUILD_COMMIT").unwrap_or_else(|_| "dev".to_string());
+        let build_commit = env::var("TERMINUS_BUILD_COMMIT").unwrap_or_else(|_| "dev".to_string());
 
         info!(%started_at, %build_commit, data_dir = %data_dir.display(), "kernel mini-service initialized");
-        info!("bearer token (Authorization: Bearer ...): {}", &bearer_token);
+        info!(
+            "bearer token (Authorization: Bearer ...): {}",
+            &bearer_token
+        );
         info!(
             "dev capability token (x-capability-token: ...): {}",
             &dev_capability_token

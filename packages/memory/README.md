@@ -1,4 +1,4 @@
-# @forge/memory
+# @terminus/memory
 
 Memory candidate extraction, consolidation curator, retrieval. Per SPEC §16, §39.
 

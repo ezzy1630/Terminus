@@ -1,5 +1,5 @@
 /**
- * Forge IDE-ACP adapter (SPEC §42.1, §32.6).
+ * Terminus IDE-ACP adapter (SPEC §42.1, §32.6).
  *
  * Per SPEC §32.6: The ACP adapter maps editor workspace and selection into
  * explicit context directives; diagnostics and open files into world-state
@@ -9,7 +9,7 @@
  * calls the public API and receives no direct filesystem authority.
  *
  * This is the scaffold. It implements the ACP-over-stdio JSON-RPC bridge:
- * the editor speaks ACP on stdin/stdout; this adapter translates to Forge
+ * the editor speaks ACP on stdin/stdout; this adapter translates to Terminus
  * public API calls. A full ACP implementation (with editor-native approval
  * prompts, patch preview, diagnostics push) is the next milestone.
  *
@@ -18,12 +18,12 @@
  *     bun apps/ide-acp/src/index.ts
  *
  * Environment:
- *   FORGE_GATEWAY   Gateway base URL (default: http://127.0.0.1:81)
+ *   TERMINUS_GATEWAY   Gateway base URL (default: http://127.0.0.1:81)
  */
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline";
 
-const GATEWAY = process.env.FORGE_GATEWAY ?? "http://127.0.0.1:81";
+const GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
 const PORT_PARAM = "XTransformPort=3050";
 
 interface JsonRpcRequest {
@@ -84,7 +84,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
     switch (req.method) {
       case "initialize": {
         respond(id, {
-          server: { version: "0.1.0", build_commit: "dev", instance_id: "forge-ide-acp" },
+          server: { version: "0.1.0", build_commit: "dev", instance_id: "terminus-ide-acp" },
           protocol: { major: 1, minor: 0 },
           capabilities: {
             supported: ["forge_task_creation", "forge_event_stream", "forge_approval_bridge", "forge_patch_preview"],
@@ -96,15 +96,15 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
         respond(id, {});
         break;
       }
-      case "forge/health": {
+      case "terminus/health": {
         respond(id, await forgeGet("/v1/system/health"));
         break;
       }
-      case "forge/sessions": {
+      case "terminus/sessions": {
         respond(id, await forgeGet("/v1/sessions"));
         break;
       }
-      case "forge/createTask": {
+      case "terminus/createTask": {
         const p = (req.params ?? {}) as {
           workspace_id?: string;
           title?: string;
@@ -135,7 +135,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
         respond(id, { session, task });
         break;
       }
-      case "forge/startTurn": {
+      case "terminus/startTurn": {
         const p = (req.params ?? {}) as { thread_id: string; task_id: string; user_input: string };
         const turn = await forgePost<{ id: string; state: string }>("/v1/turns", {
           thread_id: p.thread_id,
@@ -145,11 +145,11 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
         respond(id, turn);
         break;
       }
-      case "forge/approvals": {
+      case "terminus/approvals": {
         respond(id, await forgeGet("/v1/approvals"));
         break;
       }
-      case "forge/resolveApproval": {
+      case "terminus/resolveApproval": {
         const p = (req.params ?? {}) as {
           id: string;
           decision: "allow_once" | "allow_exact" | "allow_task_scope" | "deny_once" | "deny_and_rule" | "stop_task";
@@ -161,7 +161,7 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
         }));
         break;
       }
-      case "forge/manifest": {
+      case "terminus/manifest": {
         const p = (req.params ?? {}) as { id: string };
         respond(id, await forgeGet(`/v1/context/manifests/${p.id}`));
         break;

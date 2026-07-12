@@ -8,7 +8,7 @@
 
 ## Context
 
-Forge needs stable, sortable, collision-resistant identifiers for every domain entity (workspaces, sessions, threads, tasks, turns, episodes, attempts, tool calls, jobs, agents, memory claims, capabilities, events) and content-addressed identifiers for every artifact (tool output, diffs, traces, evidence, full provider responses).
+Terminus needs stable, sortable, collision-resistant identifiers for every domain entity (workspaces, sessions, threads, tasks, turns, episodes, attempts, tool calls, jobs, agents, memory claims, capabilities, events) and content-addressed identifiers for every artifact (tool output, diffs, traces, evidence, full provider responses).
 
 Random UUIDv4 loses time-ordering, which complicates cursor-based pagination and event-stream reconstruction. Sequential integers lose global uniqueness across workspaces/tenants. SHA-1 is broken. Blake3 is fast but less universally supported than SHA-256.
 
@@ -24,7 +24,7 @@ Adopt **UUIDv7 for entity identifiers** and **SHA-256 for content addressing** p
 - Monetary values MUST be integer micros of the configured billing currency; floating-point money is forbidden.
 - Token counts and byte counts MUST be unsigned 64-bit integers at storage boundaries.
 
-Status is PROVISIONAL because the exact UUID library and SHA-256 implementation choices are subject to a replacement gate (e.g., if a future Forge deployment needs UUIDv8 for additional entropy, this ADR is amended).
+Status is PROVISIONAL because the exact UUID library and SHA-256 implementation choices are subject to a replacement gate (e.g., if a future Terminus deployment needs UUIDv8 for additional entropy, this ADR is amended).
 
 ## Alternatives
 
@@ -32,7 +32,7 @@ Status is PROVISIONAL because the exact UUID library and SHA-256 implementation 
 - **Sequential integers.** Rejected: not globally unique; leaks count information; coordination cost across workspaces.
 - **ULID.** Rejected: not a standard; UUIDv7 covers the same ground.
 - **SHA-1.** Rejected: broken (SHAttered).
-- **Blake3.** Rejected: less universal tooling; SHA-256 is sufficient for Forge's content-addressing needs and matches the SPEC §28.1 requirement.
+- **Blake3.** Rejected: less universal tooling; SHA-256 is sufficient for Terminus's content-addressing needs and matches the SPEC §28.1 requirement.
 
 ## Consequences
 

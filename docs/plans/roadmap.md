@@ -1,6 +1,6 @@
 # Roadmap
 
-This document is Forge's implementation roadmap (SPEC §48), organized into milestones M0–M12. Each milestone has an objective, tasks, deliverables, and an exit gate. Work may continue experimentally past a milestone, but the next default layer does not depend on an unpassed gate.
+This document is Terminus's implementation roadmap (SPEC §48), organized into milestones M0–M12. Each milestone has an objective, tasks, deliverables, and an exit gate. Work may continue experimentally past a milestone, but the next default layer does not depend on an unpassed gate.
 
 ## Delivery principles (SPEC §48.1)
 
@@ -37,7 +37,7 @@ Cross-cutting owners: protocol, security, upstream integration, developer experi
 
 **Objective:** Reuse OpenCode without allowing it to define permanent boundaries.
 
-**Tasks:** OpenCode compatibility/parity test suite; inventory all inherited effect paths; exact provider-request capture; Forge task contracts; context-manifest skeleton; artifact store facade; public Forge API facade and generated client skeleton; four substrate tests (exact context visibility, total effect interception feasibility, independent task/checkpoint ownership, provider-specific rendering injection); document which OpenCode packages require patching; upstream sync CI; isolate Bun-specific APIs; disable automatic plugin installation; explicit extension lockfiles; fork/overlay decision ADR.
+**Tasks:** OpenCode compatibility/parity test suite; inventory all inherited effect paths; exact provider-request capture; Terminus task contracts; context-manifest skeleton; artifact store facade; public Terminus API facade and generated client skeleton; four substrate tests (exact context visibility, total effect interception feasibility, independent task/checkpoint ownership, provider-specific rendering injection); document which OpenCode packages require patching; upstream sync CI; isolate Bun-specific APIs; disable automatic plugin installation; explicit extension lockfiles; fork/overlay decision ADR.
 
 **Deliverables:** `packages/open-code-bridge`; effect-bypass register; provider-request recorder; OpenCode parity suite; fork gate report.
 
@@ -55,15 +55,15 @@ Cross-cutting owners: protocol, security, upstream integration, developer experi
 
 **Objective:** Establish the privileged Rust boundary and route all new effects through it.
 
-**Tasks:** `forge.kernel.v1` Protobuf packages and Buf compatibility checks; authenticated gRPC over UDS; request context, idempotency, deadline, cancellation, typed error mapping; kernel instance identity and short-lived capability tokens; safe workspace/path types; artifact ingest service integration; structured `exec` without sandbox (temporary test backend); process-tree ownership, output streaming, timeout, cancellation; durable jobs and PTY streams; control-plane kernel client and fake kernel; route one inherited command path through kernel; route all Forge-owned commands through kernel; direct-effect architecture checks in TypeScript; process restart and job reconciliation; kernel protocol compatibility tests; load/backpressure tests.
+**Tasks:** `terminus.kernel.v1` Protobuf packages and Buf compatibility checks; authenticated gRPC over UDS; request context, idempotency, deadline, cancellation, typed error mapping; kernel instance identity and short-lived capability tokens; safe workspace/path types; artifact ingest service integration; structured `exec` without sandbox (temporary test backend); process-tree ownership, output streaming, timeout, cancellation; durable jobs and PTY streams; control-plane kernel client and fake kernel; route one inherited command path through kernel; route all Terminus-owned commands through kernel; direct-effect architecture checks in TypeScript; process restart and job reconciliation; kernel protocol compatibility tests; load/backpressure tests.
 
-**Exit gate:** No Forge-owned process or file mutation bypasses the kernel. Remaining inherited bypasses are known, contained, tested, and scheduled for removal.
+**Exit gate:** No Terminus-owned process or file mutation bypasses the kernel. Remaining inherited bypasses are known, contained, tested, and scheduled for removal.
 
 ### M4 — Sandbox, policy, secrets, network, and Git protection (SPEC §48.7)
 
 **Objective:** Make the effect boundary enforce meaningful security.
 
-**Tasks:** Common sandbox policy model and backend trait; Linux Bubblewrap backend with read-only root and writable worktree; re-protect `.git`, Forge state, secret paths, denied globs; user/PID/network namespaces, no-new-privileges, seccomp, cgroup controls; explicit degraded-mode detection; structured command normalization and shell AST parser; versioned command/effect policy engine; approval records bound to normalized action hashes; secret capability broker with short-lived child injection; output redaction and secret-use audit; proxy-only network namespace and destination allowlists; DNS rebinding/private-address protections; protected Git worktree/branch/commit operations; disable untrusted Git hooks and filters; macOS and Windows backend scaffolds with honest capability reporting; container backend for untrusted evals/extensions; run sandbox, secret, network, and process-tree adversarial suites; remove inherited direct effect paths or place inherited control plane in outer sandbox until removed.
+**Tasks:** Common sandbox policy model and backend trait; Linux Bubblewrap backend with read-only root and writable worktree; re-protect `.git`, Terminus state, secret paths, denied globs; user/PID/network namespaces, no-new-privileges, seccomp, cgroup controls; explicit degraded-mode detection; structured command normalization and shell AST parser; versioned command/effect policy engine; approval records bound to normalized action hashes; secret capability broker with short-lived child injection; output redaction and secret-use audit; proxy-only network namespace and destination allowlists; DNS rebinding/private-address protections; protected Git worktree/branch/commit operations; disable untrusted Git hooks and filters; macOS and Windows backend scaffolds with honest capability reporting; container backend for untrusted evals/extensions; run sandbox, secret, network, and process-tree adversarial suites; remove inherited direct effect paths or place inherited control plane in outer sandbox until removed.
 
 **Exit gate:** The secure local profile passes the non-bypassability and adversarial security suite on supported Linux. Unsupported platforms fail closed or explicitly select a degraded profile.
 
@@ -103,7 +103,7 @@ Cross-cutting owners: protocol, security, upstream integration, developer experi
 
 **Objective:** Open the ecosystem without dissolving the security boundary.
 
-**Tasks:** Capability descriptor, registry, lockfile, activation lifecycle; Agent Skills discovery and permission-checked body loading; `forge.skill.yaml` validation and skill tests; isolated skill-script execution; MCP registration, descriptor hashing, admission; per-tool effect classification and policy; MCP process/HTTP isolation and output limits; descriptor-change reauthorization; third-party plugin process/WASI host; deterministic hook semantics and timeouts; explicit isolated extension installation with lifecycle scripts disabled; external adapter SDK and fixture agent; Codex, Pi, and one additional adapter; live capability probes and discrepancy reports; malicious plugin/MCP/adapter security suite; evaluate programmatic tool-composition mode.
+**Tasks:** Capability descriptor, registry, lockfile, activation lifecycle; Agent Skills discovery and permission-checked body loading; `terminus.skill.yaml` validation and skill tests; isolated skill-script execution; MCP registration, descriptor hashing, admission; per-tool effect classification and policy; MCP process/HTTP isolation and output limits; descriptor-change reauthorization; third-party plugin process/WASI host; deterministic hook semantics and timeouts; explicit isolated extension installation with lifecycle scripts disabled; external adapter SDK and fixture agent; Codex, Pi, and one additional adapter; live capability probes and discrepancy reports; malicious plugin/MCP/adapter security suite; evaluate programmatic tool-composition mode.
 
 **Exit gate:** Third-party code cannot acquire ambient effects. Descriptor changes are detected. External harness results are independently verified.
 

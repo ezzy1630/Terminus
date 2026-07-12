@@ -10,7 +10,7 @@ remembering; extract only the high-signal claims.
 ### Project conventions
 
 - "Tests in this repo use `pytest -k` selectors, not `pytest::filters`."
-- "The `forge-policy` crate owns all policy rule parsing; do not add
+- "The `terminus-policy` crate owns all policy rule parsing; do not add
   parsing elsewhere."
 - "Migrations require a `down.sql` companion; reviewers will block
   otherwise."

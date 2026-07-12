@@ -1,4 +1,4 @@
-# @forge/task-runtime
+# @terminus/task-runtime
 
 Task lifecycle: `TaskService` with `createTask`, `activate`, `updateContract`
 (versioned), `transition` (state machine per Appendix C — DRAFT→ACTIVE→...

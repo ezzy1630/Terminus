@@ -4,20 +4,20 @@ This document is the deep dive for the Python evaluation laboratory (SPEC §18, 
 
 ## Why an eval lab (SPEC §18, §41, J.3)
 
-Without pinned baselines, environment graders, and exact cost/trajectory records, architectural changes become anecdotes (SPEC §48.3). The eval lab is what makes Forge's primary metric (ADR-0001) measurable and what governs feature promotion (ADR-0025).
+Without pinned baselines, environment graders, and exact cost/trajectory records, architectural changes become anecdotes (SPEC §48.3). The eval lab is what makes Terminus's primary metric (ADR-0001) measurable and what governs feature promotion (ADR-0025).
 
 The eval lab is **offline and non-privileged**: it reads exported traces/artifacts; it never owns production effects. It runs in `python/forge_evals/`.
 
 ## Evaluation modes (SPEC §41.1, §18.1)
 
-1. **Harness-controlled** — drive a harness (Forge or external) against a pinned task; measure outcome.
-2. **Product comparison** — compare Forge against an external harness (codex, claude-code, pi, oh-my-pi, omnigent, openhands) on the same task.
-3. **Component ablation** — disable a Forge component (retrieval, memory, multi-agent, compression) and measure impact.
+1. **Harness-controlled** — drive a harness (Terminus or external) against a pinned task; measure outcome.
+2. **Product comparison** — compare Terminus against an external harness (codex, claude-code, pi, oh-my-pi, omnigent, openhands) on the same task.
+3. **Component ablation** — disable a Terminus component (retrieval, memory, multi-agent, compression) and measure impact.
 
 ## Permanent baselines (SPEC §18.1, §41.2)
 
-- `forge-minimal` — minimal shell mode (ADR-0025): one model, Bash-like execution, linear history, no advanced retrieval/memory/subagents. Always runnable.
-- `forge-full` — the configured Forge default with all promoted features.
+- `terminus-minimal` — minimal shell mode (ADR-0025): one model, Bash-like execution, linear history, no advanced retrieval/memory/subagents. Always runnable.
+- `terminus-full` — the configured Terminus default with all promoted features.
 
 Baselines are pinned (harness commit, configuration hash, model snapshot, environment image, source commit, task list, token/cost/time budgets, number of runs, seeds, grader versions, success/failure definitions, confidence intervals, raw task-level results, known limitations, leakage notes per Appendix I.3).
 
@@ -31,7 +31,7 @@ External benchmarks:
 
 - SWE-bench Verified (`evals/suites/swe-bench-verified.yaml`).
 - Terminal-Bench (`evals/suites/terminal-bench.yaml`).
-- Forge-internal (`evals/suites/forge-internal.yaml`).
+- Terminus-internal (`evals/suites/terminus-internal.yaml`).
 
 ## Experimental controls (SPEC §18.3, §41.6)
 
@@ -188,10 +188,10 @@ The promotion gate is implemented in `python/forge_evals/forge_evals/promotion_g
 
 ```bash
 cd python
-uv run forge-eval run --suite forge-internal --tasks tiny-bugfix/01-fix-typo --runs 1
-uv run forge-eval run --suite swe-bench-verified --runs 3
-uv run forge-eval analyze --experiment <id>
-uv run forge-eval dashboard --experiment <id>
+uv run terminus-eval run --suite terminus-internal --tasks tiny-bugfix/01-fix-typo --runs 1
+uv run terminus-eval run --suite swe-bench-verified --runs 3
+uv run terminus-eval analyze --experiment <id>
+uv run terminus-eval dashboard --experiment <id>
 ```
 
 ## Evaluation tiers (SPEC §46.11)

@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — class name combiner.
+ * Terminus Desktop — class name combiner.
  *
  * Combines clsx (conditional class assembly) with tailwind-merge
  * (deduplicates conflicting Tailwind classes). Per design constraints:

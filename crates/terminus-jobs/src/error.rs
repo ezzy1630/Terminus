@@ -13,7 +13,7 @@ pub enum JobError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("process error: {0}")]
-    Process(#[from] forge_process::ProcessError),
+    Process(#[from] terminus_process::ProcessError),
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
 }

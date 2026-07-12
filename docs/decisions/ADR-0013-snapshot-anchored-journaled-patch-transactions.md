@@ -25,7 +25,7 @@ Adopt **snapshot-anchored journaled patch transactions** per SPEC §11.6, §34.7
 7. **Transient-invalid isolated mode** — `allow_transient_invalid_state` flag permits a multi-file transaction to be in a transient-invalid state between edits, with final validation at commit (SPEC §11.6, §34.9).
 8. **Path leases** — long-running transactions acquire leases on paths to prevent concurrent conflicting edits (SPEC §34.7).
 
-Implementation: `crates/forge-patch` (engine, journal, validation) and `crates/forge-fs` (safe path resolution, snapshots).
+Implementation: `crates/terminus-patch` (engine, journal, validation) and `crates/terminus-fs` (safe path resolution, snapshots).
 
 ## Alternatives
 

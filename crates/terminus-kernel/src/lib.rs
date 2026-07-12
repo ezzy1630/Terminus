@@ -1,12 +1,13 @@
-//! The Forge kernel assembly — wires every service into typed methods
+//! The Terminus kernel assembly — wires every service into typed methods
 //! (SPEC.md Section 31.1, 31.7).
 //!
 //! The kernel is a *library*. The actual HTTP/JSON server lives in
-//! `mini-services/forge-kernel` (a separate agent's job); it calls into the
+//! `mini-services/terminus-kernel` (a separate agent's job); it calls into the
 //! methods exposed here. Every method takes a `RequestContext` + an
 //! `EffectIntent` + a typed request, and returns either a typed response or
 //! a `KernelError`.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 mod approvals;
@@ -14,12 +15,12 @@ mod error;
 mod services;
 
 pub use approvals::{
-    operation_hash, ApprovalRecord, ApprovalRequest, ApprovalRisk, ApprovalScope,
-    ApprovalStatus, ApprovalStore,
+    operation_hash, ApprovalRecord, ApprovalRequest, ApprovalRisk, ApprovalScope, ApprovalStatus,
+    ApprovalStore,
 };
+pub use error::KernelAssemblyError;
 pub use services::{
     ArtifactIngestService, CodeIntelligenceService, ExtensionRuntimeService, FileService,
     JobService, KernelHandle, KernelInfoService, NetworkService, PatchService, PolicyService,
     ProcessService, SandboxService, SecretService, WorkspaceEntry, WorkspaceService,
 };
-pub use error::KernelAssemblyError;

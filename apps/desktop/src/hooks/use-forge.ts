@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Sessions/tasks store + SSE wiring.
+ * Terminus Desktop — Sessions/tasks store + SSE wiring.
  *
  * This hook is the single source of truth for sidebar + conversation
  * state. It loads sessions + tasks, tracks which task is currently
@@ -44,7 +44,7 @@ export function normalizeTaskStatus(status: string): TaskStatusKind {
 
 // ────────────────────────── Pinned tasks ───────────────────────────────────
 
-const PINS_KEY = "forge-desktop.pinned-tasks.v1";
+const PINS_KEY = "terminus-desktop.pinned-tasks.v1";
 
 function readPins(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -275,10 +275,16 @@ export const useForgeStore = create<ForgeState>((set, get) => ({
 
 // ────────────────────────── Convenience hooks ──────────────────────────────
 
+// Zustand's useSyncExternalStore integration requires selector snapshots to
+// remain referentially stable when the underlying value is unchanged. Reusing
+// these empty collections avoids a render loop before a session/task exists.
+const EMPTY_TASKS: Task[] = [];
+const EMPTY_EVENTS: ForgeSseEvent[] = [];
+
 /** Tasks for the currently selected session. */
 export function useSelectedSessionTasks(): Task[] {
   const sessionId = useForgeStore((s) => s.selectedSessionId);
-  const tasks = useForgeStore((s) => (sessionId ? s.tasksBySession[sessionId] : undefined) ?? []);
+  const tasks = useForgeStore((s) => (sessionId ? s.tasksBySession[sessionId] : undefined) ?? EMPTY_TASKS);
   return tasks;
 }
 
@@ -304,6 +310,6 @@ export function useSelectedTask(): Task | null {
 /** Events for the currently selected task. */
 export function useSelectedTaskEvents(): ForgeSseEvent[] {
   const id = useForgeStore((s) => s.selectedTaskId);
-  const events = useForgeStore((s) => (id ? s.eventsByTask[id] : undefined) ?? []);
+  const events = useForgeStore((s) => (id ? s.eventsByTask[id] : undefined) ?? EMPTY_EVENTS);
   return events;
 }

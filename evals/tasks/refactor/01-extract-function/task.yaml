@@ -1,6 +1,6 @@
 task:
   id: refactor/01-extract-function
-  suite: forge-internal
+  suite: terminus-internal
   version: 1
   source_commit: c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
   image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -12,7 +12,7 @@ task:
     human_approvals: 0
   allowed_network: []
   secrets: []
-  grader_version: forge-internal-1.0
+  grader_version: terminus-internal-1.0
   risk_class: normal
   acceptance_criteria:
     - id: function-extracted

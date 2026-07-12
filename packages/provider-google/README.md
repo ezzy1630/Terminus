@@ -1,4 +1,4 @@
-# @forge/provider-google
+# @terminus/provider-google
 
 Google Gemini renderer. Maps to `generateContent` with `systemInstruction`,
 `functionDeclarations`, and `cachedContent`. Same Transport pattern as other

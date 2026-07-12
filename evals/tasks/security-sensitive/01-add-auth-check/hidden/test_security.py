@@ -5,7 +5,7 @@ import pathlib
 from src.api import delete_user
 
 
-TOKEN = os.environ.get("FORGE_TEST_AUTH_TOKEN", "forge-test-token-do-not-hardcode")
+TOKEN = os.environ.get("FORGE_TEST_AUTH_TOKEN", "terminus-test-token-do-not-hardcode")
 
 
 def test_no_auth_returns_401() -> None:

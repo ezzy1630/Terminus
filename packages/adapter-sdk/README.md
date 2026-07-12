@@ -1,4 +1,4 @@
-# @forge/adapter-sdk
+# @terminus/adapter-sdk
 
 External harness adapter SDK. Per SPEC §12.4, §35.11.
 
@@ -18,7 +18,7 @@ External harness adapter SDK. Per SPEC §12.4, §35.11.
 
 ## Invariants
 
-- Forge independently inspects the final workspace, collects artifacts, and
+- Terminus independently inspects the final workspace, collects artifacts, and
   runs verification. Inner-harness self-report is not sufficient evidence.
 - Schema failure gets at most one correction attempt. After that the result is
   treated as failed, not guessed from prose.

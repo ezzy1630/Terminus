@@ -2542,7 +2542,7 @@ The database is not a cache of an event log, and the event log is not the only r
 ## 29.3 Artifact store layout
 
 ```text
-$FORGE_DATA/artifacts/
+$TERMINUS_DATA/artifacts/
   sha256/
     ab/
       cd/
@@ -2667,7 +2667,7 @@ Purpose: clients, IDEs, automation, and remote supervisors.
 
 Purpose: all privileged effects between `forge-control` and `forge-kernel`.
 
-- Source of truth: Protocol Buffers under `proto/forge/kernel/v1/`.
+- Source of truth: Protocol Buffers under `proto/terminus/kernel/v1/`.
 - Transport: gRPC over a Unix domain socket locally; mutually authenticated TLS remotely.
 - Implementations: `tonic` in Rust and generated `grpc-js`/Connect-compatible TypeScript clients.
 - Streaming: server streaming for output and events; bidirectional streaming only for PTY and interactive job channels.
@@ -2860,7 +2860,7 @@ Each service MUST expose the minimum required operation, not a generic “run pr
 
 ## 31.2 Protobuf conventions
 
-- Package names: `forge.kernel.v1`.
+- Package names: `terminus.kernel.v1`.
 - Every request includes `RequestContext`.
 - Every effect includes an `EffectIntent` describing task, user intent, trust, and expected side effects.
 - Paths are workspace-relative logical paths at the public boundary; the kernel resolves canonical host paths.
@@ -2877,7 +2877,7 @@ Example:
 ```proto
 syntax = "proto3";
 
-package forge.kernel.v1;
+package terminus.kernel.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
@@ -7181,7 +7181,7 @@ Establish the privileged Rust boundary and route all new effects through it.
 
 ### Tasks
 
-1. Define `forge.kernel.v1` Protobuf packages and Buf compatibility checks.
+1. Define `terminus.kernel.v1` Protobuf packages and Buf compatibility checks.
 2. Implement authenticated gRPC over Unix domain socket.
 3. Add request context, idempotency, deadline, cancellation, and typed error mapping.
 4. Implement kernel instance identity and short-lived capability tokens.
@@ -8453,7 +8453,7 @@ Database writes that change an aggregate and emit a semantic event SHOULD occur 
 ```proto
 syntax = "proto3";
 
-package forge.kernel.v1;
+package terminus.kernel.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";

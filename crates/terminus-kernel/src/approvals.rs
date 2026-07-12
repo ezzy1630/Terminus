@@ -141,7 +141,7 @@ impl ApprovalStore {
             now.saturating_add(req.ttl_seconds)
         };
         let record = ApprovalRecord {
-            id: forge_kernel_protocol::new_id(),
+            id: terminus_kernel_protocol::new_id(),
             task_id: req.task_id,
             tool_call_id: req.tool_call_id,
             operation_hash: req.operation_hash,
@@ -304,7 +304,7 @@ pub fn operation_hash(
 ) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(b"forge-op-hash-v1\n");
+    hasher.update(b"terminus-op-hash-v1\n");
     hasher.update(program.as_bytes());
     hasher.update(b"\n");
     for arg in argv {

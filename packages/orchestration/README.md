@@ -1,4 +1,4 @@
-# @forge/orchestration
+# @terminus/orchestration
 
 Expected-value scheduler, delegation contracts, worktree ownership, integration
 coordinator, reviewer triggers, loop detection. Per SPEC §14, §37.

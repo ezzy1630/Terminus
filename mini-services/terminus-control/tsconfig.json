@@ -1,0 +1,39 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "rootDir": ".",
+    "baseUrl": "..",
+    "paths": {
+      "@terminus/domain": ["./packages/domain/src/index.ts"],
+      "@terminus/runtime-protocol": ["./packages/runtime-protocol/src/index.ts"],
+      "@terminus/context-ir": ["./packages/context-ir/src/index.ts"],
+      "@terminus/context-compiler": ["./packages/context-compiler/src/index.ts"],
+      "@terminus/provider-core": ["./packages/provider-core/src/index.ts"],
+      "@terminus/provider-openai": ["./packages/provider-openai/src/index.ts"],
+      "@terminus/provider-anthropic": ["./packages/provider-anthropic/src/index.ts"],
+      "@terminus/provider-google": ["./packages/provider-google/src/index.ts"],
+      "@terminus/provider-local": ["./packages/provider-local/src/index.ts"],
+      "@terminus/model-router": ["./packages/model-router/src/index.ts"],
+      "@terminus/task-runtime": ["./packages/task-runtime/src/index.ts"],
+      "@terminus/session-runtime": ["./packages/session-runtime/src/index.ts"],
+      "@terminus/orchestration": ["./packages/orchestration/src/index.ts"],
+      "@terminus/verification": ["./packages/verification/src/index.ts"],
+      "@terminus/memory": ["./packages/memory/src/index.ts"],
+      "@terminus/capability-registry": ["./packages/capability-registry/src/index.ts"],
+      "@terminus/policy-coordinator": ["./packages/policy-coordinator/src/index.ts"],
+      "@terminus/artifact-client": ["./packages/artifact-client/src/index.ts"],
+      "@terminus/observability": ["./packages/observability/src/index.ts"],
+      "@terminus/config": ["./packages/config/src/index.ts"],
+      "@terminus/testkit": ["./packages/testkit/src/index.ts"],
+      "@terminus/public-api": ["./packages/public-api/src/index.ts"],
+      "@terminus/public-client": ["./packages/public-client/src/index.ts"],
+      "@terminus/open-code-bridge": ["./packages/open-code-bridge/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

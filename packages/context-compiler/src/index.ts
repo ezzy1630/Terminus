@@ -1,5 +1,5 @@
 /**
- * @forge/context-compiler — the Context Compiler (SPEC §8, §33).
+ * @terminus/context-compiler — the Context Compiler (SPEC §8, §33).
  *
  * `compileContext(input: CompileInput): Promise<CompiledContext>` performs:
  *  1. collect required fragments (authority, task contract, policy)
@@ -37,7 +37,7 @@ import type {
   ContextScope,
   SelectionFeatures,
   SourceDescriptor,
-} from "@forge/domain";
+} from "@terminus/domain";
 import type {
   ContextFragment,
   ContextEpochSnapshot,
@@ -45,16 +45,16 @@ import type {
   ContextBudget,
   ContextDirective,
   ContextCachePlan,
-} from "@forge/context-ir";
-import { buildManifest, computeStablePrefixHash, isConfidentialityAllowed } from "@forge/context-ir";
+} from "@terminus/context-ir";
+import { buildManifest, computeStablePrefixHash, isConfidentialityAllowed } from "@terminus/context-ir";
 import type {
   ProviderCapabilitySnapshot,
   ModelCapabilitySnapshot,
   ProviderRenderer,
   RenderedProviderRequest,
   ConfidentialityPolicy,
-} from "@forge/provider-core";
-import { filterByConfidentiality } from "@forge/provider-core";
+} from "@terminus/provider-core";
+import { filterByConfidentiality } from "@terminus/provider-core";
 
 // ────────────────────────── Inputs ───────────────────────────────────────────
 
@@ -306,7 +306,7 @@ export async function collectRequiredFragments(
     kind: "authority",
     contentRef: makeArtifactRef("authority", authorityText),
     textContent: authorityText,
-    source: makeSource("forge://policy/secure-local-default", "policy-coordinator", now),
+    source: makeSource("terminus://policy/secure-local-default", "policy-coordinator", now),
     sourceVersion: "v1",
     authority: 100,
     priority: 100,
@@ -317,7 +317,7 @@ export async function collectRequiredFragments(
     scope,
     freshness: { observedAt: now, sourceVersion: "v1", stale: false, staleReason: null },
     dependencies: [],
-    invalidation: [{ kind: "policy_changed", selector: "forge://policy/secure-local-default" }],
+    invalidation: [{ kind: "policy_changed", selector: "terminus://policy/secure-local-default" }],
     estimatedTokens: { [modelKey]: estimateTokens(authorityText) } as Readonly<Record<string, number>>,
     selectionFeatures: emptyFeatures,
   };
@@ -385,7 +385,7 @@ export async function collectRequiredFragments(
     kind: "project_rule",
     contentRef: makeArtifactRef("policy", policyText),
     textContent: policyText,
-    source: makeSource("forge://policy/command", "policy-coordinator", now),
+    source: makeSource("terminus://policy/command", "policy-coordinator", now),
     sourceVersion: "v1",
     authority: 90,
     priority: 90,
@@ -396,7 +396,7 @@ export async function collectRequiredFragments(
     scope,
     freshness: { observedAt: now, sourceVersion: "v1", stale: false, staleReason: null },
     dependencies: ["required:authority:secure-local-default"],
-    invalidation: [{ kind: "policy_changed", selector: "forge://policy/command" }],
+    invalidation: [{ kind: "policy_changed", selector: "terminus://policy/command" }],
     estimatedTokens: { [modelKey]: estimateTokens(policyText) } as Readonly<Record<string, number>>,
     selectionFeatures: emptyFeatures,
   };

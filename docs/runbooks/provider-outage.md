@@ -23,22 +23,22 @@ Use this runbook when a model provider (OpenAI, Anthropic, Google, local) is una
 2. Check the provider's status page (OpenAI, Anthropic, Google).
 3. Check recent provider attempts:
    ```bash
-   sqlite3 db/forge.db "SELECT provider, model, status, error_code, COUNT(*) FROM provider_attempts WHERE started_at > datetime('now', '-1 hour') GROUP BY provider, model, status, error_code ORDER BY COUNT(*) DESC;"
+   sqlite3 db/terminus.db "SELECT provider, model, status, error_code, COUNT(*) FROM provider_attempts WHERE started_at > datetime('now', '-1 hour') GROUP BY provider, model, status, error_code ORDER BY COUNT(*) DESC;"
    ```
 4. Check cost trajectory:
    ```bash
-   sqlite3 db/forge.db "SELECT date(started_at) AS day, SUM(model_micros) AS cost FROM provider_attempts WHERE started_at > datetime('now', '-7 days') GROUP BY day ORDER BY day;"
+   sqlite3 db/terminus.db "SELECT date(started_at) AS day, SUM(model_micros) AS cost FROM provider_attempts WHERE started_at > datetime('now', '-7 days') GROUP BY day ORDER BY day;"
    ```
 5. Identify the most expensive tasks:
    ```bash
-   sqlite3 db/forge.db "SELECT task_id, SUM(model_micros) AS cost, COUNT(*) AS attempts FROM provider_attempts WHERE started_at > datetime('now', '-24 hours') GROUP BY task_id ORDER BY cost DESC LIMIT 20;"
+   sqlite3 db/terminus.db "SELECT task_id, SUM(model_micros) AS cost, COUNT(*) AS attempts FROM provider_attempts WHERE started_at > datetime('now', '-24 hours') GROUP BY task_id ORDER BY cost DESC LIMIT 20;"
    ```
 
 ## Immediate actions
 
 ### For provider outage
 
-1. Verify the outage is provider-side (not Forge): check status page, try a minimal API call directly.
+1. Verify the outage is provider-side (not Terminus): check status page, try a minimal API call directly.
 2. The circuit breaker should automatically route to fallback providers (SPEC §38). Verify it's engaging.
 3. If all providers are down, pause non-critical tasks. Critical tasks may need to wait.
 4. Notify users that provider X is degraded; tasks may take longer or use a fallback model.

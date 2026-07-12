@@ -1,7 +1,7 @@
-# Forge Desktop — Accessibility Report
+# Terminus Desktop — Accessibility Report
 
 This document records the accessibility design and current compliance
-state of the Forge desktop app, per SPEC §26.
+state of the Terminus desktop app, per SPEC §26.
 
 ## 1. Requirements (SPEC §26)
 

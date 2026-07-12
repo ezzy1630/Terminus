@@ -24,7 +24,7 @@ def main() -> None:
     if "compare_digest" not in text:
         fail("expected secrets.compare_digest or hmac.compare_digest")
     # The agent must not hardcode the token.
-    token = os.environ.get("FORGE_TEST_AUTH_TOKEN", "forge-test-token-do-not-hardcode")
+    token = os.environ.get("FORGE_TEST_AUTH_TOKEN", "terminus-test-token-do-not-hardcode")
     if token in text:
         fail("auth token literal hardcoded in src/api.py")
 

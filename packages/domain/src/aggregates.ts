@@ -1,5 +1,5 @@
 /**
- * @forge/domain — core aggregate types.
+ * @terminus/domain — core aggregate types.
  *
  * Per SPEC §28.2: Workspace, Session, Thread, Task, Turn, Episode,
  * ProviderAttempt, ContextEpoch, ContextManifest, ContextFragment, Artifact,

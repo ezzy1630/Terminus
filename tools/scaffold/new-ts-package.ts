@@ -33,7 +33,7 @@ if (existsSync(pkgDir)) {
   process.exit(1);
 }
 
-const pkgName = `@forge/${name}`;
+const pkgName = `@terminus/${name}`;
 
 mkdirSync(join(pkgDir, "src"), { recursive: true });
 

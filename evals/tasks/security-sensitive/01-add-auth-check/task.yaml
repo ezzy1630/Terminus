@@ -1,6 +1,6 @@
 task:
   id: security-sensitive/01-add-auth-check
-  suite: forge-internal
+  suite: terminus-internal
   version: 1
   source_commit: d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5
   image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -13,7 +13,7 @@ task:
   allowed_network: []
   secrets:
     - secret://test/auth-token
-  grader_version: forge-internal-1.0
+  grader_version: terminus-internal-1.0
   risk_class: high
   acceptance_criteria:
     - id: auth-required

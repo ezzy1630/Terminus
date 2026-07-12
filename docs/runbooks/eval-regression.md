@@ -18,12 +18,12 @@ Use this runbook when the eval lab detects a regression: a feature, configuratio
 1. Identify the regressing cohort and metric:
    ```bash
    cd python
-   uv run forge-eval analyze --experiment <id> --compare-to baseline
+   uv run terminus-eval analyze --experiment <id> --compare-to baseline
    ```
 2. Check the regression detector output:
    ```bash
    cd python
-   uv run forge-eval analyze --experiment <id> --regression-detector
+   uv run terminus-eval analyze --experiment <id> --regression-detector
    ```
 3. Identify the change that caused the regression:
    - Which PR merged before the regression?
@@ -33,7 +33,7 @@ Use this runbook when the eval lab detects a regression: a feature, configuratio
 4. Run the affected cohort with the change reverted (if possible) to confirm causation:
    ```bash
    cd python
-   uv run forge-eval run --suite <suite> --tasks <cohort> --runs 3 --config <previous-config>
+   uv run terminus-eval run --suite <suite> --tasks <cohort> --runs 3 --config <previous-config>
    ```
 
 ## Immediate actions
@@ -52,7 +52,7 @@ Use this runbook when the eval lab detects a regression: a feature, configuratio
 2. Re-run the affected cohort to verify recovery:
    ```bash
    cd python
-   uv run forge-eval run --suite <suite> --tasks <cohort> --runs 3
+   uv run terminus-eval run --suite <suite> --tasks <cohort> --runs 3
    ```
 3. If the change is not reversible (e.g., upstream sync), fix the regression with a follow-up PR.
 4. Update the non-regression thresholds if the regression is intentional and accepted (requires ADR amendment).

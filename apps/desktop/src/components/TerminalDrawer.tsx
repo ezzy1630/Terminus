@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — TerminalDrawer.
+ * Terminus Desktop — TerminalDrawer.
  *
  * Per SPEC §15: a resizable bottom drawer, hidden by default, with:
  *
@@ -79,7 +79,7 @@ type FitAddon = { fit(): void; proposeDimensions(): { cols: number; rows: number
 export interface TerminalSessionAdapter {
   /** Unique id. */
   id: string;
-  /** Display label (e.g. "bash" or "zsh — forge"). */
+  /** Display label (e.g. "bash" or "zsh — terminus"). */
   label: string;
   /** Working directory or initial command. */
   cwd?: string;
@@ -336,7 +336,7 @@ function TerminalDrawerImpl({
       } catch (err) {
         // xterm.js failed to load (e.g. CSS missing in a non-electron
         // test env). Fall back to stub rendering.
-        console.warn("[forge] xterm.js load failed — falling back to text mode", err);
+        console.warn("[terminus] xterm.js load failed — falling back to text mode", err);
         setTabs((prev) =>
           prev.map((t) => (t.id === activeTab.id ? { ...t, isReal: false } : t)),
         );
@@ -749,7 +749,7 @@ export class StubTerminalSessionFactory implements TerminalSessionFactory {
         // Emit a banner so the user sees the session start.
         window.setTimeout(() => {
           if (!disposed) {
-            handler(`Forge stub terminal — ${label}\r\n`);
+            handler(`Terminus stub terminal — ${label}\r\n`);
             handler(cwd ? `cwd: ${cwd}\r\n` : "");
             handler("Type to echo. Connect a real PTY adapter for live sessions.\r\n\r\n");
           }
@@ -821,8 +821,8 @@ export class PtyTerminalSessionFactory implements TerminalSessionFactory {
         // node-pty not available — surface an error banner then become
         // an echo stub so the user can still see *something*.
         for (const h of handlers) {
-          h(`\r\n[forge] PTY unavailable: ${res.error ?? "spawn failed"}\r\n`);
-          h("[forge] Falling back to echo mode.\r\n\r\n");
+          h(`\r\n[terminus] PTY unavailable: ${res.error ?? "spawn failed"}\r\n`);
+          h("[terminus] Falling back to echo mode.\r\n\r\n");
         }
         return;
       }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use forge_code_intel::{DiagnoseResult, InspectResult, ReferenceResult};
+use terminus_code_intel::{DiagnoseResult, InspectResult, ReferenceResult};
 use serde::Deserialize;
 
 use crate::api::Envelope;

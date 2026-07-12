@@ -1,4 +1,4 @@
-# AGENTS.md — forge-fs
+# AGENTS.md — terminus-fs
 
 ## Local rules
 
@@ -8,7 +8,7 @@
 - **Symlink policy.** `PathResolver::resolve` MUST reject any symlink whose
   canonical target leaves the workspace root. Dangling symlinks are denied
   too — fail closed.
-- **Protected paths.** `.git`, `.forge`, `credentials`, `secrets`, `.ssh`,
+- **Protected paths.** `.git`, `.terminus`, `credentials`, `secrets`, `.ssh`,
   `.aws`, `.env`, `secret-store`, `host` are protected from model-driven
   writes. New protected prefixes go in `protected.rs` and require a test.
 - **No panics.** Return `PathError` rather than `unwrap`/`expect`/`panic!`.

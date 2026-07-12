@@ -1,10 +1,10 @@
 /**
- * @forge/capability-registry — capability descriptor, registry, lockfile,
+ * @terminus/capability-registry — capability descriptor, registry, lockfile,
  * activation lifecycle.
  *
  * Per SPEC §12, §35: CapabilityRegistry with discover(), admit(descriptor),
  * activate(id, session, task), deactivate(id), revoke(id). Loads Agent Skills
- * (SKILL.md + forge.skill.yaml). Pin descriptor hashes.
+ * (SKILL.md + terminus.skill.yaml). Pin descriptor hashes.
  */
 import { z } from "zod";
 import type {
@@ -16,8 +16,8 @@ import type {
   Uuid7,
   PrincipalId,
   Rfc3339Timestamp,
-} from "@forge/domain";
-import { ValidationError, ConflictError, PermissionError } from "@forge/domain";
+} from "@terminus/domain";
+import { ValidationError, ConflictError, PermissionError } from "@terminus/domain";
 
 // ────────────────────────── Repository ───────────────────────────────────────
 
@@ -245,7 +245,7 @@ export const skillManifestSchema = z.object({
 });
 
 /**
- * Loads a `SkillManifest` from a `forge.skill.yaml`-shaped object. Does NOT
+ * Loads a `SkillManifest` from a `terminus.skill.yaml`-shaped object. Does NOT
  * read the filesystem — the caller supplies the parsed YAML.
  */
 export function loadSkillManifest(yaml: unknown): SkillManifest {

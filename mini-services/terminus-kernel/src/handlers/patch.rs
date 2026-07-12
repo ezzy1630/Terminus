@@ -4,7 +4,7 @@
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use forge_kernel_protocol::{PatchCommitMode, PatchEdit, PatchResponse, WorkspaceBaseline};
+use terminus_kernel_protocol::{PatchCommitMode, PatchEdit, PatchResponse, WorkspaceBaseline};
 use serde::Deserialize;
 use std::sync::Arc;
 

@@ -1,4 +1,4 @@
-# AGENTS.md — forge-sandbox-macos
+# AGENTS.md — terminus-sandbox-macos
 
 ## Local rules
 

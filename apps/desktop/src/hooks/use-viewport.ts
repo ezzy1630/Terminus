@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — viewport-size hook.
+ * Terminus Desktop — viewport-size hook.
  *
  * Per SPEC §6 progressive collapse breakpoints:
  *   < 1100px → narrow sidebar

@@ -10,7 +10,7 @@
 
 The Model Context Protocol (MCP) is a valuable interoperability protocol: it lets servers expose tools, resources, and prompts to clients. But the MCP spec itself says tool descriptions should be treated as untrusted unless obtained from a trusted server, and notes that protocol-level enforcement is insufficient (SPEC §3.6). Recent tool-poisoning research demonstrates both single-tool and distributed multi-tool attacks (SPEC Appendix B).
 
-Forge cannot treat MCP as a trust boundary. MCP servers are Z4 untrusted. Their tool descriptions, outputs, and metadata must be taint-tracked, capability-scoped, and reauthorized on change.
+Terminus cannot treat MCP as a trust boundary. MCP servers are Z4 untrusted. Their tool descriptions, outputs, and metadata must be taint-tracked, capability-scoped, and reauthorized on change.
 
 ## Decision
 
@@ -25,14 +25,14 @@ Adopt **MCP as an isolated capability source, not a trust boundary** per SPEC §
 7. **Output limits** — MCP tool output is size-limited and artifact-backed (SPEC §35.3).
 8. **Aggregate tool set hashing** — the aggregate tool set (all active MCP tools) is hashed and recorded in the context manifest (ADR-0010).
 
-Implementation: `packages/extension-host` + `crates/forge-extension-runtime`. Schemas: `schemas/capabilities/mcp-server.json`.
+Implementation: `packages/extension-host` + `crates/terminus-extension-runtime`. Schemas: `schemas/capabilities/mcp-server.json`.
 
 ## Alternatives
 
 - **Trust MCP servers by default.** Rejected (SPEC §3.6, §49.6): tool-poisoning attacks; distributed-tool-poisoning attacks; rug-pull attacks.
 - **In-process MCP execution.** Rejected (SPEC §49.6): violates non-bypassability; no isolation.
 - **All MCP tools loaded into every request.** Rejected (SPEC §49.6): token bloat; model confusion; attack surface.
-- **MCP as the only tool source.** Rejected: Forge built-in tools (ADR-0012) are first-class; MCP is one source among many.
+- **MCP as the only tool source.** Rejected: Terminus built-in tools (ADR-0012) are first-class; MCP is one source among many.
 
 ## Consequences
 
@@ -55,7 +55,7 @@ Critical. MCP tool poisoning is a known attack class (SPEC §3.6, Appendix I.1).
 
 ## Migration
 
-MCP support is introduced in M9 (SPEC §48.12). OpenCode's MCP integration is wrapped behind the Forge capability registry (ADR-0002).
+MCP support is introduced in M9 (SPEC §48.12). OpenCode's MCP integration is wrapped behind the Terminus capability registry (ADR-0002).
 
 ## Rollback
 

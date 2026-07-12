@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — grouped execution block.
+ * Terminus Desktop — grouped execution block.
  *
  * Per SPEC §9.3: hybrid response structure. Normal explanation stays as
  * prose; structured actions use purpose-built compact blocks. Examples:

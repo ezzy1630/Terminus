@@ -1,4 +1,4 @@
-# AGENTS.md — forge-sandbox-windows
+# AGENTS.md — terminus-sandbox-windows
 
 ## Local rules
 

@@ -2,7 +2,7 @@
 
 ## When to use
 
-Use this runbook when the control plane (`forge-control`) and the kernel (`forge-kernel`) report incompatible versions, when capability tokens are rejected, or when RPC schemas don't match. The kernel protocol uses buf breaking-change checks (SPEC §45.4) but a running deployment may still end up with mismatched versions after a partial upgrade.
+Use this runbook when the control plane (`terminus-control`) and the kernel (`terminus-kernel`) report incompatible versions, when capability tokens are rejected, or when RPC schemas don't match. The kernel protocol uses buf breaking-change checks (SPEC §45.4) but a running deployment may still end up with mismatched versions after a partial upgrade.
 
 ## Symptoms
 
@@ -17,7 +17,7 @@ Use this runbook when the control plane (`forge-control`) and the kernel (`forge
 1. Check versions from both sides:
    ```bash
    # Kernel
-   grpcurl -plaintext -unix /var/run/forge-kernel.sock forge.kernel.v1.KernelInfoService/GetInfo
+   grpcurl -plaintext -unix /var/run/terminus-kernel.sock terminus.kernel.v1.KernelInfoService/GetInfo
    # Control plane
    curl http://localhost:3050/health
    ```

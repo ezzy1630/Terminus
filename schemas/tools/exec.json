@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/tools/exec.json",
+  "$id": "https://terminus.dev/schemas/tools/exec.json",
   "title": "exec",
   "description": "Run a short bounded command in the sandbox. The command AST (not a raw shell string) is classified by the policy engine before execution. Shell requires prompt unless explicitly allowlisted. Returns stdout/stderr artifacts, exit code, and resource usage.",
   "type": "object",

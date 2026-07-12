@@ -1,4 +1,4 @@
--- Forge — Initial SQLite schema migration (Appendix C of SPEC.md).
+-- Terminus — Initial SQLite schema migration (Appendix C of SPEC.md).
 --
 -- This is the executable source of truth for the database schema. Prisma
 -- (prisma/schema.prisma) is the TypeScript-facing client; this file is the
@@ -647,7 +647,9 @@ CREATE TABLE IF NOT EXISTS recovery_reports (
     details_json            TEXT NOT NULL DEFAULT '{}'
 ) STRICT;
 
--- Record this migration.
-INSERT INTO schema_migrations (version, name, checksum_sha256, applied_at)
-VALUES (1, 'initial', 'sha256:0001_initial_placeholder', datetime('now'))
-ON CONFLICT DO NOTHING;
+-- The migration runner (`scripts/migrate.ts`) records this migration in
+-- `schema_migrations` with a sha256 checksum computed from this file's bytes
+-- (SPEC §29.2: monotonic, checksum-verified migrations). Do NOT record the
+-- migration here: a second INSERT would conflict on the `version` primary key
+-- and would embed a stale placeholder checksum. The runner is the single
+-- source of truth for the applied-migration ledger.

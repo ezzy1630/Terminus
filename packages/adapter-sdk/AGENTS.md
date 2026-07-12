@@ -1,8 +1,8 @@
-# @forge/adapter-sdk — local rules
+# @terminus/adapter-sdk — local rules
 
 ## Non-negotiable
 
-- Adapters are untrusted. Forge independently inspects the final workspace.
+- Adapters are untrusted. Terminus independently inspects the final workspace.
 - Inner-harness self-report is not sufficient evidence.
 - Schema failure gets at most one correction attempt.
 - Declared/observed capability discrepancies may disable the adapter.

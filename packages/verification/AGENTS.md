@@ -1,4 +1,4 @@
-# @forge/verification — local rules
+# @terminus/verification — local rules
 
 ## Non-negotiable
 

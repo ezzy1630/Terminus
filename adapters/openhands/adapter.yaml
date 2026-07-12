@@ -5,7 +5,7 @@ adapter:
   description: |
     OpenHands adapter. OpenHands is an open-source coding agent with
     strong typed tool events and complete artifact export. Its context
-    visibility is partial; Forge supplies outer sandbox and brokered
+    visibility is partial; Terminus supplies outer sandbox and brokered
     network and secrets.
   capabilities:
     exact_context_visibility: partial
@@ -20,7 +20,7 @@ adapter:
     model_selection: constrained
     native_compaction: true
   observed_by_probe:
-    probe_version: forge-probe-1.0
+    probe_version: terminus-probe-1.0
     probed_at: "2025-01-15T00:00:00Z"
     probed_capabilities:
       exact_context_visibility: partial
@@ -35,12 +35,12 @@ adapter:
       model_selection: opaque
       native_compaction: true
   discrepancies:
-    - "filesystem_enforcement: declared outer_sandbox, observed none — Forge MUST supply outer sandbox"
-    - "network_enforcement: declared outer_sandbox, observed none — Forge MUST supply outer sandbox"
-    - "secret_isolation: declared outer_broker, observed none — Forge MUST broker secrets"
-    - "model_selection: declared constrained, observed opaque — Forge MUST control model selection"
+    - "filesystem_enforcement: declared outer_sandbox, observed none — Terminus MUST supply outer sandbox"
+    - "network_enforcement: declared outer_sandbox, observed none — Terminus MUST supply outer sandbox"
+    - "secret_isolation: declared outer_broker, observed none — Terminus MUST broker secrets"
+    - "model_selection: declared constrained, observed opaque — Terminus MUST control model selection"
   last_verified: "2025-01-15T00:00:00Z"
-  result_schema: forge.worker.v1
+  result_schema: terminus.worker.v1
   notes: |
     OpenHands is selected as a permanent baseline (SPEC §41.2) and for
     open-source-harness comparisons. Its complete artifact export and

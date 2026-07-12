@@ -1,10 +1,10 @@
 # Threat model
 
-This document covers Forge's threat actors (SPEC §36.2) and the threat/control matrix (Appendix I.1). For the trust-zone model and non-bypassability invariant, see `docs/architecture/trust-boundaries.md`. For the bypass register, see `docs/security/effect-bypass-register.yaml`.
+This document covers Terminus's threat actors (SPEC §36.2) and the threat/control matrix (Appendix I.1). For the trust-zone model and non-bypassability invariant, see `docs/architecture/trust-boundaries.md`. For the bypass register, see `docs/security/effect-bypass-register.yaml`.
 
 ## Scope (SPEC §36.1)
 
-Forge SHALL protect:
+Terminus SHALL protect:
 
 - host filesystem and user data;
 - repository integrity and Git metadata;
@@ -18,7 +18,7 @@ Forge SHALL protect:
 
 The security design **assumes the model, repository, external content, third-party extensions, MCP servers, and model-generated commands may be malicious or compromised**.
 
-**Out of scope:** Forge does not claim to defend a user from a fully compromised host administrator. This boundary is stated explicitly at startup when remote multi-tenant mode is enabled (ADR-0030).
+**Out of scope:** Terminus does not claim to defend a user from a fully compromised host administrator. This boundary is stated explicitly at startup when remote multi-tenant mode is enabled (ADR-0030).
 
 ## Threat actors (SPEC §36.2)
 
@@ -27,11 +27,11 @@ The security design **assumes the model, repository, external content, third-par
 3. **Malicious repository author** — the repository itself is adversarial (e.g., a cloned untrusted repo).
 4. **Compromised npm/PyPI/crate/MCP/skill package** — supply-chain attack on a dependency.
 5. **Malicious plugin or external harness** — third-party extension is adversarial (Z4).
-6. **Attacker with access to a remote Forge endpoint** — network attacker (only relevant if remote mode is enabled, ADR-0030).
+6. **Attacker with access to a remote Terminus endpoint** — network attacker (only relevant if remote mode is enabled, ADR-0030).
 7. **Another tenant in a shared execution environment** — cross-tenant attack (only relevant if multi-tenancy is enabled, ADR-0030).
 8. **Accidental user approval or misconfiguration** — the user approves something they shouldn't have, or misconfigures policy.
 9. **Compromised provider or leaked provider response** — the provider itself is compromised, or a previous provider response leaks.
-10. **Local malware outside Forge** — partially in scope; Forge defends its own boundary but cannot defend a fully compromised host.
+10. **Local malware outside Terminus** — partially in scope; Terminus defends its own boundary but cannot defend a fully compromised host.
 
 ## Threat/control matrix (Appendix I.1)
 
@@ -84,7 +84,7 @@ Every requested effect is classified into: `READ_LOCAL`, `WRITE_LOCAL`, `EXECUTE
 ### T1: Model runs destructive command
 
 - **Threat:** The model generates a command (`rm -rf /`, `git push --force`, `DROP TABLE`) that destroys user data.
-- **Controls:** Task scope (allowed paths/effects), command policy (`policies/command/default.yaml`), human approval for high-risk commands, sandbox (writable only to active worktree), `.git` and Forge-state denied.
+- **Controls:** Task scope (allowed paths/effects), command policy (`policies/command/default.yaml`), human approval for high-risk commands, sandbox (writable only to active worktree), `.git` and Terminus-state denied.
 - **Verification:** Command-policy tests, sandbox tests, approval-binding tests.
 
 ### T2: Repository prompt injection
@@ -114,7 +114,7 @@ Every requested effect is classified into: `READ_LOCAL`, `WRITE_LOCAL`, `EXECUTE
 ### T6: Path traversal/symlink escape
 
 - **Threat:** The model generates a path like `../../../etc/passwd` or a symlink that escapes the worktree.
-- **Controls:** Canonical path resolver (`crates/forge-fs`), mount/ACL controls (`.git`, Forge state, secret store, host denied), symlink containment (`symlinks: contained_only`).
+- **Controls:** Canonical path resolver (`crates/terminus-fs`), mount/ACL controls (`.git`, Terminus state, secret store, host denied), symlink containment (`symlinks: contained_only`).
 - **Verification:** Property tests (canonical path resolution never escapes root), race tests.
 
 ### T7: Child process escapes

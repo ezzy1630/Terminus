@@ -1,5 +1,5 @@
 /**
- * @forge/model-router — deterministic routing + escalation.
+ * @terminus/model-router — deterministic routing + escalation.
  *
  * Per SPEC §38.3 and §38.4: tasks request capabilities rather than model names.
  * The router ranks eligible models by cohort performance, health, predicted
@@ -11,13 +11,13 @@ import type {
   ModelKey,
   ConfidentialityLabel,
   RiskClass,
-} from "@forge/domain";
+} from "@terminus/domain";
 import type {
   ModelCapabilitySnapshot,
   ProviderCapabilitySnapshot,
   ConfidentialityPolicy,
-} from "@forge/provider-core";
-import { isConfidentialityAllowed } from "@forge/provider-core";
+} from "@terminus/provider-core";
+import { isConfidentialityAllowed } from "@terminus/provider-core";
 
 // ────────────────────────── Routing profile (§38.3) ──────────────────────────
 

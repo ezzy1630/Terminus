@@ -1,13 +1,13 @@
 baseline:
-  id: forge-minimal
+  id: terminus-minimal
   version: 1
   description: |
-    Forge minimal shell baseline (SPEC §18.1, §41.2). Uses only the
+    Terminus minimal shell baseline (SPEC §18.1, §41.2). Uses only the
     minimal always-visible ACI (read, search, edit, exec, job,
     diagnostics, capability) with no auxiliary agents, no memory, no
     compaction. Used as the lower-bound reference for harness-controlled
     comparison.
-  harness: forge
+  harness: terminus
   harness_commit: 0000000000000000000000000000000000000000
   configuration:
     orchestration:

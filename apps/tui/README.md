@@ -1,6 +1,6 @@
-# @forge/tui — Terminal Client
+# @terminus/tui — Terminal Client
 
-The **primary client surface** for Forge (SPEC §43.4). Connects to the public
+The **primary client surface** for Terminus (SPEC §43.4). Connects to the public
 API via the Caddy gateway, subscribes to the SSE event stream, and renders a
 live view of sessions, tasks, turns, approvals, and events in the terminal.
 
@@ -30,7 +30,7 @@ bun apps/tui/src/index.ts new
 
 ## Environment
 
-- `FORGE_GATEWAY` — Gateway base URL (default: `http://127.0.0.1:81`)
+- `TERMINUS_GATEWAY` — Gateway base URL (default: `http://127.0.0.1:81`)
 
 ## Status
 

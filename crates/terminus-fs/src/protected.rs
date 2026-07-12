@@ -3,8 +3,8 @@
 //! The following paths are protected against model-driven writes regardless
 //! of where the workspace lives:
 //!
-//! - `.git`, `.forge` — version control and Forge state
-//! - `forge-state://`, `secret-store://`, `host://` — internal URI schemes
+//! - `.git`, `.terminus` — version control and Terminus state
+//! - `terminus-state://`, `secret-store://`, `host://` — internal URI schemes
 //! - `credentials`, `secrets`, `.ssh`, `.aws`, `.env` — common secret files
 
 /// A category of protected resource.
@@ -22,8 +22,8 @@ pub const PROTECTED_PREFIXES: &[(&str, ProtectedResource)] = &[
     (".git", ProtectedResource::VersionControl),
     (".hg", ProtectedResource::VersionControl),
     (".svn", ProtectedResource::VersionControl),
-    (".forge", ProtectedResource::ForgeState),
-    ("forge-state", ProtectedResource::ForgeState),
+    (".terminus", ProtectedResource::ForgeState),
+    ("terminus-state", ProtectedResource::ForgeState),
     ("secret-store", ProtectedResource::SecretStore),
     ("credentials", ProtectedResource::Credentials),
     ("secrets", ProtectedResource::Credentials),

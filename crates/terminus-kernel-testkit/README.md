@@ -1,6 +1,6 @@
-# forge-kernel-testkit
+# terminus-kernel-testkit
 
-Test helpers for the Forge kernel.
+Test helpers for the Terminus kernel.
 
 Provides a `FakeKernel` that records invocations and returns success-shaped
 responses, an `InMemoryArtifactStore` for fast unit tests, a `MockSandbox`

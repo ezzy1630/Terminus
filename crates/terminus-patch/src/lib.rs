@@ -13,10 +13,11 @@
 //! 9. apply staged file replacements atomically;
 //! 10. on failure, roll back from the overlay snapshots.
 //!
-//! The patch is atomic at the Forge transaction layer, not at the native
+//! The patch is atomic at the Terminus transaction layer, not at the native
 //! filesystem layer. The journal and snapshots guarantee recovery from
 //! partial host-level application.
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 mod engine;

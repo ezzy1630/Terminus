@@ -11,7 +11,7 @@ const nextConfig: NextConfig = {
   // Webpack's dev server is slower to warm up but uses significantly less RAM.
   // We also raise the experimental memory limit.
   experimental: {
-    fetchCacheKeyPrefix: "forge",
+    fetchCacheKeyPrefix: "terminus",
   },
   // Allow the dev server to be reached via 127.0.0.1 from agent-browser.
   allowedDevOrigins: ["127.0.0.1", "localhost"],

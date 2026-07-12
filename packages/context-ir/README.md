@@ -1,4 +1,4 @@
-# @forge/context-ir
+# @terminus/context-ir
 
 Context IR schemas and helpers — context fragment types, source descriptors,
 exactness classes, trust/confidentiality/injection labels, freshness,
@@ -9,7 +9,7 @@ Per SPEC §8 and §33. Pure data — no I/O.
 
 ## Public API
 
-- Re-exports context-related types from `@forge/domain`.
+- Re-exports context-related types from `@terminus/domain`.
 - Schemas: `contextFragmentSchema`, `sourceDescriptorSchema`,
   `freshnessSchema`, `invalidationRuleSchema`, `selectionFeaturesSchema`,
   `contextScopeSchema`, `worldStateObservationSchema`,
@@ -24,12 +24,12 @@ Per SPEC §8 and §33. Pure data — no I/O.
 
 ## Dependencies
 
-`@forge/domain`, `zod`.
+`@terminus/domain`, `zod`.
 
 ## Invariants
 
 - The Context IR is provider-neutral. Provider-specific shapes live in
-  `@forge/provider-*`.
+  `@terminus/provider-*`.
 - A fragment's source URI + version MUST be sufficient to determine staleness.
 - `buildManifest` does not persist; the caller persists before sending the
   provider request.

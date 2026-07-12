@@ -1,6 +1,6 @@
-# forge-sandbox-container
+# terminus-sandbox-container
 
-Platform sandbox backend stub for Forge.
+Platform sandbox backend stub for Terminus.
 
 This crate provides a `SandboxBackend` implementation that honestly reports
 its effective enforcement. The in-sandbox build does not link the platform's

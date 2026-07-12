@@ -1,4 +1,4 @@
-# @forge/provider-local
+# @terminus/provider-local
 
 Local-model renderer. Chat-template-aware, tokenizer-aware. Same Transport
 pattern as other providers (OpenAI-compatible local endpoint).

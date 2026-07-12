@@ -1,4 +1,4 @@
-# AGENTS.md — forge-kernel-protocol
+# AGENTS.md — terminus-kernel-protocol
 
 ## Local rules
 

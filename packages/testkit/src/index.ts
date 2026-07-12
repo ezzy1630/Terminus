@@ -1,5 +1,5 @@
 /**
- * @forge/testkit — fixtures and builders for Forge tests.
+ * @terminus/testkit — fixtures and builders for Terminus tests.
  *
  * Provides:
  * - `fakeProvider` (scripted streaming text, tool calls, errors, rate limits,
@@ -35,9 +35,9 @@ import type {
   SourceDescriptor,
   SelectionFeatures,
   ActorKind,
-} from "@forge/domain";
-import { asContentHash, artifactUriFromHex, nowTimestamp } from "@forge/domain";
-import type { AnyTypedEvent, EventSink, EventPayloadMap, EventType } from "@forge/runtime-protocol";
+} from "@terminus/domain";
+import { asContentHash, artifactUriFromHex, nowTimestamp } from "@terminus/domain";
+import type { AnyTypedEvent, EventSink, EventPayloadMap, EventType } from "@terminus/runtime-protocol";
 
 // ────────────────────────── ID generation ────────────────────────────────────
 

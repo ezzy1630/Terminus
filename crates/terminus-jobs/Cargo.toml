@@ -1,17 +1,17 @@
 [package]
-name = "forge-jobs"
+name = "terminus-jobs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Durable job state machine for the Forge kernel."
+description = "Durable job state machine for the Terminus kernel."
 
 [lints]
 workspace = true
 
 [dependencies]
-forge-kernel-protocol = { workspace = true }
-forge-process = { workspace = true }
+terminus-kernel-protocol = { workspace = true }
+terminus-process = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,4 +20,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-forge-artifacts = { workspace = true }
+terminus-artifacts = { workspace = true }

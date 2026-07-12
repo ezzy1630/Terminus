@@ -8,7 +8,7 @@
 
 ## Context
 
-OpenCode's upstream plugin model allows in-process plugins that can auto-install packages and receive shell access (SPEC §4 competitive synthesis, §36.17). This is unacceptable for Forge: in-process third-party code can bypass the kernel (violating SPEC §5.2), read ambient secrets, and corrupt the control plane's memory.
+OpenCode's upstream plugin model allows in-process plugins that can auto-install packages and receive shell access (SPEC §4 competitive synthesis, §36.17). This is unacceptable for Terminus: in-process third-party code can bypass the kernel (violating SPEC §5.2), read ambient secrets, and corrupt the control plane's memory.
 
 Third-party plugins are Z4 untrusted. They must run in separate processes or WASI sandboxes with declared capabilities, no lifecycle scripts, and supply-chain pinning.
 
@@ -23,9 +23,9 @@ Adopt **third-party plugins out of process or WASI** per SPEC §12.3 and §35.4:
 5. **Signatures** — plugins are signed; signatures verified at install and load (SPEC §46.17).
 6. **Lockfiles** — `extension.lock.json` pins all active extensions; changes require user action.
 7. **Capability declaration** — every plugin declares its capabilities (filesystem, network, secrets, subprocesses, model-visibility) in a manifest. The kernel enforces these.
-8. **Disabled auto-install** — automatic plugin installation is disabled in the secure Forge profile (SPEC §48.4 task 13).
+8. **Disabled auto-install** — automatic plugin installation is disabled in the secure Terminus profile (SPEC §48.4 task 13).
 
-Implementation: `crates/forge-extension-runtime` (host, manifest validation) + `packages/extension-host` (TS-side coordination). Schemas: `schemas/capabilities/plugin.json`.
+Implementation: `crates/terminus-extension-runtime` (host, manifest validation) + `packages/extension-host` (TS-side coordination). Schemas: `schemas/capabilities/plugin.json`.
 
 ## Alternatives
 
@@ -36,7 +36,7 @@ Implementation: `crates/forge-extension-runtime` (host, manifest validation) + `
 
 ## Consequences
 
-- Plugins are first-class capabilities in the Forge registry.
+- Plugins are first-class capabilities in the Terminus registry.
 - Plugin manifests are validated at load; capability changes trigger reauthorization (like MCP, ADR-0018).
 - The `extension.lock.json` is the source of truth for active extensions.
 - Plugin processes are owned by the kernel; killed on cancellation or unload.
@@ -56,7 +56,7 @@ Critical. This is what prevents third-party code from acquiring ambient effects 
 
 ## Migration
 
-Plugins are introduced in M9 (SPEC §48.12). OpenCode's in-process plugin model is replaced by the Forge extension runtime (ADR-0002, `docs/security/effect-bypass-register.yaml`).
+Plugins are introduced in M9 (SPEC §48.12). OpenCode's in-process plugin model is replaced by the Terminus extension runtime (ADR-0002, `docs/security/effect-bypass-register.yaml`).
 
 ## Rollback
 

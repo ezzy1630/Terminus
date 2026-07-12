@@ -1,4 +1,4 @@
-# AGENTS.md — forge-policy
+# AGENTS.md — terminus-policy
 
 ## Local rules
 

@@ -1,4 +1,4 @@
-# @forge/model-router — local rules
+# @terminus/model-router — local rules
 
 ## Non-negotiable
 

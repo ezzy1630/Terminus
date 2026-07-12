@@ -1,5 +1,5 @@
 /**
- * @forge/verification — tests for parallel DAG execution (§40.1),
+ * @terminus/verification — tests for parallel DAG execution (§40.1),
  * changed-code invalidation (§40.5), flaky-test policy (§40.9), and
  * predicate registry (§40.2).
  */
@@ -10,7 +10,7 @@ import type {
   VerificationResult,
   Uuid7,
   Rfc3339Timestamp,
-} from "@forge/domain";
+} from "@terminus/domain";
 import {
   VerificationEngine,
   buildVerificationPlan,

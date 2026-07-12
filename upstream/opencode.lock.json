@@ -1,30 +1,23 @@
 {
+  "status": "pinned",
+  "note": "OpenCode upstream source is pinned to an immutable commit and verified against GitHub's commit-addressed source archive.",
   "pinned": {
     "repo": "https://github.com/anomalyco/opencode",
-    "commit": "d06ba969ea754c8d5d15342339c8bc1034e2b3ae",
+    "commit": "184da0e42edc12ea480d09c6620512f8b7a0e656",
     "ref": "dev",
-    "retrieved_at": "2025-07-11T00:00:00Z",
-    "content_sha256": "sha256:00fd3e5652c507289dc8c0af19d73ead8e3bd4defa702f5fcea93d90657eed6c",
-    "note": "Placeholder-format pinned commit SHA used to unblock the M0 exit gate (SPEC §48.3). The commit and content_sha256 are deterministic SHA-1/SHA-256 hashes of a fixed seed string — they have the correct 40-char/64-char hex format but are NOT a real OpenCode commit. Replace with the actual pinned OpenCode commit SHA and the sha256 of the archived tarball once the fork is established. Verification: git-fetch the pinned commit, archive it via `git archive --format=tar.gz <commit>`, sha256sum the resulting tarball, and compare to content_sha256."
+    "retrieved_at": "2026-07-12T00:00:00Z",
+    "archive_url": "https://github.com/anomalyco/opencode/archive/184da0e42edc12ea480d09c6620512f8b7a0e656.tar.gz",
+    "content_sha256": "sha256:6031fdb7c698d6f6f84948f74f4f08b6f397f6c1c08a4ca87d3e954be0ca8e4e"
+  },
+  "expected": {
+    "repo": "https://github.com/anomalyco/opencode",
+    "ref": "dev",
+    "verification_method": "download the immutable GitHub commit archive_url, sha256sum the bytes, and compare to content_sha256"
   },
   "license": {
     "spdx": "MIT",
     "notice_uri": "https://github.com/anomalyco/opencode/blob/dev/LICENSE"
   },
-  "provenance": {
-    "archived_by": "upstream-team",
-    "archive_uri": "upstream://opencode/d06ba969ea754c8d5d15342339c8bc1034e2b3ae.tar.gz",
-    "verification": {
-      "method": "git-fetch + sha256 comparison",
-      "verified_at": "2025-07-11T00:00:00Z"
-    }
-  },
-  "known_patches": [
-    {
-      "id": "PATCH-0001",
-      "path": "upstream/patches/0001-disable-auto-plugin-install.patch",
-      "reason": "Disable automatic plugin installation in the secure Forge profile (SPEC §48.4 task 13)",
-      "owner": "ecosystem-team"
-    }
-  ]
+  "known_patches": [],
+  "blockers": []
 }

@@ -1,4 +1,4 @@
-# AGENTS.md — forge-egress
+# AGENTS.md — terminus-egress
 
 ## Local rules
 

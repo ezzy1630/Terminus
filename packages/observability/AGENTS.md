@@ -1,4 +1,4 @@
-# @forge/observability — local rules
+# @terminus/observability — local rules
 
 ## Non-negotiable
 

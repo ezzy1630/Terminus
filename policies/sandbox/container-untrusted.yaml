@@ -13,7 +13,7 @@ profile:
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
     # In production this is a real digest pinning the gVisor / Firecracker
     # image with the workspace runtime and pinned toolchain.
-    repository: ghcr.io/forge/sandbox-untrusted
+    repository: ghcr.io/terminus/sandbox-untrusted
     tag: pinned
   require_full_enforcement: true
   filesystem:
@@ -26,7 +26,7 @@ profile:
       - worktree://active/**
     deny:
       - worktree://active/.git/**
-      - forge-state://**
+      - terminus-state://**
       - secret-store://**
       - host://**
       - credentials://**

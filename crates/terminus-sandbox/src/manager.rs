@@ -50,13 +50,16 @@ impl SandboxManager {
     /// backend rejects the profile as misconfigured (a security refusal, not
     /// a capability gap), that error is propagated verbatim so callers can
     /// distinguish "unsafe profile" from "no backend available".
-    pub fn select(&self, profile: &SandboxProfile) -> Result<Arc<dyn SandboxBackend>, SandboxError> {
+    pub fn select(
+        &self,
+        profile: &SandboxProfile,
+    ) -> Result<Arc<dyn SandboxBackend>, SandboxError> {
         match self.default_backend.supports_profile(profile) {
             Ok(()) => return Ok(Arc::clone(&self.default_backend)),
-            Err(SandboxError::Misconfigured(_)) => {
+            Err(e @ SandboxError::Misconfigured(_)) => {
                 // Security refusal: do not silently fall through to a weaker
-                // backend. Propagate the misconfiguration error.
-                return Err(self.default_backend.supports_profile(profile).unwrap_err());
+                // backend. Propagate the misconfiguration error verbatim.
+                return Err(e);
             }
             Err(_) => {}
         }
@@ -89,7 +92,7 @@ impl Default for SandboxManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::{SecretsAccess, SandboxProfile};
+    use crate::profile::{SandboxProfile, SecretsAccess};
     use crate::report::EnforcementStatus;
 
     #[test]

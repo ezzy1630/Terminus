@@ -1,5 +1,5 @@
 /**
- * @forge/memory — memory candidate extraction, consolidation curator, retrieval.
+ * @terminus/memory — memory candidate extraction, consolidation curator, retrieval.
  *
  * Per SPEC §16, §39: MemoryService with extractCandidates(task),
  * consolidate() (lease-protected), retrieve(query, scope), invalidate(fileHash),
@@ -32,8 +32,8 @@ import type {
   AcceptanceCriterion,
   InvalidationRule,
   Micros,
-} from "@forge/domain";
-import { ValidationError, ConflictError } from "@forge/domain";
+} from "@terminus/domain";
+import { ValidationError, ConflictError } from "@terminus/domain";
 
 // ────────────────────────── Repository ───────────────────────────────────────
 

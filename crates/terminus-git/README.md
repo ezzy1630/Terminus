@@ -1,6 +1,6 @@
-# forge-git
+# terminus-git
 
-Protected Git operations for the Forge kernel.
+Protected Git operations for the Terminus kernel.
 
 `GitOps` runs structured `worktree`, `commit`, `branch`, and `merge`
 operations by shelling out to a pinned `git` binary through

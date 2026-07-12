@@ -11,7 +11,7 @@
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use forge_kernel_protocol::WorkspacePath;
+use terminus_kernel_protocol::WorkspacePath;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -31,7 +31,7 @@ pub struct ReadFileRequest {
 
 #[derive(Debug, Serialize)]
 pub struct ReadFileResponse {
-    pub artifact: forge_kernel_protocol::ArtifactRef,
+    pub artifact: terminus_kernel_protocol::ArtifactRef,
     pub model_projection_utf8: String,
     pub source_version: String,
     pub elisions: Vec<serde_json::Value>,
@@ -105,7 +105,7 @@ pub async fn list(
     // before listing. We reuse the kernel's PathResolver so the same
     // safety guarantees apply to `list` as to `read`.
     let resolver = state.kernel.files.resolver();
-    let safe = forge_fs::SafePath::new(&req.path.relative_path).map_err(|e| {
+    let safe = terminus_fs::SafePath::new(&req.path.relative_path).map_err(|e| {
         ApiError::validation(format!("path rejected by SafePath: {e}"), &trace_id.0)
     })?;
     let resolved = resolver.resolve_strict(&safe).map_err(|e| {
@@ -117,8 +117,8 @@ pub async fn list(
         Ok(rd) => rd,
         Err(e) => {
             return Err(ApiError::new(
-                forge_kernel_protocol::ErrorCode::PathNotFound,
-                forge_kernel_protocol::ErrorCategory::NotFound,
+                terminus_kernel_protocol::ErrorCode::PathNotFound,
+                terminus_kernel_protocol::ErrorCategory::NotFound,
                 format!("list {}: {e}", base.display()),
                 trace_id.0,
             ));

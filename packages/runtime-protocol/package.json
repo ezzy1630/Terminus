@@ -1,5 +1,5 @@
 {
-  "name": "@forge/runtime-protocol",
+  "name": "@terminus/runtime-protocol",
   "version": "0.1.0",
   "type": "module",
   "main": "./src/index.ts",
@@ -11,7 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@forge/domain": "workspace:*",
+    "@terminus/domain": "workspace:*",
     "zod": "^4.0.2"
   }
 }

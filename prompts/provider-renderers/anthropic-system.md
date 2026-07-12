@@ -1,19 +1,19 @@
 # Anthropic System Prompt Renderer
 
-Forge renders the compiled context into an Anthropic Messages API request.
+Terminus renders the compiled context into an Anthropic Messages API request.
 The renderer MUST follow these rules.
 
 ## Message ordering and cache prefixes
 
 Anthropic caches a stable prefix of system + tools + initial messages when
-`cache_control` breakpoints are set. Forge preserves cache hits by emitting:
+`cache_control` breakpoints are set. Terminus preserves cache hits by emitting:
 
 1. `system` array — the authority layer as a single text block with
-   `cache_control: { type: "ephemeral" }`. Forge never modifies the
+   `cache_control: { type: "ephemeral" }`. Terminus never modifies the
    authority between turns of the same task.
 2. `tools` array — the active tool schemas, with a `cache_control`
    breakpoint after the last tool. Tool layer hash changes are logged.
-3. User/assistant turns — the volatile suffix. Forge places a
+3. User/assistant turns — the volatile suffix. Terminus places a
    `cache_control` breakpoint after the most recent complete episode
    boundary so subsequent turns reuse the prefix.
 
@@ -55,10 +55,10 @@ For `claude-3-*` and `claude-4-*` models, the renderer:
 
 ## Continuation and compaction
 
-Anthropic exposes `stop_reason: "max_tokens"` for continuation. Forge
+Anthropic exposes `stop_reason: "max_tokens"` for continuation. Terminus
 emulates continuation by appending an assistant turn ending at the stop,
 then a user turn `Continue from where you left off.` Native compaction
-is not used; Forge checkpoints and rebuilds.
+is not used; Terminus checkpoints and rebuilds.
 
 ## Streaming
 

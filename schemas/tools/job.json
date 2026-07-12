@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://forge.dev/schemas/tools/job.json",
+  "$id": "https://terminus.dev/schemas/tools/job.json",
   "title": "job",
   "description": "Manage a durable process. Operations: start, read (incremental output by cursor), input (PTY input), signal, stop, status. Long-running processes (servers, watchers, test runners that exceed exec timeout) use job instead of exec.",
   "type": "object",

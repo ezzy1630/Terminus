@@ -1,6 +1,6 @@
-# forge-sandbox
+# terminus-sandbox
 
-Sandbox backend trait and manager for the Forge kernel.
+Sandbox backend trait and manager for the Terminus kernel.
 
 `SandboxBackend` is a trait with one honest method — `enforcement_report()`
 — that lists which features are enforced, degraded, and unsupported. The
@@ -11,6 +11,6 @@ explicitly listed as unsupported. `SandboxManager` selects a backend per
 profile and fails closed when no backend can satisfy a profile (SPEC.md
 Section 13.3, 13.4).
 
-Platform-specific backends live in `forge-sandbox-linux`,
-`forge-sandbox-macos`, `forge-sandbox-windows`, and
-`forge-sandbox-container`.
+Platform-specific backends live in `terminus-sandbox-linux`,
+`terminus-sandbox-macos`, `terminus-sandbox-windows`, and
+`terminus-sandbox-container`.

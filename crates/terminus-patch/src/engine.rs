@@ -4,16 +4,16 @@ use crate::validate::{
     brace_balance_check, line_count_sanity, utf8_check, ValidationProfile, ValidationResult,
     ValidationStatus,
 };
-use forge_fs::{PathResolver, SafePath};
-use forge_kernel_protocol::{
-    ChangedFile, CreateFile, DeleteFile, DeleteRange, InsertContent, MoveFile, PatchCommitMode,
-    PatchEdit, PatchResponse, ReplaceExactText, ReplaceRange, ReplaceSymbol, UnifiedDiff,
-    WorkspaceBaseline, WorkspacePath,
-};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use terminus_fs::{PathResolver, SafePath};
+use terminus_kernel_protocol::{
+    ChangedFile, CreateFile, DeleteFile, DeleteRange, InsertContent, MoveFile, PatchCommitMode,
+    PatchEdit, PatchResponse, ReplaceExactText, ReplaceRange, ReplaceSymbol, UnifiedDiff,
+    WorkspaceBaseline, WorkspacePath,
+};
 
 /// A transaction in progress. Holds snapshots for rollback.
 #[derive(Debug)]
@@ -188,7 +188,9 @@ impl PatchEngine {
         let state = match commit_mode {
             PatchCommitMode::PreviewOnly => "preview".to_string(),
             PatchCommitMode::StageOnly => "staged".to_string(),
-            PatchCommitMode::ApplyToWorktree | PatchCommitMode::Unspecified => "applied".to_string(),
+            PatchCommitMode::ApplyToWorktree | PatchCommitMode::Unspecified => {
+                "applied".to_string()
+            }
         };
 
         // In PreviewOnly mode we must NOT persist any changes to the worktree.
@@ -205,7 +207,7 @@ impl PatchEngine {
         // Convert validations to protocol type.
         let protocol_validations = validations
             .into_iter()
-            .map(|v| forge_kernel_protocol::ValidationResult {
+            .map(|v| terminus_kernel_protocol::ValidationResult {
                 check_id: v.check_id,
                 status: match v.status {
                     ValidationStatus::Pass => "pass".to_string(),
@@ -237,9 +239,7 @@ impl PatchEngine {
     ) -> Result<(), PatchError> {
         match edit {
             PatchEdit::CreateFile(e) => self.apply_create_file(tx, e, changed_files),
-            PatchEdit::ReplaceRange(e) => {
-                self.apply_replace_range(tx, baseline, e, changed_files)
-            }
+            PatchEdit::ReplaceRange(e) => self.apply_replace_range(tx, baseline, e, changed_files),
             PatchEdit::ReplaceExactText(e) => {
                 self.apply_replace_exact_text(tx, baseline, e, changed_files)
             }
@@ -247,9 +247,7 @@ impl PatchEngine {
                 self.apply_replace_symbol(tx, baseline, e, changed_files)
             }
             PatchEdit::Insert(e) => self.apply_insert(tx, baseline, e, changed_files),
-            PatchEdit::DeleteRange(e) => {
-                self.apply_delete_range(tx, baseline, e, changed_files)
-            }
+            PatchEdit::DeleteRange(e) => self.apply_delete_range(tx, baseline, e, changed_files),
             PatchEdit::MoveFile(e) => self.apply_move_file(tx, baseline, e, changed_files),
             PatchEdit::DeleteFile(e) => self.apply_delete_file(tx, baseline, e, changed_files),
             PatchEdit::UnifiedDiff(e) => self.apply_unified_diff(tx, e, changed_files),
@@ -271,7 +269,7 @@ impl PatchEngine {
         let snapshot_name = format!(
             "{}-{}",
             relative_path.replace('/', "_"),
-            forge_kernel_protocol::new_id()
+            terminus_kernel_protocol::new_id()
         );
         let snapshot_path = tx.overlay_dir.join(&snapshot_name);
         std::fs::write(&snapshot_path, &original_bytes)?;
@@ -341,8 +339,7 @@ impl PatchEngine {
                 lines.len()
             )));
         }
-        let mut new_lines: Vec<String> =
-            lines[..start - 1].iter().map(|s| s.to_string()).collect();
+        let mut new_lines: Vec<String> = lines[..start - 1].iter().map(|s| s.to_string()).collect();
         new_lines.push(String::from_utf8_lossy(&edit.replacement_utf8).to_string());
         for line in &lines[end..] {
             new_lines.push(line.to_string());
@@ -419,7 +416,7 @@ impl PatchEngine {
         // finding the first occurrence of the symbol name followed by `(` or
         // `=` and replacing the smallest matching block bounded by balanced
         // braces. This is a degraded implementation; full symbol resolution
-        // lives in forge-code-intel.
+        // lives in terminus-code-intel.
         let original_hash = self.snapshot_if_existing(tx, &edit.path.relative_path)?;
         self.verify_hash(&edit.path, &edit.expected_sha256, &original_hash, baseline)?;
         let safe = SafePath::new(&edit.path.relative_path)?;
@@ -549,8 +546,7 @@ impl PatchEngine {
                 lines.len()
             )));
         }
-        let mut new_lines: Vec<String> =
-            lines[..start - 1].iter().map(|s| s.to_string()).collect();
+        let mut new_lines: Vec<String> = lines[..start - 1].iter().map(|s| s.to_string()).collect();
         for line in &lines[end..] {
             new_lines.push(line.to_string());
         }
@@ -772,11 +768,11 @@ fn compute_dirty_digest(changed: &[ChangedFile]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_kernel_protocol::{
+    use tempfile::tempdir;
+    use terminus_kernel_protocol::{
         CreateFile, DeleteFile, InsertContent, LineRange, PatchCommitMode, PatchEdit,
         ReplaceExactText, ReplaceRange, SourceVersion, WorkspaceBaseline, WorkspacePath,
     };
-    use tempfile::tempdir;
 
     fn engine() -> (tempfile::TempDir, PatchEngine) {
         let dir = tempdir().unwrap();
@@ -829,8 +825,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.state, "applied");
         assert_eq!(resp.changed_files.len(), 1);
-        let content =
-            std::fs::read_to_string(dir.path().join("workspace/hello.txt")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("workspace/hello.txt")).unwrap();
         assert_eq!(content, "hello world\n");
     }
 
@@ -855,8 +850,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, PatchError::AlreadyExists(_)));
         // File untouched.
-        let content =
-            std::fs::read_to_string(dir.path().join("workspace/existing.txt")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("workspace/existing.txt")).unwrap();
         assert_eq!(content, "old");
     }
 
@@ -868,8 +862,7 @@ mod tests {
             "fn old() {}\nfn other() {}\n",
         )
         .unwrap();
-        let original_hash =
-            hash_of("fn old() {}\nfn other() {}\n");
+        let original_hash = hash_of("fn old() {}\nfn other() {}\n");
         let edit = PatchEdit::ReplaceExactText(ReplaceExactText {
             path: ws_path("code.txt"),
             expected_sha256: original_hash,
@@ -887,23 +880,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(resp.state, "applied");
-        let content =
-            std::fs::read_to_string(dir.path().join("workspace/code.txt")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("workspace/code.txt")).unwrap();
         assert_eq!(content, "fn new() {}\nfn other() {}\n");
     }
 
     #[test]
     fn stale_hash_rejected() {
         let (dir, engine) = engine();
-        std::fs::write(
-            dir.path().join("workspace/code.txt"),
-            "fn old() {}\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("workspace/code.txt"), "fn old() {}\n").unwrap();
         let edit = PatchEdit::ReplaceExactText(ReplaceExactText {
             path: ws_path("code.txt"),
-            expected_sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                .to_string(),
+            expected_sha256:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
             expected_utf8: b"fn old() {}".to_vec(),
             replacement_utf8: b"fn new() {}".to_vec(),
             require_unique: true,
@@ -948,8 +937,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(resp.state, "applied");
-        let content =
-            std::fs::read_to_string(dir.path().join("workspace/multi.txt")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("workspace/multi.txt")).unwrap();
         assert_eq!(content, "line1\nreplaced2\nreplaced3\nline4\n");
     }
 
@@ -997,8 +985,7 @@ mod tests {
                 ValidationProfile::TaskDefault,
             )
             .unwrap();
-        let content =
-            std::fs::read_to_string(dir.path().join("workspace/code.txt")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("workspace/code.txt")).unwrap();
         assert_eq!(content, "fn main() {}\nfn helper() {}\n");
     }
 
@@ -1027,8 +1014,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, PatchError::ValidationFailed(_)));
         // File should be rolled back.
-        let content =
-            std::fs::read_to_string(dir.path().join("workspace/code.txt")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("workspace/code.txt")).unwrap();
         assert_eq!(content, "fn main() {}\n");
     }
 
@@ -1059,8 +1045,7 @@ mod tests {
         // File should NOT be modified in preview_only — but our current
         // implementation writes then rolls back; we check that final state
         // matches the original.
-        let content =
-            std::fs::read_to_string(dir.path().join("workspace/code.txt")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("workspace/code.txt")).unwrap();
         assert_eq!(content, "fn main() {}\n");
     }
 

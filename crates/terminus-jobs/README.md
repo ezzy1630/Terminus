@@ -1,6 +1,6 @@
-# forge-jobs
+# terminus-jobs
 
-Durable job state machine for the Forge kernel.
+Durable job state machine for the Terminus kernel.
 
 `JobManager` tracks long-running processes through the state machine
 `CREATED → STARTING → RUNNING → EXITED/STOPPING/ORPHANED/LOST` and reconciles

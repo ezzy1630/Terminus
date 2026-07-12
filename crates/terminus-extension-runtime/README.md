@@ -1,6 +1,6 @@
-# forge-extension-runtime
+# terminus-extension-runtime
 
-WASI extension host (stub) for the Forge kernel.
+WASI extension host (stub) for the Terminus kernel.
 
 `WasiExtensionHost` reports whether a WASI runtime is available, validates
 `ExtensionManifest`s structurally, and (when a runtime is linked) executes

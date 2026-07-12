@@ -17,12 +17,20 @@ impl TraceId {
     /// Pull a trace ID from the request's `x-trace-id` or `traceparent`
     /// header; otherwise generate a fresh UUIDv7.
     pub fn from_request_or_new(req: &Request) -> Self {
-        if let Some(h) = req.headers().get("x-trace-id").and_then(|h| h.to_str().ok()) {
+        if let Some(h) = req
+            .headers()
+            .get("x-trace-id")
+            .and_then(|h| h.to_str().ok())
+        {
             if !h.is_empty() {
                 return Self(h.to_string());
             }
         }
-        if let Some(h) = req.headers().get("traceparent").and_then(|h| h.to_str().ok()) {
+        if let Some(h) = req
+            .headers()
+            .get("traceparent")
+            .and_then(|h| h.to_str().ok())
+        {
             // traceparent format: 00-<trace-id>-<span-id>-<flags>
             // We use the trace-id portion.
             let parts: Vec<&str> = h.split('-').collect();
@@ -47,4 +55,3 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     h.update(bytes);
     format!("sha256:{}", hex::encode(h.finalize()))
 }
-

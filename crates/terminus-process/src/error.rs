@@ -13,7 +13,7 @@ pub enum ProcessError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("artifact store error: {0}")]
-    Artifact(#[from] forge_artifacts::ArtifactError),
+    Artifact(#[from] terminus_artifacts::ArtifactError),
     #[error("invalid command spec: {0}")]
     InvalidSpec(String),
     #[error("cancelled")]

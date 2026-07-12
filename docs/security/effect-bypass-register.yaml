@@ -1,88 +1,44 @@
 # Effect bypass register (SPEC §27.5)
 #
-# During the first migration stage, inherited OpenCode code may still contain
-# direct effect paths. Those paths MUST be inventoried here with: id, owner,
-# source, effect, reason, containment, removal_milestone, test, status.
+# Inventories direct effect paths in inherited OpenCode code that have not yet
+# been routed through the Rust kernel. Each entry MUST list: id, owner, source,
+# effect, reason, containment, removal_milestone, test, status.
 #
-# The release gate is NOT "zero entries immediately"; it is "no unknown
-# entries, every entry contained, and all entries removed before the
-# secure-default milestone (M4)."
+# The release gate (SPEC §46.18) is NOT "zero entries immediately"; it is
+# "no unknown entries, every entry contained, and all entries removed before
+# the secure-default milestone (M4)."
 #
 # Status: open | contained | removed
+#
+# HONESTY NOTE (2026-07-12 audit): the previous version of this register listed
+# six BYPASS entries pointing at packages/open-code-bridge/src/inherited/*.ts
+# and tests/security/bypass/*.test.ts. None of those files existed — the OpenCode
+# fork had not actually been imported (see upstream/opencode.lock.json, status
+# `pending`). Those entries were removed because they documented bypasses in
+# code that was not present and tests that did not exist. This register now
+# reflects reality: zero inherited effect paths exist yet. When the OpenCode
+# fork is imported (M1/M2), every inherited direct effect path MUST be added
+# back here with a containment plan and a removal milestone BEFORE it ships.
 
 version: 1
-last_updated: "2025-07-11"
+last_updated: "2026-07-12"
 owner: security-runtime
 review_cadence: per-release
 
-# Inherited OpenCode bypasses identified during M1 (SPEC §48.4).
-# Each entry is contained (not bypassing the kernel in production) and
-# scheduled for removal by the named milestone.
-entries:
-  - id: BYPASS-0001
-    owner: upstream-team
-    source: packages/open-code-bridge/src/inherited/exec.ts
-    effect: EXECUTE_LOCAL
-    reason: inherited OpenCode subprocess spawn for the dev server
-    containment: process-level outer sandbox; not on the Forge-owned command path
-    removal_milestone: M3
-    test: tests/security/bypass/BYPASS-0001.test.ts
-    status: contained
-
-  - id: BYPASS-0002
-    owner: upstream-team
-    source: packages/open-code-bridge/src/inherited/fs.ts
-    effect: WRITE_LOCAL
-    reason: inherited OpenCode direct file write for session persistence
-    containment: writes routed through forge-fs after M2; outer sandbox until then
-    removal_milestone: M2
-    test: tests/security/bypass/BYPASS-0002.test.ts
-    status: contained
-
-  - id: BYPASS-0003
-    owner: upstream-team
-    source: packages/open-code-bridge/src/inherited/network.ts
-    effect: NETWORK_WRITE
-    reason: inherited OpenCode direct socket for provider calls
-    containment: provider calls routed through forge-egress proxy after M4
-    removal_milestone: M4
-    test: tests/security/bypass/BYPASS-0003.test.ts
-    status: contained
-
-  - id: BYPASS-0004
-    owner: upstream-team
-    source: packages/open-code-bridge/src/inherited/secrets.ts
-    effect: SECRET_USE
-    reason: inherited OpenCode environment-based secret access
-    containment: secrets routed through forge-secrets broker after M4
-    removal_milestone: M4
-    test: tests/security/bypass/BYPASS-0004.test.ts
-    status: contained
-
-  - id: BYPASS-0005
-    owner: ecosystem-team
-    source: packages/open-code-bridge/src/inherited/plugins.ts
-    effect: PLUGIN_ADMIN
-    reason: inherited OpenCode in-process plugin execution
-    containment: plugins disabled in secure Forge profile (SPEC §48.4 task 13)
-    removal_milestone: M9
-    test: tests/security/bypass/BYPASS-0005.test.ts
-    status: contained
-
-  - id: BYPASS-0006
-    owner: upstream-team
-    source: packages/open-code-bridge/src/inherited/git.ts
-    effect: WRITE_LOCAL
-    reason: inherited OpenCode direct git operations
-    containment: git operations routed through forge-git after M4
-    removal_milestone: M4
-    test: tests/security/bypass/BYPASS-0006.test.ts
-    status: contained
+entries: []
 
 # Summary for the release gate (SPEC §46.18):
-#   total: 6
-#   contained: 6
+#   total: 0
+#   contained: 0
 #   open: 0
-#   removed-by-M4-required: 4 (BYPASS-0002/0003/0004/0006)
-#   removed-by-M9-required: 1 (BYPASS-0005)
-#   M3-removal: 1 (BYPASS-0001)
+#   removed-by-M4-required: 0
+#
+# When the OpenCode fork is imported, the expected initial bypass set is:
+#   BYPASS-0001  EXECUTE_LOCAL   inherited subprocess spawn        -> M3
+#   BYPASS-0002  WRITE_LOCAL     inherited direct file write        -> M2
+#   BYPASS-0003  NETWORK_WRITE   inherited direct provider socket   -> M4
+#   BYPASS-0004  SECRET_USE      inherited env-based secret access  -> M4
+#   BYPASS-0005  PLUGIN_ADMIN    inherited in-process plugin exec   -> M9
+#   BYPASS-0006  WRITE_LOCAL     inherited direct git operations    -> M4
+# Each MUST be backed by a real file under packages/open-code-bridge/src/inherited/
+# and a real test under tests/security/bypass/ before it is listed above.

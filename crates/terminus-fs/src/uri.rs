@@ -1,5 +1,5 @@
 //! Workspace URI parser for `workspace://`, `session://`, `task://`,
-//! `artifact://`, `secret://`, `forge-state://`, `host://` URIs.
+//! `artifact://`, `secret://`, `terminus-state://`, `host://` URIs.
 //!
 //! This is a minimal hand-rolled parser — we intentionally avoid pulling in a
 //! full URL crate to keep dependencies minimal.
@@ -42,7 +42,7 @@ impl WorkspaceUriKind {
             Self::Verification => "verification",
             Self::Artifact => "artifact",
             Self::Secret => "secret",
-            Self::ForgeState => "forge-state",
+            Self::ForgeState => "terminus-state",
             Self::Host => "host",
         }
     }
@@ -61,7 +61,7 @@ impl WorkspaceUriKind {
             "verification" => Self::Verification,
             "artifact" => Self::Artifact,
             "secret" => Self::Secret,
-            "forge-state" => Self::ForgeState,
+            "terminus-state" => Self::ForgeState,
             "host" => Self::Host,
             _ => return None,
         })
@@ -79,7 +79,7 @@ impl fmt::Display for WorkspaceUriError {
 
 impl std::error::Error for WorkspaceUriError {}
 
-/// A parsed Forge internal URI.
+/// A parsed Terminus internal URI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceUri {
     pub kind: WorkspaceUriKind,
@@ -89,9 +89,9 @@ pub struct WorkspaceUri {
 
 impl WorkspaceUri {
     pub fn parse(uri: &str) -> Result<Self, PathError> {
-        let scheme_end = uri.find("://").ok_or_else(|| {
-            PathError::Uri(format!("missing `://` scheme separator in `{uri}`"))
-        })?;
+        let scheme_end = uri
+            .find("://")
+            .ok_or_else(|| PathError::Uri(format!("missing `://` scheme separator in `{uri}`")))?;
         let scheme = &uri[..scheme_end];
         let kind = WorkspaceUriKind::from_scheme(scheme)
             .ok_or_else(|| PathError::Uri(format!("unknown scheme `{scheme}`")))?;
@@ -102,9 +102,7 @@ impl WorkspaceUri {
             None => (rest.to_string(), String::new()),
         };
         if authority.is_empty() && !matches!(kind, WorkspaceUriKind::Host) {
-            return Err(PathError::Uri(format!(
-                "missing authority in `{uri}`"
-            )));
+            return Err(PathError::Uri(format!("missing authority in `{uri}`")));
         }
         // Reject path traversal inside URIs.
         if path.contains("..") {
@@ -128,7 +126,13 @@ impl WorkspaceUri {
 
 impl fmt::Display for WorkspaceUri {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}://{}/{}", self.kind.scheme(), self.authority, self.path)
+        write!(
+            f,
+            "{}://{}/{}",
+            self.kind.scheme(),
+            self.authority,
+            self.path
+        )
     }
 }
 
@@ -146,8 +150,7 @@ mod tests {
 
     #[test]
     fn parses_artifact_uri() {
-        let uri =
-            WorkspaceUri::parse("artifact://sha256/abcdef0123456789").unwrap();
+        let uri = WorkspaceUri::parse("artifact://sha256/abcdef0123456789").unwrap();
         assert_eq!(uri.kind, WorkspaceUriKind::Artifact);
         assert_eq!(uri.authority, "sha256");
         assert_eq!(uri.path, "abcdef0123456789");

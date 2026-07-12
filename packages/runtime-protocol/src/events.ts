@@ -1,5 +1,5 @@
 /**
- * @forge/runtime-protocol — Agent Runtime Protocol (ARP) event union.
+ * @terminus/runtime-protocol — Agent Runtime Protocol (ARP) event union.
  *
  * Per SPEC §28.9 every semantic audit event carries an envelope with:
  * event_id, event_type, schema_version, aggregate_type, aggregate_id,
@@ -16,11 +16,11 @@ import type {
   ActorKind,
   ModelKey,
   ContentHash,
-} from "@forge/domain";
+} from "@terminus/domain";
 import {
   artifactRefSchema,
   actorKindSchema,
-} from "@forge/domain";
+} from "@terminus/domain";
 
 // ────────────────────────── Envelope schemas ─────────────────────────────────
 
@@ -639,5 +639,5 @@ export function payloadArtifactHash(_payload: unknown): ContentHash | null {
   return null;
 }
 
-// ArtifactRef and ActorKind are re-exported from @forge/domain.
-export type { ArtifactRef, ActorKind } from "@forge/domain";
+// ArtifactRef and ActorKind are re-exported from @terminus/domain.
+export type { ArtifactRef, ActorKind } from "@terminus/domain";

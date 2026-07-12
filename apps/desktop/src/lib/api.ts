@@ -1,9 +1,9 @@
 /**
- * Forge Desktop — Forge control-plane API client.
+ * Terminus Desktop — Terminus control-plane API client.
  *
  * Per the task contract: a small fetch-based wrapper that talks to the
- * Forge control plane at http://127.0.0.1:3050 with bearer token
- * `forge-control-dev-token`. The methods are:
+ * Terminus control plane at http://127.0.0.1:3050 with bearer token
+ * `terminus-control-dev-token`. The methods are:
  *
  *   health()
  *   listSessions()
@@ -21,7 +21,7 @@
  *
  * Per SPEC §30.6: SSE reconnects with `Last-Event-ID` / cursor. The
  * browser's native EventSource cannot send `Authorization` headers, so
- * we use fetch + ReadableStream + the SSE decoder from @forge/public-api
+ * we use fetch + ReadableStream + the SSE decoder from @terminus/public-api
  * and expose an EventSource-like surface (onopen/onmessage/onerror +
  * addEventListener/removeEventListener + close).
  *
@@ -30,7 +30,7 @@
  * after status check — full zod decoding can be layered later without
  * changing call sites.
  */
-import { createSseDecoder } from "@forge/public-api";
+import { createSseDecoder } from "@terminus/public-api";
 import type {
   Approval,
   ApprovalDecision,
@@ -59,7 +59,7 @@ function resolveApiBase(): string {
   if (typeof window !== "undefined" && window.forgeDesktop?.apiBase) {
     return window.forgeDesktop.apiBase;
   }
-  const env = (import.meta.env.VITE_FORGE_API_BASE as string | undefined) ?? null;
+  const env = (import.meta.env.VITE_TERMINUS_API_BASE as string | undefined) ?? null;
   return env ?? "http://127.0.0.1:3050";
 }
 
@@ -67,8 +67,8 @@ function resolveApiToken(): string {
   if (typeof window !== "undefined" && window.forgeDesktop?.token) {
     return window.forgeDesktop.token;
   }
-  const env = (import.meta.env.VITE_FORGE_TOKEN as string | undefined) ?? null;
-  return env ?? "forge-control-dev-token";
+  const env = (import.meta.env.VITE_TERMINUS_TOKEN as string | undefined) ?? null;
+  return env ?? "terminus-control-dev-token";
 }
 
 // ────────────────────────── Errors ─────────────────────────────────────────
@@ -274,7 +274,7 @@ export class ForgeApiClient {
 // The browser's native EventSource cannot set custom headers (so no
 // `Authorization: Bearer …`). The control plane requires bearer auth on
 // `/v1/events`, so we use fetch + a streaming reader + the SSE decoder
-// from @forge/public-api, and surface an EventSource-like object.
+// from @terminus/public-api, and surface an EventSource-like object.
 
 export type ForgeEventStreamHandler = (event: ForgeSseEvent) => void;
 
@@ -432,7 +432,7 @@ export const api = new ForgeApiClient();
  *
  * Per the task contract: "subscribeEvents(taskId?) (returns EventSource)".
  * We return a small wrapper that matches the EventSource surface used
- * by Forge Desktop, because the native EventSource cannot send the
+ * by Terminus Desktop, because the native EventSource cannot send the
  * `Authorization: Bearer` header the control plane requires.
  */
 export function subscribeEvents(opts: SubscribeEventsOptions = {}): ForgeEventStream {

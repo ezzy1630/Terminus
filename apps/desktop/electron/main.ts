@@ -1,5 +1,5 @@
 /**
- * Forge Desktop — Electron main process.
+ * Terminus Desktop — Electron main process.
  *
  * Per SPEC §2: "Electron is the application shell, not the execution
  * authority. The renderer must consume the harness through the repository's
@@ -7,7 +7,7 @@
  *
  * The main process creates the native macOS window with integrated title bar,
  * native traffic lights, and correct draggable regions. It does NOT run any
- * harness logic — all cognition, effects, and execution happen in the Forge
+ * harness logic — all cognition, effects, and execution happen in the Terminus
  * kernel (port 3040) and control plane (port 3050).
  *
  * It DOES own two native bridges the renderer cannot reach on its own:
@@ -43,6 +43,7 @@ import { randomUUID } from "node:crypto";
 declare const __dirname: string;
 
 const isDev = !app.isPackaged;
+app.setName("Terminus");
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -67,7 +68,7 @@ function loadPty(): void {
     pty = require("node-pty") as typeof import("node-pty");
   } catch (err) {
     ptyLoadError = err instanceof Error ? err.message : String(err);
-    console.warn(`[forge] node-pty unavailable — terminal drawer will use stub. ${ptyLoadError}`);
+    console.warn(`[terminus] node-pty unavailable — terminal drawer will use stub. ${ptyLoadError}`);
   }
 }
 
@@ -107,7 +108,7 @@ function handleTerminalSpawn(
       cols: opts.cols && opts.cols > 0 ? opts.cols : 80,
       rows: opts.rows && opts.rows > 0 ? opts.rows : 24,
       cwd,
-      env: { ...process.env, TERM: "xterm-256color", FORGE_SHELL: "1" } as Record<string, string>,
+      env: { ...process.env, TERM: "xterm-256color", TERMINUS_SHELL: "1" } as Record<string, string>,
     });
     const session: PtySession = {
       id,
@@ -186,7 +187,7 @@ async function handleGetScreenSources(): Promise<
     }));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[forge] desktopCapturer.getSources failed: ${msg}`);
+    console.warn(`[terminus] desktopCapturer.getSources failed: ${msg}`);
     return [];
   }
 }
@@ -204,6 +205,7 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width,
     height,
+    title: "Terminus",
     minWidth: 900,
     minHeight: 600,
     center: true,
@@ -242,7 +244,9 @@ function createWindow(): void {
   });
 
   if (isDev) {
-    void mainWindow.loadURL("http://localhost:5173");
+    // Keep the dev renderer from reusing a pre-migration Forge document from
+    // Electron's HTTP cache after the app rename.
+    void mainWindow.loadURL("http://localhost:5173/?app=terminus");
     mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
     void mainWindow.loadFile(join(__dirname, "../dist/index.html"));
@@ -256,7 +260,7 @@ nativeTheme.themeSource = "system";
 // ────────────────────────── IPC registration ─────────────────────────────────
 
 function registerIpc(): void {
-  // ── Forge desktop bridge ──
+  // ── Terminus desktop bridge ──
   ipcMain.handle("notify", (_e, { title, body }: { title: string; body: string }) => {
     const { Notification } = require("electron") as typeof import("electron");
     if (Notification.isSupported()) {

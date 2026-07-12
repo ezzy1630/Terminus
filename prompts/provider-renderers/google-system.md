@@ -1,15 +1,15 @@
 # Google (Gemini) System Prompt Renderer
 
-Forge renders the compiled context into a Google Gemini `generateContent`
+Terminus renders the compiled context into a Google Gemini `generateContent`
 or `streamGenerateContent` request. The renderer MUST follow these rules.
 
 ## Message ordering and cache prefixes
 
-Google exposes implicit caching on a stable prefix. Forge preserves cache
+Google exposes implicit caching on a stable prefix. Terminus preserves cache
 hits by emitting:
 
 1. `system_instruction` — the authority layer as a single `text` part.
-   Forge never modifies the authority between turns of the same task.
+   Terminus never modifies the authority between turns of the same task.
 2. `tools` array — the active tool schemas as `function_declarations`.
    Tool layer hash changes are logged.
 3. `contents` — the volatile suffix as alternating `user` and `model`
@@ -33,7 +33,7 @@ OpenAI/Anthropic:
 - `description` is required on every property.
 - `$ref`, `allOf`, `if/then/else`, and `patternProperties` are NOT
   supported.
-- Maximum 128 function declarations per request; Forge uses progressive
+- Maximum 128 function declarations per request; Terminus uses progressive
   disclosure beyond that.
 - The renderer MUST emit `parameters: { type: "object", properties: {} }`
   (not `null`) for tools with no parameters.
@@ -57,10 +57,10 @@ For `gemini-2.5-*` models with thinking enabled, the renderer:
 
 ## Continuation and compaction
 
-Google exposes `finishReason: "MAX_TOKENS"` for continuation. Forge
+Google exposes `finishReason: "MAX_TOKENS"` for continuation. Terminus
 emulates continuation by appending a model turn ending at the stop, then
 a user turn `Continue from where you left off.` Native compaction is
-not used; Forge checkpoints and rebuilds.
+not used; Terminus checkpoints and rebuilds.
 
 ## Streaming
 

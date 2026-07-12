@@ -42,11 +42,11 @@ rules:
       kind: deny
 
   - id: deny-protected-path-write
-    description: Deny writes to .git, .forge, credentials, .env
+    description: Deny writes to .git, .terminus, credentials, .env
     priority: 50
     match:
       effects_any: ["WRITE_LOCAL"]
-      working_directory_glob: ["**/.git/**", "**/.forge/**", "**/credentials/**", "**/.env*"]
+      working_directory_glob: ["**/.git/**", "**/.terminus/**", "**/credentials/**", "**/.env*"]
     effect:
       kind: deny
 

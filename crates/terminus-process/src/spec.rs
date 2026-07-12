@@ -1,8 +1,8 @@
 //! Conversion helpers from protocol `CommandSpec` to a normalized spawn.
 
 use crate::error::ProcessError;
-use forge_kernel_protocol::CommandSpec;
 use std::collections::BTreeMap;
+use terminus_kernel_protocol::CommandSpec;
 
 /// A normalized spawn request: an executable path, an argv, an explicit env,
 /// a working directory, and a timeout in milliseconds.
@@ -34,14 +34,22 @@ impl NormalizedSpawn {
                 "powershell" => "powershell",
                 "cmd" => "cmd",
                 "" => "sh",
-                other => return Err(ProcessError::InvalidSpec(format!("unsupported shell dialect `{other}`"))),
+                other => {
+                    return Err(ProcessError::InvalidSpec(format!(
+                        "unsupported shell dialect `{other}`"
+                    )))
+                }
             };
             return Ok(Self {
                 program: program.to_string(),
                 args: vec!["-c".to_string(), cmd.shell.script.clone()],
                 env: cmd.public_env.clone(),
                 working_dir: None,
-                timeout_ms: if cmd.timeout_ms == 0 { 60_000 } else { cmd.timeout_ms },
+                timeout_ms: if cmd.timeout_ms == 0 {
+                    60_000
+                } else {
+                    cmd.timeout_ms
+                },
                 shell: true,
             });
         }
@@ -55,7 +63,11 @@ impl NormalizedSpawn {
             args: cmd.args.clone(),
             env: cmd.public_env.clone(),
             working_dir: None,
-            timeout_ms: if cmd.timeout_ms == 0 { 60_000 } else { cmd.timeout_ms },
+            timeout_ms: if cmd.timeout_ms == 0 {
+                60_000
+            } else {
+                cmd.timeout_ms
+            },
             shell: false,
         })
     }

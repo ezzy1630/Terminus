@@ -1,18 +1,18 @@
 [package]
-name = "forge-patch"
+name = "terminus-patch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Transactional patch engine for the Forge kernel."
+description = "Transactional patch engine for the Terminus kernel."
 
 [lints]
 workspace = true
 
 [dependencies]
-forge-kernel-protocol = { workspace = true }
-forge-fs = { workspace = true }
-forge-artifacts = { workspace = true }
+terminus-kernel-protocol = { workspace = true }
+terminus-fs = { workspace = true }
+terminus-artifacts = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

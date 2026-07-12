@@ -1,5 +1,5 @@
 /**
- * @forge/provider-openai — OpenAI chat-completions renderer.
+ * @terminus/provider-openai — OpenAI chat-completions renderer.
  *
  * Maps canonical context → OpenAI Chat Completions API format. Handles tool
  * schemas (function calling), system messages, cache control headers,
@@ -22,9 +22,9 @@ import type {
   ContinuationInput,
   ContinuationDecision,
   ProviderToolSchema,
-} from "@forge/provider-core";
-import { BaseProviderRenderer } from "@forge/provider-core";
-import type { TokenCount } from "@forge/domain";
+} from "@terminus/provider-core";
+import { BaseProviderRenderer } from "@terminus/provider-core";
+import type { TokenCount } from "@terminus/domain";
 
 // ────────────────────────── OpenAI wire shapes ───────────────────────────────
 

@@ -16,7 +16,7 @@ Use this runbook when durable jobs (`JobService`) reference processes that no lo
 
 1. List orphaned jobs:
    ```bash
-   sqlite3 db/forge.db "SELECT id, session_id, task_id, state, started_at FROM jobs WHERE state IN ('running', 'unknown') ORDER BY started_at;"
+   sqlite3 db/terminus.db "SELECT id, session_id, task_id, state, started_at FROM jobs WHERE state IN ('running', 'unknown') ORDER BY started_at;"
    ```
 2. Check if the process is actually running on the host:
    ```bash
@@ -24,7 +24,7 @@ Use this runbook when durable jobs (`JobService`) reference processes that no lo
    ```
 3. Check the kernel job table:
    ```bash
-   grpcurl -plaintext -unix /var/run/forge-kernel.sock forge.kernel.v1.JobService/Get '{"job_id": "<id>"}'
+   grpcurl -plaintext -unix /var/run/terminus-kernel.sock terminus.kernel.v1.JobService/Get '{"job_id": "<id>"}'
    ```
 4. Check job artifacts:
    ```bash
@@ -46,7 +46,7 @@ Use this runbook when durable jobs (`JobService`) reference processes that no lo
 1. Reconcile each orphaned job:
    ```bash
    # Trigger reconciliation (the kernel does this on startup, but can be triggered manually)
-   grpcurl -plaintext -unix /var/run/forge-kernel.sock forge.kernel.v1.JobService/Get '{"job_id": "<id>"}'
+   grpcurl -plaintext -unix /var/run/terminus-kernel.sock terminus.kernel.v1.JobService/Get '{"job_id": "<id>"}'
    # The response includes the reconciled state
    ```
 2. For `unknown-settlement` non-idempotent jobs, manually verify the external state (e.g., did the deploy land? did the push succeed?) before marking `success` or `failed`.

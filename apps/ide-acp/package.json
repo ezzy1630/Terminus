@@ -1,5 +1,5 @@
 {
-  "name": "@forge/ide-acp",
+  "name": "@terminus/ide-acp",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,7 @@
     "lint": "eslint src"
   },
   "dependencies": {
-    "@forge/public-client": "workspace:*",
-    "@forge/public-api": "workspace:*"
+    "@terminus/public-client": "workspace:*",
+    "@terminus/public-api": "workspace:*"
   }
 }

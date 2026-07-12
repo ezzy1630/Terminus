@@ -1,4 +1,4 @@
-# @forge/capability-registry
+# @terminus/capability-registry
 
 Capability descriptor, registry, lockfile, activation lifecycle. Per SPEC §12, §35.
 

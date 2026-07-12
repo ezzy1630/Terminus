@@ -1,4 +1,4 @@
-# @forge/extension-host — local rules
+# @terminus/extension-host — local rules
 
 ## Non-negotiable
 

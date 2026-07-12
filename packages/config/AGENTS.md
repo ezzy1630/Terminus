@@ -1,4 +1,4 @@
-# @forge/config — local rules
+# @terminus/config — local rules
 
 ## Non-negotiable
 

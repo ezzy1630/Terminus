@@ -1,10 +1,10 @@
 /**
- * @forge/policy-coordinator — high-level policy coordinator.
+ * @terminus/policy-coordinator — high-level policy coordinator.
  *
  * Per SPEC §13, §36: translates task contracts into kernel capability
  * requests. `PolicyCoordinator` with `authorizeEffect(intent, task, scope)`,
  * `requestApproval(operationHash, scope, risk)`, `resolveApproval(id,
- * decision)`. Bridges `@forge/task-runtime` and the kernel RPC client.
+ * decision)`. Bridges `@terminus/task-runtime` and the kernel RPC client.
  */
 import type {
   Uuid7,
@@ -15,13 +15,13 @@ import type {
   PolicyDecision,
   PrincipalId,
   AllowedScope,
-} from "@forge/domain";
+} from "@terminus/domain";
 import {
   ApprovalRequiredError,
   PolicyDeniedError,
   ValidationError,
   ConflictError,
-} from "@forge/domain";
+} from "@terminus/domain";
 
 // ────────────────────────── Effect intent ────────────────────────────────────
 

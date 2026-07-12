@@ -1,10 +1,10 @@
 /**
- * @forge/orchestration — tests for loop detection (§37.14, all 10 signals),
+ * @terminus/orchestration — tests for loop detection (§37.14, all 10 signals),
  * budget control (§37.16), hierarchical cancellation (§37.17), and plan
  * artifact (§37.4).
  */
 import { describe, test, expect } from "bun:test";
-import type { Uuid7, Rfc3339Timestamp, TaskContract } from "@forge/domain";
+import type { Uuid7, Rfc3339Timestamp, TaskContract } from "@terminus/domain";
 import {
   LoopDetector,
   DEFAULT_LOOP_DETECTOR_CONFIG,

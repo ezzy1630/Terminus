@@ -86,10 +86,11 @@ impl RuleMatch {
             return MatchKind::Positive;
         }
         if !self.network_destinations_any.is_empty()
-            && cmd
-                .network_destinations
-                .iter()
-                .any(|d| self.network_destinations_any.iter().any(|p| match_net(p, d)))
+            && cmd.network_destinations.iter().any(|d| {
+                self.network_destinations_any
+                    .iter()
+                    .any(|p| match_net(p, d))
+            })
         {
             return MatchKind::Positive;
         }
@@ -126,14 +127,11 @@ impl RuleMatch {
             }
         }
         if !self.secret_capability_prefix_any.is_empty()
-            && cmd
-                .secret_capabilities
-                .iter()
-                .any(|cap| {
-                    self.secret_capability_prefix_any
-                        .iter()
-                        .any(|p| cap.starts_with(p))
-                })
+            && cmd.secret_capabilities.iter().any(|cap| {
+                self.secret_capability_prefix_any
+                    .iter()
+                    .any(|p| cap.starts_with(p))
+            })
         {
             return MatchKind::Positive;
         }
@@ -244,7 +242,7 @@ impl RuleSet {
             .iter()
             .filter(|r| r.r#match.matches(cmd) == MatchKind::Positive)
             .collect();
-        matched.sort_by(|a, b| b.priority.cmp(&a.priority));
+        matched.sort_by_key(|r| std::cmp::Reverse(r.priority));
         matched
     }
 }

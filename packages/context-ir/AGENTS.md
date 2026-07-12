@@ -1,4 +1,4 @@
-# @forge/context-ir — local rules
+# @terminus/context-ir — local rules
 
 ## Non-negotiable
 
@@ -17,6 +17,6 @@
 
 ## What NOT to add
 
-- Provider adapters or renderers (use `@forge/provider-*`).
+- Provider adapters or renderers (use `@terminus/provider-*`).
 - Database access.
 - Logging side effects.
