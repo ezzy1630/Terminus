@@ -19,9 +19,9 @@
 
 | File | Size |
 |---|---:|
-| `config.md` | 5976 B |
-| `events.md` | 11641 B |
-| `public-api.md` | 2415 B |
-| `sqlx.md` | 700 B |
-| `tools.md` | 7272 B |
+| `config.md` | 5988 B |
+| `events.md` | 11644 B |
+| `public-api.md` | 2418 B |
+| `sqlx.md` | 706 B |
+| `tools.md` | 7296 B |
 
