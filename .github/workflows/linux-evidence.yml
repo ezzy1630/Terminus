@@ -32,12 +32,16 @@ jobs:
             --die-with-parent --new-session --cap-drop ALL -- /bin/true
       - uses: sigstore/cosign-installer@v3
       - name: Build kernel probe binary
-        run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
+        run: |
+          cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
+          sudo install -D -m 0755 \
+            mini-services/terminus-kernel/target/release/terminus-kernel-mini \
+            /usr/local/lib/terminus/terminus-kernel-mini
       - name: Produce signed evidence
         env:
           TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
           TERMINUS_CGROUP_ROOT: /sys/fs/cgroup/terminus-ci
-          TERMINUS_KERNEL_BINARY: ${{ github.workspace }}/mini-services/terminus-kernel/target/release/terminus-kernel-mini
+          TERMINUS_KERNEL_BINARY: /usr/local/lib/terminus/terminus-kernel-mini
           TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
           TERMINUS_LINUX_EVIDENCE: ${{ runner.temp }}/terminus-linux-evidence.json
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/terminus-linux-evidence.json.sig
