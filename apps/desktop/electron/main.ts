@@ -32,7 +32,8 @@
  *   3. `terminusDesktop` notifications + window controls + theme — same as
  *      before.
  */
-import { app, BrowserWindow, shell, nativeTheme, screen, ipcMain, desktopCapturer, systemPreferences, dialog, type IpcMainInvokeEvent, type Rectangle } from "electron";
+import { app, BrowserWindow, shell, nativeTheme, screen, ipcMain, desktopCapturer, systemPreferences, dialog, Notification, type IpcMainInvokeEvent, type Rectangle } from "electron";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -42,6 +43,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 // `import.meta.url` so the same source compiles cleanly under both
 // CommonJS and ESM module settings.
 declare const __dirname: string;
+declare const __filename: string;
+
+const cjsRequire = createRequire(__filename);
 
 const isDev = !app.isPackaged;
 app.setName("Terminus");
@@ -129,7 +133,7 @@ function loadPty(): void {
     // use a dynamic `require()` so node-pty (a native module) is loaded
     // lazily — if it failed to compile on this platform, we catch and
     // fall back to a stub terminal in the renderer.
-    pty = require("node-pty") as typeof import("node-pty");
+    pty = cjsRequire("node-pty") as typeof import("node-pty");
   } catch (err) {
     ptyLoadError = err instanceof Error ? err.message : String(err);
     console.warn(`[terminus] node-pty unavailable — terminal drawer will use stub. ${ptyLoadError}`);
@@ -331,7 +335,6 @@ nativeTheme.themeSource = "system";
 function registerIpc(): void {
   // ── Terminus desktop bridge ──
   ipcMain.handle("notify", (_e, { title, body }: { title: string; body: string }) => {
-    const { Notification } = require("electron") as typeof import("electron");
     if (Notification.isSupported() && !mainWindow?.isFocused()) {
       new Notification({ title, body }).show();
     }

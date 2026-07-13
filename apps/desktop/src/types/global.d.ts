@@ -45,15 +45,14 @@ export interface TerminusTerminalBridge {
 }
 
 declare global {
-  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace JSX {
     type Element = ReactJSX.Element;
     type ElementClass = ReactJSX.ElementClass;
     type ElementType = ReactJSX.ElementType;
-    interface ElementAttributesProperty extends ReactJSX.ElementAttributesProperty {}
-    interface ElementChildrenAttribute extends ReactJSX.ElementChildrenAttribute {}
-    interface IntrinsicAttributes extends ReactJSX.IntrinsicAttributes {}
-    interface IntrinsicClassAttributes<T> extends ReactJSX.IntrinsicClassAttributes<T> {}
+    type ElementAttributesProperty = ReactJSX.ElementAttributesProperty;
+    type ElementChildrenAttribute = ReactJSX.ElementChildrenAttribute;
+    type IntrinsicAttributes = ReactJSX.IntrinsicAttributes;
+    type IntrinsicClassAttributes<T> = ReactJSX.IntrinsicClassAttributes<T>;
     type IntrinsicElements = ReactJSX.IntrinsicElements;
     type LibraryManagedAttributes<C, P> = ReactJSX.LibraryManagedAttributes<C, P>;
   }

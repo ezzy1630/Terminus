@@ -378,7 +378,19 @@ function DiffViewerImpl({
 
   // A flat list of change lines for next/prev navigation.
   const changeLineRefs = useRef<Array<HTMLDivElement | null>>([]);
-  changeLineRefs.current = [];
+  const registerChangeLine = useCallback((index: number, element: HTMLDivElement | null): void => {
+    if (element) {
+      changeLineRefs.current[index] = element;
+    } else {
+      delete changeLineRefs.current[index];
+    }
+  }, []);
+
+  const changeCount = useMemo(() => {
+    if (!selectedFile) return 0;
+    const path = selectedFile.displayPath ?? selectedFile.newPath;
+    return buildDiffRows(selectedFile, viewMode, path, resolvedHunks).changeRowIndices.length;
+  }, [selectedFile, viewMode, resolvedHunks]);
 
   const filteredFiles = useMemo(() => {
     if (!query.trim()) return files;
@@ -399,7 +411,7 @@ function DiffViewerImpl({
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if (e.key === "j") {
         e.preventDefault();
-        setFocusIndex((i) => Math.min(changeLineRefs.current.length - 1, i + 1));
+        setFocusIndex((i) => Math.min(changeCount - 1, i + 1));
       } else if (e.key === "k") {
         e.preventDefault();
         setFocusIndex((i) => Math.max(0, i - 1));
@@ -424,7 +436,7 @@ function DiffViewerImpl({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [files, selectedPath]);
+  }, [changeCount, files, selectedPath]);
 
   // Focus the change line on focusIndex change.
   useEffect(() => {
@@ -496,7 +508,7 @@ function DiffViewerImpl({
           onRevealInFinder={onRevealInFinder}
           onRestore={onRestore}
           focusIndex={focusIndex}
-          changeCount={changeLineRefs.current.length}
+            changeCount={changeCount}
           onFocusIndexChange={setFocusIndex}
         />
         {selectedFile ? (
@@ -526,7 +538,7 @@ function DiffViewerImpl({
               })
             }
             resolvedHunks={resolvedHunks}
-            changeLineRefs={changeLineRefs}
+            registerChangeLine={registerChangeLine}
             focusIndex={focusIndex}
           />
         ) : (
@@ -974,7 +986,7 @@ function DiffBody({
   onHunkResolve,
   onRestore,
   resolvedHunks,
-  changeLineRefs,
+  registerChangeLine,
   focusIndex,
 }: {
   file: DiffFile;
@@ -989,7 +1001,7 @@ function DiffBody({
   onHunkResolve: (hunkKey: string, decision: "accept" | "reject") => void;
   onRestore?: (hunkKey: string) => void;
   resolvedHunks: Record<string, "accept" | "reject">;
-  changeLineRefs: React.MutableRefObject<Array<HTMLDivElement | null>>;
+  registerChangeLine: (index: number, element: HTMLDivElement | null) => void;
   focusIndex: number;
 }): JSX.Element {
   const path = file.displayPath ?? file.newPath;
@@ -1015,14 +1027,6 @@ function DiffBody({
     overscan: 16,
   });
 
-  // Keep changeLineRefs in sync with the virtualized rows that are
-  // currently mounted. The parent (DiffViewerImpl) reads this array to
-  // navigate j/k. With virtualization only visible rows have refs, so
-  // the j/k handler falls back to `virtualizer.scrollToIndex` (below).
-  useEffect(() => {
-    changeLineRefs.current = changeLineRefs.current.slice(0, changeRowIndices.length);
-  }, [changeLineRefs, changeRowIndices.length]);
-
   // When focusIndex changes, scroll the matching change row into view.
   // With virtualization we can't rely on `scrollIntoView` for off-screen
   // rows, so we ask the virtualizer to bring the row into view first.
@@ -1031,12 +1035,6 @@ function DiffBody({
     const rowIndex = changeRowIndices[focusIndex];
     if (rowIndex === undefined) return;
     virtualizer.scrollToIndex(rowIndex, { align: "center" });
-    // After the virtual row mounts, scroll the inner element into view
-    // for the focus ring + browser semantics.
-    window.setTimeout(() => {
-      const el = changeLineRefs.current[focusIndex];
-      el?.scrollIntoView({ block: "center", behavior: "smooth" });
-    }, 30);
   }, [focusIndex, changeRowIndices, virtualizer]);
 
   if (file.binary) {
@@ -1089,7 +1087,7 @@ function DiffBody({
                 onHunkResolve={onHunkResolve}
                 onRestore={onRestore}
                 focusIndex={focusIndex}
-                changeLineRefs={changeLineRefs}
+                registerChangeLine={registerChangeLine}
               />
             </div>
           );
@@ -1114,7 +1112,7 @@ function DiffRowView({
   onHunkResolve,
   onRestore,
   focusIndex,
-  changeLineRefs,
+  registerChangeLine,
 }: {
   row: DiffRow;
   path: string;
@@ -1128,7 +1126,7 @@ function DiffRowView({
   onHunkResolve: (hunkKey: string, decision: "accept" | "reject") => void;
   onRestore?: (hunkKey: string) => void;
   focusIndex: number;
-  changeLineRefs: React.MutableRefObject<Array<HTMLDivElement | null>>;
+  registerChangeLine: (index: number, element: HTMLDivElement | null) => void;
 }): JSX.Element {
   if (row.kind === "hunk-header") {
     const hunk = row.hunk;
@@ -1236,7 +1234,7 @@ function DiffRowView({
         onAskAgentRevise={onAskAgentRevise}
         changeIdx={row.changeIdx}
         focused={row.changeIdx === focusIndex && row.changeIdx >= 0}
-        changeLineRefs={changeLineRefs}
+        registerChangeLine={registerChangeLine}
       />
     );
   }
@@ -1255,7 +1253,7 @@ function DiffRowView({
       onAskAgentRevise={onAskAgentRevise}
       changeIdx={row.changeIdx}
       focused={row.changeIdx === focusIndex && row.changeIdx >= 0}
-      changeLineRefs={changeLineRefs}
+      registerChangeLine={registerChangeLine}
     />
   );
 }
@@ -1278,7 +1276,7 @@ function UnifiedLineView({
   onAskAgentRevise,
   changeIdx,
   focused,
-  changeLineRefs,
+  registerChangeLine,
 }: {
   line: DiffLine;
   path: string;
@@ -1291,7 +1289,7 @@ function UnifiedLineView({
   onAskAgentRevise?: (filePath: string, lineStart: number, lineEnd: number) => void;
   changeIdx: number;
   focused: boolean;
-  changeLineRefs: React.MutableRefObject<Array<HTMLDivElement | null>>;
+  registerChangeLine: (index: number, element: HTMLDivElement | null) => void;
 }): JSX.Element {
   const isChange = line.kind === "add" || line.kind === "del";
   const lineNo = line.newNo ?? line.oldNo ?? 0;
@@ -1305,7 +1303,7 @@ function UnifiedLineView({
       <div
         ref={(el) => {
           if (isChange && changeIdx >= 0) {
-            changeLineRefs.current[changeIdx] = el;
+            registerChangeLine(changeIdx, el);
           }
         }}
         className={cn(
@@ -1457,7 +1455,7 @@ function SplitRowView({
   onAskAgentRevise,
   changeIdx,
   focused,
-  changeLineRefs,
+  registerChangeLine,
 }: {
   left: DiffLine | null;
   right: DiffLine | null;
@@ -1471,14 +1469,14 @@ function SplitRowView({
   onAskAgentRevise?: (filePath: string, lineStart: number, lineEnd: number) => void;
   changeIdx: number;
   focused: boolean;
-  changeLineRefs: React.MutableRefObject<Array<HTMLDivElement | null>>;
+  registerChangeLine: (index: number, element: HTMLDivElement | null) => void;
 }): JSX.Element {
   const isChange = (left?.kind === "del") || (right?.kind === "add");
   return (
     <div
       ref={(el) => {
         if (isChange && changeIdx >= 0) {
-          changeLineRefs.current[changeIdx] = el;
+          registerChangeLine(changeIdx, el);
         }
       }}
       className={cn("flex items-stretch hover:bg-hover", focused && "ring-1 ring-inset")}
