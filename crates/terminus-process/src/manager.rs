@@ -14,6 +14,9 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time;
 
+type ManagedProcessRef = Arc<Mutex<ManagedProcess>>;
+type ChildRegistry = Arc<Mutex<HashMap<String, ManagedProcessRef>>>;
+
 /// A resource that must remain alive for the full child-process lease.
 ///
 /// The process supervisor drops the lease after the child is reaped, on a
@@ -62,7 +65,7 @@ pub struct ManagedProcess {
 #[derive(Debug, Clone)]
 pub struct ProcessManager {
     artifact_store: Arc<ArtifactStore>,
-    children: Arc<Mutex<HashMap<String, Arc<Mutex<ManagedProcess>>>>>,
+    children: ChildRegistry,
     /// Maximum captured output before spilling to artifact. 1 MiB by default.
     max_inline_bytes: usize,
 }
@@ -431,11 +434,7 @@ impl ProcessManager {
     }
 }
 
-async fn release_managed(
-    children: &Arc<Mutex<HashMap<String, Arc<Mutex<ManagedProcess>>>>>,
-    process_id: &str,
-    managed: &Arc<Mutex<ManagedProcess>>,
-) {
+async fn release_managed(children: &ChildRegistry, process_id: &str, managed: &ManagedProcessRef) {
     let lease = {
         let mut guard = managed.lock().await;
         guard.child = None;

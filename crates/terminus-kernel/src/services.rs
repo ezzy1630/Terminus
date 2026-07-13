@@ -49,7 +49,7 @@ use terminus_kernel_protocol::{
 };
 use terminus_patch::PatchEngine;
 use terminus_policy::{Constraint, Decision, NormalizedCommand, PolicyEngine, TaintSource};
-use terminus_process::ProcessManager;
+use terminus_process::{ProcessManager, SpawnLease};
 use terminus_sandbox::{EnforcementStatus, SandboxManager, SandboxProfile};
 use terminus_secrets::SecretBroker;
 
@@ -136,6 +136,7 @@ impl KernelHandle {
             terminus_egress::EgressPolicy::default(),
             terminus_egress::RateLimit::default(),
         ));
+        let egress_broker_root = data_dir.join("egress-brokers");
         let workspace_resolver = Arc::new(PathResolver::new(&data_dir)?);
         let patch_engine = PatchEngine::new(
             // The patch engine needs its own resolver (it does not share
@@ -163,7 +164,8 @@ impl KernelHandle {
                 Arc::clone(&token_issuer),
                 Arc::clone(&approvals),
             )
-            .with_sandbox(Arc::clone(&sandbox_manager)),
+            .with_sandbox(Arc::clone(&sandbox_manager))
+            .with_egress_broker(Arc::clone(&egress), egress_broker_root.clone()),
             jobs: JobService::new(
                 job_manager,
                 Arc::clone(&token_issuer),
@@ -173,7 +175,8 @@ impl KernelHandle {
                     Arc::clone(&token_issuer),
                     Arc::clone(&approvals),
                 )
-                .with_sandbox(Arc::clone(&sandbox_manager)),
+                .with_sandbox(Arc::clone(&sandbox_manager))
+                .with_egress_broker(Arc::clone(&egress), egress_broker_root),
             ),
             sandboxes: SandboxService::new(sandbox_manager),
             policies: PolicyService::new(policy_engine),
@@ -650,12 +653,45 @@ fn resolve_sandbox_profile(profile_id: &str) -> KernelResult<SandboxProfile> {
             profile.id = profile_id.to_string();
             Ok(profile)
         }
+        "proxy-required" => {
+            let mut profile = SandboxProfile::default_restrictive();
+            profile.id = profile_id.to_string();
+            profile.network = terminus_sandbox::NetworkAccess::ProxyRequired;
+            Ok(profile)
+        }
         _ => Err(KernelError::new(
             terminus_kernel_protocol::ErrorCode::InvalidArgument,
             terminus_kernel_protocol::ErrorCategory::Validation,
             format!("unknown sandbox profile `{profile_id}`"),
             false,
         )),
+    }
+}
+
+#[cfg(test)]
+mod sandbox_profile_tests {
+    use super::resolve_sandbox_profile;
+
+    #[test]
+    fn proxy_required_is_explicit_and_non_default() {
+        assert!(matches!(
+            resolve_sandbox_profile("proxy-required"),
+            Ok(profile)
+                if profile.id == "proxy-required"
+                    && matches!(
+                        profile.network,
+                        terminus_sandbox::NetworkAccess::ProxyRequired
+                    )
+        ));
+        assert!(matches!(
+            resolve_sandbox_profile("default-restrictive"),
+            Ok(profile) if matches!(profile.network, terminus_sandbox::NetworkAccess::Deny)
+        ));
+    }
+
+    #[test]
+    fn unknown_profile_is_rejected() {
+        assert!(resolve_sandbox_profile("unknown-profile").is_err());
     }
 }
 
@@ -672,6 +708,66 @@ pub struct ProcessService {
     /// test constructs `ProcessService` directly; the production
     /// `KernelHandle` wires a real manager via `with_sandbox`.
     sandbox: Option<Arc<SandboxManager>>,
+    /// Kernel-owned route for `proxy-required` sandbox leases. The caller
+    /// never supplies this path: each process receives a fresh private
+    /// broker socket after policy/capability authorization succeeds.
+    egress_broker: Option<EgressBrokerConfig>,
+}
+
+#[derive(Debug, Clone)]
+struct EgressBrokerConfig {
+    proxy: Arc<EgressProxy>,
+    root: PathBuf,
+}
+
+#[cfg(unix)]
+struct ActiveEgressBroker {
+    broker_dir: Option<PathBuf>,
+    socket_path: Option<PathBuf>,
+    server: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl ActiveEgressBroker {
+    fn guest_socket_path() -> String {
+        format!(
+            "{}/{}",
+            terminus_sandbox_linux::LinuxSandboxBackend::EGRESS_BROKER_GUEST_DIR,
+            terminus_sandbox_linux::LinuxSandboxBackend::EGRESS_BROKER_SOCKET_NAME
+        )
+    }
+
+    fn into_spawn_lease(mut self) -> SpawnLease {
+        let server = self.server.take();
+        let socket_path = self.socket_path.take();
+        let broker_dir = self.broker_dir.take();
+        SpawnLease::new(move || {
+            if let Some(server) = server {
+                server.abort();
+            }
+            if let Some(socket_path) = socket_path {
+                let _ = std::fs::remove_file(socket_path);
+            }
+            if let Some(broker_dir) = broker_dir {
+                let _ = std::fs::remove_dir_all(broker_dir);
+            }
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ActiveEgressBroker {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            server.abort();
+        }
+        if let Some(socket_path) = self.socket_path.take() {
+            let _ = std::fs::remove_file(socket_path);
+        }
+        if let Some(broker_dir) = self.broker_dir.take() {
+            let _ = std::fs::remove_dir_all(broker_dir);
+        }
+    }
 }
 
 impl std::fmt::Debug for ProcessService {
@@ -696,6 +792,7 @@ impl ProcessService {
             token_issuer,
             approvals,
             sandbox: None,
+            egress_broker: None,
         }
     }
 
@@ -704,6 +801,82 @@ impl ProcessService {
     pub fn with_sandbox(mut self, sandbox: Arc<SandboxManager>) -> Self {
         self.sandbox = Some(sandbox);
         self
+    }
+
+    /// Attach the kernel-owned egress relay factory for explicit
+    /// `proxy-required` executions.
+    pub fn with_egress_broker(mut self, proxy: Arc<EgressProxy>, root: PathBuf) -> Self {
+        self.egress_broker = Some(EgressBrokerConfig { proxy, root });
+        self
+    }
+
+    #[cfg(unix)]
+    async fn start_egress_broker(&self) -> KernelResult<ActiveEgressBroker> {
+        let config = self.egress_broker.clone().ok_or_else(|| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
+                terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+                "proxy-required profile has no kernel-owned egress broker".to_string(),
+                false,
+            )
+        })?;
+        let (broker, broker_dir, socket_path) = tokio::task::spawn_blocking(move || {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::create_dir_all(&config.root)?;
+            std::fs::set_permissions(&config.root, std::fs::Permissions::from_mode(0o700))?;
+            let broker_dir = config.root.join(terminus_kernel_protocol::new_id());
+            std::fs::create_dir(&broker_dir)?;
+            std::fs::set_permissions(&broker_dir, std::fs::Permissions::from_mode(0o700))?;
+            let socket_path = broker_dir
+                .join(terminus_sandbox_linux::LinuxSandboxBackend::EGRESS_BROKER_SOCKET_NAME);
+            let broker = terminus_egress::EgressBroker::bind(&socket_path, config.proxy)?;
+            Ok::<_, terminus_egress::EgressError>((broker, broker_dir, socket_path))
+        })
+        .await
+        .map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
+                terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+                format!("egress broker setup task failed: {error}"),
+                false,
+            )
+        })?
+        .map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
+                terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+                format!("egress broker setup failed: {error}"),
+                false,
+            )
+        })?;
+        let server = tokio::spawn(async move {
+            loop {
+                if let Err(error) = broker.serve_one().await {
+                    tracing::debug!(
+                        target: "terminus_kernel_audit",
+                        event = "egress_broker_connection_rejected",
+                        error = %error,
+                        "egress broker rejected or closed a client connection"
+                    );
+                }
+            }
+        });
+        Ok(ActiveEgressBroker {
+            broker_dir: Some(broker_dir),
+            socket_path: Some(socket_path),
+            server: Some(server),
+        })
+    }
+
+    #[cfg(not(unix))]
+    async fn start_egress_broker(&self) -> KernelResult<()> {
+        Err(KernelError::new(
+            terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
+            terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+            "proxy-required execution requires a Unix-domain egress broker".to_string(),
+            false,
+        ))
     }
 
     /// Build a `NormalizedCommand` from a `CommandSpec`. The command is
@@ -966,17 +1139,9 @@ impl ProcessService {
         // (degraded) enforcement and proceed — degraded is an explicit,
         // audited state, never a silent downgrade.
         let profile = resolve_sandbox_profile(sandbox_profile_id)?;
-        let (enforcement, sandbox_wrapper) = if let Some(mgr) = &self.sandbox {
+        let (enforcement, sandbox_backend) = if let Some(mgr) = &self.sandbox {
             match mgr.select(&profile) {
-                Ok(backend) => {
-                    // SPEC §34.11: if the backend can wrap the spawn in an
-                    // OS sandbox (e.g. bwrap), capture the wrapper argv so
-                    // we spawn inside it. `spawn_wrapper` returns None when
-                    // the backend has no OS isolation (LocalRestrictive) or
-                    // when the wrapper binary is unavailable.
-                    let wrapper = backend.spawn_wrapper(&command, &profile);
-                    (backend.enforcement_report(), wrapper)
-                }
+                Ok(backend) => (backend.enforcement_report(), Some(backend)),
                 Err(e) => {
                     return Err(KernelError::new(
                         terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
@@ -1001,13 +1166,44 @@ impl ProcessService {
                 None,
             )
         };
+        #[cfg(unix)]
+        let mut egress_broker: Option<ActiveEgressBroker> = None;
+        let sandbox_wrapper = if matches!(
+            profile.network,
+            terminus_sandbox::NetworkAccess::ProxyRequired
+        ) {
+            #[cfg(unix)]
+            {
+                let broker = self.start_egress_broker().await?;
+                let wrapper = broker.broker_dir.as_deref().and_then(|broker_dir| {
+                    sandbox_backend.as_ref().and_then(|backend| {
+                        backend.spawn_wrapper_with_egress_broker(&command, &profile, broker_dir)
+                    })
+                });
+                egress_broker = Some(broker);
+                wrapper
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = self.start_egress_broker().await?;
+                None
+            }
+        } else {
+            sandbox_backend
+                .as_ref()
+                .and_then(|backend| backend.spawn_wrapper(&command, &profile))
+        };
         // Defense in depth: any profile that promises a network namespace
         // must have an actual wrapper. A backend report is not sufficient on
         // its own because wrapper construction can still fail (for example if
         // the launcher executable is unavailable). Never substitute a direct
         // process spawn for a secure profile.
         if sandbox_profile_id != "degraded-local"
-            && matches!(profile.network, terminus_sandbox::NetworkAccess::Deny)
+            && matches!(
+                profile.network,
+                terminus_sandbox::NetworkAccess::Deny
+                    | terminus_sandbox::NetworkAccess::ProxyRequired
+            )
             && sandbox_wrapper.is_none()
         {
             return Err(KernelError::new(
@@ -1147,9 +1343,31 @@ impl ProcessService {
                 wrapper = %wrapper_bin.display(),
                 "spawning process inside OS sandbox wrapper"
             );
-            process_manager
-                .spawn_wrapped(wrapper_bin, wrapper_argv, spawn)
-                .await
+            #[cfg(unix)]
+            if let Some(broker) = egress_broker {
+                spawn.env.insert(
+                    "TERMINUS_EGRESS_BROKER_SOCKET".to_string(),
+                    ActiveEgressBroker::guest_socket_path(),
+                );
+                process_manager
+                    .spawn_wrapped_with_lease(
+                        wrapper_bin,
+                        wrapper_argv,
+                        spawn,
+                        broker.into_spawn_lease(),
+                    )
+                    .await
+            } else {
+                process_manager
+                    .spawn_wrapped(wrapper_bin, wrapper_argv, spawn)
+                    .await
+            }
+            #[cfg(not(unix))]
+            {
+                process_manager
+                    .spawn_wrapped(wrapper_bin, wrapper_argv, spawn)
+                    .await
+            }
         } else {
             process_manager.spawn(spawn).await
         }
