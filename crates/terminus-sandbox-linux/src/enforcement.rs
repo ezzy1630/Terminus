@@ -164,13 +164,13 @@ pub fn run_probe() -> Result<i32, SandboxError> {
                     "set -eu; \
                      test -r /proc/self/status; \
                      test -r /sys/fs/cgroup/cgroup.controllers; \
-                     if /usr/bin/unshare -Ur true >/dev/null 2>&1; then \
+                     if /usr/bin/unshare -Ur true; then \
                        echo seccomp=failed; exit 11; \
                      else echo seccomp=blocked; fi; \
-                     if /usr/bin/python3 -c 'import socket; socket.socket()' >/dev/null 2>&1; then \
+                     if /usr/bin/python3 -c 'import socket; socket.socket()'; then \
                        echo network=failed; exit 12; \
                      else echo network=blocked; fi; \
-                     if touch /terminus-sandbox-write-probe >/dev/null 2>&1; then \
+                     if touch /terminus-sandbox-write-probe; then \
                        echo filesystem=failed; exit 13; \
                      else echo filesystem=readonly; fi; \
                      echo cgroup=visible"
