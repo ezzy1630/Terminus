@@ -3,10 +3,8 @@
 use crate::error::ProcessError;
 use crate::spec::{NormalizedSpawn, SpawnOutcome};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::SystemTime;
 use terminus_artifacts::ArtifactStore;
 use terminus_kernel_protocol::{
     ArtifactRef, OutputChunk, ProcessEvent, ProcessExited, ProcessStarted,
@@ -23,6 +21,8 @@ pub struct ManagedProcess {
     pub job_id: String,
     pub child: Option<Child>,
     pub stdin: Option<ChildStdin>,
+    pub pid: Option<u32>,
+    pub cancel_requested: bool,
 }
 
 /// ProcessManager owns child processes. Construction is cheap; share via
@@ -111,7 +111,6 @@ impl ProcessManager {
         // Process group on unix so tree-kill reaches sandbox descendants.
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
 
@@ -130,11 +129,14 @@ impl ProcessManager {
         let _ = tx.send(ProcessEvent::Started(started.clone())).await;
 
         let stdin = child.stdin.take();
+        let child_pid = child.id();
         let managed = Arc::new(Mutex::new(ManagedProcess {
             process_id: process_id.clone(),
             job_id: job_id.clone(),
             child: Some(child),
             stdin,
+            pid: child_pid,
+            cancel_requested: false,
         }));
         self.children
             .lock()
@@ -158,7 +160,7 @@ impl ProcessManager {
         tokio::spawn(async move {
             // Pull child out of the managed wrapper so we can take stdout/stderr.
             let mut child_guard = managed.lock().await;
-            let child = match child_guard.child.as_mut() {
+            let mut child = match child_guard.child.take() {
                 Some(c) => c,
                 None => return,
             };
@@ -186,11 +188,6 @@ impl ProcessManager {
             };
 
             // Wait with timeout.
-            let mut child_guard = managed.lock().await;
-            let child = match child_guard.child.as_mut() {
-                Some(c) => c,
-                None => return,
-            };
             let wait_fut = child.wait();
             let exit_result = if timeout_ms == 0 {
                 wait_fut.await
@@ -199,11 +196,14 @@ impl ProcessManager {
                     Ok(r) => r,
                     Err(_) => {
                         // Timed out; kill the process group.
-                        let pid = child.id();
-                        drop(child_guard);
-                        if let Some(pid) = pid {
+                        if let Some(pid) = child_pid {
                             kill_process_group(pid);
+                            let _ = child.wait().await;
                         }
+                        let mut child_guard = managed.lock().await;
+                        child_guard.pid = None;
+                        child_guard.stdin = None;
+                        drop(child_guard);
                         let _ = tx_clone
                             .send(ProcessEvent::Exited(ProcessExited {
                                 exit_code: -1,
@@ -220,6 +220,10 @@ impl ProcessManager {
             let status = match exit_result {
                 Ok(s) => s,
                 Err(e) => {
+                    let mut child_guard = managed.lock().await;
+                    child_guard.pid = None;
+                    child_guard.stdin = None;
+                    drop(child_guard);
                     let _ = tx_clone
                         .send(ProcessEvent::Exited(ProcessExited {
                             exit_code: -1,
@@ -232,6 +236,9 @@ impl ProcessManager {
                     return;
                 }
             };
+            let mut child_guard = managed.lock().await;
+            child_guard.pid = None;
+            child_guard.stdin = None;
             drop(child_guard);
 
             // Drain stdout/stderr tasks.
@@ -275,6 +282,7 @@ impl ProcessManager {
             // Drop the child from the managed wrapper.
             let mut child_guard = managed.lock().await;
             child_guard.child = None;
+            child_guard.pid = None;
             // Drop the final sender so the receiver closes.
             drop(child_guard);
             let _ = pid;
@@ -299,18 +307,16 @@ impl ProcessManager {
                 .cloned()
                 .ok_or_else(|| ProcessError::NotFound(process_id.to_string()))?
         };
-        let mut guard = managed.lock().await;
-        if let Some(child) = guard.child.as_mut() {
-            let pid = child.id();
-            // Kill the whole process group.
-            if let Some(pid) = pid {
-                kill_process_group(pid);
-            }
-            // Try to reap.
-            let _ = child.wait().await;
+        // The supervisor owns the child wait. Dispatch the group kill and let
+        // the supervisor reap, drain output, and publish the terminal event.
+        let pid = {
+            let mut guard = managed.lock().await;
+            guard.cancel_requested = true;
+            guard.pid
+        };
+        if let Some(pid) = pid {
+            kill_process_group(pid);
         }
-        guard.child = None;
-        guard.stdin = None;
         Ok("cancelled".to_string())
     }
 
@@ -368,7 +374,7 @@ impl ProcessManager {
         let children = self.children.lock().await;
         if let Some(m) = children.get(process_id) {
             let g = m.lock().await;
-            g.child.is_some()
+            g.pid.is_some() && !g.cancel_requested
         } else {
             false
         }
@@ -667,6 +673,7 @@ mod tests {
                 pwd_line.push_str(&String::from_utf8_lossy(&c.bytes));
             }
         }
-        assert_eq!(pwd_line.trim(), tmp.path().to_string_lossy());
+        let expected = std::fs::canonicalize(tmp.path()).unwrap();
+        assert_eq!(pwd_line.trim(), expected.to_string_lossy());
     }
 }

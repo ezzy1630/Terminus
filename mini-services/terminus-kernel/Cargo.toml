@@ -34,6 +34,7 @@ terminus-artifacts = { path = "../../crates/terminus-artifacts" }
 terminus-fs = { path = "../../crates/terminus-fs" }
 terminus-policy = { path = "../../crates/terminus-policy" }
 terminus-sandbox = { path = "../../crates/terminus-sandbox" }
+terminus-sandbox-linux = { path = "../../crates/terminus-sandbox-linux" }
 terminus-process = { path = "../../crates/terminus-process" }
 terminus-jobs = { path = "../../crates/terminus-jobs" }
 terminus-patch = { path = "../../crates/terminus-patch" }

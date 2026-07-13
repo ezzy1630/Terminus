@@ -290,6 +290,9 @@ function checkNoRawSqlOutsideRepositories(): void {
     join(ROOT, "docs"),
     join(ROOT, "skills"),
     join(ROOT, "tools"),
+    // Vendored upstream sources are checked by their own parity/divergence
+    // gates and are not part of Terminus's first-party architecture surface.
+    join(ROOT, "vendor"),
     join(ROOT, "python", "forge_evals", ".venv"),
   ];
   function inSkipped(p: string): boolean {

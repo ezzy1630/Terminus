@@ -7,10 +7,14 @@
  */
 
 type JsonObject = Record<string, unknown>;
+type ApiOptions = { idempotencyKey?: string };
 
 const baseUrl = process.env.TERMINUS_E2E_CONTROL_URL ?? "http://127.0.0.1:3050";
 const token = process.env.TERMINUS_E2E_CONTROL_TOKEN;
 const workspaceRoot = process.env.TERMINUS_E2E_WORKSPACE_ROOT;
+const debug = (message: string): void => {
+  if (process.env.TERMINUS_E2E_DEBUG === "1") console.error(`[e2e] ${message}`);
+};
 
 if (!token || !workspaceRoot) {
   throw new Error("E2E control token and workspace root are required");
@@ -31,7 +35,12 @@ function stringField(value: JsonObject, key: string, label: string): string {
   return field;
 }
 
-async function api(method: "GET" | "POST", path: string, body?: JsonObject): Promise<JsonObject> {
+async function api(
+  method: "GET" | "POST",
+  path: string,
+  body?: JsonObject,
+  options: ApiOptions = {},
+): Promise<JsonObject> {
   const headers: Record<string, string> = {
     authorization: `Bearer ${token}`,
     accept: "application/json",
@@ -39,28 +48,54 @@ async function api(method: "GET" | "POST", path: string, body?: JsonObject): Pro
   const init: RequestInit = { method, headers };
   if (body) {
     headers["content-type"] = "application/json";
-    headers["x-idempotency-key"] = crypto.randomUUID();
+    headers["x-idempotency-key"] = options.idempotencyKey ?? crypto.randomUUID();
     init.body = JSON.stringify(body);
   }
-  const response = await fetch(`${baseUrl}${path}`, init);
-  const text = await response.text();
-  let parsed: unknown = null;
-  if (text.length > 0) {
-    try {
-      parsed = JSON.parse(text) as unknown;
-    } catch {
-      throw new Error(`${method} ${path} returned non-JSON: ${text.slice(0, 200)}`);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const response = await fetch(`${baseUrl}${path}`, init);
+    const text = await response.text();
+    let parsed: unknown = null;
+    if (text.length > 0) {
+      try {
+        parsed = JSON.parse(text) as unknown;
+      } catch {
+        throw new Error(`${method} ${path} returned non-JSON: ${text.slice(0, 200)}`);
+      }
     }
+    if (response.status === 409 && options.idempotencyKey) {
+      const error = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as JsonObject).error
+        : null;
+      const errorObject = error && typeof error === "object" && !Array.isArray(error)
+        ? error as JsonObject
+        : null;
+      if (errorObject?.code === "IDEMPOTENCY_IN_PROGRESS") {
+        const retryAfter = typeof errorObject.details === "object" && errorObject.details !== null
+          && !Array.isArray(errorObject.details)
+          && typeof (errorObject.details as JsonObject).retry_after_ms === "number"
+          ? (errorObject.details as JsonObject).retry_after_ms as number
+          : 500;
+        await new Promise<void>((resolve) => setTimeout(resolve, Math.min(Math.max(retryAfter, 50), 1_000)));
+        continue;
+      }
+    }
+    if (!response.ok) {
+      throw new Error(`${method} ${path} failed (${response.status}): ${JSON.stringify(parsed)}`);
+    }
+    return asObject(parsed, `${method} ${path}`);
   }
-  if (!response.ok) {
-    throw new Error(`${method} ${path} failed (${response.status}): ${JSON.stringify(parsed)}`);
-  }
-  return asObject(parsed, `${method} ${path}`);
+  throw new Error(`${method} ${path} exceeded idempotency retry budget`);
 }
 
-async function expectFailure(method: "GET" | "POST", path: string, expectedStatus: number): Promise<void> {
+async function expectFailure(
+  method: "GET" | "POST",
+  path: string,
+  expectedStatus: number,
+  body?: JsonObject,
+  options?: ApiOptions,
+): Promise<void> {
   try {
-    await api(method, path);
+    await api(method, path, body, options);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes(`failed (${expectedStatus})`)) return;
@@ -82,13 +117,83 @@ async function waitForCompletion(taskId: string): Promise<JsonObject> {
   return task;
 }
 
-const workspace = await api("POST", "/v1/workspaces/open", {
+const workspaceRequest = {
   root_uri: workspaceRoot,
   kind: "local_directory",
   trust: "trusted",
   policy_profile_id: "secure-local-default",
+};
+const workspaceOpenKey = "e2e-workspace-open-v1";
+const workspace = await api("POST", "/v1/workspaces/open", workspaceRequest, {
+  idempotencyKey: workspaceOpenKey,
 });
+debug("workspace opened and replayed");
 const workspaceId = stringField(workspace, "id", "workspace");
+const workspaceReplay = await api("POST", "/v1/workspaces/open", workspaceRequest, {
+  idempotencyKey: workspaceOpenKey,
+});
+if (stringField(workspaceReplay, "id", "workspace replay") !== workspaceId) {
+  throw new Error(`idempotency replay created a second workspace: ${JSON.stringify(workspaceReplay)}`);
+}
+await expectFailure(
+  "POST",
+  "/v1/workspaces/open",
+  409,
+  { ...workspaceRequest, root_uri: `${workspaceRoot}/different` },
+  { idempotencyKey: workspaceOpenKey },
+);
+
+const readFixture = await api("POST", "/v1/tools/read", {
+  workspace_id: "dev",
+  path: "e2e-fixture.txt",
+});
+const readArtifact = readFixture.fullContent ?? readFixture.full_content;
+if (!readArtifact || typeof readArtifact !== "object") {
+  throw new Error(`kernel UDS file read did not return an artifact: ${JSON.stringify(readFixture)}`);
+}
+const sourceVersion = asObject(readFixture.sourceVersion ?? readFixture.source_version, "read source version");
+const fixtureSha = stringField(sourceVersion, "sha256", "read source version");
+const patchBody = {
+  workspace_id: "dev",
+  path: "e2e-fixture.txt",
+  expected_sha256: fixtureSha,
+  expected_utf8: "Terminus deterministic read fixture.\n",
+  replacement_utf8: "Terminus deterministic patched fixture.\n",
+};
+const preview = await api("POST", "/v1/tools/patch", { ...patchBody, commit_mode: "preview" });
+if (preview.state !== "preview" && preview.state !== "staged") {
+  throw new Error(`patch preview did not remain non-mutating: ${JSON.stringify(preview)}`);
+}
+const applied = await api("POST", "/v1/tools/patch", { ...patchBody, commit_mode: "apply" });
+if (applied.state !== "applied") {
+  throw new Error(`patch apply did not settle: ${JSON.stringify(applied)}`);
+}
+await expectFailure("POST", "/v1/tools/patch", 500, { ...patchBody, commit_mode: "apply" });
+
+const exec = await api("POST", "/v1/tools/exec", {
+  program: "/bin/ls",
+  args: ["-d", "."],
+  cwd: ".",
+  sandbox_profile_id: "degraded-local",
+});
+if (!stringField(exec, "processId" in exec ? "processId" : "process_id", "exec").length) {
+  throw new Error(`kernel UDS process start did not return a process id: ${JSON.stringify(exec)}`);
+}
+
+const job = await api("POST", "/v1/tools/job", {
+  program: "/bin/cat",
+  args: [],
+  cwd: ".",
+  sandbox_profile_id: "degraded-local",
+  durable: true,
+});
+const jobId = stringField(job, "jobId" in job ? "jobId" : "job_id", "job");
+const jobView = await api("GET", `/v1/jobs/${encodeURIComponent(jobId)}`);
+if (!stringField(jobView, "jobId" in jobView ? "jobId" : "job_id", "job view")) {
+  throw new Error(`durable job was not visible through control: ${JSON.stringify(jobView)}`);
+}
+await api("POST", `/v1/jobs/${encodeURIComponent(jobId)}/stop`, { reason: "deterministic cleanup" });
+debug("kernel file/process/job paths completed");
 
 const session = await api("POST", "/v1/sessions", {
   workspace_id: workspaceId,
@@ -109,6 +214,34 @@ const task = await api("POST", "/v1/tasks", {
 });
 const taskId = stringField(task, "id", "task");
 
+const deniedApproval = await api("POST", "/v1/approvals", {
+  task_id: taskId,
+  operation_hash: "sha256:e2e-deny",
+  risk: { class: "high", effects: ["WRITE_LOCAL"] },
+});
+const deniedApprovalId = stringField(deniedApproval, "id", "denied approval");
+const pendingApprovals = await api("GET", "/v1/approvals");
+if (!Array.isArray(pendingApprovals.approvals) || !pendingApprovals.approvals.some((candidate) => asObject(candidate, "approval").id === deniedApprovalId)) {
+  throw new Error(`pending approval was not listed: ${JSON.stringify(pendingApprovals)}`);
+}
+const denied = await api("POST", `/v1/approvals/${encodeURIComponent(deniedApprovalId)}/resolve`, {
+  decision: "deny_once",
+  rationale: "deterministic denial path",
+});
+if (denied.status !== "denied") throw new Error(`approval denial did not persist: ${JSON.stringify(denied)}`);
+
+const allowedApproval = await api("POST", "/v1/approvals", {
+  task_id: taskId,
+  operation_hash: "sha256:e2e-allow",
+  risk: { class: "normal", effects: ["READ_LOCAL"] },
+});
+const allowedApprovalId = stringField(allowedApproval, "id", "allowed approval");
+const allowed = await api("POST", `/v1/approvals/${encodeURIComponent(allowedApprovalId)}/resolve`, {
+  decision: "allow_once",
+  rationale: "deterministic approval path",
+});
+if (allowed.status !== "allowed") throw new Error(`approval allow did not persist: ${JSON.stringify(allowed)}`);
+
 const streamController = new AbortController();
 const streamResponse = await fetch(`${baseUrl}/v1/events?task_id=${encodeURIComponent(taskId)}`, {
   headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" },
@@ -120,6 +253,7 @@ if (!streamResponse.ok || !streamResponse.body) {
 const streamReader = streamResponse.body.getReader();
 
 await api("POST", `/v1/tasks/${encodeURIComponent(taskId)}/start`, {});
+debug("task started");
 const turn = await api("POST", "/v1/turns", {
   thread_id: threadId,
   task_id: taskId,
@@ -127,9 +261,34 @@ const turn = await api("POST", "/v1/turns", {
 });
 const turnId = stringField(turn, "id", "turn");
 const completed = await waitForCompletion(taskId);
+debug("task completed");
 if (completed.phase !== "COMPLETE") {
   throw new Error(`completed task has unexpected phase: ${JSON.stringify(completed)}`);
 }
+
+const interruptTask = await api("POST", "/v1/tasks", {
+  session_id: sessionId,
+  thread_id: threadId,
+  objective: "exercise deterministic turn interruption",
+  non_goals: ["completion"],
+  acceptance_criteria: [{ id: "interrupt", statement: "The turn can be interrupted safely.", required: true }],
+  allowed_scope: { read_paths: ["/**"], write_paths: [], external_systems: [] },
+});
+const interruptTaskId = stringField(interruptTask, "id", "interrupt task");
+await api("POST", `/v1/tasks/${encodeURIComponent(interruptTaskId)}/start`, {});
+const interruptTurn = await api("POST", "/v1/turns", {
+  thread_id: threadId,
+  task_id: interruptTaskId,
+  user_input: "interrupt this deterministic turn",
+});
+const interruptTurnId = stringField(interruptTurn, "id", "interrupt turn");
+const interrupted = await api("POST", `/v1/turns/${encodeURIComponent(interruptTurnId)}/interrupt`, {
+  reason: "deterministic interruption",
+});
+if (interrupted.state !== "INTERRUPTED") {
+  throw new Error(`turn interruption did not persist: ${JSON.stringify(interrupted)}`);
+}
+await api("POST", `/v1/tasks/${encodeURIComponent(interruptTaskId)}/cancel`, { reason: "cleanup interrupted fixture" });
 
 const toolCatalog = await api("GET", "/v1/tools");
 if (!Array.isArray(toolCatalog.tools) || toolCatalog.tools.length < 5 || toolCatalog.default_profile !== "secure-local-default") {
@@ -151,12 +310,15 @@ while (Date.now() < eventDeadline && !eventChunk.includes("task.") && !eventChun
   eventChunk += new TextDecoder().decode(next.value);
 }
 streamController.abort();
+debug("event stream abort requested");
 await streamReader.cancel();
+debug("event stream cancelled");
 if (!eventChunk.includes("task.") && !eventChunk.includes("turn.")) {
   throw new Error(`event stream did not contain a lifecycle event: ${eventChunk.slice(0, 500)}`);
 }
 
 const exported = await api("POST", "/v1/system/export", {});
+debug("export loaded");
 const exportManifest = asObject(exported.manifest, "export.manifest");
 if (exportManifest.format !== "terminus-export-v1") {
   throw new Error(`unexpected export format: ${JSON.stringify(exported)}`);
@@ -198,6 +360,7 @@ const paused = await api("POST", `/v1/sessions/${encodeURIComponent(sessionId)}/
 if (paused.status !== "paused") throw new Error(`session pause did not persist: ${JSON.stringify(paused)}`);
 
 const recovery = await api("POST", "/v1/system/recover", {});
+debug("recovery loaded");
 if (recovery.integrity_ok !== true || typeof recovery.id !== "string") {
   throw new Error(`recovery report did not prove integrity: ${JSON.stringify(recovery)}`);
 }
@@ -208,6 +371,8 @@ console.log(JSON.stringify({
   session_id: sessionId,
   task_id: taskId,
   turn_id: turnId,
+  thread_id: threadId,
+  checkpoint_id: checkpointId,
   event_count: events.length,
   context_manifest_count: manifests.length,
   verification_plan_count: verifications.length,

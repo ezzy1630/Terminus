@@ -138,7 +138,7 @@ integration:
 
 # Local-capable security suite (per-PR subset).
 security:
-    cargo test --workspace --test security
+    cargo test --workspace --test capability_token_e2e --test non_bypassability --test policy_wiring
     bun run test:security
     cargo deny check
 
@@ -182,7 +182,7 @@ run:
 
 # Run the Rust kernel mini-service on :3040.
 run-kernel:
-    cd mini-services/terminus-kernel && cargo run --release
+    cd mini-services/terminus-kernel && TERMINUS_DEV=1 TERMINUS_KERNEL_HTTP_BOOTSTRAP=1 cargo run --release
 
 # Run the TS control plane mini-service on :3050.
 run-control:

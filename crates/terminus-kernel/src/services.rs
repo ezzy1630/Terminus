@@ -92,6 +92,7 @@ impl KernelHandle {
         let process_manager = Arc::new(ProcessManager::new(Arc::clone(&artifact_store)));
         let job_manager = Arc::new(JobManager::new(Arc::clone(&process_manager)));
         let policy_engine = Arc::new(PolicyEngine::new(terminus_policy::default_rule_set()));
+        let info = KernelInfoService::new();
         // SPEC §13.4 / §36.5: on Linux, prefer the Bubblewrap backend (real
         // namespace isolation) when bwrap is on PATH; fall back to the
         // local-restrictive backend (process groups + env sanitization, no
@@ -118,9 +119,11 @@ impl KernelHandle {
         };
         let sandbox_manager = Arc::new(sandbox_manager);
         let secret_broker = Arc::new(SecretBroker::new());
+        let issuer_secret = std::env::var("TERMINUS_KERNEL_CAPABILITY_SECRET")
+            .unwrap_or_else(|_| "kernel-default-secret-please-rotate".to_string());
         let token_issuer = Arc::new(TokenIssuer::new(
-            b"kernel-default-secret-please-rotate".to_vec(),
-            "kernel-instance-1".to_string(),
+            issuer_secret.into_bytes(),
+            info.instance_id().to_string(),
             3600,
         ));
         let revocation = token_issuer.revocation_list();
@@ -146,7 +149,7 @@ impl KernelHandle {
         let approvals = Arc::new(ApprovalStore::new());
 
         Ok(Self {
-            info: KernelInfoService::new(),
+            info,
             workspaces: WorkspaceService::new(),
             files: FileService::new(
                 Arc::clone(&artifact_store),
@@ -1646,6 +1649,38 @@ impl ExtensionRuntimeService {
                 false,
             )
         })
+    }
+
+    /// Authorize an extension invocation and return the host's effective
+    /// runtime report. The current host is deliberately unavailable and
+    /// therefore produces a typed, fail-closed result at the transport
+    /// boundary instead of an unimplemented RPC.
+    pub fn invoke_report(
+        &self,
+        ctx: &RequestContext,
+        capability_id: &str,
+        operation: &str,
+        input_len: usize,
+    ) -> KernelResult<terminus_extension_runtime::WasiExtensionHostReport> {
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Extension,
+            &Scope::default(),
+        )?;
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "authorized",
+            service = "extension.invoke",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            actor_id = %ctx.actor_id,
+            capability_id = %capability_id,
+            operation = %operation,
+            input_len,
+            "extension invocation authorized"
+        );
+        Ok(self.host.report())
     }
 }
 

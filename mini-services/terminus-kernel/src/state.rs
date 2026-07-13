@@ -74,26 +74,11 @@ impl AppState {
         let kernel = KernelHandle::new(data_dir.clone())
             .map_err(|e| std::io::Error::other(format!("kernel assembly: {e}")))?;
 
-        // Token issuer with a dev secret. In production this secret is loaded
-        // from a sealed config and the kernel instance id matches the
-        // KernelHandle's info service instance id.
-        let kernel_instance_id = kernel.info.instance_id().to_string();
-        let issuer_secret = match env::var("TERMINUS_KERNEL_CAPABILITY_SECRET") {
-            Ok(s) if !s.is_empty() => s,
-            _ if dev_mode => "terminus-kernel-dev-capability-secret-please-rotate".to_string(),
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "TERMINUS_KERNEL_CAPABILITY_SECRET is required (or set TERMINUS_DEV=1 for local dev)",
-                ));
-            }
-        };
-        let token_issuer = Arc::new(TokenIssuer::new(
-            issuer_secret.into_bytes(),
-            kernel_instance_id,
-            // 10-year TTL for the dev token (315_360_000 seconds).
-            315_360_000,
-        ));
+        // The KernelHandle owns the one issuer used by every service. The
+        // control-plane token must be minted by that issuer; a second issuer
+        // would produce signatures and audiences the gRPC adapters cannot
+        // validate.
+        let token_issuer = Arc::clone(&kernel.token_issuer);
 
         // Mint a long-lived dev capability token with all operation classes.
         let binder = TokenBinder {
@@ -123,7 +108,13 @@ impl AppState {
         // tokens after approval; the kernel does not vend a god token.
         let dev_capability_token = if dev_mode {
             token_issuer
-                .mint(binder, ops, Scope::default(), None, "dev-capability-nonce")
+                .mint(
+                    binder,
+                    ops,
+                    Scope::default(),
+                    Some(315_360_000),
+                    "dev-capability-nonce",
+                )
                 .and_then(|t| t.encode())
                 .unwrap_or_else(|_| "<dev-token-mint-failed>".to_string())
         } else {

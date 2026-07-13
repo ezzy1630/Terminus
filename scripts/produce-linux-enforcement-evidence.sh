@@ -22,20 +22,24 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 command -v bwrap >/dev/null 2>&1 || fail "bubblewrap is required"
 command -v cosign >/dev/null 2>&1 || fail "cosign is required"
 [[ -r /sys/fs/cgroup/cgroup.controllers ]] || fail "cgroup v2 controller inventory is unavailable"
-[[ -r "$report" ]] || fail "effective enforcement report is missing: $report"
-
-jq -e '
-  .status == "enforced" and
-  .sandbox.cgroup_mode == "v2" and
-  .sandbox.network_mode == "proxy-only" and
-  (.sandbox.seccomp_filter_sha256 | type == "string" and length > 0)
-' "$report" >/dev/null || fail "effective report does not prove the secure Linux profile"
-
 mkdir -p "$(dirname "$manifest")"
 {
   echo "# command: $test_command"
   bash -lc "$test_command"
 } >"$test_log" 2>&1
+
+[[ -r "$report" ]] || fail "effective enforcement report is missing after test: $report"
+jq -e '
+  .status == "enforced" and
+  .sandbox.cgroup_mode == "v2" and
+  .sandbox.network_mode == "deny" and
+  (.sandbox.seccomp_filter_sha256 | type == "string" and length > 0) and
+  .checks.seccomp == "blocked" and
+  .checks.network == "blocked" and
+  .checks.filesystem == "readonly" and
+  .checks.cgroup == "visible" and
+  .exit_status == 0
+' "$report" >/dev/null || fail "effective report does not prove the secure Linux profile"
 
 commit="${TERMINUS_RELEASE_COMMIT:-${GITHUB_SHA:-$(git -C "$ROOT" rev-parse HEAD)}}"
 run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-local/terminus}/actions/runs/${GITHUB_RUN_ID:-local}"
@@ -67,7 +71,7 @@ jq -n \
       seccomp_filter_sha256: $filter,
       cgroup_mode: "v2",
       cgroup_controllers: $controllers,
-      network_mode: "proxy-only"
+      network_mode: "deny"
     },
     test_suite_sha256: $test_digest,
     command: $command,

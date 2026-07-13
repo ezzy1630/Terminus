@@ -42,24 +42,25 @@ anyhow = "1"
 hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 libc = "0.2"
+seccompiler = "0.5.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
-terminus-kernel-protocol = { path = "crates/terminus-kernel-protocol" }
-terminus-fs = { path = "crates/terminus-fs" }
-terminus-artifacts = { path = "crates/terminus-artifacts" }
-terminus-policy = { path = "crates/terminus-policy" }
-terminus-sandbox = { path = "crates/terminus-sandbox" }
-terminus-sandbox-linux = { path = "crates/terminus-sandbox-linux" }
-terminus-sandbox-macos = { path = "crates/terminus-sandbox-macos" }
-terminus-sandbox-windows = { path = "crates/terminus-sandbox-windows" }
-terminus-sandbox-container = { path = "crates/terminus-sandbox-container" }
-terminus-process = { path = "crates/terminus-process" }
-terminus-jobs = { path = "crates/terminus-jobs" }
-terminus-patch = { path = "crates/terminus-patch" }
-terminus-secrets = { path = "crates/terminus-secrets" }
-terminus-egress = { path = "crates/terminus-egress" }
-terminus-code-intel = { path = "crates/terminus-code-intel" }
-terminus-extension-runtime = { path = "crates/terminus-extension-runtime" }
-terminus-git = { path = "crates/terminus-git" }
-terminus-authz = { path = "crates/terminus-authz" }
-terminus-kernel = { path = "crates/terminus-kernel" }
-terminus-kernel-testkit = { path = "crates/terminus-kernel-testkit" }
+terminus-kernel-protocol = { path = "crates/terminus-kernel-protocol", version = "0.1.0" }
+terminus-fs = { path = "crates/terminus-fs", version = "0.1.0" }
+terminus-artifacts = { path = "crates/terminus-artifacts", version = "0.1.0" }
+terminus-policy = { path = "crates/terminus-policy", version = "0.1.0" }
+terminus-sandbox = { path = "crates/terminus-sandbox", version = "0.1.0" }
+terminus-sandbox-linux = { path = "crates/terminus-sandbox-linux", version = "0.1.0" }
+terminus-sandbox-macos = { path = "crates/terminus-sandbox-macos", version = "0.1.0" }
+terminus-sandbox-windows = { path = "crates/terminus-sandbox-windows", version = "0.1.0" }
+terminus-sandbox-container = { path = "crates/terminus-sandbox-container", version = "0.1.0" }
+terminus-process = { path = "crates/terminus-process", version = "0.1.0" }
+terminus-jobs = { path = "crates/terminus-jobs", version = "0.1.0" }
+terminus-patch = { path = "crates/terminus-patch", version = "0.1.0" }
+terminus-secrets = { path = "crates/terminus-secrets", version = "0.1.0" }
+terminus-egress = { path = "crates/terminus-egress", version = "0.1.0" }
+terminus-code-intel = { path = "crates/terminus-code-intel", version = "0.1.0" }
+terminus-extension-runtime = { path = "crates/terminus-extension-runtime", version = "0.1.0" }
+terminus-git = { path = "crates/terminus-git", version = "0.1.0" }
+terminus-authz = { path = "crates/terminus-authz", version = "0.1.0" }
+terminus-kernel = { path = "crates/terminus-kernel", version = "0.1.0" }
+terminus-kernel-testkit = { path = "crates/terminus-kernel-testkit", version = "0.1.0" }

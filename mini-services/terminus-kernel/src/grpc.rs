@@ -1,11 +1,20 @@
 //! Generated gRPC-over-UDS transport for the privileged kernel boundary.
 
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+// Tonic's public streaming traits return `Result<_, Status>` by contract;
+// these targeted allowances keep the transport adapter lintable without
+// boxing every generated status. The generated prost module is excluded
+// separately because it is not repository-authored code.
+#![allow(clippy::result_large_err)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::default_trait_access)]
+#![allow(clippy::map_flatten)]
 
 use std::path::PathBuf;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{transport::Server, Request, Response, Status};
 
+#[allow(clippy::all)]
 pub mod protocol {
     tonic::include_proto!("terminus.kernel.v1");
 }
@@ -81,9 +90,13 @@ impl WorkspaceServiceRpc for GrpcKernel {
         request: Request<protocol::RegisterWorkspaceRequest>,
     ) -> Result<Response<WorkspaceEntryMessage>, Status> {
         let request = request.into_inner();
-        let ctx = request.context.map(context).unwrap_or_else(|| {
-            terminus_kernel_protocol::RequestContext::new(terminus_kernel_protocol::new_id())
-        });
+        let ctx = authorize_context(
+            &self.kernel,
+            request
+                .context
+                .ok_or_else(|| Status::invalid_argument("context is required"))?,
+            terminus_authz::OperationClass::Admin,
+        )?;
         let id = self
             .kernel
             .workspaces
@@ -108,10 +121,18 @@ impl WorkspaceServiceRpc for GrpcKernel {
         &self,
         request: Request<protocol::GetWorkspaceRequest>,
     ) -> Result<Response<WorkspaceEntryMessage>, Status> {
+        let request = request.into_inner();
+        authorize_context(
+            &self.kernel,
+            request
+                .context
+                .ok_or_else(|| Status::invalid_argument("context is required"))?,
+            terminus_authz::OperationClass::Read,
+        )?;
         let entry = self
             .kernel
             .workspaces
-            .get(&request.into_inner().workspace_id)
+            .get(&request.workspace_id)
             .map_err(status)?;
         Ok(Response::new(WorkspaceEntryMessage {
             id: entry.id,
@@ -190,8 +211,16 @@ impl FileServiceRpc for GrpcKernel {
 impl SandboxServiceRpc for GrpcKernel {
     async fn report(
         &self,
-        _request: Request<protocol::SandboxReportRequest>,
+        request: Request<protocol::SandboxReportRequest>,
     ) -> Result<Response<EnforcementReportMessage>, Status> {
+        let request = request.into_inner();
+        authorize_context(
+            &self.kernel,
+            request
+                .context
+                .ok_or_else(|| Status::invalid_argument("context is required"))?,
+            terminus_authz::OperationClass::Sandbox,
+        )?;
         let report = self.kernel.sandboxes.enforcement_report();
         Ok(Response::new(EnforcementReportMessage {
             backend_id: report.backend_id,
@@ -299,27 +328,38 @@ impl ArtifactIngestRpc for GrpcKernel {
     }
 }
 
-macro_rules! unavailable_unary {
-    ($trait:path, $method:ident, $request:ty, $response:ty, $label:literal) => {
-        #[tonic::async_trait]
-        impl $trait for GrpcKernel {
-            async fn $method(
-                &self,
-                _request: Request<$request>,
-            ) -> Result<Response<$response>, Status> {
-                Err(Status::unimplemented($label))
-            }
-        }
-    };
+#[tonic::async_trait]
+impl ExtensionRuntimeRpc for GrpcKernel {
+    async fn invoke(
+        &self,
+        request: Request<protocol::ExtensionInvokeRequest>,
+    ) -> Result<Response<protocol::ExtensionInvokeResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let report = self
+            .kernel
+            .extensions
+            .invoke_report(
+                &ctx,
+                &request.capability_id,
+                &request.operation,
+                request.input.len(),
+            )
+            .map_err(status)?;
+        Ok(Response::new(protocol::ExtensionInvokeResponse {
+            output: Vec::new(),
+            ok: false,
+            error: if report.available {
+                "extension runtime returned no executable result".to_string()
+            } else {
+                report.reason
+            },
+        }))
+    }
 }
-
-unavailable_unary!(
-    ExtensionRuntimeRpc,
-    invoke,
-    protocol::ExtensionInvokeRequest,
-    protocol::ExtensionInvokeResponse,
-    "Extension.Invoke is not wired"
-);
 
 #[tonic::async_trait]
 impl PolicyServiceRpc for GrpcKernel {
@@ -332,6 +372,13 @@ impl PolicyServiceRpc for GrpcKernel {
             .context
             .map(context)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        terminus_kernel::validate_capability_for_op(
+            &self.kernel.token_issuer,
+            &ctx,
+            terminus_authz::OperationClass::Policy,
+            &terminus_authz::Scope::default(),
+        )
+        .map_err(status)?;
         let command = request
             .command
             .ok_or_else(|| Status::invalid_argument("command is required"))?;
@@ -449,21 +496,41 @@ impl CodeIntelligenceRpc for GrpcKernel {
         request: Request<protocol::CodeSearchRequest>,
     ) -> Result<Response<protocol::CodeSearchResponse>, Status> {
         let request = request.into_inner();
-        let ctx = request.context.map(context).ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
         if request.query.is_empty() {
             return Err(Status::invalid_argument("query is required"));
         }
-        let result = self.kernel.code_intel.inspect(&ctx, &Default::default(), &request.query).map_err(status)?;
-        let limit = if request.limit == 0 { 100 } else { request.limit as usize };
+        let result = self
+            .kernel
+            .code_intel
+            .inspect(&ctx, &Default::default(), &request.query)
+            .map_err(status)?;
+        let limit = if request.limit == 0 {
+            100
+        } else {
+            request.limit as usize
+        };
         let mut results = Vec::new();
         if let Some(symbol) = result.symbol {
             if request.workspace_id.is_empty() || symbol.path.starts_with(&request.workspace_id) {
-                results.push(protocol::CodeSearchResult { path: symbol.path, line: symbol.start_line, symbol: symbol.name, method: "symbol-index".to_string() });
+                results.push(protocol::CodeSearchResult {
+                    path: symbol.path,
+                    line: symbol.start_line,
+                    symbol: symbol.name,
+                    method: "symbol-index".to_string(),
+                });
             }
         }
         let truncated = results.len() > limit;
         results.truncate(limit);
-        Ok(Response::new(protocol::CodeSearchResponse { results, truncated, continuation: None }))
+        Ok(Response::new(protocol::CodeSearchResponse {
+            results,
+            truncated,
+            continuation: None,
+        }))
     }
 }
 
@@ -595,9 +662,8 @@ impl ProcessServiceRpc for GrpcKernel {
 
 #[tonic::async_trait]
 impl JobServiceRpc for GrpcKernel {
-    type StreamStream = std::pin::Pin<
-        Box<dyn Stream<Item = Result<protocol::JobEvent, Status>> + Send>,
-    >;
+    type StreamStream =
+        std::pin::Pin<Box<dyn Stream<Item = Result<protocol::JobEvent, Status>> + Send>>;
     async fn start(
         &self,
         request: Request<protocol::StartJobRequest>,
@@ -800,6 +866,22 @@ fn context(value: ProtoContext) -> terminus_kernel_protocol::RequestContext {
         traceparent: value.traceparent,
         capability_token: value.capability_token,
     }
+}
+
+fn authorize_context(
+    kernel: &terminus_kernel::KernelHandle,
+    value: ProtoContext,
+    operation: terminus_authz::OperationClass,
+) -> Result<terminus_kernel_protocol::RequestContext, Status> {
+    let ctx = context(value);
+    terminus_kernel::validate_capability_for_op(
+        &kernel.token_issuer,
+        &ctx,
+        operation,
+        &terminus_authz::Scope::default(),
+    )
+    .map(|_| ctx)
+    .map_err(status)
 }
 fn intent(value: protocol::EffectIntent) -> terminus_kernel_protocol::EffectIntent {
     terminus_kernel_protocol::EffectIntent {
@@ -1076,7 +1158,56 @@ fn patch_response(value: terminus_kernel_protocol::PatchResponse) -> protocol::P
     }
 }
 fn status(error: terminus_kernel_protocol::KernelError) -> Status {
-    Status::internal(error.to_string())
+    use terminus_kernel_protocol::ErrorCode;
+    let code = match error.code() {
+        ErrorCode::InvalidRequest
+        | ErrorCode::InvalidArgument
+        | ErrorCode::MissingField
+        | ErrorCode::SchemaMismatch => tonic::Code::InvalidArgument,
+        ErrorCode::NotFound
+        | ErrorCode::WorkspaceNotFound
+        | ErrorCode::JobNotFound
+        | ErrorCode::ProcessNotFound
+        | ErrorCode::ArtifactNotFound
+        | ErrorCode::PathNotFound => tonic::Code::NotFound,
+        ErrorCode::StaleSourceVersion
+        | ErrorCode::AlreadyExists
+        | ErrorCode::TransactionConflict
+        | ErrorCode::LeaseHeld => tonic::Code::Aborted,
+        ErrorCode::PermissionDenied
+        | ErrorCode::CapabilityTokenInvalid
+        | ErrorCode::CapabilityTokenExpired
+        | ErrorCode::CapabilityTokenRevoked => tonic::Code::PermissionDenied,
+        ErrorCode::PolicyDenied | ErrorCode::ApprovalRejected => tonic::Code::PermissionDenied,
+        ErrorCode::ApprovalRequired
+        | ErrorCode::SandboxUnavailable
+        | ErrorCode::SandboxDegraded
+        | ErrorCode::UnsupportedPlatform
+        | ErrorCode::IntegrityCheckFailed
+        | ErrorCode::HashMismatch => tonic::Code::FailedPrecondition,
+        ErrorCode::ResourceExhausted | ErrorCode::BudgetExhausted => tonic::Code::ResourceExhausted,
+        ErrorCode::Timeout => tonic::Code::DeadlineExceeded,
+        ErrorCode::Cancelled => tonic::Code::Cancelled,
+        ErrorCode::ExternalDependencyFailed | ErrorCode::ProviderError => tonic::Code::Unavailable,
+        ErrorCode::UnknownSettlement => tonic::Code::Unknown,
+        ErrorCode::Internal => tonic::Code::Internal,
+        ErrorCode::TaintedByUntrustedSource => tonic::Code::PermissionDenied,
+        ErrorCode::NotImplemented => tonic::Code::Unimplemented,
+    };
+    let mut status = Status::new(code, "kernel request failed");
+    let metadata = status.metadata_mut();
+    if let Ok(value) = tonic::metadata::MetadataValue::try_from(error.code_name()) {
+        metadata.insert("terminus-error-code", value);
+    }
+    if let Ok(value) = tonic::metadata::MetadataValue::try_from(error.category().as_str()) {
+        metadata.insert("terminus-error-category", value);
+    }
+    if let Ok(value) =
+        tonic::metadata::MetadataValue::try_from(if error.retryable() { "true" } else { "false" })
+    {
+        metadata.insert("terminus-error-retryable", value);
+    }
+    status
 }
 
 fn string(value: &serde_json::Value, key: &str, fallback: &str) -> String {
@@ -1119,9 +1250,26 @@ pub async fn serve_grpc(
                 )
                 .into());
             }
+            let parent_uid = metadata.uid();
             tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
+            if tokio::fs::symlink_metadata(parent).await?.uid() != parent_uid {
+                return Err(format!(
+                    "gRPC socket parent {} changed owner during setup",
+                    parent.display()
+                )
+                .into());
+            }
         }
     }
+    #[cfg(unix)]
+    let expected_owner = match socket_path.parent() {
+        Some(parent) => {
+            let metadata = tokio::fs::symlink_metadata(parent).await?;
+            use std::os::unix::fs::MetadataExt;
+            Some(metadata.uid())
+        }
+        None => None,
+    };
     match tokio::fs::symlink_metadata(&socket_path).await {
         Ok(metadata) => {
             #[cfg(unix)]
@@ -1141,6 +1289,13 @@ pub async fn serve_grpc(
                     )
                     .into());
                 }
+                if expected_owner != Some(metadata.uid()) {
+                    return Err(format!(
+                        "refusing to replace a socket not owned by the private parent owner {}",
+                        socket_path.display()
+                    )
+                    .into());
+                }
             }
             tokio::fs::remove_file(&socket_path).await?;
         }
@@ -1153,24 +1308,90 @@ pub async fn serve_grpc(
     {
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).await?;
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let metadata = tokio::fs::symlink_metadata(&socket_path).await?;
+        if !metadata.file_type().is_socket()
+            || metadata.mode() & 0o077 != 0
+            || expected_owner != Some(metadata.uid())
+        {
+            let _ = tokio::fs::remove_file(&socket_path).await;
+            return Err(format!(
+                "gRPC socket {} failed ownership or mode verification",
+                socket_path.display()
+            )
+            .into());
+        }
     }
 
     tracing::info!(socket = %socket_path.display(), "kernel gRPC listening on UDS");
+    const MAX_GRPC_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
     let service = GrpcKernel::new(kernel);
     let result = Server::builder()
-        .add_service(KernelInfoServiceServer::new(service.clone()))
-        .add_service(FileServiceServer::new(service.clone()))
-        .add_service(PatchServiceServer::new(service.clone()))
-        .add_service(ProcessServiceServer::new(service.clone()))
-        .add_service(JobServiceServer::new(service.clone()))
-        .add_service(WorkspaceServiceServer::new(service.clone()))
-        .add_service(SandboxServiceServer::new(service.clone()))
-        .add_service(PolicyServiceServer::new(service.clone()))
-        .add_service(SecretServiceServer::new(service.clone()))
-        .add_service(NetworkServiceServer::new(service.clone()))
-        .add_service(CodeIntelligenceServiceServer::new(service.clone()))
-        .add_service(ExtensionRuntimeServiceServer::new(service.clone()))
-        .add_service(ArtifactIngestServiceServer::new(service))
+        .add_service(
+            KernelInfoServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            FileServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            PatchServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            ProcessServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            JobServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            WorkspaceServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            SandboxServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            PolicyServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            SecretServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            NetworkServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            CodeIntelligenceServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            ExtensionRuntimeServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            ArtifactIngestServiceServer::new(service)
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
         .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener))
         .await;
     let _ = tokio::fs::remove_file(&socket_path).await;
@@ -1186,6 +1407,7 @@ mod tests {
     use protocol::sandbox_service_client::SandboxServiceClient;
     use protocol::workspace_service_client::WorkspaceServiceClient;
     use std::os::unix::fs::PermissionsExt;
+    use terminus_authz::{OperationClass, Scope, TokenBinder};
     use tokio::net::UnixStream;
     use tonic::transport::{Endpoint, Uri};
     use tower::service_fn;
@@ -1193,14 +1415,32 @@ mod tests {
     #[tokio::test]
     async fn generated_client_reaches_generated_server_over_restricted_uds() {
         let dir = tempfile::tempdir().expect("temporary directory");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private test directory");
         let socket = dir.path().join("kernel.sock");
         let server_socket = socket.clone();
-        let server = tokio::spawn(async move {
-            let data_dir = tempfile::tempdir().expect("kernel data dir");
-            let kernel =
-                terminus_kernel::KernelHandle::new(data_dir.path().to_path_buf()).expect("kernel");
-            serve_grpc(server_socket, kernel).await
-        });
+        let data_dir = tempfile::tempdir().expect("kernel data dir");
+        let kernel =
+            terminus_kernel::KernelHandle::new(data_dir.path().to_path_buf()).expect("kernel");
+        let token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "grpc-test".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    workspace_id: "workspace".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![OperationClass::Admin],
+                Scope::default(),
+                None,
+                "grpc-test-nonce",
+            )
+            .expect("test capability")
+            .encode()
+            .expect("encoded capability");
+        let server = tokio::spawn(async move { serve_grpc(server_socket, kernel).await });
 
         for _ in 0..100 {
             if socket.exists() {
@@ -1236,7 +1476,16 @@ mod tests {
 
         let workspace = WorkspaceServiceClient::new(channel.clone())
             .register(protocol::RegisterWorkspaceRequest {
-                context: None,
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-register".to_string(),
+                    idempotency_key: "grpc-register".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: token.clone(),
+                }),
                 root_uri: "file:///tmp/terminus-grpc".to_string(),
                 canonical_root: "/tmp/terminus-grpc".to_string(),
                 trust: "restricted".to_string(),
@@ -1248,7 +1497,16 @@ mod tests {
 
         let report = SandboxServiceClient::new(channel)
             .report(protocol::SandboxReportRequest {
-                context: None,
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-sandbox".to_string(),
+                    idempotency_key: "grpc-sandbox".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: token,
+                }),
                 profile_id: "secure-local-default".to_string(),
             })
             .await

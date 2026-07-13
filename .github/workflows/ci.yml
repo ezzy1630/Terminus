@@ -221,6 +221,34 @@ jobs:
       - name: Verify delegated Linux controls
         run: just linux-enforcement-prereqs
 
+  # ---------- Linux adversarial enforcement ----------
+  linux-enforcement-adversarial:
+    name: Linux adversarial sandbox enforcement
+    runs-on: ubuntu-latest
+    needs: setup
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: just bootstrap
+      - name: Install host enforcement dependencies
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
+      - name: Build kernel probe binary
+        run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
+      - name: Verify effective enforcement
+        env:
+          TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
+          TERMINUS_KERNEL_BINARY: ${{ github.workspace }}/mini-services/terminus-kernel/target/release/terminus-kernel-mini
+        run: bash scripts/run-linux-enforcement-probe.sh
+      - name: Upload enforcement report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-enforcement-report
+          path: ${{ runner.temp }}/terminus-enforcement-report.json
+          if-no-files-found: error
+
   # ---------- Eval smoke (per PR for agent-behavior changes) ----------
   eval-smoke:
     name: Eval smoke

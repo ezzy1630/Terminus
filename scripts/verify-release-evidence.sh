@@ -45,7 +45,7 @@ done
 jq -e '
   .schema_version == 1 and
   .runner.os == "linux" and
-  .sandbox.network_mode == "proxy-only" and
+  .sandbox.network_mode == "deny" and
   .sandbox.cgroup_mode == "v2" and
   (.tests | type == "array" and length > 0) and
   (.tests | all(.[]; .status == "passed" and (.artifact_digest | type == "string"))) and

@@ -45,6 +45,8 @@ CONTROL_PORT="${TERMINUS_E2E_CONTROL_PORT:-$((KERNEL_PORT + 1))}"
 export TERMINUS_KERNEL_PORT="$KERNEL_PORT"
 export TERMINUS_CONTROL_PORT="$CONTROL_PORT"
 mkdir -p "$TERMINUS_E2E_WORKSPACE_ROOT"
+mkdir -p "$TERMINUS_DATA"
+cp "$ROOT/scripts/e2e/fixtures/read.txt" "$TERMINUS_DATA/e2e-fixture.txt"
 
 if curl --noproxy '*' -sS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" >/dev/null 2>&1; then
   echo "[e2e] port $CONTROL_PORT is already in use; refusing to share a control plane" >&2
@@ -56,8 +58,10 @@ DATABASE_URL="$DATABASE_URL" bun run "$ROOT/scripts/migrate.ts" >"$TMP_DIR/migra
 
 echo "[e2e] starting kernel"
 kernel_binary="$ROOT/mini-services/terminus-kernel/target/debug/terminus-kernel-mini"
+cargo build --manifest-path "$ROOT/mini-services/terminus-kernel/Cargo.toml" >"$TMP_DIR/kernel-build.log" 2>&1
 if [[ ! -x "$kernel_binary" ]]; then
-  cargo build --manifest-path "$ROOT/mini-services/terminus-kernel/Cargo.toml" >"$TMP_DIR/kernel-build.log" 2>&1
+  echo "[e2e] kernel build did not produce an executable; see $TMP_DIR/kernel-build.log" >&2
+  exit 1
 fi
 # macOS dyld can hold an executable on the external Neural volume in the
 # loader before main() starts. Copy the verified build into the isolated
@@ -94,24 +98,51 @@ if [[ -z "$capability_token" ]]; then
 fi
 export TERMINUS_KERNEL_CAP_TOKEN="$capability_token"
 
-echo "[e2e] starting control plane"
-nohup bun run "$ROOT/mini-services/terminus-control/src/index.ts" </dev/null >"$TMP_DIR/control.log" 2>&1 &
-CONTROL_PID=$!
+start_control() {
+  echo "[e2e] starting control plane"
+  nohup bun run "$ROOT/mini-services/terminus-control/src/index.ts" </dev/null >>"$TMP_DIR/control.log" 2>&1 &
+  CONTROL_PID=$!
 
-for _ in $(seq 1 600); do
-  if curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" \
-    -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" >/dev/null 2>&1; then
-    break
+  for _ in $(seq 1 600); do
+    if curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" \
+      -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  if ! curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" \
+    -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" >/dev/null; then
+    echo "[e2e] control plane did not become healthy; see $TMP_DIR/control.log" >&2
+    exit 1
   fi
-  sleep 0.1
-done
+}
 
-if ! curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" \
-  -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" >/dev/null; then
-  echo "[e2e] control plane did not become healthy; see $TMP_DIR/control.log" >&2
-  exit 1
-fi
+start_control
+
+lifecycle_json="$(
+  TERMINUS_E2E_CONTROL_URL="http://127.0.0.1:$CONTROL_PORT" \
+    TERMINUS_E2E_CONTROL_TOKEN="$TERMINUS_CONTROL_TOKEN" \
+    TERMINUS_E2E_DEBUG="${TERMINUS_E2E_DEBUG:-0}" \
+    bun run "$ROOT/scripts/e2e/assert-lifecycle.ts"
+)"
+echo "$lifecycle_json"
+
+json_field() {
+  python3 -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"
+}
+
+export TERMINUS_E2E_SESSION_ID="$(printf '%s' "$lifecycle_json" | json_field session_id)"
+export TERMINUS_E2E_TASK_ID="$(printf '%s' "$lifecycle_json" | json_field task_id)"
+export TERMINUS_E2E_THREAD_ID="$(printf '%s' "$lifecycle_json" | json_field thread_id)"
+export TERMINUS_E2E_CHECKPOINT_ID="$(printf '%s' "$lifecycle_json" | json_field checkpoint_id)"
+
+echo "[e2e] restarting control plane for recovery/resume proof"
+kill "$CONTROL_PID" 2>/dev/null || true
+wait "$CONTROL_PID" 2>/dev/null || true
+CONTROL_PID=""
+start_control
 
 TERMINUS_E2E_CONTROL_URL="http://127.0.0.1:$CONTROL_PORT" \
   TERMINUS_E2E_CONTROL_TOKEN="$TERMINUS_CONTROL_TOKEN" \
-  bun run "$ROOT/scripts/e2e/assert-lifecycle.ts"
+  bun run "$ROOT/scripts/e2e/assert-restart.ts"

@@ -479,6 +479,49 @@ impl KernelError {
             Self::Structured { retryable, .. } => *retryable,
         }
     }
+
+    /// Return the stable machine-facing code without exposing the error
+    /// message, which may contain workspace paths or other sensitive detail.
+    pub fn code_name(&self) -> &'static str {
+        match self.code() {
+            ErrorCode::InvalidRequest => "INVALID_REQUEST",
+            ErrorCode::InvalidArgument => "INVALID_ARGUMENT",
+            ErrorCode::MissingField => "MISSING_FIELD",
+            ErrorCode::SchemaMismatch => "SCHEMA_MISMATCH",
+            ErrorCode::NotFound => "NOT_FOUND",
+            ErrorCode::WorkspaceNotFound => "WORKSPACE_NOT_FOUND",
+            ErrorCode::JobNotFound => "JOB_NOT_FOUND",
+            ErrorCode::ProcessNotFound => "PROCESS_NOT_FOUND",
+            ErrorCode::ArtifactNotFound => "ARTIFACT_NOT_FOUND",
+            ErrorCode::PathNotFound => "PATH_NOT_FOUND",
+            ErrorCode::StaleSourceVersion => "STALE_SOURCE_VERSION",
+            ErrorCode::AlreadyExists => "ALREADY_EXISTS",
+            ErrorCode::TransactionConflict => "TRANSACTION_CONFLICT",
+            ErrorCode::LeaseHeld => "LEASE_HELD",
+            ErrorCode::PermissionDenied => "PERMISSION_DENIED",
+            ErrorCode::CapabilityTokenInvalid => "CAPABILITY_TOKEN_INVALID",
+            ErrorCode::CapabilityTokenExpired => "CAPABILITY_TOKEN_EXPIRED",
+            ErrorCode::CapabilityTokenRevoked => "CAPABILITY_TOKEN_REVOKED",
+            ErrorCode::PolicyDenied => "POLICY_DENIED",
+            ErrorCode::ApprovalRequired => "APPROVAL_REQUIRED",
+            ErrorCode::ApprovalRejected => "APPROVAL_REJECTED",
+            ErrorCode::TaintedByUntrustedSource => "TAINTED_BY_UNTRUSTED_SOURCE",
+            ErrorCode::SandboxUnavailable => "SANDBOX_UNAVAILABLE",
+            ErrorCode::SandboxDegraded => "SANDBOX_DEGRADED",
+            ErrorCode::UnsupportedPlatform => "UNSUPPORTED_PLATFORM",
+            ErrorCode::ResourceExhausted => "RESOURCE_EXHAUSTED",
+            ErrorCode::BudgetExhausted => "BUDGET_EXHAUSTED",
+            ErrorCode::Timeout => "TIMEOUT",
+            ErrorCode::Cancelled => "CANCELLED",
+            ErrorCode::IntegrityCheckFailed => "INTEGRITY_CHECK_FAILED",
+            ErrorCode::HashMismatch => "HASH_MISMATCH",
+            ErrorCode::ExternalDependencyFailed => "EXTERNAL_DEPENDENCY_FAILED",
+            ErrorCode::ProviderError => "PROVIDER_ERROR",
+            ErrorCode::Internal => "INTERNAL",
+            ErrorCode::UnknownSettlement => "UNKNOWN_SETTLEMENT",
+            ErrorCode::NotImplemented => "NOT_IMPLEMENTED",
+        }
+    }
 }
 
 pub type KernelResult<T> = Result<T, KernelError>;

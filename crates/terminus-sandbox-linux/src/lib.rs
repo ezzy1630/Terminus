@@ -9,12 +9,9 @@
 //! production. The UI must display effective enforcement, never silently
 //! downgrade."):
 //!
-//! - When `bwrap` IS on `$PATH` (verified at construction time via
-//!   `which bwrap`), the backend reports `Enforced` for the namespace-backed
-//!   features it actually provides: filesystem, network, process, pid/mount/
-//!   user namespaces, and `NO_NEW_PRIVS`. It reports `Degraded` for
-//!   `SeccompFilter` (bwrap does not install a seccomp filter by default)
-//!   and `CgroupResourceLimits` (bwrap does not manage cgroups).
+//! - When `bwrap` IS on `$PATH` and a real namespace probe succeeds, the
+//!   backend can report `Enforced` for the namespace-backed features. The
+//!   payload launcher adds the versioned seccomp filter and cgroup v2 lease.
 //! - When `bwrap` is NOT on `$PATH`, the backend reports `Degraded` with an
 //!   explicit note naming the missing binary. It does NOT silently downgrade
 //!   by claiming `Enforced` for features it cannot actually enforce. Profiles
@@ -37,6 +34,8 @@ use terminus_sandbox::profile::{FilesystemAccess, NetworkAccess, SandboxProfile}
 use terminus_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
 use terminus_sandbox::{SandboxBackend, SandboxError};
 
+mod enforcement;
+
 #[derive(Debug, Clone, Default)]
 pub struct LinuxSandboxBackend {
     /// Resolved absolute path to `bwrap`. `None` means bubblewrap was not
@@ -44,6 +43,7 @@ pub struct LinuxSandboxBackend {
     /// `Degraded` for the namespace-backed features and MUST reject profiles
     /// that require namespace isolation.
     bwrap_path: Option<PathBuf>,
+    bwrap_verified: bool,
 }
 
 impl LinuxSandboxBackend {
@@ -52,8 +52,10 @@ impl LinuxSandboxBackend {
     /// otherwise it reports `Degraded` and rejects profiles that require
     /// namespace isolation.
     pub fn new() -> Self {
+        let bwrap_path = which_bwrap();
         Self {
-            bwrap_path: which_bwrap(),
+            bwrap_verified: bwrap_path.is_some(),
+            bwrap_path,
         }
     }
 
@@ -70,12 +72,13 @@ impl LinuxSandboxBackend {
     }
 
     /// Construct with an explicit resolved `bwrap` path. The path MUST be
-    /// absolute; if a relative path is passed it is rejected at spawn time
-    /// (the backend reports `Degraded` until an absolute path is provided).
+    /// absolute and pass the same namespace probe used by [`Self::new`].
     pub fn with_bwrap_path(path: PathBuf) -> Self {
         if path.is_absolute() && std::fs::metadata(&path).is_ok() {
+            let bwrap_verified = probe_bwrap_path(&path);
             Self {
                 bwrap_path: Some(path),
+                bwrap_verified,
             }
         } else {
             Self::default()
@@ -93,6 +96,7 @@ impl LinuxSandboxBackend {
         if available {
             Self {
                 bwrap_path: Some(PathBuf::from("/usr/bin/bwrap")),
+                bwrap_verified: false,
             }
         } else {
             Self::default()
@@ -192,6 +196,27 @@ impl LinuxSandboxBackend {
         argv
     }
 
+    /// Build a launcher that lets bubblewrap finish namespace setup before
+    /// the payload installs seccomp and joins cgroup v2. The launcher is the
+    /// current kernel executable in a dedicated mode, so release packaging
+    /// does not need a second helper binary.
+    pub fn build_enforced_wrapper(
+        &self,
+        command: &CommandSpec,
+        profile: &SandboxProfile,
+    ) -> Option<(PathBuf, Vec<String>)> {
+        let bwrap_path = self.bwrap_path.as_ref()?;
+        if !self.bwrap_verified {
+            return None;
+        }
+        enforcement::payload_wrapper(
+            bwrap_path,
+            &Self::build_bwrap_argv(command, profile),
+            profile.resources,
+            matches!(profile.network, NetworkAccess::Deny),
+        )
+    }
+
     /// Spawn `command` inside a bwrap sandbox configured by `profile`.
     /// Returns the captured `std::process::Output` (stdout, stderr, exit
     /// code). Returns `SandboxError::Unsupported` if `bwrap` was not
@@ -201,13 +226,19 @@ impl LinuxSandboxBackend {
         command: &CommandSpec,
         profile: &SandboxProfile,
     ) -> Result<std::process::Output, SandboxError> {
-        let bwrap_path = self.bwrap_path.as_ref().ok_or_else(|| {
-            SandboxError::Unsupported(
+        if self.bwrap_path.is_none() {
+            return Err(SandboxError::Unsupported(
                 "bwrap not available on this host; cannot spawn in sandbox".to_string(),
-            )
-        })?;
-        let argv = Self::build_bwrap_argv(command, profile);
-        let mut cmd = Command::new(bwrap_path);
+            ));
+        }
+        let (launcher, argv) = self
+            .build_enforced_wrapper(command, profile)
+            .ok_or_else(|| {
+                SandboxError::Unsupported(
+                    "cannot build the enforced Linux sandbox launcher".to_string(),
+                )
+            })?;
+        let mut cmd = Command::new(launcher);
         cmd.args(&argv);
         // Clear the environment — bwrap does not propagate ambient env by
         // default when --unshare-all is used, but we explicitly clear here
@@ -216,11 +247,7 @@ impl LinuxSandboxBackend {
         for (k, v) in &command.public_env {
             cmd.env(k, v);
         }
-        if command.timeout_ms > 0 {
-            // std::process::Command does not have a native timeout; the
-            // caller is responsible for enforcing it externally (e.g. via
-            // a watchdog). We record it here for future use.
-        }
+        let _ = command.timeout_ms;
         cmd.output().map_err(SandboxError::Io)
     }
 }
@@ -241,25 +268,28 @@ impl SandboxBackend for LinuxSandboxBackend {
         command: &CommandSpec,
         profile: &SandboxProfile,
     ) -> Option<(std::path::PathBuf, Vec<String>)> {
-        let bwrap_path = self.bwrap_path.as_ref()?;
-        if !bwrap_path.is_absolute() {
-            return None;
-        }
-        Some((bwrap_path.clone(), Self::build_bwrap_argv(command, profile)))
+        self.build_enforced_wrapper(command, profile)
     }
 
     fn enforcement_report(&self) -> EnforcementReport {
-        if let Some(path) = &self.bwrap_path {
-            // bwrap is available. Report Enforced for the namespace-backed
-            // features it actually provides. Be honest about SeccompFilter
-            // (bwrap does not install a seccomp filter by default) and
-            // CgroupResourceLimits (bwrap does not manage cgroups).
+        if let Some(path) = self.bwrap_path.as_ref().filter(|_| self.bwrap_verified) {
+            if !enforcement::cgroup_v2_ready() {
+                return EnforcementReport {
+                    backend_id: self.id().to_string(),
+                    status: EnforcementStatus::Degraded,
+                    enforced: vec![],
+                    degraded: vec![EnforcementFeature::CgroupResourceLimits],
+                    unsupported: vec![EnforcementFeature::SeccompFilter],
+                    notes: vec![
+                        format!("bubblewrap available at {}", path.display()),
+                        "cgroup v2 is not delegated and writable for Terminus".to_string(),
+                        "secure execution fails closed until cgroup v2 is available".to_string(),
+                    ],
+                };
+            }
             return EnforcementReport {
                 backend_id: self.id().to_string(),
-                // A backend with missing mandatory controls is degraded as a
-                // whole; callers must never infer full enforcement merely
-                // because the namespace subset is active.
-                status: EnforcementStatus::Degraded,
+                status: EnforcementStatus::Enforced,
                 enforced: vec![
                     EnforcementFeature::FilesystemIsolation,
                     EnforcementFeature::NetworkIsolation,
@@ -270,25 +300,22 @@ impl SandboxBackend for LinuxSandboxBackend {
                     EnforcementFeature::PidNamespace,
                     EnforcementFeature::MountNamespace,
                     EnforcementFeature::UserNamespace,
-                ],
-                degraded: vec![
                     EnforcementFeature::SeccompFilter,
                     EnforcementFeature::CgroupResourceLimits,
                 ],
+                degraded: vec![],
                 unsupported: vec![],
                 notes: vec![
                     format!(
                         "bubblewrap available at {} — user/mount/pid/net namespaces enforced",
                         path.display()
                     ),
-                    "seccomp filter: degraded (bwrap does not install a seccomp filter by default)"
-                        .to_string(),
-                    "cgroup resource limits: degraded (bwrap does not manage cgroups)".to_string(),
-                    "spawn_in_sandbox() constructs the bwrap argv from the profile".to_string(),
+                    format!("seccomp policy: {}", enforcement::seccomp_policy_hash(true)),
+                    "cgroup v2 resource limits are applied by the payload launcher".to_string(),
                 ],
             };
         }
-        // Honest degraded report: bwrap was not found on PATH.
+        // Honest degraded report: bwrap was not verified on PATH.
         EnforcementReport {
             backend_id: self.id().to_string(),
             status: EnforcementStatus::Degraded,
@@ -307,7 +334,7 @@ impl SandboxBackend for LinuxSandboxBackend {
                 EnforcementFeature::UserNamespace,
             ],
             notes: vec![
-                "degraded: bubblewrap (bwrap) not found on PATH; namespace isolation unavailable"
+                "degraded: bubblewrap (bwrap) not found or not verified on PATH; namespace isolation unavailable"
                     .to_string(),
                 "cgroup-style resource limits via setrlimit where available (degraded — not wired in this build)"
                     .to_string(),
@@ -342,6 +369,12 @@ impl SandboxBackend for LinuxSandboxBackend {
         // can be partially enforced via terminus-fs path policy, so we do not
         // reject them here; the enforcement report shows Degraded for
         // FilesystemIsolation.
+        if matches!(profile.network, NetworkAccess::ProxyRequired) {
+            return Err(SandboxError::Unsupported(
+                "proxy-required profiles need the Terminus egress bridge; direct network is not permitted"
+                    .into(),
+            ));
+        }
         if self.bwrap_path.is_none() && matches!(profile.network, NetworkAccess::Deny) {
             return Err(SandboxError::Unsupported(
                 "profile requires network isolation (--unshare-net) but bwrap is not available"
@@ -358,15 +391,17 @@ impl SandboxBackend for LinuxSandboxBackend {
 /// In this build we do not link libc directly; the function returns
 /// `Err(SandboxError::Degraded)` so callers can record the gap honestly.
 pub fn apply_resource_limits(
-    _limits: &terminus_sandbox::ResourceLimits,
+    limits: &terminus_sandbox::ResourceLimits,
 ) -> Result<(), SandboxError> {
-    Err(SandboxError::Degraded(
-        "setrlimit binding unavailable in this build".into(),
+    let _ = limits;
+    Err(SandboxError::Unsupported(
+        "resource limits are applied by the Linux payload launcher".into(),
     ))
 }
 
-/// Resolve `bwrap` on `$PATH` by invoking `bwrap --version` and then
-/// `which bwrap`. Returns `None` if not found.
+/// Resolve and exercise `bwrap` on `$PATH`. A version string alone is not
+/// evidence of enforcement: the probe must successfully create the
+/// namespaces and launch a command before the path is trusted.
 fn which_bwrap() -> Option<PathBuf> {
     // Try `bwrap --version` first — that's the canonical existence check.
     let output = Command::new("bwrap")
@@ -386,15 +421,41 @@ fn which_bwrap() -> Option<PathBuf> {
         .output()
         .ok()?;
     if !which.status.success() {
-        // `bwrap --version` worked but `which bwrap` failed — fall back to
-        // the bare name and trust the OS to resolve it at spawn time.
-        return Some(PathBuf::from("bwrap"));
+        // `bwrap --version` worked but `which bwrap` failed. Keep the same
+        // functional probe and only retain the bare name if it passes.
+        return probe_bwrap_path(std::path::Path::new("bwrap")).then(|| PathBuf::from("bwrap"));
     }
     let path_str = String::from_utf8_lossy(&which.stdout).trim().to_string();
     if path_str.is_empty() {
-        return Some(PathBuf::from("bwrap"));
+        return probe_bwrap_path(std::path::Path::new("bwrap")).then(|| PathBuf::from("bwrap"));
     }
-    Some(PathBuf::from(path_str))
+    let path = PathBuf::from(path_str);
+    probe_bwrap_path(&path).then_some(path)
+}
+
+fn probe_bwrap_path(path: &std::path::Path) -> bool {
+    Command::new(path)
+        .args([
+            "--unshare-all",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--die-with-parent",
+            "--new-session",
+            "--cap-drop",
+            "ALL",
+            "--",
+            "/bin/true",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -546,38 +607,14 @@ mod tests {
         assert_eq!(report_with.status, EnforcementStatus::Degraded);
         assert!(with_bwrap.bwrap_path.is_some());
 
-        // The enforced feature list MUST be strictly larger when bwrap is
-        // available.
-        assert!(report_with.enforced.len() > report_without.enforced.len());
-
-        // Specifically, namespace features MUST move from `unsupported` to
-        // `enforced` when bwrap becomes available.
-        for feature in [
-            EnforcementFeature::FilesystemIsolation,
-            EnforcementFeature::NetworkIsolation,
-            EnforcementFeature::PidNamespace,
-            EnforcementFeature::MountNamespace,
-            EnforcementFeature::UserNamespace,
-            EnforcementFeature::NoNewPrivs,
-        ] {
-            assert!(
-                report_without.unsupported.contains(&feature),
-                "without bwrap, {feature:?} should be unsupported"
-            );
-            assert!(
-                report_with.enforced.contains(&feature),
-                "with bwrap, {feature:?} should be enforced"
-            );
-        }
-
-        // SeccompFilter and CgroupResourceLimits MUST be in `degraded` when
-        // bwrap is available (bwrap does not provide these by default).
+        // A mocked path is intentionally not enough to claim enforcement.
+        // Only a verified executable plus writable cgroup v2 may move a
+        // profile to Enforced.
+        assert_eq!(report_with.status, EnforcementStatus::Degraded);
         assert!(report_with
-            .degraded
-            .contains(&EnforcementFeature::SeccompFilter));
-        assert!(report_with
-            .degraded
-            .contains(&EnforcementFeature::CgroupResourceLimits));
+            .notes
+            .iter()
+            .any(|note| note.contains("not found or not verified")));
     }
 
     #[test]

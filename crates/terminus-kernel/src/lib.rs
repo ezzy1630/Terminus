@@ -20,7 +20,8 @@ pub use approvals::{
 };
 pub use error::KernelAssemblyError;
 pub use services::{
-    ArtifactIngestService, CodeIntelligenceService, ExtensionRuntimeService, FileService,
-    JobService, KernelHandle, KernelInfoService, NetworkService, PatchService, PolicyService,
-    ProcessService, SandboxService, SecretService, WorkspaceEntry, WorkspaceService,
+    validate_capability_for_op, ArtifactIngestService, CodeIntelligenceService,
+    ExtensionRuntimeService, FileService, JobService, KernelHandle, KernelInfoService,
+    NetworkService, PatchService, PolicyService, ProcessService, SandboxService, SecretService,
+    WorkspaceEntry, WorkspaceService,
 };

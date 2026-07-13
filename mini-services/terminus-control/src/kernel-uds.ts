@@ -15,6 +15,7 @@ import {
   FileServiceClientImpl,
   JobServiceClientImpl,
   KernelInfoServiceClientImpl,
+  PatchServiceClientImpl,
   ProcessServiceClientImpl,
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 
@@ -92,6 +93,7 @@ export interface KernelUdsClients {
   files: FileServiceClientImpl;
   process: ProcessServiceClientImpl;
   jobs: JobServiceClientImpl;
+  patch: PatchServiceClientImpl;
   artifacts: ArtifactIngestServiceClientImpl;
 }
 
@@ -105,6 +107,7 @@ export function createKernelUdsClients(
     files: new FileServiceClientImpl(rpc),
     process: new ProcessServiceClientImpl(rpc),
     jobs: new JobServiceClientImpl(rpc),
+    patch: new PatchServiceClientImpl(rpc),
     artifacts: new ArtifactIngestServiceClientImpl(rpc),
   };
 }

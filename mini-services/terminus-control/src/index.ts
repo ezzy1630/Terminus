@@ -34,6 +34,7 @@ import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { firstValueFrom } from "rxjs";
 import { createKernelUdsClients, type KernelUdsClients } from "./kernel-uds.js";
+import { PatchCommitMode } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 
 // ────────────────────────── Configuration ──────────────────────────────────
 
@@ -805,6 +806,29 @@ const routes: Route[] = [
       created_at: updated.createdAt.toISOString(), updated_at: updated.updatedAt.toISOString(),
     });
   }),
+  route("POST", "/v1/sessions/:id/resume", async (_req, res, params) => {
+    const s = await db.session.findUnique({ where: { id: String(params.id) } });
+    if (!s) return sendError(res, 404, "SESSION_NOT_FOUND", "session not found", "not_found");
+    const updated = await db.session.update({
+      where: { id: s.id },
+      data: { status: "active" },
+    });
+    await emit({
+      eventType: "session.resumed",
+      aggregateType: "session",
+      aggregateId: updated.id,
+      aggregateSequence: 3,
+      payload: { previous_status: s.status, new_status: updated.status },
+    });
+    sendJson(res, 200, {
+      id: updated.id, workspace_id: updated.workspaceId, owner_principal: updated.ownerPrincipal,
+      title: updated.title, status: updated.status,
+      default_model_profile: updated.defaultModelProfile,
+      default_permission_profile: updated.defaultPermissionProfile,
+      active_thread_id: updated.activeThreadId,
+      created_at: updated.createdAt.toISOString(), updated_at: updated.updatedAt.toISOString(),
+    });
+  }),
 
   // ────────────────────────── /threads ───────────────────────────────────
   route("POST", "/v1/threads", async (req, res) => {
@@ -1259,6 +1283,38 @@ const routes: Route[] = [
   }),
 
   // ────────────────────────── /approvals ─────────────────────────────────
+  route("POST", "/v1/approvals", async (req, res) => {
+    const body = await jsonBody(req) as {
+      task_id: string;
+      operation_hash: string;
+      scope?: unknown;
+      risk?: unknown;
+      use_limit?: number;
+    };
+    const task = await db.task.findUnique({ where: { id: body.task_id } });
+    if (!task) return sendError(res, 404, "TASK_NOT_FOUND", "task not found", "not_found");
+    const approval = await db.approval.create({
+      data: {
+        id: uuid(),
+        taskId: body.task_id,
+        operationHash: body.operation_hash,
+        scopeJson: JSON.stringify(body.scope ?? {}),
+        riskJson: JSON.stringify(body.risk ?? { class: "normal", effects: [] }),
+        status: "pending",
+        useLimit: body.use_limit ?? 1,
+      },
+    });
+    await emit({
+      eventType: "approval.requested",
+      aggregateType: "approval", aggregateId: approval.id, aggregateSequence: 1,
+      correlationId: approval.taskId,
+      payload: { operation_hash: approval.operationHash, status: approval.status },
+    });
+    sendJson(res, 201, {
+      id: approval.id, task_id: approval.taskId, operation_hash: approval.operationHash,
+      status: approval.status, risk: JSON.parse(approval.riskJson), requested_at: approval.requestedAt.toISOString(),
+    });
+  }),
   route("GET", "/v1/approvals", async (_req, res) => {
     const approvals = await db.approval.findMany({
       where: { status: "pending" },
@@ -1330,6 +1386,18 @@ const routes: Route[] = [
 
   // ────────────────────────── /jobs ──────────────────────────────────────
   route("GET", "/v1/jobs/:id", async (_req, res, params) => {
+    if (kernelUds) {
+      try {
+        const state = await kernelUds.jobs.Get({
+          context: kernelContext(),
+          jobId: String(params.id),
+        });
+        return sendJson(res, 200, state);
+      } catch {
+        // Fall through to the control-plane recovery projection for jobs
+        // created before the kernel UDS bridge was enabled.
+      }
+    }
     const j = await db.job.findUnique({ where: { id: String(params.id) } });
     if (!j) return sendError(res, 404, "JOB_NOT_FOUND", "job not found", "not_found");
     sendJson(res, 200, {
@@ -1415,8 +1483,57 @@ const routes: Route[] = [
       sendError(res, 500, "READ_FAILED", String(err), "internal");
     }
   }),
+  route("POST", "/v1/tools/patch", async (req, res) => {
+    const body = await jsonBody(req) as {
+      workspace_id: string;
+      path: string;
+      expected_sha256: string;
+      expected_utf8: string;
+      replacement_utf8: string;
+      commit_mode?: "preview" | "apply";
+    };
+    try {
+      const response = await requireKernelUds().patch.Apply({
+        context: kernelContext(),
+        intent: kernelIntent(),
+        transactionId: randomUUID(),
+        baseline: {
+          workspaceId: body.workspace_id,
+          repositoryRevision: "no-vcs",
+          dirtyDigest: "",
+          sources: [{
+            path: { workspaceId: body.workspace_id, relativePath: body.path },
+            sha256: body.expected_sha256,
+            repositoryRevision: "no-vcs",
+          }],
+        },
+        edits: [{
+          replaceExactText: {
+            path: { workspaceId: body.workspace_id, relativePath: body.path },
+            expectedSha256: body.expected_sha256,
+            expectedUtf8: new TextEncoder().encode(body.expected_utf8),
+            replacementUtf8: new TextEncoder().encode(body.replacement_utf8),
+            requireUnique: true,
+          },
+        }],
+        validationProfileId: "task-default",
+        allowTransientInvalidState: false,
+        commitMode: body.commit_mode === "preview"
+          ? PatchCommitMode.PATCH_COMMIT_MODE_PREVIEW_ONLY
+          : PatchCommitMode.PATCH_COMMIT_MODE_APPLY_TO_WORKTREE,
+      });
+      sendJson(res, 200, response);
+    } catch (err) {
+      sendError(res, 500, "PATCH_FAILED", String(err), "internal");
+    }
+  }),
   route("POST", "/v1/tools/exec", async (req, res) => {
-    const body = await jsonBody(req) as { program: string; args?: string[]; cwd?: string };
+    const body = await jsonBody(req) as {
+      program: string;
+      args?: string[];
+      cwd?: string;
+      sandbox_profile_id?: string;
+    };
     try {
       const events = requireKernelUds().process.Start({
         context: kernelContext(),
@@ -1428,7 +1545,7 @@ const routes: Route[] = [
           publicEnv: {}, secretCapabilityUris: [], timeout: undefined,
           allocatePty: false, shell: undefined,
         },
-        sandboxProfileId: "secure-local-default",
+        sandboxProfileId: body.sandbox_profile_id ?? "secure-local-default",
         outputPolicyId: "default",
       });
       const first = await firstValueFrom(events);
@@ -1438,6 +1555,34 @@ const routes: Route[] = [
       sendJson(res, 200, r);
     } catch (err) {
       sendError(res, 500, "EXEC_FAILED", String(err), "internal");
+    }
+  }),
+  route("POST", "/v1/tools/job", async (req, res) => {
+    const body = await jsonBody(req) as {
+      program: string;
+      args?: string[];
+      cwd?: string;
+      sandbox_profile_id?: string;
+      durable?: boolean;
+    };
+    try {
+      const result = await requireKernelUds().jobs.Start({
+        context: kernelContext(),
+        intent: kernelIntent(),
+        command: {
+          program: body.program,
+          args: body.args ?? [],
+          cwd: { workspaceId: "dev", relativePath: body.cwd ?? "." },
+          publicEnv: {}, secretCapabilityUris: [], timeout: undefined,
+          allocatePty: false, shell: undefined,
+        },
+        sandboxProfileId: body.sandbox_profile_id ?? "secure-local-default",
+        outputPolicyId: "default",
+        durable: body.durable ?? true,
+      });
+      sendJson(res, 201, result);
+    } catch (err) {
+      sendError(res, 500, "JOB_START_FAILED", String(err), "internal");
     }
   }),
 

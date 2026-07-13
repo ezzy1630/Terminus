@@ -35,6 +35,38 @@ const DEFAULT_PORT: u16 = 3040;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "linux")]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some(terminus_sandbox_linux::LAUNCHER_ARG) {
+            match terminus_sandbox_linux::run_launcher(&args[1..]) {
+                Ok(code) => std::process::exit(code),
+                Err(error) => {
+                    eprintln!("terminus sandbox launcher failed: {error}");
+                    std::process::exit(126);
+                }
+            }
+        }
+        if args.get(1).map(String::as_str) == Some(terminus_sandbox_linux::PAYLOAD_ARG) {
+            match terminus_sandbox_linux::run_payload(&args[1..]) {
+                Ok(code) => std::process::exit(code),
+                Err(error) => {
+                    eprintln!("terminus sandbox payload failed closed: {error}");
+                    std::process::exit(126);
+                }
+            }
+        }
+        if args.get(1).map(String::as_str) == Some("--terminus-sandbox-probe") {
+            match terminus_sandbox_linux::run_probe() {
+                Ok(code) => std::process::exit(code),
+                Err(error) => {
+                    eprintln!("terminus sandbox probe failed: {error}");
+                    std::process::exit(126);
+                }
+            }
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -52,6 +84,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map(|value| value == "1")
         .unwrap_or(false);
 
+    let allow_http_bootstrap = std::env::var("TERMINUS_KERNEL_HTTP_BOOTSTRAP")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+        && std::env::var("TERMINUS_DEV")
+            .map(|value| value == "1")
+            .unwrap_or(false);
+    if !require_uds && !allow_http_bootstrap {
+        return Err(
+            "secure kernel startup requires TERMINUS_KERNEL_REQUIRE_UDS=1; HTTP bootstrap is development-only"
+                .into(),
+        );
+    }
+
     // Production must not retain the privileged HTTP bootstrap once the UDS
     // transport is required. Failing closed here prevents a misconfigured
     // deployment from silently exposing the effect kernel over TCP.
@@ -62,12 +107,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
 
-    // SPEC §30.1 Boundary B / ADR-0007: the privileged kernel MUST be
-    // reachable only over a loopback Unix-domain socket (gRPC-over-UDS is the
-    // M3 target). Until that binding lands, the JSON-over-HTTP bootstrap is
-    // restricted to the loopback interface so the privileged effect boundary
-    // is never exposed to other hosts or the local network. Binding the kernel
-    // to `0.0.0.0` is a release blocker (SPEC §26.3 invariant 1).
+    // Development-only compatibility path. Production must set
+    // TERMINUS_KERNEL_REQUIRE_UDS=1 above, which returns before any TCP
+    // listener is created.
     let port = std::env::var("TERMINUS_KERNEL_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
