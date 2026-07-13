@@ -70,6 +70,9 @@ interface ComposerProps {
 
 function computeSendMode(taskStatus: string | undefined): ComposerSendMode {
   if (!taskStatus) return "send";
+  // A PENDING task has been created but has not started its first turn yet.
+  // Keep Send available so onSubmit can call startTask before startTurn.
+  if (taskStatus.toLowerCase() === "pending") return "send";
   const kind = normalizeTaskStatus(taskStatus);
   if (kind === "working" || kind === "waiting" || kind === "needs_approval" || kind === "needs_review") {
     return "steer";

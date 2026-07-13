@@ -20,7 +20,7 @@
  *      the `title` attribute (native tooltip).
  */
 import { describe, expect, test, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, cleanup, act } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 
@@ -201,6 +201,10 @@ vi.mock("../src/lib/api", async (importOriginal) => {
     ...actual,
     api: {
       resolveApproval: vi.fn(),
+      startTask: vi.fn(async () => ({ task_id: "task-1", status: "ACTIVE" })),
+      startTurn: vi.fn(async () => ({ id: "turn-1" })),
+      cancelTask: vi.fn(async () => ({ task_id: "task-1", status: "CANCELLED" })),
+      listTasks: vi.fn(async () => ({ tasks: [] })),
     },
   };
 });
@@ -590,10 +594,36 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.getByRole("button", { name: /Steer/ })).toBeInTheDocument();
   });
 
-  test("task.status=PENDING → button label is 'Stop'", () => {
+  test("task.status=PENDING → button label is 'Send' so the first turn can start", () => {
     makeTask("PENDING");
     render(<Composer />);
+    expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
+  });
+
+  test("task.status=QUEUED → button label is 'Stop'", () => {
+    makeTask("QUEUED");
+    render(<Composer />);
     expect(screen.getByRole("button", { name: /Stop/ })).toBeInTheDocument();
+  });
+
+  test("submitting a pending task starts it before creating the first turn", async () => {
+    makeTask("PENDING");
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    await user.type(screen.getByRole("textbox", { name: "Message composer" }), "Begin the task");
+    await user.click(screen.getByRole("button", { name: /^Send/ }));
+
+    await waitFor(() => expect(api.startTurn).toHaveBeenCalledTimes(1));
+    expect(api.startTask).toHaveBeenCalledWith("task-1");
+    expect(vi.mocked(api.startTask).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(api.startTurn).mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(api.startTurn).toHaveBeenCalledWith({
+      thread_id: "thread-1",
+      task_id: "task-1",
+      user_input: "Begin the task",
+    });
   });
 
   test("task.status=WAITING → button label is 'Steer'", () => {
