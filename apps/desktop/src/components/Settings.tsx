@@ -53,6 +53,7 @@ import {
 import { create } from "zustand";
 import { cn } from "../lib/cn";
 import { useThemeStore } from "../hooks/use-theme";
+import { useTerminusStore } from "../hooks/use-terminus";
 import type { Density, Theme } from "../types";
 
 // ────────────────────────── Setting model ───────────────────────────────────
@@ -771,6 +772,15 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
   const [activeCat, setActiveCat] = useState<SettingCategoryId>(initialCategoryId ?? "general");
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const sessions = useTerminusStore((state) => state.sessions);
+  const runtimeProfiles = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const session of sessions) {
+      const profile = session.default_model_profile?.trim();
+      if (profile) counts.set(profile, (counts.get(profile) ?? 0) + 1);
+    }
+    return Array.from(counts, ([id, projectCount]) => ({ id, projectCount }));
+  }, [sessions]);
 
   // Sync theme store on first open so the appearance select reflects reality.
   useEffect(() => {
@@ -932,11 +942,44 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
                       <span>Reset category</span>
                     </button>
                   </div>
-                  <div className="flex flex-col gap-1">
+                    <div className="flex flex-col gap-1">
                     {activeCategory.settings.map((s) => (
                       <SettingRow key={s.id} descriptor={s} />
                     ))}
-                  </div>
+                    </div>
+
+                    {activeCategory.id === "agents" ? (
+                      <section className="mb-5 rounded-lg border border-subtle bg-elevated p-4" aria-label="Runtime model profiles">
+                        <div className="flex items-start gap-3">
+                          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md bg-hover text-secondary">
+                            <Plug size={14} />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-primary" style={{ fontSize: "var(--font-size-sm)", fontWeight: 600 }}>Available model profiles</div>
+                            <p className="mt-0.5 text-tertiary" style={{ fontSize: "var(--font-size-xs)", lineHeight: 1.45 }}>
+                              Profiles reported by current project sessions. Terminus never invents provider or model names.
+                            </p>
+                          </div>
+                          <span className="rounded-full border border-subtle px-2 py-0.5 font-mono text-tertiary" style={{ fontSize: 10 }}>
+                            {runtimeProfiles.length}
+                          </span>
+                        </div>
+                        {runtimeProfiles.length > 0 ? (
+                          <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+                            {runtimeProfiles.map((profile) => (
+                              <li key={profile.id} className="flex min-h-11 items-center justify-between rounded-md border border-subtle bg-canvas px-3 py-2">
+                                <span className="min-w-0 truncate font-mono text-primary" style={{ fontSize: "var(--font-size-xs)" }}>{profile.id}</span>
+                                <span className="ml-3 flex-shrink-0 text-tertiary" style={{ fontSize: 10 }}>{profile.projectCount} project{profile.projectCount === 1 ? "" : "s"}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="mt-3 rounded-md border border-dashed border-default px-3 py-3 text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>
+                            No provider-backed model profile has been reported by the control plane.
+                          </div>
+                        )}
+                      </section>
+                    ) : null}
                 </>
               ) : null}
             </div>
