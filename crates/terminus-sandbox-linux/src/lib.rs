@@ -362,22 +362,29 @@ impl SandboxBackend for LinuxSandboxBackend {
                 "ambient plugin authority not permitted".into(),
             ));
         }
-        // If bwrap is unavailable, profiles that REQUIRE namespace isolation
-        // are rejected with Unsupported so the caller can fall back to a
-        // stronger backend (e.g. terminus-sandbox-container). Network Deny
-        // requires --unshare-net, which requires bwrap. Filesystem Deny rules
-        // can be partially enforced via terminus-fs path policy, so we do not
-        // reject them here; the enforcement report shows Degraded for
-        // FilesystemIsolation.
+        // Profiles that require network isolation may only be selected after
+        // the complete enforcement chain is verified. Merely finding a
+        // `bwrap` binary is insufficient: a failed namespace probe or an
+        // unavailable delegated cgroup would otherwise let a caller select
+        // this backend while `spawn_wrapper()` returns `None`. Secure callers
+        // must receive a typed refusal before any direct spawn is possible.
+        // Filesystem Deny rules can be partially enforced via terminus-fs path
+        // policy, so they remain reportable as degraded rather than rejected
+        // here.
         if matches!(profile.network, NetworkAccess::ProxyRequired) {
             return Err(SandboxError::Unsupported(
                 "proxy-required profiles need the Terminus egress bridge; direct network is not permitted"
                     .into(),
             ));
         }
-        if self.bwrap_path.is_none() && matches!(profile.network, NetworkAccess::Deny) {
+        if matches!(profile.network, NetworkAccess::Deny)
+            && !matches!(
+                self.enforcement_report().status,
+                EnforcementStatus::Enforced
+            )
+        {
             return Err(SandboxError::Unsupported(
-                "profile requires network isolation (--unshare-net) but bwrap is not available"
+                "profile requires verified Linux namespace, seccomp, and delegated cgroup enforcement"
                     .into(),
             ));
         }
@@ -637,11 +644,15 @@ mod tests {
     }
 
     #[test]
-    fn supports_profile_accepts_restrictive_with_bwrap() {
+    fn supports_profile_rejects_unverified_bwrap_for_network_deny() {
+        // A path-shaped mock has no functional namespace proof and no cgroup
+        // delegation. It must be rejected before a caller can fall through to
+        // an unsandboxed process spawn.
         let backend = LinuxSandboxBackend::with_mocked_bwrap(true);
-        backend
+        let error = backend
             .supports_profile(&profile_with_network_deny())
-            .expect("restrictive profile should be accepted with bwrap");
+            .expect_err("unverified bwrap must not satisfy a secure profile");
+        assert!(matches!(error, SandboxError::Unsupported(_)));
     }
 
     #[test]

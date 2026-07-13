@@ -1001,6 +1001,29 @@ impl ProcessService {
                 None,
             )
         };
+        // Defense in depth: any profile that promises a network namespace
+        // must have an actual wrapper. A backend report is not sufficient on
+        // its own because wrapper construction can still fail (for example if
+        // the launcher executable is unavailable). Never substitute a direct
+        // process spawn for a secure profile.
+        if matches!(profile.network, terminus_sandbox::NetworkAccess::Deny)
+            && sandbox_wrapper.is_none()
+        {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::SandboxUnavailable,
+                terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+                format!(
+                    "sandbox backend `{}` did not produce a network-isolating wrapper for secure profile `{}`",
+                    enforcement.backend_id, sandbox_profile_id
+                ),
+                false,
+            )
+            .with_details(serde_json::json!({
+                "backend": enforcement.backend_id,
+                "profile": sandbox_profile_id,
+                "notes": enforcement.notes,
+            })));
+        }
         // Degraded execution is an explicit profile choice. The secure
         // default fails closed without relying on an opt-in environment
         // variable (SPEC §36.5).
