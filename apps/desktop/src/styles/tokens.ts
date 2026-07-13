@@ -27,41 +27,41 @@
 
 export const darkTokens = {
   // Main canvas — warm Codex-like charcoal
-  "--bg-canvas": "#1e1e1e",
+  "--bg-canvas": "#171717",
   // Elevated surfaces — noticeably distinct from canvas
-  "--bg-elevated": "#262626",
+  "--bg-elevated": "#232323",
   // Sidebar — darker than canvas (Codex pattern: sidebar grounds the layout)
-  "--bg-sidebar": "#171717",
+  "--bg-sidebar": "#292929",
   // Inspector — floating card surface
   "--bg-inspector": "#242424",
   // Terminal and diff — slightly cooler and darker
   "--bg-terminal": "#141416",
   "--bg-diff": "#141416",
   // Composer surface
-  "--bg-composer": "#2a2a2a",
+  "--bg-composer": "#2c2c2c",
   // Starter cards — distinct from canvas
-  "--bg-card": "#282828",
+  "--bg-card": "#1b1b1b",
   // Hover — subtle lift
-  "--bg-hover": "#333333",
+  "--bg-hover": "#383838",
   // Nav row hover — slightly warmer
-  "--bg-nav-hover": "#2a2a2a",
+  "--bg-nav-hover": "#343434",
   // Selected (no bright saturated background)
-  "--bg-selected": "#2d2d2d",
+  "--bg-selected": "#3a3a3a",
 
   // Text
   "--text-primary": "#ececed",
-  "--text-secondary": "#a0a0a8",
-  "--text-tertiary": "#6b6b74",
+  "--text-secondary": "#b5b5b7",
+  "--text-tertiary": "#77777b",
   "--text-inverse": "#1a1a1c",
   // Warm accent for branding (Codex uses an orange-tinted icon)
   "--text-accent": "#e8845e",
 
   // Separators
-  "--border-subtle": "#2c2c2e",
-  "--border-default": "#3a3a3c",
+  "--border-subtle": "#303032",
+  "--border-default": "#404043",
   "--border-strong": "#4a4a4e",
   // Sidebar-specific separator
-  "--sidebar-separator": "#252527",
+  "--sidebar-separator": "#363638",
 
   // Semantic colors (color is reserved for meaning)
   "--color-success": "#3fb950",
@@ -84,11 +84,11 @@ export const darkTokens = {
 
   // Shadows — refined for warm theme
   "--shadow-sm": "0 1px 3px rgba(0,0,0,0.28)",
-  "--shadow-md": "0 4px 12px rgba(0,0,0,0.36)",
-  "--shadow-lg": "0 8px 28px rgba(0,0,0,0.48)",
+  "--shadow-md": "0 8px 24px rgba(0,0,0,0.34), 0 1px 1px rgba(255,255,255,0.03) inset",
+  "--shadow-lg": "0 18px 48px rgba(0,0,0,0.52), 0 1px 1px rgba(255,255,255,0.04) inset",
   // Card-specific shadow (starter cards)
-  "--shadow-card": "0 1px 4px rgba(0,0,0,0.18)",
-  "--shadow-card-hover": "0 4px 16px rgba(0,0,0,0.32)",
+  "--shadow-card": "0 10px 28px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.025)",
+  "--shadow-card-hover": "0 16px 38px rgba(0,0,0,0.34), inset 0 1px 0 rgba(255,255,255,0.05)",
 } as const;
 
 export const lightTokens = {
@@ -166,13 +166,13 @@ export const typography = {
     '"SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, monospace',
 
   // Sizes — comfortable body, restrained headings
-  fontSizeXs: "11px",
-  fontSizeSm: "12px",
-  fontSizeBase: "13px",
-  fontSizeMd: "14px",
+  fontSizeXs: "12px",
+  fontSizeSm: "13px",
+  fontSizeBase: "14px",
+  fontSizeMd: "15px",
   fontSizeLg: "16px",
   fontSizeXl: "18px",
-  fontSize2xl: "24px",
+  fontSize2xl: "26px",
   fontSize3xl: "32px",
 
   // Line heights — strong line height

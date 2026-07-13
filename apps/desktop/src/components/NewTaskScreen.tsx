@@ -160,11 +160,10 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
 
   return (
     <div
-      className={cn("flex h-full w-full flex-col overflow-y-auto", className)}
-      style={{ padding: "clamp(56px, 9vh, 120px) clamp(24px, 6vw, 72px) 28px" }}
+      className={cn("new-task-screen flex h-full w-full flex-col overflow-y-auto", className)}
     >
       <div className="flex min-h-full w-full flex-col" style={{ maxWidth: 960, margin: "0 auto" }}>
-        <div className="flex flex-1 flex-col items-center justify-center pb-12">
+        <div className="new-task-hero flex flex-1 flex-col items-center justify-center">
           <div className="start-mark mb-7 flex h-14 w-14 items-center justify-center rounded-2xl text-accent" aria-hidden>
             <span className="start-mark-glyph flex h-10 w-10 items-center justify-center rounded-xl">
               <SquareTerminal size={25} strokeWidth={1.5} />
@@ -178,19 +177,19 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
             {session ? `What should we build in ${session.title}?` : "What should we build?"}
           </h1>
 
-          <div className="starter-grid mt-12 grid w-full grid-cols-4 gap-4 max-[900px]:grid-cols-2" aria-label="Task starters">
+          <div className="starter-grid grid w-full grid-cols-4 max-[900px]:grid-cols-2" aria-label="Task starters">
             {suggestions.map((suggestion, index) => (
               <button
                 key={suggestion.id}
                 type="button"
                 onClick={() => pickSuggestion(suggestion)}
-                className="starter-card flex min-h-[148px] flex-col items-start rounded-2xl border border-subtle p-5 text-left"
+                className="starter-card flex flex-col items-start rounded-2xl border border-subtle text-left"
                 style={{ animationDelay: `${70 + index * 45}ms` }}
                 title={suggestion.detail}
               >
                 <span className={cn(`starter-icon-${suggestion.id}`)}>{suggestion.icon}</span>
                 <span className="mt-auto flex flex-col gap-1">
-                  <span className="text-primary" style={{ fontSize: 'var(--font-size-sm)', fontWeight: 520, lineHeight: 1.35 }}>
+                  <span className="text-primary" style={{ fontSize: 'var(--font-size-sm)', fontWeight: 500, lineHeight: 1.35 }}>
                     {suggestion.label}
                   </span>
                   <span className="text-tertiary" style={{ fontSize: 'var(--font-size-xs)', lineHeight: 1.4 }}>

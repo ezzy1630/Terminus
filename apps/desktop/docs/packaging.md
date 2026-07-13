@@ -81,7 +81,9 @@ key:
     "appId": "dev.terminus.desktop",
     "productName": "Terminus",
     "directories": { "output": "release" },
+    "afterPack": "electron/after-pack.cjs",
     "mac": {
+      "icon": "assets/icon.icns",
       "category": "public.app-category.developer-tools",
       "target": [
         { "target": "dmg", "arch": ["arm64", "x64"] },
@@ -96,6 +98,12 @@ key:
   }
 }
 ```
+
+The checked-in `assets/icon.svg` is the editable source for the native
+`assets/icon.icns` bundle. The `afterPack` hook also removes Electron's
+generic camera, microphone, Bluetooth, and arbitrary-network privacy keys
+from the final `Info.plist`; Terminus must not advertise capabilities it does
+not use.
 
 This produces both arm64 (Apple Silicon) and x64 (Intel) builds. For
 a faster build during development, target only the host architecture:

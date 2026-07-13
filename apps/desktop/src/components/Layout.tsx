@@ -78,7 +78,7 @@ const TitleBar = memo(function TitleBar({
 }: TitleBarProps): JSX.Element {
   return (
     <div
-      className="titlebar-drag flex items-center justify-between border-b border-subtle bg-sidebar"
+      className="titlebar-shell titlebar-drag flex items-center justify-between"
       style={{
         height: TITLEBAR_HEIGHT,
         // Leave space for macOS traffic lights on the left.

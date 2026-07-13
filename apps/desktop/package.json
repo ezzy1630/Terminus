@@ -60,6 +60,7 @@
       "output": "release"
     },
     "mac": {
+      "icon": "assets/icon.icns",
       "category": "public.app-category.developer-tools",
       "target": [
         {

@@ -396,6 +396,9 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             aria-label="Message composer"
             role="textbox"
             aria-multiline="true"
+            spellCheck={false}
+            data-gramm="false"
+            data-gramm_editor="false"
             className={cn(
               "selectable w-full resize-none bg-transparent px-4 pt-3 text-primary placeholder:text-tertiary",
               "focus:outline-none",
@@ -403,7 +406,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             style={{
               fontSize: "var(--font-size-md)",
               lineHeight: "var(--line-height-relaxed)" as unknown as string,
-              minHeight: task ? 44 : isStartSurface ? 76 : 64,
+              minHeight: task ? 44 : isStartSurface ? 52 : 64,
               maxHeight: "var(--composer-max-height)",
               fontFamily: "var(--font-family)",
             }}
@@ -413,7 +416,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
               appearing/disappearing never causes layout shift (SPEC §10). */}
           <div
             className="flex items-center gap-0.5 px-3 pb-3 pt-1"
-            style={{ minHeight: isStartSurface ? 48 : 40 }}
+            style={{ minHeight: isStartSurface ? 42 : 40 }}
           >
             {/* Attachment. */}
             <button
