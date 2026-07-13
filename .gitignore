@@ -81,6 +81,7 @@ Thumbs.db
 evals/results/*
 !evals/results/.gitkeep
 !evals/results/golden/
+python/evals/results/
 
 # ────────────────────────── Vercel ─────────────────────────────────────────
 .vercel

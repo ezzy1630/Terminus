@@ -188,10 +188,14 @@ The promotion gate is implemented in `python/forge_evals/forge_evals/promotion_g
 
 ```bash
 cd python
-uv run terminus-eval run --suite terminus-internal --tasks tiny-bugfix/01-fix-typo --runs 1
-uv run terminus-eval run --suite swe-bench-verified --runs 3
-uv run terminus-eval analyze --experiment <id>
-uv run terminus-eval dashboard --experiment <id>
+uv run terminus-eval run \
+  --suite terminus-internal \
+  --task build-failure/build-001 \
+  --task-dir forge_evals/evals/tasks/build-failure/build-001 \
+  --harness terminus-minimal \
+  --seeds 1
+uv run terminus-eval aggregate --runs-dir evals/results/smoke --output -
+uv run terminus-eval dashboard --runs-dir evals/results/smoke --output evals/results/smoke/dashboard.html
 ```
 
 ## Evaluation tiers (SPEC §46.11)

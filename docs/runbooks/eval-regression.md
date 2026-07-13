@@ -33,7 +33,7 @@ Use this runbook when the eval lab detects a regression: a feature, configuratio
 4. Run the affected cohort with the change reverted (if possible) to confirm causation:
    ```bash
    cd python
-   uv run terminus-eval run --suite <suite> --tasks <cohort> --runs 3 --config <previous-config>
+   uv run terminus-eval run --suite <suite> --task <task-id> --task-dir <task-package> --harness <harness-id> --seeds 3
    ```
 
 ## Immediate actions
@@ -52,7 +52,7 @@ Use this runbook when the eval lab detects a regression: a feature, configuratio
 2. Re-run the affected cohort to verify recovery:
    ```bash
    cd python
-   uv run terminus-eval run --suite <suite> --tasks <cohort> --runs 3
+   uv run terminus-eval run --suite <suite> --task <task-id> --task-dir <task-package> --harness <harness-id> --seeds 3
    ```
 3. If the change is not reversible (e.g., upstream sync), fix the regression with a follow-up PR.
 4. Update the non-regression thresholds if the regression is intentional and accepted (requires ADR amendment).

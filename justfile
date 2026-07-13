@@ -26,7 +26,7 @@ bootstrap:
     echo "[bootstrap] installing TS workspace deps..."
     bun install --frozen-lockfile
     echo "[bootstrap] installing Python eval deps..."
-    cd python && uv sync --frozen
+    cd python && uv sync --frozen --extra dev
     echo "[bootstrap] verifying buf..."
     buf --version
     echo "[bootstrap] verifying OpenCode source pin..."
@@ -54,7 +54,7 @@ check: boundary-check
     # settings (tsconfig.packages.json), then the Next.js dashboard.
     bun run typecheck:packages
     bun run typecheck
-    cd python && uv run ruff check . && uv run mypy forge_evals
+    cd python && uv run --extra dev ruff check . && uv run --extra dev mypy forge_evals
 
 # Lint + test the kernel HTTP mini-service, which intentionally sits outside
 # the root Cargo workspace (SPEC §42.5 boundary). The root `cargo clippy
@@ -128,13 +128,13 @@ codegen-docs:
 unit:
     cargo test --workspace --lib
     bun run test:unit
-    cd python && uv run pytest -q
+    cd python && uv run --extra dev pytest -q
 
 # Integration tests.
 integration:
     cargo test --workspace --test '*'
     bun run test:integration
-    cd python && uv run pytest -q tests/integration
+    cd python && uv run --extra dev pytest -q tests/integration
 
 # Local-capable security suite (per-PR subset).
 security:
@@ -148,13 +148,23 @@ e2e:
 
 # Small deterministic eval suite.
 eval-smoke:
-    cd python && uv run terminus-eval run --suite terminus-internal --tasks tiny-bugfix/01-fix-typo,tiny-bugfix/02-null-check --runs 1
+    #!/usr/bin/env bash
+    set -eu
+    cd python
+    for task in build-failure/build-001 test-generation/testgen-001; do
+      uv run terminus-eval run --suite terminus-internal --task "$task" --task-dir "forge_evals/evals/tasks/$task" --harness terminus-minimal --seeds 1 --output-dir evals/results/smoke
+    done
 
 # Full configured evaluation suite.
 eval-full:
-    cd python && uv run terminus-eval run --suite terminus-internal --runs 3
-    cd python && uv run terminus-eval run --suite swe-bench-verified --runs 3
-    cd python && uv run terminus-eval run --suite terminal-bench --runs 3
+    #!/usr/bin/env bash
+    set -eu
+    cd python
+    for task_dir in forge_evals/evals/tasks/*/*; do
+      test -d "$task_dir" || continue
+      task="${task_dir#forge_evals/evals/tasks/}"
+      uv run terminus-eval run --suite terminus-internal --task "$task" --task-dir "$task_dir" --harness terminus-minimal --seeds 3 --output-dir evals/results/full
+    done
 
 # OpenCode parity and divergence checks.
 upstream-check:

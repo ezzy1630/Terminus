@@ -33,7 +33,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["forge_evals"]
+# The evaluation package lives below the historical `forge_evals/` container
+# directory. Point Hatch at the import-package directory so the editable
+# installation used by `uv run terminus-eval` exposes `forge_evals.cli`.
+packages = ["forge_evals/forge_evals"]
 
 [tool.ruff]
 line-length = 100
@@ -71,7 +74,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-testpaths = ["forge_evals/tests"]
+testpaths = ["forge_evals/forge_evals/tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "slow: long-running statistical tests",
