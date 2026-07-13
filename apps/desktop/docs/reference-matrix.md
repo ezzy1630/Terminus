@@ -57,7 +57,7 @@ Each row also notes where in the app the pattern belongs.
 | Always-available composer (send + steer + queue + stop) | Codex | Works: user can steer a running agent without losing their draft. | Adopt (SPEC §10) | `Composer.tsx` |
 | Reserved-height control row (no layout shift when metadata appears) | Linear, Stripe | Works: prevents the composer from "jumping" as risk class / thread id appear. | Adopt (SPEC §10) | `Composer.tsx` |
 | Drag-and-drop + paste of images                 | Slack, Discord | Works: natural attachment model. | Adopt | `Composer.tsx` |
-| Draft persistence per task                      | Codex        | Works: switching tasks doesn't lose drafts. | Adopt + modify: write via `requestIdleCallback` so streaming renders never block keystrokes (SPEC §25.1) | `useForgeStore.draftsByTask` |
+| Draft persistence per task                      | Codex        | Works: switching tasks doesn't lose drafts. | Adopt + modify: isolate drafts by task in Zustand so streaming event updates do not replace composer state (SPEC §25.1) | `useTerminusStore.draftsByTask` |
 | Decorative attachment chips with file-type icons | email clients | Fails: visual noise for an app where attachments are rare. | Reject — minimal image thumbnails only | — |
 | Hidden send button until text is entered        | some chat apps | Fails: discoverability. | Reject — always show the send button, disabled when empty | `Composer.tsx` |
 
@@ -67,7 +67,7 @@ Each row also notes where in the app the pattern belongs.
 | ----------------------------------------------- | ------------ | -------------------- | ----------- | ---------------- |
 | Dynamic sections (appear only when relevant)    | Xcode Inspector | Works: surfaces the right info without overwhelming. Fails when sections reorder while you're reading. | Adopt + modify: sections never reorder (SPEC §11) | `Inspector.tsx` |
 | Floating rounded card (12px padding, border, shadow-lg) | macOS Inspector | Works: feels lightweight; doesn't claim a permanent column at narrow widths. | Adopt (SPEC §11.1) | `Layout.tsx` |
-| Pin / unpin inspector                            | Xcode        | Works: lets power users keep it visible; lets focused writers hide it. | Modify — pinning is implicit (inspector is always pinned by default); future wiring for unpin | `Inspector.tsx` |
+| Pin / unpin inspector                            | Xcode        | Works: lets power users keep it visible; lets focused writers hide it. | Adopt + modify: title-bar/command actions toggle it; pinning preserves it beside the review split and at overlay widths | `App.tsx`, `Inspector.tsx` |
 | Always-empty sections with "No data"            | naive dashboards | Fails: visual noise. | Reject — render no section at all if its data is empty | — |
 
 ## 6. Diff viewer
@@ -99,7 +99,7 @@ Each row also notes where in the app the pattern belongs.
 | ----------------------------------------------- | ------------ | -------------------- | ----------- | ---------------- |
 | Inline approval card (not a modal)               | Codex        | Works: keeps the user in the conversation flow. | Adopt (SPEC §17) | `ApprovalCard.tsx` |
 | Three buttons: Allow once / Allow for this task / Deny | Codex | Works: covers the three real intents; "Deny" is explicit (no auto-deny on Esc). | Adopt (SPEC §17) | `ApprovalCard.tsx` |
-| Risk-class accent on the left border             | GitHub PR labels | Works: glanceable severity without color overload. | Adopt (SPEC §17) | `ApprovalCard.tsx` |
+| Risk class shown through icon, text, and restrained full-surface tint | Codex, macOS | Works without depending on color or a decorative side stripe. | Adopt + modify (SPEC §17) | `ApprovalCard.tsx` |
 | Modal approval dialog                            | some enterprise tools | Fails: disrupts the conversation flow; SPEC §17 says avoid unless macOS itself requires it. | Reject | — |
 | Auto-deny on Esc                                  | some tools | Fails: too easy to accidentally lose progress. | Reject (SPEC §17) | — |
 
@@ -140,7 +140,7 @@ Each row also notes where in the app the pattern belongs.
 | Pattern                                         | Product      | Why it works / fails | Disposition | Where it belongs |
 | ----------------------------------------------- | ------------ | -------------------- | ----------- | ---------------- |
 | Calm empty states with a single primary action   | Linear, Stripe | Works: tells the user what to do next without scolding. | Adopt (SPEC §27) | `EmptyState.tsx` |
-| Curated error catalog with per-error copy        | Stripe, Vercel | Works: every error has a recovery action. | Adopt (SPEC §27 — 13 presets) | `ErrorState.tsx` |
+| Curated error catalog with per-error copy        | Stripe, Vercel | Works: every error has a recovery action. | Adopt (SPEC §27) | `ErrorState.tsx` |
 | `role="status"` + `aria-live="polite"` for empty | WAI-ARIA     | Works: screen readers announce changes. | Adopt | `EmptyState.tsx` |
 | `role="alert"` + `aria-live="assertive"` for errors | WAI-ARIA  | Works: screen readers interrupt immediately. | Adopt | `ErrorState.tsx` |
 | Decorative illustrations on empty states         | some SaaS | Fails: SPEC §4.1 forbids "large decorative illustrations". | Reject — lucide icon in a small rounded tile only | — |

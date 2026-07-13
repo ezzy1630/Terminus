@@ -8,7 +8,7 @@ noted. Where a shortcut has a UI affordance, the affordance is listed.
 
 | Shortcut       | Action                                | Affordance | SPEC § |
 | -------------- | ------------------------------------- | ---------- | ------ |
-| `⌘K`           | Open / close the command palette      | Command icon in the title bar | 18 |
+| `⌘K`           | Open / close the command palette      | Shortcut reference in Settings | 18 |
 | `⌘,`           | Open / close Settings                 | —          | 20     |
 | `⌘\``          | Toggle the terminal drawer            | Panel-bottom icon in the title bar | 6, 15 |
 | `⌘N`           | New task (clears the selected task → NewTaskScreen) | "New task" button in the sidebar | 7, 8 |
@@ -80,7 +80,7 @@ whether the drawer is open or closed.
 | Shortcut  | Action                                                |
 | --------- | ----------------------------------------------------- |
 | `⌘,`      | Open / close Settings                                 |
-| `Esc`     | Close Settings (when no input has focus)              |
+| `Esc`     | Close Settings and restore the prior focus target      |
 
 ## Onboarding shortcuts
 
@@ -115,6 +115,6 @@ Per SPEC §18: "Clear shortcut hints."
   top edge to resize` while the drawer is open.
 - Sidebar rows show their full title via the `title` attribute
   (native tooltip) — no custom shortcut hint on rows.
-- Icon-only buttons in the title bar (theme cycle, density toggle,
-  terminal toggle, command palette) all carry both `aria-label` and
+- Icon-only buttons in the title bar (theme cycle, inspector toggle,
+  terminal toggle) all carry both `aria-label` and
   `title` so hover and screen readers reveal their function.

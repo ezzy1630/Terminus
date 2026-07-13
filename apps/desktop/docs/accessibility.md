@@ -210,8 +210,8 @@ Per SPEC §26: "No meaning conveyed by color alone."
   deletions get a `-` prefix and a red tint. The `+`/`-` is readable
   without color.
 - **Approval risk** — the risk class is rendered as text ("Low risk" /
-  "Normal risk" / "High risk" / "Critical risk") in addition to the
-  accent color on the left border.
+  "Normal risk" / "High risk" / "Critical risk") with a matching icon
+  and restrained full-surface tint.
 - **Health dot** — the title-bar health indicator is green when ready
   and red when offline, but the `aria-label` is "Control plane ready"
   or "Control plane offline" so screen readers announce the state.

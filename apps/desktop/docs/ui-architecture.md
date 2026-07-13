@@ -12,8 +12,10 @@ library (no React Router, no Next.js). The main surface is routed by a
 plain conditional in `App.tsx` based on `selectedTaskId`:
 
 ```
-selectedTaskId === null  →  <NewTaskScreen />           (SPEC §8)
-selectedTaskId !== null  →  <Conversation /> + <Composer />  (SPEC §9 + §10)
+selectedTaskId === null + new_task → <NewTaskScreen />
+selectedTaskId === null + secondary destination → <DestinationSurface />
+selectedTaskId !== null → <Conversation /> + <Composer />
+selectedTaskId !== null + changesOpen → <ResizableReviewLayout />
 ```
 
 Overlays that can appear above the main surface at any time:
@@ -43,7 +45,7 @@ App
 │   │   ├── center slot (active task objective, when useful)
 │   │   └── right slot (theme, inspector, terminal, health dot)
 │   ├── Sidebar                             (SPEC §7)
-│   │   ├── Workspace navigation (New task, Scheduled, Plugins, Sites, Pull requests, Chat)
+│   │   ├── Workspace navigation (New task, Scheduled, Plugins, Pull requests, Chat)
 │   │   ├── SidebarItem (Pinned tasks)
 │   │   └── SidebarItem (Projects → Tasks, nested)
 │   ├── main
@@ -87,16 +89,18 @@ factory and persisted to `localStorage` where appropriate.
 - Actions: `setTheme`, `setDensity`, `toggleDensity`, `cycleTheme`,
   `refresh`.
 
-### `useForgeStore` (`hooks/use-terminus.ts`)
+### `useTerminusStore` (`hooks/use-terminus.ts`)
 
 - State: `sessions`, `tasksBySession`, `taskById`, `selectedSessionId`,
-  `selectedTaskId`, `pinnedTaskIds`, `draftsByTask`, `eventsByTask`
+  `selectedTaskId`, `pinnedTaskIds`, `draftsByTask`,
+  `queuedInstructionsByTask`, `eventsByTask`
   (capped at 2000 per task), `_stream` (the live SSE stream).
 - Actions: `refreshAll`, `refreshSessions`, `refreshTasks`,
   `selectSession`, `selectTask`, `togglePin`, `setDraft`, `clearDraft`,
-  `_attachStream`, `_appendEvent`, `_updateTaskFromEvent`.
+  `queueInstruction`, `_flushQueuedInstruction`, `_attachStream`,
+  `_appendEvent`, `_updateTaskFromEvent`.
 - Persistence keys: `terminus-desktop.pinned-tasks.v1`.
-- The `_attachStream(taskId)` action opens a `ForgeEventStream` (see
+- The `_attachStream(taskId)` action opens a `TerminusEventStream` (see
   §5) and resumes from the last-seen event id (SPEC §30.6 — durable
   cursor).
 - Selection hooks: `useSelectedSessionTasks`, `usePinnedTasks`,
@@ -118,11 +122,11 @@ factory and persisted to `localStorage` where appropriate.
 
 ## 4. API client architecture
 
-`lib/api.ts` exports a single `ForgeApiClient` class and a `ForgeApiError`
+`lib/api.ts` exports a single `TerminusApiClient` class and a `TerminusApiError`
 error envelope. A singleton `api` instance is also exported.
 
 ```
-ForgeApiClient(baseUrl, token)
+TerminusApiClient(baseUrl, token)
   ├── health()                        GET  /v1/system/health
   ├── listSessions()                  GET  /v1/sessions
   ├── createSession(input)            POST /v1/sessions
@@ -137,7 +141,7 @@ ForgeApiClient(baseUrl, token)
   └── buildHeaders(extra)             (public; used by the SSE stream)
 ```
 
-Every non-2xx response raises a `ForgeApiError(status, message,
+Every non-2xx response raises a `TerminusApiError(status, message,
 envelope)`. The envelope mirrors SPEC §30.4:
 
 ```ts
@@ -153,12 +157,12 @@ envelope)`. The envelope mirrors SPEC §30.4:
 ```
 
 Network errors (connection refused, DNS failure, CORS) surface as
-`ForgeApiError(status=0, "network error: …", null)`. This makes them
+`TerminusApiError(status=0, "network error: …", null)`. This makes them
 distinguishable from 5xx responses without a separate error class.
 
 The client resolves `baseUrl` and `token` in this order:
 
-1. `window.forgeDesktop.apiBase` / `.token` (Electron preload bridge).
+1. `window.terminusDesktop.apiBase` / `.token` (Electron preload bridge).
 2. `import.meta.env.VITE_TERMINUS_API_BASE` / `VITE_TERMINUS_TOKEN` (Vite env).
 3. Hard-coded defaults: `http://127.0.0.1:3050` and
    `terminus-control-dev-token`.
@@ -184,11 +188,11 @@ Event flow:
 ```
 /v1/events (HTTP/1.1 chunked, text/event-stream)
   ↓ fetch + ReadableStream reader
-createSseDecoder().feed(chunk)  → ForgeSseEvent[] { id, event, data }
+createSseDecoder().feed(chunk)  → TerminusSseEvent[] { id, event, data }
   ↓ FetchEventStream.emit("message", ev)
-useForgeStore._appendEvent(taskId, ev)
+useTerminusStore._appendEvent(taskId, ev)
   ↓
-useForgeStore._updateTaskFromEvent(ev)   (updates task status/phase)
+useTerminusStore._updateTaskFromEvent(ev)   (updates task status/phase)
   ↓
 Conversation (useSelectedTaskEvents → decodes events into messages + blocks)
 Inspector   (useSelectedTaskEvents → renders Activity + Approvals sections)
@@ -197,12 +201,10 @@ Inspector   (useSelectedTaskEvents → renders Activity + Approvals sections)
 Heartbeat comments (`:heartbeat`) are filtered out by the decoder and
 never reach the store.
 
-Reconnection (SPEC §30.6): the caller passes `cursor:
-stream.lastEventId` on retry to resume from the last-seen event. The
-store's `_attachStream(taskId)` does this automatically when the
-selected task changes. A full auto-reconnect-with-backoff helper is
-slated for a future hardening pass — the current wiring handles the
-single-shot reconnect case.
+Reconnection (SPEC §30.6): `_attachStream(taskId)` resumes from the
+last-seen event id and retries unexpected drops with bounded exponential
+backoff. Stream generations and task ids prevent stale retries from attaching
+after the user switches tasks.
 
 ## 6. Progressive disclosure strategy
 
@@ -233,8 +235,8 @@ Defined in `hooks/use-viewport.ts`:
 
 | Breakpoint | Trigger        | Effect |
 | ---------- | -------------- | ------ |
-| 1100px     | narrowSidebar | Sidebar switches from `--sidebar-width` (260px spacious / 220px compact) to `--sidebar-width-compact` (200px / 180px) |
-| 900px      | inspectorOverlay | Inspector switches from inline flex item to absolute-positioned floating card (top: 56, right: 12, bottom: terminalHeight + 12) |
+| 1100px     | narrowSidebar | Sidebar switches from `--sidebar-width` (260px spacious / 230px compact) to `--sidebar-width-compact` (220px / 190px) |
+| 900px      | inspectorOverlay | Inspector stops reserving reading width and becomes a dismissible floating overlay |
 | 700px      | sidebarRail   | Sidebar collapses to a 56px icon rail; the full `Sidebar` component re-renders in `compact` mode (icons only, no labels) |
 
 The viewport hook debounces resize via `requestAnimationFrame` so
@@ -244,22 +246,21 @@ so the sidebar narrows smoothly rather than jumping.
 
 ## 8. Module graph (build-time)
 
-The Vite build produces a single ~457KB JS bundle (gzip 133KB). The
-module graph is intentionally shallow:
+The Vite build keeps the initial shell separate from task-heavy and secondary
+surfaces:
 
 ```
 index.html
   └── main.tsx
        ├── App.tsx
-       │    ├── Layout, Sidebar, Conversation, Composer, NewTaskScreen, Inspector
-       │    ├── CommandPalette, Settings, Onboarding (overlays)
-       │    ├── useForgeStore, useThemeStore
+       │    ├── Layout, Sidebar, Composer, NewTaskScreen, CommandPalette
+       │    ├── Conversation, Inspector (lazy task surfaces)
+       │    ├── Settings, Onboarding, ReviewPane (lazy secondary surfaces)
+       │    ├── useTerminusStore, useThemeStore
        │    └── lib/api.ts (singleton)
        ├── styles/globals.css
        └── styles/tokens.ts (applied at first paint by use-theme.ts)
 ```
 
-No `React.lazy` / `Suspense` boundaries yet — the bundle is small
-enough that eager loading is fine on the target M4 MacBook Air. See
-`docs/ui-performance.md` for the measured bundle and lazy-loading evidence when the bundle
-crosses ~700KB.
+See `docs/ui-performance.md` for current raw/gzip measurements and the
+remaining production-trace gates.
