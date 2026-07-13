@@ -14,4 +14,6 @@ pub enum EgressError {
     Io(#[from] std::io::Error),
     #[error("dns resolution failed: {0}")]
     Dns(String),
+    #[error("egress broker protocol error: {0}")]
+    Protocol(String),
 }

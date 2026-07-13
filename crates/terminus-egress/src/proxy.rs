@@ -82,22 +82,32 @@ impl EgressProxy {
         Ok(())
     }
 
-    /// Simulate a TCP relay that transfers `bytes` bytes. Returns the actual
-    /// number of bytes allowed under the budget. In this stub build no real
-    /// socket is opened; callers use this to model the byte budget.
+    /// Reserve `bytes` from the shared relay budget. The Unix broker calls
+    /// this before each write; other transports must do the same rather than
+    /// treating authorization as permission for unmetered I/O.
     pub fn relay(&self, bytes: u64) -> Result<u64, EgressError> {
-        let current = self.counter.bytes_transferred.load(Ordering::Relaxed);
-        if current >= self.rate_limit.max_total_bytes {
-            return Err(EgressError::ByteBudgetExceeded);
+        // A load followed by fetch_add can oversubscribe the shared task
+        // budget when both relay directions make progress concurrently.
+        // Reserve the allowance with compare_exchange instead.
+        loop {
+            let current = self.counter.bytes_transferred.load(Ordering::Acquire);
+            if current >= self.rate_limit.max_total_bytes {
+                return Err(EgressError::ByteBudgetExceeded);
+            }
+            let allowed = std::cmp::min(
+                bytes,
+                self.rate_limit.max_total_bytes.saturating_sub(current),
+            );
+            let next = current.saturating_add(allowed);
+            if self
+                .counter
+                .bytes_transferred
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(allowed);
+            }
         }
-        let allowed = std::cmp::min(
-            bytes,
-            self.rate_limit.max_total_bytes.saturating_sub(current),
-        );
-        self.counter
-            .bytes_transferred
-            .fetch_add(allowed, Ordering::Relaxed);
-        Ok(allowed)
     }
 
     pub fn bytes_transferred(&self) -> u64 {
