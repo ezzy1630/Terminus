@@ -4,10 +4,10 @@
 use axum::extract::{Path, Query, State};
 use axum::Extension;
 use axum::Json;
-use terminus_kernel_protocol::{CommandSpec, OutputChunk, ProcessEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use terminus_kernel_protocol::{CommandSpec, OutputChunk, ProcessEvent};
 use tokio::task::JoinHandle;
 
 use crate::api::Envelope;

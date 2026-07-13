@@ -10,6 +10,12 @@ export interface PendingApproval {
   action: string;
   risk: "low" | "normal" | "high" | "critical";
   reversibility?: string;
+  operation?: string;
+  reason?: string;
+  scope?: string[];
+  environment?: string;
+  requestedAt?: string;
+  canPersist: boolean;
 }
 
 export interface SubagentActivity {
@@ -49,6 +55,17 @@ function stringField(value: Record<string, unknown>, ...fields: string[]): strin
   return undefined;
 }
 
+function stringArrayField(value: Record<string, unknown>, ...fields: string[]): string[] | undefined {
+  for (const field of fields) {
+    const candidate = value[field];
+    if (Array.isArray(candidate)) {
+      const strings = candidate.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+      if (strings.length > 0) return strings;
+    }
+  }
+  return undefined;
+}
+
 function approvalRisk(value: string | undefined): PendingApproval["risk"] {
   return value === "low" || value === "high" || value === "critical" ? value : "normal";
 }
@@ -66,6 +83,12 @@ export function derivePendingApprovals(events: TerminusSseEvent[]): PendingAppro
         action: stringField(payload, "operation_summary", "operationSummary") ?? "Authorize requested operation",
         risk: approvalRisk(stringField(payload, "risk")),
         reversibility: stringField(payload, "reversibility"),
+        operation: stringField(payload, "operation", "command", "exact_operation", "exactOperation"),
+        reason: stringField(payload, "reason", "rationale", "why_required", "whyRequired"),
+        scope: stringArrayField(payload, "scope", "affected_paths", "affectedPaths"),
+        environment: stringField(payload, "environment", "affected_environment", "affectedEnvironment"),
+        requestedAt: stringField(payload, "requested_at", "requestedAt"),
+        canPersist: payload.can_persist !== false && payload.canPersist !== false,
       });
     }
     if (event.event === "approval.resolved") {

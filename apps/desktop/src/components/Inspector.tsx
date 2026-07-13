@@ -57,6 +57,21 @@ interface InspectorSectionProps {
   children: React.ReactNode;
 }
 
+function activityLabel(eventName: string): string {
+  const labels: Record<string, string> = {
+    "turn.started": "Turn started",
+    "turn.provider_running": "Agent working",
+    "turn.response_validating": "Validating response",
+    "turn.completed": "Turn completed",
+    "tool.proposed": "Tool proposed",
+    "tool.authorized": "Tool authorized",
+    "tool.settled": "Tool finished",
+    "task.completed": "Task completed",
+    "task.failed": "Task failed",
+  };
+  return labels[eventName] ?? eventName.replace(/[._]/g, " ");
+}
+
 function InspectorSection({
   title,
   icon,
@@ -247,17 +262,14 @@ function InspectorImpl({
             {recentEvents.map((ev: TerminusSseEvent, i) => (
               <li key={ev.id ?? i} className="flex flex-col gap-0.5">
                 <div className="flex items-center gap-1.5">
-                  <span
-                    className="rounded-sm bg-hover px-1 py-0.5 font-mono text-tertiary"
-                    style={{ fontSize: 10 }}
-                  >
-                    {ev.event}
+                  <span className="text-secondary" style={{ fontSize: "var(--font-size-xs)" }}>
+                    {activityLabel(ev.event)}
                   </span>
                 </div>
                 {ev.data ? (
                   <div
-                    className="selectable truncate font-mono text-tertiary"
-                    style={{ fontSize: 10 }}
+                    className="selectable truncate text-tertiary"
+                    style={{ fontSize: "var(--font-size-xs)" }}
                     title={ev.data}
                   >
                     {ev.data.slice(0, 80)}

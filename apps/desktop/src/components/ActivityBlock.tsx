@@ -46,8 +46,8 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
   return (
     <div
       className={cn(
-        "selectable my-2 overflow-hidden rounded-md border border-subtle",
-        expanded && "bg-elevated",
+        "selectable my-1 overflow-hidden border-l-2 border-subtle",
+        expanded && "border-default bg-elevated",
       )}
       style={{ background: expanded ? "var(--bg-elevated)" : "transparent" }}
     >
@@ -56,7 +56,7 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
         type="button"
         onClick={() => setExpanded((e) => !e)}
         aria-expanded={expanded}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-hover"
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-hover"
         style={{ height: 32 }}
       >
         <ChevronRight
@@ -67,8 +67,8 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
           <StatusIndicator status={kind} size={11} />
         </span>
         <span
-          className="min-w-0 flex-1 truncate text-primary"
-          style={{ fontSize: "var(--font-size-base)", fontWeight: 500 }}
+          className="min-w-0 flex-1 truncate text-secondary"
+          style={{ fontSize: "var(--font-size-sm)", fontWeight: 500 }}
         >
           {block.title}
         </span>

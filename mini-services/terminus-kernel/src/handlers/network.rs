@@ -14,9 +14,9 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use terminus_egress::EgressPolicy;
 use serde::{Deserialize, Serialize};
 use std::net::ToSocketAddrs;
+use terminus_egress::EgressPolicy;
 
 use crate::api::Envelope;
 use crate::auth::ValidatedCapabilityToken;

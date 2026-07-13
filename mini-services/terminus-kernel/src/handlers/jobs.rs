@@ -10,9 +10,9 @@ use axum::extract::{Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
+use serde::{Deserialize, Serialize};
 use terminus_jobs::{JobRecord, JobState};
 use terminus_kernel_protocol::CommandSpec;
-use serde::{Deserialize, Serialize};
 
 use crate::api::Envelope;
 use crate::error::{json_error, ApiError};

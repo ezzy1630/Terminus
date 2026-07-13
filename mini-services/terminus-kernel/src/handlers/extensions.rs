@@ -11,8 +11,8 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use terminus_extension_runtime::ExtensionManifest;
 use serde::{Deserialize, Serialize};
+use terminus_extension_runtime::ExtensionManifest;
 
 use crate::api::Envelope;
 use crate::auth::ValidatedCapabilityToken;

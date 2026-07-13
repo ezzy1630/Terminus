@@ -210,28 +210,19 @@ describeLive("TerminusApiClient — live control plane (http://127.0.0.1:3050)",
   /**
    * The control plane's `POST /v1/sessions` validates that `workspace_id`
    * references an existing Workspace row (foreign-key constraint). To
-   * keep the live tests self-contained, we open a fresh workspace via
-   * the public API (not via TerminusApiClient — the client doesn't yet
-   * surface /v1/workspaces/open) at the start of each test that needs
-   * one. The workspace_id is then reused for createSession.
+   * keep the live tests self-contained, we open a fresh workspace through
+   * the same client path onboarding uses. The workspace_id is then reused
+   * for createSession.
    */
   async function openWorkspace(c: TerminusApiClient): Promise<string> {
     const rootUri = `file:///tmp/terminus-desktop-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const res = await fetch(`${API_BASE}/v1/workspaces/open`, {
-      method: "POST",
-      headers: c.buildHeaders(),
-      body: JSON.stringify({
-        root_uri: rootUri,
-        kind: "local_directory",
-        trust: "trusted",
-        policy_profile_id: "secure-local-default",
-      }),
+    const workspace = await c.openWorkspace({
+      root_uri: rootUri,
+      kind: "local_directory",
+      trust: "trusted",
+      policy_profile_id: "secure-local-default",
     });
-    if (!res.ok) {
-      throw new Error(`openWorkspace failed: ${res.status} ${await res.text()}`);
-    }
-    const body = (await res.json()) as { id: string };
-    return body.id;
+    return workspace.id;
   }
 
   test("health() returns ok=true with a version string", async () => {

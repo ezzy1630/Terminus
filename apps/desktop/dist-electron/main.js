@@ -37,9 +37,71 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
 const node_path_1 = require("node:path");
 const node_crypto_1 = require("node:crypto");
+const node_fs_1 = require("node:fs");
 const isDev = !electron_1.app.isPackaged;
 electron_1.app.setName("Terminus");
 let mainWindow = null;
+const WINDOW_STATE_FILE = "window-state.json";
+function windowStatePath() {
+    return (0, node_path_1.join)(electron_1.app.getPath("userData"), WINDOW_STATE_FILE);
+}
+function isVisibleOnAnyDisplay(bounds) {
+    return electron_1.screen.getAllDisplays().some(({ workArea }) => {
+        const overlapWidth = Math.max(0, Math.min(bounds.x + bounds.width, workArea.x + workArea.width) - Math.max(bounds.x, workArea.x));
+        const overlapHeight = Math.max(0, Math.min(bounds.y + bounds.height, workArea.y + workArea.height) - Math.max(bounds.y, workArea.y));
+        return overlapWidth >= 160 && overlapHeight >= 120;
+    });
+}
+function readWindowState() {
+    try {
+        const parsed = JSON.parse((0, node_fs_1.readFileSync)(windowStatePath(), "utf8"));
+        if (!parsed || typeof parsed !== "object")
+            return null;
+        const candidate = parsed;
+        const bounds = candidate.bounds;
+        if (!bounds || typeof bounds !== "object")
+            return null;
+        const value = bounds;
+        if (![value.x, value.y, value.width, value.height].every((entry) => typeof entry === "number"))
+            return null;
+        const restored = {
+            x: value.x,
+            y: value.y,
+            width: Math.max(900, value.width),
+            height: Math.max(600, value.height),
+        };
+        if (!isVisibleOnAnyDisplay(restored))
+            return null;
+        return { bounds: restored, maximized: candidate.maximized === true };
+    }
+    catch {
+        return null;
+    }
+}
+function persistWindowState(window) {
+    try {
+        const state = {
+            bounds: window.isMaximized() ? window.getNormalBounds() : window.getBounds(),
+            maximized: window.isMaximized(),
+        };
+        (0, node_fs_1.writeFileSync)(windowStatePath(), JSON.stringify(state), { encoding: "utf8", mode: 0o600 });
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[terminus] unable to persist window state: ${message}`);
+    }
+}
+function prefersReducedTransparency() {
+    if (process.platform !== "darwin")
+        return false;
+    try {
+        return electron_1.systemPreferences.getUserDefault("reduceTransparency", "boolean") === true
+            || electron_1.systemPreferences.getUserDefault("AppleReduceTransparency", "boolean") === true;
+    }
+    catch {
+        return false;
+    }
+}
 // ────────────────────────── node-pty (graceful) ───────────────────────────────
 /**
  * Lazily-loaded `node-pty` module. Native compilation can fail on Linux
@@ -178,19 +240,22 @@ function createWindow() {
     const { width: screenWidth, height: screenHeight } = electron_1.screen.getPrimaryDisplay().workAreaSize;
     const width = Math.min(Math.round(screenWidth * 0.88), 1600);
     const height = Math.min(Math.round(screenHeight * 0.88), 1000);
+    const restored = readWindowState();
+    const reduceTransparency = prefersReducedTransparency();
     mainWindow = new electron_1.BrowserWindow({
-        width,
-        height,
+        width: restored?.bounds.width ?? width,
+        height: restored?.bounds.height ?? height,
+        ...(restored ? { x: restored.bounds.x, y: restored.bounds.y } : { center: true }),
         title: "Terminus",
-        minWidth: 900,
+        // Keep the <900px inspector-overlay and <700px sidebar-rail states
+        // reachable in the packaged app for side-by-side workflows.
+        minWidth: 640,
         minHeight: 600,
-        center: true,
         titleBarStyle: "hiddenInset",
         trafficLightPosition: { x: 16, y: 18 },
         backgroundColor: electron_1.nativeTheme.shouldUseDarkColors ? "#1a1a1c" : "#f7f7f8",
         show: false,
-        vibrancy: "under-window",
-        visualEffectState: "active",
+        ...(reduceTransparency ? {} : { vibrancy: "under-window", visualEffectState: "active" }),
         webPreferences: {
             preload: (0, node_path_1.join)(__dirname, "preload.js"),
             contextIsolation: true,
@@ -198,10 +263,14 @@ function createWindow() {
             sandbox: false, // required for contextBridge + preload with IPC
         },
     });
-    // SPEC §5: "Remember previous window size and position"
-    // TODO: persist bounds to electron-store.
     mainWindow.once("ready-to-show", () => {
+        if (restored?.maximized)
+            mainWindow?.maximize();
         mainWindow?.show();
+    });
+    mainWindow.on("close", () => {
+        if (mainWindow)
+            persistWindowState(mainWindow);
     });
     // SPEC §5: "Support multiple application windows if existing product
     // behavior allows it"
@@ -232,7 +301,7 @@ function registerIpc() {
     // ── Terminus desktop bridge ──
     electron_1.ipcMain.handle("notify", (_e, { title, body }) => {
         const { Notification } = require("electron");
-        if (Notification.isSupported()) {
+        if (Notification.isSupported() && !mainWindow?.isFocused()) {
             new Notification({ title, body }).show();
         }
         return null;
@@ -260,6 +329,16 @@ function registerIpc() {
         return electron_1.nativeTheme.themeSource;
     });
     electron_1.ipcMain.handle("desktop:getScreenSources", handleGetScreenSources);
+    electron_1.ipcMain.handle("desktop:pickDirectory", async () => {
+        const options = {
+            title: "Open project",
+            properties: ["openDirectory", "createDirectory"],
+        };
+        const result = mainWindow
+            ? await electron_1.dialog.showOpenDialog(mainWindow, options)
+            : await electron_1.dialog.showOpenDialog(options);
+        return result.canceled ? null : result.filePaths[0] ?? null;
+    });
     // ── Terminal (node-pty) ──
     electron_1.ipcMain.handle("terminusTerminal:spawn", handleTerminalSpawn);
     electron_1.ipcMain.handle("terminusTerminal:write", handleTerminalWrite);

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use terminus_code_intel::{DiagnoseResult, InspectResult, ReferenceResult};
 use serde::Deserialize;
+use terminus_code_intel::{DiagnoseResult, InspectResult, ReferenceResult};
 
 use crate::api::Envelope;
 use crate::auth::ValidatedCapabilityToken;

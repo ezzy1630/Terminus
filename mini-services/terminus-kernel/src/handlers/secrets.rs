@@ -11,8 +11,8 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use terminus_secrets::{Redactor, SecretMetadata};
 use serde::{Deserialize, Serialize};
+use terminus_secrets::{Redactor, SecretMetadata};
 
 use crate::api::Envelope;
 use crate::auth::ValidatedCapabilityToken;
@@ -84,7 +84,10 @@ pub async fn request(
                 &trace_id.0,
             )
         })?;
-    let handle_ref = format!("terminus-secret-handle:{}", terminus_kernel_protocol::new_id());
+    let handle_ref = format!(
+        "terminus-secret-handle:{}",
+        terminus_kernel_protocol::new_id()
+    );
     let metadata = handle.metadata.clone();
     drop(handle); // wipes the value
     Ok(Json(SecretRequestResponse {

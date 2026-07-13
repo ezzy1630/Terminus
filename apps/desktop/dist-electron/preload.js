@@ -47,6 +47,7 @@ electron_1.contextBridge.exposeInMainWorld("terminusDesktop", {
     setTheme: (theme) => electron_1.ipcRenderer.invoke("theme:set", theme),
     // Screen capture (SPEC §16 — computer-use PiP).
     getScreenSources: () => electron_1.ipcRenderer.invoke("desktop:getScreenSources"),
+    pickDirectory: () => electron_1.ipcRenderer.invoke("desktop:pickDirectory"),
 });
 // ────────────────────────── terminusTerminal ────────────────────────────────────
 /**

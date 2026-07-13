@@ -1,7 +1,7 @@
 //! Shared API envelope types used by handlers.
 
-use terminus_kernel_protocol::{EffectIntent, RequestContext};
 use serde::{Deserialize, Serialize};
+use terminus_kernel_protocol::{EffectIntent, RequestContext};
 
 use crate::auth::ValidatedCapabilityToken;
 

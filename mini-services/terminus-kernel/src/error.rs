@@ -6,8 +6,8 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use terminus_kernel_protocol::{ErrorCategory, ErrorCode, KernelError};
 use serde_json::json;
+use terminus_kernel_protocol::{ErrorCategory, ErrorCode, KernelError};
 
 /// A structured API error that serializes to the SPEC §30.4 envelope.
 #[derive(Debug, Clone)]

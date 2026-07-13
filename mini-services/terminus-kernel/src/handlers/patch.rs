@@ -4,9 +4,9 @@
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use terminus_kernel_protocol::{PatchCommitMode, PatchEdit, PatchResponse, WorkspaceBaseline};
 use serde::Deserialize;
 use std::sync::Arc;
+use terminus_kernel_protocol::{PatchCommitMode, PatchEdit, PatchResponse, WorkspaceBaseline};
 
 use crate::api::Envelope;
 use crate::auth::ValidatedCapabilityToken;

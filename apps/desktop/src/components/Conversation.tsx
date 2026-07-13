@@ -563,10 +563,13 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
                 key={approval.id}
                 id={approval.id}
                 action={approval.action}
-                reason="The task needs your permission before this effect can continue."
+                operation={approval.operation}
+                reason={approval.reason ?? "The task needs your permission before this effect can continue."}
                 risk={approval.risk}
-                affectedEnvironment="Current task environment"
-                canPersist
+                scope={approval.scope}
+                affectedEnvironment={approval.environment}
+                requestedAt={approval.requestedAt}
+                canPersist={approval.canPersist}
               />
             ))}
           </div>

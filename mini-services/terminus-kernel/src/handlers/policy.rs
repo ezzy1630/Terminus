@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
-use terminus_policy::{DecisionReport, NormalizedCommand};
 use serde::Deserialize;
+use terminus_policy::{DecisionReport, NormalizedCommand};
 
 use crate::api::Envelope;
 use crate::error::{json_error, ApiError};

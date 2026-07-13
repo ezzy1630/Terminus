@@ -33,8 +33,32 @@ describe("task surface event projections", () => {
       event("3", "approval.resolved", { approvalId: "approval-a", decision: "deny_once" }),
     ];
     expect(derivePendingApprovals(events)).toEqual([
-      { id: "approval-b", action: "Push branch", risk: "normal", reversibility: undefined },
+      expect.objectContaining({ id: "approval-b", action: "Push branch", risk: "normal", canPersist: true }),
     ]);
+  });
+
+  test("preserves exact approval context for the inline decision", () => {
+    const approvals = derivePendingApprovals([
+      event("1", "approval.requested", {
+        approval_id: "approval-a",
+        operation_summary: "Run database migration",
+        command: "bun run migrate:production",
+        reason: "This can modify production data.",
+        risk: "critical",
+        scope: ["database:production"],
+        affected_environment: "production",
+        requested_at: "2026-07-12T00:00:00Z",
+        can_persist: false,
+      }),
+    ]);
+    expect(approvals[0]).toEqual(expect.objectContaining({
+      operation: "bun run migrate:production",
+      reason: "This can modify production data.",
+      scope: ["database:production"],
+      environment: "production",
+      requestedAt: "2026-07-12T00:00:00Z",
+      canPersist: false,
+    }));
   });
 
   test("tracks subagents through completion without turning identity into primary UI", () => {
@@ -71,7 +95,7 @@ describe("task surface event projections", () => {
     ];
 
     expect(derivePendingApprovals(events)).toEqual([
-      { id: "approval-a", action: "Apply migration", risk: "critical", reversibility: undefined },
+      expect.objectContaining({ id: "approval-a", action: "Apply migration", risk: "critical", canPersist: true }),
     ]);
     expect(deriveSubagentActivity(events)).toEqual([
       { id: "agent-a", role: "Review the patch", state: "done", worktreeId: "review-worktree" },

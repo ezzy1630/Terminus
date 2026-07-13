@@ -36,6 +36,7 @@ import type {
   ApprovalDecision,
   CreateSessionInput,
   CreateTaskInput,
+  OpenWorkspaceInput,
   TerminusSseEvent,
   HealthResponse,
   Session,
@@ -46,6 +47,7 @@ import type {
   Task,
   TaskListResponse,
   Turn,
+  WorkspaceSnapshot,
 } from "../types";
 
 // ────────────────────────── Configuration ──────────────────────────────────
@@ -204,6 +206,12 @@ export class TerminusApiClient {
 
   health(signal?: AbortSignal | null): Promise<HealthResponse> {
     return this.request<HealthResponse>("GET", "/v1/system/health", { signal });
+  }
+
+  // ────────────────────────── /workspaces ───────────────────────────────
+
+  openWorkspace(input: OpenWorkspaceInput, signal?: AbortSignal | null): Promise<WorkspaceSnapshot> {
+    return this.request<WorkspaceSnapshot>("POST", "/v1/workspaces/open", { body: input, signal });
   }
 
   // ────────────────────────── /sessions ─────────────────────────────────

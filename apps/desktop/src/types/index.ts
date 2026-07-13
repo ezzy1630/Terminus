@@ -62,6 +62,13 @@ export interface WorkspaceSnapshot {
   last_opened_at: string;
 }
 
+export interface OpenWorkspaceInput {
+  root_uri: string;
+  kind?: WorkspaceKind;
+  trust?: WorkspaceTrust;
+  policy_profile_id?: string;
+}
+
 // ────────────────────────── /sessions ──────────────────────────────────────
 
 export type SessionStatus = "active" | "paused" | "archived" | "deleted";

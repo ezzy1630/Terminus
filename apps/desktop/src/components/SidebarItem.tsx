@@ -15,7 +15,6 @@
  */
 import { memo, useState } from "react";
 import { Pin, PinOff } from "lucide-react";
-import { formatDistanceToNowStrict } from "date-fns";
 import { cn } from "../lib/cn";
 import { StatusIndicator } from "./StatusIndicator";
 import { normalizeTaskStatus } from "../hooks/use-terminus";
@@ -45,7 +44,7 @@ interface SidebarItemProps {
 function SidebarItemImpl({
   title,
   status,
-  updatedAt,
+  updatedAt: _updatedAt,
   selected,
   pinned = false,
   compact = false,
@@ -133,21 +132,13 @@ function SidebarItemImpl({
         {title}
       </span>
 
-      {/* Right side: timestamp + pin action. Reserve fixed width so hover
-          actions don't cause layout shift (SPEC §7.1). */}
+      {/* Right side: reserve a compact action slot so hover affordances never
+          move the task title. Recency is available in the inspector instead
+          of adding a noisy second column to every navigation row. */}
       <span
         className="flex flex-shrink-0 items-center justify-end gap-1"
-        style={{ width: 60 }}
+        style={{ width: 22 }}
       >
-        {updatedAt && !hovered ? (
-          <span
-            className="truncate text-tertiary"
-            style={{ fontSize: "var(--font-size-xs)" }}
-            aria-hidden
-          >
-            {formatDistanceToNowStrict(new Date(updatedAt), { addSuffix: false })}
-          </span>
-        ) : null}
         {onTogglePin ? (
           <button
             type="button"

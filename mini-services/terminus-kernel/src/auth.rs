@@ -5,8 +5,8 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
-use terminus_authz::{OperationClass, TokenClaims};
 use std::sync::Arc;
+use terminus_authz::{OperationClass, TokenClaims};
 
 use crate::error::ApiError;
 use crate::state::AppState;

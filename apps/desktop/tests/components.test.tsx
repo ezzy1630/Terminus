@@ -627,6 +627,17 @@ describe("Composer — send-button mode switches based on task status", () => {
     render(<Composer />);
     expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
   });
+
+  test("the start-surface composer delegates a fresh objective to task creation", async () => {
+    const user = userEvent.setup();
+    const createTask = vi.fn(async () => undefined);
+    render(<Composer onCreateTask={createTask} />);
+
+    await user.type(screen.getByRole("textbox", { name: "Message composer" }), "Map this project");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(createTask).toHaveBeenCalledWith("Map this project");
+  });
 });
 
 // ────────────────────────── 7. SidebarItem ──────────────────────────────────

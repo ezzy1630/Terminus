@@ -11,10 +11,10 @@
 use axum::extract::State;
 use axum::Extension;
 use axum::Json;
-use terminus_kernel_protocol::WorkspacePath;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use terminus_kernel_protocol::WorkspacePath;
 
 use crate::api::Envelope;
 use crate::auth::ValidatedCapabilityToken;
