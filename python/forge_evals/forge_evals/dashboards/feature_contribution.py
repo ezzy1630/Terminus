@@ -202,23 +202,6 @@ def _count(records: Iterable[RunRecord] | RunCatalog) -> int:
     return sum(1 for _ in records)
 
 
-def _ablation_row(c: AblationContribution) -> str:
-    """Render a single ablation contribution row."""
-    bar = _delta_bar(c.delta_mean, c.delta_ci_low, c.delta_ci_high)
-    return _ROW.format(
-        component=_esc(c.component),
-        baseline_runs=c.baseline_runs,
-        ablation_runs=c.ablation_runs,
-        n_pairs=c.n_pairs,
-        delta=c.delta_mean,
-        ci=f"[{c.delta_ci_low:.4f}, {c.delta_ci_high:.4f}]",
-        bar=bar,
-        d=c.cohens_d,
-        load_bearing="yes" if c.is_load_bearing else "no",
-        interp=_esc(c.interpretation),
-    )
-
-
 def _delta_bar(value: float, lo: float, hi: float) -> str:
     """Render a horizontal bar centered at 0."""
     vmin = min(-0.2, lo, value)
@@ -227,7 +210,7 @@ def _delta_bar(value: float, lo: float, hi: float) -> str:
     if span <= 0:
         return ""
 
-    def pct(x):
+    def pct(x: float) -> float:
         return max(0, min(100, (x - vmin) / span * 100))
 
     val_pct = pct(value)

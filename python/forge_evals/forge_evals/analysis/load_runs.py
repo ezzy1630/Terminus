@@ -16,9 +16,11 @@ and a flattened Polars DataFrame for analysis.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
@@ -72,7 +74,7 @@ class RunCatalog:
             out.setdefault(r.task, []).append(r)
         return out
 
-    def filter(self, predicate) -> RunCatalog:
+    def filter(self, predicate: Callable[[RunRecord], bool]) -> RunCatalog:
         """Return a sub-catalog of records matching ``predicate(record)``."""
         return RunCatalog(records=[r for r in self.records if predicate(r)])
 
@@ -242,57 +244,103 @@ def _empty_schema() -> pl.DataFrame:
 def _row_to_record(row: dict[str, object]) -> RunRecord:
     """Reconstruct a :class:`RunRecord` from a flattened row dict."""
     # Parse nested JSON string columns.
-    graders_raw: list[dict[str, object]] = []
-    graders_str = row.get("grader_results")
-    if isinstance(graders_str, str):
-        graders_raw = json.loads(graders_str)
+    graders_raw = _json_dict_list(row.get("grader_results"))
     cost: CostBreakdown | None = None
-    if row.get("provider_reported_usd") is not None:
+    provider_reported = row.get("provider_reported_usd")
+    if provider_reported is not None:
+        provider_reported_usd = _as_float(provider_reported)
+        computed_usd = _as_float(row.get("computed_usd"))
         cost = CostBreakdown(
-            provider_reported_usd=float(row["provider_reported_usd"]),  # type: ignore[arg-type]
-            computed_usd=float(row["computed_usd"]),  # type: ignore[arg-type]
-            input_tokens=int(row.get("input_tokens") or 0),  # type: ignore[arg-type]
-            output_tokens=int(row.get("output_tokens") or 0),  # type: ignore[arg-type]
-            cached_tokens=int(row.get("cached_tokens") or 0),  # type: ignore[arg-type]
-            reasoning_tokens=int(row.get("reasoning_tokens") or 0),  # type: ignore[arg-type]
-            cache_write_tokens=int(row.get("cache_write_tokens") or 0),  # type: ignore[arg-type]
-            cache_read_tokens=int(row.get("cache_read_tokens") or 0),  # type: ignore[arg-type]
-            reconciliation_delta_usd=float(row.get("provider_reported_usd") or 0)  # type: ignore[arg-type]
-            - float(row.get("computed_usd") or 0),
+            provider_reported_usd=provider_reported_usd,
+            computed_usd=computed_usd,
+            input_tokens=_as_int(row.get("input_tokens")),
+            output_tokens=_as_int(row.get("output_tokens")),
+            cached_tokens=_as_int(row.get("cached_tokens")),
+            reasoning_tokens=_as_int(row.get("reasoning_tokens")),
+            cache_write_tokens=_as_int(row.get("cache_write_tokens")),
+            cache_read_tokens=_as_int(row.get("cache_read_tokens")),
+            reconciliation_delta_usd=provider_reported_usd - computed_usd,
             reconciliation_flagged=bool(row.get("cost_reconciliation_flagged", False)),
         )
     graders = [GraderResult(**g) for g in graders_raw]
-    end = row.get("end")
+    start = _as_datetime(row.get("start"), "start")
+    end = _as_datetime_or_none(row.get("end"), "end")
     return RunRecord(
         run_id=str(row["run_id"]),
         suite=str(row["suite"]),
         task=str(row["task"]),
         harness=str(row["harness"]),
         harness_commit=str(row["harness_commit"]),
-        model_capability_snapshot=_loads_or_default(row.get("model_capability_snapshot"), {}),
+        model_capability_snapshot=_json_dict(row.get("model_capability_snapshot")),
         environment_digest=str(row["environment_digest"]),
-        random_seed=int(row.get("random_seed") or 0),
-        budgets=_loads_or_default(row.get("budgets"), {}),
-        experiment_assignments=_loads_or_default(row.get("experiment_assignments"), []),
-        start=row["start"],  # type: ignore[arg-type]
-        end=end if end is not None else None,
+        random_seed=_as_int(row.get("random_seed")),
+        budgets=_json_dict(row.get("budgets")),
+        experiment_assignments=_json_dict_list(row.get("experiment_assignments")),
+        start=start,
+        end=end,
         outcome=Outcome(str(row.get("outcome", "missing"))),
         grader_results=graders,
         cost=cost,
-        artifacts=_loads_or_default(row.get("artifacts"), []),
-        context_manifests=_loads_or_default(row.get("context_manifests"), []),
-        trajectory=_loads_or_default(row.get("trajectory"), []),
+        artifacts=_json_dict_list(row.get("artifacts")),
+        context_manifests=_json_dict_list(row.get("context_manifests")),
+        trajectory=_json_dict_list(row.get("trajectory")),
         notes=str(row.get("notes", "")),
     )
 
 
-def _loads_or_default(v: object, default: object) -> object:
-    """JSON-decode ``v`` if it's a string, else return as-is or default."""
-    if v is None:
-        return default
-    if isinstance(v, str):
+def _json_value(value: object) -> object:
+    """Decode a JSON string, preserving native Parquet values unchanged."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def _json_dict(value: object) -> dict[str, Any]:
+    """Decode a record object, treating malformed data as an empty object."""
+    parsed = _json_value(value)
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _json_dict_list(value: object) -> list[dict[str, Any]]:
+    """Decode a list of record objects while dropping malformed entries."""
+    parsed = _json_value(value)
+    if not isinstance(parsed, list):
+        return []
+    return [dict(item) for item in parsed if isinstance(item, dict)]
+
+
+def _as_int(value: object) -> int:
+    """Coerce a scalar Parquet value to an integer, defaulting to zero."""
+    if isinstance(value, (int, float, str)):
         try:
-            return json.loads(v)
-        except json.JSONDecodeError:
-            return default
-    return v
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _as_float(value: object) -> float:
+    """Coerce a scalar Parquet value to a float, defaulting to zero."""
+    if isinstance(value, (int, float, str)):
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _as_datetime(value: object, field_name: str) -> datetime:
+    """Require a datetime cell from the canonical flattened schema."""
+    if isinstance(value, datetime):
+        return value
+    raise ValueError(f"invalid {field_name} in flattened run record")
+
+
+def _as_datetime_or_none(value: object, field_name: str) -> datetime | None:
+    """Decode an optional datetime cell from the canonical flattened schema."""
+    if value is None:
+        return None
+    return _as_datetime(value, field_name)

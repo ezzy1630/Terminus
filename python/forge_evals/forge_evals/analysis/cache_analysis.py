@@ -140,8 +140,6 @@ def cache_invalidation_causes(
     out: list[CacheInvalidationCause] = []
     for r in recs:
         for ev in r.trajectory:
-            if not isinstance(ev, dict):
-                continue
             et = ev.get("event_type")
             if et not in ("memory.claim_invalidated", "context.compaction_started"):
                 continue

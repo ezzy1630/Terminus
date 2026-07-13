@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -505,18 +506,20 @@ class FakeScriptHarness:
         return self.result
 
 
-def make_default_cost(usage: dict[str, int], pricing: dict[str, float]) -> CostBreakdown:
+def make_default_cost(
+    usage: Mapping[str, int | float], pricing: Mapping[str, float]
+) -> CostBreakdown:
     """Build a :class:`CostBreakdown` by computing cost from usage and pricing.
 
     ``pricing`` keys: ``input``, ``output``, ``cached``, ``reasoning``,
     ``cache_write``, ``cache_read`` — each a per-1M-token USD rate.
     """
-    input_tokens = usage.get("input_tokens", 0)
-    output_tokens = usage.get("output_tokens", 0)
-    cached_tokens = usage.get("cached_tokens", 0)
-    reasoning_tokens = usage.get("reasoning_tokens", 0)
-    cache_write_tokens = usage.get("cache_write_tokens", 0)
-    cache_read_tokens = usage.get("cache_read_tokens", 0)
+    input_tokens = int(usage.get("input_tokens", 0))
+    output_tokens = int(usage.get("output_tokens", 0))
+    cached_tokens = int(usage.get("cached_tokens", 0))
+    reasoning_tokens = int(usage.get("reasoning_tokens", 0))
+    cache_write_tokens = int(usage.get("cache_write_tokens", 0))
+    cache_read_tokens = int(usage.get("cache_read_tokens", 0))
 
     def _cost(key: str, tokens: int) -> float:
         rate = pricing.get(key, 0.0)
@@ -530,9 +533,10 @@ def make_default_cost(usage: dict[str, int], pricing: dict[str, float]) -> CostB
         + _cost("cache_write", cache_write_tokens)
         + _cost("cache_read", cache_read_tokens)
     )
-    provider_reported = usage.pop("_provider_reported_usd", None)
-    if provider_reported is None:
-        provider_reported = computed
+    provider_reported_raw = usage.get("_provider_reported_usd")
+    provider_reported = (
+        float(provider_reported_raw) if provider_reported_raw is not None else computed
+    )
     delta = provider_reported - computed
     flagged = abs(delta) > 0.001 and abs(delta) > 0.01 * max(computed, 1e-9)
     return CostBreakdown(

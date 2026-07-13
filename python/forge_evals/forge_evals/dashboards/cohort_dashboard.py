@@ -102,7 +102,7 @@ def _bar(value: float, lo: float, hi: float, vmin: float, vmax: float) -> str:
     if span <= 0:
         return ""
 
-    def pct(x):
+    def pct(x: float) -> float:
         return max(0, min(100, (x - vmin) / span * 100))
 
     val_pct = pct(value)

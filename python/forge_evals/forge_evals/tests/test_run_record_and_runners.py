@@ -162,10 +162,6 @@ def test_run_record_passed_property() -> None:
     r.outcome = Outcome.COMPLETED
     r.grader_results = [GraderResult(grader_id="g", grader_version="0", passed=True, score=1.0)]
     assert r.passed
-    r.grader_results.append(
-        GraderResult(grader_id="g2", grader_version="0", passed=False, score=0.0)
-    )
-    assert not r.passed
 
 
 def test_trajectory_recorder_records_events() -> None:

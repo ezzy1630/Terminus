@@ -92,7 +92,7 @@ def _build_parser() -> argparse.ArgumentParser:
 # ──────────────────────────── run ─────────────────────────────────────────
 
 
-def _add_run_cmd(sub: argparse._SubParsersAction) -> None:
+def _add_run_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     """Add the ``run`` subcommand."""
     p = sub.add_parser("run", help="Run a single harness on a benchmark task.")
     p.add_argument("--suite", required=True, help="Suite id (e.g. tiny-bugfix).")
@@ -194,7 +194,7 @@ def _write_record(record: RunRecord, output_dir: Path, fmt: str, *, suffix: str 
 # ──────────────────────────── aggregate ───────────────────────────────────
 
 
-def _add_aggregate_cmd(sub: argparse._SubParsersAction) -> None:
+def _add_aggregate_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     """Add the ``aggregate`` command."""
     p = sub.add_parser("aggregate", help="Aggregate run records into cohort summaries.")
     p.add_argument(
@@ -243,7 +243,7 @@ def _write_df(df: Any, output: str, fmt: str) -> None:
 # ──────────────────────────── dashboard ───────────────────────────────────
 
 
-def _add_dashboard_cmd(sub: argparse._SubParsersAction) -> None:
+def _add_dashboard_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     """Add the ``dashboard`` command."""
     p = sub.add_parser("dashboard", help="Generate a cohort dashboard HTML.")
     p.add_argument("--runs-dir", default="evals/results", help="Directory of run records.")
@@ -279,7 +279,7 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
 # ──────────────────────────── promote ─────────────────────────────────────
 
 
-def _add_promote_cmd(sub: argparse._SubParsersAction) -> None:
+def _add_promote_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     """Add the ``promote`` command."""
     p = sub.add_parser("promote", help="Evaluate the promotion gate for an experiment.")
     p.add_argument("--experiment", required=True, help="Experiment id (for logging).")
@@ -360,7 +360,7 @@ def _write_json(obj: Any, output: str) -> None:
 # ──────────────────────────── regression ─────────────────────────────────
 
 
-def _add_regression_cmd(sub: argparse._SubParsersAction) -> None:
+def _add_regression_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     """Add the ``regression`` command."""
     p = sub.add_parser("regression", help="Compare two run sets for regressions.")
     p.add_argument("--baseline-run", required=True, help="Baseline runs (JSONL/JSON dir/Parquet).")
@@ -400,7 +400,7 @@ def _cmd_regression(args: argparse.Namespace) -> int:
 # ──────────────────────────── security ────────────────────────────────────
 
 
-def _add_security_cmd(sub: argparse._SubParsersAction) -> None:
+def _add_security_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     """Add the ``security`` command."""
     p = sub.add_parser("security", help="Generate a security report from run records.")
     p.add_argument("--runs-dir", required=True, help="Directory of run records.")

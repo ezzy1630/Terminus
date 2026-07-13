@@ -13,6 +13,7 @@ correctness, not policy enforcement. Conformance failures produce
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,7 +37,7 @@ class ConformanceCheck:
 
     check_id: str
     description: str
-    predicate: Any  # Callable[[EndStateGraderInput], ConformanceCheckResult]
+    predicate: Callable[[EndStateGraderInput], ConformanceCheckResult]
 
     def run(self, inp: EndStateGraderInput) -> ConformanceCheckResult:
         """Run the predicate and return its result."""

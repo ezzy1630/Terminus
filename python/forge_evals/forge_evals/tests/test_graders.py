@@ -35,7 +35,7 @@ def _make_input(workdir: Path, **extra: object) -> EndStateGraderInput:
         objective="test objective",
         acceptance_criteria=["criterion 1"],
         risk_class="normal",
-        metadata=dict(extra) if isinstance(extra, dict) else {},  # type: ignore[arg-type]
+        metadata=dict(extra),
     )
 
 
