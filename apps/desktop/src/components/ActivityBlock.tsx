@@ -46,8 +46,8 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
   return (
     <div
       className={cn(
-        "selectable my-1 overflow-hidden border-l-2 border-subtle",
-        expanded && "border-default bg-elevated",
+        "activity-block selectable my-1 overflow-hidden rounded-md border border-transparent",
+        expanded && "is-expanded border-subtle bg-elevated",
       )}
       style={{ background: expanded ? "var(--bg-elevated)" : "transparent" }}
     >
@@ -56,14 +56,14 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
         type="button"
         onClick={() => setExpanded((e) => !e)}
         aria-expanded={expanded}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-hover"
-        style={{ height: 32 }}
+        className="activity-header flex w-full items-center gap-2 px-2.5 text-left hover:bg-hover"
+        style={{ minHeight: 34 }}
       >
         <ChevronRight
           size={12}
           className={cn("flex-shrink-0 text-tertiary transition-transform", expanded && "rotate-90")}
         />
-        <span className="flex w-4 flex-shrink-0 items-center justify-center">
+        <span className="activity-status flex w-4 flex-shrink-0 items-center justify-center">
           <StatusIndicator status={kind} size={11} />
         </span>
         <span
@@ -84,7 +84,7 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
 
       {/* Expanded details. */}
       {expanded && block.entries.length > 0 ? (
-        <div className="border-t border-subtle px-3 py-2">
+        <div className="activity-detail border-t border-subtle px-3 py-2.5">
           <ul className="flex flex-col gap-1.5">
             {block.entries.map((entry, i) => (
               <li

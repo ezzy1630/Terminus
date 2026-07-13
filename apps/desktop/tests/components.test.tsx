@@ -31,6 +31,7 @@ import { ApprovalCard } from "../src/components/ApprovalCard";
 import { CommandPalette, type Command } from "../src/components/CommandPalette";
 import { Composer } from "../src/components/Composer";
 import { SidebarItem } from "../src/components/SidebarItem";
+import { Message } from "../src/components/Message";
 
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import { useThemeStore } from "../src/hooks/use-theme";
@@ -709,5 +710,32 @@ describe("SidebarItem — truncation + tooltip", () => {
     );
     const unpinButton = screen.getByLabelText("Unpin task Short title");
     expect(unpinButton).not.toHaveClass("invisible");
+  });
+});
+
+describe("Message — code interactions", () => {
+  test("labels fenced code and copies the exact code payload", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <Message
+        message={{
+          id: "message-code",
+          role: "agent",
+          content: "Result:\n\n```ts\nconst ready = true;\n```",
+          createdAt: "2026-07-12T18:00:00.000Z",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("ts")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Copy code" }));
+    expect(writeText).toHaveBeenCalledWith("const ready = true;");
+    expect(screen.getByRole("button", { name: "Copied code" })).toBeInTheDocument();
   });
 });

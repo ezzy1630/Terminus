@@ -192,6 +192,33 @@ textarea {
 .send-control:active,
 .sidebar-nav-row:active { transform: scale(0.96); }
 
+.sidebar-task-row {
+  transition: background var(--duration-fast) var(--easing-default), color var(--duration-fast) var(--easing-default), transform 100ms var(--easing-default);
+}
+.sidebar-task-row::before {
+  content: "";
+  position: absolute;
+  inset-block: 7px;
+  left: 2px;
+  width: 2px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background var(--duration-fast) var(--easing-default), transform var(--duration-fast) var(--easing-default);
+  transform: scaleY(.45);
+}
+.sidebar-task-row[aria-pressed="true"]::before { background: var(--text-secondary); transform: scaleY(1); }
+.sidebar-task-row:active { transform: scale(.992); }
+
+.activity-block { transition: background var(--duration-fast) var(--easing-default), border-color var(--duration-fast) var(--easing-default); }
+.activity-header svg { transition: transform var(--duration-fast) var(--easing-default), color var(--duration-fast) var(--easing-default); }
+.activity-detail { animation: fade-in var(--duration-fast) var(--easing-default); }
+
+.code-surface { background: var(--bg-terminal); }
+.code-toolbar { background: color-mix(in srgb, var(--bg-elevated) 74%, var(--bg-terminal)); }
+.code-copy { opacity: .72; transition: opacity var(--duration-fast) var(--easing-default), background var(--duration-fast) var(--easing-default); }
+.code-surface:hover .code-copy,
+.code-copy:focus-visible { opacity: 1; }
+
 @media (max-height: 760px) {
   .starter-card { min-height: 112px; padding: 14px; }
 }

@@ -105,7 +105,7 @@ function SidebarItemImpl({
       }
       title={title}
       className={cn(
-        "group relative flex cursor-default items-center gap-2 rounded-md text-sm",
+        "sidebar-task-row group relative flex cursor-default items-center gap-2 rounded-md text-sm",
         selected ? "bg-selected text-primary" : hovered ? "bg-hover text-primary" : "text-secondary",
       )}
       style={{

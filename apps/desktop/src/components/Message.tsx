@@ -18,7 +18,8 @@
  * (paragraphs, line breaks, fenced code blocks, inline code). Full
  * markdown rendering is a Phase-5 concern and would be lazy-loaded.
  */
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
+import { Check, Copy } from "lucide-react";
 import { cn } from "../lib/cn";
 import type { ConversationMessage } from "../types";
 
@@ -121,6 +122,13 @@ function renderProse(text: string, keyBase: string): JSX.Element[] {
 
 function MessageImpl({ message }: MessageProps): JSX.Element {
   const segments = useMemo(() => parseSegments(message.content), [message.content]);
+  const [copiedSegment, setCopiedSegment] = useState<number | null>(null);
+
+  const copyCode = async (content: string, segment: number): Promise<void> => {
+    await navigator.clipboard.writeText(content.replace(/\n$/, ""));
+    setCopiedSegment(segment);
+    window.setTimeout(() => setCopiedSegment((current) => current === segment ? null : current), 1400);
+  };
 
   if (message.role === "user") {
     // Restrained low-contrast rounded surface.
@@ -165,28 +173,30 @@ function MessageImpl({ message }: MessageProps): JSX.Element {
       {segments.map((seg, i) => {
         if (seg.kind === "code") {
           return (
-            <pre
+            <div
               key={`seg-${i}`}
               className={cn(
-                "selectable my-3 overflow-x-auto rounded-md border border-subtle",
-                "px-4 py-3 font-mono",
+                "code-surface selectable group my-3 overflow-hidden rounded-md border border-subtle",
               )}
-              style={{
-                background: "var(--bg-terminal)",
-                fontSize: "var(--font-size-sm)",
-                lineHeight: 1.5,
-              }}
             >
-              {seg.lang ? (
-                <div
-                  className="mb-2 text-xs text-tertiary"
-                  style={{ fontSize: "var(--font-size-xs)" }}
+              <div className="code-toolbar flex h-8 items-center justify-between border-b border-subtle px-3">
+                <span className="font-mono text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>
+                  {seg.lang || "code"}
+                </span>
+                <button
+                  type="button"
+                  className="code-copy flex h-6 items-center gap-1 rounded px-1.5 text-tertiary hover:bg-hover hover:text-primary"
+                  onClick={() => void copyCode(seg.content, i)}
+                  aria-label={copiedSegment === i ? "Copied code" : "Copy code"}
                 >
-                  {seg.lang}
-                </div>
-              ) : null}
-              <code>{seg.content.replace(/\n$/, "")}</code>
-            </pre>
+                  {copiedSegment === i ? <Check size={12} /> : <Copy size={12} />}
+                  <span style={{ fontSize: "var(--font-size-xs)" }}>{copiedSegment === i ? "Copied" : "Copy"}</span>
+                </button>
+              </div>
+              <pre className="overflow-x-auto rounded-none border-0 px-4 py-3" style={{ fontSize: "var(--font-size-sm)", lineHeight: 1.55 }}>
+                <code>{seg.content.replace(/\n$/, "")}</code>
+              </pre>
+            </div>
           );
         }
         return (
