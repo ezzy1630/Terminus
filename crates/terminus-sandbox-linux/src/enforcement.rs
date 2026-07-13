@@ -328,6 +328,12 @@ impl CgroupGuard {
         }
         let parent = root.join("terminus");
         std::fs::create_dir_all(&parent)?;
+        // The delegated root has controllers enabled for its direct children,
+        // but the per-launch parent must enable them again before its job
+        // child can receive `*.max` controls. This happens before the
+        // launcher joins the lease, so cgroup-v2's no-internal-process rule
+        // is preserved.
+        write_control(&parent, "cgroup.subtree_control", "+cpu +memory +pids")?;
         let path = parent.join(format!("job-{}-{}", std::process::id(), monotonic_nonce()));
         std::fs::create_dir(&path)?;
         let result = (|| {
