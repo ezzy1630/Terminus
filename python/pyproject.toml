@@ -22,6 +22,7 @@ dev = [
     "mypy>=1.10",
     "pytest>=8.0",
     "hypothesis>=6.100",
+    "pip-audit>=2.7",
     "types-PyYAML",
 ]
 

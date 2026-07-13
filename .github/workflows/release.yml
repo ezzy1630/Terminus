@@ -35,7 +35,7 @@ jobs:
       - name: bun audit (npm advisories)
         run: bun audit --production
       - name: pip-audit (Python advisories)
-        run: cd python && uv run pip-audit --strict
+        run: cd python && uv export --frozen --extra dev --no-emit-project | uv run pip-audit --strict -r /dev/stdin
       - name: Boundary checks (§42.5)
         run: just boundary-check
       - name: Codegen drift (§45.2)
