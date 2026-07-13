@@ -1006,7 +1006,8 @@ impl ProcessService {
         // its own because wrapper construction can still fail (for example if
         // the launcher executable is unavailable). Never substitute a direct
         // process spawn for a secure profile.
-        if matches!(profile.network, terminus_sandbox::NetworkAccess::Deny)
+        if sandbox_profile_id != "degraded-local"
+            && matches!(profile.network, terminus_sandbox::NetworkAccess::Deny)
             && sandbox_wrapper.is_none()
         {
             return Err(KernelError::new(
