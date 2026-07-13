@@ -42,6 +42,7 @@ schemas/generated/*
 # Per SPEC §29: SQLite DB, artifact store, journals, patch state are runtime
 # state, NOT source-of-truth. They are regenerated from migrations + events.
 .forge-data/
+.terminus-data/
 db/*.db
 db/*.db-journal
 db/*.db-wal
