@@ -1,6 +1,7 @@
 {
   "name": "@terminus/desktop",
   "version": "0.1.0",
+  "author": "Terminus",
   "private": true,
   "description": "Terminus desktop application — the calm, fast, focused macOS-native UI for the Terminus coding-agent harness.",
   "main": "dist-electron/main.js",
@@ -52,6 +53,7 @@
     "wait-on": "^8.0.0"
   },
   "build": {
+    "afterPack": "electron/after-pack.cjs",
     "appId": "dev.terminus.desktop",
     "productName": "Terminus",
     "directories": {

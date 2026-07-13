@@ -152,6 +152,19 @@ The app does **not** request:
 - `device.audio-input` / `device.camera` (not used by Terminus).
 - `apple-events` (not used).
 
+Electron's stock application bundle includes camera, microphone, Bluetooth,
+and unrestricted-network usage descriptions. The `electron/after-pack.cjs`
+hook removes those unused declarations and the broad
+`NSAllowsArbitraryLoads` flag before signing. Localhost exceptions remain for
+the Terminus control plane. Verify this on every packaged artifact with:
+
+```bash
+plutil -p release/mac-arm64/Terminus.app/Contents/Info.plist | \
+  rg 'NS(Camera|Microphone|Bluetooth)|NSAllowsArbitraryLoads'
+```
+
+Expected: no output.
+
 ## 5. Code signing
 
 ### 5.1 Set up environment variables
