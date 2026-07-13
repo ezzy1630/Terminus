@@ -639,6 +639,40 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.getByRole("button", { name: "Permission profile: Workspace policy" })).toBeInTheDocument();
   });
 
+  test("opens connection management from an empty runtime model inventory", async () => {
+    const openSettings = vi.fn();
+    window.addEventListener("terminus:open-settings", openSettings, { once: true });
+    render(<Composer onCreateTask={vi.fn(async () => undefined)} />);
+
+    const provider = screen.getByRole("button", { name: "Connect provider" });
+    await userEvent.setup().click(provider);
+    await userEvent.setup().click(screen.getByRole("menuitemradio", { name: /Connect provider/ }));
+
+    expect(openSettings).toHaveBeenCalledTimes(1);
+  });
+
+  test("opens permission management and exposes contextual options", async () => {
+    const openSettings = vi.fn();
+    window.addEventListener("terminus:open-settings", openSettings, { once: true });
+    render(<Composer onCreateTask={vi.fn(async () => undefined)} />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Permission profile: Workspace policy" }));
+    expect(openSettings).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    expect(screen.getByText("Branch / worktree")).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: /Queue follow-up/ })).toBeDisabled();
+  });
+
+  test("opts the native composer out of browser writing-assistant injection", () => {
+    render(<Composer onCreateTask={vi.fn(async () => undefined)} />);
+    const textbox = screen.getByRole("textbox", { name: "Message composer" });
+    expect(textbox).toHaveAttribute("spellcheck", "false");
+    expect(textbox).toHaveAttribute("data-gramm", "false");
+    expect(textbox).toHaveAttribute("data-gramm_editor", "false");
+  });
+
   test("the start-surface composer delegates a fresh objective to task creation", async () => {
     const user = userEvent.setup();
     const createTask = vi.fn(async () => undefined);
