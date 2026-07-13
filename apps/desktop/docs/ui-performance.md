@@ -14,12 +14,12 @@ pnpm --filter @terminus/desktop build
 
 | Artifact | Raw | Gzip |
 | --- | ---: | ---: |
-| Initial application JavaScript | 443.42 kB | 132.26 kB |
+| Initial application JavaScript | 443.79 kB | 132.40 kB |
 | Application CSS | 40.70 kB | 8.53 kB |
 | Deferred Conversation | 32.79 kB | 9.81 kB |
 | Deferred ReviewPane | 30.24 kB | 8.23 kB |
 | Deferred Settings | 29.30 kB | 8.74 kB |
-| Deferred Inspector | 20.33 kB | 5.79 kB |
+| Deferred Inspector | 20.46 kB | 5.86 kB |
 | Deferred Onboarding | 14.59 kB | 4.38 kB |
 | xterm runtime chunk | 332.63 kB | 83.87 kB |
 

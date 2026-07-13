@@ -33,6 +33,7 @@ import { useTerminusStore, useSelectedSessionTasks, useSelectedTask, useSelected
 import { useThemeStore } from "./hooks/use-theme";
 import { useViewport } from "./hooks/use-viewport";
 import { deriveComputerUseActivity } from "./lib/task-surface";
+import { api } from "./lib/api";
 import type { Theme } from "./types";
 import type { SidebarDestination } from "./components/Sidebar";
 
@@ -160,8 +161,9 @@ export function App(): JSX.Element {
   const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => shouldShowOnboarding());
   const [activeDestination, setActiveDestination] = useState<SidebarDestination>("new_task");
 
-  const [computerUseExpanded, setComputerUseExpanded] = useState(false);
-  const [computerUseHidden, setComputerUseHidden] = useState(false);
+  const [computerUseExpandedTaskId, setComputerUseExpandedTaskId] = useState<string | null>(null);
+  const [computerUseHiddenTaskId, setComputerUseHiddenTaskId] = useState<string | null>(null);
+  const [computerUseStoppedTaskId, setComputerUseStoppedTaskId] = useState<string | null>(null);
   const [changesOpen, setChangesOpen] = useState(false);
   const [inspectorVisible, setInspectorVisible] = useState(true);
   const [inspectorPinned, setInspectorPinned] = useState(false);
@@ -171,6 +173,20 @@ export function App(): JSX.Element {
     () => deriveComputerUseActivity(selectedTaskEvents),
     [selectedTaskEvents],
   );
+
+  const stopComputerUse = useCallback(async (): Promise<void> => {
+    if (!selectedTaskId) return;
+    try {
+      await api.cancelTask(selectedTaskId, "computer_use_stopped_by_user");
+      setComputerUseExpandedTaskId(null);
+      setComputerUseHiddenTaskId(null);
+      setComputerUseStoppedTaskId(selectedTaskId);
+    } catch (error) {
+      useTerminusStore.setState({
+        lastError: error instanceof Error ? error.message : "Failed to stop computer use",
+      });
+    }
+  }, [selectedTaskId]);
 
   const toggleInspector = useCallback((): void => {
     if (viewport.inspectorOverlay && !inspectorPinned) {
@@ -333,12 +349,14 @@ export function App(): JSX.Element {
           <Suspense fallback={null}>
             <Inspector
               computerUseSession={{
-                active: computerUseActivity.active,
-                expanded: computerUseExpanded,
-                hidden: computerUseHidden,
+                active: computerUseActivity.active && computerUseStoppedTaskId !== selectedTaskId,
+                expanded: computerUseExpandedTaskId === selectedTaskId,
+                hidden: computerUseHiddenTaskId === selectedTaskId,
               }}
-              onComputerUseHide={() => setComputerUseHidden(true)}
-              onComputerUseToggleExpanded={(expanded) => setComputerUseExpanded(expanded)}
+            onComputerUseHide={() => setComputerUseHiddenTaskId(selectedTaskId)}
+            onComputerUseShow={() => setComputerUseHiddenTaskId(null)}
+            onComputerUseStop={() => void stopComputerUse()}
+            onComputerUseToggleExpanded={(expanded) => setComputerUseExpandedTaskId(expanded ? selectedTaskId : null)}
               onShowChanges={() => setChangesOpen(true)}
             />
           </Suspense>

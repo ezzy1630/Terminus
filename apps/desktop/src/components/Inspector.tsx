@@ -42,6 +42,7 @@ interface InspectorProps {
   };
   /** Called when the user hides the PiP. */
   onComputerUseHide?: () => void;
+  onComputerUseShow?: () => void;
   /** Called when the user stops the session. */
   onComputerUseStop?: () => void;
   /** Called when the user toggles expanded mode. */
@@ -135,6 +136,7 @@ function InspectorImpl({
   className,
   computerUseSession,
   onComputerUseHide,
+  onComputerUseShow,
   onComputerUseStop,
   onComputerUseToggleExpanded,
   onShowChanges,
@@ -323,6 +325,7 @@ function InspectorImpl({
               expanded={computerUseSession.expanded}
               hidden={computerUseSession.hidden}
               onHide={onComputerUseHide}
+              onShow={onComputerUseShow}
               onStop={onComputerUseStop}
               onToggleExpanded={onComputerUseToggleExpanded}
               onTakeOver={(next) => setControlState(next)}

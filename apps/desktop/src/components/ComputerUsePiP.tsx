@@ -65,6 +65,8 @@ export interface ComputerUsePiPProps {
   className?: string;
   /** Called when the user dismisses the PiP. */
   onHide?: () => void;
+  /** Called when the collapsed activity badge restores the PiP. */
+  onShow?: () => void;
   /** Called when the user stops the session. */
   onStop?: () => void;
   /** Called when the user toggles between PiP and expanded-full-canvas. */
@@ -94,6 +96,7 @@ interface DragState {
 function ComputerUsePiPImpl({
   className,
   onHide,
+  onShow,
   onStop,
   onToggleExpanded,
   onTakeOver,
@@ -173,6 +176,9 @@ function ComputerUsePiPImpl({
   // helpful error but keep the rest of the controls working.
   useEffect(() => {
     if (expanded || !hidden) {
+      // This effect initializes the external capture resource; its async
+      // completion updates the visible permission/error state.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       void acquireStream();
     }
     return () => {
@@ -182,7 +188,6 @@ function ComputerUsePiPImpl({
         streamRef.current = null;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Pause / resume the video element when `paused` or `hidden` changes.
@@ -280,7 +285,10 @@ function ComputerUsePiPImpl({
     return (
       <button
         type="button"
-        onClick={() => onToggleExpanded?.(false)}
+        onClick={() => {
+          onToggleExpanded?.(false);
+          onShow?.();
+        }}
         aria-label="Show computer-use preview"
         title="Show computer-use preview"
         className={cn(
@@ -333,6 +341,7 @@ function ComputerUsePiPImpl({
     >
       {/* Header — draggable. */}
       <div
+        data-testid="computer-use-drag-handle"
         onPointerDown={startMove}
         className="flex flex-shrink-0 items-center gap-2 border-b border-subtle px-3 py-2"
         style={{
@@ -453,6 +462,7 @@ function ComputerUsePiPImpl({
         {/* Resize handle (bottom-right corner). */}
         {!expanded ? (
           <div
+            data-testid="computer-use-resize-handle"
             onPointerDown={startResize}
             aria-hidden
             style={{

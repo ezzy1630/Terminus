@@ -168,7 +168,6 @@ function TerminalDrawerImpl({
     if (open && tabs.length === 0 && sessionFactory) {
       void createTerminal();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, sessionFactory]);
 
   // Preserve the scroll position when switching tabs (only relevant for

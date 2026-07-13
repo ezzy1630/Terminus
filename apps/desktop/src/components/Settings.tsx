@@ -607,7 +607,6 @@ function buildCatalog(): SettingCategory[] {
           validate: (v) => {
             if (typeof v !== "string") return null;
             try {
-              // eslint-disable-next-line no-new
               new URL(v);
               return null;
             } catch {

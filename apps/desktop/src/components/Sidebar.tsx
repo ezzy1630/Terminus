@@ -543,6 +543,9 @@ function SessionTaskList({
   // Virtualize when >threshold items; otherwise render inline.
   const shouldVirtualize = tasks.length > VIRTUALIZATION_THRESHOLD;
 
+  // TanStack Virtual exposes imperative functions by design; compiler
+  // memoization would risk stale task rows.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: shouldVirtualize ? tasks.length : 0,
     getScrollElement: () => {

@@ -369,6 +369,9 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stickRef = useRef(true);
 
+  // TanStack Virtual exposes imperative functions by design; keep this
+  // component outside React Compiler memoization rather than risking stale rows.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollRef.current,

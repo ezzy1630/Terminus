@@ -1014,6 +1014,9 @@ function DiffBody({
 
   // Virtualizer — only visible rows are mounted. Per SPEC §25.1: large
   // diffs (10k+ lines) must remain interactive. Each line is ~20px.
+  // TanStack Virtual exposes imperative functions by design; compiler
+  // memoization would risk stale diff rows.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
