@@ -443,18 +443,14 @@ impl NetworkServiceRpc for GrpcKernel {
                 }));
             }
         };
-        match self
-            .kernel
-            .network
-            .authorize(
-                &ctx,
-                &Default::default(),
-                host,
-                port,
-                scheme,
-                &resolved_ips,
-            )
-        {
+        match self.kernel.network.authorize(
+            &ctx,
+            &Default::default(),
+            host,
+            port,
+            scheme,
+            &resolved_ips,
+        ) {
             Ok(()) => Ok(Response::new(protocol::EgressDecisionMessage {
                 allowed: true,
                 reason: "allowlisted by kernel egress policy".to_string(),

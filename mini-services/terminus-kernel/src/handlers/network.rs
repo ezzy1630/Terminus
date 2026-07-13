@@ -68,7 +68,9 @@ pub async fn request(
     let scheme = url.scheme().to_string();
 
     // Resolve the host to IPs (for private-IP denial).
-    let resolved_ips: Vec<std::net::IpAddr> = match tokio::net::lookup_host((host.as_str(), port)).await {
+    let resolved_ips: Vec<std::net::IpAddr> = match tokio::net::lookup_host((host.as_str(), port))
+        .await
+    {
         Ok(addresses) => addresses.map(|address| address.ip()).collect(),
         Err(error) => {
             return Ok(Json(EgressResponse {
