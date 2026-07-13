@@ -90,6 +90,8 @@ codegen-check:
 # Protobuf codegen (Rust types via prost, TS clients via buf).
 codegen-proto:
     buf generate proto
+    mkdir -p schemas/generated
+    buf build proto --as-file-descriptor-set --exclude-source-info -o schemas/generated/terminus.kernel.v1.binpb
 
 # Read-only Linux host preflight for the real enforcement runner.
 linux-enforcement-prereqs:

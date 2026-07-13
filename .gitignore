@@ -37,6 +37,7 @@ packages/*/*.tsbuildinfo
 
 # Generated code (kept under src control per SPEC §45.2, but local regen output)
 schemas/generated/*
+!schemas/generated/terminus.kernel.v1.binpb
 
 # ────────────────────────── Forge runtime state ────────────────────────────
 # Per SPEC §29: SQLite DB, artifact store, journals, patch state are runtime
