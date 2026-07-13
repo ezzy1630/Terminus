@@ -304,6 +304,29 @@ Verify:
 - ⌘` opens the terminal drawer.
 - Theme and density toggles work without restart.
 
+### Latest local verification attempt (2026-07-12)
+
+The arm64 directory build was attempted with:
+
+```bash
+PYTHON=/usr/bin/python3 npm_config_python=/usr/bin/python3 bun run package:dir
+```
+
+The explicit system Python is required because Homebrew Python 3.14 does not
+provide `distutils`, which the current `node-gyp` release still imports. With
+`/usr/bin/python3`, the `node-pty` rebuild completes successfully.
+
+The current builder then stalls after reporting:
+
+```text
+packaging platform=darwin arch=arm64 electron=33.4.11 appOutDir=...
+```
+
+This was reproduced with a fresh Electron download, a clean output directory,
+and output on both `/Volumes/Neural` and `/tmp`. Only an intermediate
+`Electron.app` is produced; no `Terminus.app` is completed. Packaged launch
+verification therefore remains blocked and must not be reported as passing.
+
 ## 9. Distribution
 
 ### Direct download
