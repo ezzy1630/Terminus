@@ -205,9 +205,10 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
         <div className="composer-dock w-full">
           <button
             type="button"
-            onClick={() => !session && window.dispatchEvent(new Event("terminus:open-onboarding"))}
+            onClick={() => window.dispatchEvent(new Event("terminus:focus-project-search"))}
             className="project-chooser flex h-13 w-full items-center gap-2 rounded-t-2xl px-5 text-secondary"
             aria-label={session ? `Project: ${session.title}` : "Choose project"}
+            title="Choose or search projects"
           >
             <Folder size={16} strokeWidth={1.7} />
             <span>{session?.title ?? "Choose project"}</span>

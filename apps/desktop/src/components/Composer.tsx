@@ -515,14 +515,15 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
               </button>
               {moreOpen ? (
                 <Dropdown onClose={() => setMoreOpen(false)} minWidth={220}>
-                  <DropdownItem onClick={() => setMoreOpen(false)} icon={<GitBranch size={12} />}>
-                    Branch / worktree
-                  </DropdownItem>
-                  <DropdownItem onClick={() => setMoreOpen(false)} icon={<Monitor size={12} />}>
-                    Computer use
-                  </DropdownItem>
-                  <DropdownItem onClick={() => setMoreOpen(false)} icon={<ListPlus size={12} />}>
-                    Queue behavior
+                  <DropdownInfo icon={<GitBranch size={12} />} label="Branch / worktree" value={task ? "Task environment" : "Choose a project"} />
+                  <DropdownInfo icon={<Monitor size={12} />} label="Computer use" value={task ? "Appears when active" : "Not active"} />
+                  <DropdownItem
+                    onClick={() => { void onSubmit("queue"); setMoreOpen(false); }}
+                    icon={<ListPlus size={12} />}
+                    disabled={!task || draft.trim().length === 0 || sending}
+                    hint={!task ? "Available during a task" : draft.trim().length === 0 ? "Write a follow-up first" : "Send this draft after current work"}
+                  >
+                    Queue follow-up
                   </DropdownItem>
                 </Dropdown>
               ) : null}
@@ -659,21 +660,24 @@ function DropdownItem({
   onClick,
   hint,
   icon,
+  disabled = false,
 }: {
   children: React.ReactNode;
   selected?: boolean;
   onClick: () => void;
   hint?: string;
   icon?: React.ReactNode;
+  disabled?: boolean;
 }): JSX.Element {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       role="menuitemradio"
       aria-checked={selected}
       className={cn(
-        "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-secondary hover:bg-hover hover:text-primary",
+        "flex min-h-9 w-full items-center gap-2 rounded px-2 py-1.5 text-left text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-secondary",
         selected && "text-primary",
       )}
       style={{ fontSize: "var(--font-size-xs)" }}
@@ -695,6 +699,16 @@ function DropdownItem({
         />
       ) : null}
     </button>
+  );
+}
+
+function DropdownInfo({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }): JSX.Element {
+  return (
+    <div role="menuitem" aria-disabled="true" className="flex min-h-9 w-full items-center gap-2 rounded px-2 py-1.5 text-secondary">
+      <span className="flex-shrink-0 text-tertiary">{icon}</span>
+      <span className="min-w-0 flex-1 truncate" style={{ fontSize: "var(--font-size-xs)" }}>{label}</span>
+      <span className="flex-shrink-0 text-tertiary" style={{ fontSize: 10 }}>{value}</span>
+    </div>
   );
 }
 

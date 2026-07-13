@@ -73,10 +73,10 @@ describe("Layout — three-region render", () => {
     expect(screen.getByTestId("inspector-content")).toBeInTheDocument();
   });
 
-  test("renders a minimal title bar with navigation controls", () => {
+  test("does not expose inert history controls", () => {
     renderLayout();
-    expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Forward" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Forward" })).not.toBeInTheDocument();
   });
 
   test("renders a terminal toggle button in the title bar", () => {

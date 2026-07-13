@@ -25,7 +25,7 @@
  * traffic lights live in the top-left ~80px (we leave that space).
  */
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, PanelBottomClose, PanelBottomOpen } from "lucide-react";
+import { PanelBottomClose, PanelBottomOpen } from "lucide-react";
 import { cn } from "../lib/cn";
 import { useViewport } from "../hooks/use-viewport";
 import { useThemeStore } from "../hooks/use-theme";
@@ -87,15 +87,8 @@ const TitleBar = memo(function TitleBar({
         WebkitAppRegion: "drag",
       } as React.CSSProperties}
     >
-      {/* Navigation arrows — back/forward (disabled placeholders). */}
-      <div className="titlebar-no-drag flex items-center gap-0.5">
-        <button type="button" className="flex h-6 w-6 items-center justify-center rounded text-tertiary hover:text-secondary" aria-label="Back" disabled>
-          <ChevronLeft size={14} />
-        </button>
-        <button type="button" className="flex h-6 w-6 items-center justify-center rounded text-tertiary hover:text-secondary" aria-label="Forward" disabled>
-          <ChevronRight size={14} />
-        </button>
-      </div>
+      {/* Preserve title centering without exposing inert history buttons. */}
+      <div className="h-7 w-[52px] flex-shrink-0" aria-hidden />
       {/* Center region — task objective when active, empty otherwise. */}
       <div className="titlebar-no-drag flex min-w-0 flex-1 items-center justify-center">
         {center}

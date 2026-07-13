@@ -24,7 +24,7 @@
  *
  * Per SPEC §24: compact mode = icons only.
  */
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarClock,
   ChevronDown,
@@ -94,6 +94,16 @@ function SidebarImpl({ compact: compactProp, activeDestination = "new_task", onN
   const [searchOpen, setSearchOpen] = useState(false);
   const [collapsedSessions, setCollapsedSessions] = useState<Set<string>>(new Set());
   const [expandedTaskLists, setExpandedTaskLists] = useState<Set<string>>(new Set());
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const focusProjectSearch = (): void => {
+      setSearchOpen(true);
+      window.requestAnimationFrame(() => searchInputRef.current?.focus());
+    };
+    window.addEventListener("terminus:focus-project-search", focusProjectSearch);
+    return () => window.removeEventListener("terminus:focus-project-search", focusProjectSearch);
+  }, []);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return sessions;
@@ -245,6 +255,7 @@ function SidebarImpl({ compact: compactProp, activeDestination = "new_task", onN
             className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-tertiary"
           />
           <input
+            ref={searchInputRef}
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
