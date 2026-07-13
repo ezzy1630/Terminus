@@ -213,6 +213,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+    environment: terminus-release
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -220,6 +221,16 @@ jobs:
           path: dist
           merge-multiple: true
       - uses: sigstore/cosign-installer@v3
+      - name: Require recorded release approvals
+        env:
+          RELEASE_OWNER_APPROVAL: ${{ vars.TERMINUS_RELEASE_OWNER_APPROVAL }}
+          SECURITY_OWNER_APPROVAL: ${{ vars.TERMINUS_SECURITY_OWNER_APPROVAL }}
+          PROTOCOL_OWNER_APPROVAL: ${{ vars.TERMINUS_PROTOCOL_OWNER_APPROVAL }}
+          EVALUATION_OWNER_APPROVAL: ${{ vars.TERMINUS_EVALUATION_OWNER_APPROVAL }}
+        run: |
+          for approval in RELEASE_OWNER_APPROVAL SECURITY_OWNER_APPROVAL PROTOCOL_OWNER_APPROVAL EVALUATION_OWNER_APPROVAL; do
+            test -n "${!approval}" || { echo "missing recorded approval: $approval" >&2; exit 1; }
+          done
       - name: Verify Linux enforcement evidence before publishing
         env:
           TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
@@ -263,6 +274,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Write release decision
+        env:
+          RELEASE_OWNER_APPROVAL: ${{ vars.TERMINUS_RELEASE_OWNER_APPROVAL }}
+          SECURITY_OWNER_APPROVAL: ${{ vars.TERMINUS_SECURITY_OWNER_APPROVAL }}
+          PROTOCOL_OWNER_APPROVAL: ${{ vars.TERMINUS_PROTOCOL_OWNER_APPROVAL }}
+          EVALUATION_OWNER_APPROVAL: ${{ vars.TERMINUS_EVALUATION_OWNER_APPROVAL }}
         run: |
           cat > release-decision.yaml <<'EOF'
           release:
@@ -278,10 +294,10 @@ jobs:
             known_limitations: []
             accepted_risks: []
             signatures:
-              release_owner: ""
-              security_owner: ""
-              protocol_owner: ""
-              evaluation_owner: ""
+              release_owner: "${RELEASE_OWNER_APPROVAL}"
+              security_owner: "${SECURITY_OWNER_APPROVAL}"
+              protocol_owner: "${PROTOCOL_OWNER_APPROVAL}"
+              evaluation_owner: "${EVALUATION_OWNER_APPROVAL}"
           EOF
       - uses: actions/upload-artifact@v4
         with:
