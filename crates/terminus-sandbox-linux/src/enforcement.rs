@@ -27,7 +27,7 @@ pub fn payload_wrapper(
 ) -> Option<(PathBuf, Vec<String>)> {
     let executable = std::env::current_exe().ok()?;
     let separator = bwrap_args.iter().position(|arg| arg == "--")?;
-    let mut payload_args = bwrap_args[..=separator].to_vec();
+    let mut payload_args = bwrap_args[..separator].to_vec();
     // The host-specific delegated subtree is mounted at the stable guest
     // path. Do not leak the host path to the payload: it is not visible after
     // the bind mount and would make the lease setup silently fall back.
@@ -36,6 +36,7 @@ pub fn payload_wrapper(
         "TERMINUS_CGROUP_ROOT".to_string(),
         "/sys/fs/cgroup".to_string(),
     ]);
+    payload_args.push("--".to_string());
     let limits_json = serde_json::to_string(&limits).ok()?;
     payload_args.extend([
         executable.to_string_lossy().to_string(),
@@ -464,4 +465,42 @@ fn install_seccomp(network_deny: bool) -> Result<(), SandboxError> {
     .map_err(|error| SandboxError::Unsupported(format!("compile seccomp filter: {error}")))?;
     seccompiler::apply_filter(&filter)
         .map_err(|error| SandboxError::Unsupported(format!("install seccomp filter: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::payload_wrapper;
+    use std::path::Path;
+    use terminus_sandbox::{NetworkAccess, ResourceLimits};
+
+    #[test]
+    fn guest_cgroup_env_is_a_bubblewrap_option() {
+        let wrapped = payload_wrapper(
+            Path::new("/usr/bin/bwrap"),
+            &["--unshare-all".to_string(), "--".to_string()],
+            ResourceLimits::default(),
+            NetworkAccess::Deny,
+        );
+        assert!(wrapped.is_some());
+        let Some((_, argv)) = wrapped else {
+            return;
+        };
+
+        let separator = argv.iter().position(|value| value == "--");
+        let setenv = argv.iter().position(|value| value == "--setenv");
+        assert!(separator.is_some());
+        assert!(setenv.is_some());
+        let Some(separator) = separator else {
+            return;
+        };
+        let Some(setenv) = setenv else {
+            return;
+        };
+        assert!(setenv < separator);
+        assert_eq!(
+            argv.get(setenv + 1),
+            Some(&"TERMINUS_CGROUP_ROOT".to_string())
+        );
+        assert_eq!(argv.get(setenv + 2), Some(&"/sys/fs/cgroup".to_string()));
+    }
 }
