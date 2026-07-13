@@ -13,7 +13,8 @@ managed:
   # directly; it consumes exported traces/artifacts.
 
 plugins:
-  - remote: buf.build/community/neoeinstein-prost
+  - remote: buf.build/community/neoeinstein-prost:v0.5.0
+    revision: 1
     out: crates/terminus-kernel-protocol/src/generated
     opt:
       - file_descriptor_set
