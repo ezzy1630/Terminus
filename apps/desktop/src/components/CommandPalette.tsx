@@ -386,7 +386,7 @@ function CommandPaletteImpl({
             type="button"
             onClick={onClose}
             aria-label="Close command palette"
-            className="flex h-6 w-6 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
+            className="icon-button flex h-6 w-6 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
           >
             <X size={12} />
           </button>

@@ -417,7 +417,7 @@ export function App(): JSX.Element {
               onClick={() => setTheme(theme === "system" ? "light" : theme === "light" ? "dark" : "system")}
               aria-label={`Theme: ${theme}`}
               title={`Theme: ${theme}`}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
+              className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
             >
               {theme === "system" ? <Monitor size={14} /> : theme === "light" ? <Sun size={14} /> : <Moon size={14} />}
             </button>
@@ -427,7 +427,7 @@ export function App(): JSX.Element {
               disabled={!selectedTask}
               aria-label={inspectorVisible ? "Hide task context" : "Show task context"}
               title={selectedTask ? (inspectorVisible ? "Hide task context" : "Show task context") : "Task context appears when a task is selected"}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-35"
+              className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-35"
             >
               <PanelRight size={14} />
             </button>

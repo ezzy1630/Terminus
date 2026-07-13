@@ -284,6 +284,15 @@ textarea::placeholder,
     transform 100ms var(--easing-default);
 }
 
+.icon-button {
+  transition:
+    color var(--duration-fast) var(--easing-default),
+    background var(--duration-fast) var(--easing-default),
+    transform 100ms var(--easing-default);
+}
+
+.icon-button:not(:disabled):active { transform: scale(0.94); }
+
 .composer-control:hover {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-default) 72%, transparent);
 }
@@ -388,7 +397,7 @@ textarea::placeholder,
 
 .inspector-section { transition: background var(--duration-fast) var(--easing-default); }
 .inspector-section.is-urgent { background: color-mix(in srgb, var(--color-warning) 4%, transparent); }
-.inspector-section.is-urgent > button { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--color-warning) 72%, transparent); }
+.inspector-section.is-urgent > button { color: var(--color-warning); }
 
 .error-state {
   border: 1px solid color-mix(in srgb, var(--color-warning) 24%, var(--border-subtle));

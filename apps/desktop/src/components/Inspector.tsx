@@ -90,6 +90,7 @@ function InspectorSection({
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
+        aria-label={`${title}${summary ? `, ${summary}` : ""}`}
         className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-hover"
         style={{ height: 32 }}
       >
@@ -97,7 +98,7 @@ function InspectorSection({
         {icon ? <span className="flex-shrink-0 text-secondary">{icon}</span> : null}
         <span
           className="flex-1 truncate text-secondary"
-          style={{ fontSize: "var(--font-size-xs)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}
+          style={{ fontSize: "var(--font-size-xs)", fontWeight: 600 }}
         >
           {title}
         </span>
@@ -125,7 +126,7 @@ function NoSelection(): JSX.Element {
       <div className="pt-4" style={{ lineHeight: 1.55 }}>
         Select a task to inspect its environment, activity, changes, and approvals.
       </div>
-      <div className="mt-5 border-l-2 border-default pl-3" style={{ lineHeight: 1.5 }}>
+      <div className="mt-5 rounded-md border border-subtle px-3 py-2" style={{ lineHeight: 1.5, background: "var(--bg-elevated)" }}>
         This space stays quiet until the current task has something useful to show.
       </div>
     </div>
@@ -221,6 +222,7 @@ function InspectorImpl({
           <button
             type="button"
             onClick={onShowChanges}
+            aria-label="Open patch review"
             className="flex w-full items-center justify-between rounded-sm border border-subtle px-2.5 py-2 text-left hover:border-default hover:bg-hover"
             style={{ fontSize: "var(--font-size-xs)" }}
           >
@@ -308,7 +310,11 @@ function InspectorImpl({
         <InspectorSection title="Approvals" icon={<ShieldAlert size={12} />} summary={`${approvals.length} waiting`} urgent defaultOpen>
           <ul className="flex flex-col gap-2" style={{ fontSize: "var(--font-size-xs)" }}>
             {approvals.map((approval) => (
-              <li key={approval.id} className="border-l-2 border-l-[var(--color-approval-risk)] pl-2 text-secondary">
+              <li
+                key={approval.id}
+                className="rounded-sm border border-subtle px-2 py-1.5 text-secondary"
+                style={{ background: "color-mix(in srgb, var(--color-warning) 4%, transparent)" }}
+              >
                 <span className="block truncate text-primary">{approval.action}</span>
                 <span className="text-tertiary">{approval.risk} risk{approval.reversibility ? ` · ${approval.reversibility}` : ""}</span>
               </li>

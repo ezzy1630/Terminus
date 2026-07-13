@@ -34,6 +34,7 @@ import { NewTaskScreen } from "../src/components/NewTaskScreen";
 import { Sidebar } from "../src/components/Sidebar";
 import { SidebarItem } from "../src/components/SidebarItem";
 import { Message } from "../src/components/Message";
+import { ActivityBlock } from "../src/components/ActivityBlock";
 import { sidebarVisibleTaskCount } from "../src/components/Sidebar";
 import { deriveRuntimeModelProfiles, useSettingsStore } from "../src/components/Settings";
 
@@ -126,6 +127,36 @@ describe("EmptyState", () => {
     render(<EmptyState title="Empty" />);
     const region = screen.getByRole("status");
     expect(region).toHaveAttribute("aria-live", "polite");
+  });
+});
+
+describe("ActivityBlock", () => {
+  test("keeps the outcome scannable while collapsed and reveals exact evidence on demand", async () => {
+    render(
+      <ActivityBlock
+        block={{
+          id: "verify-1",
+          title: "Ran verification",
+          metric: "18 tests passed",
+          status: "done",
+          entries: [{
+            tool: "test",
+            summary: "Desktop component suite",
+            detail: "18 passed, 0 failed",
+            at: "2026-07-13T00:00:00.000Z",
+          }],
+        }}
+      />,
+    );
+
+    const toggle = screen.getByRole("button", { name: "Ran verification, 18 tests passed" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("18 tests passed")).toBeInTheDocument();
+    expect(screen.queryByText("18 passed, 0 failed")).not.toBeInTheDocument();
+
+    await userEvent.setup().click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("18 passed, 0 failed")).toBeInTheDocument();
   });
 });
 
@@ -670,6 +701,27 @@ describe("Composer — send-button mode switches based on task status", () => {
     await waitFor(() => expect(useTerminusStore.getState().queuedInstructionsByTask["task-1"]).toHaveLength(1));
     expect(api.startTurn).not.toHaveBeenCalled();
     expect(screen.getByText("1 queued")).toBeInTheDocument();
+  });
+
+  test("preserves composer text and focus while streaming task state updates", async () => {
+    makeTask("ACTIVE");
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    const composer = screen.getByRole("textbox", { name: "Message composer" });
+    await user.type(composer, "Keep this draft while the agent streams");
+    expect(composer).toHaveFocus();
+
+    act(() => {
+      useTerminusStore.getState()._updateTaskFromEvent({
+        id: "event-streaming",
+        event: "task.updated",
+        data: JSON.stringify({ task_id: "task-1", status: "ACTIVE", phase: "EXECUTING" }),
+      }, "task-1");
+    });
+
+    expect(composer).toHaveValue("Keep this draft while the agent streams");
+    expect(composer).toHaveFocus();
   });
 
   test("drains the next queued follow-up only after task completion", async () => {

@@ -878,7 +878,7 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
             type="button"
             onClick={onClose}
             aria-label="Close settings"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
+            className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
           >
             <X size={14} />
           </button>

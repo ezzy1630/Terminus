@@ -380,7 +380,7 @@ function ComputerUsePiPImpl({
           onClick={togglePause}
           aria-label={paused ? "Resume preview" : "Pause preview"}
           title={paused ? "Resume preview" : "Pause preview"}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
+          className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
         >
           {paused ? <Play size={13} /> : <Pause size={13} />}
         </button>
@@ -389,7 +389,7 @@ function ComputerUsePiPImpl({
           onClick={toggleExpand}
           aria-label={expanded ? "Return to PiP" : "Expand to main canvas"}
           title={expanded ? "Return to PiP" : "Expand to main canvas"}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
+          className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
         >
           {expanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
         </button>
@@ -399,7 +399,7 @@ function ComputerUsePiPImpl({
             onClick={() => onHide()}
             aria-label="Hide preview"
             title="Hide preview"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
+            className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
           >
             <EyeOff size={13} />
           </button>
@@ -410,7 +410,7 @@ function ComputerUsePiPImpl({
             onClick={() => onStop()}
             aria-label="Stop session"
             title="Stop session"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-error"
+            className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-error"
           >
             <Square size={13} />
           </button>

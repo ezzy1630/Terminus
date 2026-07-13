@@ -209,7 +209,7 @@ function SidebarImpl({ compact: compactProp, activeDestination = "new_task", onN
           <button
             type="button"
             onClick={() => setSearchOpen((open) => !open)}
-            className="ml-auto flex h-8 w-8 items-center justify-center rounded-lg text-secondary hover:bg-hover hover:text-primary"
+            className="icon-button ml-auto flex h-8 w-8 items-center justify-center rounded-lg text-secondary hover:bg-hover hover:text-primary"
             aria-label="Search tasks"
             aria-expanded={searchOpen}
           >
@@ -454,7 +454,7 @@ function SidebarImpl({ compact: compactProp, activeDestination = "new_task", onN
           onClick={() => window.dispatchEvent(new CustomEvent("terminus:open-settings", { detail: { category: "general" } }))}
           aria-label="Settings"
           title="Settings"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-secondary"
+          className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-secondary"
         >
           <Settings size={14} />
         </button>
@@ -463,7 +463,7 @@ function SidebarImpl({ compact: compactProp, activeDestination = "new_task", onN
           onClick={() => window.dispatchEvent(new CustomEvent("terminus:open-settings", { detail: { category: "shortcuts" } }))}
           aria-label="Help"
           title="Help and shortcuts"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-secondary"
+          className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-secondary"
         >
           <HelpCircle size={14} />
         </button>

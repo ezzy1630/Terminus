@@ -102,7 +102,7 @@ const TitleBar = memo(function TitleBar({
           aria-label={terminalOpen ? "Hide terminal" : "Show terminal"}
           title={terminalOpen ? "Hide terminal" : "Show terminal"}
           className={cn(
-            "flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover",
+            "icon-button flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover",
             terminalOpen && "text-primary bg-hover",
           )}
         >
