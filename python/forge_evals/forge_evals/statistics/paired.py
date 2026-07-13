@@ -340,7 +340,7 @@ class McNemarResult:
     p_value: float
     n: int
     discordant: int
-    extras: dict[str, int] = field(default_factory=dict)
+    extras: dict[str, int | str] = field(default_factory=dict)
 
 
 def mc_nemar(

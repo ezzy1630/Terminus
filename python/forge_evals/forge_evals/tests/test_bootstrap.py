@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import pytest
 
@@ -16,7 +16,7 @@ from forge_evals.statistics.bootstrap import (
 )
 
 
-def _mean(s: list[float]) -> float:
+def _mean(s: Sequence[float]) -> float:
     """Sample mean (empty → 0)."""
     return sum(s) / len(s) if s else 0.0
 
@@ -136,6 +136,6 @@ def test_bootstrap_ci_invalid_confidence_raises() -> None:
         bootstrap_ci([1.0, 2.0], _mean, confidence_level=1.0)
 
 
-def _statistic_with_alias() -> Callable[[list[float]], float]:
+def _statistic_with_alias() -> Callable[[Sequence[float]], float]:
     """Trivial wrapper for typing clarity."""
     return _mean

@@ -17,12 +17,17 @@ from forge_evals.statistics.paired import (
 )
 
 
+def enumerate_pairs(values: list[float]) -> list[tuple[str, float]]:
+    """Give numeric test samples stable string task identifiers."""
+    return [(str(index), value) for index, value in enumerate(values)]
+
+
 def test_paired_t_test_significant_improvement() -> None:
     """A clear positive delta should produce a small p-value."""
     random.seed(0)
     baseline = [random.gauss(0.5, 0.2) for _ in range(30)]
     candidate = [b + random.gauss(0.3, 0.1) for b in baseline]
-    seq = PairedSequence.from_pairs(enumerate(baseline), enumerate(candidate))
+    seq = PairedSequence.from_pairs(enumerate_pairs(baseline), enumerate_pairs(candidate))
     res = paired_t_test(seq)
     assert res.p_value < 0.001
     assert res.effect_size is not None and res.effect_size > 0.5
@@ -33,7 +38,7 @@ def test_paired_t_test_no_effect() -> None:
     random.seed(1)
     baseline = [random.gauss(0.5, 0.2) for _ in range(30)]
     candidate = [b + random.gauss(0.0, 0.05) for b in baseline]
-    seq = PairedSequence.from_pairs(enumerate(baseline), enumerate(candidate))
+    seq = PairedSequence.from_pairs(enumerate_pairs(baseline), enumerate_pairs(candidate))
     res = paired_t_test(seq)
     assert res.p_value > 0.05
 
@@ -43,7 +48,7 @@ def test_paired_t_test_significant_regression() -> None:
     random.seed(2)
     baseline = [random.gauss(0.5, 0.2) for _ in range(30)]
     candidate = [b - random.gauss(0.3, 0.1) for b in baseline]
-    seq = PairedSequence.from_pairs(enumerate(baseline), enumerate(candidate))
+    seq = PairedSequence.from_pairs(enumerate_pairs(baseline), enumerate_pairs(candidate))
     res = paired_t_test(seq)
     assert res.p_value < 0.001
     assert res.effect_size is not None and res.effect_size < -0.5
@@ -61,7 +66,7 @@ def test_paired_wilcoxon_matches_t_test_direction() -> None:
     random.seed(3)
     baseline = [random.gauss(0.5, 0.2) for _ in range(20)]
     candidate = [b + 0.5 for b in baseline]
-    seq = PairedSequence.from_pairs(enumerate(baseline), enumerate(candidate))
+    seq = PairedSequence.from_pairs(enumerate_pairs(baseline), enumerate_pairs(candidate))
     t_res = paired_t_test(seq)
     w_res = paired_wilcoxon(seq)
     assert t_res.p_value < 0.05
@@ -107,7 +112,7 @@ def test_paired_mean_delta_ci_covers_true_delta() -> None:
     true_delta = 0.2
     baseline = [random.gauss(0.5, 0.2) for _ in range(40)]
     candidate = [b + true_delta + random.gauss(0, 0.1) for b in baseline]
-    seq = PairedSequence.from_pairs(enumerate(baseline), enumerate(candidate))
+    seq = PairedSequence.from_pairs(enumerate_pairs(baseline), enumerate_pairs(candidate))
     res = paired_mean_delta(seq, n_bootstrap=1000, rng_seed=0)
     assert res.ci_low <= true_delta <= res.ci_high
 
@@ -145,7 +150,7 @@ def test_paired_t_test_effect_size_magnitude() -> None:
     random.seed(11)
     baseline = [random.gauss(0, 1) for _ in range(50)]
     candidate = [b + 1.0 for b in baseline]  # large effect
-    seq = PairedSequence.from_pairs(enumerate(baseline), enumerate(candidate))
+    seq = PairedSequence.from_pairs(enumerate_pairs(baseline), enumerate_pairs(candidate))
     res = paired_t_test(seq)
     assert res.effect_size is not None
     assert abs(res.effect_size) > 0.8  # large by Cohen's convention
