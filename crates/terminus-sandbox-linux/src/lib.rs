@@ -36,6 +36,11 @@ use terminus_sandbox::{SandboxBackend, SandboxError};
 
 mod enforcement;
 
+// The packaged kernel binary relaunches itself through these Linux-only
+// enforcement entrypoints. Keep the implementation private while exposing
+// the narrow binary boundary required by `mini-services/terminus-kernel`.
+pub use enforcement::{run_launcher, run_payload, run_probe, LAUNCHER_ARG, PAYLOAD_ARG};
+
 #[derive(Debug, Clone, Default)]
 pub struct LinuxSandboxBackend {
     /// Resolved absolute path to `bwrap`. `None` means bubblewrap was not
