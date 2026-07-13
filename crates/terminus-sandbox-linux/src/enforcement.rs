@@ -28,13 +28,13 @@ pub fn payload_wrapper(
     let executable = std::env::current_exe().ok()?;
     let separator = bwrap_args.iter().position(|arg| arg == "--")?;
     let mut payload_args = bwrap_args[..separator].to_vec();
-    // The host-specific delegated subtree is mounted at the stable guest
-    // path. Do not leak the host path to the payload: it is not visible after
-    // the bind mount and would make the lease setup silently fall back.
+    // The trusted launcher creates the cgroup lease before Bubblewrap starts.
+    // The payload receives only this marker and inherits the lease; it never
+    // gets write access to a host cgroup filesystem.
     payload_args.extend([
         "--setenv".to_string(),
-        "TERMINUS_CGROUP_ROOT".to_string(),
-        "/sys/fs/cgroup".to_string(),
+        "TERMINUS_CGROUP_LEASE".to_string(),
+        "1".to_string(),
     ]);
     payload_args.push("--".to_string());
     let limits_json = serde_json::to_string(&limits).ok()?;
@@ -68,6 +68,10 @@ pub fn run_launcher(args: &[String]) -> Result<i32, SandboxError> {
     let bwrap_args = args.get(2..).ok_or_else(|| {
         SandboxError::Misconfigured("sandbox launcher missing bwrap arguments".to_string())
     })?;
+    // Create and join the cgroup before Bubblewrap constructs its read-only
+    // mount namespace. The bwrap child and final payload inherit this lease,
+    // while the payload itself never gains cgroup write authority.
+    let _cgroup = CgroupGuard::create(payload_limits(bwrap_args)?)?;
     let status = std::process::Command::new(bwrap)
         .args(bwrap_args)
         .status()?;
@@ -84,7 +88,7 @@ pub fn run_launcher(_args: &[String]) -> Result<i32, SandboxError> {
 
 #[cfg(target_os = "linux")]
 pub fn run_payload(args: &[String]) -> Result<i32, SandboxError> {
-    let limits: ResourceLimits = serde_json::from_str(args.get(1).ok_or_else(|| {
+    let _limits: ResourceLimits = serde_json::from_str(args.get(1).ok_or_else(|| {
         SandboxError::Misconfigured("sandbox payload missing resource limits".to_string())
     })?)
     .map_err(|error| SandboxError::Misconfigured(format!("invalid resource limits: {error}")))?;
@@ -108,7 +112,11 @@ pub fn run_payload(args: &[String]) -> Result<i32, SandboxError> {
     })?;
     let command_args = args.get(separator + 2..).unwrap_or_default();
 
-    let _cgroup = CgroupGuard::create(limits)?;
+    if std::env::var("TERMINUS_CGROUP_LEASE").ok().as_deref() != Some("1") {
+        return Err(SandboxError::Misconfigured(
+            "sandbox payload was started without a launcher-owned cgroup lease".to_string(),
+        ));
+    }
     install_seccomp(network_deny)?;
 
     let status = std::process::Command::new(program)
@@ -129,9 +137,9 @@ pub fn run_payload(_args: &[String]) -> Result<i32, SandboxError> {
 ///
 /// This must execute from the kernel binary itself: the enforced wrapper
 /// relaunches that binary after bubblewrap completes namespace setup, so the
-/// payload can install seccomp and join its cgroup before the probe command
-/// starts. The probe exits non-zero unless the observed controls match the
-/// effective report.
+/// trusted launcher can join its cgroup before Bubblewrap starts. The payload
+/// then installs seccomp before the probe command starts. The probe exits
+/// non-zero unless the observed controls match the effective report.
 #[cfg(target_os = "linux")]
 pub fn run_probe() -> Result<i32, SandboxError> {
     use serde_json::json;
@@ -360,6 +368,24 @@ fn cgroup_root() -> PathBuf {
     delegated_cgroup_root().unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"))
 }
 
+#[cfg(target_os = "linux")]
+fn payload_limits(bwrap_args: &[String]) -> Result<ResourceLimits, SandboxError> {
+    let marker = bwrap_args
+        .iter()
+        .position(|arg| arg == PAYLOAD_ARG)
+        .ok_or_else(|| {
+            SandboxError::Misconfigured("sandbox launcher is missing payload marker".to_string())
+        })?;
+    let encoded_limits = bwrap_args.get(marker + 1).ok_or_else(|| {
+        SandboxError::Misconfigured("sandbox launcher is missing resource limits".to_string())
+    })?;
+    serde_json::from_str(encoded_limits).map_err(|error| {
+        SandboxError::Misconfigured(format!(
+            "sandbox launcher has invalid resource limits: {error}"
+        ))
+    })
+}
+
 /// Return the host-provided cgroup-v2 delegation root for a secure lease.
 ///
 /// The global hierarchy is never a valid delegation root: mounting it
@@ -474,7 +500,7 @@ mod tests {
     use terminus_sandbox::{NetworkAccess, ResourceLimits};
 
     #[test]
-    fn guest_cgroup_env_is_a_bubblewrap_option() {
+    fn cgroup_lease_marker_is_a_bubblewrap_option() {
         let wrapped = payload_wrapper(
             Path::new("/usr/bin/bwrap"),
             &["--unshare-all".to_string(), "--".to_string()],
@@ -499,8 +525,8 @@ mod tests {
         assert!(setenv < separator);
         assert_eq!(
             argv.get(setenv + 1),
-            Some(&"TERMINUS_CGROUP_ROOT".to_string())
+            Some(&"TERMINUS_CGROUP_LEASE".to_string())
         );
-        assert_eq!(argv.get(setenv + 2), Some(&"/sys/fs/cgroup".to_string()));
+        assert_eq!(argv.get(setenv + 2), Some(&"1".to_string()));
     }
 }
