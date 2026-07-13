@@ -82,6 +82,7 @@ evals/results/*
 !evals/results/.gitkeep
 !evals/results/golden/
 python/evals/results/
+apps/desktop/release/
 
 # ────────────────────────── Vercel ─────────────────────────────────────────
 .vercel
