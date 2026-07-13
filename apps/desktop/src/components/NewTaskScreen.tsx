@@ -18,7 +18,7 @@
  * immediately."
  */
 import { memo, useCallback, useMemo, useState } from "react";
-import { Bug, Code2, FileSearch, Hammer } from "lucide-react";
+import { Bug, Code2, FileSearch, Folder, Hammer, TerminalSquare } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, TerminusApiError } from "../lib/api";
 import { useTerminusStore } from "../hooks/use-terminus";
@@ -160,63 +160,52 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
 
   return (
     <div
-      className={cn("flex h-full w-full flex-col justify-center overflow-y-auto", className)}
-      style={{ padding: "48px clamp(24px, 6vw, 72px) 76px" }}
+      className={cn("flex h-full w-full flex-col overflow-y-auto", className)}
+      style={{ padding: "clamp(56px, 9vh, 120px) clamp(24px, 6vw, 72px) 28px" }}
     >
-      {/* The empty-task composition intentionally stays quiet and centered,
-          mirroring Codex's start surface rather than a dashboard. */}
-      <div style={{ maxWidth: "680px", margin: "2vh auto 0", width: "100%" }}>
-        <div className="mb-3 text-center text-tertiary" style={{ fontSize: "var(--font-size-xs)", letterSpacing: "0.01em" }}>
-          {session ? session.title : "New task"}
-        </div>
-
-        <h1
-          className="text-center text-primary"
-          style={{
-            fontSize: "30px",
-            fontWeight: 500,
-            lineHeight: "var(--line-height-tight)" as unknown as string,
-            letterSpacing: "-0.025em",
-          }}
-        >
-          {session ? "What are we working on?" : "What should we work on?"}
-        </h1>
-
-        {!session ? (
-          <div className="mt-3 flex justify-center">
-            <button
-              type="button"
-              onClick={() => window.dispatchEvent(new Event("terminus:open-onboarding"))}
-              className="rounded-md px-2 py-1 text-secondary hover:bg-hover hover:text-primary"
-              style={{ fontSize: "var(--font-size-sm)" }}
-            >
-              Open a project to begin
-            </button>
+      <div className="flex min-h-full w-full flex-col" style={{ maxWidth: 960, margin: "0 auto" }}>
+        <div className="flex flex-1 flex-col items-center justify-center pb-12">
+          <div className="start-mark mb-7 flex h-14 w-14 items-center justify-center rounded-2xl text-tertiary" aria-hidden>
+            <TerminalSquare size={30} strokeWidth={1.45} />
           </div>
-        ) : null}
 
-        {/* Composer. */}
-        <div style={{ marginTop: session ? "32px" : "24px" }}>
-          <Composer onCreateTask={createTask} />
-        </div>
+          <h1
+            className="text-center text-primary"
+            style={{ fontSize: "34px", fontWeight: 450, lineHeight: 1.15, letterSpacing: "-0.035em" }}
+          >
+            {session ? `What should we build in ${session.title}?` : "What should we build?"}
+          </h1>
 
-        {/* Starters are quiet shortcuts, not a dashboard. */}
-        <div className="mt-5 flex flex-wrap items-center justify-center gap-x-1 gap-y-2" aria-label="Task starters">
-          {suggestions.map((suggestion, index) => (
-            <div key={suggestion.id} className="flex items-center">
-              {index > 0 ? <span className="mx-1 text-tertiary" aria-hidden>·</span> : null}
+          <div className="mt-12 grid w-full grid-cols-4 gap-3 max-[900px]:grid-cols-2" aria-label="Task starters">
+            {suggestions.map((suggestion, index) => (
               <button
+                key={suggestion.id}
                 type="button"
                 onClick={() => pickSuggestion(suggestion)}
-                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-tertiary hover:bg-hover hover:text-secondary"
-                style={{ fontSize: "var(--font-size-xs)" }}
+                className="starter-card flex min-h-[142px] flex-col items-start rounded-2xl border border-subtle p-5 text-left"
+                style={{ animationDelay: `${70 + index * 45}ms` }}
                 title={suggestion.detail}
               >
-                {suggestion.icon}
-                <span>{suggestion.label}</span>
+                <span className={cn(`starter-icon-${suggestion.id}`)}>{suggestion.icon}</span>
+                <span className="text-primary" style={{ marginTop: "auto", fontSize: "var(--font-size-md)", fontWeight: 520, lineHeight: 1.35 }}>
+                  {suggestion.label}
+                </span>
               </button>
-            </div>
-          ))}
+            ))}
+          </div>
+        </div>
+
+        <div className="composer-dock w-full">
+          <button
+            type="button"
+            onClick={() => !session && window.dispatchEvent(new Event("terminus:open-onboarding"))}
+            className="project-chooser flex h-13 w-full items-center gap-2 rounded-t-2xl px-5 text-secondary"
+            aria-label={session ? `Project: ${session.title}` : "Choose project"}
+          >
+            <Folder size={16} strokeWidth={1.7} />
+            <span>{session?.title ?? "Choose project"}</span>
+          </button>
+          <Composer onCreateTask={createTask} className="start-composer" />
         </div>
 
         {creating ? (

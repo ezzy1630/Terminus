@@ -109,6 +109,11 @@ textarea {
   to { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes start-rise {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 .animate-fade-in {
   animation: fade-in var(--duration-normal, 250ms) var(--easing-default, cubic-bezier(0.25,0.1,0.25,1));
 }
@@ -119,6 +124,76 @@ textarea {
 
 .animate-slide-down {
   animation: slide-down var(--duration-normal, 250ms) var(--easing-default, cubic-bezier(0.25,0.1,0.25,1));
+}
+
+.start-mark {
+  color: color-mix(in srgb, var(--text-tertiary) 72%, transparent);
+  animation: fade-in 420ms var(--easing-default) both;
+}
+
+.starter-card {
+  background: color-mix(in srgb, var(--bg-elevated) 84%, transparent);
+  opacity: 0;
+  animation: start-rise 360ms var(--easing-default) forwards;
+  transition:
+    transform var(--duration-fast) var(--easing-default),
+    border-color var(--duration-fast) var(--easing-default),
+    background var(--duration-fast) var(--easing-default),
+    box-shadow var(--duration-fast) var(--easing-default);
+}
+
+.starter-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-default);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+}
+
+.starter-card:active { transform: translateY(0) scale(0.992); }
+.starter-icon-explore { color: var(--color-info); }
+.starter-icon-build { color: var(--color-primary); }
+.starter-icon-review { color: var(--color-success); }
+.starter-icon-fix { color: var(--color-warning); }
+
+.composer-dock {
+  animation: slide-up 360ms var(--easing-default) 180ms both;
+}
+
+.project-chooser {
+  height: 52px;
+  background: color-mix(in srgb, var(--bg-elevated) 92%, var(--bg-canvas));
+  border: 1px solid var(--border-subtle);
+  border-bottom: 0;
+  transition: background var(--duration-fast) var(--easing-default);
+}
+
+.project-chooser:hover { background: var(--bg-elevated); color: var(--text-primary); }
+
+.start-composer { margin-top: -8px; position: relative; }
+.start-composer .composer-surface { border-color: var(--border-default); }
+
+.composer-surface {
+  transition:
+    border-color var(--duration-fast) var(--easing-default),
+    box-shadow var(--duration-normal) var(--easing-default),
+    transform var(--duration-fast) var(--easing-default);
+}
+
+.composer-control,
+.send-control,
+.sidebar-nav-row {
+  transition:
+    color var(--duration-fast) var(--easing-default),
+    background var(--duration-fast) var(--easing-default),
+    transform 100ms var(--easing-default);
+}
+
+.composer-control:active,
+.send-control:active,
+.sidebar-nav-row:active { transform: scale(0.96); }
+
+@media (max-height: 760px) {
+  .starter-card { min-height: 112px; padding: 14px; }
 }
 
 /* ────────────────────────── Spinner ──────────────────────────────────── */

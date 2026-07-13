@@ -20,22 +20,22 @@
 
 export const darkTokens = {
   // Main canvas — neutral Codex-like charcoal
-  "--bg-canvas": "#1c1c1e",
+  "--bg-canvas": "#18191a",
   // Elevated surfaces — barely warmer gray
-  "--bg-elevated": "#242426",
+  "--bg-elevated": "#1d1e1f",
   // Sidebar — native macOS material (simulated)
-  "--bg-sidebar": "#202022",
+  "--bg-sidebar": "#29292a",
   // Inspector — floating card
   "--bg-inspector": "#252629",
   // Terminal and diff — slightly cooler and darker
   "--bg-terminal": "#161618",
   "--bg-diff": "#161618",
   // Composer
-  "--bg-composer": "#262628",
+  "--bg-composer": "#303031",
   // Hover
-  "--bg-hover": "#2d2d30",
+  "--bg-hover": "#353536",
   // Selected (no bright saturated background)
-  "--bg-selected": "#343438",
+  "--bg-selected": "#3a3a3b",
 
   // Text
   "--text-primary": "#f1f1f2",
@@ -44,8 +44,8 @@ export const darkTokens = {
   "--text-inverse": "#1a1a1c",
 
   // Separators
-  "--border-subtle": "#2c2c2f",
-  "--border-default": "#3b3b3f",
+  "--border-subtle": "#343435",
+  "--border-default": "#414143",
   "--border-strong": "#505158",
 
   // Semantic colors (color is reserved for meaning)
@@ -166,11 +166,11 @@ export const spaciousTokens = {
   "--space-8": "32px",
   "--space-10": "40px",
   "--space-12": "48px",
-  "--sidebar-width": "272px",
+  "--sidebar-width": "300px",
   "--sidebar-width-compact": "216px",
   "--inspector-width": "320px",
   "--composer-max-height": "280px",
-  "--conversation-max-width": "740px",
+  "--conversation-max-width": "960px",
   "--row-height": "38px",
   "--radius-sm": "6px",
   "--radius-md": "10px",

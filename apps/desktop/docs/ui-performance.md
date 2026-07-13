@@ -15,11 +15,11 @@ bun run build:electron
 
 | Artifact | Raw | Gzip |
 | --- | ---: | ---: |
-| Initial application JavaScript | 489.24 kB | 144.02 kB |
-| Application CSS | 27.58 kB | 6.35 kB |
-| Deferred ReviewPane | 30.23 kB | 8.21 kB |
-| Deferred Settings | 26.44 kB | 7.93 kB |
-| Deferred Onboarding | 14.47 kB | 4.31 kB |
+| Initial application JavaScript | 491.85 kB | 144.66 kB |
+| Application CSS | 30.92 kB | 6.92 kB |
+| Deferred ReviewPane | 30.19 kB | 8.19 kB |
+| Deferred Settings | 26.41 kB | 7.91 kB |
+| Deferred Onboarding | 14.44 kB | 4.30 kB |
 | xterm runtime chunk | 332.63 kB | 83.87 kB |
 
 The shell, review surface, settings, onboarding, and xterm runtime are emitted

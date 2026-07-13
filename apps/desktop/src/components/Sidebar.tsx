@@ -24,7 +24,7 @@
  * Per SPEC §24: compact mode = icons only.
  */
 import { memo, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Plus, Search, Settings, TerminalSquare, TriangleAlert, User } from "lucide-react";
+import { ChevronDown, ChevronRight, HelpCircle, PanelLeft, Plus, Search, Settings, SquarePen, TerminalSquare, TriangleAlert, User } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
 import { useTerminusStore, usePinnedTasks, normalizeTaskStatus } from "../hooks/use-terminus";
@@ -58,6 +58,7 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
   const pinnedTasks = usePinnedTasks();
 
   const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [collapsedSessions, setCollapsedSessions] = useState<Set<string>>(new Set());
 
   const filtered = useMemo(() => {
@@ -126,37 +127,43 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
   return (
     <div className="flex h-full flex-col">
       {/* Application name + global task navigation. */}
-      <div className="flex flex-col gap-1 px-3 pb-3 pt-3">
-        <div className="flex items-center">
+      <div className="flex flex-col px-4 pb-4 pt-4">
+        <div className="mb-5 flex items-center gap-2 text-tertiary">
+          <PanelLeft size={15} strokeWidth={1.7} />
+          <span className="h-4 w-px bg-default" />
+        </div>
+        <div className="mb-4 flex items-center">
           <div className="flex items-center gap-2">
             <span
-              className="flex h-7 w-7 items-center justify-center rounded-md text-secondary"
-              aria-hidden
-            >
-              <TerminalSquare size={15} strokeWidth={1.8} />
-            </span>
-            <span
               className="font-semibold tracking-tight text-primary"
-              style={{ fontSize: "var(--font-size-md)" }}
+              style={{ fontSize: "var(--font-size-lg)" }}
             >
               Terminus
             </span>
           </div>
+          <button
+            type="button"
+            onClick={() => setSearchOpen((open) => !open)}
+            className="ml-auto flex h-8 w-8 items-center justify-center rounded-lg text-secondary hover:bg-hover hover:text-primary"
+            aria-label="Search tasks"
+            aria-expanded={searchOpen}
+          >
+            <Search size={16} strokeWidth={1.7} />
+          </button>
         </div>
 
         <button
           type="button"
           onClick={onNewTask}
-          className="mt-1 flex h-8 items-center gap-2 rounded-md px-2 text-left text-secondary hover:bg-hover hover:text-primary"
-          style={{ fontSize: "var(--font-size-sm)" }}
+          className="sidebar-nav-row flex h-9 items-center gap-3 rounded-lg px-1.5 text-left text-secondary hover:bg-hover hover:text-primary"
+          style={{ fontSize: "var(--font-size-base)" }}
         >
-          <Plus size={15} strokeWidth={1.8} />
+          <SquarePen size={16} strokeWidth={1.7} />
           <span>New task</span>
-          <span className="ml-auto text-tertiary" style={{ fontSize: 10 }}>⌘ N</span>
         </button>
 
         {/* Search. */}
-        <div className="relative">
+        {searchOpen ? <div className="relative mt-2 animate-slide-down">
           <Search
             size={12}
             className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-tertiary"
@@ -171,13 +178,14 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
               "focus:bg-hover focus:outline-none",
             )}
             style={{
-              height: 26,
-              fontSize: "var(--font-size-xs)",
-              background: "transparent",
+              height: 32,
+              fontSize: "var(--font-size-sm)",
+              background: "var(--bg-hover)",
             }}
             aria-label="Search tasks"
+            autoFocus
           />
-        </div>
+        </div> : null}
 
         {!healthReady && lastError ? (
           <button
@@ -196,7 +204,7 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
       </div>
 
       {/* Scrollable projects/tasks list. */}
-      <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-2 pb-2">
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 pb-3">
         {/* Pinned section. */}
         {pinnedTasks.length > 0 ? (
           <SidebarSection title="Pinned">
@@ -292,7 +300,7 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
 
       {/* User profile at bottom. */}
       <div
-        className="flex items-center gap-2 border-t border-subtle px-3 py-2"
+        className="flex items-center gap-3 border-t border-subtle px-4 py-3"
         style={{ background: "var(--bg-sidebar)" }}
       >
         <div
@@ -325,6 +333,15 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
         >
           <Settings size={14} />
         </button>
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new Event("terminus:open-settings"))}
+          aria-label="Help"
+          title="Help and shortcuts"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-secondary"
+        >
+          <HelpCircle size={14} />
+        </button>
       </div>
     </div>
   );
@@ -338,10 +355,10 @@ function SidebarSection({
   children: React.ReactNode;
 }): JSX.Element {
   return (
-    <div className="flex flex-col gap-0.5">
+    <div className="flex flex-col gap-1">
       <div
-        className="px-2 py-1 text-tertiary uppercase tracking-wide"
-        style={{ fontSize: "var(--font-size-xs)", fontWeight: 500 }}
+        className="px-2 py-1 text-tertiary"
+        style={{ fontSize: "var(--font-size-sm)", fontWeight: 500 }}
       >
         {title}
       </div>

@@ -47,6 +47,7 @@ import {
   ListPlus,
   Monitor,
   Paperclip,
+  Plus,
   ShieldCheck,
   Square,
 } from "lucide-react";
@@ -116,6 +117,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
   const [error, setError] = useState<string | null>(null);
 
   const sendMode = computeSendMode(task?.status);
+  const isStartSurface = !task && Boolean(onCreateTask);
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === (task?.session_id ?? selectedSessionId)),
     [selectedSessionId, sessions, task?.session_id],
@@ -323,7 +325,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
     <div className={cn("relative", className)}>
       {/* Reading-column-width container — matches Conversation. */}
       <div style={{ maxWidth: "var(--conversation-max-width)", margin: "0 auto" }}>
-        {activeSession ? (
+        {activeSession && !isStartSurface ? (
           <div
             className="mb-2 flex min-w-0 items-center gap-4 px-2 text-secondary"
             style={{ fontSize: "var(--font-size-xs)" }}
@@ -349,8 +351,9 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
           onDrop={onDrop}
           onDragOver={onDragOver}
           className={cn(
-            "flex flex-col rounded-xl border border-default bg-composer shadow-md",
-            "focus-within:border-strong",
+            "composer-surface flex flex-col border border-default bg-composer shadow-md",
+            isStartSurface ? "rounded-[22px]" : "rounded-xl",
+            "focus-within:border-strong focus-within:shadow-lg",
           )}
           style={{ background: "var(--bg-composer)" }}
         >
@@ -406,7 +409,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             onKeyDown={onKeyDown}
             onPaste={onPaste}
             rows={1}
-            placeholder={task ? "Send a message, steer work, or queue a follow-up…" : "Describe what you want to build…"}
+            placeholder={task ? "Send a message, steer work, or queue a follow-up…" : isStartSurface ? "Do anything" : "Describe what you want to build…"}
             aria-label="Message composer"
             aria-description="Press Command Enter to send, Shift Command Enter to queue, Escape to interrupt."
             role="textbox"
@@ -418,7 +421,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             style={{
               fontSize: "var(--font-size-md)",
               lineHeight: "var(--line-height-relaxed)" as unknown as string,
-              minHeight: task ? 44 : 64,
+              minHeight: task ? 44 : isStartSurface ? 76 : 64,
               maxHeight: "var(--composer-max-height)",
               fontFamily: "var(--font-family)",
             }}
@@ -427,8 +430,8 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
           {/* Control row — always visible. Reserved height so metadata
               appearing/disappearing never causes layout shift (SPEC §10). */}
           <div
-            className="flex items-center gap-0.5 px-2 pb-2 pt-1"
-            style={{ minHeight: 40 }}
+            className="flex items-center gap-0.5 px-3 pb-3 pt-1"
+            style={{ minHeight: isStartSurface ? 48 : 40 }}
           >
             {/* Attachment. */}
             <button
@@ -436,17 +439,18 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
               onClick={() => fileInputRef.current?.click()}
               aria-label="Attach file"
               title="Attach file"
-              className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
+              className="composer-control flex h-8 w-8 items-center justify-center rounded-lg text-secondary hover:bg-hover hover:text-primary"
+              style={{ order: 1 }}
             >
-              <Paperclip size={14} />
+              {isStartSurface ? <Plus size={17} /> : <Paperclip size={14} />}
             </button>
 
             {/* Agent / model selector. */}
-            <div className="relative">
+            <div className="relative" style={{ order: isStartSurface ? 4 : 2, marginLeft: isStartSurface ? "auto" : undefined }}>
               <button
                 type="button"
                 onClick={() => { setAgentOpen((o) => !o); setAccessOpen(false); setMoreOpen(false); }}
-                className="flex h-7 items-center gap-1 rounded-md px-2 text-xs text-secondary hover:bg-hover hover:text-primary"
+                className="composer-control flex h-8 items-center gap-1 rounded-lg px-2 text-xs text-secondary hover:bg-hover hover:text-primary"
                 style={{ fontSize: "var(--font-size-xs)" }}
                 aria-haspopup="menu"
                 aria-expanded={agentOpen}
@@ -470,11 +474,11 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             </div>
 
             {/* Access level. */}
-            <div className="relative">
+            <div className="relative" style={{ order: isStartSurface ? 2 : 3 }}>
               <button
                 type="button"
                 onClick={() => { setAccessOpen((o) => !o); setAgentOpen(false); setMoreOpen(false); }}
-                className="flex h-7 items-center gap-1 rounded-md px-2 text-xs text-secondary hover:bg-hover hover:text-primary"
+                className="composer-control flex h-8 items-center gap-1 rounded-lg px-2 text-xs text-warning hover:bg-hover hover:text-primary"
                 style={{ fontSize: "var(--font-size-xs)" }}
                 aria-haspopup="menu"
                 aria-expanded={accessOpen}
@@ -500,13 +504,13 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             </div>
 
             {/* Compact "more" menu for contextual controls. */}
-            <div className="relative">
+            <div className="relative" style={{ order: 3 }}>
               <button
                 type="button"
                 onClick={() => { setMoreOpen((o) => !o); setAgentOpen(false); setAccessOpen(false); }}
                 aria-label="More options"
                 title="Branch, worktree, computer use, queue behavior"
-                className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
+                className="composer-control flex h-8 w-8 items-center justify-center rounded-lg text-secondary hover:bg-hover hover:text-primary"
               >
                 <ChevronDown size={14} />
               </button>
@@ -526,7 +530,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             </div>
 
             {/* Right side — mode pill + send button. */}
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex items-center gap-2" style={{ order: 5 }}>
               {sendMode === "steer" ? (
                 <span
                   className="rounded px-1.5 py-0.5 text-tertiary"
@@ -564,7 +568,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
                 aria-label={sendButtonContent.label}
                 title={sendButtonContent.label}
                 className={cn(
-                  "flex h-8 w-8 items-center justify-center rounded-full text-xs font-medium",
+                  "send-control flex h-9 w-9 items-center justify-center rounded-full text-xs font-medium",
                   sendButtonContent.mode === "stop"
                     ? "bg-hover text-error"
                     : "text-primary",
@@ -598,7 +602,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
           className="mt-2 flex items-center justify-between px-1 text-tertiary"
           style={{ fontSize: "var(--font-size-xs)" }}
         >
-          <span>{task ? <><kbd className="font-mono">⌘↵</kbd> send · <kbd className="font-mono">⇧⌘↵</kbd> queue · <kbd className="font-mono">esc</kbd> interrupt</> : "Drop files or paste images to add context"}</span>
+          <span>{task ? <><kbd className="font-mono">⌘↵</kbd> send · <kbd className="font-mono">⇧⌘↵</kbd> queue · <kbd className="font-mono">esc</kbd> interrupt</> : isStartSurface ? "" : "Drop files or paste images to add context"}</span>
           {task ? (
             <span className="truncate" style={{ maxWidth: 200 }}>
               {task.thread_id.slice(0, 8)} · {task.risk_class} risk
