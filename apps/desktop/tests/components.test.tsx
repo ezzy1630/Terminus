@@ -146,6 +146,10 @@ describe("ErrorState presets (SPEC §27 catalog)", () => {
     "rateLimit",
     "contextLimit",
     "unsupportedFile",
+    "hugeOutput",
+    "deletedProjectPath",
+    "updateAvailable",
+    "applicationError",
     "rendererRecovery",
   ] as const;
 

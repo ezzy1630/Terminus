@@ -11,6 +11,7 @@ import { createRoot } from "react-dom/client";
 import "./styles/globals.css";
 import { useThemeStore } from "./hooks/use-theme";
 import { App } from "./App";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
 
 // Re-apply tokens to be safe across HMR reloads.
 useThemeStore.getState().refresh();
@@ -20,6 +21,8 @@ if (!rootEl) throw new Error("#root not found");
 
 createRoot(rootEl).render(
   <StrictMode>
-    <App />
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
   </StrictMode>,
 );

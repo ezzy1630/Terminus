@@ -4,7 +4,9 @@
  * Per SPEC §27: required error states include "failed task", "offline
  * runtime", "reconnecting", "missing model", "missing editor", "missing
  * Git", "permission denied", "agent blocked", "terminal disconnected",
- * "merge conflict", "rate limit", "context limit", "renderer recovery".
+ * "merge conflict", "rate limit", "context limit", "huge output",
+ * "deleted project path", "update available", "application error", and
+ * "renderer recovery".
  *
  * Per SPEC §27: "Every state must provide a clear recovery action when
  * recovery is possible."
@@ -270,6 +272,30 @@ const PRESETS: Record<string, ErrorPreset> = {
     title: "Unsupported file",
     description: "This file type cannot be previewed. Open it in your external editor instead.",
     severity: "warning",
+  },
+  hugeOutput: {
+    title: "Output moved to an artifact",
+    description:
+      "The result is too large to render safely. Open the complete immutable artifact or continue from the reported cursor.",
+    severity: "warning",
+  },
+  deletedProjectPath: {
+    title: "Project folder is unavailable",
+    description:
+      "The saved folder was moved, renamed, or deleted. Locate it again or remove this project from the sidebar.",
+    severity: "warning",
+  },
+  updateAvailable: {
+    title: "Update ready to install",
+    description:
+      "A newer Terminus build is available. Finish active tasks before restarting to apply it.",
+    severity: "warning",
+  },
+  applicationError: {
+    title: "Terminus encountered an application error",
+    description:
+      "Your task data is preserved. Reload the interface, or open diagnostics if the problem returns.",
+    severity: "error",
   },
   rendererRecovery: {
     title: "Renderer recovered",
