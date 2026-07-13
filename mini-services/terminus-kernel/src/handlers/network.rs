@@ -2,12 +2,9 @@
 //! `GET /v1/network/allowlist`.
 //!
 //! The kernel's `EgressProxy` enforces destination allowlist, DNS, and
-//! private-IP denial, but its TCP relay is a stub that does not actually
-//! open sockets. The HTTP mini-service runs the authorization check and,
-//! for allowed destinations, attempts the request via `reqwest`-like
-//! behavior. Since we don't want a heavy HTTP client dependency in the
-//! dev mini-service, we return a structured "relay not performed" response
-//! after authorization succeeds, plus the bytes budget consumed.
+//! private-IP denial. This development-only HTTP surface makes a decision
+//! but never opens a socket; a failed lookup is denied rather than allowing
+//! a later unchecked DNS resolution.
 
 use std::sync::Arc;
 
@@ -15,7 +12,6 @@ use axum::extract::State;
 use axum::Extension;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use std::net::ToSocketAddrs;
 use terminus_egress::EgressPolicy;
 
 use crate::api::Envelope;
@@ -72,9 +68,19 @@ pub async fn request(
     let scheme = url.scheme().to_string();
 
     // Resolve the host to IPs (for private-IP denial).
-    let resolved_ips: Vec<std::net::IpAddr> = match (host.as_str(), port).to_socket_addrs() {
-        Ok(iter) => iter.map(|sa| sa.ip()).collect(),
-        Err(_) => Vec::new(),
+    let resolved_ips: Vec<std::net::IpAddr> = match tokio::net::lookup_host((host.as_str(), port)).await {
+        Ok(addresses) => addresses.map(|address| address.ip()).collect(),
+        Err(error) => {
+            return Ok(Json(EgressResponse {
+                authorized: false,
+                status: 0,
+                headers: std::collections::BTreeMap::new(),
+                body: String::new(),
+                resolved_ips: Vec::new(),
+                denial_reason: Some(format!("DNS resolution failed for {host}:{port}: {error}")),
+                bytes_relayed: 0,
+            }));
+        }
     };
     let resolved_ip_strings: Vec<String> = resolved_ips.iter().map(|ip| ip.to_string()).collect();
 

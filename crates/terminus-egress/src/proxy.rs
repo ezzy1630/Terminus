@@ -26,7 +26,9 @@ struct AtomicCounter {
 }
 
 /// The egress proxy. Resolves destinations, enforces allowlist + private-IP
-/// denial + byte/rate limits. The actual TCP relay is a stub.
+/// denial + byte/rate limits. Socket creation remains owned by the kernel;
+/// callers must resolve and authorize every destination address before any
+/// connection attempt.
 #[derive(Debug, Clone)]
 pub struct EgressProxy {
     policy: Arc<EgressPolicy>,
@@ -60,6 +62,15 @@ impl EgressProxy {
     ) -> Result<(), EgressError> {
         if self.policy.default_deny && !self.policy.matches(host, port, scheme) {
             return Err(EgressError::Denied(format!("{scheme}://{host}:{port}")));
+        }
+        // An allowlist match alone is not sufficient: proceeding without a
+        // concrete address would allow the eventual socket call to perform an
+        // unchecked second lookup (and make DNS rebinding invisible to the
+        // policy decision).
+        if resolved_ips.is_empty() {
+            return Err(EgressError::Dns(format!(
+                "no addresses resolved for {host}:{port}"
+            )));
         }
         if self.policy.deny_private_ips {
             for ip in resolved_ips {
@@ -140,6 +151,15 @@ mod tests {
             .authorize("api.github.com", 443, "https", &[ip("127.0.0.1")])
             .unwrap_err();
         assert!(matches!(err, EgressError::PrivateDestination(_)));
+    }
+
+    #[test]
+    fn unresolved_destination_is_denied_even_when_allowlisted() {
+        let proxy = EgressProxy::new(policy(), RateLimit::default());
+        let err = proxy
+            .authorize("api.github.com", 443, "https", &[])
+            .unwrap_err();
+        assert!(matches!(err, EgressError::Dns(_)));
     }
 
     #[test]

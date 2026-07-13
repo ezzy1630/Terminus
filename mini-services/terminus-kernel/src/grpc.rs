@@ -434,10 +434,26 @@ impl NetworkServiceRpc for GrpcKernel {
         } else {
             request.method.as_str()
         };
+        let resolved_ips = match tokio::net::lookup_host((host, port)).await {
+            Ok(addresses) => addresses.map(|address| address.ip()).collect::<Vec<_>>(),
+            Err(error) => {
+                return Ok(Response::new(protocol::EgressDecisionMessage {
+                    allowed: false,
+                    reason: format!("DNS resolution failed for {host}:{port}: {error}"),
+                }));
+            }
+        };
         match self
             .kernel
             .network
-            .authorize(&ctx, &Default::default(), host, port, scheme, &[])
+            .authorize(
+                &ctx,
+                &Default::default(),
+                host,
+                port,
+                scheme,
+                &resolved_ips,
+            )
         {
             Ok(()) => Ok(Response::new(protocol::EgressDecisionMessage {
                 allowed: true,
