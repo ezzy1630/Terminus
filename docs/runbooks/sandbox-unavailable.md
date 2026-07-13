@@ -9,7 +9,8 @@ Use this runbook when the kernel reports that the requested sandbox backend cann
 - Kernel `Health` returns `degraded` or `failing` with sandbox-related `degradations`.
 - `StartProcessRequest` denied with `sandbox_unavailable`.
 - UI displays "enforcement degraded" warning.
-- Linux: `bubblewrap not found` or `unshare: Operation not permitted`.
+- Linux: `bubblewrap not found`, `unshare: Operation not permitted`, or
+  `delegated cgroup root unavailable`.
 - macOS: `sandbox-exec: command not found` or profile syntax error.
 - Windows: `Job Object creation failed`.
 - Container backend: `container runtime not available`.
@@ -34,6 +35,14 @@ Use this runbook when the kernel reports that the requested sandbox backend cann
    ```
 3. Check kernel capabilities log for the backend's self-reported capabilities.
 4. Check kernel logs for sandbox construction errors.
+5. For secure Linux profiles, confirm the kernel received a dedicated cgroup-v2
+   root (not `/sys/fs/cgroup`) and that `cpu`, `memory`, and `pids` are enabled
+   for child leases:
+   ```bash
+   printf '%s\n' "$TERMINUS_CGROUP_ROOT"
+   cat "$TERMINUS_CGROUP_ROOT/cgroup.controllers"
+   cat "$TERMINUS_CGROUP_ROOT/cgroup.subtree_control"
+   ```
 
 ## Immediate actions
 
@@ -53,9 +62,14 @@ Use this runbook when the kernel reports that the requested sandbox backend cann
      sudo sysctl -w kernel.unprivileged_userns_clone=1
      ```
    - Or run Terminus with `--sandbox=degraded-local` (named degraded profile) — but only if the user explicitly accepts the risk.
-4. **For macOS degraded:** the macOS backend honestly reports degraded capability. Accept degraded mode or move to Linux.
-5. **For Windows degraded:** the Windows backend honestly reports degraded capability. Accept degraded mode or move to Linux.
-6. **For container backend missing:** install Podman or Docker, or use a different backend (ADR-0027).
+4. **For Linux `delegated cgroup root unavailable`:** configure the service
+   manager to delegate an otherwise empty cgroup-v2 subtree and enable the
+   `cpu`, `memory`, and `pids` controllers for children. Set
+   `TERMINUS_CGROUP_ROOT` to that subtree. Do not point it at the global
+   `/sys/fs/cgroup` root; the backend rejects that unsafe configuration.
+5. **For macOS degraded:** the macOS backend honestly reports degraded capability. Accept degraded mode or move to Linux.
+6. **For Windows degraded:** the Windows backend honestly reports degraded capability. Accept degraded mode or move to Linux.
+7. **For container backend missing:** install Podman or Docker, or use a different backend (ADR-0027).
 
 ## Recovery
 

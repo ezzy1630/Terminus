@@ -61,15 +61,20 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: terminus-kernel-linux-amd64
+            binary: terminus-kernel-mini
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact: terminus-kernel-linux-arm64
+            binary: terminus-kernel-mini
+            linker: aarch64-linux-gnu-gcc
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: terminus-kernel-darwin-arm64
+            binary: terminus-kernel-mini
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: terminus-kernel-windows-amd64.exe
+            binary: terminus-kernel-mini.exe
     permissions:
       contents: read
       packages: write
@@ -81,7 +86,14 @@ jobs:
           fetch-depth: 0
       - uses: jdx/mise-action@v2
       - run: just bootstrap
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Install Linux cross-linker
+        if: matrix.linker != ''
+        run: sudo apt-get update && sudo apt-get install --yes gcc-aarch64-linux-gnu
       - name: Build kernel binary (release)
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
         run: cargo build --release --target ${{ matrix.target }} --manifest-path mini-services/terminus-kernel/Cargo.toml
       - name: Build control plane distribution
         run: bun run build
@@ -89,12 +101,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/terminus-kernel-mini dist/${{ matrix.artifact }}
-      - name: Generate checksums
+          cp mini-services/terminus-kernel/target/${{ matrix.target }}/release/${{ matrix.binary }} dist/${{ matrix.artifact }}
+      - name: Generate portable checksums
         shell: bash
-        run: |
-          cd dist
-          sha256sum ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
+        run: node -e "const fs = require('node:fs'); const crypto = require('node:crypto'); const name = process.argv[1]; const digest = crypto.createHash('sha256').update(fs.readFileSync('dist/' + name)).digest('hex'); fs.writeFileSync('dist/' + name + '.sha256', digest + '  ' + name + '\\n');" "${{ matrix.artifact }}"
       - name: Generate SBOM (syft, SPDX-JSON)
         uses: anchore/sbom-action@v0
         with:
@@ -109,11 +119,9 @@ jobs:
             --output-signature dist/${{ matrix.artifact }}.sig \
             --output-certificate dist/${{ matrix.artifact }}.pem
       - name: Attest build provenance (§46.15)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest@v4
         with:
-          subject-name: ${{ matrix.artifact }}
-          subject-digest: sha256:$(sha256sum dist/${{ matrix.artifact }} | awk '{print $1}')
-          push-to-registry: false
+          subject-path: dist/${{ matrix.artifact }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -135,19 +143,45 @@ jobs:
       - run: just bootstrap
       - name: Install host enforcement dependencies
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
+      - name: Delegate cgroup-v2 subtree to the kernel probe
+        run: |
+          sudo install -d -m 0755 /sys/fs/cgroup/terminus-ci
+          printf '+cpu +memory +pids\n' | sudo tee /sys/fs/cgroup/terminus-ci/cgroup.subtree_control
+      - name: Verify Bubblewrap namespace support
+        run: |
+          sudo bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev \
+            --die-with-parent --new-session --cap-drop ALL -- /bin/true
+      - name: Verify delegated cgroup lease controls
+        run: |
+          sudo bash -ec '
+            parent=/sys/fs/cgroup/terminus-ci/.terminus-control-parent
+            lease="$parent/job"
+            mkdir "$parent"
+            printf "%s\\n" "+cpu +memory +pids" > "$parent/cgroup.subtree_control"
+            mkdir "$lease"
+            printf "%s\\n" 32 > "$lease/pids.max"
+            printf "%s\\n" "$$" > "$lease/cgroup.procs"
+          '
+          sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent/job
+          sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent
       - uses: sigstore/cosign-installer@v3
       - name: Build kernel probe binary
-        run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
+        run: |
+          cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
+          sudo install -D -m 0755 \
+            mini-services/terminus-kernel/target/release/terminus-kernel-mini \
+            /usr/local/lib/terminus/terminus-kernel-mini
       - name: Produce signed evidence
         env:
           TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
-          TERMINUS_KERNEL_BINARY: ${{ github.workspace }}/mini-services/terminus-kernel/target/release/terminus-kernel-mini
+          TERMINUS_CGROUP_ROOT: /sys/fs/cgroup/terminus-ci
+          TERMINUS_KERNEL_BINARY: /usr/local/lib/terminus/terminus-kernel-mini
           TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
           TERMINUS_LINUX_EVIDENCE: ${{ runner.temp }}/terminus-linux-evidence.json
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/terminus-linux-evidence.json.pem
           TERMINUS_LINUX_TEST_LOG: ${{ runner.temp }}/terminus-linux-enforcement.log
-          TERMINUS_LINUX_TEST_COMMAND: bash scripts/run-linux-enforcement-probe.sh
+          TERMINUS_LINUX_TEST_COMMAND: sudo --preserve-env=TERMINUS_CGROUP_ROOT,TERMINUS_ENFORCEMENT_REPORT,TERMINUS_KERNEL_BINARY bash scripts/run-linux-enforcement-probe.sh
         run: just linux-enforcement-evidence
       - name: Verify signed evidence
         env:
@@ -157,6 +191,7 @@ jobs:
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/terminus-linux-evidence.json.pem
         run: bash scripts/verify-release-evidence.sh
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: linux-enforcement-evidence
           path: |
@@ -165,6 +200,7 @@ jobs:
             ${{ runner.temp }}/terminus-linux-evidence.json.pem
             ${{ runner.temp }}/terminus-linux-enforcement.log
             ${{ runner.temp }}/terminus-enforcement-report.json
+          if-no-files-found: error
 
   # ---------- Aggregate + publish release ----------
   publish-release:
@@ -201,10 +237,13 @@ jobs:
           cp dist/terminus-linux-enforcement.log release/
           cp dist/terminus-enforcement-report.json release/
           cp dist/terminus-kernel-* release/
-      - name: Generate aggregate provenance (SLSA)
-        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
-        with:
-          base64-subjects: ""
+      - name: Publish migration bundle
+        run: |
+          tar -czf release/migrations.tar.gz migrations/
+      - name: Publish generated clients and schemas
+        run: |
+          tar -czf release/generated-clients.tar.gz packages/terminus-kernel-client/src/generated
+          tar -czf release/schemas.tar.gz schemas/
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -213,13 +252,6 @@ jobs:
           generate_release_notes: true
           draft: true
           fail_on_unmatched_files: true
-      - name: Publish migration bundle
-        run: |
-          tar -czf release/migrations.tar.gz migrations/
-      - name: Publish generated clients and schemas
-        run: |
-          tar -czf release/generated-clients.tar.gz packages/terminus-kernel-client/src/generated
-          tar -czf release/schemas.tar.gz schemas/
 
   release-decision:
     name: Machine-readable release decision (SPEC §50.10)
