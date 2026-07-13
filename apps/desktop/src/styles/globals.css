@@ -208,6 +208,11 @@ textarea {
 }
 .sidebar-task-row[aria-pressed="true"]::before { background: var(--text-secondary); transform: scaleY(1); }
 .sidebar-task-row:active { transform: scale(.992); }
+.sidebar-show-more { transition: color var(--duration-fast) var(--easing-default), background var(--duration-fast) var(--easing-default); }
+
+.inspector-section { transition: background var(--duration-fast) var(--easing-default); }
+.inspector-section.is-urgent { background: color-mix(in srgb, var(--color-warning) 4%, transparent); }
+.inspector-section.is-urgent > button { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--color-warning) 72%, transparent); }
 
 .activity-block { transition: background var(--duration-fast) var(--easing-default), border-color var(--duration-fast) var(--easing-default); }
 .activity-header svg { transition: transform var(--duration-fast) var(--easing-default), color var(--duration-fast) var(--easing-default); }

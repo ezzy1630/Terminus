@@ -53,6 +53,8 @@ interface InspectorProps {
 interface InspectorSectionProps {
   title: string;
   icon?: React.ReactNode;
+  summary?: string;
+  urgent?: boolean;
   defaultOpen?: boolean;
   children: React.ReactNode;
 }
@@ -75,12 +77,14 @@ function activityLabel(eventName: string): string {
 function InspectorSection({
   title,
   icon,
+  summary,
+  urgent = false,
   defaultOpen = true,
   children,
 }: InspectorSectionProps): JSX.Element {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="border-b border-subtle">
+    <div className={cn("inspector-section border-b border-subtle", urgent && "is-urgent")}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -96,6 +100,11 @@ function InspectorSection({
         >
           {title}
         </span>
+        {summary ? (
+          <span className={cn("flex-shrink-0 font-mono text-tertiary", urgent && "text-warning")} style={{ fontSize: 10 }}>
+            {summary}
+          </span>
+        ) : null}
       </button>
       {open ? <div className="px-3 pb-3">{children}</div> : null}
     </div>
@@ -206,7 +215,7 @@ function InspectorImpl({
       </InspectorSection>
 
       {hasPatchEvidence ? (
-        <InspectorSection title="Changes" icon={<FileDiff size={12} />} defaultOpen>
+        <InspectorSection title="Changes" icon={<FileDiff size={12} />} summary="Ready" defaultOpen>
           <button
             type="button"
             onClick={onShowChanges}
@@ -220,7 +229,12 @@ function InspectorImpl({
       ) : null}
 
       {subagents.length > 0 ? (
-        <InspectorSection title="Subagents" icon={<UsersRound size={12} />} defaultOpen>
+        <InspectorSection
+          title="Subagents"
+          icon={<UsersRound size={12} />}
+          summary={`${subagents.filter((item) => item.state === "working").length} working · ${subagents.filter((item) => item.state === "done").length} done`}
+          defaultOpen
+        >
           <ul className="flex flex-col gap-2" style={{ fontSize: "var(--font-size-xs)" }}>
             {subagents.map((subagent) => (
               <li key={subagent.id} className="flex items-start gap-2">
@@ -240,7 +254,13 @@ function InspectorImpl({
       ) : null}
 
       {verification.length > 0 ? (
-        <InspectorSection title="Verification" icon={<Workflow size={12} />} defaultOpen>
+        <InspectorSection
+          title="Verification"
+          icon={<Workflow size={12} />}
+          summary={`${verification.filter((check) => check.state === "passed").length}/${verification.length}`}
+          urgent={verification.some((check) => check.state === "failed")}
+          defaultOpen
+        >
           <ul className="flex flex-col gap-1.5" style={{ fontSize: "var(--font-size-xs)" }}>
             {verification.slice(-5).reverse().map((check) => (
               <li key={check.id} className="flex items-start gap-2">
@@ -254,7 +274,7 @@ function InspectorImpl({
 
       {/* Activity section — only when events exist. */}
       {recentEvents.length > 0 ? (
-        <InspectorSection title="Activity" icon={<Workflow size={12} />} defaultOpen>
+        <InspectorSection title="Activity" icon={<Workflow size={12} />} summary={`${recentEvents.length}`} defaultOpen>
           <ul
             className="flex flex-col gap-1.5 text-secondary"
             style={{ fontSize: "var(--font-size-xs)" }}
@@ -283,7 +303,7 @@ function InspectorImpl({
 
       {/* Approvals section — only when relevant. */}
       {approvals.length > 0 ? (
-        <InspectorSection title="Approvals" icon={<ShieldAlert size={12} />} defaultOpen>
+        <InspectorSection title="Approvals" icon={<ShieldAlert size={12} />} summary={`${approvals.length} waiting`} urgent defaultOpen>
           <ul className="flex flex-col gap-2" style={{ fontSize: "var(--font-size-xs)" }}>
             {approvals.map((approval) => (
               <li key={approval.id} className="border-l-2 border-l-[var(--color-approval-risk)] pl-2 text-secondary">

@@ -60,6 +60,7 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [collapsedSessions, setCollapsedSessions] = useState<Set<string>>(new Set());
+  const [expandedTaskLists, setExpandedTaskLists] = useState<Set<string>>(new Set());
 
   const filtered = useMemo(() => {
     if (!query.trim()) return sessions;
@@ -237,7 +238,15 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
           {filtered.map((session) => {
             const collapsed = collapsedSessions.has(session.id);
             const tasks = tasksBySession[session.id] ?? [];
-            const visibleTasks = collapsed ? [] : tasks;
+            const taskListExpanded = expandedTaskLists.has(session.id) || query.trim().length > 0;
+            const selectedTaskIndex = tasks.findIndex((task) => task.id === selectedTaskId);
+            const visibleCount = sidebarVisibleTaskCount(
+              tasks.length,
+              selectedTaskIndex,
+              taskListExpanded,
+            );
+            const visibleTasks = collapsed ? [] : tasks.slice(0, visibleCount);
+            const hiddenTaskCount = Math.max(0, tasks.length - visibleTasks.length);
             return (
               <div key={session.id} className="flex flex-col">
                 {/* Project row. */}
@@ -283,14 +292,46 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
                 </button>
                 {/* Tasks under this session. */}
                 {!collapsed && visibleTasks.length > 0 ? (
-                  <SessionTaskList
-                    id={`session-tasks-${session.id}`}
-                    tasks={visibleTasks}
-                    selectedTaskId={selectedTaskId}
-                    pinnedTaskIds={pinnedTaskIds}
-                    onSelectTask={selectTask}
-                    onTogglePin={togglePin}
-                  />
+                  <>
+                    <SessionTaskList
+                      id={`session-tasks-${session.id}`}
+                      tasks={visibleTasks}
+                      selectedTaskId={selectedTaskId}
+                      pinnedTaskIds={pinnedTaskIds}
+                      onSelectTask={selectTask}
+                      onTogglePin={togglePin}
+                    />
+                    {hiddenTaskCount > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setExpandedTaskLists((previous) => {
+                          const next = new Set(previous);
+                          next.add(session.id);
+                          return next;
+                        })}
+                        className="sidebar-show-more ml-7 flex h-7 items-center rounded-md px-2 text-left text-tertiary hover:bg-hover hover:text-secondary"
+                        style={{ fontSize: "var(--font-size-sm)" }}
+                        aria-label={`Show ${hiddenTaskCount} more tasks in ${session.title}`}
+                      >
+                        Show more
+                        <span className="ml-1.5 font-mono opacity-70">{hiddenTaskCount}</span>
+                      </button>
+                    ) : taskListExpanded && tasks.length > COLLAPSED_TASK_LIMIT && !query.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => setExpandedTaskLists((previous) => {
+                          const next = new Set(previous);
+                          next.delete(session.id);
+                          return next;
+                        })}
+                        className="sidebar-show-more ml-7 flex h-7 items-center rounded-md px-2 text-left text-tertiary hover:bg-hover hover:text-secondary"
+                        style={{ fontSize: "var(--font-size-sm)" }}
+                        aria-label={`Show fewer tasks in ${session.title}`}
+                      >
+                        Show less
+                      </button>
+                    ) : null}
+                  </>
                 ) : null}
               </div>
             );
@@ -370,6 +411,16 @@ function SidebarSection({
 // ────────────────────────── Virtualized task list ───────────────────────────
 
 const VIRTUALIZATION_THRESHOLD = 50;
+const COLLAPSED_TASK_LIMIT = 5;
+
+export function sidebarVisibleTaskCount(
+  taskCount: number,
+  selectedTaskIndex: number,
+  expanded: boolean,
+): number {
+  if (expanded) return taskCount;
+  return Math.min(taskCount, Math.max(COLLAPSED_TASK_LIMIT, selectedTaskIndex + 1));
+}
 
 /**
  * Renders the tasks belonging to a single session.

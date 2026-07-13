@@ -32,6 +32,7 @@ import { CommandPalette, type Command } from "../src/components/CommandPalette";
 import { Composer } from "../src/components/Composer";
 import { SidebarItem } from "../src/components/SidebarItem";
 import { Message } from "../src/components/Message";
+import { sidebarVisibleTaskCount } from "../src/components/Sidebar";
 
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import { useThemeStore } from "../src/hooks/use-theme";
@@ -737,5 +738,20 @@ describe("Message — code interactions", () => {
     await user.click(screen.getByRole("button", { name: "Copy code" }));
     expect(writeText).toHaveBeenCalledWith("const ready = true;");
     expect(screen.getByRole("button", { name: "Copied code" })).toBeInTheDocument();
+  });
+});
+
+describe("Sidebar — progressive task disclosure", () => {
+  test("shows five tasks initially and all tasks after expansion", () => {
+    expect(sidebarVisibleTaskCount(12, -1, false)).toBe(5);
+    expect(sidebarVisibleTaskCount(12, -1, true)).toBe(12);
+  });
+
+  test("keeps the selected task visible beyond the initial five", () => {
+    expect(sidebarVisibleTaskCount(12, 8, false)).toBe(9);
+  });
+
+  test("never claims more rows than the project contains", () => {
+    expect(sidebarVisibleTaskCount(3, -1, false)).toBe(3);
   });
 });
