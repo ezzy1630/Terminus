@@ -34,6 +34,7 @@ import { Sidebar } from "../src/components/Sidebar";
 import { SidebarItem } from "../src/components/SidebarItem";
 import { Message } from "../src/components/Message";
 import { sidebarVisibleTaskCount } from "../src/components/Sidebar";
+import { deriveRuntimeModelProfiles } from "../src/components/Settings";
 
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import { useThemeStore } from "../src/hooks/use-theme";
@@ -776,5 +777,34 @@ describe("Sidebar — progressive task disclosure", () => {
 
   test("never claims more rows than the project contains", () => {
     expect(sidebarVisibleTaskCount(3, -1, false)).toBe(3);
+  });
+});
+
+describe("Settings — runtime model profiles", () => {
+  test("lists only profiles reported by sessions and groups duplicate use", () => {
+    const session = (id: string, profile?: string) => ({
+      id,
+      workspace_id: `workspace-${id}`,
+      title: id,
+      status: "active" as const,
+      active_thread_id: null,
+      created_at: "2026-07-12T00:00:00.000Z",
+      updated_at: "2026-07-12T00:00:00.000Z",
+      ...(profile === undefined ? {} : { default_model_profile: profile }),
+    });
+
+    expect(deriveRuntimeModelProfiles([
+      session("one", "provider/model-a"),
+      session("two", "provider/model-a"),
+      session("three", "provider/model-b"),
+      session("four"),
+    ])).toEqual([
+      { id: "provider/model-a", projectCount: 2 },
+      { id: "provider/model-b", projectCount: 1 },
+    ]);
+  });
+
+  test("does not create fallback models when the registry is empty", () => {
+    expect(deriveRuntimeModelProfiles([])).toEqual([]);
   });
 });

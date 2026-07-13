@@ -54,7 +54,7 @@ import { create } from "zustand";
 import { cn } from "../lib/cn";
 import { useThemeStore } from "../hooks/use-theme";
 import { useTerminusStore } from "../hooks/use-terminus";
-import type { Density, Theme } from "../types";
+import type { Density, Session, Theme } from "../types";
 
 // ────────────────────────── Setting model ───────────────────────────────────
 
@@ -660,6 +660,15 @@ function buildCatalog(): SettingCategory[] {
 const CATALOG = buildCatalog();
 const CATEGORIES = CATALOG;
 
+export function deriveRuntimeModelProfiles(sessions: Session[]): Array<{ id: string; projectCount: number }> {
+  const counts = new Map<string, number>();
+  for (const session of sessions) {
+    const profile = session.default_model_profile?.trim();
+    if (profile) counts.set(profile, (counts.get(profile) ?? 0) + 1);
+  }
+  return Array.from(counts, ([id, projectCount]) => ({ id, projectCount }));
+}
+
 // ────────────────────────── Settings store ──────────────────────────────────
 
 const SETTINGS_KEY = "terminus-desktop.settings.v1";
@@ -773,14 +782,7 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
   const sessions = useTerminusStore((state) => state.sessions);
-  const runtimeProfiles = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const session of sessions) {
-      const profile = session.default_model_profile?.trim();
-      if (profile) counts.set(profile, (counts.get(profile) ?? 0) + 1);
-    }
-    return Array.from(counts, ([id, projectCount]) => ({ id, projectCount }));
-  }, [sessions]);
+  const runtimeProfiles = useMemo(() => deriveRuntimeModelProfiles(sessions), [sessions]);
 
   // Sync theme store on first open so the appearance select reflects reality.
   useEffect(() => {
