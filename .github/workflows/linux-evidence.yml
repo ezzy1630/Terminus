@@ -2,6 +2,9 @@ name: Linux enforcement evidence
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/release-blocker-closure
 
 permissions:
   contents: read
