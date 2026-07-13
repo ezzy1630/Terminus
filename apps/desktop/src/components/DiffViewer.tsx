@@ -757,9 +757,9 @@ function DiffHeader({
           disabled={changeCount === 0}
           aria-label="Previous change"
           title="Previous change (k)"
-          className="flex h-6 w-6 items-center justify-center rounded text-secondary hover:bg-hover hover:text-primary disabled:opacity-40"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary disabled:opacity-40"
         >
-          <ChevronDown size={12} style={{ transform: "rotate(180deg)" }} />
+          <ChevronDown size={13} style={{ transform: "rotate(180deg)" }} />
         </button>
         <button
           type="button"
@@ -767,9 +767,9 @@ function DiffHeader({
           disabled={changeCount === 0}
           aria-label="Next change"
           title="Next change (j)"
-          className="flex h-6 w-6 items-center justify-center rounded text-secondary hover:bg-hover hover:text-primary disabled:opacity-40"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary disabled:opacity-40"
         >
-          <ChevronDown size={12} />
+          <ChevronDown size={13} />
         </button>
         <div className="mx-1 h-4 w-px" style={{ background: "var(--border-subtle)" }} />
         {/* View mode toggle. */}
@@ -1388,9 +1388,9 @@ function UnifiedLineView({
               onClick={() => onLineClick(path, lineNo)}
               aria-label="Add comment"
               title="Add comment"
-              className="flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
+              className="flex h-6 w-6 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
             >
-              <MessageSquarePlus size={11} />
+              <MessageSquarePlus size={12} />
             </button>
             {isChange && onAskAgentRevise ? (
               <button
@@ -1404,9 +1404,9 @@ function UnifiedLineView({
                 }
                 aria-label="Ask agent to revise selected code"
                 title="Ask agent to revise"
-                className="flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
+                className="flex h-6 w-6 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
               >
-                <RefreshCw size={11} />
+                <RefreshCw size={12} />
               </button>
             ) : null}
           </div>
@@ -1594,9 +1594,9 @@ function SplitSideView({
             onClick={() => onLineClick(path, lineNo)}
             aria-label="Add comment"
             title="Add comment"
-            className="flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
+            className="flex h-6 w-6 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
           >
-            <MessageSquarePlus size={11} />
+            <MessageSquarePlus size={12} />
           </button>
           {(line.kind === "add" || line.kind === "del") && onAskAgentRevise ? (
             <button
@@ -1606,9 +1606,9 @@ function SplitSideView({
               }
               aria-label="Ask agent to revise selected code"
               title="Ask agent to revise"
-              className="flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
+              className="flex h-6 w-6 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
             >
-              <RefreshCw size={11} />
+              <RefreshCw size={12} />
             </button>
           ) : null}
         </div>

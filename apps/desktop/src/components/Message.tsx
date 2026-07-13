@@ -185,11 +185,11 @@ function MessageImpl({ message }: MessageProps): JSX.Element {
                 </span>
                 <button
                   type="button"
-                  className="code-copy flex h-6 items-center gap-1 rounded px-1.5 text-tertiary hover:bg-hover hover:text-primary"
+                  className="code-copy flex h-7 items-center gap-1.5 rounded-md px-2 text-tertiary hover:bg-hover hover:text-primary"
                   onClick={() => void copyCode(seg.content, i)}
                   aria-label={copiedSegment === i ? "Copied code" : "Copy code"}
                 >
-                  {copiedSegment === i ? <Check size={12} /> : <Copy size={12} />}
+                  {copiedSegment === i ? <Check size={13} /> : <Copy size={13} />}
                   <span style={{ fontSize: "var(--font-size-xs)" }}>{copiedSegment === i ? "Copied" : "Copy"}</span>
                 </button>
               </div>

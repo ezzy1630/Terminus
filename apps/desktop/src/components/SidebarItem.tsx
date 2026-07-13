@@ -137,7 +137,7 @@ function SidebarItemImpl({
           of adding a noisy second column to every navigation row. */}
       <span
         className="flex flex-shrink-0 items-center justify-end gap-1"
-        style={{ width: 22 }}
+        style={{ width: 24 }}
       >
         {onTogglePin ? (
           <button
@@ -149,7 +149,7 @@ function SidebarItemImpl({
             aria-label={`${pinned ? "Unpin" : "Pin"} task ${title}`}
             title={pinned ? "Unpin" : "Pin"}
             className={cn(
-              "flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover",
+              "flex h-6 w-6 items-center justify-center rounded-md text-tertiary hover:bg-hover",
               pinned && "text-primary",
               !hovered && !pinned && "invisible",
             )}
