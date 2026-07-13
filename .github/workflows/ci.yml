@@ -207,6 +207,20 @@ jobs:
       - name: Path traversal / secret redaction tests
         run: cargo test --workspace --test security
 
+  # ---------- Linux enforcement host gate ----------
+  linux-enforcement-preflight:
+    name: Linux enforcement prerequisites
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: just bootstrap
+      - name: Install host enforcement dependencies
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq
+      - name: Verify delegated Linux controls
+        run: just linux-enforcement-prereqs
+
   # ---------- Eval smoke (per PR for agent-behavior changes) ----------
   eval-smoke:
     name: Eval smoke
