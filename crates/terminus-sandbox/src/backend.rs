@@ -25,6 +25,19 @@ pub trait SandboxBackend: Send + Sync + std::fmt::Debug {
     ) -> Option<(std::path::PathBuf, Vec<String>)> {
         None
     }
+
+    /// Build a wrapper for a proxy-required profile with exactly one
+    /// kernel-owned broker directory visible inside the sandbox. Backends
+    /// that cannot create a network namespace and mount this private route
+    /// must return `None`; callers fail closed rather than spawning directly.
+    fn spawn_wrapper_with_egress_broker(
+        &self,
+        _command: &terminus_kernel_protocol::CommandSpec,
+        _profile: &SandboxProfile,
+        _broker_dir: &std::path::Path,
+    ) -> Option<(std::path::PathBuf, Vec<String>)> {
+        None
+    }
 }
 
 /// The default local backend. This is intentionally NOT a full namespace

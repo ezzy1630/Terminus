@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use terminus_sandbox::{ResourceLimits, SandboxError};
+use terminus_sandbox::{NetworkAccess, ResourceLimits, SandboxError};
 
 pub const LAUNCHER_ARG: &str = "--terminus-sandbox-launch";
 pub const PAYLOAD_ARG: &str = "--terminus-sandbox-payload";
@@ -23,7 +23,7 @@ pub fn payload_wrapper(
     bwrap_path: &Path,
     bwrap_args: &[String],
     limits: ResourceLimits,
-    network_deny: bool,
+    network: NetworkAccess,
 ) -> Option<(PathBuf, Vec<String>)> {
     let executable = std::env::current_exe().ok()?;
     let separator = bwrap_args.iter().position(|arg| arg == "--")?;
@@ -33,7 +33,12 @@ pub fn payload_wrapper(
         executable.to_string_lossy().to_string(),
         PAYLOAD_ARG.to_string(),
         limits_json,
-        if network_deny { "deny" } else { "allow" }.to_string(),
+        match network {
+            NetworkAccess::Deny => "deny",
+            NetworkAccess::ProxyRequired => "proxy",
+            NetworkAccess::Allow => "allow",
+        }
+        .to_string(),
         "--".to_string(),
     ]);
     payload_args.extend(bwrap_args[separator + 1..].iter().cloned());
@@ -76,7 +81,10 @@ pub fn run_payload(args: &[String]) -> Result<i32, SandboxError> {
     .map_err(|error| SandboxError::Misconfigured(format!("invalid resource limits: {error}")))?;
     let network_deny = match args.get(2).map(String::as_str) {
         Some("deny") => true,
-        Some("allow") => false,
+        // ProxyRequired has an unshared network namespace. It must retain
+        // Unix-domain sockets to reach the mounted broker, while direct
+        // network routes remain absent from that namespace.
+        Some("proxy") | Some("allow") => false,
         _ => {
             return Err(SandboxError::Misconfigured(
                 "sandbox payload missing network mode".to_string(),

@@ -14,6 +14,37 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time;
 
+/// A resource that must remain alive for the full child-process lease.
+///
+/// The process supervisor drops the lease after the child is reaped, on a
+/// timeout, or on a spawn-stream failure. This keeps per-process resources
+/// such as an egress broker from becoming detached background state.
+pub struct SpawnLease {
+    cleanup: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl SpawnLease {
+    pub fn new(cleanup: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            cleanup: Some(Box::new(cleanup)),
+        }
+    }
+}
+
+impl std::fmt::Debug for SpawnLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnLease").finish_non_exhaustive()
+    }
+}
+
+impl Drop for SpawnLease {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
+}
+
 /// A running or recently-exited managed process.
 #[derive(Debug)]
 pub struct ManagedProcess {
@@ -23,6 +54,7 @@ pub struct ManagedProcess {
     pub stdin: Option<ChildStdin>,
     pub pid: Option<u32>,
     pub cancel_requested: bool,
+    lease: Option<SpawnLease>,
 }
 
 /// ProcessManager owns child processes. Construction is cheap; share via
@@ -63,7 +95,7 @@ impl ProcessManager {
             command.current_dir(cwd);
         }
         let resolved_executable = spawn.program.clone();
-        self.spawn_command(command, resolved_executable, spawn.timeout_ms)
+        self.spawn_command(command, resolved_executable, spawn.timeout_ms, None)
             .await
     }
 
@@ -89,7 +121,26 @@ impl ProcessManager {
         // the new mount namespace.
         let resolved_executable =
             format!("{} (sandboxed via {})", spawn.program, wrapper.display());
-        self.spawn_command(command, resolved_executable, spawn.timeout_ms)
+        self.spawn_command(command, resolved_executable, spawn.timeout_ms, None)
+            .await
+    }
+
+    /// Spawn a sandboxed process and retain a lease-owned resource until its
+    /// process group has terminated and been reaped.
+    pub async fn spawn_wrapped_with_lease(
+        &self,
+        wrapper: std::path::PathBuf,
+        wrapper_argv: Vec<String>,
+        spawn: NormalizedSpawn,
+        lease: SpawnLease,
+    ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
+        let mut command = Command::new(&wrapper);
+        command.args(&wrapper_argv);
+        command.env_clear();
+        command.envs(&spawn.env);
+        let resolved_executable =
+            format!("{} (sandboxed via {})", spawn.program, wrapper.display());
+        self.spawn_command(command, resolved_executable, spawn.timeout_ms, Some(lease))
             .await
     }
 
@@ -101,6 +152,7 @@ impl ProcessManager {
         mut command: Command,
         resolved_executable: String,
         timeout_ms: u64,
+        lease: Option<SpawnLease>,
     ) -> Result<(SpawnOutcome, mpsc::Receiver<ProcessEvent>), ProcessError> {
         let process_id = terminus_kernel_protocol::new_id();
         let job_id = terminus_kernel_protocol::new_id();
@@ -137,6 +189,7 @@ impl ProcessManager {
             stdin,
             pid: child_pid,
             cancel_requested: false,
+            lease,
         }));
         self.children
             .lock()
@@ -147,6 +200,7 @@ impl ProcessManager {
         let max_inline = self.max_inline_bytes;
         let pid = process_id.clone();
         let tx_clone = tx.clone();
+        let children = Arc::clone(&self.children);
         // `timeout_ms` is a parameter of `spawn_command`.
 
         // SPEC §44.2 ownership: this supervisor task owns the child's
@@ -213,6 +267,7 @@ impl ProcessManager {
                                 stderr_artifact: None,
                             }))
                             .await;
+                        release_managed(&children, &pid, &managed).await;
                         return;
                     }
                 }
@@ -233,6 +288,7 @@ impl ProcessManager {
                             stderr_artifact: None,
                         }))
                         .await;
+                    release_managed(&children, &pid, &managed).await;
                     return;
                 }
             };
@@ -279,13 +335,7 @@ impl ProcessManager {
                     stderr_artifact,
                 }))
                 .await;
-            // Drop the child from the managed wrapper.
-            let mut child_guard = managed.lock().await;
-            child_guard.child = None;
-            child_guard.pid = None;
-            // Drop the final sender so the receiver closes.
-            drop(child_guard);
-            let _ = pid;
+            release_managed(&children, &pid, &managed).await;
         });
 
         Ok((
@@ -379,6 +429,22 @@ impl ProcessManager {
             false
         }
     }
+}
+
+async fn release_managed(
+    children: &Arc<Mutex<HashMap<String, Arc<Mutex<ManagedProcess>>>>>,
+    process_id: &str,
+    managed: &Arc<Mutex<ManagedProcess>>,
+) {
+    let lease = {
+        let mut guard = managed.lock().await;
+        guard.child = None;
+        guard.pid = None;
+        guard.stdin = None;
+        guard.lease.take()
+    };
+    drop(lease);
+    children.lock().await.remove(process_id);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -504,6 +570,7 @@ fn now_rfc3339() -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
 
     fn store() -> (tempfile::TempDir, Arc<ArtifactStore>) {
@@ -675,5 +742,39 @@ mod tests {
         }
         let expected = std::fs::canonicalize(tmp.path()).unwrap();
         assert_eq!(pwd_line.trim(), expected.to_string_lossy());
+    }
+
+    #[tokio::test]
+    async fn lease_is_released_when_the_child_exits() {
+        let (_dir, store) = store();
+        let mgr = ProcessManager::new(store);
+        let released = Arc::new(AtomicBool::new(false));
+        let released_for_lease = Arc::clone(&released);
+        let spawn = NormalizedSpawn {
+            program: "echo".into(),
+            args: vec!["lease".into()],
+            env: std::collections::BTreeMap::new(),
+            working_dir: None,
+            timeout_ms: 5_000,
+            shell: false,
+        };
+        let (outcome, mut rx) = mgr
+            .spawn_wrapped_with_lease(
+                PathBuf::from("echo"),
+                vec!["lease".to_string()],
+                spawn,
+                SpawnLease::new(move || {
+                    released_for_lease.store(true, Ordering::Release);
+                }),
+            )
+            .await
+            .unwrap();
+        while rx.recv().await.is_some() {}
+        assert!(released.load(Ordering::Acquire));
+        assert!(!mgr.is_running(&outcome.process_id).await);
+        assert!(matches!(
+            mgr.cancel(&outcome.process_id, "after-exit").await,
+            Err(ProcessError::NotFound(_))
+        ));
     }
 }

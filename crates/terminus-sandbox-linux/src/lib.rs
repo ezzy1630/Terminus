@@ -47,6 +47,10 @@ pub struct LinuxSandboxBackend {
 }
 
 impl LinuxSandboxBackend {
+    /// Guest-visible directory containing the sole broker socket allowed for
+    /// a proxy-required sandbox lease.
+    pub const EGRESS_BROKER_GUEST_DIR: &str = "/run/terminus-egress";
+    pub const EGRESS_BROKER_SOCKET_NAME: &str = "broker.sock";
     /// Construct a backend that probes `$PATH` for `bwrap`. If found, the
     /// backend reports `Enforced` for the namespace-backed features;
     /// otherwise it reports `Degraded` and rejects profiles that require
@@ -128,11 +132,26 @@ impl LinuxSandboxBackend {
     /// - `--chdir <cwd>` — set the working directory.
     /// - `--` followed by the command program and its args.
     pub fn build_bwrap_argv(command: &CommandSpec, profile: &SandboxProfile) -> Vec<String> {
+        Self::build_bwrap_argv_with_egress_broker(command, profile, None)
+    }
+
+    /// Build bwrap argv with an optional private egress-broker mount. The
+    /// host broker parent is hidden by a tmpfs before the single lease
+    /// directory is mounted at a fixed guest path, preventing a payload from
+    /// enumerating or reusing another task's broker socket.
+    pub fn build_bwrap_argv_with_egress_broker(
+        command: &CommandSpec,
+        profile: &SandboxProfile,
+        broker_dir: Option<&std::path::Path>,
+    ) -> Vec<String> {
         let mut argv: Vec<String> = Vec::new();
 
         // Namespace isolation. --unshare-all covers user, pid, mount, ipc, uts.
         argv.push("--unshare-all".to_string());
-        if matches!(profile.network, NetworkAccess::Deny) {
+        if matches!(
+            profile.network,
+            NetworkAccess::Deny | NetworkAccess::ProxyRequired
+        ) {
             argv.push("--unshare-net".to_string());
         }
 
@@ -171,6 +190,23 @@ impl LinuxSandboxBackend {
             }
         }
 
+        if let Some(broker_dir) = broker_dir {
+            if let Some(broker_parent) = broker_dir.parent() {
+                // Hide the host lease parent inherited through `--ro-bind / /`.
+                argv.push("--tmpfs".to_string());
+                argv.push(broker_parent.display().to_string());
+                // Then create a guest-only runtime path and expose just this
+                // lease directory (which contains one 0600 Unix socket).
+                argv.push("--tmpfs".to_string());
+                argv.push("/run".to_string());
+                argv.push("--dir".to_string());
+                argv.push(Self::EGRESS_BROKER_GUEST_DIR.to_string());
+                argv.push("--ro-bind".to_string());
+                argv.push(broker_dir.display().to_string());
+                argv.push(Self::EGRESS_BROKER_GUEST_DIR.to_string());
+            }
+        }
+
         // Lifecycle isolation.
         argv.push("--die-with-parent".to_string());
         argv.push("--new-session".to_string());
@@ -205,15 +241,24 @@ impl LinuxSandboxBackend {
         command: &CommandSpec,
         profile: &SandboxProfile,
     ) -> Option<(PathBuf, Vec<String>)> {
+        self.build_enforced_wrapper_with_egress_broker(command, profile, None)
+    }
+
+    pub fn build_enforced_wrapper_with_egress_broker(
+        &self,
+        command: &CommandSpec,
+        profile: &SandboxProfile,
+        broker_dir: Option<&std::path::Path>,
+    ) -> Option<(PathBuf, Vec<String>)> {
         let bwrap_path = self.bwrap_path.as_ref()?;
         if !self.bwrap_verified {
             return None;
         }
         enforcement::payload_wrapper(
             bwrap_path,
-            &Self::build_bwrap_argv(command, profile),
+            &Self::build_bwrap_argv_with_egress_broker(command, profile, broker_dir),
             profile.resources,
-            matches!(profile.network, NetworkAccess::Deny),
+            profile.network,
         )
     }
 
@@ -269,6 +314,18 @@ impl SandboxBackend for LinuxSandboxBackend {
         profile: &SandboxProfile,
     ) -> Option<(std::path::PathBuf, Vec<String>)> {
         self.build_enforced_wrapper(command, profile)
+    }
+
+    fn spawn_wrapper_with_egress_broker(
+        &self,
+        command: &CommandSpec,
+        profile: &SandboxProfile,
+        broker_dir: &std::path::Path,
+    ) -> Option<(std::path::PathBuf, Vec<String>)> {
+        if !matches!(profile.network, NetworkAccess::ProxyRequired) {
+            return None;
+        }
+        self.build_enforced_wrapper_with_egress_broker(command, profile, Some(broker_dir))
     }
 
     fn enforcement_report(&self) -> EnforcementReport {
@@ -371,18 +428,13 @@ impl SandboxBackend for LinuxSandboxBackend {
         // Filesystem Deny rules can be partially enforced via terminus-fs path
         // policy, so they remain reportable as degraded rather than rejected
         // here.
-        if matches!(profile.network, NetworkAccess::ProxyRequired) {
-            return Err(SandboxError::Unsupported(
-                "proxy-required profiles need the Terminus egress bridge; direct network is not permitted"
-                    .into(),
-            ));
-        }
-        if matches!(profile.network, NetworkAccess::Deny)
-            && !matches!(
-                self.enforcement_report().status,
-                EnforcementStatus::Enforced
-            )
-        {
+        if matches!(
+            profile.network,
+            NetworkAccess::Deny | NetworkAccess::ProxyRequired
+        ) && !matches!(
+            self.enforcement_report().status,
+            EnforcementStatus::Enforced
+        ) {
             return Err(SandboxError::Unsupported(
                 "profile requires verified Linux namespace, seccomp, and delegated cgroup enforcement"
                     .into(),
@@ -487,6 +539,12 @@ mod tests {
     fn profile_with_network_allow() -> SandboxProfile {
         let mut p = restrictive_profile();
         p.network = NetworkAccess::Allow;
+        p
+    }
+
+    fn profile_with_proxy_required() -> SandboxProfile {
+        let mut p = restrictive_profile();
+        p.network = NetworkAccess::ProxyRequired;
         p
     }
 
@@ -809,6 +867,32 @@ mod tests {
             "workspace:// URIs must not be passed to bwrap; got {:?}",
             argv
         );
+    }
+
+    #[test]
+    fn proxy_required_mounts_only_the_lease_broker_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let broker_root = temp.path().join("brokers");
+        let broker_dir = broker_root.join("lease-1");
+        std::fs::create_dir_all(&broker_dir).unwrap();
+        let command = simple_command("curl");
+        let argv = LinuxSandboxBackend::build_bwrap_argv_with_egress_broker(
+            &command,
+            &profile_with_proxy_required(),
+            Some(&broker_dir),
+        );
+        assert!(argv.contains(&"--unshare-net".to_string()));
+        assert!(argv.windows(2).any(|window| {
+            window[0] == "--tmpfs" && window[1] == broker_root.display().to_string()
+        }));
+        assert!(argv
+            .windows(2)
+            .any(|window| { window[0] == "--tmpfs" && window[1] == "/run" }));
+        assert!(argv.windows(3).any(|window| {
+            window[0] == "--ro-bind"
+                && window[1] == broker_dir.display().to_string()
+                && window[2] == LinuxSandboxBackend::EGRESS_BROKER_GUEST_DIR
+        }));
     }
 
     #[test]

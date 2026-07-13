@@ -29,5 +29,5 @@ mod manager;
 mod spec;
 
 pub use error::ProcessError;
-pub use manager::{ManagedProcess, ProcessManager};
+pub use manager::{ManagedProcess, ProcessManager, SpawnLease};
 pub use spec::{NormalizedSpawn, SpawnOutcome};
