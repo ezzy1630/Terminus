@@ -203,6 +203,9 @@ function buildCatalog(): SettingCategory[] {
           description: "Disable non-essential animations.",
           control: { kind: "toggle" },
           defaultValue: false,
+          apply: (v) => {
+            document.documentElement.dataset.reduceMotion = Boolean(v) ? "true" : "false";
+          },
         },
         {
           id: "appearance.reduce-transparency",
@@ -210,7 +213,9 @@ function buildCatalog(): SettingCategory[] {
           description: "Use solid surfaces instead of native vibrancy.",
           control: { kind: "toggle" },
           defaultValue: false,
-          restartRequired: true,
+          apply: (v) => {
+            document.documentElement.dataset.reduceTransparency = Boolean(v) ? "true" : "false";
+          },
         },
       ],
     },
@@ -759,6 +764,16 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
 }));
 
+// Install every live preference once at module load so persisted motion,
+// transparency, theme, and density choices are true before Settings opens.
+for (const category of CATALOG) {
+  for (const descriptor of category.settings) {
+    if (!descriptor.apply) continue;
+    const value = useSettingsStore.getState().get(descriptor.id) ?? descriptor.defaultValue;
+    descriptor.apply(value);
+  }
+}
+
 function findDescriptor(id: string): SettingDescriptor | undefined {
   for (const cat of CATALOG) {
     const s = cat.settings.find((x) => x.id === id);
@@ -1004,6 +1019,7 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
   const [draftText, setDraftText] = useState<string | null>(null);
 
   const current: SettingValue = value ?? descriptor.defaultValue;
+  const available = typeof descriptor.apply === "function";
 
   const commit = useCallback(
     (next: SettingValue): void => {
@@ -1022,7 +1038,7 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
 
   return (
     <div
-      className="flex items-start gap-4 rounded-md px-3 py-3 hover:bg-hover"
+      className={cn("flex items-start gap-4 rounded-md px-3 py-3", available ? "hover:bg-hover" : "opacity-70")}
       style={{ transition: "background var(--duration-fast) var(--easing-default)" }}
     >
       <div className="flex min-w-0 flex-1 flex-col" style={{ gap: 2 }}>
@@ -1046,6 +1062,11 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
               Restart
             </span>
           ) : null}
+          {!available ? (
+            <span className="rounded-sm border border-subtle px-1.5 py-0.5 text-tertiary" style={{ fontSize: 10 }} title="This control is not connected to a runtime contract yet">
+              Unavailable
+            </span>
+          ) : null}
         </div>
         {descriptor.description ? (
           <p className="text-secondary" style={{ fontSize: "var(--font-size-xs)", lineHeight: "var(--line-height-relaxed)" }}>
@@ -1065,8 +1086,9 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
           onChange={commit}
           draftText={draftText}
           onDraftText={setDraftText}
+          disabled={!available}
         />
-        <button
+        {available ? <button
           type="button"
           onClick={() => {
             setError(null);
@@ -1077,7 +1099,7 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
           className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
         >
           <RotateCcw size={12} />
-        </button>
+        </button> : null}
       </div>
     </div>
   );
@@ -1089,12 +1111,14 @@ function SettingControlView({
   onChange,
   draftText,
   onDraftText,
+  disabled,
 }: {
   descriptor: SettingDescriptor;
   value: SettingValue;
   onChange: (v: SettingValue) => void;
   draftText: string | null;
   onDraftText: (v: string | null) => void;
+  disabled: boolean;
 }): JSX.Element {
   const c = descriptor.control;
   const isModified = value !== descriptor.defaultValue;
@@ -1108,7 +1132,8 @@ function SettingControlView({
         aria-checked={checked}
         aria-label={descriptor.label}
         onClick={() => onChange(!checked)}
-        className={cn("relative inline-flex h-5 w-9 items-center rounded-full transition-colors")}
+        disabled={disabled}
+        className={cn("relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed")}
         style={{
           background: checked ? "var(--color-primary)" : "var(--bg-hover)",
           border: "1px solid var(--border-default)",
@@ -1132,6 +1157,7 @@ function SettingControlView({
         value={String(value)}
         onChange={(e) => onChange(e.target.value)}
         aria-label={descriptor.label}
+        disabled={disabled}
         className="rounded-md bg-canvas text-primary focus:outline-none"
         style={{
           height: 28,
@@ -1166,6 +1192,7 @@ function SettingControlView({
             onChange(Number.isFinite(n) ? n : 0);
           }}
           aria-label={descriptor.label}
+          disabled={disabled}
           className="rounded-md bg-canvas text-primary focus:outline-none"
           style={{
             height: 28,
@@ -1211,6 +1238,7 @@ function SettingControlView({
           }
         }}
         aria-label={descriptor.label}
+        disabled={disabled}
         className="rounded-md bg-canvas text-primary placeholder:text-tertiary focus:outline-none"
         style={{
           height: 28,
@@ -1229,6 +1257,7 @@ function SettingControlView({
       label={descriptor.label}
       value={String(value)}
       onChange={onChange}
+      disabled={disabled}
     />
   );
 }
@@ -1237,10 +1266,12 @@ function ShortcutControl({
   label,
   value,
   onChange,
+  disabled,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
+  disabled: boolean;
 }): JSX.Element {
   const [recording, setRecording] = useState(false);
   useEffect(() => {
@@ -1270,6 +1301,7 @@ function ShortcutControl({
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={() => setRecording(true)}
       aria-label={`Edit shortcut for ${label}`}
       className={cn(

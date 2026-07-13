@@ -34,7 +34,7 @@ import { Sidebar } from "../src/components/Sidebar";
 import { SidebarItem } from "../src/components/SidebarItem";
 import { Message } from "../src/components/Message";
 import { sidebarVisibleTaskCount } from "../src/components/Sidebar";
-import { deriveRuntimeModelProfiles } from "../src/components/Settings";
+import { deriveRuntimeModelProfiles, useSettingsStore } from "../src/components/Settings";
 
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import { useThemeStore } from "../src/hooks/use-theme";
@@ -806,5 +806,18 @@ describe("Settings — runtime model profiles", () => {
 
   test("does not create fallback models when the registry is empty", () => {
     expect(deriveRuntimeModelProfiles([])).toEqual([]);
+  });
+
+  test("applies reduced motion and transparency to the live document", () => {
+    const settings = useSettingsStore.getState();
+    settings.set("appearance.reduce-motion", true);
+    settings.set("appearance.reduce-transparency", true);
+    expect(document.documentElement.dataset.reduceMotion).toBe("true");
+    expect(document.documentElement.dataset.reduceTransparency).toBe("true");
+
+    settings.set("appearance.reduce-motion", false);
+    settings.set("appearance.reduce-transparency", false);
+    expect(document.documentElement.dataset.reduceMotion).toBe("false");
+    expect(document.documentElement.dataset.reduceTransparency).toBe("false");
   });
 });

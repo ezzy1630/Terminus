@@ -416,6 +416,21 @@ textarea {
   }
 }
 
+html[data-reduce-motion="true"] *,
+html[data-reduce-motion="true"] *::before,
+html[data-reduce-motion="true"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+html[data-reduce-transparency="true"] .inspector-card,
+html[data-reduce-transparency="true"] .command-palette-shell {
+  backdrop-filter: none !important;
+  background: var(--bg-inspector) !important;
+}
+
 /* ────────────────────────── Utility classes ──────────────────────────── */
 
 .font-mono {
