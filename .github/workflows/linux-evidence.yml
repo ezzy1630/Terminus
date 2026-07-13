@@ -30,6 +30,13 @@ jobs:
         run: |
           sudo bwrap --unshare-all --ro-bind / / --proc /proc --dev /dev \
             --die-with-parent --new-session --cap-drop ALL -- /bin/true
+      - name: Verify delegated cgroup mount is writable in Bubblewrap
+        run: |
+          sudo bwrap --unshare-all --ro-bind / / \
+            --bind /sys/fs/cgroup/terminus-ci /sys/fs/cgroup \
+            --proc /proc --dev /dev --die-with-parent --new-session \
+            --cap-drop ALL -- /bin/sh -ec \
+            'lease=/sys/fs/cgroup/.terminus-bwrap-probe; mkdir "$lease"; rmdir "$lease"'
       - uses: sigstore/cosign-installer@v3
       - name: Build kernel probe binary
         run: |
