@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- Electron Builder loads this hook as CommonJS. */
 "use strict";
 
 const { execFileSync } = require("node:child_process");
@@ -34,4 +35,3 @@ exports.default = async function afterPack(context) {
   for (const key of UNUSED_PRIVACY_KEYS) deletePlistKey(infoPlist, key);
   deletePlistKey(infoPlist, "NSAppTransportSecurity:NSAllowsArbitraryLoads");
 };
-
