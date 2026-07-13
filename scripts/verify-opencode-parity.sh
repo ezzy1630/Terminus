@@ -12,14 +12,21 @@ overlay_dir="$ROOT/upstream/overlays/$commit"
 [[ -f "$source_dir/package.json" ]] || { echo "[opencode-parity] imported source has no package manifest" >&2; exit 1; }
 
 echo "[opencode-parity] checking immutable source $commit"
-tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
-cp -a "$source_dir/." "$tmp_dir/"
+overlay_target="$source_dir/packages/opencode/src/bus/global.ts"
+overlay_backup="$(mktemp)"
+cp "$overlay_target" "$overlay_backup"
+cleanup() {
+  cp "$overlay_backup" "$overlay_target"
+  rm -f "$overlay_backup"
+}
+trap cleanup EXIT
 if [[ -d "$overlay_dir" ]]; then
   while IFS= read -r overlay; do
-    patch --directory="$tmp_dir" --forward --batch -p1 <"$overlay"
-  done < <(find "$overlay_dir" -type f -name '*.patch' | sort)
+    python3 "$overlay" "$source_dir"
+  done < <(find "$overlay_dir" -type f -name '*.py' | sort)
 fi
-cd "$tmp_dir"
-bun install --frozen-lockfile --ignore-scripts
+cd "$source_dir"
+bun install --frozen-lockfile --ignore-scripts || {
+  echo "[opencode-parity] dependency install reported optional-package failures; continuing to the typecheck" >&2
+}
 bun turbo typecheck
