@@ -1245,6 +1245,7 @@ fn strings(value: &serde_json::Value, key: &str) -> Vec<String> {
 }
 
 /// Serve the canonical Protobuf API over a filesystem-restricted Unix socket.
+#[cfg(unix)]
 pub async fn serve_grpc(
     socket_path: PathBuf,
     kernel: terminus_kernel::KernelHandle,
@@ -1411,7 +1412,18 @@ pub async fn serve_grpc(
     Ok(())
 }
 
+/// Windows has no Unix-domain socket transport. Refuse startup explicitly
+/// rather than silently replacing the authenticated local transport with TCP.
+#[cfg(not(unix))]
+pub async fn serve_grpc(
+    _socket_path: PathBuf,
+    _kernel: terminus_kernel::KernelHandle,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    Err("the kernel gRPC UDS transport is unsupported on this platform".into())
+}
+
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use hyper_util::rt::TokioIo;
