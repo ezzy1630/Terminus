@@ -280,7 +280,7 @@ jobs:
           PROTOCOL_OWNER_APPROVAL: ${{ vars.TERMINUS_PROTOCOL_OWNER_APPROVAL }}
           EVALUATION_OWNER_APPROVAL: ${{ vars.TERMINUS_EVALUATION_OWNER_APPROVAL }}
         run: |
-          cat > release-decision.yaml <<'EOF'
+          cat > release-decision.yaml <<EOF
           release:
             version: v${{ needs.supply-chain-gate.outputs.version }}
             commit: ${{ github.sha }}
