@@ -408,17 +408,7 @@ impl ProcessManager {
             .as_ref()
             .and_then(Child::id)
             .ok_or_else(|| ProcessError::NotFound(process_id.to_string()))?;
-        let signal_number = match signal {
-            "SIGTERM" => libc::SIGTERM,
-            "SIGKILL" => libc::SIGKILL,
-            "SIGINT" => libc::SIGINT,
-            "SIGHUP" => libc::SIGHUP,
-            _ => {
-                return Err(ProcessError::InvalidSpec(format!(
-                    "unsupported signal `{signal}`"
-                )))
-            }
-        };
+        let signal_number = signal_number(signal)?;
         send_process_signal(pid, signal_number)?;
         Ok(signal.to_string())
     }
@@ -432,6 +422,26 @@ impl ProcessManager {
             false
         }
     }
+}
+
+#[cfg(unix)]
+fn signal_number(signal: &str) -> Result<i32, ProcessError> {
+    match signal {
+        "SIGTERM" => Ok(libc::SIGTERM),
+        "SIGKILL" => Ok(libc::SIGKILL),
+        "SIGINT" => Ok(libc::SIGINT),
+        "SIGHUP" => Ok(libc::SIGHUP),
+        _ => Err(ProcessError::InvalidSpec(format!(
+            "unsupported signal `{signal}`"
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_number(_signal: &str) -> Result<i32, ProcessError> {
+    Err(ProcessError::InvalidSpec(
+        "signals are unsupported on this platform".to_string(),
+    ))
 }
 
 async fn release_managed(children: &ChildRegistry, process_id: &str, managed: &ManagedProcessRef) {
@@ -576,6 +586,28 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = ArtifactStore::open(dir.path()).unwrap();
         (dir, Arc::new(store))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_number_allows_the_documented_signals() {
+        assert!(signal_number("SIGTERM").is_ok());
+        assert!(signal_number("SIGKILL").is_ok());
+        assert!(signal_number("SIGINT").is_ok());
+        assert!(signal_number("SIGHUP").is_ok());
+        assert!(matches!(
+            signal_number("SIGQUIT"),
+            Err(ProcessError::InvalidSpec(_))
+        ));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn signal_number_rejects_unsupported_platforms() {
+        assert!(matches!(
+            signal_number("SIGTERM"),
+            Err(ProcessError::InvalidSpec(_))
+        ));
     }
 
     #[tokio::test]
