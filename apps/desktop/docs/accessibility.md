@@ -183,15 +183,14 @@ All text/background combinations meet WCAG AA (4.5:1 for body text,
 
 | Combination | Dark | Light |
 | ----------- | ---- | ----- |
-| `--text-primary` on `--bg-canvas` | `#e8e8ea` on `#1a1a1c` (12.6:1) | `#1a1a1c` on `#f7f7f8` (15.3:1) |
-| `--text-secondary` on `--bg-canvas` | `#99999e` on `#1a1a1c` (5.9:1) | `#5a5a5e` on `#f7f7f8` (7.0:1) |
-| `--text-tertiary` on `--bg-canvas` | `#6a6a6e` on `#1a1a1c` (3.5:1) | `#8a8a8e` on `#f7f7f8` (3.5:1) |
-| `--text-inverse` on `--color-primary` | `#1a1a1c` on `#58a6ff` (8.4:1) | `#ffffff` on `#0969da` (5.3:1) |
+| `--text-primary` on `--bg-canvas` | `#ececed` on `#171717` (15.2:1) | `#1a1a1c` on `#f6f6f7` (16.1:1) |
+| `--text-secondary` on `--bg-canvas` | `#b5b5b7` on `#171717` (8.8:1) | `#5a5a5e` on `#f6f6f7` (6.4:1) |
+| `--text-tertiary` on `--bg-canvas` | `#828287` on `#171717` (4.7:1) | `#707075` on `#f6f6f7` (4.6:1) |
+| `--text-placeholder` on form surfaces | `#949499` on `#2c2c2c` (4.6:1) | `#68686d` on `#f6f6f7` (5.1:1) |
+| `--text-inverse` on `--color-primary` | `#1a1a1c` on `#80aefb` (7.8:1) | `#ffffff` on `#316fca` (4.9:1) |
 
-`--text-tertiary` is borderline (3.5:1) for body text. It's used only
-for muted metadata (timestamps, hint text) where the lower contrast is
-intentional. Body text always uses `--text-primary` or
-`--text-secondary`.
+All interface text tokens now meet WCAG AA against their intended surfaces,
+including muted metadata and form placeholders.
 
 ## 10. Color is never the sole signal
 

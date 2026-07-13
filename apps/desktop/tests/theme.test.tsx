@@ -30,6 +30,20 @@ function getCssVar(name: string): string {
   return document.documentElement.style.getPropertyValue(name).trim();
 }
 
+function contrastRatio(foreground: string, background: string): number {
+  const luminance = (hex: string): number => {
+    const channels = hex.slice(1).match(/.{2}/g)?.map((channel) => Number.parseInt(channel, 16) / 255) ?? [];
+    const [red = 0, green = 0, blue = 0] = channels.map((channel) =>
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+    );
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  };
+  const foregroundLuminance = luminance(foreground);
+  const backgroundLuminance = luminance(background);
+  return (Math.max(foregroundLuminance, backgroundLuminance) + 0.05)
+    / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05);
+}
+
 function resetStore(): void {
   // Re-read persisted state from a clean localStorage.
   window.localStorage.clear();
@@ -93,6 +107,13 @@ describe("useThemeStore — theme switching installs color variables", () => {
     expect(getCssVar("--border-default")).toBe(lightTokens["--border-default"]);
     // The terminal background flips to dark in light theme for contrast.
     expect(getCssVar("--bg-terminal")).toBe(lightTokens["--bg-terminal"]);
+  });
+
+  test("muted and placeholder text retain WCAG AA contrast in both themes", () => {
+    expect(contrastRatio(darkTokens["--text-tertiary"], darkTokens["--bg-canvas"])).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(darkTokens["--text-placeholder"], darkTokens["--bg-composer"])).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightTokens["--text-tertiary"], lightTokens["--bg-canvas"])).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightTokens["--text-placeholder"], lightTokens["--bg-canvas"])).toBeGreaterThanOrEqual(4.5);
   });
 
   test("switching between dark and light swaps the canvas variable", () => {

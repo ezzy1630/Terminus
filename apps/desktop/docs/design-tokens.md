@@ -16,24 +16,25 @@ agent state, selected state, primary action, success).
 
 | Token                  | Value      | Purpose |
 | ---------------------- | ---------- | ------- |
-| `--bg-canvas`          | `#1e1e1e`  | Main canvas — warm Codex-like charcoal |
-| `--bg-elevated`        | `#262626`  | Elevated surfaces (cards, dropdowns) |
-| `--bg-sidebar`         | `#171717`  | Sidebar — darker grounding surface |
+| `--bg-canvas`          | `#171717`  | Main canvas — warm Codex-like charcoal |
+| `--bg-elevated`        | `#232323`  | Elevated surfaces (cards, dropdowns) |
+| `--bg-sidebar`         | `#292929`  | Sidebar — contrasting grounding surface |
 | `--bg-inspector`       | `#242424`  | Floating inspector card |
-| `--bg-terminal`        | `#161618`  | Terminal and diff surfaces (cooler, darker) |
-| `--bg-diff`            | `#161618`  | Diff background (matches terminal) |
-| `--bg-composer`        | `#2a2a2a`  | Composer input surface |
-| `--bg-card`            | `#282828`  | Starter card surface |
-| `--bg-hover`           | `#333333`  | Hover state for rows, buttons |
-| `--bg-nav-hover`       | `#2a2a2a`  | Sidebar navigation hover |
-| `--bg-selected`        | `#2d2d2d`  | Selected row (no bright saturated background per SPEC §7.2) |
+| `--bg-terminal`        | `#141416`  | Terminal and diff surfaces (cooler, darker) |
+| `--bg-diff`            | `#141416`  | Diff background (matches terminal) |
+| `--bg-composer`        | `#2c2c2c`  | Composer input surface |
+| `--bg-card`            | `#1b1b1b`  | Starter card surface |
+| `--bg-hover`           | `#383838`  | Hover state for rows, buttons |
+| `--bg-nav-hover`       | `#343434`  | Sidebar navigation hover |
+| `--bg-selected`        | `#343434`  | Selected row (no bright saturated background per SPEC §7.2) |
 | `--text-primary`       | `#ececed`  | Primary text |
-| `--text-secondary`     | `#a0a0a8`  | Secondary text |
-| `--text-tertiary`      | `#6a6a6e`  | Tertiary / muted text |
+| `--text-secondary`     | `#b5b5b7`  | Secondary text |
+| `--text-tertiary`      | `#828287`  | Tertiary / muted text |
+| `--text-placeholder`   | `#949499`  | Accessible form placeholder text |
 | `--text-inverse`       | `#1a1a1c`  | Text on saturated backgrounds (e.g. primary button) |
-| `--border-subtle`      | `#2e2e30`  | Subtle separators |
-| `--border-default`     | `#38383a`  | Default borders |
-| `--border-strong`      | `#48484a`  | Strong borders (focus-within on composer, etc.) |
+| `--border-subtle`      | `#303032`  | Subtle separators |
+| `--border-default`     | `#404043`  | Default borders |
+| `--border-strong`      | `#4a4a4e`  | Strong borders (focus-within on composer, etc.) |
 | `--color-success`      | `#3fb950`  | Success states, additions, "done" status |
 | `--color-error`        | `#f85149`  | Errors, deletions, "failed" status, deny actions |
 | `--color-warning`      | `#d29922`  | Warnings, approval risk (high), "waiting" status |
@@ -43,47 +44,50 @@ agent state, selected state, primary action, success).
 | `--color-primary`      | `#80aefb`  | Primary actions, "working" status |
 | `--color-access-full`  | `#3fb950`  | Full-access composer state |
 | `--text-accent`        | `#e8845e`  | Warm branded accent |
-| `--sidebar-separator`  | `#252527`  | Sidebar separator |
+| `--sidebar-separator`  | `#363638`  | Sidebar separator |
 | `--color-approval-risk`| `#d29922`  | Approval risk accent |
 | `--color-agent-working`| `#58a6ff`  | Spinner accent for active tasks |
 | `--color-agent-queued` | `#6a6a6e`  | Queued task indicator |
 | `--color-agent-waiting`| `#d29922`  | Waiting task indicator |
-| `--focus-ring`         | `0 0 0 2px #58a6ff40` | Focus-visible outline |
-| `--shadow-sm`          | `0 1px 3px rgba(0,0,0,0.3)` | Subtle elevation |
-| `--shadow-md`          | `0 4px 12px rgba(0,0,0,0.4)` | Dropdowns, inspector |
-| `--shadow-lg`          | `0 8px 24px rgba(0,0,0,0.5)` | Overlay surfaces (command palette, settings) |
+| `--focus-ring`         | `0 0 0 2px #80aefb44` | Focus-visible outline |
+| `--shadow-sm`          | `0 1px 3px rgba(0,0,0,0.28)` | Subtle elevation |
+| `--shadow-md`          | `0 8px 24px rgba(0,0,0,0.34)` | Dropdowns, inspector |
+| `--shadow-lg`          | `0 18px 48px rgba(0,0,0,0.52)` | Overlay surfaces |
+| `--shadow-card`        | `0 2px 6px rgba(0,0,0,0.18)` | Resting starter action |
+| `--shadow-card-hover`  | `0 4px 8px rgba(0,0,0,0.28)` | Hovered starter action |
 
 ### Light theme (`lightTokens`)
 
 | Token                  | Value      |
 | ---------------------- | ---------- |
-| `--bg-canvas`          | `#f7f7f8`  |
+| `--bg-canvas`          | `#f6f6f7`  |
 | `--bg-elevated`        | `#ffffff`  |
-| `--bg-sidebar`         | `#f0f0f2`  |
+| `--bg-sidebar`         | `#ededf0`  |
 | `--bg-inspector`       | `#ffffff`  |
 | `--bg-terminal`        | `#1a1a1c`  (stays dark for terminal contrast) |
 | `--bg-diff`            | `#ffffff`  |
 | `--bg-composer`        | `#ffffff`  |
 | `--bg-card`            | `#ffffff`  |
-| `--bg-hover`           | `#ececee`  |
+| `--bg-hover`           | `#e6e6ea`  |
 | `--bg-nav-hover`       | `#e9e9ed`  |
-| `--bg-selected`        | `#e4e4e8`  |
+| `--bg-selected`        | `#e0e0e5`  |
 | `--text-primary`       | `#1a1a1c`  |
 | `--text-secondary`     | `#5a5a5e`  |
-| `--text-tertiary`      | `#8a8a8e`  |
+| `--text-tertiary`      | `#707075`  |
+| `--text-placeholder`   | `#68686d`  |
 | `--text-inverse`       | `#ffffff`  |
-| `--border-subtle`      | `#e4e4e6`  |
-| `--border-default`     | `#d4d4d6`  |
+| `--border-subtle`      | `#e2e2e5`  |
+| `--border-default`     | `#d2d2d5`  |
 | `--border-strong`      | `#a4a4a6`  |
 | `--color-success`      | `#1a7f37`  |
 | `--color-error`        | `#cf222e`  |
 | `--color-warning`      | `#9a6700`  |
 | `--color-info`         | `#0969da`  |
-| `--color-primary`      | `#0969da`  |
+| `--color-primary`      | `#316fca`  |
 | `--color-access-full`  | `#1a7f37`  |
 | `--text-accent`        | `#c96a3e`  |
 | `--sidebar-separator`  | `#dcdce0`  |
-| `--focus-ring`         | `0 0 0 2px #0969da30` |
+| `--focus-ring`         | `0 0 0 2px #316fca3d` |
 
 Light theme uses softer, GitHub-light-inspired hues. The terminal
 background stays dark in both themes for readability — this matches
@@ -99,14 +103,14 @@ code and technical metadata.
 | ---------------------- | ----- |
 | `--font-family`        | `-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif` |
 | `--font-family-mono`   | `"SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, monospace` |
-| `--font-size-xs`       | `11px` |
-| `--font-size-sm`       | `12px` |
-| `--font-size-base`     | `13px` |
-| `--font-size-md`       | `14px` |
+| `--font-size-xs`       | `12px` |
+| `--font-size-sm`       | `13px` |
+| `--font-size-base`     | `14px` |
+| `--font-size-md`       | `15px` |
 | `--font-size-lg`       | `16px` |
 | `--font-size-xl`       | `18px` |
-| `--font-size-2xl`      | `22px` |
-| `--font-size-3xl`      | `28px` |
+| `--font-size-2xl`      | `26px` |
+| `--font-size-3xl`      | `32px` |
 | `--line-height-tight`  | `1.25` |
 | `--line-height-normal` | `1.5`  |
 | `--line-height-relaxed`| `1.7`  |
@@ -116,8 +120,8 @@ Font weights (constants, not CSS vars):
 - medium: `500`
 - semibold: `600`
 
-Body text uses `--font-size-base` (13px) with `--line-height-normal`
-(1.5). Headings are restrained: page titles use `--font-size-md` (14px)
+Body text uses `--font-size-base` (14px) with `--line-height-normal`
+(1.5). Headings are restrained: page titles use `--font-size-md` (15px)
 at weight 600; nothing in the app uses `--font-size-3xl` outside the
 onboarding welcome screen.
 
@@ -141,14 +145,16 @@ vertical padding for power users on smaller displays.
 | `--space-10`           | `40px` |
 | `--space-12`           | `48px` |
 | `--sidebar-width`      | `260px` |
-| `--sidebar-width-compact` | `200px` |
+| `--sidebar-width-compact` | `220px` |
 | `--inspector-width`    | `300px` |
 | `--composer-max-height`| `280px` |
 | `--conversation-max-width` | `720px` |
 | `--row-height`         | `34px` |
+| `--nav-row-height`     | `32px` |
 | `--radius-sm`          | `6px` |
 | `--radius-md`          | `10px` |
 | `--radius-lg`          | `14px` |
+| `--radius-xl`          | `18px` |
 
 ### Compact
 
@@ -169,9 +175,11 @@ vertical padding for power users on smaller displays.
 | `--composer-max-height`| `220px` |
 | `--conversation-max-width` | `680px` |
 | `--row-height`         | `28px` |
+| `--nav-row-height`     | `28px` |
 | `--radius-sm`          | `5px` |
 | `--radius-md`          | `8px` |
 | `--radius-lg`          | `12px` |
+| `--radius-xl`          | `16px` |
 
 Density changes apply immediately (no restart required) via
 `useThemeStore.setDensity()`. The `dataset.density` attribute on

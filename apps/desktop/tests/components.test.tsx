@@ -837,6 +837,14 @@ describe("NewTaskScreen — first turn lifecycle", () => {
     );
     expect(useTerminusStore.getState().selectedTaskId).toBe("task-new");
   });
+
+  test("keeps starter actions compact while preserving their explanatory tooltips", () => {
+    render(<NewTaskScreen />);
+
+    const starter = screen.getByRole("button", { name: "Explore and understand code" });
+    expect(starter).toHaveAttribute("title", "Map the system before making a change");
+    expect(screen.queryByText("Map the system before making a change")).not.toBeInTheDocument();
+  });
 });
 
 describe("Sidebar — navigation destinations", () => {

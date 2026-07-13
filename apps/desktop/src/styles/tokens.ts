@@ -46,12 +46,13 @@ export const darkTokens = {
   // Nav row hover — slightly warmer
   "--bg-nav-hover": "#343434",
   // Selected (no bright saturated background)
-  "--bg-selected": "#3a3a3a",
+  "--bg-selected": "#343434",
 
   // Text
   "--text-primary": "#ececed",
   "--text-secondary": "#b5b5b7",
-  "--text-tertiary": "#77777b",
+  "--text-tertiary": "#828287",
+  "--text-placeholder": "#949499",
   "--text-inverse": "#1a1a1c",
   // Warm accent for branding (Codex uses an orange-tinted icon)
   "--text-accent": "#e8845e",
@@ -87,8 +88,8 @@ export const darkTokens = {
   "--shadow-md": "0 8px 24px rgba(0,0,0,0.34), 0 1px 1px rgba(255,255,255,0.03) inset",
   "--shadow-lg": "0 18px 48px rgba(0,0,0,0.52), 0 1px 1px rgba(255,255,255,0.04) inset",
   // Card-specific shadow (starter cards)
-  "--shadow-card": "0 10px 28px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.025)",
-  "--shadow-card-hover": "0 16px 38px rgba(0,0,0,0.34), inset 0 1px 0 rgba(255,255,255,0.05)",
+  "--shadow-card": "0 2px 6px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.025)",
+  "--shadow-card-hover": "0 4px 8px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.05)",
 } as const;
 
 export const lightTokens = {
@@ -117,7 +118,8 @@ export const lightTokens = {
   // Text
   "--text-primary": "#1a1a1c",
   "--text-secondary": "#5a5a5e",
-  "--text-tertiary": "#8a8a8e",
+  "--text-tertiary": "#707075",
+  "--text-placeholder": "#68686d",
   "--text-inverse": "#ffffff",
   // Warm accent
   "--text-accent": "#c96a3e",
