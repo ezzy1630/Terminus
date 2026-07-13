@@ -36,7 +36,12 @@ jobs:
             --bind /sys/fs/cgroup/terminus-ci /sys/fs/cgroup \
             --proc /proc --dev /dev --die-with-parent --new-session \
             --cap-drop ALL -- /bin/sh -ec \
-            'lease=/sys/fs/cgroup/.terminus-bwrap-probe; mkdir "$lease"; rmdir "$lease"'
+            'lease=/sys/fs/cgroup/.terminus-bwrap-probe; \
+             mkdir "$lease"; \
+             printf "32\\n" > "$lease/pids.max"; \
+             printf "%s\\n" "$$" > "$lease/cgroup.procs"; \
+             printf "%s\\n" "$$" > /sys/fs/cgroup/cgroup.procs; \
+             rmdir "$lease"'
       - uses: sigstore/cosign-installer@v3
       - name: Build kernel probe binary
         run: |
