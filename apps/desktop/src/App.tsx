@@ -13,15 +13,15 @@
  *
  * Per SPEC §24: theme + density come from the Zustand store (which
  * installs CSS variables on document.documentElement at module load).
- * A small control in the title-bar area lets the user cycle theme +
- * toggle density without a restart.
+ * The title-bar theme control changes immediately; density remains available
+ * through the command palette and Settings without a restart.
  *
  * Per SPEC §25.1: "The initial shell must appear before heavy feature
  * bundles load." The main route switch is plain conditional rendering
  * — no React.lazy / Suspense boundaries yet.
  */
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { Command, Monitor, Moon, PanelRight, Rows3, Sun } from "lucide-react";
+import { CalendarClock, GitPullRequestArrow, Globe, MessageCircle, Monitor, Moon, PanelRight, Puzzle, Sun } from "lucide-react";
 import { Layout } from "./components/Layout";
 import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
 import { Sidebar } from "./components/Sidebar";
@@ -29,29 +29,94 @@ import { Inspector } from "./components/Inspector";
 import { Conversation } from "./components/Conversation";
 import { Composer } from "./components/Composer";
 import { NewTaskScreen } from "./components/NewTaskScreen";
+import { EmptyState } from "./components/EmptyState";
 import { CommandPalette, buildDefaultCommands } from "./components/CommandPalette";
 import { useTerminusStore, useSelectedSessionTasks, useSelectedTask, useSelectedTaskEvents } from "./hooks/use-terminus";
 import { useThemeStore } from "./hooks/use-theme";
 import { useViewport } from "./hooks/use-viewport";
 import { deriveComputerUseActivity } from "./lib/task-surface";
 import type { Theme } from "./types";
+import type { SidebarDestination } from "./components/Sidebar";
 
 const Settings = lazy(async () => {
-  const module = await import("./components/Settings");
-  return { default: module.Settings };
+  const settingsModule = await import("./components/Settings");
+  return { default: settingsModule.Settings };
 });
 
 const Onboarding = lazy(async () => {
-  const module = await import("./components/Onboarding");
-  return { default: module.Onboarding };
+  const onboardingModule = await import("./components/Onboarding");
+  return { default: onboardingModule.Onboarding };
 });
 
 const ReviewPane = lazy(async () => {
-  const module = await import("./components/ReviewPane");
-  return { default: module.ReviewPane };
+  const reviewModule = await import("./components/ReviewPane");
+  return { default: reviewModule.ReviewPane };
 });
 
 const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
+
+type SecondaryDestination = Exclude<SidebarDestination, "new_task" | "chat"> | "chat";
+
+const DESTINATION_SURFACES: Record<SecondaryDestination, {
+  icon: JSX.Element;
+  title: string;
+  description: string;
+  actionLabel: string;
+}> = {
+  scheduled: {
+    icon: <CalendarClock size={18} strokeWidth={1.6} />,
+    title: "Nothing scheduled yet",
+    description: "Scheduled tasks will appear here when the control plane exposes them. Start with a focused task whenever you are ready.",
+    actionLabel: "Start a task",
+  },
+  plugins: {
+    icon: <Puzzle size={18} strokeWidth={1.6} />,
+    title: "Plugins are quiet for now",
+    description: "Installed capabilities will be listed here with their trust boundary and current status.",
+    actionLabel: "Open settings",
+  },
+  sites: {
+    icon: <Globe size={18} strokeWidth={1.6} />,
+    title: "No sites connected",
+    description: "Connected product destinations will appear here once a site capability is configured.",
+    actionLabel: "Start a task",
+  },
+  pull_requests: {
+    icon: <GitPullRequestArrow size={18} strokeWidth={1.6} />,
+    title: "No pull requests yet",
+    description: "Pull requests created from verified task changes will be collected here.",
+    actionLabel: "Start a review",
+  },
+  chat: {
+    icon: <MessageCircle size={18} strokeWidth={1.6} />,
+    title: "Start a conversation",
+    description: "Choose a project and describe what you want to explore, build, review, or fix.",
+    actionLabel: "New task",
+  },
+};
+
+function DestinationSurface({
+  destination,
+  onStartTask,
+  onOpenSettings,
+}: {
+  destination: SecondaryDestination;
+  onStartTask: () => void;
+  onOpenSettings: () => void;
+}): JSX.Element {
+  const surface = DESTINATION_SURFACES[destination];
+  const action = destination === "plugins" ? onOpenSettings : onStartTask;
+  return (
+    <div className="flex h-full items-center justify-center bg-canvas">
+      <EmptyState
+        icon={surface.icon}
+        title={surface.title}
+        description={surface.description}
+        action={{ label: surface.actionLabel, onClick: action, shortcutHint: destination === "plugins" ? "⌘," : "⌘N" }}
+      />
+    </div>
+  );
+}
 
 function shouldShowOnboarding(): boolean {
   if (typeof window === "undefined") return false;
@@ -87,11 +152,11 @@ export function App(): JSX.Element {
   const setTheme = useThemeStore((s) => s.setTheme);
   const cycleTheme = useThemeStore((s) => s.cycleTheme);
   const toggleDensity = useThemeStore((s) => s.toggleDensity);
-  const density = useThemeStore((s) => s.density);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => shouldShowOnboarding());
+  const [activeDestination, setActiveDestination] = useState<SidebarDestination>("new_task");
 
   const [computerUseExpanded, setComputerUseExpanded] = useState(false);
   const [computerUseHidden, setComputerUseHidden] = useState(false);
@@ -114,6 +179,12 @@ export function App(): JSX.Element {
     setInspectorVisible((visible) => !visible);
   }, [inspectorPinned, viewport.inspectorOverlay]);
 
+  const goToNewTask = useCallback((): void => {
+    setActiveDestination("new_task");
+    selectTask(null);
+    setChangesOpen(false);
+  }, [selectTask]);
+
   // Initial data load.
   useEffect(() => {
     void refreshAll();
@@ -134,8 +205,7 @@ export function App(): JSX.Element {
         setPaletteOpen((o) => !o);
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
-        selectTask(null);
-        setChangesOpen(false);
+        goToNewTask();
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d" && selectedTaskId) {
         e.preventDefault();
         setChangesOpen((open) => !open);
@@ -158,6 +228,7 @@ export function App(): JSX.Element {
         const task = selectedSessionTasks[Number(e.key) - 1];
         if (task) {
           e.preventDefault();
+          setActiveDestination("chat");
           selectTask(task.id);
           setChangesOpen(false);
         }
@@ -165,7 +236,7 @@ export function App(): JSX.Element {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedSessionTasks, selectedTaskId, selectTask, toggleInspector]);
+  }, [goToNewTask, selectedSessionTasks, selectedTaskId, selectTask, toggleInspector]);
 
   useEffect(() => {
     const openSettings = (): void => setSettingsOpen(true);
@@ -183,7 +254,7 @@ export function App(): JSX.Element {
   const commands = useMemo(
     () =>
       buildDefaultCommands({
-        newTask: () => selectTask(null),
+        newTask: goToNewTask,
         showChanges: selectedTaskId ? () => setChangesOpen(true) : undefined,
         openTerminal: () => setTerminalOpen(true),
         toggleInspector,
@@ -207,10 +278,11 @@ export function App(): JSX.Element {
         revealInFinder: undefined,
         viewShortcuts: undefined,
       }),
-    [cycleTheme, selectTask, selectedTaskId, toggleDensity, toggleInspector],
+    [cycleTheme, goToNewTask, selectedTaskId, toggleDensity, toggleInspector],
   );
 
-  const showNewTask = selectedTaskId === null;
+  const showNewTask = selectedTaskId === null && activeDestination === "new_task";
+  const showNavigationSurface = selectedTaskId === null && !showNewTask;
 
   const onCompleteOnboarding = useCallback((): void => {
     markOnboardingComplete();
@@ -229,7 +301,12 @@ export function App(): JSX.Element {
   return (
     <>
       <Layout
-        sidebar={<Sidebar />}
+        sidebar={
+          <Sidebar
+            activeDestination={selectedTaskId ? "chat" : activeDestination}
+            onNavigate={setActiveDestination}
+          />
+        }
         sidebarVisible={sidebarVisible}
         // The inspector is contextual. A new-task screen has no task-bound
         // context yet, so keeping it out of the canvas restores the calm,
@@ -259,6 +336,12 @@ export function App(): JSX.Element {
         main={
           showNewTask ? (
             <NewTaskScreen />
+          ) : showNavigationSurface ? (
+            <DestinationSurface
+              destination={activeDestination === "new_task" ? "chat" : activeDestination}
+              onStartTask={goToNewTask}
+              onOpenSettings={() => setSettingsOpen(true)}
+            />
           ) : changesOpen ? (
             <ResizableReviewLayout
               conversation={<div className="flex h-full min-w-0 flex-col">
@@ -306,26 +389,6 @@ export function App(): JSX.Element {
               className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-35"
             >
               <PanelRight size={14} />
-            </button>
-            {/* Density toggle. */}
-            <button
-              type="button"
-              onClick={toggleDensity}
-              aria-label={`Density: ${density}`}
-              title={`Density: ${density}`}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
-            >
-              <Rows3 size={14} />
-            </button>
-            {/* Command palette trigger (small icon — main entry is ⌘K). */}
-            <button
-              type="button"
-              onClick={() => setPaletteOpen(true)}
-              aria-label="Open command palette"
-              title="Command palette (⌘K)"
-              className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
-            >
-              <Command size={14} />
             </button>
             {/* Health indicator — a single restrained dot. */}
             <span

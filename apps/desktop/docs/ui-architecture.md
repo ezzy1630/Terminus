@@ -40,9 +40,10 @@ Layout states (driven by `useViewport`):
 App
 ├── Layout                                  (SPEC §6 — three-region shell)
 │   ├── TitleBar
-│   │   ├── center slot (default: "Terminus" product name)
-│   │   └── right slot (theme, density, ⌘K, health dot)
+│   │   ├── center slot (active task objective, when useful)
+│   │   └── right slot (theme, inspector, terminal, health dot)
 │   ├── Sidebar                             (SPEC §7)
+│   │   ├── Workspace navigation (New task, Scheduled, Plugins, Sites, Pull requests, Chat)
 │   │   ├── SidebarItem (Pinned tasks)
 │   │   └── SidebarItem (Projects → Tasks, nested)
 │   ├── main
@@ -212,7 +213,7 @@ The same principle is applied throughout:
 
 | Surface           | Empty state                                  | Progressive reveal |
 | ----------------- | -------------------------------------------- | ------------------ |
-| Sidebar           | "No projects yet." (search-aware)            | Pinned section appears only when ≥ 1 task pinned |
+| Sidebar           | "No projects yet." (search-aware)            | Navigation remains available; Pinned appears only when ≥ 1 task is pinned |
 | Inspector         | "No task selected" placeholder               | Environment (always), Changes (patch evidence), Subagents (agent events), Verification (verification events), Approvals (pending approval events) |
 | Conversation      | (placeholder before first event)             | Messages + ActivityBlocks emerge as the agent emits events |
 | TerminalDrawer    | `EmptyState` ("No terminal session")         | Tabs appear as the user opens terminals |

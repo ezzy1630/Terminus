@@ -7,7 +7,7 @@
  * terminal drawer at the bottom.
  *
  * ┌──────────────────────────────────────────────────────────────┐
- * │ Native integrated title bar (draggable, 44px)                │
+ * │ Native integrated title bar (draggable, 40px)                │
  * ├──────────┬───────────────────────────────┬───────────────────┤
  * │ Left     │ Main conversation and working surface              │
  * │ sidebar  │                          ╭─ Dynamic inspector ─╮  │
@@ -25,7 +25,7 @@
  * traffic lights live in the top-left ~80px (we leave that space).
  */
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { PanelBottomClose, PanelBottomOpen } from "lucide-react";
+import { ChevronLeft, ChevronRight, PanelBottomClose, PanelBottomOpen } from "lucide-react";
 import { cn } from "../lib/cn";
 import { useViewport } from "../hooks/use-viewport";
 import { useThemeStore } from "../hooks/use-theme";
@@ -39,7 +39,7 @@ interface LayoutProps {
   inspector: ReactNode;
   /** Hides the contextual inspector when a technical split needs the width. */
   inspectorVisible?: boolean;
-  /** Optional content for the right side of the title bar (theme, density, etc.). */
+  /** Optional content for the right side of the title bar (theme, inspector, health). */
   right?: ReactNode;
   /** Optional content for the center of the title bar. */
   center?: ReactNode;
@@ -50,7 +50,7 @@ interface LayoutProps {
   onTerminalOpenChange?: (open: boolean) => void;
 }
 
-const TITLEBAR_HEIGHT = 44;
+const TITLEBAR_HEIGHT = 40;
 const TRAFFIC_LIGHTS_PAD = 80;
 const TERMINAL_MIN_HEIGHT = 120;
 const TERMINAL_DEFAULT_HEIGHT = 240;
@@ -87,7 +87,16 @@ const TitleBar = memo(function TitleBar({
         WebkitAppRegion: "drag",
       } as React.CSSProperties}
     >
-      {/* Center region — application/section title. */}
+      {/* Navigation arrows — back/forward (disabled placeholders). */}
+      <div className="titlebar-no-drag flex items-center gap-0.5">
+        <button type="button" className="flex h-6 w-6 items-center justify-center rounded text-tertiary hover:text-secondary" aria-label="Back" disabled>
+          <ChevronLeft size={14} />
+        </button>
+        <button type="button" className="flex h-6 w-6 items-center justify-center rounded text-tertiary hover:text-secondary" aria-label="Forward" disabled>
+          <ChevronRight size={14} />
+        </button>
+      </div>
+      {/* Center region — task objective when active, empty otherwise. */}
       <div className="titlebar-no-drag flex min-w-0 flex-1 items-center justify-center">
         {center}
       </div>
@@ -104,7 +113,7 @@ const TitleBar = memo(function TitleBar({
             terminalOpen && "text-primary bg-hover",
           )}
         >
-          {terminalOpen ? <PanelBottomClose size={15} /> : <PanelBottomOpen size={15} />}
+          {terminalOpen ? <PanelBottomClose size={14} /> : <PanelBottomOpen size={14} />}
         </button>
       </div>
     </div>
@@ -254,13 +263,7 @@ function LayoutImpl({
       <TitleBar
         terminalOpen={terminalOpen}
         onToggleTerminal={toggleTerminal}
-        center={
-          center ?? (
-            <div className="flex items-center gap-2 text-xs text-tertiary">
-              <span className="font-medium tracking-tight text-secondary">Terminus</span>
-            </div>
-          )
-        }
+        center={center ?? null}
         right={right}
       />
 
@@ -269,10 +272,11 @@ function LayoutImpl({
         {/* Sidebar. */}
         {sidebarVisible ? <aside
           className={cn(
-            "flex h-full flex-col border-r border-subtle bg-sidebar",
+            "flex h-full flex-col border-r bg-sidebar",
             density === "compact" && "py-0",
           )}
           style={{
+            borderColor: 'var(--sidebar-separator)',
             width: sidebarWidth,
             minWidth: typeof sidebarWidth === "number" ? sidebarWidth : 180,
             flexShrink: 0,
@@ -317,7 +321,7 @@ function LayoutImpl({
                 zIndex: 30,
               }}
             >
-              <div className="pointer-events-auto max-h-full overflow-hidden rounded-lg border border-default bg-inspector shadow-lg">
+              <div className="inspector-card pointer-events-auto max-h-full overflow-hidden rounded-lg border border-default bg-inspector shadow-lg">
                 {inspector}
               </div>
             </div>

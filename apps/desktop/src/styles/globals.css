@@ -28,7 +28,7 @@ html, body, #root {
 
 body {
   font-family: var(--font-family, -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif);
-  font-size: var(--font-size-base, 14px);
+  font-size: var(--font-size-base, 13px);
   line-height: var(--line-height-normal, 1.5);
   color: var(--text-primary);
   background: var(--bg-canvas);
@@ -52,8 +52,8 @@ textarea {
 /* Minimal macOS-style scrollbars */
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
 }
 
 ::-webkit-scrollbar-track {
@@ -110,7 +110,7 @@ textarea {
 }
 
 @keyframes start-rise {
-  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
@@ -131,10 +131,23 @@ textarea {
   animation: fade-in 420ms var(--easing-default) both;
 }
 
+.start-mark-glyph {
+  background: color-mix(in srgb, var(--text-accent) 12%, var(--bg-card));
+  border: 1px solid color-mix(in srgb, var(--text-accent) 28%, var(--border-subtle));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 8%, transparent), var(--shadow-sm);
+}
+
+/* ────────────────────────── Starter Cards ────────────────────────────── */
+/* Codex-style action cards on the new task screen. More elevated feel. */
+
 .starter-card {
-  background: color-mix(in srgb, var(--bg-elevated) 84%, transparent);
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-card);
   opacity: 0;
-  animation: start-rise 360ms var(--easing-default) forwards;
+  animation: start-rise 380ms var(--easing-default) forwards;
   transition:
     transform var(--duration-fast) var(--easing-default),
     border-color var(--duration-fast) var(--easing-default),
@@ -142,35 +155,58 @@ textarea {
     box-shadow var(--duration-fast) var(--easing-default);
 }
 
+.starter-card::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+  border-radius: inherit;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--easing-default);
+}
+
 .starter-card:hover {
   transform: translateY(-2px);
   border-color: var(--border-default);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-card-hover);
 }
+
+.starter-card:hover::after,
+.starter-card:focus-visible::after { opacity: 1; }
 
 .starter-card:active { transform: translateY(0) scale(0.992); }
 .starter-icon-explore { color: var(--color-info); }
-.starter-icon-build { color: var(--color-primary); }
+.starter-icon-build { color: var(--text-accent); }
 .starter-icon-review { color: var(--color-success); }
 .starter-icon-fix { color: var(--color-warning); }
+
+/* ────────────────────────── Composer ─────────────────────────────────── */
 
 .composer-dock {
   animation: slide-up 360ms var(--easing-default) 180ms both;
 }
 
 .project-chooser {
-  height: 52px;
-  background: color-mix(in srgb, var(--bg-elevated) 92%, var(--bg-canvas));
+  height: 48px;
+  background: color-mix(in srgb, var(--bg-card) 92%, var(--bg-canvas));
   border: 1px solid var(--border-subtle);
   border-bottom: 0;
-  transition: background var(--duration-fast) var(--easing-default);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  transition: background var(--duration-fast) var(--easing-default),
+              color var(--duration-fast) var(--easing-default);
 }
 
-.project-chooser:hover { background: var(--bg-elevated); color: var(--text-primary); }
+.project-chooser:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
 
-.start-composer { margin-top: -8px; position: relative; }
-.start-composer .composer-surface { border-color: var(--border-default); }
+.start-composer { margin-top: -1px; position: relative; }
+.start-composer .composer-surface {
+  border-color: var(--border-default);
+  border-radius: 0 0 var(--radius-xl) var(--radius-xl);
+}
 
 .composer-surface {
   transition:
@@ -180,8 +216,7 @@ textarea {
 }
 
 .composer-control,
-.send-control,
-.sidebar-nav-row {
+.send-control {
   transition:
     color var(--duration-fast) var(--easing-default),
     background var(--duration-fast) var(--easing-default),
@@ -189,9 +224,75 @@ textarea {
 }
 
 .composer-control:active,
-.send-control:active,
-.sidebar-nav-row:active { transform: scale(0.96); }
+.send-control:active { transform: scale(0.96); }
 
+/* ────────────────────────── Sidebar ──────────────────────────────────── */
+
+.sidebar-nav-row {
+  transition:
+    color var(--duration-fast) var(--easing-default),
+    background var(--duration-fast) var(--easing-default),
+    transform 100ms var(--easing-default);
+}
+
+.sidebar-nav-row:active { transform: scale(0.98); }
+
+/* Navigation items — Codex-style consistent row treatment */
+.sidebar-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: var(--nav-row-height, 32px);
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  text-align: left;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color var(--duration-fast) var(--easing-default),
+    background var(--duration-fast) var(--easing-default);
+}
+
+.sidebar-nav-item:hover {
+  background: var(--bg-nav-hover);
+  color: var(--text-primary);
+}
+
+.sidebar-nav-item:active {
+  transform: scale(0.98);
+}
+
+.sidebar-nav-item.is-active {
+  background: var(--bg-selected);
+  color: var(--text-primary);
+}
+
+.sidebar-nav-item:focus-visible,
+.sidebar-task-row:focus-visible,
+.composer-control:focus-visible,
+.send-control:focus-visible {
+  position: relative;
+  z-index: 1;
+}
+
+/* Section headers in sidebar */
+.sidebar-section-header {
+  padding: 0 8px;
+  margin-top: 4px;
+  margin-bottom: 2px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+/* Task rows — refined for Codex parity */
 .sidebar-task-row {
   transition: background var(--duration-fast) var(--easing-default), color var(--duration-fast) var(--easing-default), transform 100ms var(--easing-default);
 }
@@ -210,13 +311,36 @@ textarea {
 .sidebar-task-row:active { transform: scale(.992); }
 .sidebar-show-more { transition: color var(--duration-fast) var(--easing-default), background var(--duration-fast) var(--easing-default); }
 
+/* ────────────────────────── Inspector ────────────────────────────────── */
+
+.inspector-card {
+  backdrop-filter: blur(18px);
+  background: color-mix(in srgb, var(--bg-inspector) 94%, transparent);
+}
+
 .inspector-section { transition: background var(--duration-fast) var(--easing-default); }
 .inspector-section.is-urgent { background: color-mix(in srgb, var(--color-warning) 4%, transparent); }
 .inspector-section.is-urgent > button { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--color-warning) 72%, transparent); }
 
-.activity-block { transition: background var(--duration-fast) var(--easing-default), border-color var(--duration-fast) var(--easing-default); }
+.error-state {
+  border: 1px solid color-mix(in srgb, var(--color-warning) 24%, var(--border-subtle));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-warning) 4%, var(--bg-elevated));
+}
+
+.command-palette-shell {
+  background: color-mix(in srgb, var(--bg-elevated) 96%, var(--text-accent));
+  backdrop-filter: blur(20px);
+}
+
+/* ────────────────────────── Activity Blocks ──────────────────────────── */
+
+.activity-block { transition: background var(--duration-fast) var(--easing-default), border-color var(--duration-fast) var(--easing-default), box-shadow var(--duration-fast) var(--easing-default); }
+.activity-block:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-default) 65%, transparent); }
 .activity-header svg { transition: transform var(--duration-fast) var(--easing-default), color var(--duration-fast) var(--easing-default); }
 .activity-detail { animation: fade-in var(--duration-fast) var(--easing-default); }
+
+/* ────────────────────────── Code Surfaces ────────────────────────────── */
 
 .code-surface { background: var(--bg-terminal); }
 .code-toolbar { background: color-mix(in srgb, var(--bg-elevated) 74%, var(--bg-terminal)); }
@@ -225,7 +349,7 @@ textarea {
 .code-copy:focus-visible { opacity: 1; }
 
 @media (max-height: 760px) {
-  .starter-card { min-height: 112px; padding: 14px; }
+  .starter-card { min-height: 100px; padding: 12px; }
 }
 
 /* ────────────────────────── Spinner ──────────────────────────────────── */
@@ -241,6 +365,44 @@ textarea {
   border-top-color: var(--color-agent-working);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+/* Small spinner for sidebar status indicators */
+.spinner-sm {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid color-mix(in srgb, var(--border-default) 50%, transparent);
+  border-top-color: var(--color-agent-working);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* ────────────────────────── Status Dots ──────────────────────────────── */
+
+.status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot-working { background: var(--color-agent-working); }
+.status-dot-queued { background: var(--color-agent-queued); }
+.status-dot-waiting { background: var(--color-agent-waiting); }
+.status-dot-approval { background: var(--color-approval-risk); }
+.status-dot-failed { background: var(--color-error); }
+.status-dot-done { background: var(--color-success); }
+.status-dot-idle { background: var(--border-default); }
+
+/* Pulsing animation for active status */
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.status-dot-active {
+  animation: status-pulse 2s ease-in-out infinite;
 }
 
 /* ────────────────────────── Reduced motion ───────────────────────────── */
@@ -266,11 +428,12 @@ textarea {
 .text-md { font-size: var(--font-size-md, 14px); }
 .text-lg { font-size: var(--font-size-lg, 16px); }
 .text-xl { font-size: var(--font-size-xl, 18px); }
-.text-2xl { font-size: var(--font-size-2xl, 22px); }
+.text-2xl { font-size: var(--font-size-2xl, 24px); }
 
 .text-primary { color: var(--text-primary); }
 .text-secondary { color: var(--text-secondary); }
 .text-tertiary { color: var(--text-tertiary); }
+.text-accent { color: var(--text-accent); }
 .text-success { color: var(--color-success); }
 .text-error { color: var(--color-error); }
 .text-warning { color: var(--color-warning); }
@@ -280,6 +443,7 @@ textarea {
 
 .bg-canvas { background: var(--bg-canvas); }
 .bg-elevated { background: var(--bg-elevated); }
+.bg-card { background: var(--bg-card); }
 .bg-sidebar { background: var(--bg-sidebar); }
 .bg-inspector { background: var(--bg-inspector); }
 .bg-hover:hover { background: var(--bg-hover); }
@@ -292,6 +456,16 @@ textarea {
 .shadow-sm { box-shadow: var(--shadow-sm); }
 .shadow-md { box-shadow: var(--shadow-md); }
 .shadow-lg { box-shadow: var(--shadow-lg); }
+
+@media (max-width: 1100px) {
+  .starter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 700px) {
+  .starter-grid { grid-template-columns: 1fr; }
+  .starter-card { min-height: 116px; }
+  .project-chooser { padding-inline: 16px; }
+}
 
 .rounded-sm { border-radius: var(--radius-sm); }
 .rounded-md { border-radius: var(--radius-md); }

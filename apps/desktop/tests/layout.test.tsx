@@ -73,10 +73,10 @@ describe("Layout — three-region render", () => {
     expect(screen.getByTestId("inspector-content")).toBeInTheDocument();
   });
 
-  test("renders a native title bar with the application name in the center", () => {
+  test("renders a minimal title bar with navigation controls", () => {
     renderLayout();
-    // The default center slot shows the "Terminus" product name.
-    expect(screen.getByText("Terminus")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Forward" })).toBeInTheDocument();
   });
 
   test("renders a terminal toggle button in the title bar", () => {
@@ -206,7 +206,7 @@ describe("Layout — terminal expansion", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show terminal" }));
     fireEvent.click(screen.getByRole("button", { name: "Expand" }));
     expect(screen.getByRole("button", { name: "Collapse" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Terminal drawer" })).toHaveStyle({ height: "856px" });
+    expect(screen.getByRole("region", { name: "Terminal drawer" })).toHaveStyle({ height: "860px" });
     fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
     expect(screen.getByRole("button", { name: "Expand" })).toBeInTheDocument();
   });

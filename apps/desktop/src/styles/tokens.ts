@@ -14,39 +14,54 @@
  *
  * Per SPEC §24: "Support System theme, Light theme, Dark theme, Spacious
  * density, Compact density."
+ *
+ * Codex reference alignment:
+ *   - Warmer charcoal canvas (#1e1e1e range)
+ *   - Sidebar darker than canvas (sidebar as grounding surface)
+ *   - Distinct card elevation for starter cards
+ *   - Green "Full access" accent
+ *   - Warm orange text accent for branding
  */
 
 // ────────────────────────── Color tokens ───────────────────────────────────
 
 export const darkTokens = {
-  // Main canvas — neutral Codex-like charcoal
-  "--bg-canvas": "#18191a",
-  // Elevated surfaces — barely warmer gray
-  "--bg-elevated": "#1d1e1f",
-  // Sidebar — native macOS material (simulated)
-  "--bg-sidebar": "#29292a",
-  // Inspector — floating card
-  "--bg-inspector": "#252629",
+  // Main canvas — warm Codex-like charcoal
+  "--bg-canvas": "#1e1e1e",
+  // Elevated surfaces — noticeably distinct from canvas
+  "--bg-elevated": "#262626",
+  // Sidebar — darker than canvas (Codex pattern: sidebar grounds the layout)
+  "--bg-sidebar": "#171717",
+  // Inspector — floating card surface
+  "--bg-inspector": "#242424",
   // Terminal and diff — slightly cooler and darker
-  "--bg-terminal": "#161618",
-  "--bg-diff": "#161618",
-  // Composer
-  "--bg-composer": "#303031",
-  // Hover
-  "--bg-hover": "#353536",
+  "--bg-terminal": "#141416",
+  "--bg-diff": "#141416",
+  // Composer surface
+  "--bg-composer": "#2a2a2a",
+  // Starter cards — distinct from canvas
+  "--bg-card": "#282828",
+  // Hover — subtle lift
+  "--bg-hover": "#333333",
+  // Nav row hover — slightly warmer
+  "--bg-nav-hover": "#2a2a2a",
   // Selected (no bright saturated background)
-  "--bg-selected": "#3a3a3b",
+  "--bg-selected": "#2d2d2d",
 
   // Text
-  "--text-primary": "#f1f1f2",
-  "--text-secondary": "#adadb3",
-  "--text-tertiary": "#777880",
+  "--text-primary": "#ececed",
+  "--text-secondary": "#a0a0a8",
+  "--text-tertiary": "#6b6b74",
   "--text-inverse": "#1a1a1c",
+  // Warm accent for branding (Codex uses an orange-tinted icon)
+  "--text-accent": "#e8845e",
 
   // Separators
-  "--border-subtle": "#343435",
-  "--border-default": "#414143",
-  "--border-strong": "#505158",
+  "--border-subtle": "#2c2c2e",
+  "--border-default": "#3a3a3c",
+  "--border-strong": "#4a4a4e",
+  // Sidebar-specific separator
+  "--sidebar-separator": "#252527",
 
   // Semantic colors (color is reserved for meaning)
   "--color-success": "#3fb950",
@@ -60,14 +75,20 @@ export const darkTokens = {
   "--color-agent-working": "#58a6ff",
   "--color-agent-queued": "#6a6a6e",
   "--color-agent-waiting": "#d29922",
+  // Access level — green for full/trusted access (Codex pattern)
+  "--color-access-full": "#3fb950",
+  "--color-access-limited": "#d29922",
 
   // Focus
-  "--focus-ring": "0 0 0 2px #80aefb52",
+  "--focus-ring": "0 0 0 2px #80aefb44",
 
-  // Shadows
-  "--shadow-sm": "0 1px 3px rgba(0,0,0,0.3)",
-  "--shadow-md": "0 4px 12px rgba(0,0,0,0.4)",
-  "--shadow-lg": "0 8px 24px rgba(0,0,0,0.5)",
+  // Shadows — refined for warm theme
+  "--shadow-sm": "0 1px 3px rgba(0,0,0,0.28)",
+  "--shadow-md": "0 4px 12px rgba(0,0,0,0.36)",
+  "--shadow-lg": "0 8px 28px rgba(0,0,0,0.48)",
+  // Card-specific shadow (starter cards)
+  "--shadow-card": "0 1px 4px rgba(0,0,0,0.18)",
+  "--shadow-card-hover": "0 4px 16px rgba(0,0,0,0.32)",
 } as const;
 
 export const lightTokens = {
@@ -75,8 +96,8 @@ export const lightTokens = {
   "--bg-canvas": "#f6f6f7",
   // Elevated surfaces
   "--bg-elevated": "#ffffff",
-  // Sidebar
-  "--bg-sidebar": "#f1f1f3",
+  // Sidebar — slightly cooler than canvas
+  "--bg-sidebar": "#ededf0",
   // Inspector
   "--bg-inspector": "#ffffff",
   // Terminal and diff
@@ -84,21 +105,29 @@ export const lightTokens = {
   "--bg-diff": "#ffffff",
   // Composer
   "--bg-composer": "#ffffff",
+  // Starter cards
+  "--bg-card": "#ffffff",
   // Hover
-  "--bg-hover": "#e9e9ec",
+  "--bg-hover": "#e6e6ea",
+  // Nav hover
+  "--bg-nav-hover": "#e9e9ed",
   // Selected
-  "--bg-selected": "#e3e4e8",
+  "--bg-selected": "#e0e0e5",
 
   // Text
   "--text-primary": "#1a1a1c",
   "--text-secondary": "#5a5a5e",
   "--text-tertiary": "#8a8a8e",
   "--text-inverse": "#ffffff",
+  // Warm accent
+  "--text-accent": "#c96a3e",
 
   // Separators
-  "--border-subtle": "#e4e4e6",
-  "--border-default": "#d4d4d6",
+  "--border-subtle": "#e2e2e5",
+  "--border-default": "#d2d2d5",
   "--border-strong": "#a4a4a6",
+  // Sidebar separator
+  "--sidebar-separator": "#dcdce0",
 
   // Semantic colors
   "--color-success": "#1a7f37",
@@ -112,14 +141,18 @@ export const lightTokens = {
   "--color-agent-working": "#0969da",
   "--color-agent-queued": "#8a8a8e",
   "--color-agent-waiting": "#9a6700",
+  "--color-access-full": "#1a7f37",
+  "--color-access-limited": "#9a6700",
 
   // Focus
   "--focus-ring": "0 0 0 2px #316fca3d",
 
   // Shadows
-  "--shadow-sm": "0 1px 3px rgba(0,0,0,0.08)",
-  "--shadow-md": "0 4px 12px rgba(0,0,0,0.12)",
-  "--shadow-lg": "0 8px 24px rgba(0,0,0,0.16)",
+  "--shadow-sm": "0 1px 3px rgba(0,0,0,0.06)",
+  "--shadow-md": "0 4px 12px rgba(0,0,0,0.10)",
+  "--shadow-lg": "0 8px 28px rgba(0,0,0,0.14)",
+  "--shadow-card": "0 1px 3px rgba(0,0,0,0.06)",
+  "--shadow-card-hover": "0 4px 12px rgba(0,0,0,0.12)",
 } as const;
 
 // ────────────────────────── Typography ─────────────────────────────────────
@@ -135,12 +168,12 @@ export const typography = {
   // Sizes — comfortable body, restrained headings
   fontSizeXs: "11px",
   fontSizeSm: "12px",
-  fontSizeBase: "14px",
-  fontSizeMd: "15px",
-  fontSizeLg: "17px",
-  fontSizeXl: "20px",
-  fontSize2xl: "28px",
-  fontSize3xl: "34px",
+  fontSizeBase: "13px",
+  fontSizeMd: "14px",
+  fontSizeLg: "16px",
+  fontSizeXl: "18px",
+  fontSize2xl: "24px",
+  fontSize3xl: "32px",
 
   // Line heights — strong line height
   lineHeightTight: 1.25,
@@ -166,15 +199,17 @@ export const spaciousTokens = {
   "--space-8": "32px",
   "--space-10": "40px",
   "--space-12": "48px",
-  "--sidebar-width": "300px",
-  "--sidebar-width-compact": "216px",
-  "--inspector-width": "320px",
+  "--sidebar-width": "260px",
+  "--sidebar-width-compact": "220px",
+  "--inspector-width": "300px",
   "--composer-max-height": "280px",
-  "--conversation-max-width": "960px",
-  "--row-height": "38px",
+  "--conversation-max-width": "720px",
+  "--row-height": "34px",
+  "--nav-row-height": "32px",
   "--radius-sm": "6px",
   "--radius-md": "10px",
   "--radius-lg": "14px",
+  "--radius-xl": "18px",
 } as const;
 
 export const compactTokens = {
@@ -190,13 +225,15 @@ export const compactTokens = {
   "--space-12": "36px",
   "--sidebar-width": "230px",
   "--sidebar-width-compact": "190px",
-  "--inspector-width": "288px",
+  "--inspector-width": "280px",
   "--composer-max-height": "220px",
-  "--conversation-max-width": "700px",
-  "--row-height": "30px",
+  "--conversation-max-width": "680px",
+  "--row-height": "28px",
+  "--nav-row-height": "28px",
   "--radius-sm": "5px",
   "--radius-md": "8px",
   "--radius-lg": "12px",
+  "--radius-xl": "16px",
 } as const;
 
 // ────────────────────────── Motion ─────────────────────────────────────────

@@ -6,19 +6,18 @@
  *
  *   working         → tiny spinner
  *   queued          → muted dot
- *   waiting         → small clock icon
+ *   waiting         → warning dot
  *   needs_approval  → warning dot
  *   needs_review    → info dot
  *   failed          → error dot
  *   interrupted     → muted dot
- *   done            → checkmark
+ *   done            → muted dot
  *
  * Per SPEC §7.2: "Selected active tasks may show a small live activity
  * indicator similar to Codex." — the working spinner serves this role.
  *
  * Per design constraints: "No emojis. Use lucide-react for icons."
  */
-import { Check, Clock, Dot } from "lucide-react";
 import { memo } from "react";
 import { cn } from "../lib/cn";
 import type { TaskStatusKind } from "../types";
@@ -33,6 +32,22 @@ interface StatusIndicatorProps {
 }
 
 const SIZE_DEFAULT = 12;
+
+function StatusDot({ size, color, label }: { size: number; color: string; label: string }): JSX.Element {
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      style={{
+        display: "inline-block",
+        width: Math.max(6, size - 2),
+        height: Math.max(6, size - 2),
+        borderRadius: "50%",
+        background: color,
+      }}
+    />
+  );
+}
 
 function StatusGlyph({
   status,
@@ -54,71 +69,19 @@ function StatusGlyph({
       );
     case "queued":
     case "interrupted":
-      // Muted dot.
-      return (
-        <Dot
-          size={size + 4}
-          aria-label={status}
-          style={{ color: "var(--text-tertiary)", strokeWidth: 2 }}
-        />
-      );
+      return <StatusDot size={size} color="var(--color-agent-queued)" label={status} />;
     case "waiting":
-      return (
-        <Clock
-          size={size}
-          aria-label="waiting"
-          style={{ color: "var(--color-agent-waiting)" }}
-          strokeWidth={1.75}
-        />
-      );
+      return <StatusDot size={size} color="var(--color-agent-waiting)" label="waiting" />;
     case "needs_approval":
-      return (
-        <span
-          aria-label="needs approval"
-          style={{
-            display: "inline-block",
-            width: size,
-            height: size,
-            borderRadius: "50%",
-            background: "var(--color-approval-risk)",
-          }}
-        />
-      );
+      return <StatusDot size={size} color="var(--color-approval-risk)" label="needs approval" />;
     case "needs_review":
-      return (
-        <span
-          aria-label="needs review"
-          style={{
-            display: "inline-block",
-            width: size,
-            height: size,
-            borderRadius: "50%",
-            background: "var(--color-info)",
-          }}
-        />
-      );
+      return <StatusDot size={size} color="var(--color-info)" label="needs review" />;
     case "failed":
-      return (
-        <span
-          aria-label="failed"
-          style={{
-            display: "inline-block",
-            width: size,
-            height: size,
-            borderRadius: "50%",
-            background: "var(--color-error)",
-          }}
-        />
-      );
+      return <StatusDot size={size} color="var(--color-error)" label="failed" />;
     case "done":
-      return (
-        <Check
-          size={size}
-          aria-label="done"
-          style={{ color: "var(--color-success)" }}
-          strokeWidth={2.25}
-        />
-      );
+      // Completed tasks stay quiet in navigation; the task detail surface
+      // carries the stronger success treatment when it matters.
+      return <StatusDot size={size} color="var(--text-tertiary)" label="done" />;
     case "unknown":
     default:
       return (

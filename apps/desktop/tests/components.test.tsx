@@ -30,6 +30,7 @@ import { ErrorState, errorPreset } from "../src/components/ErrorState";
 import { ApprovalCard } from "../src/components/ApprovalCard";
 import { CommandPalette, type Command } from "../src/components/CommandPalette";
 import { Composer } from "../src/components/Composer";
+import { Sidebar } from "../src/components/Sidebar";
 import { SidebarItem } from "../src/components/SidebarItem";
 import { Message } from "../src/components/Message";
 import { sidebarVisibleTaskCount } from "../src/components/Sidebar";
@@ -630,6 +631,12 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
   });
 
+  test("defaults to the green Full access presentation", () => {
+    useTerminusStore.setState({ selectedTaskId: null });
+    render(<Composer />);
+    expect(screen.getByRole("button", { name: /Full access/ })).toBeInTheDocument();
+  });
+
   test("the start-surface composer delegates a fresh objective to task creation", async () => {
     const user = userEvent.setup();
     const createTask = vi.fn(async () => undefined);
@@ -639,6 +646,20 @@ describe("Composer — send-button mode switches based on task status", () => {
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     expect(createTask).toHaveBeenCalledWith("Map this project");
+  });
+});
+
+describe("Sidebar — navigation destinations", () => {
+  test("surfaces the Codex-style destination hierarchy", async () => {
+    const onNavigate = vi.fn();
+    render(<Sidebar onNavigate={onNavigate} />);
+
+    for (const label of ["New task", "Scheduled", "Plugins", "Sites", "Pull requests", "Chat"]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Plugins" }));
+    expect(onNavigate).toHaveBeenCalledWith("plugins");
   });
 });
 

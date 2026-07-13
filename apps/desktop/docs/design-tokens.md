@@ -16,17 +16,19 @@ agent state, selected state, primary action, success).
 
 | Token                  | Value      | Purpose |
 | ---------------------- | ---------- | ------- |
-| `--bg-canvas`          | `#1a1a1c`  | Main canvas — neutral Codex-like charcoal |
-| `--bg-elevated`        | `#222224`  | Elevated surfaces (cards, dropdowns) |
-| `--bg-sidebar`         | `#1e1e20`  | Sidebar — native macOS material (simulated) |
-| `--bg-inspector`       | `#2a2a2c`  | Floating inspector card |
+| `--bg-canvas`          | `#1e1e1e`  | Main canvas — warm Codex-like charcoal |
+| `--bg-elevated`        | `#262626`  | Elevated surfaces (cards, dropdowns) |
+| `--bg-sidebar`         | `#171717`  | Sidebar — darker grounding surface |
+| `--bg-inspector`       | `#242424`  | Floating inspector card |
 | `--bg-terminal`        | `#161618`  | Terminal and diff surfaces (cooler, darker) |
 | `--bg-diff`            | `#161618`  | Diff background (matches terminal) |
-| `--bg-composer`        | `#262628`  | Composer input surface |
-| `--bg-hover`           | `#2e2e30`  | Hover state for rows, buttons |
-| `--bg-selected`        | `#2a2a2e`  | Selected row (no bright saturated background per SPEC §7.2) |
-| `--text-primary`       | `#e8e8ea`  | Primary text |
-| `--text-secondary`     | `#99999e`  | Secondary text |
+| `--bg-composer`        | `#2a2a2a`  | Composer input surface |
+| `--bg-card`            | `#282828`  | Starter card surface |
+| `--bg-hover`           | `#333333`  | Hover state for rows, buttons |
+| `--bg-nav-hover`       | `#2a2a2a`  | Sidebar navigation hover |
+| `--bg-selected`        | `#2d2d2d`  | Selected row (no bright saturated background per SPEC §7.2) |
+| `--text-primary`       | `#ececed`  | Primary text |
+| `--text-secondary`     | `#a0a0a8`  | Secondary text |
 | `--text-tertiary`      | `#6a6a6e`  | Tertiary / muted text |
 | `--text-inverse`       | `#1a1a1c`  | Text on saturated backgrounds (e.g. primary button) |
 | `--border-subtle`      | `#2e2e30`  | Subtle separators |
@@ -38,7 +40,10 @@ agent state, selected state, primary action, success).
 | `--color-info`         | `#58a6ff`  | Info, "needs_review" status |
 | `--color-addition`     | `#3fb950`  | Diff additions (alias of success) |
 | `--color-deletion`     | `#f85149`  | Diff deletions (alias of error) |
-| `--color-primary`      | `#58a6ff`  | Primary actions, "working" status |
+| `--color-primary`      | `#80aefb`  | Primary actions, "working" status |
+| `--color-access-full`  | `#3fb950`  | Full-access composer state |
+| `--text-accent`        | `#e8845e`  | Warm branded accent |
+| `--sidebar-separator`  | `#252527`  | Sidebar separator |
 | `--color-approval-risk`| `#d29922`  | Approval risk accent |
 | `--color-agent-working`| `#58a6ff`  | Spinner accent for active tasks |
 | `--color-agent-queued` | `#6a6a6e`  | Queued task indicator |
@@ -59,7 +64,9 @@ agent state, selected state, primary action, success).
 | `--bg-terminal`        | `#1a1a1c`  (stays dark for terminal contrast) |
 | `--bg-diff`            | `#ffffff`  |
 | `--bg-composer`        | `#ffffff`  |
+| `--bg-card`            | `#ffffff`  |
 | `--bg-hover`           | `#ececee`  |
+| `--bg-nav-hover`       | `#e9e9ed`  |
 | `--bg-selected`        | `#e4e4e8`  |
 | `--text-primary`       | `#1a1a1c`  |
 | `--text-secondary`     | `#5a5a5e`  |
@@ -73,6 +80,9 @@ agent state, selected state, primary action, success).
 | `--color-warning`      | `#9a6700`  |
 | `--color-info`         | `#0969da`  |
 | `--color-primary`      | `#0969da`  |
+| `--color-access-full`  | `#1a7f37`  |
+| `--text-accent`        | `#c96a3e`  |
+| `--sidebar-separator`  | `#dcdce0`  |
 | `--focus-ring`         | `0 0 0 2px #0969da30` |
 
 Light theme uses softer, GitHub-light-inspired hues. The terminal
@@ -132,10 +142,10 @@ vertical padding for power users on smaller displays.
 | `--space-12`           | `48px` |
 | `--sidebar-width`      | `260px` |
 | `--sidebar-width-compact` | `200px` |
-| `--inspector-width`    | `340px` |
+| `--inspector-width`    | `300px` |
 | `--composer-max-height`| `280px` |
 | `--conversation-max-width` | `720px` |
-| `--row-height`         | `36px` |
+| `--row-height`         | `34px` |
 | `--radius-sm`          | `6px` |
 | `--radius-md`          | `10px` |
 | `--radius-lg`          | `14px` |
@@ -153,9 +163,9 @@ vertical padding for power users on smaller displays.
 | `--space-8`            | `24px` |
 | `--space-10`           | `30px` |
 | `--space-12`           | `36px` |
-| `--sidebar-width`      | `220px` |
-| `--sidebar-width-compact` | `180px` |
-| `--inspector-width`    | `300px` |
+| `--sidebar-width`      | `230px` |
+| `--sidebar-width-compact` | `190px` |
+| `--inspector-width`    | `280px` |
 | `--composer-max-height`| `220px` |
 | `--conversation-max-width` | `680px` |
 | `--row-height`         | `28px` |

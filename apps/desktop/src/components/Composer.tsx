@@ -69,15 +69,15 @@ interface ComposerProps {
 }
 
 const FALLBACK_AGENT_OPTIONS = [
-  { id: "implementer", label: "Implementer" },
-  { id: "scout", label: "Scout" },
-  { id: "reviewer", label: "Reviewer" },
+  { id: "implementer", label: "5.6 Sol Medium" },
+  { id: "scout", label: "5.6 Sol Fast" },
+  { id: "reviewer", label: "5.6 Sol Review" },
 ] as const;
 
 const ACCESS_LEVELS: Array<{ id: AccessLevel; label: string; hint: string }> = [
   { id: "read_only", label: "Read-only", hint: "Read files only. No writes, no exec." },
   { id: "local_dev", label: "Local dev", hint: "Read/write within workspace. Sandbox exec." },
-  { id: "trusted", label: "Trusted", hint: "Full workspace access. Network allowlist." },
+  { id: "trusted", label: "Full access", hint: "Full workspace access. Network allowlist." },
   { id: "elevated", label: "Elevated", hint: "All effects allowed. Approvals required." },
 ];
 
@@ -112,7 +112,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
   const [moreOpen, setMoreOpen] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [agentId, setAgentId] = useState<string>(FALLBACK_AGENT_OPTIONS[0]!.id);
-  const [accessLevel, setAccessLevel] = useState<AccessLevel>("local_dev");
+  const [accessLevel, setAccessLevel] = useState<AccessLevel>("trusted");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -319,6 +319,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
 
   const selectedAccess = ACCESS_LEVELS.find((a) => a.id === accessLevel) ?? ACCESS_LEVELS[1]!;
   const selectedAgent = agentOptions.find((a) => a.id === agentId) ?? agentOptions[0]!;
+  const accessTone = accessLevel === "trusted" ? "text-success" : accessLevel === "elevated" ? "text-warning" : "text-secondary";
   const sendDisabled = sending || (sendButtonContent.mode !== "stop" && draft.trim().length === 0);
 
   return (
@@ -365,7 +366,6 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
                   key={i}
                   className="relative h-16 w-16 overflow-hidden rounded-md border border-subtle"
                 >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={url}
                     alt={`Attachment ${i + 1}`}
@@ -411,7 +411,6 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             rows={1}
             placeholder={task ? "Send a message, steer work, or queue a follow-up…" : isStartSurface ? "Do anything" : "Describe what you want to build…"}
             aria-label="Message composer"
-            aria-description="Press Command Enter to send, Shift Command Enter to queue, Escape to interrupt."
             role="textbox"
             aria-multiline="true"
             className={cn(
@@ -478,7 +477,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
               <button
                 type="button"
                 onClick={() => { setAccessOpen((o) => !o); setAgentOpen(false); setMoreOpen(false); }}
-                className="composer-control flex h-8 items-center gap-1 rounded-lg px-2 text-xs text-warning hover:bg-hover hover:text-primary"
+                className={cn("composer-control flex h-8 items-center gap-1 rounded-lg px-2 text-xs hover:bg-hover hover:text-primary", accessTone)}
                 style={{ fontSize: "var(--font-size-xs)" }}
                 aria-haspopup="menu"
                 aria-expanded={accessOpen}

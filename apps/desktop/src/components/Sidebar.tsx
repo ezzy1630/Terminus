@@ -4,6 +4,7 @@
  * Per SPEC §7:
  *   Application name
  *   New task        ← primary action button
+ *   Scheduled / Plugins / Sites / Pull requests / Chat
  *   Search tasks    ← filtering input
  *   Pinned          ← important tasks
  *     - task
@@ -24,7 +25,23 @@
  * Per SPEC §24: compact mode = icons only.
  */
 import { memo, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, HelpCircle, PanelLeft, Plus, Search, Settings, SquarePen, TerminalSquare, TriangleAlert, User } from "lucide-react";
+import {
+  CalendarClock,
+  ChevronDown,
+  ChevronRight,
+  GitPullRequestArrow,
+  Globe,
+  HelpCircle,
+  MessageCircle,
+  Plus,
+  Puzzle,
+  Search,
+  Settings,
+  SquarePen,
+  SquareTerminal,
+  TriangleAlert,
+  User,
+} from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
 import { useTerminusStore, usePinnedTasks, normalizeTaskStatus } from "../hooks/use-terminus";
@@ -35,9 +52,25 @@ import type { Session, Task } from "../types";
 
 interface SidebarProps {
   compact?: boolean;
+  activeDestination?: SidebarDestination;
+  onNavigate?: (destination: SidebarDestination) => void;
 }
 
-function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
+export type SidebarDestination = "new_task" | "scheduled" | "plugins" | "sites" | "pull_requests" | "chat";
+
+const DESTINATION_NAV: Array<{
+  id: Exclude<SidebarDestination, "new_task">;
+  label: string;
+  icon: typeof CalendarClock;
+}> = [
+  { id: "scheduled", label: "Scheduled", icon: CalendarClock },
+  { id: "plugins", label: "Plugins", icon: Puzzle },
+  { id: "sites", label: "Sites", icon: Globe },
+  { id: "pull_requests", label: "Pull requests", icon: GitPullRequestArrow },
+  { id: "chat", label: "Chat", icon: MessageCircle },
+];
+
+function SidebarImpl({ compact: compactProp, activeDestination = "new_task", onNavigate }: SidebarProps): JSX.Element {
   const viewport = useViewport();
   const compact = compactProp ?? viewport.sidebarRail;
 
@@ -84,6 +117,17 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
   const onNewTask = (): void => {
     // New Task screen is shown when selectedTaskId === null. Clearing the
     // selection routes the main surface to <NewTaskScreen />.
+    onNavigate?.("new_task");
+    selectTask(null);
+  };
+
+  const onSelectTask = (taskId: string): void => {
+    onNavigate?.("chat");
+    selectTask(taskId);
+  };
+
+  const onDestination = (destination: SidebarDestination): void => {
+    onNavigate?.(destination);
     selectTask(null);
   };
 
@@ -96,7 +140,7 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
           aria-label="Terminus"
           title="Terminus"
         >
-          <TerminalSquare size={16} strokeWidth={1.8} />
+          <SquareTerminal size={16} strokeWidth={1.8} />
         </div>
         <button
           type="button"
@@ -107,6 +151,22 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
         >
           <Plus size={16} />
         </button>
+        {DESTINATION_NAV.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => onDestination(id)}
+            aria-label={label}
+            title={label}
+            aria-current={activeDestination === id ? "page" : undefined}
+            className={cn(
+              "flex h-8 w-8 items-center justify-center rounded-md",
+              activeDestination === id ? "bg-selected text-primary" : "text-secondary hover:bg-hover",
+            )}
+          >
+            <Icon size={15} strokeWidth={1.7} />
+          </button>
+        ))}
         <div className="my-1 h-px w-6 bg-subtle" style={{ background: "var(--border-subtle)" }} />
         <div className="flex flex-1 flex-col items-center gap-1 overflow-y-auto">
           {sessions.slice(0, 12).map((s) => (
@@ -128,12 +188,8 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
   return (
     <div className="flex h-full flex-col">
       {/* Application name + global task navigation. */}
-      <div className="flex flex-col px-4 pb-4 pt-4">
-        <div className="mb-5 flex items-center gap-2 text-tertiary">
-          <PanelLeft size={15} strokeWidth={1.7} />
-          <span className="h-4 w-px bg-default" />
-        </div>
-        <div className="mb-4 flex items-center">
+      <div className="flex flex-col px-4 pb-3 pt-4">
+        <div className="mb-3 flex items-center">
           <div className="flex items-center gap-2">
             <span
               className="font-semibold tracking-tight text-primary"
@@ -156,12 +212,31 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
         <button
           type="button"
           onClick={onNewTask}
-          className="sidebar-nav-row flex h-9 items-center gap-3 rounded-lg px-1.5 text-left text-secondary hover:bg-hover hover:text-primary"
+          aria-current={activeDestination === "new_task" ? "page" : undefined}
+          className={cn(
+            "sidebar-nav-item h-9 px-1.5",
+            activeDestination === "new_task" && "is-active",
+          )}
           style={{ fontSize: "var(--font-size-base)" }}
         >
           <SquarePen size={16} strokeWidth={1.7} />
           <span>New task</span>
         </button>
+
+        <nav className="mt-2 flex flex-col gap-0.5" aria-label="Workspace navigation">
+          {DESTINATION_NAV.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => onDestination(id)}
+              aria-current={activeDestination === id ? "page" : undefined}
+              className={cn("sidebar-nav-item", activeDestination === id && "is-active")}
+            >
+              <Icon size={15} strokeWidth={1.7} />
+              <span>{label}</span>
+            </button>
+          ))}
+        </nav>
 
         {/* Search. */}
         {searchOpen ? <div className="relative mt-2 animate-slide-down">
@@ -218,7 +293,7 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
                 selected={t.id === selectedTaskId}
                 pinned
                 depth={0}
-                onClick={() => selectTask(t.id)}
+                onClick={() => onSelectTask(t.id)}
                 onTogglePin={() => togglePin(t.id)}
               />
             ))}
@@ -298,7 +373,7 @@ function SidebarImpl({ compact: compactProp }: SidebarProps): JSX.Element {
                       tasks={visibleTasks}
                       selectedTaskId={selectedTaskId}
                       pinnedTaskIds={pinnedTaskIds}
-                      onSelectTask={selectTask}
+                      onSelectTask={onSelectTask}
                       onTogglePin={togglePin}
                     />
                     {hiddenTaskCount > 0 ? (

@@ -56,8 +56,9 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
         type="button"
         onClick={() => setExpanded((e) => !e)}
         aria-expanded={expanded}
+        aria-label={`${block.title}${block.metric ? `, ${block.metric}` : ""}`}
         className="activity-header flex w-full items-center gap-2 px-2.5 text-left hover:bg-hover"
-        style={{ minHeight: 34 }}
+        style={{ minHeight: 38 }}
       >
         <ChevronRight
           size={12}

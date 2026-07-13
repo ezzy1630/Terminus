@@ -348,7 +348,7 @@ function CommandPaletteImpl({
     >
       <div
         className={cn(
-          "flex max-h-[70vh] w-full flex-col overflow-hidden rounded-lg border bg-elevated shadow-lg",
+          "command-palette-shell flex max-h-[70vh] w-full flex-col overflow-hidden rounded-xl border bg-elevated shadow-lg",
           className,
         )}
         style={{

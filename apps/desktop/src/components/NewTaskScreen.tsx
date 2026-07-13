@@ -18,7 +18,7 @@
  * immediately."
  */
 import { memo, useCallback, useMemo, useState } from "react";
-import { Bug, Code2, FileSearch, Folder, Hammer, TerminalSquare } from "lucide-react";
+import { Bug, FileCode2, FileSearch, Folder, Hammer, SquareTerminal } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, TerminusApiError } from "../lib/api";
 import { useTerminusStore } from "../hooks/use-terminus";
@@ -40,7 +40,7 @@ interface Suggestion {
 const STARTER_TEMPLATES: Suggestion[] = [
   {
     id: "explore",
-    icon: <FileSearch size={14} />,
+    icon: <FileSearch size={16} />,
     label: "Explore and understand code",
     detail: "Map the system before making a change",
     prompt:
@@ -48,24 +48,24 @@ const STARTER_TEMPLATES: Suggestion[] = [
   },
   {
     id: "build",
-    icon: <Hammer size={14} />,
-    label: "Build a feature",
+    icon: <Hammer size={16} />,
+    label: "Build a new feature, app, or tool",
     detail: "Plan the smallest complete vertical slice",
     prompt:
       "I want to build a new feature. Before writing code, propose a small plan, identify the files you'll touch, and call out anything you're uncertain about.",
   },
   {
     id: "review",
-    icon: <Code2 size={14} />,
-    label: "Review code",
+    icon: <FileCode2 size={16} />,
+    label: "Review code and suggest changes",
     detail: "Find correctness and clarity issues",
     prompt:
       "Review the most recent changes in this workspace. Focus on correctness, then on clarity. Suggest concrete edits with rationale.",
   },
   {
     id: "fix",
-    icon: <Bug size={14} />,
-    label: "Fix failures",
+    icon: <Bug size={16} />,
+    label: "Fix issues and failures",
     detail: "Reproduce, isolate, then verify the fix",
     prompt:
       "Find the most recent failing tests or build errors in this workspace. Reproduce, isolate, propose a fix, and verify before reporting done.",
@@ -165,30 +165,37 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
     >
       <div className="flex min-h-full w-full flex-col" style={{ maxWidth: 960, margin: "0 auto" }}>
         <div className="flex flex-1 flex-col items-center justify-center pb-12">
-          <div className="start-mark mb-7 flex h-14 w-14 items-center justify-center rounded-2xl text-tertiary" aria-hidden>
-            <TerminalSquare size={30} strokeWidth={1.45} />
+          <div className="start-mark mb-7 flex h-14 w-14 items-center justify-center rounded-2xl text-accent" aria-hidden>
+            <span className="start-mark-glyph flex h-10 w-10 items-center justify-center rounded-xl">
+              <SquareTerminal size={25} strokeWidth={1.5} />
+            </span>
           </div>
 
           <h1
             className="text-center text-primary"
-            style={{ fontSize: "34px", fontWeight: 450, lineHeight: 1.15, letterSpacing: "-0.035em" }}
+            style={{ fontSize: "var(--font-size-2xl)", fontWeight: 500, lineHeight: 1.2, letterSpacing: "-0.025em" }}
           >
             {session ? `What should we build in ${session.title}?` : "What should we build?"}
           </h1>
 
-          <div className="mt-12 grid w-full grid-cols-4 gap-3 max-[900px]:grid-cols-2" aria-label="Task starters">
+          <div className="starter-grid mt-12 grid w-full grid-cols-4 gap-4 max-[900px]:grid-cols-2" aria-label="Task starters">
             {suggestions.map((suggestion, index) => (
               <button
                 key={suggestion.id}
                 type="button"
                 onClick={() => pickSuggestion(suggestion)}
-                className="starter-card flex min-h-[142px] flex-col items-start rounded-2xl border border-subtle p-5 text-left"
+                className="starter-card flex min-h-[148px] flex-col items-start rounded-2xl border border-subtle p-5 text-left"
                 style={{ animationDelay: `${70 + index * 45}ms` }}
                 title={suggestion.detail}
               >
                 <span className={cn(`starter-icon-${suggestion.id}`)}>{suggestion.icon}</span>
-                <span className="text-primary" style={{ marginTop: "auto", fontSize: "var(--font-size-md)", fontWeight: 520, lineHeight: 1.35 }}>
-                  {suggestion.label}
+                <span className="mt-auto flex flex-col gap-1">
+                  <span className="text-primary" style={{ fontSize: 'var(--font-size-sm)', fontWeight: 520, lineHeight: 1.35 }}>
+                    {suggestion.label}
+                  </span>
+                  <span className="text-tertiary" style={{ fontSize: 'var(--font-size-xs)', lineHeight: 1.4 }}>
+                    {suggestion.detail}
+                  </span>
                 </span>
               </button>
             ))}

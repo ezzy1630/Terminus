@@ -34,7 +34,10 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Message } from "./Message";
 import { ActivityBlock } from "./ActivityBlock";
 import { ApprovalCard } from "./ApprovalCard";
+import { EmptyState } from "./EmptyState";
 import { ErrorState, errorPreset } from "./ErrorState";
+import { StatusIndicator, statusLabel } from "./StatusIndicator";
+import { MessageCircle } from "lucide-react";
 import { normalizeTaskStatus, useSelectedTask, useSelectedTaskEvents, useTerminusStore } from "../hooks/use-terminus";
 import { derivePendingApprovals } from "../lib/task-surface";
 import type {
@@ -334,13 +337,14 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
   const task = useSelectedTask();
   const events = useSelectedTaskEvents();
   const streamState = useTerminusStore((state) => state.streamState);
+  const lastEventId = events[events.length - 1]?.id;
 
   const decoded = useMemo(() => {
     if (!task) return { messages: [], blocks: [], order: [] };
     return decodeFeed(events, task.created_at);
     // Recompute when the events list grows OR the task changes. The last
     // event id is included so streaming appends trigger a re-decode.
-  }, [events, task?.id, events.length, events[events.length - 1]?.id]);
+  }, [events, task?.id, events.length, lastEventId]);
   const approvals = useMemo(() => derivePendingApprovals(events), [events]);
 
   // Build the flattened feed items list.
@@ -419,13 +423,13 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
 
   if (!task) {
     return (
-      <div
-        className={className}
-        style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}
-      >
-        <div className="text-tertiary" style={{ fontSize: "var(--font-size-sm)" }}>
-          Select a task to view its conversation.
-        </div>
+      <div className={className} style={{ height: "100%" }}>
+        <EmptyState
+          icon={<MessageCircle size={17} strokeWidth={1.6} />}
+          title="No task selected"
+          description="Choose a task from the sidebar to review its conversation and activity."
+          compact
+        />
       </div>
     );
   }
@@ -458,17 +462,15 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
         }}
       >
         {/* Task header. */}
-        <div className="mb-6 border-b border-subtle pb-3">
-          <div
-            className="text-xs uppercase tracking-wide text-tertiary"
-            style={{ fontSize: "var(--font-size-xs)" }}
-          >
-            Task
+        <div className="task-header mb-5 border-b border-subtle pb-4">
+          <div className="mb-2 flex items-center gap-2 text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>
+            <StatusIndicator status={normalizeTaskStatus(task.status)} size={10} />
+            <span className="uppercase tracking-wide">{statusLabel(normalizeTaskStatus(task.status))}</span>
           </div>
           <h1
             className="text-primary"
             style={{
-              fontSize: "var(--font-size-xl)",
+              fontSize: "var(--font-size-lg)",
               fontWeight: 600,
               lineHeight: "var(--line-height-tight)" as unknown as string,
               marginTop: 4,
@@ -510,13 +512,16 @@ function ConversationImpl({ className }: ConversationProps): JSX.Element {
             }}
           />
         ) : items.length === 0 ? (
-          <div className="py-8 text-center text-tertiary" role="status" style={{ fontSize: "var(--font-size-sm)" }}>
-            {normalizeTaskStatus(task.status) === "queued"
-              ? "Queued. Work will begin when the runtime is ready."
+          <EmptyState
+            icon={<MessageCircle size={17} strokeWidth={1.6} />}
+            title={normalizeTaskStatus(task.status) === "queued" ? "Queued" : normalizeTaskStatus(task.status) === "waiting" ? "Waiting for input" : "Preparing the first turn"}
+            description={normalizeTaskStatus(task.status) === "queued"
+              ? "Work will begin when the runtime is ready."
               : normalizeTaskStatus(task.status) === "waiting"
-                ? "Waiting for input before work can continue."
-                : "Preparing the first turn…"}
-          </div>
+                ? "The task will continue as soon as the required input is available."
+                : "The conversation will appear here as the agent starts working."}
+            compact
+          />
         ) : null}
 
         {/* Virtualized feed. The outer div sets the total height; each

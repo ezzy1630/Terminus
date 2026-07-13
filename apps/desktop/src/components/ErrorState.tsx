@@ -17,6 +17,7 @@
  * background only when the error is recoverable / blocking.
  */
 import { memo, type ReactNode } from "react";
+import { TriangleAlert } from "lucide-react";
 import { cn } from "../lib/cn";
 
 export interface ErrorStateAction {
@@ -69,19 +70,20 @@ function ErrorStateImpl({
   compact = false,
 }: ErrorStateProps): JSX.Element {
   const glyphColor = severity === "warning" ? "var(--color-warning)" : "var(--color-error)";
+  const resolvedIcon = icon ?? <TriangleAlert size={15} strokeWidth={1.8} />;
   return (
     <div
       role="alert"
       aria-live="assertive"
       className={cn(
-        "flex w-full flex-col",
+        "error-state flex w-full flex-col",
         compact ? "py-4" : "py-10",
         className,
       )}
       style={{ gap: compact ? 8 : 12, padding: compact ? "0 16px" : "0 24px" }}
     >
       <div className="flex items-start gap-3">
-        {icon ? (
+        {resolvedIcon ? (
           <div
             aria-hidden
             className="flex flex-shrink-0 items-center justify-center"
@@ -93,7 +95,7 @@ function ErrorStateImpl({
               color: glyphColor,
             }}
           >
-            {icon}
+            {resolvedIcon}
           </div>
         ) : null}
         <div className="flex min-w-0 flex-1 flex-col" style={{ gap: 4 }}>
@@ -127,7 +129,7 @@ function ErrorStateImpl({
       {(action || secondaryAction) ? (
         <div
           className="flex flex-wrap items-center"
-          style={{ gap: 12, marginTop: 4, paddingLeft: icon ? 40 : 0 }}
+          style={{ gap: 12, marginTop: 4, paddingLeft: resolvedIcon ? 40 : 0 }}
         >
           {action ? (
             <button
@@ -206,7 +208,7 @@ const PRESETS: Record<string, ErrorPreset> = {
     title: "Control plane offline",
     description:
       "Terminus cannot reach the control plane at the configured address. Make sure the local service is running.",
-    severity: "error",
+    severity: "warning",
   },
   reconnecting: {
     title: "Reconnecting",
