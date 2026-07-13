@@ -162,7 +162,7 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
     <div
       className={cn("new-task-screen flex h-full w-full flex-col overflow-y-auto", className)}
     >
-      <div className="flex min-h-full w-full flex-col" style={{ maxWidth: 960, margin: "0 auto" }}>
+      <div className="start-surface-shell flex min-h-full w-full flex-col" style={{ maxWidth: 1080, margin: "0 auto" }}>
         <div className="new-task-hero flex flex-1 flex-col items-center justify-center">
           <div className="start-mark mb-7 flex h-14 w-14 items-center justify-center rounded-2xl text-accent" aria-hidden>
             <span className="start-mark-glyph flex h-10 w-10 items-center justify-center rounded-xl">
@@ -171,13 +171,13 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
           </div>
 
           <h1
-            className="text-center text-primary"
-            style={{ fontSize: "var(--font-size-2xl)", fontWeight: 500, lineHeight: 1.2, letterSpacing: "-0.025em" }}
+            className="new-task-heading text-center text-primary"
+            style={{ fontWeight: 500, lineHeight: 1.2, letterSpacing: "-0.025em" }}
           >
             {session ? `What should we build in ${session.title}?` : "What should we build?"}
           </h1>
 
-          <div className="starter-grid grid w-full grid-cols-4 max-[900px]:grid-cols-2" aria-label="Task starters">
+          <div className="starter-grid grid w-full" aria-label="Task starters">
             {suggestions.map((suggestion, index) => (
               <button
                 key={suggestion.id}
@@ -189,10 +189,10 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
               >
                 <span className={cn(`starter-icon-${suggestion.id}`)}>{suggestion.icon}</span>
                 <span className="mt-auto flex flex-col gap-1">
-                  <span className="text-primary" style={{ fontSize: 'var(--font-size-sm)', fontWeight: 500, lineHeight: 1.35 }}>
+                  <span className="starter-card-title text-primary" style={{ fontWeight: 500, lineHeight: 1.35 }}>
                     {suggestion.label}
                   </span>
-                  <span className="text-tertiary" style={{ fontSize: 'var(--font-size-xs)', lineHeight: 1.4 }}>
+                  <span className="starter-card-detail text-tertiary" style={{ lineHeight: 1.4 }}>
                     {suggestion.detail}
                   </span>
                 </span>
@@ -209,7 +209,7 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
             aria-label={session ? `Project: ${session.title}` : "Choose project"}
             title="Choose or search projects"
           >
-            <Folder size={16} strokeWidth={1.7} />
+            <Folder size={18} strokeWidth={1.7} />
             <span>{session?.title ?? "Choose project"}</span>
           </button>
           <Composer onCreateTask={createTask} className="start-composer" />

@@ -406,17 +406,18 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             style={{
               fontSize: "var(--font-size-md)",
               lineHeight: "var(--line-height-relaxed)" as unknown as string,
-              minHeight: task ? 44 : isStartSurface ? 52 : 64,
+              minHeight: task ? 44 : isStartSurface ? 76 : 64,
               maxHeight: "var(--composer-max-height)",
               fontFamily: "var(--font-family)",
+              caretColor: "var(--text-accent)",
             }}
           />
 
           {/* Control row — always visible. Reserved height so metadata
               appearing/disappearing never causes layout shift (SPEC §10). */}
           <div
-            className="flex items-center gap-0.5 px-3 pb-3 pt-1"
-            style={{ minHeight: isStartSurface ? 42 : 40 }}
+            className="composer-controls flex items-center gap-0.5 px-3 pb-3 pt-1"
+            style={{ minHeight: isStartSurface ? 48 : 40 }}
           >
             {/* Attachment. */}
             <button
