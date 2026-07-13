@@ -14,7 +14,7 @@ pnpm --filter @terminus/desktop build
 
 | Artifact | Raw | Gzip |
 | --- | ---: | ---: |
-| Initial application JavaScript | 443.79 kB | 132.40 kB |
+| Initial application JavaScript | 444.08 kB | 132.52 kB |
 | Application CSS | 40.70 kB | 8.53 kB |
 | Deferred Conversation | 32.79 kB | 9.81 kB |
 | Deferred ReviewPane | 30.24 kB | 8.23 kB |

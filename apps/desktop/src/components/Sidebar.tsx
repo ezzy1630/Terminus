@@ -451,7 +451,7 @@ function SidebarImpl({ compact: compactProp, activeDestination = "new_task", onN
         </div>
         <button
           type="button"
-          onClick={() => window.dispatchEvent(new Event("terminus:open-settings"))}
+          onClick={() => window.dispatchEvent(new CustomEvent("terminus:open-settings", { detail: { category: "general" } }))}
           aria-label="Settings"
           title="Settings"
           className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-secondary"
@@ -460,7 +460,7 @@ function SidebarImpl({ compact: compactProp, activeDestination = "new_task", onN
         </button>
         <button
           type="button"
-          onClick={() => window.dispatchEvent(new Event("terminus:open-settings"))}
+          onClick={() => window.dispatchEvent(new CustomEvent("terminus:open-settings", { detail: { category: "shortcuts" } }))}
           aria-label="Help"
           title="Help and shortcuts"
           className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-secondary"

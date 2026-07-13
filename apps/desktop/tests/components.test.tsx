@@ -860,6 +860,22 @@ describe("Sidebar — navigation destinations", () => {
     await userEvent.setup().click(screen.getByRole("button", { name: "Plugins" }));
     expect(onNavigate).toHaveBeenCalledWith("plugins");
   });
+
+  test("routes Settings and Help to distinct settings categories", async () => {
+    const details: unknown[] = [];
+    const listener = (event: Event): void => {
+      details.push(event instanceof CustomEvent ? event.detail : null);
+    };
+    window.addEventListener("terminus:open-settings", listener);
+    render(<Sidebar />);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.click(screen.getByRole("button", { name: "Help" }));
+
+    expect(details).toEqual([{ category: "general" }, { category: "shortcuts" }]);
+    window.removeEventListener("terminus:open-settings", listener);
+  });
 });
 
 // ────────────────────────── 7. SidebarItem ──────────────────────────────────

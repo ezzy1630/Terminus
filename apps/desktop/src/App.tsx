@@ -36,6 +36,7 @@ import { deriveComputerUseActivity } from "./lib/task-surface";
 import { api } from "./lib/api";
 import type { Theme } from "./types";
 import type { SidebarDestination } from "./components/Sidebar";
+import type { SettingCategoryId } from "./components/Settings";
 
 const Settings = lazy(async () => {
   const settingsModule = await import("./components/Settings");
@@ -158,6 +159,7 @@ export function App(): JSX.Element {
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsCategory, setSettingsCategory] = useState<SettingCategoryId>("general");
   const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => shouldShowOnboarding());
   const [activeDestination, setActiveDestination] = useState<SidebarDestination>("new_task");
 
@@ -203,6 +205,11 @@ export function App(): JSX.Element {
     setChangesOpen(false);
   }, [selectTask]);
 
+  const openSettings = useCallback((category: SettingCategoryId = "general"): void => {
+    setSettingsCategory(category);
+    setSettingsOpen(true);
+  }, []);
+
   // Initial data load.
   useEffect(() => {
     void refreshAll();
@@ -232,7 +239,8 @@ export function App(): JSX.Element {
         toggleInspector();
       } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
-        setSettingsOpen((o) => !o);
+        if (settingsOpen) setSettingsOpen(false);
+        else openSettings("general");
       } else if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
         e.preventDefault();
         setSidebarVisible((visible) => !visible);
@@ -241,7 +249,7 @@ export function App(): JSX.Element {
         setOnboardingOpen(true);
       } else if ((e.metaKey || e.ctrlKey) && e.key === "/") {
         e.preventDefault();
-        setSettingsOpen(true);
+        openSettings("shortcuts");
       } else if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
         const task = selectedSessionTasks[Number(e.key) - 1];
         if (task) {
@@ -254,18 +262,23 @@ export function App(): JSX.Element {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [goToNewTask, selectedSessionTasks, selectedTaskId, selectTask, toggleInspector]);
+  }, [goToNewTask, openSettings, selectedSessionTasks, selectedTaskId, selectTask, settingsOpen, toggleInspector]);
 
   useEffect(() => {
-    const openSettings = (): void => setSettingsOpen(true);
+    const onOpenSettings = (event: Event): void => {
+      const detail = event instanceof CustomEvent
+        ? event.detail as { category?: SettingCategoryId } | undefined
+        : undefined;
+      openSettings(detail?.category ?? "general");
+    };
     const openOnboarding = (): void => setOnboardingOpen(true);
-    window.addEventListener("terminus:open-settings", openSettings);
+    window.addEventListener("terminus:open-settings", onOpenSettings);
     window.addEventListener("terminus:open-onboarding", openOnboarding);
     return () => {
-      window.removeEventListener("terminus:open-settings", openSettings);
+      window.removeEventListener("terminus:open-settings", onOpenSettings);
       window.removeEventListener("terminus:open-onboarding", openOnboarding);
     };
-  }, []);
+  }, [openSettings]);
 
   // Build the command catalog. Memoized so the palette doesn't re-rank
   // on every App re-render.
@@ -282,7 +295,7 @@ export function App(): JSX.Element {
         },
         switchTheme: () => cycleTheme(),
         switchDensity: () => toggleDensity(),
-        openSettings: () => setSettingsOpen(true),
+        openSettings,
         openProject: undefined,
         openTask: undefined,
         switchModel: undefined,
@@ -296,7 +309,7 @@ export function App(): JSX.Element {
         revealInFinder: undefined,
         viewShortcuts: undefined,
       }),
-    [cycleTheme, goToNewTask, selectedTaskId, toggleDensity, toggleInspector],
+    [cycleTheme, goToNewTask, openSettings, selectedTaskId, toggleDensity, toggleInspector],
   );
 
   const showNewTask = selectedTaskId === null && activeDestination === "new_task";
@@ -368,7 +381,7 @@ export function App(): JSX.Element {
             <DestinationSurface
               destination={activeDestination === "new_task" ? "chat" : activeDestination}
               onStartTask={goToNewTask}
-              onOpenSettings={() => setSettingsOpen(true)}
+              onOpenSettings={openSettings}
             />
           ) : changesOpen ? (
             <ResizableReviewLayout
@@ -435,7 +448,12 @@ export function App(): JSX.Element {
       />
       {settingsOpen ? (
         <Suspense fallback={null}>
-          <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          <Settings
+            key={settingsCategory}
+            open={settingsOpen}
+            onClose={() => setSettingsOpen(false)}
+            initialCategoryId={settingsCategory}
+          />
         </Suspense>
       ) : null}
       {onboardingOpen ? (
