@@ -849,13 +849,13 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
       role="dialog"
       aria-modal="true"
       aria-label="Settings"
-      className="fixed inset-0 z-50 flex flex-col bg-canvas"
+      className="settings-dialog fixed inset-0 z-50 flex flex-col bg-canvas"
       style={{ animation: "fade-in var(--duration-fast) var(--easing-default)" }}
     >
       {/* Header. */}
       <div
-        className="titlebar-drag flex flex-shrink-0 items-center gap-2 border-b border-subtle px-4"
-        style={{ height: 44, paddingLeft: 80 }}
+        className="settings-titlebar titlebar-drag flex flex-shrink-0 items-center gap-2 border-b border-subtle px-4"
+        style={{ height: 48, paddingLeft: 80 }}
       >
         <SettingsIcon size={14} className="text-secondary" />
         <span className="text-primary" style={{ fontSize: "var(--font-size-md)", fontWeight: 600 }}>
@@ -875,12 +875,12 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
       <div className="flex min-h-0 flex-1">
         {/* Sidebar — category list + search. */}
         <aside
-          className="flex h-full w-64 flex-shrink-0 flex-col border-r border-subtle bg-sidebar"
-          style={{ width: 240 }}
+          className="settings-sidebar flex h-full w-64 flex-shrink-0 flex-col border-r border-subtle bg-sidebar"
+          style={{ width: 260 }}
         >
           <div className="border-b border-subtle p-2">
-            <div className="flex items-center gap-1.5 rounded-md bg-canvas px-2" style={{ height: 28 }}>
-              <Search size={12} className="text-tertiary" />
+            <div className="settings-search flex items-center gap-2 rounded-lg bg-canvas px-2.5" style={{ height: 34 }}>
+              <Search size={14} className="text-tertiary" />
               <input
                 ref={inputRef}
                 value={query}
@@ -915,7 +915,7 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
                   onClick={() => setActiveCat(cat.id)}
                   aria-current={isSel}
                   className={cn(
-                    "flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-hover",
+                    "settings-category flex w-full items-center gap-2.5 px-3 text-left hover:bg-hover",
                     isSel ? "bg-selected text-primary" : "text-secondary",
                   )}
                   style={{ fontSize: "var(--font-size-sm)" }}
@@ -937,10 +937,10 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
         {/* Main pane. */}
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 overflow-y-auto">
-            <div className="mx-auto w-full" style={{ maxWidth: 720, padding: "24px 32px" }}>
+            <div className="mx-auto w-full" style={{ maxWidth: 840, padding: "36px 44px" }}>
               {activeCategory ? (
                 <>
-                  <div className="mb-4 flex items-start justify-between gap-4">
+                  <div className="mb-7 flex items-start justify-between gap-4">
                     <div>
                       <h1 className="text-primary" style={{ fontSize: "var(--font-size-xl)", fontWeight: 600 }}>
                         {activeCategory.label}
@@ -959,7 +959,7 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
                       <span>Reset category</span>
                     </button>
                   </div>
-                    <div className="flex flex-col gap-1">
+                    <div className="settings-panel flex flex-col overflow-hidden rounded-xl border border-subtle bg-elevated">
                     {activeCategory.settings.map((s) => (
                       <SettingRow key={s.id} descriptor={s} />
                     ))}
@@ -1038,7 +1038,7 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
 
   return (
     <div
-      className={cn("flex items-start gap-4 rounded-md px-3 py-3", available ? "hover:bg-hover" : "opacity-70")}
+      className={cn("settings-row flex items-start gap-5 px-4 py-4", available ? "hover:bg-hover" : "is-unavailable")}
       style={{ transition: "background var(--duration-fast) var(--easing-default)" }}
     >
       <div className="flex min-w-0 flex-1 flex-col" style={{ gap: 2 }}>
@@ -1133,16 +1133,17 @@ function SettingControlView({
         aria-label={descriptor.label}
         onClick={() => onChange(!checked)}
         disabled={disabled}
-        className={cn("relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed")}
+        className={cn("relative inline-flex h-6 w-10 items-center rounded-full transition-colors disabled:cursor-not-allowed")}
         style={{
-          background: checked ? "var(--color-primary)" : "var(--bg-hover)",
+          background: disabled ? "var(--bg-hover)" : checked ? "var(--color-primary)" : "var(--bg-hover)",
           border: "1px solid var(--border-default)",
         }}
       >
         <span
-          className="inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform"
+          className="inline-block h-4 w-4 rounded-full bg-white transition-transform"
           style={{
-            transform: checked ? "translateX(18px)" : "translateX(2px)",
+            transform: checked ? "translateX(20px)" : "translateX(2px)",
+            opacity: disabled ? 0.58 : 1,
             transitionDuration: "var(--duration-fast)",
           }}
         />

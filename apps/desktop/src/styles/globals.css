@@ -147,18 +147,25 @@ textarea {
 }
 
 .new-task-screen {
-  padding: clamp(40px, 6vh, 76px) clamp(28px, 5vw, 64px) 10px;
+  padding: clamp(28px, 4vh, 56px) clamp(28px, 5vw, 72px) 20px;
 }
 
+.start-surface-shell { container-type: inline-size; }
+
 .new-task-hero {
-  padding: clamp(56px, 9vh, 104px) 0 clamp(44px, 7vh, 72px);
-  transform: translateY(clamp(28px, 5vh, 54px));
+  min-height: 0;
+  padding: clamp(34px, 7vh, 84px) 0 clamp(30px, 5vh, 58px);
 }
 
 .starter-grid {
-  width: min(100%, 700px);
-  margin-top: 42px;
+  width: min(100%, 920px);
+  margin-top: clamp(32px, 5vh, 48px);
   gap: 14px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.new-task-heading {
+  font-size: clamp(24px, 2.3vw, 32px);
 }
 
 /* ────────────────────────── Starter Cards ────────────────────────────── */
@@ -177,8 +184,16 @@ textarea {
     border-color var(--duration-fast) var(--easing-default),
     background var(--duration-fast) var(--easing-default),
     box-shadow var(--duration-fast) var(--easing-default);
-  min-height: 108px;
-  padding: 16px;
+  min-height: 144px;
+  padding: 20px;
+}
+
+.starter-card-title {
+  font-size: clamp(13px, 1.35vw, 15px);
+}
+
+.starter-card-detail {
+  font-size: clamp(12px, 1.2vw, 14px);
 }
 
 .starter-card::after {
@@ -211,7 +226,7 @@ textarea {
 
 .composer-dock {
   animation: slide-up 360ms var(--easing-default) 180ms both;
-  max-width: 700px;
+  max-width: 920px;
   margin-inline: auto;
 }
 
@@ -241,6 +256,23 @@ textarea {
 
 .start-composer .composer-surface {
   box-shadow: 0 18px 52px rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.035);
+}
+
+.start-composer textarea {
+  min-height: 76px;
+  padding: 16px 18px 8px;
+  letter-spacing: -0.01em;
+}
+
+/* The outer surface owns focus treatment. The textarea itself should stay
+   quiet, otherwise the browser focus ring reads as a blue overlay. */
+.composer-surface textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.start-composer .composer-controls {
+  padding: 4px 14px 12px;
 }
 
 .composer-surface {
@@ -375,6 +407,41 @@ textarea {
   backdrop-filter: blur(20px);
 }
 
+/* Settings is a full workspace, not a dense preference table. */
+.settings-titlebar {
+  background: linear-gradient(to right, var(--bg-sidebar) 0 260px, var(--bg-canvas) 260px 100%);
+}
+
+.settings-search {
+  border: 1px solid color-mix(in srgb, var(--border-default) 72%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 2.5%, transparent);
+}
+
+.settings-category {
+  min-height: 36px;
+  margin: 1px 7px;
+  width: calc(100% - 14px);
+  border-radius: var(--radius-sm);
+  transition: background var(--duration-fast) var(--easing-default), color var(--duration-fast) var(--easing-default), transform 100ms var(--easing-default);
+}
+
+.settings-category:active { transform: scale(.985); }
+
+.settings-panel {
+  box-shadow: var(--shadow-sm), inset 0 1px 0 color-mix(in srgb, white 2.5%, transparent);
+}
+
+.settings-row {
+  min-height: 72px;
+  transition: background var(--duration-fast) var(--easing-default);
+}
+
+.settings-row + .settings-row {
+  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+}
+
+.settings-row.is-unavailable { opacity: .58; }
+
 /* ────────────────────────── Activity Blocks ──────────────────────────── */
 
 .activity-block { transition: background var(--duration-fast) var(--easing-default), border-color var(--duration-fast) var(--easing-default), box-shadow var(--duration-fast) var(--easing-default); }
@@ -391,7 +458,11 @@ textarea {
 .code-copy:focus-visible { opacity: 1; }
 
 @media (max-height: 760px) {
-  .starter-card { min-height: 100px; padding: 12px; }
+  .new-task-screen { padding-top: 20px; }
+  .new-task-hero { padding-block: 24px 28px; }
+  .starter-grid { margin-top: 28px; }
+  .starter-card { min-height: 142px; padding: 18px; }
+  .start-composer textarea { min-height: 68px; }
 }
 
 /* ────────────────────────── Spinner ──────────────────────────────────── */
@@ -514,17 +585,19 @@ html[data-reduce-transparency="true"] .command-palette-shell {
 .shadow-md { box-shadow: var(--shadow-md); }
 .shadow-lg { box-shadow: var(--shadow-lg); }
 
-@media (max-width: 1100px) {
-  .starter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
 @media (max-width: 700px) {
-  .starter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .starter-card { min-height: 108px; padding: 14px; }
   .project-chooser { padding-inline: 16px; }
 }
 
-@media (max-width: 480px) {
+@container (max-width: 680px) {
+  .starter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+}
+
+@container (max-width: 480px) {
   .starter-grid { grid-template-columns: 1fr; }
 }
 
