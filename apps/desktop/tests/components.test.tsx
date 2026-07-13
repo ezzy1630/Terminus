@@ -30,6 +30,7 @@ import { ErrorState, errorPreset } from "../src/components/ErrorState";
 import { ApprovalCard } from "../src/components/ApprovalCard";
 import { CommandPalette, type Command } from "../src/components/CommandPalette";
 import { Composer } from "../src/components/Composer";
+import { NewTaskScreen } from "../src/components/NewTaskScreen";
 import { Sidebar } from "../src/components/Sidebar";
 import { SidebarItem } from "../src/components/SidebarItem";
 import { Message } from "../src/components/Message";
@@ -201,8 +202,33 @@ vi.mock("../src/lib/api", async (importOriginal) => {
     ...actual,
     api: {
       resolveApproval: vi.fn(),
-      startTask: vi.fn(async () => ({ task_id: "task-1", status: "ACTIVE" })),
+      startTask: vi.fn(async () => ({ task_id: "task-1", status: "ACTIVE", event_cursor: "cursor-1" })),
       startTurn: vi.fn(async () => ({ id: "turn-1" })),
+      createTask: vi.fn(async () => ({
+        id: "task-new",
+        session_id: "session-1",
+        thread_id: "thread-1",
+        status: "DRAFT",
+        phase: "INTAKE",
+        active_contract_version: 1,
+        risk_class: "normal",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        completed_at: null,
+      })),
+      getTask: vi.fn(async () => ({
+        id: "task-new",
+        session_id: "session-1",
+        thread_id: "thread-1",
+        status: "ACTIVE",
+        phase: "DISCOVER",
+        active_contract_version: 1,
+        risk_class: "normal",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        completed_at: null,
+        contract: null,
+      })),
       cancelTask: vi.fn(async () => ({ task_id: "task-1", status: "CANCELLED" })),
       listTasks: vi.fn(async () => ({ tasks: [] })),
     },
@@ -638,6 +664,22 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
   });
 
+  test("a completion event updates both task detail and the sidebar task list", () => {
+    makeTask("ACTIVE");
+    const task = useTerminusStore.getState().taskById["task-1"];
+    expect(task).toBeDefined();
+    useTerminusStore.setState({ tasksBySession: { "session-1": task ? [task] : [] } });
+
+    useTerminusStore.getState()._updateTaskFromEvent({
+      id: "event-1",
+      event: "task.completed",
+      data: JSON.stringify({ phase: "COMPLETE" }),
+    }, "task-1");
+
+    expect(useTerminusStore.getState().taskById["task-1"]?.status).toBe("COMPLETED");
+    expect(useTerminusStore.getState().tasksBySession["session-1"]?.[0]?.status).toBe("COMPLETED");
+  });
+
   test("task.status=FAILED → button label is 'Send' (re-send a follow-up)", () => {
     makeTask("FAILED");
     render(<Composer />);
@@ -712,6 +754,49 @@ describe("Composer — send-button mode switches based on task status", () => {
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     expect(createTask).toHaveBeenCalledWith("Map this project");
+  });
+});
+
+describe("NewTaskScreen — first turn lifecycle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useTerminusStore.setState({
+      sessions: [{
+        id: "session-1",
+        workspace_id: "workspace-1",
+        title: "Terminus",
+        status: "active",
+        active_thread_id: "thread-1",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }],
+      tasksBySession: { "session-1": [] },
+      taskById: {},
+      selectedSessionId: "session-1",
+      selectedTaskId: null,
+      draftsByTask: {},
+      eventsByTask: {},
+    });
+  });
+
+  test("starts the task and submits the objective as its first turn", async () => {
+    const user = userEvent.setup();
+    render(<NewTaskScreen />);
+
+    await user.type(screen.getByRole("textbox", { name: "Message composer" }), "Build the live task surface");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    await waitFor(() => expect(api.startTurn).toHaveBeenCalledTimes(1));
+    expect(api.startTask).toHaveBeenCalledWith("task-new");
+    expect(api.startTurn).toHaveBeenCalledWith({
+      thread_id: "thread-1",
+      task_id: "task-new",
+      user_input: "Build the live task surface",
+    });
+    expect(vi.mocked(api.startTask).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(api.startTurn).mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(useTerminusStore.getState().selectedTaskId).toBe("task-new");
   });
 });
 

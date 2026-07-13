@@ -274,7 +274,7 @@ function InspectorImpl({
 
       {/* Activity section — only when events exist. */}
       {recentEvents.length > 0 ? (
-        <InspectorSection title="Activity" icon={<Workflow size={12} />} summary={`${recentEvents.length}`} defaultOpen>
+        <InspectorSection title="Activity" icon={<Workflow size={12} />} summary={`${recentEvents.length}`} defaultOpen={false}>
           <ul
             className="flex flex-col gap-1.5 text-secondary"
             style={{ fontSize: "var(--font-size-xs)" }}

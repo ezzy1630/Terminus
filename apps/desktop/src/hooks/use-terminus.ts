@@ -108,17 +108,18 @@ interface TerminusState {
   refreshAll: () => Promise<void>;
   refreshSessions: () => Promise<void>;
   refreshTasks: (sessionId: string) => Promise<void>;
+  refreshTask: (taskId: string) => Promise<void>;
   selectSession: (sessionId: string | null) => void;
-  selectTask: (taskId: string | null) => void;
+  selectTask: (taskId: string | null, cursor?: string | null) => void;
   togglePin: (taskId: string) => void;
   setDraft: (taskId: string, text: string) => void;
   clearDraft: (taskId: string) => void;
 
   /** Internal: attach SSE stream to selected task. */
   _stream: TerminusEventStream | null;
-  _attachStream: (taskId: string | null) => void;
+  _attachStream: (taskId: string | null, initialCursor?: string | null) => void;
   _appendEvent: (taskId: string, ev: TerminusSseEvent) => void;
-  _updateTaskFromEvent: (ev: TerminusSseEvent) => void;
+  _updateTaskFromEvent: (ev: TerminusSseEvent, streamTaskId?: string) => void;
 }
 
 export const useTerminusStore = create<TerminusState>((set, get) => ({
@@ -190,6 +191,24 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     }
   },
 
+  refreshTask: async (taskId: string) => {
+    try {
+      const task = await api.getTask(taskId);
+      set((state) => ({
+        taskById: { ...state.taskById, [task.id]: task },
+        tasksBySession: {
+          ...state.tasksBySession,
+          [task.session_id]: (state.tasksBySession[task.session_id] ?? []).map((candidate) =>
+            candidate.id === task.id ? task : candidate,
+          ),
+        },
+      }));
+    } catch (err) {
+      const msg = err instanceof TerminusApiError ? err.message : err instanceof Error ? err.message : "get task failed";
+      set({ lastError: msg });
+    }
+  },
+
   selectSession: (sessionId) => {
     set({ selectedSessionId: sessionId, selectedTaskId: null });
     // Detach stream when session changes.
@@ -197,9 +216,10 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     if (sessionId) void get().refreshTasks(sessionId);
   },
 
-  selectTask: (taskId) => {
+  selectTask: (taskId, cursor = null) => {
     set({ selectedTaskId: taskId });
-    get()._attachStream(taskId);
+    if (taskId) void get().refreshTask(taskId);
+    get()._attachStream(taskId, cursor);
   },
 
   togglePin: (taskId) => {
@@ -232,7 +252,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     });
   },
 
-  _updateTaskFromEvent: (ev) => {
+  _updateTaskFromEvent: (ev, streamTaskId) => {
     // Update task status from task.* events.
     if (!ev.event.startsWith("task.")) return;
     let payload: unknown;
@@ -243,9 +263,22 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     }
     if (!payload || typeof payload !== "object") return;
     const p = payload as Record<string, unknown>;
-    const taskId = typeof p.task_id === "string" ? p.task_id : typeof p.id === "string" ? p.id : null;
+    const taskId = typeof p.task_id === "string"
+      ? p.task_id
+      : typeof p.id === "string"
+        ? p.id
+        : streamTaskId ?? null;
     if (!taskId) return;
-    const status = typeof p.status === "string" ? p.status : null;
+    const eventStatus = (() => {
+      switch (ev.event) {
+        case "task.completed": return "COMPLETED";
+        case "task.failed": return "FAILED";
+        case "task.interrupted": return "INTERRUPTED";
+        case "task.aborted": return "CANCELLED";
+        default: return null;
+      }
+    })();
+    const status = typeof p.status === "string" ? p.status : eventStatus;
     const phase = typeof p.phase === "string" ? p.phase : null;
     set((state) => {
       const existing = state.taskById[taskId];
@@ -256,11 +289,18 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         phase: phase ?? existing.phase,
         updated_at: new Date().toISOString(),
       };
-      return { taskById: { ...state.taskById, [taskId]: updated } };
+      const tasks = state.tasksBySession[updated.session_id] ?? [];
+      return {
+        taskById: { ...state.taskById, [taskId]: updated },
+        tasksBySession: {
+          ...state.tasksBySession,
+          [updated.session_id]: tasks.map((task) => task.id === taskId ? updated : task),
+        },
+      };
     });
   },
 
-  _attachStream: (taskId) => {
+  _attachStream: (taskId, initialCursor = null) => {
     streamGeneration += 1;
     const generation = streamGeneration;
     if (reconnectTimer) {
@@ -278,7 +318,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     const connect = (): void => {
       if (generation !== streamGeneration || get().selectedTaskId !== taskId) return;
       const events = get().eventsByTask[taskId] ?? [];
-      const cursor = events.length > 0 ? (events[events.length - 1]?.id ?? null) : null;
+      const cursor = events.length > 0 ? (events[events.length - 1]?.id ?? initialCursor) : initialCursor;
       const stream = subscribeEvents({ task_id: taskId, cursor });
       set({ _stream: stream, streamState: attempts > 0 ? "reconnecting" : "connecting" });
       stream.addEventListener("open", () => {
@@ -289,7 +329,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
       stream.addEventListener("message", (ev) => {
         if (generation !== streamGeneration) return;
         get()._appendEvent(taskId, ev);
-        get()._updateTaskFromEvent(ev);
+        get()._updateTaskFromEvent(ev, taskId);
       });
       stream.addEventListener("error", () => {
         if (generation !== streamGeneration || reconnectTimer) return;

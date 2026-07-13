@@ -144,11 +144,20 @@ function NewTaskScreenImpl({ className }: NewTaskScreenProps): JSX.Element {
         objective,
         risk_class: "normal",
       });
-      // Start it immediately — primary slice wants the agent loop to kick off.
-      await api.startTask(task.id);
-      // Refresh + select the new task.
+      // Creating a task only establishes its contract. Start the task and its
+      // first turn as one user-visible action so the conversation never gets
+      // stranded on "Preparing the first turn" after pressing Send.
+      const started = await api.startTask(task.id);
+      // Refresh and attach the task stream from the activation cursor before
+      // creating the turn. If the turn finishes faster than the renderer can
+      // subscribe, the cursor makes the control plane replay every event.
       await refreshTasks(session.id);
-      selectTask(task.id);
+      selectTask(task.id, started.event_cursor);
+      await api.startTurn({
+        thread_id: task.thread_id,
+        task_id: task.id,
+        user_input: objective,
+      });
     } catch (err) {
       const message = err instanceof TerminusApiError || err instanceof Error ? err.message : "Failed to create task";
       setError(message);

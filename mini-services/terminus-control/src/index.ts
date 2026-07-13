@@ -1164,10 +1164,17 @@ const routes: Route[] = [
     const streamName = taskId ? `task:${taskId}` : sessionId ? `session:${sessionId}` : "global";
 
     const filter = (ev: StoredEvent) => {
-      if (taskId && ev.payloadJson && ev.payloadJson.includes(taskId)) return true;
-      if (sessionId && ev.payloadJson && ev.payloadJson.includes(sessionId)) return true;
-      if (!taskId && !sessionId) return true;
-      return false;
+      if (taskId) {
+        // Turn, provider, tool, verification, and completion events use the
+        // task id as their correlation id. Their payloads intentionally do
+        // not all duplicate it, so payload-only matching strands the desktop
+        // after turn.started and drops the rest of the live trajectory.
+        return ev.correlationId === taskId
+          || (ev.aggregateType === "task" && ev.aggregateId === taskId)
+          || (ev.payloadJson?.includes(taskId) ?? false);
+      }
+      if (sessionId) return ev.payloadJson?.includes(sessionId) ?? false;
+      return true;
     };
 
     let lastEventId: string | null = cursor ?? null;

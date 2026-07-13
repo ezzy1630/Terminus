@@ -35,9 +35,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
  *      before.
  */
 const electron_1 = require("electron");
+const node_module_1 = require("node:module");
 const node_path_1 = require("node:path");
 const node_crypto_1 = require("node:crypto");
 const node_fs_1 = require("node:fs");
+const cjsRequire = (0, node_module_1.createRequire)(__filename);
 const isDev = !electron_1.app.isPackaged;
 electron_1.app.setName("Terminus");
 let mainWindow = null;
@@ -119,7 +121,7 @@ function loadPty() {
         // use a dynamic `require()` so node-pty (a native module) is loaded
         // lazily — if it failed to compile on this platform, we catch and
         // fall back to a stub terminal in the renderer.
-        pty = require("node-pty");
+        pty = cjsRequire("node-pty");
     }
     catch (err) {
         ptyLoadError = err instanceof Error ? err.message : String(err);
@@ -287,7 +289,9 @@ function createWindow() {
         // Keep the dev renderer from reusing a pre-migration Terminus document from
         // Electron's HTTP cache after the app rename.
         void mainWindow.loadURL("http://localhost:5173/?app=terminus");
-        mainWindow.webContents.openDevTools({ mode: "detach" });
+        if (process.env.TERMINUS_DESKTOP_DEVTOOLS !== "0") {
+            mainWindow.webContents.openDevTools({ mode: "detach" });
+        }
     }
     else {
         void mainWindow.loadFile((0, node_path_1.join)(__dirname, "../dist/index.html"));
@@ -300,9 +304,8 @@ electron_1.nativeTheme.themeSource = "system";
 function registerIpc() {
     // ── Terminus desktop bridge ──
     electron_1.ipcMain.handle("notify", (_e, { title, body }) => {
-        const { Notification } = require("electron");
-        if (Notification.isSupported() && !mainWindow?.isFocused()) {
-            new Notification({ title, body }).show();
+        if (electron_1.Notification.isSupported() && !mainWindow?.isFocused()) {
+            new electron_1.Notification({ title, body }).show();
         }
         return null;
     });

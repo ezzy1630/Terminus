@@ -320,7 +320,9 @@ function createWindow(): void {
     // Keep the dev renderer from reusing a pre-migration Terminus document from
     // Electron's HTTP cache after the app rename.
     void mainWindow.loadURL("http://localhost:5173/?app=terminus");
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+    if (process.env.TERMINUS_DESKTOP_DEVTOOLS !== "0") {
+      mainWindow.webContents.openDevTools({ mode: "detach" });
+    }
   } else {
     void mainWindow.loadFile(join(__dirname, "../dist/index.html"));
   }

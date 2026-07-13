@@ -44,10 +44,11 @@ jobs:
         id: version
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            raw_version="${{ github.event.inputs.version }}"
           else
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            raw_version="${GITHUB_REF_NAME}"
           fi
+          echo "version=${raw_version#v}" >> "$GITHUB_OUTPUT"
 
   # ---------- Build signed artifacts across platforms ----------
   build-artifacts:
@@ -206,7 +207,7 @@ jobs:
   publish-release:
     name: Publish release with SBOM and provenance
     runs-on: ubuntu-latest
-    needs: [build-artifacts, linux-enforcement-evidence]
+    needs: [supply-chain-gate, build-artifacts, linux-enforcement-evidence]
     permissions:
       contents: write
       packages: write
@@ -249,6 +250,8 @@ jobs:
         with:
           files: |
             release/*
+          tag_name: v${{ needs.supply-chain-gate.outputs.version }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           draft: true
           fail_on_unmatched_files: true
@@ -256,14 +259,14 @@ jobs:
   release-decision:
     name: Machine-readable release decision (SPEC §50.10)
     runs-on: ubuntu-latest
-    needs: publish-release
+    needs: [publish-release, supply-chain-gate]
     steps:
       - uses: actions/checkout@v4
       - name: Write release decision
         run: |
           cat > release-decision.yaml <<'EOF'
           release:
-            version: ${{ github.event.inputs.version || github.ref_name }}
+            version: v${{ needs.supply-chain-gate.outputs.version }}
             commit: ${{ github.sha }}
             protocol_versions:
               terminus_kernel_v1: "1"
