@@ -715,6 +715,31 @@ function defaultValues(): SettingValueMap {
   return out;
 }
 
+function normalizeSettingValue(id: string, value: unknown): SettingValue {
+  const descriptor = findDescriptor(id);
+  if (!descriptor) return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : "";
+  const control = descriptor.control;
+  if (control.kind === "toggle") return typeof value === "boolean" ? value : descriptor.defaultValue;
+  if (control.kind === "select") {
+    return typeof value === "string" && control.options.some((option) => option.value === value)
+      ? value
+      : descriptor.defaultValue;
+  }
+  if (control.kind === "number") {
+    if (typeof value !== "number" || !Number.isFinite(value)) return descriptor.defaultValue;
+    return Math.min(control.max ?? Number.POSITIVE_INFINITY, Math.max(control.min ?? Number.NEGATIVE_INFINITY, value));
+  }
+  return typeof value === "string" ? value : descriptor.defaultValue;
+}
+
+function normalizedPersistedValues(): SettingValueMap {
+  const values: SettingValueMap = {};
+  for (const [id, value] of Object.entries(persisted)) {
+    if (findDescriptor(id)) values[id] = normalizeSettingValue(id, value);
+  }
+  return values;
+}
+
 interface SettingsState {
   values: SettingValueMap;
   get: (id: string) => SettingValue | undefined;
@@ -727,17 +752,18 @@ interface SettingsState {
 const persisted = readPersisted();
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
-  values: { ...defaultValues(), ...persisted },
+  values: { ...defaultValues(), ...normalizedPersistedValues() },
   get: (id) => get().values[id],
   set: (id, value) => {
+    const normalized = normalizeSettingValue(id, value);
     set((state) => {
-      const next = { ...state.values, [id]: value };
+      const next = { ...state.values, [id]: normalized };
       writePersisted(next);
       return { values: next };
     });
     // Apply side-effects (theme/density live preview).
     const descriptor = findDescriptor(id);
-    descriptor?.apply?.(value);
+    descriptor?.apply?.(normalized);
   },
   reset: (id) => {
     const descriptor = findDescriptor(id);

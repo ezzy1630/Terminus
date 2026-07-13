@@ -854,4 +854,17 @@ describe("Settings — runtime model profiles", () => {
     expect(document.documentElement.dataset.reduceMotion).toBe("false");
     expect(document.documentElement.dataset.reduceTransparency).toBe("false");
   });
+
+  test("normalizes malformed persisted-style select and numeric values", () => {
+    const settings = useSettingsStore.getState();
+    settings.set("appearance.theme", "Light");
+    settings.set("appearance.density", "dense");
+    settings.set("performance.max-events-per-task", 50000);
+
+    expect(settings.get("appearance.theme")).toBe("system");
+    expect(settings.get("appearance.density")).toBe("spacious");
+    expect(settings.get("performance.max-events-per-task")).toBe(10000);
+    expect(useThemeStore.getState().theme).toBe("system");
+    expect(useThemeStore.getState().density).toBe("spacious");
+  });
 });
