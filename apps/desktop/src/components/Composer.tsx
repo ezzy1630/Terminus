@@ -56,7 +56,7 @@ import { api, TerminusApiError } from "../lib/api";
 import { useTerminusStore, useSelectedTask } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
 import { normalizeTaskStatus } from "../hooks/use-terminus";
-import type { AccessLevel, ComposerSendMode } from "../types";
+import type { ComposerSendMode } from "../types";
 
 interface ComposerProps {
   className?: string;
@@ -67,19 +67,6 @@ interface ComposerProps {
    */
   onCreateTask?: (objective: string) => Promise<void>;
 }
-
-const FALLBACK_AGENT_OPTIONS = [
-  { id: "implementer", label: "5.6 Sol Medium" },
-  { id: "scout", label: "5.6 Sol Fast" },
-  { id: "reviewer", label: "5.6 Sol Review" },
-] as const;
-
-const ACCESS_LEVELS: Array<{ id: AccessLevel; label: string; hint: string }> = [
-  { id: "read_only", label: "Read-only", hint: "Read files only. No writes, no exec." },
-  { id: "local_dev", label: "Local dev", hint: "Read/write within workspace. Sandbox exec." },
-  { id: "trusted", label: "Full access", hint: "Full workspace access. Network allowlist." },
-  { id: "elevated", label: "Elevated", hint: "All effects allowed. Approvals required." },
-];
 
 function computeSendMode(taskStatus: string | undefined): ComposerSendMode {
   if (!taskStatus) return "send";
@@ -108,11 +95,9 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const attachmentUrlsRef = useRef<Set<string>>(new Set());
   const [agentOpen, setAgentOpen] = useState(false);
-  const [accessOpen, setAccessOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
-  const [agentId, setAgentId] = useState<string>(FALLBACK_AGENT_OPTIONS[0]!.id);
-  const [accessLevel, setAccessLevel] = useState<AccessLevel>("trusted");
+  const [agentId, setAgentId] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -122,17 +107,15 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
     () => sessions.find((session) => session.id === (task?.session_id ?? selectedSessionId)),
     [selectedSessionId, sessions, task?.session_id],
   );
-  const agentOptions = useMemo(() => {
-    const profile = activeSession?.default_model_profile?.trim();
-    if (!profile || FALLBACK_AGENT_OPTIONS.some((option) => option.id === profile)) return FALLBACK_AGENT_OPTIONS;
-    return [{ id: profile, label: profile }, ...FALLBACK_AGENT_OPTIONS];
-  }, [activeSession?.default_model_profile]);
+  const agentOptions = useMemo(() => Array.from(new Set(
+    sessions.flatMap((candidate) => candidate.default_model_profile?.trim() ? [candidate.default_model_profile.trim()] : []),
+  )).map((profile) => ({ id: profile, label: profile })), [sessions]);
 
   // A project can nominate a default profile. Keep the selector aligned on
   // the new-task surface while leaving an active task's explicit choice alone.
   useEffect(() => {
     if (!task && activeSession?.default_model_profile) {
-      setAgentId(activeSession.default_model_profile);
+      setAgentId(activeSession.default_model_profile.trim());
     }
   }, [activeSession?.default_model_profile, task]);
 
@@ -317,9 +300,9 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
     }
   })();
 
-  const selectedAccess = ACCESS_LEVELS.find((a) => a.id === accessLevel) ?? ACCESS_LEVELS[1]!;
-  const selectedAgent = agentOptions.find((a) => a.id === agentId) ?? agentOptions[0]!;
-  const accessTone = accessLevel === "trusted" ? "text-success" : accessLevel === "elevated" ? "text-warning" : "text-secondary";
+  const selectedAgent = agentOptions.find((option) => option.id === agentId)
+    ?? (activeSession?.default_model_profile?.trim() ? { id: activeSession.default_model_profile.trim(), label: activeSession.default_model_profile.trim() } : null);
+  const permissionProfile = activeSession?.default_permission_profile?.trim() || "Workspace policy";
   const sendDisabled = sending || (sendButtonContent.mode !== "stop" && draft.trim().length === 0);
 
   return (
@@ -448,13 +431,13 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
             <div className="relative" style={{ order: isStartSurface ? 4 : 2, marginLeft: isStartSurface ? "auto" : undefined }}>
               <button
                 type="button"
-                onClick={() => { setAgentOpen((o) => !o); setAccessOpen(false); setMoreOpen(false); }}
+                onClick={() => { setAgentOpen((o) => !o); setMoreOpen(false); }}
                 className="composer-control flex h-8 items-center gap-1 rounded-lg px-2 text-xs text-secondary hover:bg-hover hover:text-primary"
                 style={{ fontSize: "var(--font-size-xs)" }}
                 aria-haspopup="menu"
                 aria-expanded={agentOpen}
               >
-                <span>{selectedAgent.label}</span>
+                <span>{selectedAgent?.label ?? "Connect provider"}</span>
                 <ChevronDown size={11} />
               </button>
               {agentOpen ? (
@@ -468,45 +451,36 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
                       {a.label}
                     </DropdownItem>
                   ))}
+                  <DropdownItem
+                    onClick={() => { setAgentOpen(false); window.dispatchEvent(new Event("terminus:open-settings")); }}
+                    hint={agentOptions.length === 0 ? "No configured model profiles were reported" : "Manage provider and model profiles"}
+                  >
+                    {agentOptions.length === 0 ? "Connect provider" : "Manage connections"}
+                  </DropdownItem>
                 </Dropdown>
               ) : null}
             </div>
 
-            {/* Access level. */}
+            {/* Permission profile — sourced from the selected session. */}
             <div className="relative" style={{ order: isStartSurface ? 2 : 3 }}>
               <button
                 type="button"
-                onClick={() => { setAccessOpen((o) => !o); setAgentOpen(false); setMoreOpen(false); }}
-                className={cn("composer-control flex h-8 items-center gap-1 rounded-lg px-2 text-xs hover:bg-hover hover:text-primary", accessTone)}
+                onClick={() => window.dispatchEvent(new Event("terminus:open-settings"))}
+                className="composer-control flex h-8 items-center gap-1 rounded-lg px-2 text-xs text-secondary hover:bg-hover hover:text-primary"
                 style={{ fontSize: "var(--font-size-xs)" }}
-                aria-haspopup="menu"
-                aria-expanded={accessOpen}
+                aria-label={`Permission profile: ${permissionProfile}`}
+                title="Manage permission policy"
               >
                 <ShieldCheck size={13} strokeWidth={1.8} />
-                <span>{selectedAccess.label}</span>
-                <ChevronDown size={11} />
+                <span>{permissionProfile}</span>
               </button>
-              {accessOpen ? (
-                <Dropdown onClose={() => setAccessOpen(false)}>
-                  {ACCESS_LEVELS.map((a) => (
-                    <DropdownItem
-                      key={a.id}
-                      selected={a.id === accessLevel}
-                      onClick={() => { setAccessLevel(a.id); setAccessOpen(false); }}
-                      hint={a.hint}
-                    >
-                      {a.label}
-                    </DropdownItem>
-                  ))}
-                </Dropdown>
-              ) : null}
             </div>
 
             {/* Compact "more" menu for contextual controls. */}
             <div className="relative" style={{ order: 3 }}>
               <button
                 type="button"
-                onClick={() => { setMoreOpen((o) => !o); setAgentOpen(false); setAccessOpen(false); }}
+                onClick={() => { setMoreOpen((o) => !o); setAgentOpen(false); }}
                 aria-label="More options"
                 title="Branch, worktree, computer use, queue behavior"
                 className="composer-control flex h-8 w-8 items-center justify-center rounded-lg text-secondary hover:bg-hover hover:text-primary"

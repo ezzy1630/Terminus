@@ -302,24 +302,17 @@ function buildCatalog(): SettingCategory[] {
       settings: [
         {
           id: "agents.default",
-          label: "Default agent",
-          description: "Agent used for new tasks unless overridden.",
-          control: {
-            kind: "select",
-            options: [
-              { value: "implementer", label: "Implementer" },
-              { value: "scout", label: "Scout" },
-              { value: "reviewer", label: "Reviewer" },
-            ],
-          },
-          defaultValue: "implementer",
+          label: "Default model profile",
+          description: "Profile id supplied by a connected provider. Leave empty to use the session default.",
+          control: { kind: "text", placeholder: "Connected provider profile" },
+          defaultValue: "",
         },
         {
           id: "agents.model",
-          label: "Default model",
-          description: "Model profile id from your provider configuration.",
-          control: { kind: "text", placeholder: "default" },
-          defaultValue: "default",
+          label: "Provider connection",
+          description: "Connection id reported by the provider registry.",
+          control: { kind: "text", placeholder: "No provider connected" },
+          defaultValue: "",
         },
         {
           id: "agents.auto-verify",
@@ -345,18 +338,10 @@ function buildCatalog(): SettingCategory[] {
       settings: [
         {
           id: "permissions.default-access",
-          label: "Default access level",
-          description: "Lowest access level applied to new tasks.",
-          control: {
-            kind: "select",
-            options: [
-              { value: "read_only", label: "Read-only" },
-              { value: "local_dev", label: "Local dev" },
-              { value: "trusted", label: "Trusted" },
-              { value: "elevated", label: "Elevated" },
-            ],
-          },
-          defaultValue: "local_dev",
+          label: "Default permission profile",
+          description: "Policy profile id supplied by the selected workspace or session.",
+          control: { kind: "text", placeholder: "Workspace policy" },
+          defaultValue: "",
         },
         {
           id: "permissions.approve-network",

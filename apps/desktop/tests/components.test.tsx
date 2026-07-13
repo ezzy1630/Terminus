@@ -631,10 +631,11 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
   });
 
-  test("defaults to the green Full access presentation", () => {
+  test("does not invent a model or access level when no session profile exists", () => {
     useTerminusStore.setState({ selectedTaskId: null });
     render(<Composer />);
-    expect(screen.getByRole("button", { name: /Full access/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect provider" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Permission profile: Workspace policy" })).toBeInTheDocument();
   });
 
   test("the start-surface composer delegates a fresh objective to task creation", async () => {
@@ -654,9 +655,10 @@ describe("Sidebar — navigation destinations", () => {
     const onNavigate = vi.fn();
     render(<Sidebar onNavigate={onNavigate} />);
 
-    for (const label of ["New task", "Scheduled", "Plugins", "Sites", "Pull requests", "Chat"]) {
+    for (const label of ["New task", "Scheduled", "Plugins", "Pull requests", "Chat"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
+    expect(screen.queryByRole("button", { name: "Sites" })).not.toBeInTheDocument();
 
     await userEvent.setup().click(screen.getByRole("button", { name: "Plugins" }));
     expect(onNavigate).toHaveBeenCalledWith("plugins");

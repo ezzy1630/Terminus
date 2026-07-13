@@ -4,7 +4,7 @@
  * Per SPEC §7:
  *   Application name
  *   New task        ← primary action button
- *   Scheduled / Plugins / Sites / Pull requests / Chat
+ *   Scheduled / Plugins / Pull requests / Chat
  *   Search tasks    ← filtering input
  *   Pinned          ← important tasks
  *     - task
@@ -30,7 +30,6 @@ import {
   ChevronDown,
   ChevronRight,
   GitPullRequestArrow,
-  Globe,
   HelpCircle,
   MessageCircle,
   Plus,
@@ -56,7 +55,7 @@ interface SidebarProps {
   onNavigate?: (destination: SidebarDestination) => void;
 }
 
-export type SidebarDestination = "new_task" | "scheduled" | "plugins" | "sites" | "pull_requests" | "chat";
+export type SidebarDestination = "new_task" | "scheduled" | "plugins" | "pull_requests" | "chat";
 
 const DESTINATION_NAV: Array<{
   id: Exclude<SidebarDestination, "new_task">;
@@ -65,7 +64,6 @@ const DESTINATION_NAV: Array<{
 }> = [
   { id: "scheduled", label: "Scheduled", icon: CalendarClock },
   { id: "plugins", label: "Plugins", icon: Puzzle },
-  { id: "sites", label: "Sites", icon: Globe },
   { id: "pull_requests", label: "Pull requests", icon: GitPullRequestArrow },
   { id: "chat", label: "Chat", icon: MessageCircle },
 ];

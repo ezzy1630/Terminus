@@ -21,7 +21,7 @@
  * — no React.lazy / Suspense boundaries yet.
  */
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarClock, GitPullRequestArrow, Globe, MessageCircle, Monitor, Moon, PanelRight, Puzzle, Sun } from "lucide-react";
+import { CalendarClock, GitPullRequestArrow, MessageCircle, Monitor, Moon, PanelRight, Puzzle, Sun } from "lucide-react";
 import { Layout } from "./components/Layout";
 import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
 import { Sidebar } from "./components/Sidebar";
@@ -74,12 +74,6 @@ const DESTINATION_SURFACES: Record<SecondaryDestination, {
     title: "Plugins are quiet for now",
     description: "Installed capabilities will be listed here with their trust boundary and current status.",
     actionLabel: "Open settings",
-  },
-  sites: {
-    icon: <Globe size={18} strokeWidth={1.6} />,
-    title: "No sites connected",
-    description: "Connected product destinations will appear here once a site capability is configured.",
-    actionLabel: "Start a task",
   },
   pull_requests: {
     icon: <GitPullRequestArrow size={18} strokeWidth={1.6} />,
