@@ -51,6 +51,8 @@ describe("Onboarding production flow", () => {
       links: { events: "/v1/events", task: `/v1/tasks/${task.id}` },
     });
     vi.spyOn(api, "listTasks").mockResolvedValue({ tasks: [task] });
+    vi.spyOn(api, "getTask").mockResolvedValue(task);
+    vi.spyOn(api, "startTurn").mockResolvedValue({ id: "turn-1" } as never);
   });
 
   afterEach(() => {
@@ -87,6 +89,14 @@ describe("Onboarding production flow", () => {
       objective: "Audit the desktop UI.",
     }));
     expect(api.startTask).toHaveBeenCalledWith(task.id);
+    expect(api.startTurn).toHaveBeenCalledWith({
+      thread_id: task.thread_id,
+      task_id: task.id,
+      user_input: "Audit the desktop UI.",
+    });
+    expect(vi.mocked(api.startTask).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(api.startTurn).mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
     expect(useTerminusStore.getState().selectedTaskId).toBe(task.id);
   });
 });

@@ -17,16 +17,14 @@
  * through the command palette and Settings without a restart.
  *
  * Per SPEC §25.1: "The initial shell must appear before heavy feature
- * bundles load." The main route switch is plain conditional rendering
- * — no React.lazy / Suspense boundaries yet.
+ * bundles load." Settings, onboarding, review, conversation, and the
+ * task inspector are split behind React.lazy boundaries.
  */
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { CalendarClock, GitPullRequestArrow, MessageCircle, Monitor, Moon, PanelRight, Puzzle, Sun } from "lucide-react";
 import { Layout } from "./components/Layout";
 import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
 import { Sidebar } from "./components/Sidebar";
-import { Inspector } from "./components/Inspector";
-import { Conversation } from "./components/Conversation";
 import { Composer } from "./components/Composer";
 import { NewTaskScreen } from "./components/NewTaskScreen";
 import { EmptyState } from "./components/EmptyState";
@@ -51,6 +49,16 @@ const Onboarding = lazy(async () => {
 const ReviewPane = lazy(async () => {
   const reviewModule = await import("./components/ReviewPane");
   return { default: reviewModule.ReviewPane };
+});
+
+const Conversation = lazy(async () => {
+  const conversationModule = await import("./components/Conversation");
+  return { default: conversationModule.Conversation };
+});
+
+const Inspector = lazy(async () => {
+  const inspectorModule = await import("./components/Inspector");
+  return { default: inspectorModule.Inspector };
 });
 
 const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
@@ -292,6 +300,12 @@ export function App(): JSX.Element {
     });
   }, [selectedTaskId, setDraft]);
 
+  const conversation = (
+    <Suspense fallback={<div className="flex h-full items-center justify-center text-tertiary" style={{ fontSize: "var(--font-size-sm)" }}>Loading task…</div>}>
+      <Conversation />
+    </Suspense>
+  );
+
   return (
     <>
       <Layout
@@ -316,16 +330,18 @@ export function App(): JSX.Element {
           ) : undefined
         }
         inspector={
-          <Inspector
-            computerUseSession={{
-              active: computerUseActivity.active,
-              expanded: computerUseExpanded,
-              hidden: computerUseHidden,
-            }}
-            onComputerUseHide={() => setComputerUseHidden(true)}
-            onComputerUseToggleExpanded={(expanded) => setComputerUseExpanded(expanded)}
-            onShowChanges={() => setChangesOpen(true)}
-          />
+          <Suspense fallback={null}>
+            <Inspector
+              computerUseSession={{
+                active: computerUseActivity.active,
+                expanded: computerUseExpanded,
+                hidden: computerUseHidden,
+              }}
+              onComputerUseHide={() => setComputerUseHidden(true)}
+              onComputerUseToggleExpanded={(expanded) => setComputerUseExpanded(expanded)}
+              onShowChanges={() => setChangesOpen(true)}
+            />
+          </Suspense>
         }
         main={
           showNewTask ? (
@@ -339,7 +355,7 @@ export function App(): JSX.Element {
           ) : changesOpen ? (
             <ResizableReviewLayout
               conversation={<div className="flex h-full min-w-0 flex-col">
-                <div className="min-h-0 flex-1"><Conversation /></div>
+                <div className="min-h-0 flex-1">{conversation}</div>
                 <div className="border-t border-subtle" style={{ background: "var(--bg-canvas)", padding: "10px 20px 14px" }}>
                   <Composer />
                 </div>
@@ -351,7 +367,7 @@ export function App(): JSX.Element {
           ) : (
             <div className="flex h-full flex-col">
               <div className="min-h-0 flex-1">
-                <Conversation />
+                {conversation}
               </div>
               <div
                 className="border-t border-subtle"

@@ -26,6 +26,7 @@
  * no purple gradients, no glowing effects.
  */
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { useDialogFocus } from "../hooks/use-dialog-focus";
 import {
   ArrowRight,
   Check,
@@ -164,6 +165,7 @@ function OnboardingImpl({
   const skip = useCallback((): void => {
     onComplete({ projectPath: null, initialPrompt: "", session: null, skipped: true });
   }, [onComplete]);
+  const dialogRef = useDialogFocus<HTMLDivElement>(true, skip);
 
   const next = useCallback((): void => {
     setStep((s) => Math.min(TOTAL_STEPS, s + 1));
@@ -197,9 +199,14 @@ function OnboardingImpl({
           objective,
           risk_class: "normal",
         });
-        await api.startTask(task.id);
+        const started = await api.startTask(task.id);
         await useTerminusStore.getState().refreshTasks(session.id);
-        selectTask(task.id);
+        selectTask(task.id, started.event_cursor);
+        await api.startTurn({
+          thread_id: task.thread_id,
+          task_id: task.id,
+          user_input: objective,
+        });
       }
       onComplete({ projectPath: projectPath || null, initialPrompt, session, skipped: false });
     } catch (err) {
@@ -227,6 +234,7 @@ function OnboardingImpl({
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Welcome to Terminus"

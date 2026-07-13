@@ -211,6 +211,7 @@ function CommandPaletteImpl({
 }: CommandPaletteProps): JSX.Element {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [recent, setRecent] = useState<string[]>(() => readRecent());
@@ -218,11 +219,17 @@ function CommandPaletteImpl({
   // Reset query + selection on open. Focus the input.
   useEffect(() => {
     if (!open) return;
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setQuery("");
     setSelectedIndex(0);
     setRecent(readRecent());
     // Defer focus to next frame so the input is mounted.
-    window.setTimeout(() => inputRef.current?.focus(), 0);
+    const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => {
+      window.clearTimeout(focusTimer);
+      const previousFocus = previousFocusRef.current;
+      window.requestAnimationFrame(() => previousFocus?.focus());
+    };
   }, [open]);
 
   // Compute ranked results.

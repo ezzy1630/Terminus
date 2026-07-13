@@ -89,9 +89,11 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
   const draftsByTask = useTerminusStore((s) => s.draftsByTask);
   const setDraft = useTerminusStore((s) => s.setDraft);
   const clearDraft = useTerminusStore((s) => s.clearDraft);
+  const taskId = task?.id ?? "__new__";
+  const queueInstruction = useTerminusStore((s) => s.queueInstruction);
+  const queuedInstructionCount = useTerminusStore((s) => s.queuedInstructionsByTask[taskId]?.length ?? 0);
   const refreshTasks = useTerminusStore((s) => s.refreshTasks);
 
-  const taskId = task?.id ?? "__new__";
   const draft = draftsByTask[taskId] ?? "";
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -213,15 +215,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
         clearDraft(taskId);
         void refreshTasks(task.session_id);
       } else if (mode === "queue") {
-        // Queue behavior: send the input as a turn but mark it as queued
-        // via metadata in the user_input. The control plane doesn't yet
-        // expose a dedicated queue endpoint, so we prefix with a marker
-        // the agent loop will recognize. (Phase 5 will add a real queue.)
-        await api.startTurn({
-          thread_id: task.thread_id,
-          task_id: task.id,
-          user_input: `[queued] ${text}`,
-        });
+        queueInstruction(task.id, text);
         clearDraft(taskId);
       }
     } catch (err) {
@@ -583,7 +577,7 @@ function ComposerImpl({ className, onCreateTask }: ComposerProps): JSX.Element {
           className="mt-2 flex items-center justify-between px-1 text-tertiary"
           style={{ fontSize: "var(--font-size-xs)" }}
         >
-          <span>{task ? <><kbd className="font-mono">⌘↵</kbd> send · <kbd className="font-mono">⇧⌘↵</kbd> queue · <kbd className="font-mono">esc</kbd> interrupt</> : isStartSurface ? "" : "Drop files or paste images to add context"}</span>
+          <span>{task ? <><kbd className="font-mono">⌘↵</kbd> send · <kbd className="font-mono">⇧⌘↵</kbd> queue · <kbd className="font-mono">esc</kbd> interrupt{queuedInstructionCount > 0 ? <> · <span className="text-secondary">{queuedInstructionCount} queued</span></> : null}</> : isStartSurface ? "" : "Drop files or paste images to add context"}</span>
           {task ? (
             <span className="truncate" style={{ maxWidth: 200 }}>
               {task.thread_id.slice(0, 8)} · {task.risk_class} risk

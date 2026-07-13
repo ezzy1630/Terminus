@@ -6,24 +6,26 @@ authoritative performance report for the desktop UI.
 
 ## Current production build
 
-Measured on 2026-07-12 with:
+Measured on 2026-07-13 with:
 
 ```bash
-cd apps/desktop
-bun run build:electron
+pnpm --filter @terminus/desktop build
 ```
 
 | Artifact | Raw | Gzip |
 | --- | ---: | ---: |
-| Initial application JavaScript | 491.85 kB | 144.66 kB |
-| Application CSS | 30.92 kB | 6.92 kB |
-| Deferred ReviewPane | 30.19 kB | 8.19 kB |
-| Deferred Settings | 26.41 kB | 7.91 kB |
-| Deferred Onboarding | 14.44 kB | 4.30 kB |
+| Initial application JavaScript | 437.43 kB | 130.40 kB |
+| Application CSS | 41.23 kB | 8.62 kB |
+| Deferred Conversation | 37.49 kB | 11.09 kB |
+| Deferred ReviewPane | 30.24 kB | 8.23 kB |
+| Deferred Settings | 29.30 kB | 8.74 kB |
+| Deferred Inspector | 20.33 kB | 5.79 kB |
+| Deferred Onboarding | 14.59 kB | 4.38 kB |
 | xterm runtime chunk | 332.63 kB | 83.87 kB |
 
-The shell, review surface, settings, onboarding, and xterm runtime are emitted
-as separate chunks. Review, settings, and onboarding mount only when opened.
+The shell, conversation, inspector, review surface, settings, onboarding, and
+xterm runtime are emitted as separate chunks. Conversation and Inspector load
+only for an active task; the remaining secondary surfaces load only when opened.
 
 ## Implemented safeguards
 
@@ -37,7 +39,7 @@ as separate chunks. Review, settings, and onboarding mount only when opened.
   exponential backoff.
 - Hidden computer-use previews pause their media element.
 - Composer object URLs are revoked on removal and unmount.
-- Review, Settings, and Onboarding are lazy-loaded.
+- Conversation, Inspector, Review, Settings, and Onboarding are lazy-loaded.
 - The review split and terminal drawer persist only small numeric preferences.
 - Motion is disabled through `prefers-reduced-motion` without runtime loops.
 
@@ -62,9 +64,8 @@ still required before the full performance completion gate can pass.
 ## Reproduction
 
 ```bash
-cd apps/desktop
-bun run build:electron
-bun run preview
+pnpm --filter @terminus/desktop build
+pnpm --filter @terminus/desktop preview
 ```
 
 Use the production renderer rather than Vite development mode for timing,

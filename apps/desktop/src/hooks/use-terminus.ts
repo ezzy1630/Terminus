@@ -97,6 +97,11 @@ interface TerminusState {
   // Drafts per task (Composer spec: "Preserve drafts per task").
   draftsByTask: Record<string, string>;
 
+  // Follow-ups queued behind the currently running turn. This stays in the
+  // desktop store so switching projects never loses an instruction while the
+  // control-plane contract remains turn-oriented.
+  queuedInstructionsByTask: Record<string, QueuedInstruction[]>;
+
   // Events per task (capped). Each entry is the raw SSE event.
   eventsByTask: Record<string, TerminusSseEvent[]>;
 
@@ -114,13 +119,23 @@ interface TerminusState {
   togglePin: (taskId: string) => void;
   setDraft: (taskId: string, text: string) => void;
   clearDraft: (taskId: string) => void;
+  queueInstruction: (taskId: string, text: string) => void;
 
   /** Internal: attach SSE stream to selected task. */
   _stream: TerminusEventStream | null;
   _attachStream: (taskId: string | null, initialCursor?: string | null) => void;
   _appendEvent: (taskId: string, ev: TerminusSseEvent) => void;
   _updateTaskFromEvent: (ev: TerminusSseEvent, streamTaskId?: string) => void;
+  _flushQueuedInstruction: (taskId: string) => Promise<void>;
 }
+
+export interface QueuedInstruction {
+  id: string;
+  text: string;
+  queuedAt: string;
+}
+
+const flushingQueuedTasks = new Set<string>();
 
 export const useTerminusStore = create<TerminusState>((set, get) => ({
   healthReady: false,
@@ -137,6 +152,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
   pinnedTaskIds: readPins(),
 
   draftsByTask: {},
+  queuedInstructionsByTask: {},
   eventsByTask: {},
 
   loadingSessions: false,
@@ -242,6 +258,65 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     });
   },
 
+  queueInstruction: (taskId, text) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const instruction: QueuedInstruction = {
+      id: typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      text: trimmed,
+      queuedAt: new Date().toISOString(),
+    };
+    set((state) => ({
+      queuedInstructionsByTask: {
+        ...state.queuedInstructionsByTask,
+        [taskId]: [...(state.queuedInstructionsByTask[taskId] ?? []), instruction],
+      },
+    }));
+  },
+
+  _flushQueuedInstruction: async (taskId) => {
+    if (flushingQueuedTasks.has(taskId)) return;
+    const task = get().taskById[taskId];
+    const instruction = get().queuedInstructionsByTask[taskId]?.[0];
+    if (!task || !instruction) return;
+    flushingQueuedTasks.add(taskId);
+    try {
+      await api.startTask(taskId);
+      set((state) => {
+        const current = state.taskById[taskId];
+        if (!current) return {};
+        const active: Task = { ...current, status: "ACTIVE", phase: "DISCOVER", updated_at: new Date().toISOString() };
+        return {
+          taskById: { ...state.taskById, [taskId]: active },
+          tasksBySession: {
+            ...state.tasksBySession,
+            [active.session_id]: (state.tasksBySession[active.session_id] ?? []).map((candidate) =>
+              candidate.id === taskId ? active : candidate,
+            ),
+          },
+        };
+      });
+      await api.startTurn({
+        thread_id: task.thread_id,
+        task_id: task.id,
+        user_input: instruction.text,
+      });
+      set((state) => ({
+        queuedInstructionsByTask: {
+          ...state.queuedInstructionsByTask,
+          [taskId]: (state.queuedInstructionsByTask[taskId] ?? []).filter((item) => item.id !== instruction.id),
+        },
+      }));
+    } catch (err) {
+      const message = err instanceof TerminusApiError ? err.message : err instanceof Error ? err.message : "queued instruction failed";
+      set({ lastError: message });
+    } finally {
+      flushingQueuedTasks.delete(taskId);
+    }
+  },
+
   _appendEvent: (taskId, ev) => {
     set((state) => {
       const existing = state.eventsByTask[taskId] ?? [];
@@ -298,6 +373,9 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         },
       };
     });
+    if (ev.event === "task.completed") {
+      void get()._flushQueuedInstruction(taskId);
+    }
   },
 
   _attachStream: (taskId, initialCursor = null) => {

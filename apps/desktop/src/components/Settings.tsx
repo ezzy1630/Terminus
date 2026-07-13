@@ -31,6 +31,7 @@
  * the existing useThemeStore so the preview is immediate.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDialogFocus } from "../hooks/use-dialog-focus";
 import {
   Bell,
   Bug,
@@ -824,6 +825,7 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
   const inputRef = useRef<HTMLInputElement | null>(null);
   const sessions = useTerminusStore((state) => state.sessions);
   const runtimeProfiles = useMemo(() => deriveRuntimeModelProfiles(sessions), [sessions]);
+  const dialogRef = useDialogFocus<HTMLDivElement>(open, onClose);
 
   // Sync theme store on first open so the appearance select reflects reality.
   useEffect(() => {
@@ -835,22 +837,6 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
     if (store.get("appearance.density") !== density) store.set("appearance.density", density);
     window.setTimeout(() => inputRef.current?.focus(), 0);
   }, [open]);
-
-  // Esc closes.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
-        const target = e.target as HTMLElement | null;
-        if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA") return;
-        e.preventDefault();
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, onClose]);
 
   const filteredCategories = useMemo(() => {
     if (!query.trim()) return CATEGORIES;
@@ -872,6 +858,7 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Settings"

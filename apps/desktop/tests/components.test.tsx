@@ -577,6 +577,7 @@ describe("CommandPalette", () => {
 
 describe("Composer — send-button mode switches based on task status", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     // Reset both stores between tests so state doesn't bleed.
     useTerminusStore.setState({
       sessions: [],
@@ -586,6 +587,7 @@ describe("Composer — send-button mode switches based on task status", () => {
       selectedTaskId: null,
       pinnedTaskIds: new Set(),
       draftsByTask: {},
+      queuedInstructionsByTask: {},
       eventsByTask: {},
     });
     useThemeStore.getState().setDensity("spacious");
@@ -650,6 +652,39 @@ describe("Composer — send-button mode switches based on task status", () => {
       task_id: "task-1",
       user_input: "Begin the task",
     });
+  });
+
+  test("queues a follow-up without starting a concurrent turn", async () => {
+    makeTask("ACTIVE");
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    const composer = screen.getByRole("textbox", { name: "Message composer" });
+    await user.type(composer, "Run the visual checks after implementation");
+    fireEvent.keyDown(composer, { key: "Enter", metaKey: true, shiftKey: true });
+
+    await waitFor(() => expect(useTerminusStore.getState().queuedInstructionsByTask["task-1"]).toHaveLength(1));
+    expect(api.startTurn).not.toHaveBeenCalled();
+    expect(screen.getByText("1 queued")).toBeInTheDocument();
+  });
+
+  test("drains the next queued follow-up only after task completion", async () => {
+    makeTask("ACTIVE");
+    useTerminusStore.getState().queueInstruction("task-1", "Now verify the finished work");
+
+    useTerminusStore.getState()._updateTaskFromEvent({
+      id: "event-complete",
+      event: "task.completed",
+      data: JSON.stringify({ phase: "COMPLETE" }),
+    }, "task-1");
+
+    await waitFor(() => expect(api.startTurn).toHaveBeenCalledWith({
+      thread_id: "thread-1",
+      task_id: "task-1",
+      user_input: "Now verify the finished work",
+    }));
+    expect(api.startTask).toHaveBeenCalledWith("task-1");
+    expect(useTerminusStore.getState().queuedInstructionsByTask["task-1"]).toHaveLength(0);
   });
 
   test("task.status=WAITING → button label is 'Steer'", () => {

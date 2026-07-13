@@ -38,9 +38,9 @@ The desktop spec mandates:
 | `⌘Enter`       | Send / steer |
 | `⇧⌘Enter`      | Queue |
 | `Esc`          | Interrupt / close overlay |
-| `⌘1`–`⌘9`      | Switch tasks (reserved, not yet wired) |
-| `⌘]`           | Toggle inspector (reserved) |
-| `⌘\`           | Toggle sidebar (reserved) |
+| `⌘1`–`⌘9`      | Switch to the corresponding visible task |
+| `⌘]`           | Toggle inspector |
+| `⌘\`           | Toggle sidebar |
 
 ### Per-surface shortcuts
 
@@ -173,9 +173,8 @@ directly — no vibrancy simulation. The visual difference between
 "with vibrancy" and "without" is subtle by design (SPEC §4.2: "Do not
 place blurred translucent materials behind every surface").
 
-A future hardening patch will detect `AppleReduceTransparency` via
-`process.systemPreferences.getAccessibility()` and toggle the
-vibrancy on/off accordingly.
+The Electron main process reads the macOS `AppleReduceTransparency`
+preference before creating the window and disables vibrancy when it is set.
 
 ## 9. Contrast
 
@@ -254,18 +253,16 @@ VoiceOver-friendly:
 
 - The title bar is a single landmark; the product name is read first.
 - Sidebar sessions/tasks use `aria-pressed` to indicate selection.
-- The conversation feed is a `role="log"` candidate (not yet
-  applied — future patch).
-- Streaming messages use `aria-live="polite"` on the streaming cursor
-  span (not yet applied — currently the cursor is decorative; a
-  future patch will add an `aria-live` region for new messages).
+- The conversation is exposed as a `role="feed"` with a task-specific
+  accessible label.
+- A single off-screen `aria-live="polite"` region announces completed
+  agent responses and status changes without reading every token delta.
 - The terminal body uses `tabIndex={0}` so VoiceOver can focus it and
   read output; the search input uses `aria-label="Search terminal
   output"`.
 
 Known VoiceOver gaps (future work):
 
-- The conversation does not yet announce new messages.
 - The terminal output is read as a single pre-formatted block; a
   per-line `role="text"` would improve navigation.
 - The diff viewer's per-line actions are hover-revealed; VoiceOver
@@ -280,15 +277,10 @@ technology."
 - The streaming cursor (the pulse block on a streaming agent message)
   is `aria-hidden` so screen readers don't announce it on every
   frame.
-- Token deltas from the SSE stream are appended to the agent message
-  in-place; the message's `aria-live` is not yet set. A future
-  hardening patch will add a single `aria-live="polite"` region that
-  announces "Agent responded" when a turn completes, rather than
-  announcing every token.
+- Token deltas from the SSE stream are appended in place and remain outside
+  the live region. The live region emits only concise completion/status text.
 - The status indicator's `aria-label` updates when a task transitions
-  (e.g. working → done), but the indicator itself is not in a live
-  region. The Inspector's status row is in a polite live region
-  (planned).
+  (e.g. working → done), and the Inspector status group is polite-live.
 
 ## 15. Known gaps
 
@@ -297,14 +289,8 @@ slated for a future hardening pass:
 
 1. **VoiceOver manual test** (SPEC §28). The app has been designed for
    VoiceOver but not yet audited end-to-end.
-2. **Conversation live region** — new messages should be announced
-   via a polite live region, not the streaming cursor.
-3. **Diff viewer per-line keyboard actions** — hover-revealed actions
+2. **Diff viewer per-line keyboard actions** — hover-revealed actions
    need keyboard equivalents (currently only `j/k` navigation works).
-4. **Reduced transparency detection** — the Electron main process
-   should detect `AppleReduceTransparency` and disable vibrancy.
-5. **Focus restoration on Conversation scroll** — when the user
+3. **Focus restoration on Conversation scroll** — when the user
    navigates away from the composer and back, the composer should
    re-focus.
-6. **`⌘1`–`⌘9` task switching** — documented in the keyboard map but
-   not yet wired.
