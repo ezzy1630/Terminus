@@ -26,7 +26,7 @@ bootstrap:
     echo "[bootstrap] installing TS workspace deps..."
     bun install --frozen-lockfile
     echo "[bootstrap] installing Python eval deps..."
-    cd python && uv sync --frozen --extra dev
+    (cd python && uv sync --frozen --extra dev)
     echo "[bootstrap] verifying buf..."
     buf --version
     echo "[bootstrap] verifying OpenCode source pin..."
