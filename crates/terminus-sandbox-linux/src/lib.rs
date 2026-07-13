@@ -165,6 +165,17 @@ impl LinuxSandboxBackend {
         argv.push("/".to_string());
         argv.push("/".to_string());
 
+        // A verified secure profile receives a *delegated* cgroup-v2 tree,
+        // not the host hierarchy. It is mounted read-write because the
+        // payload creates its own lease beneath it before starting the user
+        // process. `cgroup_v2_ready` refuses the host root, so this cannot
+        // accidentally grant the payload control over sibling workloads.
+        if let Some(cgroup_root) = enforcement::delegated_cgroup_root() {
+            argv.push("--bind".to_string());
+            argv.push(cgroup_root.display().to_string());
+            argv.push("/sys/fs/cgroup".to_string());
+        }
+
         // /proc and /dev so basic tools work.
         argv.push("--proc".to_string());
         argv.push("/proc".to_string());

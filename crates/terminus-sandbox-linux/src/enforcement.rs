@@ -28,6 +28,14 @@ pub fn payload_wrapper(
     let executable = std::env::current_exe().ok()?;
     let separator = bwrap_args.iter().position(|arg| arg == "--")?;
     let mut payload_args = bwrap_args[..=separator].to_vec();
+    // The host-specific delegated subtree is mounted at the stable guest
+    // path. Do not leak the host path to the payload: it is not visible after
+    // the bind mount and would make the lease setup silently fall back.
+    payload_args.extend([
+        "--setenv".to_string(),
+        "TERMINUS_CGROUP_ROOT".to_string(),
+        "/sys/fs/cgroup".to_string(),
+    ]);
     let limits_json = serde_json::to_string(&limits).ok()?;
     payload_args.extend([
         executable.to_string_lossy().to_string(),
@@ -235,7 +243,9 @@ pub fn run_probe() -> Result<i32, SandboxError> {
 
 #[cfg(target_os = "linux")]
 pub fn cgroup_v2_ready() -> bool {
-    let root = cgroup_root();
+    let Some(root) = delegated_cgroup_root() else {
+        return false;
+    };
     let Ok(controllers) = std::fs::read_to_string(root.join("cgroup.controllers")) else {
         return false;
     };
@@ -346,9 +356,26 @@ impl Drop for CgroupGuard {
 
 #[cfg(target_os = "linux")]
 fn cgroup_root() -> PathBuf {
-    std::env::var_os("TERMINUS_CGROUP_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"))
+    delegated_cgroup_root().unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup"))
+}
+
+/// Return the host-provided cgroup-v2 delegation root for a secure lease.
+///
+/// The global hierarchy is never a valid delegation root: mounting it
+/// writable into a sandbox would expose sibling workloads. Hosts must create
+/// and delegate a dedicated subtree, then point `TERMINUS_CGROUP_ROOT` at it.
+#[cfg(target_os = "linux")]
+pub(crate) fn delegated_cgroup_root() -> Option<PathBuf> {
+    let root = PathBuf::from(std::env::var_os("TERMINUS_CGROUP_ROOT")?);
+    if !root.is_absolute() || root == Path::new("/sys/fs/cgroup") {
+        return None;
+    }
+    Some(root)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn delegated_cgroup_root() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(target_os = "linux")]
