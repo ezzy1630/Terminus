@@ -3,6 +3,24 @@
 This document describes how to build, sign, notarize, and package the
 Terminus desktop application for macOS.
 
+## Current verification evidence
+
+On 2026-07-13, the Apple Silicon application bundle was built from the
+repository root with:
+
+```bash
+pnpm --filter @terminus/desktop build:electron
+pnpm --filter @terminus/desktop package:dir
+codesign --verify --deep --strict apps/desktop/release/mac-arm64/Terminus.app
+```
+
+`electron-builder` rebuilt `node-pty` for arm64, produced
+`apps/desktop/release/mac-arm64/Terminus.app`, and signed it with the available
+distribution identity. Strict deep signature verification passed. Notarization
+was skipped because notarization credentials/options were not configured; this
+is still required for external distribution. A fresh manual launch and visual
+walkthrough are also required before declaring the packaged-app gate complete.
+
 ## 1. Prerequisites
 
 - macOS 13 or later (Ventura or newer).
