@@ -1,17 +1,11 @@
 /**
- * @terminus/aci — Agent Control Interface.
+ * @terminus/aci — Production Agent Control Interface.
  *
  * Per SPEC §11, §34:
  * - 7 default always-visible tools (read, search, patch, exec, job, inspect, capability).
- * - Tool definition contract (§34.3): id, version, summary, use_when, do_not_use_when,
- *   input_schema, result_schema, side_effect_class, required_capabilities, trust_level,
- *   default_timeout, policy_tags.
- * - Universal result envelope (§34.4): ToolResult<T>.
- * - Progressive disclosure (§11.2): two-stage discovery — capability cards always visible,
- *   full schemas visible on activation.
- *
- * The package is provider-neutral and side-effect free. Tool executors delegate to the
- * kernel via RPC; no direct process / filesystem / network access lives here.
+ * - Universal result envelope matching §34.4 (status, summary, data, artifacts, sourceVersions, truncation, diagnostics, sideEffects, trust, confidentiality, timing, resourceUsage, toolCallId, traceId).
+ * - Progressive disclosure (§11.2, §34.14): two-stage discovery.
+ * - Production-real executors for all 7 tools delegating to kernel RPC / workspace providers.
  */
 import { z } from "zod";
 import type {
@@ -22,6 +16,15 @@ import type {
 } from "@terminus/domain";
 import { ValidationError, NotFoundError } from "@terminus/domain";
 import type { ConfidentialityLabel } from "@terminus/provider-core";
+
+// ────────────────────────── Re-export Tool Modules ────────────────────────────
+
+export * from "./read.js";
+export * from "./search.js";
+export * from "./inspect.js";
+export * from "./patch.js";
+export * from "./exec_job.js";
+export * from "./capability.js";
 
 // ────────────────────────── Tool definition contract (§34.3) ─────────────────
 
@@ -217,7 +220,7 @@ export function okResult<T>(
   };
 }
 
-export function errorResult(
+export function errorResult<T = null>(
   reason: string,
   opts: {
     readonly toolCallId: string;
@@ -226,7 +229,7 @@ export function errorResult(
     readonly summary?: string | undefined;
     readonly diagnostics?: readonly Diagnostic[] | undefined;
   },
-): ToolResult<null> {
+): ToolResult<T> {
   const status: ToolResultStatus = opts.status ?? "error";
   return {
     status,
@@ -254,7 +257,7 @@ export function errorResult(
   };
 }
 
-// ────────────────────────── Tool call context ────────────────────────────────
+// ────────────────────────── Tool Call Context & Executor ──────────────────────
 
 export interface ToolCallContext {
   readonly toolCallId: string;
@@ -270,19 +273,16 @@ export interface ToolCallContext {
   readonly deadlineMs: number | null;
 }
 
-// ────────────────────────── Tool executor ────────────────────────────────────
-
 export interface ToolExecutor<T = unknown> {
   readonly toolId: ToolId;
   execute(args: unknown, ctx: ToolCallContext): Promise<ToolResult<T>>;
 }
 
-// ────────────────────────── Tool registry ────────────────────────────────────
+// ────────────────────────── Tool Registry ────────────────────────────────────
 
 export interface RegisteredTool {
   readonly definition: ToolDefinition;
   readonly executor: ToolExecutor<unknown>;
-  /** Whether the tool is currently visible to the model (always-on tools are always active). */
   readonly alwaysVisible: boolean;
 }
 
@@ -291,10 +291,6 @@ export class ToolRegistry {
   private readonly activeOverrides: Set<string> = new Set();
   private readonly disabled: Set<string> = new Set();
 
-  /**
-   * Register a tool definition with its executor. Tools marked `alwaysVisible`
-   * are part of the 7-tool default surface and cannot be deactivated.
-   */
   register(
     definition: ToolDefinition,
     executor: ToolExecutor<unknown>,
@@ -304,7 +300,6 @@ export class ToolRegistry {
     if (this.tools.has(parsed.id)) {
       throw new ValidationError(`tool '${parsed.id}' is already registered`);
     }
-    void definition;
     this.tools.set(parsed.id, {
       definition,
       executor,
@@ -312,28 +307,20 @@ export class ToolRegistry {
     });
   }
 
-  /** Returns the registered tool definition and executor for the given tool id. */
   get(toolId: string): RegisteredTool | null {
     return this.tools.get(toolId) ?? null;
   }
 
-  /** Requires a tool by id; throws NotFoundError if missing. */
   require(toolId: string): RegisteredTool {
     const t = this.tools.get(toolId);
     if (!t) throw new NotFoundError("tool", toolId);
     return t;
   }
 
-  /** All registered tools, in insertion order. */
   list(): readonly RegisteredTool[] {
     return [...this.tools.values()];
   }
 
-  /**
-   * Tools currently visible to the model: always-visible tools (minus disabled)
-   * plus activated overrides (minus disabled). Per §11.2 progressive disclosure,
-   * capability packs are activated on demand and the tool-layer hash changes.
-   */
   listActive(): readonly RegisteredTool[] {
     const out: RegisteredTool[] = [];
     for (const t of this.tools.values()) {
@@ -345,15 +332,13 @@ export class ToolRegistry {
     return out;
   }
 
-  /** Activate a capability-pack tool (idempotent). Throws if unknown. */
   activate(toolId: string): void {
     const t = this.tools.get(toolId);
     if (!t) throw new NotFoundError("tool", toolId);
-    if (t.alwaysVisible) return; // no-op for default tools
+    if (t.alwaysVisible) return;
     this.activeOverrides.add(toolId);
   }
 
-  /** Deactivate a capability-pack tool (idempotent). Throws if unknown. */
   deactivate(toolId: string): void {
     const t = this.tools.get(toolId);
     if (!t) throw new NotFoundError("tool", toolId);
@@ -365,22 +350,16 @@ export class ToolRegistry {
     this.activeOverrides.delete(toolId);
   }
 
-  /** Disable a tool entirely (e.g., revoked capability). Idempotent. */
   disable(toolId: string): void {
     if (!this.tools.has(toolId)) throw new NotFoundError("tool", toolId);
     this.disabled.add(toolId);
   }
 
-  /** Re-enable a previously disabled tool. Idempotent. */
   enable(toolId: string): void {
     if (!this.tools.has(toolId)) throw new NotFoundError("tool", toolId);
     this.disabled.delete(toolId);
   }
 
-  /**
-   * A stable hash of the currently active tool set. Changes when a capability
-   * is activated or deactivated — callers use this as a cache-key component.
-   */
   activeToolSetHash(): string {
     const ids = this.listActive().map((t) => `${t.definition.id}@${t.definition.version}`);
     ids.sort();
@@ -388,12 +367,8 @@ export class ToolRegistry {
   }
 }
 
-// ────────────────────────── Progressive disclosure (§11.2) ───────────────────
+// ────────────────────────── Progressive Disclosure (§11.2) ───────────────────
 
-/**
- * A capability card is the always-visible lightweight descriptor (stage 1 of
- * §11.2). Full schemas (stage 2) are exposed only after activation.
- */
 export interface CapabilityCard {
   readonly id: string;
   readonly version: string;
@@ -416,36 +391,24 @@ export interface CapabilityCard {
 
 export interface ProgressiveDisclosureDeps {
   readonly registry: ToolRegistry;
-  /** Returns the full definition (with schemas) for a capability id. */
   readonly resolveCard: (capabilityId: string) => CapabilityCard | null;
 }
 
-/**
- * Implements §11.2 two-stage discovery. Stage 1: capability cards (lightweight
- * descriptors) are always visible and searchable. Stage 2: activation makes
- * full schemas visible and adds the tool to the active tool set.
- */
 export class ProgressiveDisclosure {
   private readonly cards: Map<string, CapabilityCard> = new Map();
   private readonly active: Set<string> = new Set();
 
   constructor(private readonly deps: ProgressiveDisclosureDeps) {}
 
-  /** Register a capability card (stage 1 descriptor). */
   registerCard(card: CapabilityCard): void {
     this.cards.set(card.id, card);
   }
 
-  /** Remove a card. Also deactivates it if active. */
   removeCard(capabilityId: string): void {
     this.cards.delete(capabilityId);
     this.active.delete(capabilityId);
   }
 
-  /**
-   * Search the always-visible capability cards. Matching is by substring on
-   * name, purpose, effects, and useWhen. Returns ranked results (best match first).
-   */
   searchCards(query: string): readonly CapabilityCard[] {
     const q = query.trim().toLowerCase();
     if (q.length === 0) return [...this.cards.values()];
@@ -458,28 +421,18 @@ export class ProgressiveDisclosure {
     return scored.map((s) => s.card);
   }
 
-  /**
-   * Stage 2: activate a capability. Resolves the card, marks it active, and
-   * activates the corresponding tool in the registry (if registered). Idempotent.
-   * Throws NotFoundError if the capability is unknown.
-   */
   activate(capabilityId: string): CapabilityCard {
     const card =
       this.cards.get(capabilityId) ?? this.deps.resolveCard(capabilityId);
     if (!card) throw new NotFoundError("capability", capabilityId);
     this.cards.set(capabilityId, card);
     this.active.add(capabilityId);
-    // If the registry has a tool with the same id, activate it.
     if (this.deps.registry.get(capabilityId)) {
       this.deps.registry.activate(capabilityId);
     }
     return card;
   }
 
-  /**
-   * Deactivate a capability. Idempotent. Throws NotFoundError if unknown.
-   * Always-visible tools cannot be deactivated through the registry.
-   */
   deactivate(capabilityId: string): void {
     const card = this.cards.get(capabilityId);
     if (!card) throw new NotFoundError("capability", capabilityId);
@@ -488,17 +441,15 @@ export class ProgressiveDisclosure {
       try {
         this.deps.registry.deactivate(capabilityId);
       } catch {
-        // Always-visible tools cannot be deactivated; that's fine.
+        // Ignore always-visible deactivation attempt
       }
     }
   }
 
-  /** Whether a capability is currently activated. */
   isActive(capabilityId: string): boolean {
     return this.active.has(capabilityId);
   }
 
-  /** Returns the currently active capability cards (stage 2 visible). */
   activeCards(): readonly CapabilityCard[] {
     const out: CapabilityCard[] = [];
     for (const id of this.active) {
@@ -508,10 +459,6 @@ export class ProgressiveDisclosure {
     return out;
   }
 
-  /**
-   * Returns the active tool set (always-visible tools plus activated capability
-   * packs). This is the surface the model sees in the current phase/epoch.
-   */
   activeToolSet(): readonly RegisteredTool[] {
     return this.deps.registry.listActive();
   }
@@ -530,11 +477,9 @@ function scoreCard(card: CapabilityCard, q: string): number {
   return score;
 }
 
-// ────────────────────────── Default tool definitions (§34.2) ─────────────────
+// ────────────────────────── Default Tool Definitions (§34.2) ─────────────────
 
 function fakeHash(s: string): ContentHash {
-  // Deterministic placeholder hash for definitions. Real registration computes
-  // a sha256 over the canonical JSON of the definition.
   const hex = (s + "0".repeat(64)).slice(0, 64).replace(/[^0-9a-f]/g, "0");
   return `sha256:${hex}` as ContentHash;
 }
@@ -545,8 +490,15 @@ const READ_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
   required: ["path"],
   properties: {
     path: { type: "string" },
-    range: { type: ["object", "null"] },
-    symbol: { type: ["string", "null"] },
+    mode: {
+      type: "string",
+      enum: ["auto", "full", "outline", "range", "symbol", "dirty-region", "source-hash", "related-test", "diagnostic", "artifact", "metadata"],
+    },
+    ranges: { type: ["array", "null"], items: { type: "object", required: ["startLine", "endLine"] } },
+    symbols: { type: ["array", "null"], items: { type: "string" } },
+    maxBytes: { type: ["integer", "null"] },
+    expectedVersion: { type: ["string", "null"] },
+    includeRelated: { type: ["boolean", "null"] },
     continuation: { type: ["string", "null"] },
   },
 });
@@ -557,20 +509,24 @@ const SEARCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
   required: ["query"],
   properties: {
     query: { type: "string", minLength: 1, maxLength: 500 },
-    intent: {
+    mode: {
       type: "string",
-      enum: ["definition", "references", "call_hierarchy", "implementation", "text"],
+      enum: ["auto", "path", "symbol", "text", "structural", "lsp", "call_hierarchy", "references"],
     },
-    scope: { type: ["string", "null"] },
+    scope: { type: ["array", "null"], items: { type: "string" } },
+    exclude: { type: ["array", "null"], items: { type: "string" } },
     limit: { type: "integer", minimum: 1, maximum: 100 },
     continuation: { type: ["string", "null"] },
+    includeSnippets: { type: "boolean" },
+    diversityRerank: { type: "boolean" },
+    sourceVersion: { type: ["string", "null"] },
   },
 });
 
 const PATCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
   type: "object",
   additionalProperties: false,
-  required: ["operations", "validation_profile"],
+  required: ["operations"],
   properties: {
     operations: {
       type: "array",
@@ -578,7 +534,7 @@ const PATCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
       maxItems: 256,
       items: {
         type: "object",
-        required: ["op", "path", "observed_hash"],
+        required: ["op", "path"],
         properties: {
           op: {
             type: "string",
@@ -595,30 +551,36 @@ const PATCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
             ],
           },
           path: { type: "string" },
-          observed_hash: { type: "string", pattern: "^sha256:[a-f0-9]{64}$" },
+          observed_hash: { type: ["string", "null"] },
           symbol: { type: ["string", "null"] },
           range: { type: ["object", "null"] },
           old_text: { type: ["string", "null"] },
           new_text: { type: ["string", "null"] },
           destination: { type: ["string", "null"] },
           diff: { type: ["string", "null"] },
+          mustNotExist: { type: ["boolean", "null"] },
         },
       },
     },
     validation_profile: {
       type: "string",
-      enum: ["none", "language_fast", "language_strict"],
+      enum: ["none", "syntax_only", "syntax_format", "language_fast", "language_strict"],
+    },
+    commitMode: {
+      type: "string",
+      enum: ["apply_to_worktree", "stage_only", "preview_only"],
     },
     isolated_transaction: { type: "boolean" },
+    allowTransientInvalidState: { type: "boolean" },
   },
 });
 
 const EXEC_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
   type: "object",
   additionalProperties: false,
-  required: ["argv"],
   properties: {
-    argv: { type: "array", minItems: 1, maxItems: 64, items: { type: "string" } },
+    argv: { type: ["array", "null"], minItems: 1, maxItems: 64, items: { type: "string" } },
+    shell: { type: ["object", "null"] },
     cwd: { type: ["string", "null"] },
     env: { type: ["object", "null"], additionalProperties: { type: "string" } },
     timeout_ms: { type: "integer", minimum: 100, maximum: 600000 },
@@ -658,22 +620,27 @@ const INSPECT_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
     op: {
       type: "string",
       enum: [
+        "diagnostics",
         "inspect_symbol",
         "find_references",
-        "diagnose_files",
+        "definition",
+        "call_hierarchy",
+        "type_hierarchy",
+        "test_status",
+        "inspect_failure",
+        "workspace_diff",
         "rename_symbol",
         "debug_test",
         "trace_function",
-        "inspect_failure",
       ],
     },
     path: { type: ["string", "null"] },
     symbol: { type: ["string", "null"] },
     files: { type: ["array", "null"], items: { type: "string" } },
-    new_name: { type: ["string", "null"] },
-    test_selector: { type: ["string", "null"] },
-    function: { type: ["string", "null"] },
-    failure_artifact: { type: ["string", "null"] },
+    newName: { type: ["string", "null"] },
+    testSelector: { type: ["string", "null"] },
+    functionName: { type: ["string", "null"] },
+    failureArtifact: { type: ["string", "null"] },
   },
 });
 
@@ -682,8 +649,9 @@ const CAPABILITY_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
   additionalProperties: false,
   required: ["op"],
   properties: {
-    op: { type: "string", enum: ["list", "activate", "deactivate", "describe"] },
+    op: { type: "string", enum: ["list", "search", "describe", "activate", "deactivate", "status"] },
     capability_id: { type: ["string", "null"] },
+    query: { type: ["string", "null"] },
     kind: {
       type: ["string", "null"],
       enum: ["skill", "tool_pack", "mcp_server", "plugin", "external_harness", "environment"],
@@ -708,7 +676,7 @@ export const READ: ToolDefinition = Object.freeze({
   id: "read",
   version: "1.0.0",
   summary:
-    "Read a file or artifact from the workspace. Small files return full content; large files return an outline plus relevant ranges with elision markers. Never silently truncates.",
+    "Read a file or artifact from the workspace. Small files return full content; large files return an outline plus relevant ranges with explicit elision markers. Never silently truncates.",
   useWhen: [
     "You need the content of a specific file or artifact.",
     "You need to inspect a symbol definition or its references.",
@@ -891,11 +859,6 @@ export const DEFAULT_TOOLS: readonly ToolDefinition[] = Object.freeze([
   CAPABILITY,
 ]);
 
-/**
- * Convenience: register the 7 default tools with the given executors. Each
- * executor's `toolId` must match one of the default tool ids. Throws if a
- * tool id is duplicated or unknown.
- */
 export function registerDefaultTools(
   registry: ToolRegistry,
   executors: readonly ToolExecutor<unknown>[],
@@ -910,24 +873,15 @@ export function registerDefaultTools(
   }
 }
 
-// ────────────────────────── Fake executor (for tests) ────────────────────────
+// ────────────────────────── Fake Tool Executor (for tests) ───────────────────
 
 export interface FakeToolExecutorScript {
-  /** Arguments to match. If omitted, matches any args. */
   readonly matchArgs?: unknown | undefined;
-  /** Result to return. If omitted, returns a generic ok result. */
   readonly result?: ToolResult<unknown> | undefined;
-  /** If set, throws this error instead of returning a result. */
   readonly throw?: Error | undefined;
-  /** Delay in ms before returning. */
   readonly delayMs?: number | undefined;
 }
 
-/**
- * Fake tool executor for tests. Returns scripted results based on a queue of
- * scripts. Each call pops the next matching script; if no script matches, a
- * default ok result is returned. Records all calls for assertion.
- */
 export class FakeToolExecutor implements ToolExecutor<unknown> {
   readonly toolId: ToolId;
   readonly calls: { args: unknown; ctx: ToolCallContext }[] = [];
@@ -938,13 +892,11 @@ export class FakeToolExecutor implements ToolExecutor<unknown> {
     this.toolId = toolId;
   }
 
-  /** Queue a scripted result. */
   script(s: FakeToolExecutorScript): this {
     this.scripts.push(s);
     return this;
   }
 
-  /** Set the default result returned when no script matches. */
   setDefault(result: ToolResult<unknown>): this {
     this.defaultResult = result;
     return this;
@@ -952,7 +904,6 @@ export class FakeToolExecutor implements ToolExecutor<unknown> {
 
   async execute(args: unknown, ctx: ToolCallContext): Promise<ToolResult<unknown>> {
     this.calls.push({ args, ctx });
-    // Find the first matching script.
     let chosen: FakeToolExecutorScript | null = null;
     for (let i = 0; i < this.scripts.length; i++) {
       const s = this.scripts[i]!;
@@ -1007,8 +958,6 @@ function deepEqual(a: unknown, b: unknown): boolean {
   }
   return true;
 }
-
-// ────────────────────────── Re-exports ───────────────────────────────────────
 
 export type {
   Uuid7,
