@@ -55,6 +55,9 @@ import type {
   ConfidentialityPolicy,
 } from "@terminus/provider-core";
 import { filterByConfidentiality } from "@terminus/provider-core";
+import { resolveTokenizer, reconcileUsage } from "./tokenizer.js";
+export type { ModelTokenizer, ReconciledUsage, ModelTokenBreakdown } from "./tokenizer.js";
+export { resolveTokenizer, reconcileUsage };
 
 // ────────────────────────── Inputs ───────────────────────────────────────────
 
@@ -649,14 +652,13 @@ export interface AllocationResult {
 function tokenCostFor(
   frag: ContextFragment,
   modelKey: ModelKey,
+  providerId?: string,
 ): number {
-  return (
-    (frag.estimatedTokens as Readonly<Record<string, number>>)[modelKey as string] ??
-    (frag.estimatedTokens as Readonly<Record<string, number>>)[
-      Object.keys(frag.estimatedTokens)[0] ?? ""
-    ] ??
-    0
-  );
+  const recorded = (frag.estimatedTokens as Readonly<Record<string, number>>)[modelKey as string];
+  if (recorded !== undefined && recorded > 0) return recorded;
+
+  const tokenizer = resolveTokenizer(providerId ?? "openai", modelKey);
+  return tokenizer.estimateFragmentTokens(frag).totalTokens;
 }
 
 export function allocateBudget(
@@ -664,6 +666,7 @@ export function allocateBudget(
   budget: ContextBudget,
   options: AllocationOptions,
   modelKey: ModelKey,
+  providerId?: string,
 ): AllocationResult {
   const selected: ScoredCandidate[] = [];
   const omitted: { result: RetrievalResult; reason: string }[] = [];
@@ -675,10 +678,10 @@ export function allocateBudget(
     .sort((a, b) => b.utility - a.utility);
   for (const s of required) {
     selected.push(s);
-    remaining -= tokenCostFor(s.result.fragment, modelKey);
+    remaining -= tokenCostFor(s.result.fragment, modelKey, providerId);
   }
   for (const s of optional) {
-    const cost = tokenCostFor(s.result.fragment, modelKey);
+    const cost = tokenCostFor(s.result.fragment, modelKey, providerId);
     if (cost <= remaining) {
       // Preserve dependency closure: if any dependency is not already selected,
       // try to include it; else omit.
@@ -698,7 +701,7 @@ export function allocateBudget(
     }
   }
   const total = selected.reduce(
-    (sum, s) => sum + tokenCostFor(s.result.fragment, modelKey),
+    (sum, s) => sum + tokenCostFor(s.result.fragment, modelKey, providerId),
     0,
   );
   void budget;
@@ -716,8 +719,9 @@ export function planCacheEpoch(
   const volatileBoundary = stable.length;
   const breakpoints = stable.length > 0 ? [stable.length - 1] : [];
   const modelKey = input.model.modelKey;
+  const providerId = input.provider.providerId;
   const predicted = stable.reduce(
-    (sum, s) => sum + tokenCostFor(s.result.fragment, modelKey),
+    (sum, s) => sum + tokenCostFor(s.result.fragment, modelKey, providerId),
     0,
   );
   return {
@@ -794,7 +798,7 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     preserveDependencies: true,
     preserveCompleteEpisodes: true,
     hardIncludeRequired: true,
-  }, input.model.modelKey);
+  }, input.model.modelKey, input.provider.providerId);
   // 8. Cache plan.
   const cachePlan = planCacheEpoch(input, allocation.selected);
   // Confidentiality filter.
@@ -804,24 +808,8 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     allocation.selected.map((s) => s.result.fragment),
   );
   const selectedFragments = confFiltered.admitted;
-  // 9. Render.
-  const rendered = await input.renderer.render({
-    provider: input.provider,
-    model: input.model,
-    fragments: selectedFragments,
-    toolSchemas: [],
-    cachePlan: {
-      stablePrefixHash: cachePlan.stablePrefixHash,
-      breakpoints: cachePlan.breakpoints,
-    },
-    continuationId: input.epoch?.continuationId ?? null,
-    outputProfile: "terse",
-    reasoningReserveTokens: input.budget.reasoningReserve,
-    outputReserveTokens: input.budget.outputReserve,
-    hardInputLimit: input.budget.hardInputLimit,
-    signal: input.signal,
-  });
-  // 10. Build + persist manifest.
+
+  // 9. Build + persist manifest BEFORE send (SPEC §8.6, §33.13, ADR-0010)
   const manifestInput = {
     compilerVersion: "v1",
     policyVersion: "v1",
@@ -861,6 +849,26 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
   };
   const builtManifest = buildManifest(manifestInput);
   const manifest = await input.store.persistManifest(builtManifest);
+
+  // 10. Render with durable manifest authority.
+  const rendered = await input.renderer.render({
+    provider: input.provider,
+    model: input.model,
+    fragments: selectedFragments,
+    toolSchemas: [],
+    cachePlan: {
+      stablePrefixHash: cachePlan.stablePrefixHash,
+      breakpoints: cachePlan.breakpoints,
+    },
+    continuationId: input.epoch?.continuationId ?? null,
+    outputProfile: "terse",
+    reasoningReserveTokens: input.budget.reasoningReserve,
+    outputReserveTokens: input.budget.outputReserve,
+    hardInputLimit: input.budget.hardInputLimit,
+    signal: input.signal,
+    manifestId: manifest.id,
+  });
+
   return {
     rendered,
     manifest,

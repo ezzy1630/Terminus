@@ -10,6 +10,10 @@
     "@terminus/domain": "workspace:*",
     "@terminus/context-ir": "workspace:*",
     "@terminus/provider-core": "workspace:*",
+    "@terminus/provider-anthropic": "workspace:*",
+    "@terminus/provider-openai": "workspace:*",
+    "@terminus/provider-google": "workspace:*",
+    "@terminus/provider-local": "workspace:*",
     "zod": "^4.0.2"
   }
 }
