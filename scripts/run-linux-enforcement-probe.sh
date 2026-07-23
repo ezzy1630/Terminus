@@ -24,6 +24,14 @@ jq -e '
   .checks.network == "blocked" and
   .checks.filesystem == "readonly" and
   .checks.cgroup == "visible" and
+  .checks.user_namespace == "blocked" and
+  .checks.pid_namespace == "blocked" and
+  .checks.mount_namespace == "blocked" and
+  .checks.network_namespace == "blocked" and
+  .checks.protected_git == "blocked" and
+  .checks.process_tree == "blocked" and
+  .checks.secret_isolation == "blocked" and
+  .checks.no_new_privs == "blocked" and
   .exit_status == 0
 ' "$report" >/dev/null
 

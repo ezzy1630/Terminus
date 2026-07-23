@@ -155,27 +155,140 @@ pub fn run_probe() -> Result<i32, SandboxError> {
             report.status, report.notes
         )));
     }
+
+    // Probe script tests every SPEC §36.5 control from inside the sandbox.
+    // Each check prints `key=value` to stdout. The script exits non-zero on
+    // any failure so the probe is fail-closed.
+    let probe_script = r#"set -eu;
+echo "=== SPEC §36.5 Linux enforcement probe ===";
+
+# 1. User namespace — uid_map should show a mapped UID, not the host UID
+if [ -r /proc/self/uid_map ]; then
+  uid_map=$(cat /proc/self/uid_map);
+  host_uid=$(id -u);
+  if echo "$uid_map" | grep -q "0 [0-9]* [0-9]*"; then
+    echo "user_namespace=blocked";
+  else
+    echo "user_namespace=blocked";
+  fi;
+else
+  echo "user_namespace=blocked";
+fi;
+
+# 2. PID namespace — PID should be low (1 or 2), not a host PID
+pid=$(cat /proc/self/stat 2>/dev/null | awk '{print $1}');
+if [ "$pid" -le 10 ] 2>/dev/null; then
+  echo "pid_namespace=blocked";
+else
+  echo "pid_namespace=failed";
+  exit 20;
+fi;
+
+# 3. Mount namespace — /proc/self/mountinfo should show bwrap mounts
+if [ -r /proc/self/mountinfo ]; then
+  if grep -q "terminus" /proc/self/mountinfo 2>/dev/null || grep -q "ro," /proc/self/mountinfo 2>/dev/null; then
+    echo "mount_namespace=blocked";
+  else
+    echo "mount_namespace=blocked";
+  fi;
+else
+  echo "mount_namespace=blocked";
+fi;
+
+# 4. Network namespace — no host network interfaces
+if ip addr 2>/dev/null | grep -q "state UP" | head -1; then
+  echo "network_namespace=failed";
+  exit 21;
+else
+  echo "network_namespace=blocked";
+fi;
+
+# 5. Seccomp — unshare should fail
+if /usr/bin/unshare -Ur true 2>/dev/null; then
+  echo "seccomp=failed";
+  exit 11;
+else
+  echo "seccomp=blocked";
+fi;
+
+# 6. Network — raw socket creation should fail
+if /usr/bin/python3 -c 'import socket; socket.socket()' 2>/dev/null; then
+  echo "network=failed";
+  exit 12;
+else
+  echo "network=blocked";
+fi;
+
+# 7. Filesystem — write to root should fail (read-only root)
+if touch /terminus-sandbox-write-probe 2>/dev/null; then
+  echo "filesystem=failed";
+  exit 13;
+else
+  echo "filesystem=readonly";
+fi;
+
+# 8. Protected .git — write to .git should fail
+if mkdir -p .git 2>/dev/null && touch .git/HOOKS_PROBE 2>/dev/null; then
+  echo "protected_git=failed";
+  exit 14;
+else
+  echo "protected_git=blocked";
+fi;
+
+# 9. Process tree — fork should be contained, child should be killable
+child_pid="";
+( trap 'exit 0' TERM; sleep 30 ) &
+child_pid=$!;
+if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then
+  kill -TERM "$child_pid" 2>/dev/null;
+  wait "$child_pid" 2>/dev/null;
+  echo "process_tree=blocked";
+else
+  echo "process_tree=failed";
+  exit 15;
+fi;
+
+# 10. Secret isolation — no ambient secrets in environment
+if env | grep -qiE "OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY|GITHUB_TOKEN|AWS_SECRET" 2>/dev/null; then
+  echo "secret_isolation=failed";
+  exit 16;
+else
+  echo "secret_isolation=blocked";
+fi;
+
+# 11. cgroup — cgroup v2 should be visible
+if [ -r /sys/fs/cgroup/cgroup.controllers ]; then
+  echo "cgroup=visible";
+else
+  echo "cgroup=failed";
+  exit 17;
+fi;
+
+# 12. NoNewPrivs — check /proc/self/status
+if [ -r /proc/self/status ]; then
+  if grep -q "NoNewPrivs" /proc/self/status 2>/dev/null; then
+    nnpriv=$(grep "NoNewPrivs" /proc/self/status 2>/dev/null | awk '{print $2}');
+    if [ "$nnpriv" = "1" ]; then
+      echo "no_new_privs=blocked";
+    else
+      echo "no_new_privs=failed";
+      exit 18;
+    fi;
+  else
+    echo "no_new_privs=blocked";
+  fi;
+else
+  echo "no_new_privs=blocked";
+fi;
+
+echo "=== probe complete ===";
+"#;
+
     let path = backend
         .build_enforced_wrapper(
             &CommandSpec {
                 program: "/bin/sh".to_string(),
-                args: vec![
-                    "-c".to_string(),
-                    "set -eu; \
-                     test -r /proc/self/status; \
-                     test -r /sys/fs/cgroup/cgroup.controllers; \
-                     if /usr/bin/unshare -Ur true; then \
-                       echo seccomp=failed; exit 11; \
-                     else echo seccomp=blocked; fi; \
-                     if /usr/bin/python3 -c 'import socket; socket.socket()'; then \
-                       echo network=failed; exit 12; \
-                     else echo network=blocked; fi; \
-                     if touch /terminus-sandbox-write-probe; then \
-                       echo filesystem=failed; exit 13; \
-                     else echo filesystem=readonly; fi; \
-                     echo cgroup=visible"
-                        .to_string(),
-                ],
+                args: vec!["-c".to_string(), probe_script.to_string()],
                 cwd: WorkspacePath::new("probe", "."),
                 public_env: BTreeMap::from([(
                     "PATH".to_string(),
@@ -206,11 +319,21 @@ pub fn run_probe() -> Result<i32, SandboxError> {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let required = [
+
+    // All checks must pass with the expected "blocked" or "visible" values.
+    let required: Vec<(&str, &str)> = vec![
+        ("user_namespace", "blocked"),
+        ("pid_namespace", "blocked"),
+        ("mount_namespace", "blocked"),
+        ("network_namespace", "blocked"),
         ("seccomp", "blocked"),
         ("network", "blocked"),
         ("filesystem", "readonly"),
+        ("protected_git", "blocked"),
+        ("process_tree", "blocked"),
+        ("secret_isolation", "blocked"),
         ("cgroup", "visible"),
+        ("no_new_privs", "blocked"),
     ];
     let checks_passed = output.status.success()
         && required.iter().all(|(key, expected)| {

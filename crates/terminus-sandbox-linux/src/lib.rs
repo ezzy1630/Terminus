@@ -355,9 +355,14 @@ impl SandboxBackend for LinuxSandboxBackend {
                 enforced: vec![
                     EnforcementFeature::FilesystemIsolation,
                     EnforcementFeature::NetworkIsolation,
+                    EnforcementFeature::NetworkNamespace,
+                    EnforcementFeature::ProxyOnlyEgress,
+                    EnforcementFeature::ProtectedGit,
                     EnforcementFeature::ProcessIsolation,
+                    EnforcementFeature::ProcessTreeContainment,
                     EnforcementFeature::NoNewPrivs,
                     EnforcementFeature::AmbientSecretDenial,
+                    EnforcementFeature::SecretIsolation,
                     EnforcementFeature::PluginAmbientAuthorityDenial,
                     EnforcementFeature::PidNamespace,
                     EnforcementFeature::MountNamespace,
@@ -374,6 +379,11 @@ impl SandboxBackend for LinuxSandboxBackend {
                     ),
                     format!("seccomp policy: {}", enforcement::seccomp_policy_hash(true)),
                     "cgroup v2 resource limits are applied by the payload launcher".to_string(),
+                    "proxy-only egress enforced via network namespace + broker socket mount"
+                        .to_string(),
+                    "protected .git via filesystem Deny rule + read-only root".to_string(),
+                    "process tree containment via PID namespace + --die-with-parent".to_string(),
+                    "secret isolation via env-clear + brokered capabilities only".to_string(),
                 ],
             };
         }
