@@ -1,0 +1,16 @@
+{
+  "provider": "openai",
+  "model": "gpt-4o",
+  "request": {
+    "model": "gpt-4o",
+    "messages": [
+      { "role": "system", "content": "You are a coding assistant." },
+      { "role": "user", "content": "Explain async fn in Rust." }
+    ],
+    "temperature": 0.2,
+    "stream": true
+  },
+  "expected_events": [
+    { "type": "chunk", "content": "Async functions in Rust return a Future..." }
+  ]
+}

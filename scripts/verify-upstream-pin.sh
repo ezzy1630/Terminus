@@ -65,8 +65,31 @@ echo "[verify-pin] actual=  $ACTUAL"
 
 if [ "$ACTUAL" = "$EXPECTED" ]; then
   echo "[verify-pin] OK — content_sha256 verified"
+  
+  # License verification (SPEC §6.1)
+  SPDX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("license",{}).get("spdx",""))' "$LOCK")"
+  if [ "$SPDX" != "MIT" ]; then
+    echo "[verify-pin] license SPDX mismatch: expected MIT, got $SPDX" >&2
+    exit 3
+  fi
+
+  # Imported directory provenance check if present
+  IMPORTED="$ROOT/vendor/opencode/$COMMIT"
+  if [ -d "$IMPORTED" ]; then
+    if [ ! -f "$IMPORTED/.terminus-source-verified" ]; then
+      echo "[verify-pin] imported directory $IMPORTED missing .terminus-source-verified marker" >&2
+      exit 3
+    fi
+    if [ ! -f "$IMPORTED/LICENSE" ]; then
+      echo "[verify-pin] imported directory missing LICENSE file" >&2
+      exit 3
+    fi
+    echo "[verify-pin] OK — license ($SPDX) and local source provenance verified at $IMPORTED"
+  fi
+
   exit 0
 else
   echo "[verify-pin] INTEGRITY FAILURE — content_sha256 mismatch" >&2
   exit 2
 fi
+

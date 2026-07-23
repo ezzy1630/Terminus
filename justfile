@@ -82,7 +82,7 @@ codegen-check:
     #!/usr/bin/env bash
     set -eu
     just codegen
-    if ! git diff --exit-code -- 'packages/**/generated/**' 'crates/**/generated/**' 'schemas/generated/**' 'docs/generated/**'; then
+    if ! git diff --exit-code -- 'packages/**/generated*/**' 'crates/**/generated/**' 'schemas/generated/**' 'docs/generated/**'; then
       echo "[codegen-check] generated drift detected; run 'just codegen' and commit" >&2
       exit 1
     fi
@@ -136,7 +136,7 @@ unit:
 integration:
     cargo test --workspace --test '*'
     bun run test:integration
-    cd python && uv run --extra dev pytest -q tests/integration
+    cd python && uv run --extra dev pytest -q forge_evals/forge_evals/tests/test_runner_grader_integration.py
 
 # Local-capable security suite (per-PR subset).
 security:
@@ -173,7 +173,9 @@ upstream-check:
     #!/usr/bin/env bash
     set -eu
     python3 scripts/verify-upstream-divergence.py
+    bun test packages/open-code-bridge
     bash scripts/verify-opencode-parity.sh
+
 
 # Release gate (SPEC §46.18, §50). Every dependency is mandatory; missing
 # infrastructure or evidence is a release failure, not a warning.

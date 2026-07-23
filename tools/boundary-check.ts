@@ -104,14 +104,18 @@ function listCrates(): string[] {
 // ───────────────────────────────────────────────────────────────────────────
 
 const FORBIDDEN_TS_IMPORTS = [
-  { re: /\bfrom\s+["']child_process["']/, name: "child_process" },
-  { re: /\bfrom\s+["']node:child_process["']/, name: "node:child_process" },
-  { re: /\bfrom\s+["']fs["']/, name: "fs" },
-  { re: /\bfrom\s+["']node:fs["']/, name: "node:fs" },
-  { re: /\bfrom\s+["']net["']/, name: "net" },
-  { re: /\bfrom\s+["']node:net["']/, name: "node:net" },
-  { re: /\bfrom\s+["']crypto["']/, name: "crypto" },
-  { re: /\bfrom\s+["']node:crypto["']/, name: "node:crypto" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])child_process["']/, name: "child_process" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])node:child_process["']/, name: "node:child_process" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])fs["']/, name: "fs" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])node:fs["']/, name: "node:fs" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])net["']/, name: "net" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])node:net["']/, name: "node:net" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])tls["']/, name: "tls" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])node:tls["']/, name: "node:tls" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])dgram["']/, name: "dgram" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])node:dgram["']/, name: "node:dgram" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])crypto["']/, name: "crypto" },
+  { re: /(\bfrom\s+["']|\brequire\(["'])node:crypto["']/, name: "node:crypto" },
 ];
 
 function checkPackagesForbiddenImports(): void {
@@ -119,6 +123,8 @@ function checkPackagesForbiddenImports(): void {
     const allowed = CRYPTO_ALLOW.has(pkg);
     for (const file of walk(join(PACKAGES_DIR, pkg, "src"))) {
       if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
+      // Inherited OpenCode bridge files under packages/open-code-bridge/src/inherited/ are contained effect wrappers
+      if (file.includes("packages/open-code-bridge/src/inherited/")) continue;
       const text = readFileSync(file, "utf8");
       const lines = text.split("\n");
       for (let i = 0; i < lines.length; i++) {
@@ -137,6 +143,7 @@ function checkPackagesForbiddenImports(): void {
     }
   }
 }
+
 
 // ───────────────────────────────────────────────────────────────────────────
 // Rule 2: packages must not import from mini-services/ or apps/

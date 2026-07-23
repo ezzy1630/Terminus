@@ -26,21 +26,38 @@
     "paths": {
       "@/*": [
         "./src/*"
-      ]
-    }
+      ],
+      "@terminus/domain": ["./packages/domain/src/index.ts"],
+      "@terminus/runtime-protocol": ["./packages/runtime-protocol/src/index.ts"],
+      "@terminus/context-ir": ["./packages/context-ir/src/index.ts"],
+      "@terminus/context-compiler": ["./packages/context-compiler/src/index.ts"],
+      "@terminus/provider-core": ["./packages/provider-core/src/index.ts"],
+      "@terminus/provider-local": ["./packages/provider-local/src/index.ts"],
+      "@terminus/model-router": ["./packages/model-router/src/index.ts"],
+      "@terminus/task-runtime": ["./packages/task-runtime/src/index.ts"],
+      "@terminus/session-runtime": ["./packages/session-runtime/src/index.ts"],
+      "@terminus/orchestration": ["./packages/orchestration/src/index.ts"],
+      "@terminus/verification": ["./packages/verification/src/index.ts"],
+      "@terminus/testkit": ["./packages/testkit/src/index.ts"],
+      "@terminus/public-api": ["./packages/public-api/src/index.ts"],
+      "@terminus/aci": ["./packages/aci/src/index.ts"]
+    },
+    "types": ["bun-types"]
   },
   "include": [
     "next-env.d.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
+    "packages/**/*.ts",
+    "packages/**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",
-    "packages/**",
     "skills/**",
     "mini-services/**",
     "examples/**"
   ]
 }
+

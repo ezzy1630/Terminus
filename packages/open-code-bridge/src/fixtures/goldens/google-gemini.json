@@ -1,0 +1,18 @@
+{
+  "provider": "google",
+  "model": "gemini-1.5-pro",
+  "request": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [{ "text": "Describe Rust effect boundary." }]
+      }
+    ],
+    "generationConfig": {
+      "temperature": 0.2
+    }
+  },
+  "expected_events": [
+    { "type": "candidate", "text": "The Rust effect boundary guarantees non-bypassability." }
+  ]
+}

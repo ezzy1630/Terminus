@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce the OpenCode source/divergence contract at release time."""
+"""Enforce the OpenCode source/divergence contract and print divergence report at release time."""
 
 from __future__ import annotations
 
@@ -37,11 +37,14 @@ def main() -> int:
     budget = yaml.safe_load(BUDGET_PATH.read_text())
     per_release = budget.get("budget", {}).get("per_release", {})
     modified = budget.get("modified_files", [])
-    if len(modified) > int(per_release.get("max_modified_files", 0)):
-        fail("OpenCode modified-file divergence budget exceeded")
+    max_files = int(per_release.get("max_modified_files", 0))
+    max_hours = float(per_release.get("max_merge_conflict_hours", 0))
+
+    if len(modified) > max_files:
+        fail(f"OpenCode modified-file divergence budget exceeded ({len(modified)} > {max_files})")
     hours = sum(float(item.get("conflict_hours", 0)) for item in modified)
-    if hours > float(per_release.get("max_merge_conflict_hours", 0)):
-        fail("OpenCode merge-conflict-hour budget exceeded")
+    if hours > max_hours:
+        fail(f"OpenCode merge-conflict-hour budget exceeded ({hours} > {max_hours})")
     for item in modified:
         source = item.get("source")
         if not isinstance(source, str) or not (inherited / source).is_file():
@@ -53,13 +56,28 @@ def main() -> int:
         source = item.get("source")
         if not isinstance(source, str) or not (ROOT / source).exists():
             fail(f"effect-bypass entry does not reference a real file: {source}")
+        test_file = item.get("test")
+        if isinstance(test_file, str) and not (ROOT / test_file).exists():
+            fail(f"effect-bypass entry test path does not exist: {test_file}")
+
     if int(per_release.get("max_bypass_register_open", 0)) == 0:
         open_entries = [item for item in entries if item.get("status") not in {"contained", "removed"}]
         if open_entries:
-            fail(f"effect-bypass register has {len(open_entries)} open entries")
+            fail(f"effect-bypass register has {len(open_entries)} open (uncontained) entries")
 
     subprocess.run(["bash", str(ROOT / "scripts/verify-upstream-pin.sh")], check=True)
-    print(f"[upstream-check] source imported and divergence budget is within limits for {commit}")
+    subprocess.run(["bash", str(ROOT / "scripts/check-upstream-patches.sh")], check=True)
+
+    contained_count = sum(1 for e in entries if e.get("status") == "contained")
+    removed_count = sum(1 for e in entries if e.get("status") == "removed")
+
+    print("\n--- Terminus OpenCode Measured Divergence Report ---")
+    print(f"Pinned Upstream Commit : {commit}")
+    print(f"Modified Files         : {len(modified)} / {max_files} (budget)")
+    print(f"Merge Conflict Hours   : {hours} / {max_hours} (budget)")
+    print(f"Bypass Register Entries: {len(entries)} (Contained: {contained_count}, Removed: {removed_count}, Open: 0)")
+    print(f"Divergence Status      : WITHIN BUDGET & FULLY CONTAINED\n")
+
     return 0
 
 

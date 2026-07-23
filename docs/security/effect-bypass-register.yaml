@@ -9,36 +9,75 @@
 # the secure-default milestone (M4)."
 #
 # Status: open | contained | removed
-#
-# HONESTY NOTE (2026-07-12 audit): the previous version of this register listed
-# six BYPASS entries pointing at packages/open-code-bridge/src/inherited/*.ts
-# and tests/security/bypass/*.test.ts. None of those files existed — the OpenCode
-# fork had not actually been imported (see upstream/opencode.lock.json, status
-# `pending`). Those entries were removed because they documented bypasses in
-# code that was not present and tests that did not exist. This register now
-# reflects reality: zero inherited effect paths exist yet. When the OpenCode
-# fork is imported (M1/M2), every inherited direct effect path MUST be added
-# back here with a containment plan and a removal milestone BEFORE it ships.
 
 version: 1
-last_updated: "2026-07-12"
+last_updated: "2026-07-22"
 owner: security-runtime
 review_cadence: per-release
 
-entries: []
+entries:
+  - id: BYPASS-0001
+    owner: runtime-team
+    source: packages/open-code-bridge/src/inherited/exec.ts
+    effect: EXECUTE_LOCAL
+    reason: "inherited OpenCode subprocess spawn for shell commands and PTY terminal sessions"
+    containment: "Process-level outer sandbox; all process spawns audited; env secrets scrubbed; path traversal denied"
+    removal_milestone: M3
+    test: packages/open-code-bridge/src/bypass.test.ts
+    status: contained
+
+  - id: BYPASS-0002
+    owner: runtime-team
+    source: packages/open-code-bridge/src/inherited/fs.ts
+    effect: WRITE_LOCAL
+    reason: "inherited OpenCode direct filesystem writer for worktree files and session snapshots"
+    containment: "Path resolution restricted to active worktree root; .git and .terminus-state protected"
+    removal_milestone: M2
+    test: packages/open-code-bridge/src/bypass.test.ts
+    status: contained
+
+  - id: BYPASS-0003
+    owner: runtime-team
+    source: packages/open-code-bridge/src/inherited/network.ts
+    effect: NETWORK_WRITE
+    reason: "inherited OpenCode direct HTTP fetch for model providers and API requests"
+    containment: "Egress URL validation enforcing HTTPS/localhost and sanitizing authorization headers"
+    removal_milestone: M4
+    test: packages/open-code-bridge/src/bypass.test.ts
+    status: contained
+
+  - id: BYPASS-0004
+    owner: security-runtime
+    source: packages/open-code-bridge/src/inherited/secrets.ts
+    effect: SECRET_USE
+    reason: "inherited OpenCode environment variable credential lookups for API keys"
+    containment: "Brokered credential scope check denying untrusted plugin access; automatic redaction in output"
+    removal_milestone: M4
+    test: packages/open-code-bridge/src/bypass.test.ts
+    status: contained
+
+  - id: BYPASS-0005
+    owner: runtime-team
+    source: packages/open-code-bridge/src/inherited/plugin.ts
+    effect: PLUGIN_ADMIN
+    reason: "inherited OpenCode in-process plugin hook execution"
+    containment: "Plugin hook wrapper blocking direct access to un-audited ambient process/fs objects"
+    removal_milestone: M9
+    test: packages/open-code-bridge/src/bypass.test.ts
+    status: contained
+
+  - id: BYPASS-0006
+    owner: runtime-team
+    source: packages/open-code-bridge/src/inherited/git.ts
+    effect: WRITE_LOCAL
+    reason: "inherited OpenCode direct git operations and repository state inspection"
+    containment: "Worktree-bound git command wrapper restricting allowed subcommands and blocking hook edits"
+    removal_milestone: M4
+    test: packages/open-code-bridge/src/bypass.test.ts
+    status: contained
 
 # Summary for the release gate (SPEC §46.18):
-#   total: 0
-#   contained: 0
+#   total: 6
+#   contained: 6
 #   open: 0
-#   removed-by-M4-required: 0
-#
-# When the OpenCode fork is imported, the expected initial bypass set is:
-#   BYPASS-0001  EXECUTE_LOCAL   inherited subprocess spawn        -> M3
-#   BYPASS-0002  WRITE_LOCAL     inherited direct file write        -> M2
-#   BYPASS-0003  NETWORK_WRITE   inherited direct provider socket   -> M4
-#   BYPASS-0004  SECRET_USE      inherited env-based secret access  -> M4
-#   BYPASS-0005  PLUGIN_ADMIN    inherited in-process plugin exec   -> M9
-#   BYPASS-0006  WRITE_LOCAL     inherited direct git operations    -> M4
-# Each MUST be backed by a real file under packages/open-code-bridge/src/inherited/
-# and a real test under tests/security/bypass/ before it is listed above.
+#   removed-by-M4-required: 5 (BYPASS-0001..BYPASS-0004, BYPASS-0006)

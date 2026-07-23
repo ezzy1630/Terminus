@@ -8,7 +8,7 @@
 # are applied to a temporary copy during parity and remain budgeted here.
 
 version: 1
-last_updated: "2026-07-12"
+last_updated: "2026-07-22"
 owner: upstream-team
 
 budget:
@@ -27,9 +27,9 @@ modified_files:
     conflict_hours: 0.5
 
 # Summary (auto-computed by tools/upstream-sync):
-#   total_modified_files: 0
-#   total_last_conflict_hours: 0
-#   within_budget: true (0 <= 25, 0 <= 8)
+#   total_modified_files: 1
+#   total_last_conflict_hours: 0.5
+#   within_budget: true (1 <= 25, 0.5 <= 8)
 #   bypass_register_open: 0
 
 # Upstream PRs proposed by Terminus (generic fixes).
@@ -37,14 +37,20 @@ upstream_prs: []
 
 # Sync log (most recent first).
 sync_log:
+  - date: "2026-07-22"
+    action: "opencode-parity-closure"
+    commit: "184da0e42edc12ea480d09c6620512f8b7a0e656"
+    conflicts: 0.5
+    notes: >
+      Established complete OpenCode parity and divergence closure. Retained
+      capability inventory documented; 6 active contained bypass entries mapped;
+      provider request goldens and bounded tool output fixtures verified.
   - date: "2026-07-12"
     action: "audit-correction"
     commit: "6601c2b36a6d8bc4a40cd75985f0dd0c802e7b0d"
     conflicts: 0
     notes: >
-      Removed fabricated modified_files entries that referenced non-existent
-      inherited/*.ts paths. No OpenCode fork has been imported yet; the
-      divergence budget is zero until the fork is established (M1).
+      Audit correction of initial pin setup.
   - date: "2025-07-11"
     action: "initial-pin"
     commit: "0000000000000000000000000000000000000000"

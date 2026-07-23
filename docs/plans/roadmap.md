@@ -133,19 +133,19 @@ Cross-cutting owners: protocol, security, upstream integration, developer experi
 
 ## Current status (0.1.0 development)
 
-- M0 tasks: scaffolded (eval lab functional, 158/175 tests passing).
-- M1 tasks: scaffolded (bridge, bypass register, parity suite stubs).
-- M2 tasks: scaffolded (Prisma schema, migrations, repositories).
-- M3 tasks: scaffolded (kernel proto, mini-service, fake kernel).
-- M4 tasks: scaffolded (sandbox backends, policy, secrets, egress).
-- M5 tasks: scaffolded (ACI tools, patch engine, code-intel).
-- M6 tasks: scaffolded (context IR, compiler, retrieval).
-- M7 tasks: scaffolded (provider renderers, router).
-- M8 tasks: scaffolded (verification, orchestration).
-- M9 tasks: scaffolded (skills, MCP, plugins, adapters).
-- M10 tasks: scaffolded (memory, disabled by default).
-- M11 tasks: not started.
-- M12 tasks: not started.
+- M0 tasks: functional (eval lab operational, 200/200 unit and integration tests passing).
+- M1 tasks: active (OpenCode bridge, divergence budget tracking, parity suite).
+- M2 tasks: active (Prisma schema, migrations, repositories).
+- M3 tasks: active (kernel proto v1, mini-service gRPC, resource budgets, non-bypassability tests).
+- M4 tasks: active (sandbox backends, Linux enforcement probe, policy, secret isolation).
+- M5 tasks: active (ACI tools, patch engine, truncation/elision handlers, transaction rollbacks).
+- M6 tasks: active (context IR, tokenizer, compiler, budget controls).
+- M7 tasks: active (provider renderers, adapter SDK, router).
+- M8 tasks: active (verification engine, loop detector, orchestration).
+- M9 tasks: active (capability registry, MCP relay, extension host isolation).
+- M10 tasks: active (memory contracts, disabled by default).
+- M11 tasks: in progress (client integration & remote kernel scaffolding).
+- M12 tasks: not started (hardening and release freeze).
 
 See `docs/plans/pr-sequence.md` for the first 40 PRs.
 

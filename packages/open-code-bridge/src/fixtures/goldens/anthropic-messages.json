@@ -1,0 +1,21 @@
+{
+  "provider": "anthropic",
+  "model": "claude-3-5-sonnet-20241022",
+  "request": {
+    "model": "claude-3-5-sonnet-20241022",
+    "max_tokens": 4096,
+    "system": "You are a coding assistant running under Terminus.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a hello world program in Rust."
+      }
+    ],
+    "stream": true
+  },
+  "expected_events": [
+    { "type": "message_start", "role": "assistant" },
+    { "type": "content_block_delta", "delta": "fn main() {\n    println!(\"Hello, world!\");\n}\n" },
+    { "type": "message_stop" }
+  ]
+}
