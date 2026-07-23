@@ -47,6 +47,10 @@ impl RequestContextBuilder {
             actor_id: self.actor_id.unwrap_or_else(|| "test-actor".to_string()),
             traceparent: String::new(),
             capability_token: String::new(),
+            workspace_id: String::new(),
+            deadline_unix_ms: 0,
+            resource_budgets: terminus_kernel_protocol::ResourceBudgets::default(),
+            policy_version: String::new(),
         }
     }
 }

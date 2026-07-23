@@ -61,6 +61,17 @@ export interface RequestContext {
   traceparent: string;
   /** Short-lived kernel-issued capability */
   capabilityToken: string;
+  workspaceId: string;
+  deadline: Date | undefined;
+  resourceBudgets: ResourceBudgets | undefined;
+  policyVersion: string;
+}
+
+export interface ResourceBudgets {
+  maxCpuMilliseconds: number;
+  maxMemoryBytes: number;
+  maxOutputBytes: number;
+  maxWallclockSeconds: number;
 }
 
 /**
@@ -676,6 +687,10 @@ function createBaseRequestContext(): RequestContext {
     actorId: "",
     traceparent: "",
     capabilityToken: "",
+    workspaceId: "",
+    deadline: undefined,
+    resourceBudgets: undefined,
+    policyVersion: "",
   };
 }
 
@@ -704,6 +719,18 @@ export const RequestContext: MessageFns<RequestContext> = {
     }
     if (message.capabilityToken !== "") {
       writer.uint32(66).string(message.capabilityToken);
+    }
+    if (message.workspaceId !== "") {
+      writer.uint32(74).string(message.workspaceId);
+    }
+    if (message.deadline !== undefined) {
+      Timestamp.encode(toTimestamp(message.deadline), writer.uint32(82).fork()).join();
+    }
+    if (message.resourceBudgets !== undefined) {
+      ResourceBudgets.encode(message.resourceBudgets, writer.uint32(90).fork()).join();
+    }
+    if (message.policyVersion !== "") {
+      writer.uint32(98).string(message.policyVersion);
     }
     return writer;
   },
@@ -779,6 +806,38 @@ export const RequestContext: MessageFns<RequestContext> = {
           message.capabilityToken = reader.string();
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.deadline = fromTimestamp(Timestamp.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.resourceBudgets = ResourceBudgets.decode(reader, reader.uint32());
+          continue;
+        }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.policyVersion = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -801,6 +860,94 @@ export const RequestContext: MessageFns<RequestContext> = {
     message.actorId = object.actorId ?? "";
     message.traceparent = object.traceparent ?? "";
     message.capabilityToken = object.capabilityToken ?? "";
+    message.workspaceId = object.workspaceId ?? "";
+    message.deadline = object.deadline ?? undefined;
+    message.resourceBudgets = (object.resourceBudgets !== undefined && object.resourceBudgets !== null)
+      ? ResourceBudgets.fromPartial(object.resourceBudgets)
+      : undefined;
+    message.policyVersion = object.policyVersion ?? "";
+    return message;
+  },
+};
+
+function createBaseResourceBudgets(): ResourceBudgets {
+  return { maxCpuMilliseconds: 0, maxMemoryBytes: 0, maxOutputBytes: 0, maxWallclockSeconds: 0 };
+}
+
+export const ResourceBudgets: MessageFns<ResourceBudgets> = {
+  encode(message: ResourceBudgets, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.maxCpuMilliseconds !== 0) {
+      writer.uint32(8).uint64(message.maxCpuMilliseconds);
+    }
+    if (message.maxMemoryBytes !== 0) {
+      writer.uint32(16).uint64(message.maxMemoryBytes);
+    }
+    if (message.maxOutputBytes !== 0) {
+      writer.uint32(24).uint64(message.maxOutputBytes);
+    }
+    if (message.maxWallclockSeconds !== 0) {
+      writer.uint32(32).uint64(message.maxWallclockSeconds);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResourceBudgets {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResourceBudgets();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.maxCpuMilliseconds = longToNumber(reader.uint64());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.maxMemoryBytes = longToNumber(reader.uint64());
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.maxOutputBytes = longToNumber(reader.uint64());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.maxWallclockSeconds = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ResourceBudgets>, I>>(base?: I): ResourceBudgets {
+    return ResourceBudgets.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResourceBudgets>, I>>(object: I): ResourceBudgets {
+    const message = createBaseResourceBudgets();
+    message.maxCpuMilliseconds = object.maxCpuMilliseconds ?? 0;
+    message.maxMemoryBytes = object.maxMemoryBytes ?? 0;
+    message.maxOutputBytes = object.maxOutputBytes ?? 0;
+    message.maxWallclockSeconds = object.maxWallclockSeconds ?? 0;
     return message;
   },
 };

@@ -14,8 +14,17 @@ use thiserror::Error;
 pub mod error_codes;
 pub use error_codes::{ErrorCategory, ErrorCode};
 
+/// ResourceBudgets specifies execution resource limits for an effect.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ResourceBudgets {
+    pub max_cpu_milliseconds: u64,
+    pub max_memory_bytes: u64,
+    pub max_output_bytes: u64,
+    pub max_wallclock_seconds: u64,
+}
+
 /// RequestContext mirrors `terminus.kernel.v1.RequestContext`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RequestContext {
     pub request_id: String,
     pub idempotency_key: String,
@@ -25,6 +34,10 @@ pub struct RequestContext {
     pub actor_id: String,
     pub traceparent: String,
     pub capability_token: String,
+    pub workspace_id: String,
+    pub deadline_unix_ms: u64,
+    pub resource_budgets: ResourceBudgets,
+    pub policy_version: String,
 }
 
 impl RequestContext {
@@ -39,6 +52,10 @@ impl RequestContext {
             actor_id: String::new(),
             traceparent: String::new(),
             capability_token: String::new(),
+            workspace_id: String::new(),
+            deadline_unix_ms: 0,
+            resource_budgets: ResourceBudgets::default(),
+            policy_version: String::new(),
         }
     }
 }

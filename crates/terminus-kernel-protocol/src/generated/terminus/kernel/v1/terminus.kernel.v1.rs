@@ -30,6 +30,25 @@ pub struct RequestContext {
     /// Short-lived kernel-issued capability
     #[prost(string, tag="8")]
     pub capability_token: ::prost::alloc::string::String,
+    #[prost(string, tag="9")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="10")]
+    pub deadline: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag="11")]
+    pub resource_budgets: ::core::option::Option<ResourceBudgets>,
+    #[prost(string, tag="12")]
+    pub policy_version: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResourceBudgets {
+    #[prost(uint64, tag="1")]
+    pub max_cpu_milliseconds: u64,
+    #[prost(uint64, tag="2")]
+    pub max_memory_bytes: u64,
+    #[prost(uint64, tag="3")]
+    pub max_output_bytes: u64,
+    #[prost(uint64, tag="4")]
+    pub max_wallclock_seconds: u64,
 }
 /// ArtifactRef references an immutable blob in the content-addressed store
 /// (SPEC §29.3). `sha256` is the canonical `sha256:<hex>` form.

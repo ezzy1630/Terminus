@@ -37,6 +37,17 @@ message RequestContext {
   string actor_id = 6;            // Principal driving the request
   string traceparent = 7;         // W3C Trace Context
   string capability_token = 8;    // Short-lived kernel-issued capability
+  string workspace_id = 9;
+  google.protobuf.Timestamp deadline = 10;
+  ResourceBudgets resource_budgets = 11;
+  string policy_version = 12;
+}
+
+message ResourceBudgets {
+  uint64 max_cpu_milliseconds = 1;
+  uint64 max_memory_bytes = 2;
+  uint64 max_output_bytes = 3;
+  uint64 max_wallclock_seconds = 4;
 }
 
 // ArtifactRef references an immutable blob in the content-addressed store

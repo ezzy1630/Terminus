@@ -868,6 +868,19 @@ fn job_state(job_id: &str, state: terminus_jobs::JobState) -> protocol::JobState
 }
 
 fn context(value: ProtoContext) -> terminus_kernel_protocol::RequestContext {
+    let deadline_unix_ms = value
+        .deadline
+        .map(|t| (t.seconds as u64) * 1000 + (t.nanos as u64) / 1_000_000)
+        .unwrap_or(0);
+    let resource_budgets = value
+        .resource_budgets
+        .map(|b| terminus_kernel_protocol::ResourceBudgets {
+            max_cpu_milliseconds: b.max_cpu_milliseconds,
+            max_memory_bytes: b.max_memory_bytes,
+            max_output_bytes: b.max_output_bytes,
+            max_wallclock_seconds: b.max_wallclock_seconds,
+        })
+        .unwrap_or_default();
     terminus_kernel_protocol::RequestContext {
         request_id: value.request_id,
         idempotency_key: value.idempotency_key,
@@ -877,6 +890,10 @@ fn context(value: ProtoContext) -> terminus_kernel_protocol::RequestContext {
         actor_id: value.actor_id,
         traceparent: value.traceparent,
         capability_token: value.capability_token,
+        workspace_id: value.workspace_id,
+        deadline_unix_ms,
+        resource_budgets,
+        policy_version: value.policy_version,
     }
 }
 
@@ -1509,6 +1526,7 @@ mod tests {
                     actor_id: "grpc-test".to_string(),
                     traceparent: String::new(),
                     capability_token: token.clone(),
+                    ..Default::default()
                 }),
                 root_uri: "file:///tmp/terminus-grpc".to_string(),
                 canonical_root: "/tmp/terminus-grpc".to_string(),
@@ -1530,7 +1548,9 @@ mod tests {
                     actor_id: "grpc-test".to_string(),
                     traceparent: String::new(),
                     capability_token: token,
+                    ..Default::default()
                 }),
+
                 profile_id: "secure-local-default".to_string(),
             })
             .await

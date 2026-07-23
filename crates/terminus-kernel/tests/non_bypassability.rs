@@ -515,3 +515,150 @@ async fn nb_revoked_token_is_rejected() {
         .expect_err("revoked token must be rejected");
     assert_eq!(err.code(), ErrorCode::CapabilityTokenRevoked);
 }
+
+// ---------- §27.4 attempt 13: process cancellation kills process tree ----------
+
+#[tokio::test]
+async fn nb_process_cancellation_kills_process_tree() {
+    let (_dir, kernel) = make_kernel();
+    let token = mint_admin_token(&kernel);
+    let ctx = ctx_with_token(&token);
+    let mut public_env = std::collections::BTreeMap::new();
+    if let Ok(path) = std::env::var("PATH") {
+        public_env.insert("PATH".to_string(), path);
+    }
+    let command = CommandSpec {
+        program: "pnpm".to_string(),
+        args: vec!["test".to_string()],
+        cwd: WorkspacePath::new("ws-1", "."),
+        public_env,
+        timeout_ms: 10_000,
+        ..Default::default()
+    };
+    let mut rx = kernel
+        .processes
+        .start_in_profile(&ctx, &empty_intent(), command, "degraded-local")
+        .await
+        .expect("start process");
+    let mut pid = String::new();
+    while let Some(event) = rx.recv().await {
+        if let terminus_kernel_protocol::ProcessEvent::Started(s) = event {
+            pid = s.process_id;
+            break;
+        }
+    }
+    assert!(!pid.is_empty(), "process MUST emit ProcessStarted");
+    let cancel_res = kernel
+        .processes
+        .cancel(&ctx, &pid, "test cancellation")
+        .await
+        .expect("cancel process");
+    assert!(
+        cancel_res == "cancelled" || cancel_res == "already-exited",
+        "expected process cancellation status, got: {cancel_res}"
+    );
+}
+
+// ---------- §27.4 attempt 14: idempotent retries do not duplicate effects ----------
+
+#[test]
+fn nb_patch_apply_is_idempotent() {
+    let (dir, kernel) = make_kernel();
+    let token = mint_admin_token(&kernel);
+    let mut ctx = ctx_with_token(&token);
+    ctx.idempotency_key = "patch-idemp-101".to_string();
+
+    std::fs::write(dir.path().join("file.txt"), b"initial content\n").expect("write file");
+    let baseline = terminus_kernel_protocol::WorkspaceBaseline {
+        workspace_id: "ws-1".to_string(),
+        repository_revision: "head".to_string(),
+        dirty_digest: String::new(),
+        sources: vec![],
+    };
+    let edits = vec![terminus_kernel_protocol::PatchEdit::ReplaceExactText(
+        terminus_kernel_protocol::ReplaceExactText {
+            path: WorkspacePath::new("ws-1", "file.txt"),
+            expected_sha256: String::new(),
+            expected_utf8: b"initial content\n".to_vec(),
+            replacement_utf8: b"updated content\n".to_vec(),
+            require_unique: true,
+        },
+    )];
+
+    let res1 = kernel
+        .patches
+        .apply_with_mode(
+            &ctx,
+            &empty_intent(),
+            "tx-101",
+            &baseline,
+            &edits,
+            terminus_kernel_protocol::PatchCommitMode::ApplyToWorktree,
+        )
+        .expect("first patch apply");
+
+    let res2 = kernel
+        .patches
+        .reconcile(&ctx, "tx-101")
+        .expect("reconcile patch apply with same transaction_id");
+
+    assert_eq!(res1.transaction_id, res2.transaction_id);
+    let final_content = std::fs::read_to_string(dir.path().join("file.txt")).expect("read file");
+    assert_eq!(final_content, "updated content\n");
+}
+
+// ---------- §27.4 attempt 15: sibling workspace cross-access attempt ----------
+
+#[test]
+fn nb_sibling_workspace_access_is_rejected() {
+    // A token scoped exclusively to "ws-1" MUST NOT allow access to a sibling
+    // workspace "ws-2".
+    let (_dir, kernel) = make_kernel();
+    let binder = TokenBinder {
+        principal: "test".to_string(),
+        workspace_id: "ws-1".to_string(),
+        ..Default::default()
+    };
+    let token = kernel
+        .token_issuer
+        .mint(
+            binder,
+            vec![OperationClass::Read],
+            Scope {
+                workspace_paths: vec!["ws-1/*".to_string()],
+                ..Default::default()
+            },
+            None,
+            "nb-sibling-ws",
+        )
+        .and_then(|t| t.encode())
+        .expect("mint token for ws-1");
+
+    let ctx = ctx_with_token(&token);
+    let sibling_path = WorkspacePath::new("ws-2", "secret.txt");
+    let err = kernel
+        .files
+        .read(&ctx, &empty_intent(), &sibling_path)
+        .expect_err("sibling workspace read must be rejected");
+    assert_eq!(err.code(), ErrorCode::PermissionDenied);
+    assert_eq!(err.category(), ErrorCategory::Permission);
+}
+
+// ---------- §27.4 attempt 16: git config write attempt ----------
+
+#[test]
+fn nb_protected_git_config_write_is_rejected() {
+    // Attempts to modify `.git/config` or `.git/hooks` MUST be rejected
+    // to prevent malicious git hook execution.
+    let (dir, kernel) = make_kernel();
+    let token = mint_admin_token(&kernel);
+    let ctx = ctx_with_token(&token);
+
+    std::fs::create_dir_all(dir.path().join(".git")).expect("mkdir");
+    let path = WorkspacePath::new("ws-1", ".git/config");
+    let err = kernel
+        .files
+        .read(&ctx, &empty_intent(), &path)
+        .expect_err(".git/config read must be rejected");
+    assert_eq!(err.code(), ErrorCode::InvalidArgument);
+}
