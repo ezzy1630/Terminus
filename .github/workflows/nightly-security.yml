@@ -1,0 +1,86 @@
+name: Nightly security and fuzz
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-smoke:
+    name: Fuzz corpus smoke (SPEC §46.4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: just bootstrap
+      - run: just fuzz-smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-smoke-evidence
+          path: artifacts/release-gate/fuzz-smoke.json
+
+  fault-injection:
+    name: Fault-injection matrix (SPEC §46.9)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: just bootstrap
+      - run: just fault-injection
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fault-injection-evidence
+          path: artifacts/release-gate/fault-injection.json
+
+  soak-smoke:
+    name: Soak/leak smoke (30s)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: just bootstrap
+      - name: Short soak
+        env:
+          TERMINUS_SOAK_SECONDS: "30"
+        run: just soak
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-leak-evidence
+          path: artifacts/release-gate/soak-leak.json
+
+  linux-adversarial-nightly:
+    name: Linux adversarial (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: just bootstrap
+      - run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
+      - run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
+      - name: Run enforcement probe
+        env:
+          TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
+          TERMINUS_KERNEL_BINARY: ${{ github.workspace }}/mini-services/terminus-kernel/target/release/terminus-kernel-mini
+        run: bash scripts/run-linux-enforcement-probe.sh
+
+  cargo-fuzz-optional:
+    name: cargo-fuzz short campaign (optional)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Short fuzz each target
+        working-directory: fuzz
+        run: |
+          for t in command_ast path_symlink patch_anchors unified_diff protobuf_public mcp_tool_schemas provider_projection context_manifests policy redaction_parsers archive_notebook; do
+            cargo fuzz run "$t" -- -max_total_time=20 || true
+          done

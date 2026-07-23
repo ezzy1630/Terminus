@@ -57,6 +57,7 @@ pub struct ManagedProcess {
     pub stdin: Option<ChildStdin>,
     pub pid: Option<u32>,
     pub cancel_requested: bool,
+    pub allocate_pty: bool,
     lease: Option<SpawnLease>,
 }
 
@@ -192,6 +193,7 @@ impl ProcessManager {
             stdin,
             pid: child_pid,
             cancel_requested: false,
+            allocate_pty: false,
             lease,
         }));
         self.children
@@ -621,6 +623,7 @@ mod tests {
             working_dir: None,
             timeout_ms: 5_000,
             shell: true,
+            allocate_pty: false,
         };
         let (outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
         let mut got_started = false;
@@ -660,6 +663,7 @@ mod tests {
             working_dir: None,
             timeout_ms: 0,
             shell: true,
+            allocate_pty: false,
         };
         let (outcome, _rx) = mgr.spawn(spawn).await.unwrap();
         assert!(mgr.is_running(&outcome.process_id).await);
@@ -679,6 +683,7 @@ mod tests {
             working_dir: None,
             timeout_ms: 200,
             shell: true,
+            allocate_pty: false,
         };
         let (outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
         let mut got_timeout_exit = false;
@@ -706,6 +711,7 @@ mod tests {
             working_dir: None,
             timeout_ms: 5_000,
             shell: true,
+            allocate_pty: false,
         };
         let (_outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
         let mut got_value = false;
@@ -738,6 +744,7 @@ mod tests {
             working_dir: None,
             timeout_ms: 5_000,
             shell: true,
+            allocate_pty: false,
         };
         let (_outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
         let mut line = String::new();
@@ -763,6 +770,7 @@ mod tests {
             working_dir: Some(PathBuf::from(tmp.path())),
             timeout_ms: 5_000,
             shell: false,
+            allocate_pty: false,
         };
         let (_outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
         let mut pwd_line = String::new();
@@ -788,6 +796,7 @@ mod tests {
             working_dir: None,
             timeout_ms: 5_000,
             shell: false,
+            allocate_pty: false,
         };
         let (outcome, mut rx) = mgr
             .spawn_wrapped_with_lease(

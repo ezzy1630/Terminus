@@ -20,6 +20,13 @@ import type {
   Micros,
 } from "@terminus/domain";
 import { ValidationError, BudgetExhaustedError } from "@terminus/domain";
+import {
+  DEFAULT_SCHEDULER_CONFIG,
+  type SchedulerConfig,
+} from "./scheduler-types.js";
+
+export type { SchedulerConfig } from "./scheduler-types.js";
+export { DEFAULT_SCHEDULER_CONFIG } from "./scheduler-types.js";
 
 // ────────────────────────── Scheduler (§37.5) ────────────────────────────────
 
@@ -44,18 +51,6 @@ export interface SpawnDecision {
   readonly expectedValue: number;
   readonly reason: string;
 }
-
-export interface SchedulerConfig {
-  readonly spawnThreshold: number;
-  readonly requirePositiveExpectedValue: boolean;
-  readonly maxParallel: number;
-}
-
-export const DEFAULT_SCHEDULER_CONFIG: SchedulerConfig = {
-  spawnThreshold: 0.1,
-  requirePositiveExpectedValue: true,
-  maxParallel: 2,
-};
 
 export class Scheduler {
   constructor(private readonly config: SchedulerConfig = DEFAULT_SCHEDULER_CONFIG) {}
@@ -973,10 +968,23 @@ export type CancellableKind =
   | "session"
   | "task"
   | "turn"
+  | "model_attempt"
   | "tool_call"
   | "job"
   | "process"
+  | "worker"
+  | "integration"
   | "external_effect";
+
+/** Layers cancellation must reach for the §37.17 exit proof. */
+export const CANCELLATION_REACH_LAYERS: readonly CancellableKind[] = Object.freeze([
+  "model_attempt",
+  "tool_call",
+  "job",
+  "worker",
+  "integration",
+  "external_effect",
+]);
 
 export interface CancellableHandle {
   readonly id: string;
@@ -1036,9 +1044,43 @@ export class CancellationCoordinator {
     await this.cancelRecursive(turnId);
   }
 
+  /** Cancel a model/provider attempt (idempotent). */
+  async cancelModelAttempt(attemptId: string): Promise<void> {
+    await this.cancelRecursive(attemptId);
+  }
+
   /** Cancel a single tool call (idempotent). */
   async cancelToolCall(toolCallId: string): Promise<void> {
     await this.cancelRecursive(toolCallId);
+  }
+
+  /** Cancel a worker/delegation (idempotent). */
+  async cancelWorker(workerId: string): Promise<void> {
+    await this.cancelRecursive(workerId);
+  }
+
+  /** Cancel an in-flight integration/merge (idempotent). */
+  async cancelIntegration(integrationId: string): Promise<void> {
+    await this.cancelRecursive(integrationId);
+  }
+
+  /**
+   * Prove that cancellation registration covers every required layer under
+   * a parent. Returns missing kinds (empty iff the tree is complete).
+   */
+  missingCancellationLayers(
+    parentId: string,
+    required: readonly CancellableKind[] = CANCELLATION_REACH_LAYERS,
+  ): readonly CancellableKind[] {
+    const present = new Set<CancellableKind>();
+    const visit = (id: string): void => {
+      const h = this.handles.get(id);
+      if (h) present.add(h.kind);
+      const kids = this.children.get(id);
+      if (kids) for (const c of kids) visit(c);
+    };
+    visit(parentId);
+    return required.filter((k) => !present.has(k));
   }
 
   /** Returns true if the given id has been cancelled. */
@@ -1285,3 +1327,31 @@ export type {
   RiskClass,
   Micros,
 };
+
+export * from "./graph.js";
+export * from "./scout.js";
+export * from "./worktree.js";
+export * from "./worker.js";
+export * from "./findings.js";
+export * from "./integration.js";
+export * from "./loop-lifecycle.js";
+export * from "./scheduler-cohorts.js";
+export * from "./ablations.js";
+
+import {
+  COHORT_SCHEDULER_CONFIG,
+  type TaskCohort,
+} from "./scheduler-cohorts.js";
+
+/** Cohort-tuned scheduler decision (avoids circular init in scheduler-cohorts). */
+export function decideForCohort(
+  cohort: TaskCohort,
+  task: Task,
+  signals: SpawnSignals,
+): SpawnDecision {
+  return new Scheduler(COHORT_SCHEDULER_CONFIG[cohort]).shouldSpawnWorker(task, signals);
+}
+
+export function schedulerForCohort(cohort: TaskCohort): Scheduler {
+  return new Scheduler(COHORT_SCHEDULER_CONFIG[cohort]);
+}

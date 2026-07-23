@@ -183,6 +183,32 @@ impl JobManager {
         Ok(record.state)
     }
 
+    pub async fn reconcile_all(&self) -> Vec<(String, JobState)> {
+        let job_ids: Vec<String> = self.jobs.lock().await.keys().cloned().collect();
+        let mut results = Vec::new();
+        for job_id in job_ids {
+            if let Ok(state) = self.reconcile(&job_id).await {
+                results.push((job_id, state));
+            }
+        }
+        results
+    }
+
+    /// Clean up orphaned or settled jobs that have exceeded retention.
+    pub async fn clean_orphans(&self) -> Vec<String> {
+        let mut jobs = self.jobs.lock().await;
+        let mut removed = Vec::new();
+        jobs.retain(|id, record| {
+            if matches!(record.state, JobState::Lost | JobState::Exited) {
+                removed.push(id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
     pub async fn get(&self, job_id: &str) -> Option<JobRecord> {
         self.jobs.lock().await.get(job_id).cloned()
     }
@@ -223,6 +249,7 @@ mod tests {
             working_dir: None,
             timeout_ms: 0,
             shell: true,
+            allocate_pty: false,
         }
     }
 
@@ -234,6 +261,7 @@ mod tests {
             working_dir: None,
             timeout_ms: 5_000,
             shell: true,
+            allocate_pty: false,
         }
     }
 

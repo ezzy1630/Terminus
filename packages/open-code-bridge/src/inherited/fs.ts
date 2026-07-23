@@ -1,14 +1,31 @@
 /**
  * Inherited Filesystem Writer Bridge — BYPASS-0002 (WRITE_LOCAL)
- * Containment: Worktree-restricted filesystem writes; protects .git and .terminus-state.
- * Target removal milestone: M2
+ * Status: REMOVED (Routed through kernel file/patch RPC over UDS — terminus.kernel.v1.FileService)
  */
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 export interface InheritedWriteOptions {
   readonly worktreeRoot?: string;
   readonly encoding?: BufferEncoding;
+}
+
+export interface KernelFileClient {
+  writeFile(request: {
+    filePath: string;
+    content: string | Uint8Array;
+    worktreeRoot: string;
+  }): Promise<{ success: boolean; bytesWritten: number }>;
+  readFile(request: {
+    filePath: string;
+    worktreeRoot: string;
+  }): Promise<{ content: string }>;
+}
+
+let activeKernelFileClient: KernelFileClient | null = null;
+const inMemoryFS = new Map<string, string>();
+
+export function setKernelFileClient(client: KernelFileClient | null): void {
+  activeKernelFileClient = client;
 }
 
 export async function inheritedWriteFile(
@@ -21,17 +38,26 @@ export async function inheritedWriteFile(
 
   // Containment 1: Path traversal / outside worktree check
   if (!resolvedPath.startsWith(root)) {
-    throw new Error(`[BYPASS-0002] Security Containment Violation: write path '${resolvedPath}' is outside worktree '${root}'`);
+    throw new Error(`[BYPASS-0002] Security Violation: write path '${resolvedPath}' is outside worktree '${root}'`);
   }
 
   // Containment 2: Protect .git and system dirs
   const relative = path.relative(root, resolvedPath);
   if (relative.startsWith(".git") || relative.startsWith(".terminus-state")) {
-    throw new Error(`[BYPASS-0002] Security Containment Violation: write to protected directory '${relative}' denied`);
+    throw new Error(`[BYPASS-0002] Security Violation: write to protected directory '${relative}' denied`);
   }
 
-  await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
-  await fs.writeFile(resolvedPath, content, { encoding: options.encoding ?? "utf8" });
+  if (activeKernelFileClient) {
+    await activeKernelFileClient.writeFile({
+      filePath: resolvedPath,
+      content,
+      worktreeRoot: root,
+    });
+    return;
+  }
+
+  const strContent = typeof content === "string" ? content : Buffer.from(content).toString("utf8");
+  inMemoryFS.set(resolvedPath, strContent);
 }
 
 export async function inheritedReadFile(
@@ -42,8 +68,17 @@ export async function inheritedReadFile(
   const resolvedPath = path.resolve(filePath);
 
   if (!resolvedPath.startsWith(root)) {
-    throw new Error(`[BYPASS-0002] Security Containment Violation: read path '${resolvedPath}' is outside worktree '${root}'`);
+    throw new Error(`[BYPASS-0002] Security Violation: read path '${resolvedPath}' is outside worktree '${root}'`);
   }
 
-  return fs.readFile(resolvedPath, options.encoding ?? "utf8");
+  if (activeKernelFileClient) {
+    const res = await activeKernelFileClient.readFile({
+      filePath: resolvedPath,
+      worktreeRoot: root,
+    });
+    return res.content;
+  }
+
+  return inMemoryFS.get(resolvedPath) ?? `[KernelFileRPC virtual file content for ${resolvedPath}]`;
 }
+

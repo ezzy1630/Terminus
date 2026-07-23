@@ -1,0 +1,1 @@
+cargo test -p terminus-policy -- --nocapture

@@ -1,6 +1,13 @@
 import { describe, test, expect } from "bun:test";
-import { HookRunner, validateInstallation, WasiExtensionHost, ProcessExtensionHost, type ExtensionHost } from "./index.js";
-import { ValidationError, TimeoutError, type Rfc3339Timestamp, type Uuid7, type ContentHash } from "@terminus/domain";
+import {
+  HookRunner,
+  validateInstallation,
+  ProcessExtensionHost,
+  type ExtensionHost,
+  type KernelExtensionPort,
+  type BoundExtension,
+} from "./index.js";
+import { ValidationError, type Rfc3339Timestamp, type Uuid7, type ContentHash } from "@terminus/domain";
 
 describe("Extension Host Unit Tests", () => {
   const clock = () => Date.now();
@@ -63,5 +70,38 @@ describe("Extension Host Unit Tests", () => {
       trustLevel: "verified_third_party",
     });
     expect(valid.contentHash).toBe("sha256:3" as ContentHash);
+  });
+
+  test("ProcessExtensionHost delegates to kernel with timeout", async () => {
+    const calls: string[] = [];
+    const kernel: KernelExtensionPort = {
+      async invoke(req) {
+        calls.push(req.extensionId);
+        return { kind: "propose_annotation", annotation: { note: "x" } };
+      },
+    };
+    const binding: BoundExtension = {
+      extensionId: "ext-p",
+      entrypoint: "hook.js",
+      contentHash:
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as ContentHash,
+      capabilityGrantId: "g1",
+      grantedCapabilities: ["annotate"],
+      trustLevel: "verified_third_party",
+    };
+    const host = new ProcessExtensionHost(binding, kernel);
+    const outcome = await host.invoke({
+      capability: { kind: "propose_annotation", extensionId: "ext-p", priority: 1 },
+      event: {
+        eventId: uuid,
+        aggregateType: "task",
+        aggregateId: "t1",
+        payload: {},
+        occurredAt: timestamp,
+      },
+      timeoutMs: 1000,
+    });
+    expect(calls).toEqual(["ext-p"]);
+    expect(outcome.kind).toBe("propose_annotation");
   });
 });

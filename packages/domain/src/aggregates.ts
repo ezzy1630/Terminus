@@ -68,6 +68,25 @@ export const repositoryIdentitySchema = z.object({
   initialCommit: z.string().nullable(),
 });
 
+/** Remote environment binding when `kind === "remote"` (SPEC §48.14). */
+export interface RemoteEnvironmentRef {
+  readonly kernelId: string;
+  readonly endpoint: string;
+  readonly imageDigest: string;
+  readonly backend: "container" | "microvm";
+  readonly policyProfile: string;
+  readonly transport: "mtls";
+}
+
+export const remoteEnvironmentRefSchema = z.object({
+  kernelId: z.string().regex(/^kernel:[^\s:]+$/),
+  endpoint: z.string().min(1),
+  imageDigest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  backend: z.enum(["container", "microvm"]),
+  policyProfile: z.string().min(1),
+  transport: z.literal("mtls"),
+});
+
 export interface Workspace {
   readonly id: Uuid7;
   readonly kind: WorkspaceKind;
@@ -76,6 +95,7 @@ export interface Workspace {
   readonly trust: WorkspaceTrust;
   readonly repositoryIdentity: RepositoryIdentity;
   readonly activePolicyProfile: string | null;
+  readonly remoteEnvironment: RemoteEnvironmentRef | null;
   readonly createdAt: Rfc3339Timestamp;
   readonly lastOpenedAt: Rfc3339Timestamp | null;
 }
@@ -88,6 +108,7 @@ export const workspaceSchema = z.object({
   trust: z.enum(["trusted", "untrusted", "restricted"]),
   repositoryIdentity: repositoryIdentitySchema,
   activePolicyProfile: z.string().nullable(),
+  remoteEnvironment: remoteEnvironmentRefSchema.nullable().default(null),
   createdAt: z.string(),
   lastOpenedAt: z.string().nullable(),
 });
@@ -735,6 +756,44 @@ export interface CompletionCriterion {
   readonly status: "satisfied" | "unsatisfied" | "manual" | "unverifiable";
   readonly evidence: readonly ArtifactRef[];
   readonly reason: string | null;
+}
+
+/**
+ * Detached reviewer finding (§37.11, §40.7). Lifecycle is enforced by
+ * {@link ReviewFindingLifecycle} transitions; OPEN findings block completion
+ * unless explicitly accepted as risk or marked out of scope.
+ */
+export interface ReviewFinding {
+  readonly id: Uuid7;
+  readonly taskId: Uuid7;
+  readonly delegationId: Uuid7 | null;
+  readonly verificationPlanId: Uuid7 | null;
+  readonly title: string;
+  readonly body: string;
+  readonly severity: "info" | "low" | "medium" | "high" | "critical";
+  readonly lifecycle: ReviewFindingLifecycle;
+  readonly affectedPaths: readonly string[];
+  readonly evidence: readonly ArtifactRef[];
+  readonly createdAt: Rfc3339Timestamp;
+  readonly updatedAt: Rfc3339Timestamp;
+}
+
+/**
+ * Managed writer worktree lease (§37.8). Ownership is exclusive per path
+ * prefix; exact-HEAD policy requires `baseRevision` match before merge.
+ */
+export interface WorktreeLease {
+  readonly id: string;
+  readonly taskId: Uuid7;
+  readonly agentId: Uuid7 | null;
+  readonly delegationId: Uuid7 | null;
+  readonly path: string;
+  readonly baseRevision: string;
+  readonly headRevision: string;
+  readonly ownedPathPrefixes: readonly string[];
+  readonly status: "active" | "merging" | "merged" | "abandoned" | "conflict";
+  readonly createdAt: Rfc3339Timestamp;
+  readonly updatedAt: Rfc3339Timestamp;
 }
 
 // ───────────────────────── Memory claim (§39.3) ──────────────────────────────

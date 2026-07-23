@@ -9357,10 +9357,10 @@ Each package/crate `AGENTS.md` adds local boundaries and commands but may not we
 | ADR-0024 | External text compression shadow-only by default | ADOPTED |
 | ADR-0025 | Permanent minimal baseline and feature promotion gates | ADOPTED |
 | ADR-0026 | Node-compatible Forge packages; Bun isolated to upstream bridge | PROVISIONAL |
-| ADR-0027 | Container/micro-VM backend selection | OPEN |
+| ADR-0027 | Container/micro-VM backend selection | ADOPTED (OCI digest-pinned) |
 | ADR-0028 | Semantic index implementation | OPEN |
 | ADR-0029 | Public WebSocket transport | OPEN |
-| ADR-0030 | Remote multi-tenant deployment model | OPEN |
+| ADR-0030 | Remote multi-tenant deployment model | ADOPTED (single-tenant remote) |
 
 Every ADR contains context, decision, alternatives, consequences, security impact, evaluation plan, migration, and rollback.
 

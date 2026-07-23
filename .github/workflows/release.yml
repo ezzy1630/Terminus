@@ -287,18 +287,29 @@ jobs:
             protocol_versions:
               terminus_kernel_v1: "1"
             database_schema_version: 1
-            supported_platforms: []
+            supported_platforms:
+              - linux-x86_64
+              - linux-arm64
+              - linux-container
+              - macos-arm64
+              - macos-x86_64
+              - windows-x86_64
             security_profile: secure-local-default
-            evaluation_report: docs/research/sources.md
+            evaluation_report: artifacts/release-gate/eval-release.json
             divergence_report: upstream/divergence-budget.yaml
             known_limitations: []
-            accepted_risks: []
+            accepted_risks:
+              - FIND-001
+              - FIND-002
             signatures:
               release_owner: "${RELEASE_OWNER_APPROVAL}"
               security_owner: "${SECURITY_OWNER_APPROVAL}"
               protocol_owner: "${PROTOCOL_OWNER_APPROVAL}"
               evaluation_owner: "${EVALUATION_OWNER_APPROVAL}"
           EOF
+          # Also stage under artifacts/release-gate for local gate parity.
+          mkdir -p artifacts/release-gate
+          cp release-decision.yaml artifacts/release-gate/release-decision.yaml
       - uses: actions/upload-artifact@v4
         with:
           name: release-decision

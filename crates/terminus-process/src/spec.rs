@@ -14,6 +14,7 @@ pub struct NormalizedSpawn {
     pub working_dir: Option<std::path::PathBuf>,
     pub timeout_ms: u64,
     pub shell: bool,
+    pub allocate_pty: bool,
 }
 
 impl NormalizedSpawn {
@@ -51,6 +52,7 @@ impl NormalizedSpawn {
                     cmd.timeout_ms
                 },
                 shell: true,
+                allocate_pty: cmd.allocate_pty,
             });
         }
         if cmd.program.is_empty() {
@@ -69,6 +71,7 @@ impl NormalizedSpawn {
                 cmd.timeout_ms
             },
             shell: false,
+            allocate_pty: cmd.allocate_pty,
         })
     }
 }

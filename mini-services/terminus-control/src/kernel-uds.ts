@@ -12,11 +12,18 @@ import {
 import { Observable } from "rxjs";
 import {
   ArtifactIngestServiceClientImpl,
+  CodeIntelligenceServiceClientImpl,
+  ExtensionRuntimeServiceClientImpl,
   FileServiceClientImpl,
   JobServiceClientImpl,
   KernelInfoServiceClientImpl,
+  NetworkServiceClientImpl,
   PatchServiceClientImpl,
+  PolicyServiceClientImpl,
   ProcessServiceClientImpl,
+  SandboxServiceClientImpl,
+  SecretServiceClientImpl,
+  WorkspaceServiceClientImpl,
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 
 type UnarySerialize = (value: Uint8Array) => Buffer;
@@ -90,10 +97,17 @@ class UdsRpc implements GeneratedRpc {
 
 export interface KernelUdsClients {
   info: KernelInfoServiceClientImpl;
+  workspaces: WorkspaceServiceClientImpl;
   files: FileServiceClientImpl;
+  patch: PatchServiceClientImpl;
   process: ProcessServiceClientImpl;
   jobs: JobServiceClientImpl;
-  patch: PatchServiceClientImpl;
+  sandbox: SandboxServiceClientImpl;
+  policies: PolicyServiceClientImpl;
+  secrets: SecretServiceClientImpl;
+  network: NetworkServiceClientImpl;
+  codeIntel: CodeIntelligenceServiceClientImpl;
+  extensions: ExtensionRuntimeServiceClientImpl;
   artifacts: ArtifactIngestServiceClientImpl;
 }
 
@@ -104,10 +118,17 @@ export function createKernelUdsClients(
   const rpc = new UdsRpc(socketPath, capabilityToken);
   return {
     info: new KernelInfoServiceClientImpl(rpc),
+    workspaces: new WorkspaceServiceClientImpl(rpc),
     files: new FileServiceClientImpl(rpc),
+    patch: new PatchServiceClientImpl(rpc),
     process: new ProcessServiceClientImpl(rpc),
     jobs: new JobServiceClientImpl(rpc),
-    patch: new PatchServiceClientImpl(rpc),
+    sandbox: new SandboxServiceClientImpl(rpc),
+    policies: new PolicyServiceClientImpl(rpc),
+    secrets: new SecretServiceClientImpl(rpc),
+    network: new NetworkServiceClientImpl(rpc),
+    codeIntel: new CodeIntelligenceServiceClientImpl(rpc),
+    extensions: new ExtensionRuntimeServiceClientImpl(rpc),
     artifacts: new ArtifactIngestServiceClientImpl(rpc),
   };
 }

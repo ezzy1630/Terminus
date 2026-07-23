@@ -62,5 +62,6 @@ terminus-code-intel = { path = "crates/terminus-code-intel", version = "0.1.0" }
 terminus-extension-runtime = { path = "crates/terminus-extension-runtime", version = "0.1.0" }
 terminus-git = { path = "crates/terminus-git", version = "0.1.0" }
 terminus-authz = { path = "crates/terminus-authz", version = "0.1.0" }
+terminus-remote = { path = "crates/terminus-remote", version = "0.1.0" }
 terminus-kernel = { path = "crates/terminus-kernel", version = "0.1.0" }
 terminus-kernel-testkit = { path = "crates/terminus-kernel-testkit", version = "0.1.0" }

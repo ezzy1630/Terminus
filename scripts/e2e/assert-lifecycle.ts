@@ -330,6 +330,12 @@ if (!Array.isArray(events) || events.length === 0) throw new Error("export did n
 if (!Array.isArray(manifests) || manifests.length === 0) throw new Error("export did not contain context manifests");
 if (!Array.isArray(verifications) || verifications.length === 0) throw new Error("export did not contain verification plans");
 
+const imported = await api("POST", "/v1/system/import", exported);
+debug("import completed");
+if (imported.status !== "imported" || typeof imported.import_id !== "string") {
+  throw new Error(`export/import round-trip failed: ${JSON.stringify(imported)}`);
+}
+
 const verification = asObject(verifications[0], "verification plan");
 const verificationId = stringField(verification, "id", "verification plan");
 const verificationView = await api("GET", `/v1/verification/plans/${encodeURIComponent(verificationId)}`);
@@ -376,4 +382,5 @@ console.log(JSON.stringify({
   event_count: events.length,
   context_manifest_count: manifests.length,
   verification_plan_count: verifications.length,
+  import_status: imported.status,
 }, null, 2));

@@ -20,6 +20,8 @@ pub enum AuthzError {
     OperationNotPermitted,
     #[error("scope exceeds token maximum")]
     ScopeExceeded,
+    #[error("scope mismatch: {0}")]
+    ScopeMismatch(String),
     #[error("token audience mismatch")]
     WrongAudience,
     #[error("token audience mismatch (kernel instance)")]

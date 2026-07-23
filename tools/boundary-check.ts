@@ -350,16 +350,197 @@ function checkNoRawSqlOutsideRepositories(): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Rule 6: direct process execution forbidden in packages/*
+// ───────────────────────────────────────────────────────────────────────────
+
+const PROCESS_EXEC_PATTERNS = [
+  /\bexec\(|\bspawn\(|\bexecSync\(|\bspawnSync\(/,
+];
+
+function checkNoDirectProcessExec(): void {
+  for (const pkg of listPackages()) {
+    for (const file of walk(join(PACKAGES_DIR, pkg, "src"))) {
+      if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
+      if (file.includes("packages/open-code-bridge/src/inherited/")) continue;
+      if (file.endsWith(".test.ts") || file.endsWith(".spec.ts")) continue;
+      const text = readFileSync(file, "utf8");
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
+        if (line.trim().startsWith("//") || line.trim().startsWith("/*") || line.trim().startsWith("*")) continue;
+        for (const re of PROCESS_EXEC_PATTERNS) {
+          if (re.test(line)) {
+            violations.push({
+              rule: "R6: direct process execution in packages/*",
+              file: relative(ROOT, file),
+              line: i + 1,
+              detail: "direct process execution (exec/spawn) is forbidden in packages/*; route through kernel RPC",
+            });
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Rule 7: filesystem mutation forbidden in packages/*
+// ───────────────────────────────────────────────────────────────────────────
+
+const FS_MUTATION_PATTERNS = [
+  /\bwriteFileSync\(|\bunlinkSync\(|\bmkdirSync\(|\brmdirSync\(|\bcopyFileSync\(|\bappendFileSync\(/,
+];
+
+function checkNoDirectFsMutation(): void {
+  for (const pkg of listPackages()) {
+    if (pkg === "artifact-client") continue; // artifact client manages local cache files
+    for (const file of walk(join(PACKAGES_DIR, pkg, "src"))) {
+      if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
+      if (file.includes("packages/open-code-bridge/src/inherited/")) continue;
+      if (file.endsWith(".test.ts") || file.endsWith(".spec.ts")) continue;
+      const text = readFileSync(file, "utf8");
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
+        if (line.trim().startsWith("//") || line.trim().startsWith("/*") || line.trim().startsWith("*")) continue;
+        for (const re of FS_MUTATION_PATTERNS) {
+          if (re.test(line)) {
+            violations.push({
+              rule: "R7: direct filesystem mutation in packages/*",
+              file: relative(ROOT, file),
+              line: i + 1,
+              detail: "filesystem mutation is forbidden in packages/*; route through kernel FileService / PatchService",
+            });
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Rule 8: direct socket access outside UDS connector / egress proxy
+// ───────────────────────────────────────────────────────────────────────────
+
+const SOCKET_PATTERNS = [
+  /\bnet\.createConnection\(|\bnet\.connect\(|\btls\.connect\(/,
+];
+
+function checkNoDirectSocketAccess(): void {
+  for (const pkg of listPackages()) {
+    for (const file of walk(join(PACKAGES_DIR, pkg, "src"))) {
+      if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
+      if (file.endsWith(".test.ts") || file.endsWith(".spec.ts")) continue;
+      const text = readFileSync(file, "utf8");
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
+        if (line.trim().startsWith("//") || line.trim().startsWith("/*") || line.trim().startsWith("*")) continue;
+        for (const re of SOCKET_PATTERNS) {
+          if (re.test(line)) {
+            violations.push({
+              rule: "R8: direct socket access in packages/*",
+              file: relative(ROOT, file),
+              line: i + 1,
+              detail: "raw socket access is forbidden; use kernel egress broker or UDS connector",
+            });
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Rule 9: direct environment-secret reads outside secrets broker
+// ───────────────────────────────────────────────────────────────────────────
+
+const SECRET_ENV_PATTERNS = [
+  /process\.env\.(OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY|AWS_SECRET_ACCESS_KEY|GITHUB_TOKEN)/,
+];
+
+function checkNoEnvironmentSecretReads(): void {
+  for (const pkg of listPackages()) {
+    if (pkg === "provider-openai" || pkg === "provider-anthropic" || pkg === "provider-google") continue; // provider config defaults
+    for (const file of walk(join(PACKAGES_DIR, pkg, "src"))) {
+      if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
+      if (file.endsWith(".test.ts") || file.endsWith(".spec.ts")) continue;
+      const text = readFileSync(file, "utf8");
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
+        if (line.trim().startsWith("//") || line.trim().startsWith("/*") || line.trim().startsWith("*")) continue;
+        for (const re of SECRET_ENV_PATTERNS) {
+          if (re.test(line)) {
+            violations.push({
+              rule: "R9: environment secret read in packages/*",
+              file: relative(ROOT, file),
+              line: i + 1,
+              detail: "raw environment secret reads are forbidden; use brokered SecretService capabilities",
+            });
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Rule 10: raw Git CLI effects outside crates/terminus-git
+// ───────────────────────────────────────────────────────────────────────────
+
+const RAW_GIT_PATTERNS = [
+  /\bexec\s*\(\s*["'`]\s*git\s+/i,
+  /\bspawn\s*\(\s*["'`]\s*git\s+/i,
+];
+
+function checkNoRawGitEffects(): void {
+  for (const pkg of listPackages()) {
+    for (const file of walk(join(PACKAGES_DIR, pkg, "src"))) {
+      if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
+      if (file.includes("packages/open-code-bridge/src/inherited/")) continue;
+      if (file.endsWith(".test.ts") || file.endsWith(".spec.ts")) continue;
+      const text = readFileSync(file, "utf8");
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]!;
+        if (line.trim().startsWith("//") || line.trim().startsWith("/*") || line.trim().startsWith("*")) continue;
+        for (const re of RAW_GIT_PATTERNS) {
+          if (re.test(line)) {
+            violations.push({
+              rule: "R10: raw Git CLI execution in packages/*",
+              file: relative(ROOT, file),
+              line: i + 1,
+              detail: "raw Git CLI execution is forbidden; use crates/terminus-git via kernel",
+            });
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Main
 // ───────────────────────────────────────────────────────────────────────────
 
 function main(): void {
-  console.log("[boundary-check] running 5 SPEC §42.5 mechanical checks…");
+  console.log("[boundary-check] running 10 SPEC §42.5 mechanical checks…");
   checkPackagesForbiddenImports();
   checkPackagesNoDeployableDeps();
   checkKernelNoUIOrProvider();
   checkDomainNoProviderSDKs();
   checkNoRawSqlOutsideRepositories();
+  checkNoDirectProcessExec();
+  checkNoDirectFsMutation();
+  checkNoDirectSocketAccess();
+  checkNoEnvironmentSecretReads();
+  checkNoRawGitEffects();
 
   if (violations.length === 0) {
     console.log("[boundary-check] OK — no architecture-boundary violations");
@@ -373,3 +554,4 @@ function main(): void {
 }
 
 main();
+

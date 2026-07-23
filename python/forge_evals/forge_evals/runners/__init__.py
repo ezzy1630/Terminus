@@ -6,6 +6,16 @@ Drivers that turn a (task, harness, seed) triple into a
 
 from __future__ import annotations
 
+from .baseline_adapters import (
+    ClaudeCodeAdapter,
+    CodexAdapter,
+    OhMyPiAdapter,
+    PiAdapter,
+    PinnedOpenCodeAdapter,
+    TerminusFullAdapter,
+    TerminusMinimalAdapter,
+    get_baseline_harness,
+)
 from .cross_harness import (
     CrossHarnessPlan,
     CrossHarnessResult,
@@ -42,6 +52,8 @@ from .trajectory_recorder import TrajectoryEvent, TrajectoryRecorder
 
 __all__ = [
     "Budgets",
+    "ClaudeCodeAdapter",
+    "CodexAdapter",
     "CrossHarnessPlan",
     "CrossHarnessResult",
     "CrossHarnessRunner",
@@ -60,12 +72,19 @@ __all__ = [
     "MiniSweAgentAdapter",
     "MiniSweAgentTurn",
     "ModelCapabilitySnapshot",
+    "OhMyPiAdapter",
+    "PiAdapter",
+    "PinnedOpenCodeAdapter",
     "RunRequest",
     "ScriptStep",
+    "TerminusFullAdapter",
+    "TerminusMinimalAdapter",
     "TrajectoryEvent",
     "TrajectoryRecorder",
     "fake_text_provider",
     "fake_tool_call_provider",
+    "get_baseline_harness",
     "make_default_cost",
     "run_paired_comparison",
 ]
+

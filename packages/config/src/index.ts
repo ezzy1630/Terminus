@@ -248,6 +248,24 @@ export const orchestrationConfigSchema = z.object({
     turnsWithoutProgress: z.number().int().positive().default(8),
     maximumTurns: z.number().int().positive().default(50),
   }),
+  /** Cohort-tuned spawn thresholds (§48.11). */
+  cohorts: z
+    .record(
+      z.string(),
+      z.object({
+        spawnThreshold: z.number().default(0.1),
+        requirePositiveExpectedValue: z.boolean().default(true),
+        maxParallel: z.number().int().positive().default(2),
+      }),
+    )
+    .default({
+      tiny_bugfix: { spawnThreshold: 0.35, maxParallel: 1 },
+      parallelizable: { spawnThreshold: 0.05, maxParallel: 4 },
+      tightly_coupled: { spawnThreshold: 0.5, maxParallel: 1 },
+      unfamiliar_repository: { spawnThreshold: 0.08, maxParallel: 2 },
+      security_sensitive: { spawnThreshold: 0.4, maxParallel: 1 },
+      refactor: { spawnThreshold: 0.12, maxParallel: 2 },
+    }),
 });
 
 export const verificationConfigSchema = z.object({

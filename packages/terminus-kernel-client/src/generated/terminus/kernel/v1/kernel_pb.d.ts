@@ -1829,6 +1829,14 @@ export declare type KernelInfo = Message<"terminus.kernel.v1.KernelInfo"> & {
    * @generated from field: repeated string supported_services = 5;
    */
   supportedServices: string[];
+
+  /**
+   * Stable kernel identity for capability-token audience + mTLS SAN binding
+   * (SPEC §48.14). Format: `kernel:<opaque>`.
+   *
+   * @generated from field: string instance_id = 6;
+   */
+  instanceId: string;
 };
 
 /**
@@ -1892,6 +1900,20 @@ export declare type RegisterWorkspaceRequest = Message<"terminus.kernel.v1.Regis
    * @generated from field: string trust = 4;
    */
   trust: string;
+
+  /**
+   * Optional remote environment descriptor JSON (SPEC §48.14). Empty for local.
+   *
+   * @generated from field: string remote_environment_json = 5;
+   */
+  remoteEnvironmentJson: string;
+
+  /**
+   * workspace | container | microvm | remote
+   *
+   * @generated from field: string kind = 6;
+   */
+  kind: string;
 };
 
 /**

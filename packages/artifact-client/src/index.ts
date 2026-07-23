@@ -15,6 +15,8 @@ import type {
 } from "@terminus/domain";
 import { ValidationError, NotFoundError } from "@terminus/domain";
 
+import { createHash } from "node:crypto";
+
 // ────────────────────────── Kernel client ────────────────────────────────────
 
 export interface ArtifactKernelClient {
@@ -22,8 +24,14 @@ export interface ArtifactKernelClient {
   get(hash: ContentHash): Promise<Uint8Array | null>;
   getMetadata(hash: ContentHash): Promise<Readonly<Record<string, unknown>> | null>;
   link(hash: ContentHash, ownerType: string, ownerId: string, purpose: string): Promise<void>;
+  quarantine?(hash: ContentHash, bytes: Uint8Array, reason: string): Promise<void>;
   gcDryRun(): Promise<{ readonly deleted: readonly string[]; readonly retained: readonly string[] }>;
   gcApply(hashes: readonly string[]): Promise<void>;
+  /** Optional remote resumable ingest; when absent, client falls back to whole-blob ingest. */
+  beginIngest?(mediaType: string, expectedTotalBytes: number | null): Promise<{ sessionId: string; continuationToken: string }>;
+  appendChunk?(sessionId: string, offset: number, chunk: Uint8Array): Promise<{ nextOffset: number; continuationToken: string }>;
+  commitIngest?(sessionId: string): Promise<ContentHash>;
+  getRange?(hash: ContentHash, offset: number, maxBytes: number): Promise<{ chunk: Uint8Array; nextOffset: number; truncated: boolean; continuationToken: string }>;
 }
 
 // ────────────────────────── Artifact metadata ────────────────────────────────
@@ -83,10 +91,23 @@ export class ArtifactClient {
     return meta;
   }
 
-  /** Get the bytes for an artifact by hash. */
+  /** Get the bytes for an artifact by hash with SHA-256 verification and quarantine. */
   async get(hash: ContentHash): Promise<Uint8Array> {
     const bytes = await this.deps.kernel.get(hash);
     if (bytes === null) throw new NotFoundError("artifact", hash);
+
+    const actualHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}` as ContentHash;
+    if (actualHash !== hash) {
+      if (typeof this.deps.kernel.quarantine === "function") {
+        await this.deps.kernel.quarantine(
+          hash,
+          bytes,
+          `checksum mismatch: expected ${hash}, got ${actualHash}`,
+        );
+      }
+      this.metadataCache.delete(hash);
+      throw new ValidationError(`artifact checksum mismatch for ${hash}: got ${actualHash}`);
+    }
     return bytes;
   }
 
@@ -123,6 +144,41 @@ export class ArtifactClient {
     if (this.linkCache.has(key)) return;
     await this.deps.kernel.link(hash, ownerType, ownerId, purpose);
     this.linkCache.add(key);
+  }
+
+  /** Whole-blob ingest, or chunked resumable ingest when the kernel supports it. */
+  async ingestResumable(
+    bytes: Uint8Array,
+    metadata: {
+      readonly mediaType: string;
+      readonly chunkSize?: number | undefined;
+    },
+  ): Promise<ArtifactMetadata> {
+    const begin = this.deps.kernel.beginIngest;
+    const append = this.deps.kernel.appendChunk;
+    const commit = this.deps.kernel.commitIngest;
+    if (!begin || !append || !commit) {
+      return this.ingest(bytes, { mediaType: metadata.mediaType });
+    }
+    const chunkSize = metadata.chunkSize ?? 64 * 1024;
+    const started = await begin(metadata.mediaType, bytes.byteLength);
+    let offset = 0;
+    for await (const chunk of streamBytes(bytes, chunkSize)) {
+      const appended = await append(started.sessionId, offset, chunk);
+      offset = appended.nextOffset;
+    }
+    const hash = await commit(started.sessionId);
+    const meta: ArtifactMetadata = {
+      hash,
+      uri: `artifact://sha256/${hash.replace(/^sha256:/, "")}` as ArtifactUri,
+      bytes: BigInt(bytes.byteLength) as ByteCount,
+      mediaType: metadata.mediaType,
+      createdAt: this.deps.clock(),
+      compression: "none",
+      custom: {},
+    };
+    this.cacheMetadata(meta);
+    return meta;
   }
 
   /** Garbage-collect unreferenced artifacts. */

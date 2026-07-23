@@ -59,6 +59,98 @@ import { resolveTokenizer, reconcileUsage } from "./tokenizer.js";
 export type { ModelTokenizer, ReconciledUsage, ModelTokenBreakdown } from "./tokenizer.js";
 export { resolveTokenizer, reconcileUsage };
 
+// World-state producer registry (SPEC §33.5)
+export {
+  WorldStateProducerRegistry,
+  StaticProducer,
+  FunctionalProducer,
+  groupObservations,
+  repositoryStateProducer,
+  diagnosticsProducer,
+  jobsProducer,
+  testsProducer,
+  budgetsProducer,
+  permissionsProducer,
+  capabilitiesProducer,
+  scopeLedgerProducer,
+} from "./world-state-registry.js";
+export type {
+  WorldStateProducer,
+  ObservationGroup,
+  RepositoryState,
+  DiagnosticsState,
+  JobsState,
+  TestsState,
+  BudgetsState,
+  PermissionsState,
+  CapabilitiesState,
+  ScopeLedgerState,
+} from "./world-state-registry.js";
+
+// Structured checkpoints + provenance DAG (SPEC §9, §33.16, ADR-0011)
+export {
+  generateCheckpointContent,
+  validateCheckpoint,
+  shouldCreateCheckpoint,
+  ProvenanceDag,
+} from "./checkpoint.js";
+export type {
+  CheckpointContent,
+  CheckpointGeneratorInput,
+  ValidationResult,
+  ValidationViolation,
+  CheckpointTrigger,
+  ProvenanceNode,
+} from "./checkpoint.js";
+
+// Counterfactual replay (SPEC §33.16)
+export {
+  replayContext,
+  replayWithAblation,
+  standardAblations,
+  checkpointAblation,
+  memoryAblation,
+  worldStateAblation,
+  documentationAblation,
+} from "./replay.js";
+export type { AblationSpec, ReplayInput, ReplayResult } from "./replay.js";
+
+// Context explanation API (SPEC §33.16)
+export {
+  explainFragment,
+  explainManifest,
+  manifestExplanationToRecord,
+} from "./context-explanation.js";
+export type {
+  FragmentExplanation,
+  ManifestExplanation,
+} from "./context-explanation.js";
+
+// Project instruction discovery with scoped precedence
+export {
+  discoverInstructions,
+  instructionsToFragments,
+  resolveInstructionPrecedence,
+} from "./project-instructions.js";
+export type {
+  DiscoveredInstruction,
+  InstructionDiscoveryConfig,
+  InstructionFragmentInput,
+  ResolvedInstructions,
+} from "./project-instructions.js";
+
+// Durable goal/progress state
+export {
+  reconstructGoalState,
+  formatProgressSummary,
+  diffGoalStates,
+} from "./durable-goal-state.js";
+export type {
+  GoalState,
+  GoalStateReconstructionInput,
+  GoalStateDiff,
+} from "./durable-goal-state.js";
+
 // ────────────────────────── Inputs ───────────────────────────────────────────
 
 export interface TaskSnapshot {
@@ -743,6 +835,9 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
   // 3. Retrieval pipeline.
   const pipeline = resolveRetrievalPipeline(input);
   const retrieved = await pipeline.retrieve(queries, input);
+
+  // Track tokenizer choice for manifest recording.
+  const tokenizer = resolveTokenizer(input.provider.providerId, input.model.modelKey);
   // Combine required + retrieved as RetrievalResult.
   const requiredResults: RetrievalResult[] = [
     ...required.authority.map((f) => ({
@@ -810,8 +905,10 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
   const selectedFragments = confFiltered.admitted;
 
   // 9. Build + persist manifest BEFORE send (SPEC §8.6, §33.13, ADR-0010)
+  // Record tokenizer choice in the manifest.
+  const tokenizerChoice = `${tokenizer.providerId}:${tokenizer.modelKey}`;
   const manifestInput = {
-    compilerVersion: "v1",
+    compilerVersion: `v1 (tokenizer=${tokenizerChoice})`,
     policyVersion: "v1",
     providerCapabilityHash: hashSnapshot(input.provider),
     model: input.model.modelKey,

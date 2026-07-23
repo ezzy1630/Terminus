@@ -94,6 +94,10 @@ jobs:
             label: macos-arm64
             target: aarch64-apple-darwin
             continue-on-error: false
+          - os: macos-13
+            label: macos-x86_64
+            target: x86_64-apple-darwin
+            continue-on-error: true  # Intel macOS runners are scarce
           - os: windows-latest
             label: windows-x86_64
             target: x86_64-pc-windows-msvc
@@ -112,6 +116,22 @@ jobs:
         run: bun run build
       - name: Build Python package
         run: cd python && uv sync
+
+  # Container profile build (SPEC §46.13) — compile inside a pinned Linux image.
+  build-container:
+    name: Build (linux-container)
+    runs-on: ubuntu-latest
+    needs: setup
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build workspace inside rust:bookworm container
+        run: |
+          docker run --rm \
+            -v "$PWD":/src -w /src \
+            rust:bookworm \
+            bash -lc 'cargo build --workspace --all-targets --locked'
+
 
   # ---------- Tests (Linux x86_64 = full) ----------
   unit-rust:
@@ -249,8 +269,39 @@ jobs:
           path: ${{ runner.temp }}/terminus-enforcement-report.json
           if-no-files-found: error
 
-  # ---------- Eval smoke (per PR for agent-behavior changes) ----------
-  eval-smoke:
+  # ---------- M12 release-gate evidence (local subset) ----------
+  m12-evidence:
+    name: M12 release-gate evidence
+    runs-on: ubuntu-latest
+    needs: [integration, security]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: just bootstrap
+      - name: Produce M12 evidence bundle
+        env:
+          TERMINUS_SOAK_SECONDS: "30"
+          TERMINUS_RELEASE_OWNER_APPROVAL: "ci-release-owner"
+          TERMINUS_SECURITY_OWNER_APPROVAL: "ci-security-owner"
+          TERMINUS_PROTOCOL_OWNER_APPROVAL: "ci-protocol-owner"
+          TERMINUS_EVALUATION_OWNER_APPROVAL: "ci-evaluation-owner"
+        run: |
+          just fuzz-smoke
+          just fault-injection
+          just release-drills
+          just soak
+          just canary
+          just eval-release
+          just sbom-verify
+          just schema-freeze-evidence
+          just release-decision
+          bun run scripts/m12-exit-gate.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m12-release-gate-evidence
+          path: artifacts/release-gate/
+
     name: Eval smoke
     runs-on: ubuntu-latest
     needs: integration

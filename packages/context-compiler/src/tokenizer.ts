@@ -324,3 +324,184 @@ export function reconcileUsage(
     errorPercentage: errPct,
   };
 }
+
+// ────────────────────────── Chat template adapter (§38.13) ───────────────────
+
+/**
+ * A chat-template rendering function. Takes a sequence of role/content
+ * messages and returns the rendered string suitable as a prompt to a
+ * chat-completion endpoint. Inspired by Jinja2 and Handlebars templates
+ * used by HuggingFace tokenizers and llama.cpp.
+ */
+export interface ChatTemplateAdapter {
+  readonly name: string;
+  readonly compatibleModels: readonly string[];
+  render(messages: readonly { readonly role: string; readonly content: string }[]): string;
+  estimateControlTokens(messages: readonly { readonly role: string; readonly content: string }[]): number;
+}
+
+/**
+ * Llama-3 chat template (Jinja2-inspired).
+ * Template:
+ *   <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{content}<|eot_id|>
+ *   <|start_header_id|>user<|end_header_id|>\n\n{content}<|eot_id|>
+ *   <|start_header_id|>assistant<|end_header_id|>\n\n{content}<|eot_id|>
+ */
+export class Llama3ChatTemplate implements ChatTemplateAdapter {
+  readonly name = "llama3";
+  readonly compatibleModels = ["llama-3", "llama-3.1", "llama-3-70b", "llama-3.1-8b", "llama-3.1-70b"];
+
+  private readonly BOS = "<|begin_of_text|>";
+  private readonly EOT = "<|eot_id|>";
+  private readonly START_HEADER = "<|start_header_id|>";
+  private readonly END_HEADER = "<|end_header_id|>";
+
+  render(messages: readonly { readonly role: string; readonly content: string }[]): string {
+    const parts: string[] = [this.BOS];
+    for (const msg of messages) {
+      const role = this.mapRole(msg.role);
+      parts.push(`${this.START_HEADER}${role}${this.END_HEADER}\n\n${msg.content}${this.EOT}`);
+    }
+    // Append assistant header for generation.
+    parts.push(`${this.START_HEADER}assistant${this.END_HEADER}\n\n`);
+    return parts.join("");
+  }
+
+  estimateControlTokens(_messages: readonly { readonly role: string; readonly content: string }[]): number {
+    // BOS (1) + (header open + role + header close + double newline + EOT) * n + assistant header
+    return 1 + 7 * _messages.length + 4;
+  }
+
+  private mapRole(role: string): string {
+    switch (role) {
+      case "system": return "system";
+      case "user": return "user";
+      case "assistant": return "assistant";
+      case "tool": return "ipython";
+      case "developer": return "system";
+      default: return "user";
+    }
+  }
+}
+
+/**
+ * Mistral chat template (v3+ with function calling).
+ * Template:
+ *   [INST] {system_prompt}\n\n{user_content} [/INST]{assistant_content}</s>
+ * Uses special tokens: <s>, </s>, [INST], [/INST], [AVAILABLE_TOOLS], [/AVAILABLE_TOOLS], [TOOL_CALLS], [TOOL_RESULTS]
+ */
+export class MistralChatTemplate implements ChatTemplateAdapter {
+  readonly name = "mistral";
+  readonly compatibleModels = ["mistral", "mistral-large", "mistral-small", "mixtral"];
+
+  render(messages: readonly { readonly role: string; readonly content: string }[]): string {
+    const parts: string[] = ["<s>"];
+    let inInstruction = false;
+    let hasSystemPrompt = false;
+
+    // Collect system prompts into a single block.
+    const systemTexts: string[] = [];
+    for (const msg of messages) {
+      if (msg.role === "system") {
+        systemTexts.push(msg.content);
+        hasSystemPrompt = true;
+      }
+    }
+
+    for (const msg of messages) {
+      const role = this.mapRole(msg.role);
+      if (role === "system") {
+        // System prompts are collected — render them in the first [INST] block.
+        if (!inInstruction && hasSystemPrompt && systemTexts.length > 0) {
+          parts.push(`[INST] ${systemTexts.join("\n")} `);
+          inInstruction = true;
+          // Only emit system once.
+          systemTexts.length = 0;
+        }
+      } else if (role === "user") {
+        if (inInstruction) {
+          parts.push(`${msg.content} [/INST]`);
+          inInstruction = false;
+        } else {
+          parts.push(`[INST] ${msg.content} [/INST]`);
+        }
+      } else if (role === "assistant") {
+        parts.push(`${msg.content}</s>`);
+        inInstruction = false;
+      } else if (role === "tool") {
+        parts.push(`[TOOL_RESULTS] ${msg.content} [/TOOL_RESULTS]`);
+        inInstruction = false;
+      }
+    }
+
+    return parts.join("");
+  }
+
+  estimateControlTokens(_messages: readonly { readonly role: string; readonly content: string }[]): number {
+    // <s> (1) + up to 3 control tokens per message + possible [INST]/[/INST] pairs
+    return 1 + _messages.length * 5;
+  }
+
+  private mapRole(role: string): string {
+    switch (role) {
+      case "system": return "system";
+      case "user": return "user";
+      case "assistant": return "assistant";
+      case "tool": return "tool";
+      default: return "user";
+    }
+  }
+}
+
+/**
+ * Qwen2 chat template (Jinja2-inspired).
+ * Template:
+ *   <|im_start|>system\n{content}<|im_end|>\n
+ *   <|im_start|>user\n{content}<|im_end|>\n
+ *   <|im_start|>assistant\n{content}<|im_end|>\n
+ */
+export class Qwen2ChatTemplate implements ChatTemplateAdapter {
+  readonly name = "qwen2";
+  readonly compatibleModels = ["qwen2", "qwen2.5", "qwen-2.5-coder"];
+
+  private readonly IM_START = "<|im_start|>";
+  private readonly IM_END = "<|im_end|>";
+
+  render(messages: readonly { readonly role: string; readonly content: string }[]): string {
+    const parts: string[] = [];
+    for (const msg of messages) {
+      const role = this.mapRole(msg.role);
+      parts.push(`${this.IM_START}${role}\n${msg.content}${this.IM_END}\n`);
+    }
+    parts.push(`${this.IM_START}assistant\n`);
+    return parts.join("");
+  }
+
+  estimateControlTokens(_messages: readonly { readonly role: string; readonly content: string }[]): number {
+    // im_start + role + newline + im_end = ~4 per message + assistant header
+    return 4 * _messages.length + 2;
+  }
+
+  private mapRole(role: string): string {
+    switch (role) {
+      case "system": return "system";
+      case "user": return "user";
+      case "assistant": return "assistant";
+      case "tool": return "tool";
+      default: return "user";
+    }
+  }
+}
+
+/**
+ * Resolve the appropriate chat template for a given model key.
+ * Uses heuristic matching against compatible model lists.
+ */
+export function resolveChatTemplate(modelKey: string): ChatTemplateAdapter {
+  const m = modelKey.toLowerCase();
+  if (m.includes("llama-3") || m.includes("llama3")) return new Llama3ChatTemplate();
+  if (m.includes("mistral") || m.includes("mixtral")) return new MistralChatTemplate();
+  if (m.includes("qwen")) return new Qwen2ChatTemplate();
+  // Default: Qwen2-style is closest to ChatML/open-source norm.
+  return new Qwen2ChatTemplate();
+}

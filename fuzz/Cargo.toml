@@ -1,0 +1,99 @@
+[package]
+name = "terminus-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+serde_yaml = "0.9"
+terminus-policy = { path = "../crates/terminus-policy" }
+terminus-fs = { path = "../crates/terminus-fs" }
+terminus-patch = { path = "../crates/terminus-patch" }
+terminus-secrets = { path = "../crates/terminus-secrets" }
+terminus-kernel-protocol = { path = "../crates/terminus-kernel-protocol" }
+
+# Standalone workspace so cargo-fuzz does not inherit the repo root workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "command_ast"
+path = "fuzz_targets/command_ast.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "path_symlink"
+path = "fuzz_targets/path_symlink.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "patch_anchors"
+path = "fuzz_targets/patch_anchors.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "unified_diff"
+path = "fuzz_targets/unified_diff.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "protobuf_public"
+path = "fuzz_targets/protobuf_public.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "mcp_tool_schemas"
+path = "fuzz_targets/mcp_tool_schemas.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "provider_projection"
+path = "fuzz_targets/provider_projection.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "context_manifests"
+path = "fuzz_targets/context_manifests.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "policy"
+path = "fuzz_targets/policy.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "redaction_parsers"
+path = "fuzz_targets/redaction_parsers.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
+name = "archive_notebook"
+path = "fuzz_targets/archive_notebook.rs"
+doc = false
+test = false
+bench = false

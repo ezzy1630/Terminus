@@ -13,6 +13,7 @@ mod grpc;
 mod handlers;
 mod idempotency;
 mod logging;
+mod mtls;
 mod state;
 mod trace_id;
 
@@ -83,6 +84,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let require_uds = std::env::var("TERMINUS_KERNEL_REQUIRE_UDS")
         .map(|value| value == "1")
         .unwrap_or(false);
+    let require_mtls = std::env::var("TERMINUS_KERNEL_MTLS")
+        .map(|value| value == "1")
+        .unwrap_or(false);
 
     let allow_http_bootstrap = std::env::var("TERMINUS_KERNEL_HTTP_BOOTSTRAP")
         .map(|value| value == "1")
@@ -90,11 +94,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         && std::env::var("TERMINUS_DEV")
             .map(|value| value == "1")
             .unwrap_or(false);
-    if !require_uds && !allow_http_bootstrap {
+    if !require_uds && !require_mtls && !allow_http_bootstrap {
         return Err(
-            "secure kernel startup requires TERMINUS_KERNEL_REQUIRE_UDS=1; HTTP bootstrap is development-only"
+            "secure kernel startup requires TERMINUS_KERNEL_REQUIRE_UDS=1 or TERMINUS_KERNEL_MTLS=1; HTTP bootstrap is development-only"
                 .into(),
         );
+    }
+
+    if require_mtls {
+        let material = mtls::mtls_material_from_env()?;
+        let addr = std::env::var("TERMINUS_KERNEL_MTLS_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:7443".to_string());
+        let bind_addr: std::net::SocketAddr = addr
+            .parse()
+            .map_err(|e| format!("invalid TERMINUS_KERNEL_MTLS_ADDR: {e}"))?;
+        grpc::serve_grpc_mtls(bind_addr, state.kernel.clone(), &material).await?;
+        return Ok(());
     }
 
     // Production must not retain the privileged HTTP bootstrap once the UDS

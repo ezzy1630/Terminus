@@ -29,6 +29,12 @@ export type ModelKey = string & Brand<"ModelKey">;
 export type PrincipalId = string & Brand<"PrincipalId">;
 export type TraceId = string & Brand<"TraceId">;
 export type CursorToken = string & Brand<"CursorToken">;
+/** Remote/local kernel instance identity (`kernel:<opaque>`). */
+export type KernelId = string & Brand<"KernelId">;
+/** Hosting server identity (`server:<opaque>`). */
+export type ServerId = string & Brand<"ServerId">;
+/** Control-plane identity (`control:<opaque>`). */
+export type ControlId = string & Brand<"ControlId">;
 
 export const uuid7Schema = z
   .string()
@@ -60,6 +66,29 @@ export const modelKeySchema = z
   .string()
   .regex(/^[a-z0-9][a-z0-9._/-]*$/i)
   .brand<"ModelKey">();
+
+export const kernelIdSchema = z
+  .string()
+  .regex(/^kernel:[^\s:]+$/)
+  .brand<"KernelId">();
+export const serverIdSchema = z
+  .string()
+  .regex(/^server:[^\s:]+$/)
+  .brand<"ServerId">();
+export const controlIdSchema = z
+  .string()
+  .regex(/^control:[^\s:]+$/)
+  .brand<"ControlId">();
+
+export function asKernelId(s: string): KernelId {
+  return kernelIdSchema.parse(s);
+}
+export function asServerId(s: string): ServerId {
+  return serverIdSchema.parse(s);
+}
+export function asControlId(s: string): ControlId {
+  return controlIdSchema.parse(s);
+}
 
 /** Helper: assert a string is a content-hash-formatted sha256. */
 export function asContentHash(s: string): ContentHash {
@@ -142,3 +171,95 @@ export function bytes(n: number): ByteCount {
   }
   return BigInt(n) as ByteCount;
 }
+
+/** Generates a canonical lowercase UUIDv7. */
+export function generateUuid7(timeMs: number = Date.now()): Uuid7 {
+  const tsHex = Math.floor(timeMs).toString(16).padStart(12, "0");
+  const randBytes = new Uint8Array(10);
+  if (typeof globalThis.crypto?.getRandomValues === "function") {
+    globalThis.crypto.getRandomValues(randBytes);
+  } else {
+    for (let i = 0; i < randBytes.length; i += 1) {
+      randBytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  const randA = ((randBytes[0]! << 8) | randBytes[1]!) & 0x0fff;
+  const verRandA = (0x7000 | randA).toString(16).padStart(4, "0");
+  const varBits = (randBytes[2]! & 0x3f) | 0x80;
+  const varHex = varBits.toString(16).padStart(2, "0");
+  let restHex = "";
+  for (let i = 3; i < 10; i += 1) {
+    restHex += randBytes[i]!.toString(16).padStart(2, "0");
+  }
+  const uuidStr = `${tsHex.slice(0, 8)}-${tsHex.slice(8, 12)}-${verRandA}-${varHex}${restHex.slice(0, 2)}-${restHex.slice(2)}`.toLowerCase();
+  return uuidStr as Uuid7;
+}
+
+/** Extract the Unix epoch millisecond timestamp from a UUIDv7 string. */
+export function uuid7TimestampMs(id: string): number {
+  if (!uuid7Schema.safeParse(id).success) {
+    throw new TypeError(`not a valid UUIDv7 string: ${id}`);
+  }
+  const hexTs = id.replace(/-/g, "").slice(0, 12);
+  return Number.parseInt(hexTs, 16);
+}
+
+/** Lexicographically and chronologically compare two UUIDv7 identifiers. */
+export function compareUuid7(a: string, b: string): number {
+  const tsA = uuid7TimestampMs(a);
+  const tsB = uuid7TimestampMs(b);
+  if (tsA !== tsB) return tsA - tsB;
+  return a.localeCompare(b);
+}
+
+/** Canonicalize a URI string according to scheme, host, path, and normalization rules. */
+export function canonicalizeUri(rawUri: string): string {
+  const trimmed = rawUri.trim();
+  if (trimmed.length === 0) throw new TypeError("URI cannot be empty");
+
+  // Handle file:// URIs or absolute file paths
+  if (trimmed.startsWith("file://") || trimmed.startsWith("/")) {
+    let path = trimmed.startsWith("file://") ? trimmed.slice("file://".length) : trimmed;
+    path = path.replace(/\\/g, "/");
+    // Remove redundant slashes and resolve relative segments
+    const parts = path.split("/").filter((p) => p.length > 0 && p !== ".");
+    const stack: string[] = [];
+    for (const part of parts) {
+      if (part === "..") {
+        if (stack.length > 0) stack.pop();
+      } else {
+        stack.push(part);
+      }
+    }
+    const normalizedPath = `/${stack.join("/")}`;
+    return `file://${normalizedPath}`;
+  }
+
+  // Handle scheme://path URIs
+  const schemeMatch = trimmed.match(/^([a-z0-9+-.]+):\/\/(.*)$/i);
+  if (schemeMatch) {
+    const scheme = schemeMatch[1]!.toLowerCase();
+    let body = schemeMatch[2]!.replace(/\\/g, "/");
+    // Normalize path separators in body
+    const parts = body.split("/").filter((p) => p.length > 0 && p !== ".");
+    const stack: string[] = [];
+    for (const part of parts) {
+      if (part === "..") {
+        if (stack.length > 0) stack.pop();
+      } else {
+        stack.push(part);
+      }
+    }
+    const normalizedBody = stack.join("/");
+    return `${scheme}://${normalizedBody}`;
+  }
+
+  throw new TypeError(`unsupported URI format: ${rawUri}`);
+}
+
+/** Canonicalize a ResourceUri string. */
+export function canonicalizeResourceUri(uri: string): ResourceUri {
+  const canon = canonicalizeUri(uri);
+  return resourceUriSchema.parse(canon) as unknown as ResourceUri;
+}
+

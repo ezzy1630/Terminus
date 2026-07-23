@@ -482,6 +482,267 @@ export abstract class BaseProviderRenderer implements ProviderRenderer {
   }
 }
 
+// ────────────────────────── Budget guard (§38.14) ────────────────────────────
+
+export interface BudgetLimits {
+  readonly requestMicros: Micros;
+  readonly taskMicros: Micros;
+  readonly sessionMicros: Micros;
+}
+
+export interface BudgetState {
+  readonly requestSpent: Micros;
+  readonly taskSpent: Micros;
+  readonly sessionSpent: Micros;
+}
+
+export interface BudgetCheckResult {
+  readonly allowed: boolean;
+  readonly reason: string | null;
+  readonly scope: "request" | "task" | "session";
+  readonly limitExceeded: Micros | null;
+  readonly currentSpent: Micros;
+}
+
+export function checkBudget(
+  limits: BudgetLimits,
+  state: BudgetState,
+  estimatedCostMicros: Micros,
+): BudgetCheckResult {
+  const projected = (a: Micros, b: Micros): Micros => (a + b) as Micros;
+  if (projected(state.requestSpent, estimatedCostMicros) > limits.requestMicros) {
+    return {
+      allowed: false,
+      reason: `request budget would be exceeded: ${state.requestSpent} + ${estimatedCostMicros} > ${limits.requestMicros}`,
+      scope: "request",
+      limitExceeded: limits.requestMicros,
+      currentSpent: state.requestSpent,
+    };
+  }
+  if (projected(state.taskSpent, estimatedCostMicros) > limits.taskMicros) {
+    return {
+      allowed: false,
+      reason: `task budget would be exceeded: ${state.taskSpent} + ${estimatedCostMicros} > ${limits.taskMicros}`,
+      scope: "task",
+      limitExceeded: limits.taskMicros,
+      currentSpent: state.taskSpent,
+    };
+  }
+  if (projected(state.sessionSpent, estimatedCostMicros) > limits.sessionMicros) {
+    return {
+      allowed: false,
+      reason: `session budget would be exceeded: ${state.sessionSpent} + ${estimatedCostMicros} > ${limits.sessionMicros}`,
+      scope: "session",
+      limitExceeded: limits.sessionMicros,
+      currentSpent: state.sessionSpent,
+    };
+  }
+  return { allowed: true, reason: null, scope: "request", limitExceeded: null, currentSpent: state.requestSpent };
+}
+
+// ────────────────────────── Cache observation (§38.9) ────────────────────────
+
+export interface CacheEvent {
+  readonly kind: "read" | "write" | "hit" | "miss";
+  readonly tokens: TokenCount;
+  readonly breakpointIndex: number | null;
+  readonly stablePrefixHash: ContentHash | null;
+  readonly occurredAt: string;
+}
+
+export interface CacheObservationRecord {
+  readonly manifestId: string;
+  readonly providerId: string;
+  readonly model: ModelKey;
+  readonly events: readonly CacheEvent[];
+  readonly predictedCachedTokens: TokenCount;
+  readonly observedCachedTokens: TokenCount;
+  readonly cacheWriteTokensObserved: TokenCount;
+  readonly cacheHitRate: number;
+  readonly stablePrefixPreserved: boolean;
+  readonly prefixDriftAt: number | null;
+  readonly occurredAt: string;
+}
+
+export function computeCacheObservation(
+  manifestId: string,
+  providerId: string,
+  model: ModelKey,
+  events: readonly CacheEvent[],
+  predictedCachedTokens: TokenCount,
+): CacheObservationRecord {
+  let observedCached = 0n as TokenCount;
+  let cacheWrites = 0n as TokenCount;
+  let hits = 0;
+  let misses = 0;
+  let stablePrefixPreserved = true;
+  let prefixDriftAt: number | null = null;
+  for (const e of events) {
+    switch (e.kind) {
+      case "hit":
+        observedCached = (observedCached + e.tokens) as TokenCount;
+        hits++;
+        break;
+      case "write":
+        cacheWrites = (cacheWrites + e.tokens) as TokenCount;
+        break;
+      case "miss":
+        misses++;
+        if (stablePrefixPreserved && e.stablePrefixHash !== null) {
+          stablePrefixPreserved = false;
+          prefixDriftAt = e.breakpointIndex;
+        }
+        break;
+      case "read":
+        observedCached = (observedCached + e.tokens) as TokenCount;
+        break;
+      default: {
+        const _exhaustive: never = e.kind;
+        void _exhaustive;
+      }
+    }
+  }
+  // Cache hit rate: hits / (hits + misses) among read-related events.
+  const relevantEvents = hits + misses;
+  const hitRate = relevantEvents > 0 ? hits / relevantEvents : 0;
+  return {
+    manifestId,
+    providerId,
+    model,
+    events,
+    predictedCachedTokens,
+    observedCachedTokens: observedCached,
+    cacheWriteTokensObserved: cacheWrites,
+    cacheHitRate: hitRate,
+    stablePrefixPreserved,
+    prefixDriftAt,
+    occurredAt: new Date().toISOString(),
+  };
+}
+
+// ────────────────────────── Fallback observer (§38.5) ────────────────────────
+
+export interface FallbackObservation {
+  readonly originalProvider: string;
+  readonly originalModel: ModelKey;
+  readonly fallbackProvider: string;
+  readonly fallbackModel: ModelKey;
+  readonly reason: string;
+  readonly continuationLost: boolean;
+  readonly cacheLost: boolean;
+  readonly costImpactMicros: Micros;
+  readonly latencyImpactMs: number;
+  readonly userConsentRequired: boolean;
+  readonly policyCompliant: boolean;
+  readonly policyCheckReason: string | null;
+  readonly occurredAt: string;
+}
+
+export function validateFallbackPolicy(
+  fallback: FallbackObservation,
+  policy: ConfidentialityPolicy,
+  confidentiality: ConfidentialityLabel,
+): { readonly compliant: boolean; readonly reason: string | null } {
+  if (!isConfidentialityAllowed(policy, fallback.fallbackProvider, confidentiality)) {
+    return {
+      compliant: false,
+      reason: `confidentiality '${confidentiality}' not allowed for fallback provider '${fallback.fallbackProvider}'`,
+    };
+  }
+  return { compliant: true, reason: null };
+}
+
+// ────────────────────────── Cost reconciliation (§38.14) ─────────────────────
+
+export interface ReconciliationReport {
+  readonly manifestId: string;
+  readonly providerId: string;
+  readonly model: ModelKey;
+  readonly predictedCostMicros: Micros;
+  readonly observedCostMicros: Micros;
+  readonly providerReportedCostMicros: Micros | null;
+  readonly computedCostMicros: Micros;
+  readonly deltaMicros: Micros;
+  readonly anomaly: boolean;
+  readonly anomalyReason: string | null;
+  readonly reconciledAt: string;
+}
+
+export function reconcileCost(
+  manifestId: string,
+  providerId: string,
+  model: ModelKey,
+  usage: UsageRecord,
+  economics: ProviderEconomics,
+  predictedCostMicros: Micros,
+  providerReportedCostMicros: Micros | null,
+): ReconciliationReport {
+  const costRecord = computeCost({
+    usage,
+    economics,
+    providerReportedCostMicros,
+  });
+  const delta = (costRecord.computedCostMicros - predictedCostMicros) as Micros;
+  return {
+    manifestId,
+    providerId,
+    model,
+    predictedCostMicros,
+    observedCostMicros: costRecord.computedCostMicros,
+    providerReportedCostMicros,
+    computedCostMicros: costRecord.computedCostMicros,
+    deltaMicros: delta,
+    anomaly: costRecord.anomaly,
+    anomalyReason: costRecord.anomalyReason,
+    reconciledAt: new Date().toISOString(),
+  };
+}
+
+// ────────────────────────── Partial stream settlement (§38.12) ───────────────
+
+export interface PartialStreamResult {
+  readonly receivedChunks: number;
+  readonly textReceived: string;
+  readonly toolCallsReceived: number;
+  readonly cancellationReason: "user" | "timeout" | "budget" | "policy" | "error";
+  readonly usageAccrued: UsageRecord | null;
+  readonly costAccrued: Micros;
+  readonly continuationPossible: boolean;
+  readonly continuationId: string | null;
+}
+
+export function settlePartialStream(
+  chunks: readonly ProviderResponseChunk[],
+  cancellationReason: PartialStreamResult["cancellationReason"],
+  economics: ProviderEconomics,
+): PartialStreamResult {
+  let textReceived = "";
+  let toolCallsReceived = 0;
+  let usageAccrued: UsageRecord | null = null;
+  let continuationId: string | null = null;
+  for (const chunk of chunks) {
+    if (chunk.kind === "text" && chunk.text !== undefined) textReceived += chunk.text;
+    if (chunk.kind === "tool_call") toolCallsReceived++;
+    if (chunk.usage) usageAccrued = chunk.usage;
+    if (chunk.kind === "done" && chunk.continuationId) continuationId = chunk.continuationId;
+  }
+  const costAccrued = usageAccrued
+    ? computeCost({ usage: usageAccrued, economics, providerReportedCostMicros: null }).computedCostMicros
+    : (0n as Micros);
+  const continuationPossible =
+    toolCallsReceived === 0 && textReceived.length > 0 && chunks.length > 0;
+  return {
+    receivedChunks: chunks.length,
+    textReceived,
+    toolCallsReceived,
+    cancellationReason,
+    usageAccrued,
+    costAccrued,
+    continuationPossible,
+    continuationId,
+  };
+}
+
 // ────────────────────────── Re-exports ───────────────────────────────────────
 
 export type {

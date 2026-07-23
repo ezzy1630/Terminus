@@ -1,10 +1,9 @@
 //! ExtensionRuntimeService — `POST /v1/extensions/load` and
 //! `POST /v1/extensions/invoke`.
 //!
-//! The kernel's WASI host is a stub that fails closed (`Unavailable`) when
-//! asked to execute. We honour the same contract: `load` validates the
-//! manifest, `invoke` returns an honest "WASI runtime not available"
-//! error rather than silently executing untrusted code.
+//! WASI execution requires an available wasmtime backend and otherwise fails
+//! closed (`Unavailable`). Process-isolated extensions are available via
+//! `ProcessExtensionHost`. Invoke never silently runs untrusted in-process code.
 
 use std::sync::Arc;
 

@@ -541,13 +541,15 @@ model VerificationPlan {
 }
 
 model VerificationNode {
-  id                String  @id
-  planId            String  @map("plan_id")
-  kind              String // command | diagnostic | diff_rule | human | external_query
-  required          Boolean
-  specificationJson String  @map("specification_json")
-  timeoutMs         Int?    @map("timeout_ms")
-  retryPolicyJson   String  @map("retry_policy_json")
+  id                     String  @id
+  planId                 String  @map("plan_id")
+  kind                   String // command | diagnostic | diff_rule | human | external_query
+  required               Boolean
+  specificationJson      String  @map("specification_json")
+  timeoutMs              Int?    @map("timeout_ms")
+  retryPolicyJson        String  @map("retry_policy_json")
+  acceptanceCriterionId  String? @map("acceptance_criterion_id")
+  dependsOnJson          String  @default("[]") @map("depends_on_json")
 
   plan     VerificationPlan     @relation(fields: [planId], references: [id])
   outEdges VerificationEdge[]   @relation("EdgeFrom")
@@ -562,6 +564,7 @@ model VerificationEdge {
   planId     String @map("plan_id")
   fromNodeId String @map("from_node_id")
   toNodeId   String @map("to_node_id")
+  kind       String @default("depends") // depends | invalidates
 
   plan     VerificationPlan @relation(fields: [planId], references: [id])
   fromNode VerificationNode @relation("EdgeFrom", fields: [fromNodeId], references: [id])
@@ -569,6 +572,62 @@ model VerificationEdge {
 
   @@id([planId, fromNodeId, toNodeId])
   @@map("verification_edges")
+}
+
+model CompletionRecord {
+  id                   String   @id
+  taskId               String   @map("task_id")
+  contractVersion      Int      @map("contract_version")
+  finalRevision        String   @map("final_revision")
+  status               String // completed
+  criteriaJson         String   @map("criteria_json")
+  verificationPlanId   String   @map("verification_plan_id")
+  unresolvedRisksJson  String   @map("unresolved_risks_json")
+  acceptedRisksJson    String   @map("accepted_risks_json")
+  externalEffectsJson  String   @map("external_effects_json")
+  costMicros           BigInt   @map("cost_micros")
+  durationSeconds      Int      @map("duration_seconds")
+  finalCheckpointJson  String   @map("final_checkpoint_json")
+  generatedAt          DateTime @map("generated_at")
+
+  @@unique([taskId])
+  @@index([verificationPlanId])
+  @@map("completion_records")
+}
+
+model ReviewFinding {
+  id                   String   @id
+  taskId               String   @map("task_id")
+  delegationId         String?  @map("delegation_id")
+  verificationPlanId   String?  @map("verification_plan_id")
+  title                String
+  body                 String
+  severity             String
+  lifecycle            String
+  affectedPathsJson    String   @map("affected_paths_json")
+  evidenceJson         String   @map("evidence_json")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  @@index([taskId, lifecycle])
+  @@map("review_findings")
+}
+
+model WorktreeLease {
+  id                   String   @id
+  taskId               String   @map("task_id")
+  agentId              String?  @map("agent_id")
+  delegationId         String?  @map("delegation_id")
+  path                 String
+  baseRevision         String   @map("base_revision")
+  headRevision         String   @map("head_revision")
+  ownedPathPrefixesJson String  @map("owned_path_prefixes_json")
+  status               String
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  @@index([taskId, status])
+  @@map("worktree_leases")
 }
 
 model VerificationResult {

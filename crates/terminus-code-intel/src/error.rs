@@ -10,4 +10,6 @@ pub enum CodeIntelError {
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }

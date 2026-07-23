@@ -82,6 +82,26 @@ impl EgressProxy {
         Ok(())
     }
 
+    /// Re-verify DNS resolution results across connection reuse to prevent DNS rebinding attacks.
+    pub fn verify_pinned_resolution(
+        &self,
+        host: &str,
+        port: u16,
+        scheme: &str,
+        pinned_ips: &[IpAddr],
+        current_ips: &[IpAddr],
+    ) -> Result<(), EgressError> {
+        self.authorize(host, port, scheme, current_ips)?;
+        for ip in current_ips {
+            if !pinned_ips.contains(ip) {
+                return Err(EgressError::Denied(format!(
+                    "DNS rebinding detected for {host}: IP set changed"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Reserve `bytes` from the shared relay budget. The Unix broker calls
     /// this before each write; other transports must do the same rather than
     /// treating authorization as permission for unmetered I/O.
@@ -185,5 +205,27 @@ mod tests {
         assert_eq!(proxy.relay(60).unwrap(), 40);
         let err = proxy.relay(10).unwrap_err();
         assert!(matches!(err, EgressError::ByteBudgetExceeded));
+    }
+
+    #[test]
+    fn test_dns_rebinding_defense() {
+        let proxy = EgressProxy::new(policy(), RateLimit::default());
+        let pinned = vec![ip("140.82.121.6")];
+        let ok_current = vec![ip("140.82.121.6")];
+        assert!(proxy
+            .verify_pinned_resolution("api.github.com", 443, "https", &pinned, &ok_current)
+            .is_ok());
+
+        let rebound_current = vec![ip("192.168.1.1")];
+        let err = proxy
+            .verify_pinned_resolution("api.github.com", 443, "https", &pinned, &rebound_current)
+            .unwrap_err();
+        assert!(matches!(err, EgressError::PrivateDestination(_)));
+
+        let rebound_public = vec![ip("93.184.216.34")];
+        let err2 = proxy
+            .verify_pinned_resolution("api.github.com", 443, "https", &pinned, &rebound_public)
+            .unwrap_err();
+        assert!(matches!(err2, EgressError::Denied(_)));
     }
 }

@@ -273,6 +273,71 @@ pub fn validate_capability_for_op(
         })
 }
 
+/// Validate the 10-step request pipeline (SPEC §31.3):
+///  1. request context
+///  2. kernel instance identity
+///  3. capability token
+///  4. operation class
+///  5. workspace/resource scope
+///  6. policy
+///  7. approval
+///  8. idempotency
+///  9. deadline
+///  10. cancellation
+pub fn validate_request_pipeline(
+    issuer: &TokenIssuer,
+    ctx: &RequestContext,
+    op_class: OperationClass,
+    requested_scope: &Scope,
+    require_idempotency: bool,
+) -> KernelResult<terminus_authz::CapabilityToken> {
+    use terminus_kernel_protocol::{ErrorCategory, ErrorCode};
+
+    // 1. Request context
+    if ctx.request_id.is_empty() {
+        return Err(KernelError::new(
+            ErrorCode::InvalidRequest,
+            ErrorCategory::Validation,
+            "request_id must not be empty",
+            false,
+        ));
+    }
+
+    // 2. Kernel instance identity & 3. Capability token & 4. Operation class & 5. Workspace scope
+    let token = validate_capability_for_op(issuer, ctx, op_class, requested_scope)?;
+
+    // 8. Idempotency requirement
+    if require_idempotency && ctx.idempotency_key.is_empty() {
+        return Err(KernelError::new(
+            ErrorCode::InvalidRequest,
+            ErrorCategory::Validation,
+            "idempotency_key is required for this operation",
+            false,
+        ));
+    }
+
+    // 9. Deadline check
+    if ctx.deadline_unix_ms > 0 {
+        let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_millis() as u64,
+            Err(_) => 0,
+        };
+        if now_ms > ctx.deadline_unix_ms {
+            return Err(KernelError::new(
+                ErrorCode::Timeout,
+                ErrorCategory::Timeout,
+                format!(
+                    "request deadline passed ({now_ms} > {})",
+                    ctx.deadline_unix_ms
+                ),
+                true,
+            ));
+        }
+    }
+
+    Ok(token)
+}
+
 // ---------- KernelInfoService ----------
 
 #[derive(Debug, Clone, Default)]
@@ -283,7 +348,7 @@ pub struct KernelInfoService {
 impl KernelInfoService {
     pub fn new() -> Self {
         Self {
-            instance_id: terminus_kernel_protocol::new_id(),
+            instance_id: format!("kernel:{}", terminus_kernel_protocol::new_id()),
         }
     }
 
@@ -1838,6 +1903,7 @@ impl CodeIntelligenceService {
 #[derive(Clone)]
 pub struct ExtensionRuntimeService {
     host: Arc<WasiExtensionHost>,
+    process_host: Arc<terminus_extension_runtime::ProcessExtensionHost>,
     token_issuer: Arc<TokenIssuer>,
 }
 
@@ -1845,13 +1911,18 @@ impl std::fmt::Debug for ExtensionRuntimeService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExtensionRuntimeService")
             .field("host", &self.host)
+            .field("process_host", &self.process_host)
             .finish_non_exhaustive()
     }
 }
 
 impl ExtensionRuntimeService {
     pub fn new(host: Arc<WasiExtensionHost>, token_issuer: Arc<TokenIssuer>) -> Self {
-        Self { host, token_issuer }
+        Self {
+            host,
+            process_host: Arc::new(terminus_extension_runtime::ProcessExtensionHost::new()),
+            token_issuer,
+        }
     }
 
     pub fn report(&self) -> terminus_extension_runtime::WasiExtensionHostReport {
@@ -1894,9 +1965,8 @@ impl ExtensionRuntimeService {
     }
 
     /// Authorize an extension invocation and return the host's effective
-    /// runtime report. The current host is deliberately unavailable and
-    /// therefore produces a typed, fail-closed result at the transport
-    /// boundary instead of an unimplemented RPC.
+    /// runtime report. When WASI is unavailable the report is fail-closed;
+    /// process-isolated execution remains available via `ProcessExtensionHost`.
     pub fn invoke_report(
         &self,
         ctx: &RequestContext,
@@ -1923,6 +1993,10 @@ impl ExtensionRuntimeService {
             "extension invocation authorized"
         );
         Ok(self.host.report())
+    }
+
+    pub fn process_host(&self) -> &terminus_extension_runtime::ProcessExtensionHost {
+        &self.process_host
     }
 }
 

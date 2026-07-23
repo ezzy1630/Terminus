@@ -155,6 +155,7 @@ export const WorldStateSection = [
   "agents",
   "budget",
   "verification",
+  "scope",
 ] as const;
 export type WorldStateSection = (typeof WorldStateSection)[keyof typeof WorldStateSection];
 export const worldStateSectionSchema = z.enum(WorldStateSection);

@@ -64,6 +64,47 @@ export class WhitespaceTokenizer implements LocalTokenizer {
   }
 }
 
+/**
+ * Jinja2-inspired tokenizer that uses chat templates (§38.13).
+ * Delegates template rendering to a `ChatTemplateAdapter` from the
+ * context-compiler package and counts tokens via the adapter's control
+ * token estimate plus character-based text token estimation.
+ */
+export class JinjaTokenizer implements LocalTokenizer {
+  private readonly template: {
+    readonly render: (messages: readonly { readonly role: string; readonly content: string }[]) => string;
+    readonly estimateControlTokens: (messages: readonly { readonly role: string; readonly content: string }[]) => number;
+  };
+  private readonly charsPerToken: number;
+
+  constructor(
+    template: {
+      readonly render: (messages: readonly { readonly role: string; readonly content: string }[]) => string;
+      readonly estimateControlTokens: (messages: readonly { readonly role: string; readonly content: string }[]) => number;
+    },
+    charsPerToken = 3.6,
+  ) {
+    this.template = template;
+    this.charsPerToken = charsPerToken;
+  }
+
+  countTokens(text: string): number {
+    if (!text) return 0;
+    return Math.max(1, Math.ceil(text.length / this.charsPerToken));
+  }
+
+  renderChatTemplate(messages: readonly { readonly role: string; readonly content: string }[]): string {
+    return this.template.render(messages);
+  }
+
+  /** Estimate total tokens for a message sequence including control tokens. */
+  estimateTotalTokens(messages: readonly { readonly role: string; readonly content: string }[]): number {
+    const controlTokens = this.template.estimateControlTokens(messages);
+    const textTokens = messages.reduce((sum, m) => sum + this.countTokens(m.content), 0);
+    return controlTokens + textTokens;
+  }
+}
+
 // ────────────────────────── Renderer ─────────────────────────────────────────
 
 export class LocalRenderer extends BaseProviderRenderer {

@@ -1,35 +1,42 @@
 /**
- * @terminus/capability-registry — Isolated MCP stdio & HTTP relays.
+ * Isolated MCP stdio & HTTP relays — SPEC §35.6, §49.6.
  *
- * Per SPEC §35.6, §49.6: MCP servers run outside trusted control plane with
- * bounded messages, output caps, deadlines, cancellation, schema validation,
- * trust labeling, environment sanitization, and DNS rebinding / private IP protection.
+ * Stdio servers run through KernelProcessPort (no ambient spawn).
+ * HTTP servers use a brokered fetch port with private-IP denial.
+ * All descriptions/results are labeled untrusted unless builtin.
  */
 import { ValidationError, PermissionError, TimeoutError } from "@terminus/domain";
 import type { ContentHash } from "@terminus/domain";
+import type { KernelProcessPort } from "./kernel_port.js";
+import { labelUntrustedMcpText, type AdmittedMcpServer, mcpToolCallAuthorized } from "./mcp_admission.js";
 
 export interface McpServerConfig {
   readonly id: string;
   readonly version: string;
-  readonly transport: "stdio" | "http";
+  readonly transport: "stdio" | "http" | "streamable_http";
   readonly command?: string;
   readonly args?: readonly string[];
   readonly url?: string;
   readonly env?: Readonly<Record<string, string>>;
   readonly trustLevel: "builtin" | "first_party" | "verified_third_party" | "untrusted";
   readonly contentHash: ContentHash;
+  readonly capabilityGrantId: string;
 }
 
 export interface McpLimits {
   readonly maxMessageSizeBytes: number;
   readonly maxOutputBytes: number;
   readonly deadlineMs: number;
+  readonly maxCpuMs?: number;
+  readonly maxMemoryBytes?: number;
 }
 
 export const DEFAULT_MCP_LIMITS: McpLimits = {
-  maxMessageSizeBytes: 1_048_576, // 1 MB
-  maxOutputBytes: 4_194_304,    // 4 MB
-  deadlineMs: 10_000,           // 10 sec
+  maxMessageSizeBytes: 1_048_576,
+  maxOutputBytes: 4_194_304,
+  deadlineMs: 10_000,
+  maxCpuMs: 8_000,
+  maxMemoryBytes: 256 * 1024 * 1024,
 };
 
 export interface McpToolCallRequest {
@@ -46,11 +53,12 @@ export interface McpToolCallResult {
     readonly trustLevel: "builtin" | "first_party" | "verified_third_party" | "untrusted";
     readonly contentHash: ContentHash;
     readonly verified: boolean;
+    /** Server-generated instructions are always untrusted data. */
+    readonly instructionsUntrusted: true;
   };
   readonly executionTimeMs: number;
+  readonly truncated: boolean;
 }
-
-// ──────────────────────── Ambient Env Sanitizer ──────────────────────────────
 
 const DANGEROUS_ENV_KEYS = new Set([
   "AWS_ACCESS_KEY_ID",
@@ -66,58 +74,81 @@ export function sanitizeMcpEnvironment(
   rawEnv: Readonly<Record<string, string>> | undefined,
   trustLevel: string,
 ): Record<string, string> {
-  const cleanEnv: Record<string, string> = { PATH: "/usr/bin:/bin" };
+  const cleanEnv: Record<string, string> = {
+    PATH: "/usr/bin:/bin",
+    TERMINUS_NO_AMBIENT: "1",
+  };
   if (!rawEnv) return cleanEnv;
 
   for (const [key, value] of Object.entries(rawEnv)) {
     if (DANGEROUS_ENV_KEYS.has(key.toUpperCase()) && trustLevel !== "builtin") {
-      continue; // Strip raw secrets for non-builtin MCP servers
+      continue;
     }
     cleanEnv[key] = value;
   }
   return cleanEnv;
 }
 
-// ───────────────────── Private IP & Rebinding Checker ─────────────────────────
-
 export function isPrivateIp(ip: string): boolean {
   const cleaned = ip.replace(/^::ffff:/, "");
   if (cleaned === "127.0.0.1" || cleaned === "::1" || cleaned === "localhost") return true;
 
   const parts = cleaned.split(".").map((p) => parseInt(p, 10));
-  if (parts.length !== 4 || parts.some((p) => isNaN(p))) return false;
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p))) return false;
 
   const p0 = parts[0];
   const p1 = parts[1];
   if (p0 === undefined || p1 === undefined) return false;
 
-  // 127.0.0.0/8 (Loopback)
   if (p0 === 127) return true;
-  // 10.0.0.0/8 (Private)
   if (p0 === 10) return true;
-  // 172.16.0.0/12 (Private)
   if (p0 === 172 && p1 >= 16 && p1 <= 31) return true;
-  // 192.168.0.0/16 (Private)
   if (p0 === 192 && p1 === 168) return true;
-  // 169.254.0.0/16 (Link-local / Cloud Metadata)
   if (p0 === 169 && p1 === 254) return true;
-
   return false;
 }
 
-// ──────────────────────────── Stdio Relay ─────────────────────────────────────
+export interface McpHttpPort {
+  fetchJson(
+    url: string,
+    body: Readonly<Record<string, unknown>>,
+    opts: { readonly deadlineMs: number; readonly maxOutputBytes: number },
+  ): Promise<{ readonly status: number; readonly body: unknown; readonly truncated: boolean }>;
+}
+
+function boundOutput(raw: string, maxBytes: number): { text: string; truncated: boolean } {
+  const buf = Buffer.from(raw, "utf8");
+  if (buf.byteLength <= maxBytes) return { text: raw, truncated: false };
+  return {
+    text: buf.subarray(0, maxBytes).toString("utf8"),
+    truncated: true,
+  };
+}
+
+function trustLabelFor(
+  config: McpServerConfig,
+): McpToolCallResult["trustLabel"] {
+  return {
+    source: config.id,
+    trustLevel: config.trustLevel,
+    contentHash: config.contentHash,
+    verified: config.trustLevel === "builtin" || config.trustLevel === "first_party",
+    instructionsUntrusted: true,
+  };
+}
 
 export class McpProcessRelay {
   constructor(
     public readonly config: McpServerConfig,
     public readonly limits: McpLimits = DEFAULT_MCP_LIMITS,
+    private readonly kernel: KernelProcessPort | null = null,
+    private readonly admission: AdmittedMcpServer | null = null,
   ) {
     if (config.transport !== "stdio") {
       throw new ValidationError("McpProcessRelay requires stdio transport");
     }
   }
 
-  /** Run tool call in isolated subprocess context with deadline & limits. */
   async executeTool(
     request: McpToolCallRequest,
     signal?: AbortSignal,
@@ -125,8 +156,10 @@ export class McpProcessRelay {
     if (signal?.aborted) {
       throw new ValidationError("MCP tool execution aborted prior to launch");
     }
+    if (this.admission) {
+      mcpToolCallAuthorized(this.admission, request.toolName, null);
+    }
 
-    // Validate request message size
     const serializedReq = JSON.stringify(request);
     if (serializedReq.length > this.limits.maxMessageSizeBytes) {
       throw new ValidationError("MCP request payload exceeds max message size limit", {
@@ -135,63 +168,95 @@ export class McpProcessRelay {
       });
     }
 
-    // Sanitize environment
-    const _env = sanitizeMcpEnvironment(this.config.env, this.config.trustLevel);
-
+    const env = sanitizeMcpEnvironment(this.config.env, this.config.trustLevel);
     const start = Date.now();
 
-    // Emulated process response (kernel RPC integration boundary)
-    const simulatedResultStr = JSON.stringify({
-      status: "success",
-      result: { executed: true, toolName: request.toolName, echo: request.arguments },
-    });
+    if (this.kernel === null) {
+      throw new PermissionError(
+        "MCP stdio relay requires KernelProcessPort — ambient process spawn denied",
+        { serverId: this.config.id },
+      );
+    }
+    if (!this.config.command) {
+      throw new ValidationError("MCP stdio relay missing command", { id: this.config.id });
+    }
+
+    const rpcRequest = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: request.toolName, arguments: request.arguments },
+    };
+
+    let result;
+    try {
+      result = await this.kernel.exec({
+        program: this.config.command,
+        args: this.config.args ?? [],
+        env,
+        stdin: `${JSON.stringify(rpcRequest)}\n`,
+        deadlineMs: this.limits.deadlineMs,
+        maxOutputBytes: this.limits.maxOutputBytes,
+        capabilityGrantId: this.config.capabilityGrantId,
+        signal,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("deadline")) {
+        throw new TimeoutError(`MCP tool ${request.toolName} execution timeout`, this.limits.deadlineMs);
+      }
+      throw err;
+    }
 
     const elapsed = Date.now() - start;
     if (elapsed > this.limits.deadlineMs) {
       throw new TimeoutError(`MCP tool ${request.toolName} execution timeout`, this.limits.deadlineMs);
     }
 
-    if (simulatedResultStr.length > this.limits.maxOutputBytes) {
-      throw new ValidationError("MCP response output exceeds max output byte limit", {
-        size: simulatedResultStr.length,
-        limit: this.limits.maxOutputBytes,
-      });
+    const bounded = boundOutput(result.stdout, this.limits.maxOutputBytes);
+    let parsed: unknown = bounded.text;
+    try {
+      const line = bounded.text.trim().split("\n").find((l) => l.startsWith("{")) ?? bounded.text;
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      parsed = labelUntrustedMcpText(bounded.text, this.config.id, this.config.contentHash);
     }
 
+    const status: "success" | "error" =
+      result.exitCode === 0 && !(parsed as { error?: unknown })?.error ? "success" : "error";
+
     return {
-      status: "success",
-      output: JSON.parse(simulatedResultStr),
-      trustLabel: {
-        source: this.config.id,
-        trustLevel: this.config.trustLevel,
-        contentHash: this.config.contentHash,
-        verified: this.config.trustLevel !== "untrusted",
-      },
+      status,
+      output: parsed as Readonly<Record<string, unknown>> | string,
+      trustLabel: trustLabelFor(this.config),
       executionTimeMs: elapsed,
+      truncated: bounded.truncated || result.truncated,
     };
   }
 }
-
-// ──────────────────────────── HTTP Relay ──────────────────────────────────────
 
 export class McpHttpRelay {
   constructor(
     public readonly config: McpServerConfig,
     public readonly limits: McpLimits = DEFAULT_MCP_LIMITS,
+    private readonly http: McpHttpPort | null = null,
+    private readonly admission: AdmittedMcpServer | null = null,
   ) {
-    if (config.transport !== "http") {
-      throw new ValidationError("McpHttpRelay requires http transport");
+    if (config.transport !== "http" && config.transport !== "streamable_http") {
+      throw new ValidationError("McpHttpRelay requires http or streamable_http transport");
     }
   }
 
-  /** Run HTTP MCP request with private IP and DNS rebinding protection. */
   async executeHttpRequest(
     targetUrl: string,
     payload: Readonly<Record<string, unknown>>,
+    toolName?: string,
   ): Promise<McpToolCallResult> {
-    const urlObj = new URL(targetUrl);
+    if (toolName && this.admission) {
+      mcpToolCallAuthorized(this.admission, toolName, null);
+    }
 
-    // Protection against private IP & DNS rebinding for non-builtin HTTP MCP servers
+    const urlObj = new URL(targetUrl);
     if (this.config.trustLevel === "untrusted" || this.config.trustLevel === "verified_third_party") {
       if (isPrivateIp(urlObj.hostname)) {
         throw new PermissionError(
@@ -206,19 +271,34 @@ export class McpHttpRelay {
       throw new ValidationError("MCP HTTP payload exceeds max message size limit");
     }
 
+    if (this.http === null) {
+      throw new PermissionError(
+        "MCP HTTP relay requires brokered McpHttpPort — ambient fetch denied",
+        { serverId: this.config.id },
+      );
+    }
+
     const start = Date.now();
+    const response = await this.http.fetchJson(targetUrl, payload, {
+      deadlineMs: this.limits.deadlineMs,
+      maxOutputBytes: this.limits.maxOutputBytes,
+    });
     const elapsed = Date.now() - start;
 
     return {
-      status: "success",
-      output: { httpStatus: 200, payload },
-      trustLabel: {
-        source: this.config.id,
-        trustLevel: this.config.trustLevel,
-        contentHash: this.config.contentHash,
-        verified: this.config.trustLevel !== "untrusted",
+      status: response.status >= 200 && response.status < 300 ? "success" : "error",
+      output: {
+        httpStatus: response.status,
+        body: response.body,
+        trust: labelUntrustedMcpText(
+          typeof response.body === "string" ? response.body : JSON.stringify(response.body),
+          this.config.id,
+          this.config.contentHash,
+        ),
       },
+      trustLabel: trustLabelFor(this.config),
       executionTimeMs: elapsed,
+      truncated: response.truncated,
     };
   }
 }

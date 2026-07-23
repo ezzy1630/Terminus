@@ -140,7 +140,11 @@
       "dependencies": {
         "@terminus/context-ir": "workspace:*",
         "@terminus/domain": "workspace:*",
+        "@terminus/provider-anthropic": "workspace:*",
         "@terminus/provider-core": "workspace:*",
+        "@terminus/provider-google": "workspace:*",
+        "@terminus/provider-local": "workspace:*",
+        "@terminus/provider-openai": "workspace:*",
         "zod": "^4.0.2",
       },
     },
@@ -228,12 +232,43 @@
         "@terminus/provider-core": "workspace:*",
       },
     },
+    "packages/provider-cache": {
+      "name": "@terminus/provider-cache",
+      "version": "0.1.0",
+      "dependencies": {
+        "@terminus/domain": "workspace:*",
+        "@terminus/provider-core": "workspace:*",
+        "zod": "^4.0.2",
+      },
+    },
+    "packages/provider-conformance": {
+      "name": "@terminus/provider-conformance",
+      "version": "0.1.0",
+      "dependencies": {
+        "@terminus/domain": "workspace:*",
+        "@terminus/provider-anthropic": "workspace:*",
+        "@terminus/provider-core": "workspace:*",
+        "@terminus/provider-google": "workspace:*",
+        "@terminus/provider-local": "workspace:*",
+        "@terminus/provider-openai": "workspace:*",
+        "zod": "^4.0.2",
+      },
+    },
     "packages/provider-core": {
       "name": "@terminus/provider-core",
       "version": "0.1.0",
       "dependencies": {
         "@terminus/context-ir": "workspace:*",
         "@terminus/domain": "workspace:*",
+        "zod": "^4.0.2",
+      },
+    },
+    "packages/provider-economics": {
+      "name": "@terminus/provider-economics",
+      "version": "0.1.0",
+      "dependencies": {
+        "@terminus/domain": "workspace:*",
+        "@terminus/provider-core": "workspace:*",
         "zod": "^4.0.2",
       },
     },
@@ -279,6 +314,14 @@
         "@terminus/public-api": "workspace:*",
       },
     },
+    "packages/remote": {
+      "name": "@terminus/remote",
+      "version": "0.1.0",
+      "dependencies": {
+        "@terminus/domain": "workspace:*",
+        "zod": "^4.0.2",
+      },
+    },
     "packages/runtime-protocol": {
       "name": "@terminus/runtime-protocol",
       "version": "0.1.0",
@@ -321,6 +364,7 @@
       "name": "@terminus/verification",
       "version": "0.1.0",
       "dependencies": {
+        "@terminus/adapter-sdk": "workspace:*",
         "@terminus/context-ir": "workspace:*",
         "@terminus/domain": "workspace:*",
         "@terminus/runtime-protocol": "workspace:*",
@@ -934,7 +978,13 @@
 
     "@terminus/provider-anthropic": ["@terminus/provider-anthropic@workspace:packages/provider-anthropic"],
 
+    "@terminus/provider-cache": ["@terminus/provider-cache@workspace:packages/provider-cache"],
+
+    "@terminus/provider-conformance": ["@terminus/provider-conformance@workspace:packages/provider-conformance"],
+
     "@terminus/provider-core": ["@terminus/provider-core@workspace:packages/provider-core"],
+
+    "@terminus/provider-economics": ["@terminus/provider-economics@workspace:packages/provider-economics"],
 
     "@terminus/provider-google": ["@terminus/provider-google@workspace:packages/provider-google"],
 
@@ -945,6 +995,8 @@
     "@terminus/public-api": ["@terminus/public-api@workspace:packages/public-api"],
 
     "@terminus/public-client": ["@terminus/public-client@workspace:packages/public-client"],
+
+    "@terminus/remote": ["@terminus/remote@workspace:packages/remote"],
 
     "@terminus/runtime-protocol": ["@terminus/runtime-protocol@workspace:packages/runtime-protocol"],
 

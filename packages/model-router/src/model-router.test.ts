@@ -15,6 +15,7 @@ import {
   RateLimiter,
   CircuitBreaker,
   ConcurrencyLimiter,
+  FairnessQueue,
   ModelHealthMonitor,
   DEFAULT_RATE_LIMITER_CONFIG,
   DEFAULT_CIRCUIT_BREAKER_CONFIG,
@@ -406,6 +407,73 @@ describe("Router.route with controls", () => {
     expect(decision.chosen).not.toBeNull();
     expect(decision.chosen!.providerId).toBe("anthropic");
   });
+
+// ────────────────────────── FairnessQueue ────────────────────────────────────
+
+describe("FairnessQueue", () => {
+  test("enqueues and dequeues in fair order", () => {
+    let now = 1_000_000;
+    const fq = new FairnessQueue(() => now);
+    fq.enqueue("openai", "task-1", 2);
+    fq.enqueue("anthropic", "task-2", 1);
+    fq.enqueue("openai", "task-3", 2);
+    // First: openai task-1 finishes at virtual time 0.5 (weight 2 → 1/2 = 0.5).
+    const d1 = fq.dequeue();
+    expect(d1).not.toBeNull();
+    expect(d1!.entry.providerId).toBe("openai");
+    expect(d1!.entry.taskId).toBe("task-1");
+    // After dequeue: openai virtualTime=0.5, anthropic virtualTime=0.
+    // Remaining entries: [anthropic task-2, openai task-3]
+    // anthropic: finish = 0 + 1.0 = 1.0; openai: finish = 0.5 + 0.5 = 1.0
+    // Both finish at 1.0 — tiebreaker is array position, so anthropic (index 0) wins.
+    const d2 = fq.dequeue();
+    expect(d2).not.toBeNull();
+    expect(d2!.entry.providerId).toBe("anthropic");
+    expect(d2!.entry.taskId).toBe("task-2");
+    // Last: openai task-3.
+    const d3 = fq.dequeue();
+    expect(d3!.entry.providerId).toBe("openai");
+    expect(d3!.entry.taskId).toBe("task-3");
+    expect(fq.depth).toBe(0);
+  });
+
+  test("dequeue returns null when empty", () => {
+    const fq = new FairnessQueue();
+    expect(fq.dequeue()).toBeNull();
+  });
+
+  test("drainProvider removes entries for a provider", () => {
+    const fq = new FairnessQueue();
+    fq.enqueue("openai", "task-1", 1);
+    fq.enqueue("anthropic", "task-2", 1);
+    fq.enqueue("openai", "task-3", 1);
+    const drained = fq.drainProvider("openai");
+    expect(drained.length).toBe(2);
+    expect(fq.depth).toBe(1);
+    const d = fq.dequeue();
+    expect(d!.entry.providerId).toBe("anthropic");
+  });
+
+  test("averageWaitMs computes mean wait time", () => {
+    let now = 1_000_000;
+    const fq = new FairnessQueue(() => now);
+    fq.enqueue("openai", "task-1", 1);
+    now += 500;
+    fq.enqueue("openai", "task-2", 1);
+    // task-1 waited 500ms, task-2 waited 0ms, avg = 250ms
+    const avg = fq.averageWaitMs();
+    expect(avg).toBeGreaterThanOrEqual(240);
+    expect(avg).toBeLessThanOrEqual(260);
+  });
+
+  test("forProvider returns provider-specific entries", () => {
+    const fq = new FairnessQueue();
+    fq.enqueue("openai", "task-1", 1);
+    fq.enqueue("anthropic", "task-2", 1);
+    expect(fq.forProvider("openai").length).toBe(1);
+    expect(fq.forProvider("google").length).toBe(0);
+  });
+});
 
   test("reasons include circuit-breaker and rate-limit info", () => {
     const models = [mkModel("openai", "gpt-4")];

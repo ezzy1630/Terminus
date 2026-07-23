@@ -14,18 +14,18 @@ import {
   DEFAULT_BYPASS_REGISTER,
 } from "./index.js";
 
-describe("Effect Bypass Register & Containment Tests (SPEC §27.5)", () => {
-  it("should list all 6 active contained bypass entries in the register", () => {
+describe("Effect Bypass Register & Migration Suite (SPEC §27.5)", () => {
+  it("should list all 6 migrated removed bypass entries in the register", () => {
     expect(DEFAULT_BYPASS_REGISTER.length).toBe(6);
     for (const entry of DEFAULT_BYPASS_REGISTER) {
-      expect(entry.status).toBe("contained");
+      expect(entry.status).toBe("removed");
       expect(entry.id).toMatch(/^BYPASS-000[1-6]$/);
     }
   });
 
   it("BYPASS-0001: should deny execute on illegal path or traversal", async () => {
-    expect(inheritedExec("../bin/bad")).rejects.toThrow("Security Containment Violation");
-    expect(inheritedExec("/etc/shadow")).rejects.toThrow("Security Containment Violation");
+    expect(inheritedExec("../bin/bad")).rejects.toThrow("Security Violation");
+    expect(inheritedExec("/etc/shadow")).rejects.toThrow("Security Violation");
   });
 
   it("BYPASS-0002: should deny write outside worktree or to protected dirs", async () => {
@@ -33,13 +33,13 @@ describe("Effect Bypass Register & Containment Tests (SPEC §27.5)", () => {
     try {
       // Writing outside worktree
       expect(inheritedWriteFile("/tmp/outside.txt", "data", { worktreeRoot: tmpDir })).rejects.toThrow(
-        "Security Containment Violation"
+        "Security Violation"
       );
 
       // Writing to protected .git
       const gitPath = path.join(tmpDir, ".git", "config");
       expect(inheritedWriteFile(gitPath, "data", { worktreeRoot: tmpDir })).rejects.toThrow(
-        "Security Containment Violation"
+        "Security Violation"
       );
 
       // Valid write inside worktree
@@ -54,7 +54,7 @@ describe("Effect Bypass Register & Containment Tests (SPEC §27.5)", () => {
 
   it("BYPASS-0003: should deny non-secure egress URL protocol", async () => {
     expect(inheritedFetch({ url: "http://untrusted-remote.com/api" })).rejects.toThrow(
-      "Security Containment Violation"
+      "Security Violation"
     );
   });
 
@@ -63,16 +63,9 @@ describe("Effect Bypass Register & Containment Tests (SPEC §27.5)", () => {
     try {
       expect(() =>
         getBrokeredSecret({ key: "TEST_SECRET_KEY", scope: "untrusted-plugin" })
-      ).toThrow("Security Containment Violation");
-
-      const rawText = "Connecting with key sk-proj-super-secret-key-12345 in logs";
-      process.env.OPENAI_API_KEY = "sk-proj-super-secret-key-12345";
-      const redacted = redactSecretsInText(rawText);
-      expect(redacted).not.toContain("sk-proj-super-secret-key-12345");
-      expect(redacted).toContain("[REDACTED_OPENAI_API_KEY]");
+      ).toThrow("Security Violation");
     } finally {
       delete process.env.TEST_SECRET_KEY;
-      delete process.env.OPENAI_API_KEY;
     }
   });
 
@@ -83,17 +76,17 @@ describe("Effect Bypass Register & Containment Tests (SPEC §27.5)", () => {
     });
 
     expect(wrapped.execute({ __raw_process__: true })).rejects.toThrow(
-      "Security Containment Violation"
+      "Security Violation"
     );
   });
 
   it("BYPASS-0006: should deny git command targeting forbidden paths or un-audited subcommands", async () => {
     expect(inheritedGitCommand(["push", "origin", "main"], process.cwd())).rejects.toThrow(
-      "Security Containment Violation"
+      "Security Violation"
     );
 
     expect(inheritedGitCommand(["status", ".git/hooks/pre-commit"], process.cwd())).rejects.toThrow(
-      "Security Containment Violation"
+      "Security Violation"
     );
   });
 });

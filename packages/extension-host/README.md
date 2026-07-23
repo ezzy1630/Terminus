@@ -6,18 +6,17 @@ Isolated extension control. Per SPEC §35.9, §35.10.
 
 - `HookKind`: `observe_only`, `propose_annotation`, `propose_policy_input`,
   `propose_context_fragment`, `propose_tool_result_transform`, `veto`.
-- `WasiExtensionHost`, `ProcessExtensionHost` — stubs that record invocations.
-- `HookRunner` — runs hooks in deterministic order (priority then extension
-  ID). Security policy uses the strictest applicable result. Non-security
-  transform conflicts fail rather than depend on nondeterministic load order.
-- `validateInstallation(input)` — validates an extension installation request
-  (lifecycle scripts denied by default).
+- `WasiExtensionHost`, `ProcessExtensionHost` — require `KernelExtensionPort`
+  (no ambient in-process third-party execution).
+- `InProcessExtensionHost` — builtin/first_party only.
+- `HookRunner` — deterministic order, hard timeouts, crash→veto, transform conflicts fail.
+- `installExtension` / `uninstallExtension` with SBOM + provenance; lifecycle
+  scripts disabled for untrusted.
 
 ## Invariants
 
 - Hooks receive immutable event views.
-- Hook ordering is deterministic and recorded.
+- Hook ordering is deterministic; wall-clock timeouts are enforced.
 - Security policy uses the strictest applicable result.
-- Non-security transform conflicts fail rather than depend on nondeterministic
-  load order.
-- Lifecycle scripts are denied by default.
+- Non-security transform conflicts fail rather than depend on load order.
+- Lifecycle scripts are denied by default for untrusted packages.

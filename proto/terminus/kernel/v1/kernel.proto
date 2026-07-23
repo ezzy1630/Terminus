@@ -429,6 +429,9 @@ message KernelInfo {
   string build_revision = 3;
   repeated string supported_backends = 4;  // linux-bwrap | macos-sandbox | windows | container | microvm
   repeated string supported_services = 5;
+  // Stable kernel identity for capability-token audience + mTLS SAN binding
+  // (SPEC §48.14). Format: `kernel:<opaque>`.
+  string instance_id = 6;
 }
 
 message KernelHealth {
@@ -478,6 +481,10 @@ message RegisterWorkspaceRequest {
   string root_uri = 2;
   string canonical_root = 3;
   string trust = 4;             // trusted | untrusted | restricted
+  // Optional remote environment descriptor JSON (SPEC §48.14). Empty for local.
+  string remote_environment_json = 5;
+  // workspace | container | microvm | remote
+  string kind = 6;
 }
 
 message WorkspaceEntryMessage {

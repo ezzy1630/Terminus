@@ -70,6 +70,7 @@ impl KernelInfoServiceRpc for GrpcKernel {
             build_revision: string(&value, "build_revision", "dev"),
             supported_backends,
             supported_services,
+            instance_id: self.kernel.info.instance_id().to_string(),
         }))
     }
 
@@ -903,11 +904,12 @@ fn authorize_context(
     operation: terminus_authz::OperationClass,
 ) -> Result<terminus_kernel_protocol::RequestContext, Status> {
     let ctx = context(value);
-    terminus_kernel::validate_capability_for_op(
+    terminus_kernel::validate_request_pipeline(
         &kernel.token_issuer,
         &ctx,
         operation,
         &terminus_authz::Scope::default(),
+        false,
     )
     .map(|_| ctx)
     .map_err(status)
@@ -1429,6 +1431,102 @@ pub async fn serve_grpc(
     Ok(())
 }
 
+/// Serve the kernel gRPC API over TCP with mandatory mutual TLS (remote mode).
+pub async fn serve_grpc_mtls(
+    bind_addr: std::net::SocketAddr,
+    kernel: terminus_kernel::KernelHandle,
+    material: &terminus_remote::MtlsMaterial,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    material
+        .validate()
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.to_string().into() })?;
+    let cert = tokio::fs::read(&material.cert_pem_path).await?;
+    let key = tokio::fs::read(&material.key_pem_path).await?;
+    let ca = tokio::fs::read(&material.client_ca_pem_path).await?;
+    let identity = tonic::transport::Identity::from_pem(cert, key);
+    let client_ca = tonic::transport::Certificate::from_pem(ca);
+    let tls = tonic::transport::ServerTlsConfig::new()
+        .identity(identity)
+        .client_ca_root(client_ca);
+    tracing::info!(
+        %bind_addr,
+        peer = %material.expected_peer.as_str(),
+        "kernel gRPC listening on mTLS"
+    );
+    const MAX_GRPC_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+    let service = GrpcKernel::new(kernel);
+    Server::builder()
+        .tls_config(tls)?
+        .add_service(
+            KernelInfoServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            FileServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            PatchServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            ProcessServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            JobServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            WorkspaceServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            SandboxServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            PolicyServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            SecretServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            NetworkServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            CodeIntelligenceServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            ExtensionRuntimeServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            ArtifactIngestServiceServer::new(service)
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .serve(bind_addr)
+        .await?;
+    Ok(())
+}
+
 /// Windows has no Unix-domain socket transport. Refuse startup explicitly
 /// rather than silently replacing the authenticated local transport with TCP.
 #[cfg(not(unix))]
@@ -1514,6 +1612,10 @@ mod tests {
             .expect("GetInfo succeeds")
             .into_inner();
         assert_eq!(response.protocol_version, "terminus.kernel.v1");
+        assert!(
+            response.instance_id.starts_with("kernel:"),
+            "instance_id must be kernel-prefixed for remote identity binding"
+        );
 
         let workspace = WorkspaceServiceClient::new(channel.clone())
             .register(protocol::RegisterWorkspaceRequest {
@@ -1531,6 +1633,8 @@ mod tests {
                 root_uri: "file:///tmp/terminus-grpc".to_string(),
                 canonical_root: "/tmp/terminus-grpc".to_string(),
                 trust: "restricted".to_string(),
+                remote_environment_json: String::new(),
+                kind: "local_directory".to_string(),
             })
             .await
             .expect("Workspace.Register succeeds")

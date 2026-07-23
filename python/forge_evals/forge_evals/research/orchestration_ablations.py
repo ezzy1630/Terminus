@@ -49,6 +49,26 @@ ORCHESTRATION_ABLATIONS: list[OrchestrationAblation] = [
         predicted_direction=1,
     ),
     OrchestrationAblation(
+        ablation_id="orch_one_vs_writer",
+        dimension="writer",
+        description="One agent vs managed writer worktree",
+        spec_ref="§41.10",
+        baseline_setting="one_agent",
+        candidate_setting="writer_worktree",
+        target_cohort="parallelizable_task",
+        predicted_direction=1,
+    ),
+    OrchestrationAblation(
+        ablation_id="orch_one_vs_reviewer",
+        dimension="reviewer",
+        description="One agent vs detached reviewer triggers",
+        spec_ref="§41.10",
+        baseline_setting="one_agent",
+        candidate_setting="detached_reviewer",
+        target_cohort="security_sensitive",
+        predicted_direction=1,
+    ),
+    OrchestrationAblation(
         ablation_id="orch_one_vs_parallel_writers",
         dimension="parallel_writers",
         description="One agent vs parallel writers on separable tasks",
@@ -179,6 +199,8 @@ def build_orchestration_ablation_assignments(
 
 OrchestrationAblationDimension = Literal[
     "scout",
+    "writer",
+    "reviewer",
     "parallel_writers",
     "reviewer_trigger",
     "reviewer_family",

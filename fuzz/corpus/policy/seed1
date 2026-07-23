@@ -1,0 +1,9 @@
+rules:
+  - id: allow-local-echo
+    description: Allow echo for fuzz corpus seed
+    priority: 10
+    match:
+      executable_any: ["echo"]
+      effects_any: ["EXECUTE_LOCAL"]
+    effect:
+      kind: allow

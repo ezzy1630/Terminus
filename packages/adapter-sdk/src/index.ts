@@ -1,21 +1,26 @@
 /**
- * @terminus/adapter-sdk — external harness adapter SDK.
+ * @terminus/adapter-sdk — external harness adapter SDK (SPEC §12.4, §35.11–35.12).
  *
- * Per SPEC §12.4, §35.11: `ExternalAdapter` interface with launch(contract,
- * worktree, budgets), streamEvents(), cancel(), collectResult(). Capability
- * profile (exact_context_visibility, tool_interception, filesystem_enforcement,
- * etc.).
+ * Adapters are untrusted. Inner-harness self-report is never sufficient.
+ * Live probes produce observed capabilities; discrepancies may disable.
  */
-import { z } from "zod";
-import type {
-  Uuid7,
-  Rfc3339Timestamp,
-  ContentHash,
-  ArtifactRef,
-} from "@terminus/domain";
+import type { Rfc3339Timestamp, ArtifactRef } from "@terminus/domain";
 import { ValidationError } from "@terminus/domain";
+import type {
+  AdapterCapabilityProfile,
+  AdapterResult,
+  ExternalAdapter,
+} from "./types.js";
 
-// ────────────────────────── Capability profile (§35.11) ──────────────────────
+export * from "./types.js";
+export { validateAdapterResult, validateCapabilityProfile } from "./validate.js";
+export {
+  StdioJsonRpcAdapter,
+  type AdapterProcessPort,
+  type AdapterChildSession,
+} from "./stdio_adapter.js";
+export * from "./adapters.js";
+export * from "./conformance.js";
 
 export const adapterCapabilityProfileSchema = {
   exactContextVisibility: ["full", "partial", "opaque"] as const,
@@ -30,160 +35,37 @@ export const adapterCapabilityProfileSchema = {
   modelSelection: ["controlled", "constrained", "opaque"] as const,
 };
 
-export interface AdapterCapabilityProfile {
-  readonly exactContextVisibility: "full" | "partial" | "opaque";
-  readonly toolInterception: "full" | "partial" | "none";
-  readonly filesystemEnforcement: "native" | "outer_sandbox" | "none";
-  readonly networkEnforcement: "native" | "outer_sandbox" | "none";
-  readonly secretIsolation: "native" | "outer_broker" | "none";
-  readonly sessionResume: "native" | "emulated" | "none";
-  readonly typedResults: "native" | "parsed" | "none";
-  readonly artifactExport: "complete" | "partial" | "none";
-  readonly cancellation: "reliable" | "best_effort" | "none";
-  readonly modelSelection: "controlled" | "constrained" | "opaque";
-  readonly nativeCompaction: boolean;
-  readonly observedByProbe: Rfc3339Timestamp | null;
-  readonly lastVerified: Rfc3339Timestamp | null;
-}
-
-// ────────────────────────── Contract ─────────────────────────────────────────
-
-export interface AdapterContract {
-  readonly adapterId: string;
-  readonly version: string;
-  readonly innerHarnessVersion: string;
-  readonly taskContractHash: ContentHash;
-  readonly worktreeId: string;
-  readonly budgets: AdapterBudgets;
-  readonly permittedCapabilities: readonly string[];
-  readonly sourceArtifacts: readonly ArtifactRef[];
-  readonly outputSchemaVersion: string;
-  readonly stopConditions: readonly string[];
-}
-
-export interface AdapterBudgets {
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly toolCalls: number;
-  readonly costMicros: bigint;
-  readonly wallClockSeconds: number;
-}
-
-// ────────────────────────── Adapter events ───────────────────────────────────
-
-export type AdapterEvent =
-  | { readonly kind: "started"; readonly startedAt: Rfc3339Timestamp }
-  | { readonly kind: "progress"; readonly message: string; readonly timestamp: Rfc3339Timestamp }
-  | { readonly kind: "tool_call"; readonly toolCallId: string; readonly toolName: string; readonly timestamp: Rfc3339Timestamp }
-  | { readonly kind: "tool_result"; readonly toolCallId: string; readonly status: string; readonly timestamp: Rfc3339Timestamp }
-  | { readonly kind: "artifact_emitted"; readonly artifactHash: ContentHash; readonly timestamp: Rfc3339Timestamp }
-  | { readonly kind: "completed"; readonly status: "completed" | "blocked" | "failed" | "budget_exhausted" | "policy_denied"; readonly timestamp: Rfc3339Timestamp }
-  | { readonly kind: "cancelled"; readonly timestamp: Rfc3339Timestamp }
-  | { readonly kind: "error"; readonly errorCode: string; readonly errorMessage: string; readonly timestamp: Rfc3339Timestamp };
-
-// ────────────────────────── Adapter result ───────────────────────────────────
-
-export interface AdapterResult {
-  readonly status: "completed" | "blocked" | "failed" | "budget_exhausted" | "policy_denied";
-  readonly summary: string;
-  readonly changedFiles: readonly string[];
-  readonly commit: string | null;
-  readonly tests: readonly {
-    readonly command: string;
-    readonly status: "passed" | "failed" | "skipped" | "error";
-    readonly evidence: string | null;
-    readonly sourceRevision: string;
-  }[];
-  readonly findings: readonly string[];
-  readonly risks: readonly string[];
-  readonly unresolved: readonly string[];
-  readonly artifacts: readonly ArtifactRef[];
-  readonly actualBudget: Partial<AdapterBudgets>;
-}
-
-// ────────────────────────── Adapter interface ────────────────────────────────
-
-export interface ExternalAdapter {
-  readonly adapterId: string;
-  readonly version: string;
-  readonly capabilityProfile: AdapterCapabilityProfile;
-  launch(contract: AdapterContract, signal: AbortSignal | null): Promise<void>;
-  streamEvents(signal: AbortSignal | null): AsyncIterable<AdapterEvent>;
-  cancel(reason: string): Promise<void>;
-  collectResult(): Promise<AdapterResult>;
-}
-
-// ────────────────────────── Adapter registry ─────────────────────────────────
-
 export interface AdapterRegistry {
   register(adapter: ExternalAdapter): Promise<void>;
   get(adapterId: string): Promise<ExternalAdapter | null>;
   list(): Promise<readonly ExternalAdapter[]>;
+  disable(adapterId: string, reason: string): Promise<void>;
 }
 
-/**
- * Validates that the adapter's declared capability matches the observed
- * capability (from a probe). Declared/observed discrepancies are surfaced and
- * may disable the adapter.
- */
-export function validateCapabilityProfile(
-  declared: AdapterCapabilityProfile,
-  observed: AdapterCapabilityProfile,
-): { readonly ok: boolean; readonly discrepancies: readonly string[] } {
-  const discrepancies: string[] = [];
-  const keys: readonly (keyof AdapterCapabilityProfile)[] = [
-    "exactContextVisibility",
-    "toolInterception",
-    "filesystemEnforcement",
-    "networkEnforcement",
-    "secretIsolation",
-    "sessionResume",
-    "typedResults",
-    "artifactExport",
-    "cancellation",
-    "modelSelection",
-    "nativeCompaction",
-  ];
-  for (const k of keys) {
-    if (declared[k] !== observed[k]) {
-      discrepancies.push(`${k}: declared=${declared[k]} observed=${observed[k]}`);
-    }
+export class InMemoryAdapterRegistry implements AdapterRegistry {
+  private readonly adapters = new Map<string, ExternalAdapter>();
+  private readonly disabled = new Map<string, string>();
+
+  async register(adapter: ExternalAdapter): Promise<void> {
+    this.adapters.set(adapter.adapterId, adapter);
   }
-  return { ok: discrepancies.length === 0, discrepancies };
+
+  async get(adapterId: string): Promise<ExternalAdapter | null> {
+    if (this.disabled.has(adapterId)) return null;
+    return this.adapters.get(adapterId) ?? null;
+  }
+
+  async list(): Promise<readonly ExternalAdapter[]> {
+    return [...this.adapters.values()].filter((a) => !this.disabled.has(a.adapterId));
+  }
+
+  async disable(adapterId: string, reason: string): Promise<void> {
+    this.disabled.set(adapterId, reason);
+  }
 }
 
-/**
- * Schema failure gets at most one correction attempt. After that the result is
- * treated as failed, not guessed from prose.
- */
-export function validateAdapterResult(
-  result: unknown,
-  allowRetry: boolean,
-): { readonly ok: true; readonly result: AdapterResult } | { readonly ok: false; readonly reason: string; readonly mayRetry: boolean } {
-  if (typeof result !== "object" || result === null) {
-    return { ok: false, reason: "result is not an object", mayRetry: allowRetry };
-  }
-  const r = result as Record<string, unknown>;
-  if (typeof r.status !== "string") {
-    return { ok: false, reason: "missing status", mayRetry: allowRetry };
-  }
-  if (typeof r.summary !== "string") {
-    return { ok: false, reason: "missing summary", mayRetry: allowRetry };
-  }
-  if (!Array.isArray(r.changedFiles)) {
-    return { ok: false, reason: "missing changedFiles", mayRetry: allowRetry };
-  }
-  // The full validation is left to the caller's zod schema; here we just
-  // sanity-check the top-level fields.
-  return { ok: true, result: r as unknown as AdapterResult };
-  void z;
-}
+import { validateCapabilityProfile as validateCapabilityProfileImpl } from "./validate.js";
 
-/**
- * Independently verifies external harness adapter completion claims (Codex, Pi,
- * Claude Code). Claims of success or passing tests are NOT trusted directly;
- * they are checked by Terminus's verification engine against task criteria.
- */
 export function verifyAdapterCompletion(
   adapterResult: AdapterResult,
   verificationPassed: boolean,
@@ -196,9 +78,123 @@ export function verifyAdapterCompletion(
   }
   return {
     verifiedStatus: adapterResult.status === "completed" ? "completed" : "failed",
-    reason: adapterResult.status === "completed" ? "all verification criteria satisfied" : "adapter reported failure",
+    reason:
+      adapterResult.status === "completed"
+        ? "all verification criteria satisfied"
+        : "adapter reported failure",
   };
 }
 
+export interface IndependentVerificationInput {
+  readonly adapterResult: AdapterResult;
+  readonly observedChangedFiles: readonly string[];
+  readonly independentChecksPassed: boolean;
+  readonly workspaceInspectArtifact: ArtifactRef | null;
+}
+
+export function independentlyVerifyHarnessResult(
+  input: IndependentVerificationInput,
+): {
+  readonly verifiedStatus: "completed" | "failed";
+  readonly reason: string;
+  readonly discrepancies: readonly string[];
+} {
+  const discrepancies: string[] = [];
+  const claimed = new Set(input.adapterResult.changedFiles);
+  const observed = new Set(input.observedChangedFiles);
+  for (const f of claimed) {
+    if (!observed.has(f)) discrepancies.push(`claimed change not observed: ${f}`);
+  }
+  for (const f of observed) {
+    if (!claimed.has(f)) discrepancies.push(`observed change not claimed: ${f}`);
+  }
+  if (!input.independentChecksPassed) {
+    return {
+      verifiedStatus: "failed",
+      reason: "independent verification predicates failed",
+      discrepancies,
+    };
+  }
+  if (input.adapterResult.status === "completed" && input.workspaceInspectArtifact === null) {
+    return {
+      verifiedStatus: "failed",
+      reason: "missing independent workspace inspect artifact",
+      discrepancies,
+    };
+  }
+  const base = verifyAdapterCompletion(input.adapterResult, input.independentChecksPassed);
+  if (discrepancies.length > 0 && base.verifiedStatus === "completed") {
+    return {
+      verifiedStatus: "failed",
+      reason: "adapter changed-files claim diverged from independent workspace inspect",
+      discrepancies,
+    };
+  }
+  return { ...base, discrepancies };
+}
+
+export interface ProbeChecklist {
+  readonly exactContextVisibility: AdapterCapabilityProfile["exactContextVisibility"];
+  readonly toolInterception: AdapterCapabilityProfile["toolInterception"];
+  readonly filesystemEnforcement: AdapterCapabilityProfile["filesystemEnforcement"];
+  readonly networkEnforcement: AdapterCapabilityProfile["networkEnforcement"];
+  readonly secretIsolation: AdapterCapabilityProfile["secretIsolation"];
+  readonly sessionResume: AdapterCapabilityProfile["sessionResume"];
+  readonly typedResults: AdapterCapabilityProfile["typedResults"];
+  readonly artifactExport: AdapterCapabilityProfile["artifactExport"];
+  readonly cancellation: AdapterCapabilityProfile["cancellation"];
+  readonly modelSelection: AdapterCapabilityProfile["modelSelection"];
+  readonly nativeCompaction: boolean;
+}
+
+export interface CapabilityProbeReport {
+  readonly adapterId: string;
+  readonly probedAt: Rfc3339Timestamp;
+  readonly declared: AdapterCapabilityProfile;
+  readonly observed: AdapterCapabilityProfile;
+  readonly discrepancies: readonly string[];
+  readonly disableRecommended: boolean;
+}
+
+export function runCapabilityProbe(
+  adapterId: string,
+  declared: AdapterCapabilityProfile,
+  observedChecklist: ProbeChecklist,
+  probedAt: Rfc3339Timestamp,
+): CapabilityProbeReport {
+  const observed: AdapterCapabilityProfile = {
+    ...observedChecklist,
+    observedByProbe: probedAt,
+    lastVerified: declared.lastVerified,
+  };
+  const { discrepancies } = validateCapabilityProfileImpl(declared, observed);
+  const critical = discrepancies.some(
+    (d) =>
+      d.startsWith("filesystemEnforcement:") ||
+      d.startsWith("networkEnforcement:") ||
+      d.startsWith("secretIsolation:"),
+  );
+  return {
+    adapterId,
+    probedAt,
+    declared,
+    observed,
+    discrepancies,
+    disableRecommended: critical,
+  };
+}
+
+export function applyProbeToRegistry(
+  registry: AdapterRegistry,
+  report: CapabilityProbeReport,
+): Promise<void> {
+  if (report.disableRecommended) {
+    return registry.disable(
+      report.adapterId,
+      `capability probe discrepancies: ${report.discrepancies.join("; ")}`,
+    );
+  }
+  return Promise.resolve();
+}
+
 export { ValidationError };
-export type { Uuid7, Rfc3339Timestamp, ContentHash, ArtifactRef };

@@ -647,6 +647,101 @@ export class ConcurrencyLimiter {
   }
 }
 
+// ────────────────────────── Fairness queue (§38.15) ──────────────────────────
+
+/**
+ * Weighted fair queuing entry. Each provider has a weight and a virtual
+ * finish time. The queue always dequeues the entry with the smallest
+ * finish time, achieving max-min fairness across providers.
+ */
+export interface FairnessQueueEntry {
+  readonly providerId: string;
+  readonly taskId: string;
+  readonly queuedAt: number;
+  readonly weight: number;
+}
+
+export interface FairnessQueueDequeue {
+  readonly entry: FairnessQueueEntry;
+  readonly waitTimeMs: number;
+}
+
+export class FairnessQueue {
+  private readonly entries: FairnessQueueEntry[] = [];
+  private readonly virtualTimes: Map<string, number> = new Map();
+  private readonly clock: () => number;
+
+  constructor(clock: () => number = () => Date.now()) {
+    this.clock = clock;
+  }
+
+  /** Enqueue a task for a provider with the given weight (higher = more capacity). */
+  enqueue(providerId: string, taskId: string, weight = 1): FairnessQueueEntry {
+    const entry: FairnessQueueEntry = {
+      providerId,
+      taskId,
+      queuedAt: this.clock(),
+      weight: Math.max(1, weight),
+    };
+    this.entries.push(entry);
+    return entry;
+  }
+
+  /** Dequeue the next entry by virtual finish time (SJF-like). */
+  dequeue(): FairnessQueueDequeue | null {
+    if (this.entries.length === 0) return null;
+    let bestIdx = 0;
+    let bestFinishTime = Number.POSITIVE_INFINITY;
+    const now = this.clock();
+    for (let i = 0; i < this.entries.length; i++) {
+      const entry = this.entries[i]!;
+      const virtualNow = this.virtualTimes.get(entry.providerId) ?? 0;
+      const finishTime = virtualNow + (1 / entry.weight);
+      if (finishTime < bestFinishTime) {
+        bestFinishTime = finishTime;
+        bestIdx = i;
+      }
+    }
+    const entry = this.entries[bestIdx]!;
+    this.virtualTimes.set(entry.providerId, bestFinishTime);
+    this.entries.splice(bestIdx, 1);
+    return { entry, waitTimeMs: now - entry.queuedAt };
+  }
+
+  /** Current queue depth. */
+  get depth(): number {
+    return this.entries.length;
+  }
+
+  /** Get entries for a specific provider. */
+  forProvider(providerId: string): readonly FairnessQueueEntry[] {
+    return this.entries.filter((e) => e.providerId === providerId);
+  }
+
+  /** Remove all entries for a provider. */
+  drainProvider(providerId: string): readonly FairnessQueueEntry[] {
+    const removed: FairnessQueueEntry[] = [];
+    const remaining: FairnessQueueEntry[] = [];
+    for (const e of this.entries) {
+      if (e.providerId === providerId) {
+        removed.push(e);
+      } else {
+        remaining.push(e);
+      }
+    }
+    this.entries.length = 0;
+    this.entries.push(...remaining);
+    return removed;
+  }
+
+  /** Average wait time for all currently queued entries. */
+  averageWaitMs(): number {
+    if (this.entries.length === 0) return 0;
+    const now = this.clock();
+    return this.entries.reduce((sum, e) => sum + (now - e.queuedAt), 0) / this.entries.length;
+  }
+}
+
 /**
  * Combines rate-limiter, circuit-breaker, and concurrency-limiter signals
  * into a {@link ModelHealth} record per model key. The router consumes this

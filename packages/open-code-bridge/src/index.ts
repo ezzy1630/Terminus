@@ -16,6 +16,8 @@ export * from "./inherited/network.js";
 export * from "./inherited/secrets.js";
 export * from "./inherited/plugin.js";
 export * from "./inherited/git.js";
+export * from "./extension_lockfile.js";
+export * from "./captured_definitions.js";
 
 /**
  * An entry in the effect-bypass register (SPEC §27.5). During the bootstrap
@@ -52,10 +54,10 @@ export const DEFAULT_BYPASS_REGISTER: readonly BypassEntry[] = [
     source: "packages/open-code-bridge/src/inherited/exec.ts",
     effect: "EXECUTE_LOCAL",
     reason: "inherited OpenCode subprocess spawn for shell commands and PTY terminal sessions",
-    containment: "Process-level outer sandbox; all process spawns audited; env secrets scrubbed; path traversal denied",
+    containment: "Routed through kernel process RPC over UDS (terminus.kernel.v1.ProcessService)",
     removal_milestone: "M3",
-    test: "packages/open-code-bridge/src/bypass.test.ts",
-    status: "contained",
+    test: "packages/open-code-bridge/src/substrate.test.ts",
+    status: "removed",
   },
   {
     id: "BYPASS-0002",
@@ -63,10 +65,10 @@ export const DEFAULT_BYPASS_REGISTER: readonly BypassEntry[] = [
     source: "packages/open-code-bridge/src/inherited/fs.ts",
     effect: "WRITE_LOCAL",
     reason: "inherited OpenCode direct filesystem writer for worktree files and session snapshots",
-    containment: "Path resolution restricted to active worktree root; .git and .terminus-state protected",
+    containment: "Routed through kernel file/patch RPC over UDS (terminus.kernel.v1.FileService)",
     removal_milestone: "M2",
-    test: "packages/open-code-bridge/src/bypass.test.ts",
-    status: "contained",
+    test: "packages/open-code-bridge/src/substrate.test.ts",
+    status: "removed",
   },
   {
     id: "BYPASS-0003",
@@ -74,10 +76,10 @@ export const DEFAULT_BYPASS_REGISTER: readonly BypassEntry[] = [
     source: "packages/open-code-bridge/src/inherited/network.ts",
     effect: "NETWORK_WRITE",
     reason: "inherited OpenCode direct HTTP fetch for model providers and API requests",
-    containment: "Egress URL validation enforcing HTTPS/localhost and sanitizing authorization headers",
+    containment: "Routed through AuthorizedNetworkBroker proxy client",
     removal_milestone: "M4",
-    test: "packages/open-code-bridge/src/bypass.test.ts",
-    status: "contained",
+    test: "packages/open-code-bridge/src/substrate.test.ts",
+    status: "removed",
   },
   {
     id: "BYPASS-0004",
@@ -85,10 +87,10 @@ export const DEFAULT_BYPASS_REGISTER: readonly BypassEntry[] = [
     source: "packages/open-code-bridge/src/inherited/secrets.ts",
     effect: "SECRET_USE",
     reason: "inherited OpenCode environment variable credential lookups for API keys",
-    containment: "Brokered credential scope check denying untrusted plugin access; automatic redaction in output",
+    containment: "Replaced raw process.env secret reads with brokered secret capability tokens",
     removal_milestone: "M4",
-    test: "packages/open-code-bridge/src/bypass.test.ts",
-    status: "contained",
+    test: "packages/open-code-bridge/src/substrate.test.ts",
+    status: "removed",
   },
   {
     id: "BYPASS-0005",
@@ -96,10 +98,10 @@ export const DEFAULT_BYPASS_REGISTER: readonly BypassEntry[] = [
     source: "packages/open-code-bridge/src/inherited/plugin.ts",
     effect: "PLUGIN_ADMIN",
     reason: "inherited OpenCode in-process plugin hook execution",
-    containment: "Plugin hook wrapper blocking direct access to un-audited ambient process/fs objects",
+    containment: "Moved inherited plugin hooks out-of-process into worker IPC host",
     removal_milestone: "M9",
-    test: "packages/open-code-bridge/src/bypass.test.ts",
-    status: "contained",
+    test: "packages/open-code-bridge/src/substrate.test.ts",
+    status: "removed",
   },
   {
     id: "BYPASS-0006",
@@ -107,10 +109,10 @@ export const DEFAULT_BYPASS_REGISTER: readonly BypassEntry[] = [
     source: "packages/open-code-bridge/src/inherited/git.ts",
     effect: "WRITE_LOCAL",
     reason: "inherited OpenCode direct git operations and repository state inspection",
-    containment: "Worktree-bound git command wrapper restricting allowed subcommands and blocking hook edits",
+    containment: "Routed through terminus-git kernel RPC",
     removal_milestone: "M4",
-    test: "packages/open-code-bridge/src/bypass.test.ts",
-    status: "contained",
+    test: "packages/open-code-bridge/src/substrate.test.ts",
+    status: "removed",
   },
 ];
 

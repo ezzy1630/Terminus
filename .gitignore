@@ -89,10 +89,8 @@ apps/desktop/release/
 # ────────────────────────── Vercel ─────────────────────────────────────────
 .vercel
 
-# ────────────────────────── Sandbox / temp ─────────────────────────────────
-tool-results/
-upload/
-download/
-/tmp/
-*.tmp
-*.bak
+# ────────────────────────── Release-gate evidence ──────────────────────────
+# Immutable evidence is produced by `just m12-exit-gate` and uploaded by CI.
+# Keep the directory; ignore generated payloads.
+artifacts/release-gate/*
+!artifacts/release-gate/.gitkeep

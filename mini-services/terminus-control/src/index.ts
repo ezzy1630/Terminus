@@ -35,6 +35,13 @@ import { PrismaClient } from "@prisma/client";
 import { firstValueFrom } from "rxjs";
 import { createKernelUdsClients, type KernelUdsClients } from "./kernel-uds.js";
 import { PatchCommitMode } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
+import {
+  createVerificationRuntime,
+  defaultCriteriaNodes,
+  persistPlanToPrisma,
+  persistResultsToPrisma,
+} from "./verification-runtime.js";
+import type { AcceptanceCriterion } from "../../../packages/domain/src/index.ts";
 
 // ────────────────────────── Configuration ──────────────────────────────────
 
@@ -1903,6 +1910,140 @@ const routes: Route[] = [
 
     sendJson(res, 200, exportPayload);
   }),
+
+  // ────────────────────────── /import (§29.6) ───────────────────────────
+  route("POST", "/v1/system/import", async (req, res) => {
+    const body = await jsonBody(req) as {
+      manifest?: { format?: string; export_id?: string };
+      sessions?: Array<{ id: string; workspace_id: string; title: string; status: string; created_at: string; updated_at: string }>;
+      tasks?: Array<{ id: string; session_id: string; status: string; phase: string; objective: string | null; created_at: string; completed_at?: string | null }>;
+      events?: Array<{ event_id: string; event_type: string; schema_version: number; aggregate_type: string; aggregate_id: string; aggregate_sequence: number; occurred_at: string; payload: unknown }>;
+    };
+    if (body.manifest?.format && body.manifest.format !== "terminus-export-v1") {
+      return sendError(res, 400, "INVALID_EXPORT_FORMAT", "unsupported export format", "validation");
+    }
+    let importedSessions = 0;
+    let importedTasks = 0;
+    let importedEvents = 0;
+
+    if (Array.isArray(body.sessions)) {
+      for (const s of body.sessions) {
+        await db.session.upsert({
+          where: { id: s.id },
+          create: {
+            id: s.id,
+            workspaceId: s.workspace_id,
+            ownerPrincipal: SERVER_PRINCIPAL,
+            title: s.title,
+            status: s.status,
+            createdAt: new Date(s.created_at),
+            updatedAt: new Date(s.updated_at),
+          },
+          update: { title: s.title, status: s.status, updatedAt: new Date(s.updated_at) },
+        }).catch(() => {});
+        importedSessions += 1;
+      }
+    }
+
+    if (Array.isArray(body.tasks)) {
+      for (const t of body.tasks) {
+        const threadId = uuid();
+        await db.thread.create({
+          data: { id: threadId, sessionId: t.session_id, status: "active" },
+        }).catch(() => {});
+
+        await db.task.upsert({
+          where: { id: t.id },
+          create: {
+            id: t.id,
+            sessionId: t.session_id,
+            threadId,
+            status: t.status,
+            phase: t.phase,
+            createdAt: new Date(t.created_at),
+            completedAt: t.completed_at ? new Date(t.completed_at) : null,
+          },
+          update: { status: t.status, phase: t.phase, completedAt: t.completed_at ? new Date(t.completed_at) : null },
+        }).catch(() => {});
+        importedTasks += 1;
+      }
+    }
+
+    if (Array.isArray(body.events)) {
+      for (const e of body.events) {
+        await db.semanticEvent.upsert({
+          where: { eventId: e.event_id },
+          create: {
+            eventId: e.event_id,
+            eventType: e.event_type,
+            schemaVersion: e.schema_version ?? 1,
+            aggregateType: e.aggregate_type,
+            aggregateId: e.aggregate_id,
+            aggregateSequence: e.aggregate_sequence ?? 1,
+            occurredAt: new Date(e.occurred_at),
+            actorJson: JSON.stringify({ principal: SERVER_PRINCIPAL }),
+            correlationId: uuid(),
+            causationId: null,
+            idempotencyKey: null,
+            payloadJson: JSON.stringify(e.payload ?? {}),
+            artifactRefsJson: "[]",
+            traceId: null,
+          },
+          update: {},
+        }).catch(() => {});
+        importedEvents += 1;
+      }
+    }
+
+    sendJson(res, 200, {
+      status: "imported",
+      import_id: uuid(),
+      imported_at: new Date().toISOString(),
+      counts: {
+        sessions: importedSessions,
+        tasks: importedTasks,
+        events: importedEvents,
+      },
+    });
+  }),
+
+  // ────────────────────────── /side-effects (§28.6) ─────────────────────
+  route("GET", "/v1/side-effects", async (_req, res) => {
+    const effects = await db.sideEffect.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
+    sendJson(res, 200, {
+      side_effects: effects.map((e) => ({
+        id: e.id,
+        task_id: e.taskId,
+        kind: e.kind,
+        state: e.state,
+        idempotency_key: e.idempotencyKey,
+        result: e.result,
+        started_at: e.startedAt?.toISOString() ?? null,
+        settled_at: e.settledAt?.toISOString() ?? null,
+      })),
+    });
+  }),
+  route("POST", "/v1/side-effects/:id/settle", async (req, res, params) => {
+    const body = await jsonBody(req) as { result: "settled" | "failed"; justification?: string };
+    const effectId = String(params.id);
+    const effect = await db.sideEffect.findUnique({ where: { id: effectId } });
+    if (!effect) return sendError(res, 404, "SIDE_EFFECT_NOT_FOUND", "side effect not found", "not_found");
+    const updated = await db.sideEffect.update({
+      where: { id: effectId },
+      data: {
+        state: body.result === "settled" ? "SETTLED" : "FAILED",
+        result: body.result,
+        settledAt: new Date(),
+      },
+    });
+    sendJson(res, 200, {
+      id: updated.id,
+      task_id: updated.taskId,
+      state: updated.state,
+      result: updated.result,
+      settled_at: updated.settledAt?.toISOString() ?? null,
+    });
+  }),
 ];
 
 /** JSON.parse with a fallback so a corrupt stored value never crashes the API. */
@@ -2111,55 +2252,170 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
           aggregateType: "task", aggregateId: task.id, aggregateSequence: 3,
           payload: { phase: "VERIFY" },
         });
-        // Synthetic verification plan: parse + diagnostics + narrow_tests.
-        const planId = uuid();
-        await db.verificationPlan.create({
-          data: {
-            id: planId, taskId: task.id, contractVersion: task.activeContractVersion,
-            sourceRevision: "git:dev", completionExpression: "parse && diagnostics && narrow_tests",
-            planArtifact: `artifact://sha256/${randomUUID().replace(/-/g, "").slice(0, 64)}`,
+        // Real verification DAG + completion gate (M8). False completion is denied.
+        const runtime = createVerificationRuntime();
+        const contractRows = await db.acceptanceCriterion.findMany({
+          where: {
+            taskId: task.id,
+            contractVersion: task.activeContractVersion,
           },
         });
-        for (const [nodeName, kind, required] of [["parse", "command", true], ["diagnostics", "diagnostic", true], ["narrow_tests", "command", true]] as const) {
-          await db.verificationNode.create({
-            data: {
-              id: `${planId}-${nodeName}`, planId, kind, required,
-              specificationJson: JSON.stringify({ command: kind === "command" ? "echo ok" : null }),
-              timeoutMs: 30_000, retryPolicyJson: JSON.stringify({ max_attempts: 1 }),
-            },
+        const criteria: AcceptanceCriterion[] = contractRows.map((c) => ({
+          id: c.criterionId,
+          statement: c.statement,
+          verificationHint: c.verificationHint,
+          required: c.required,
+        }));
+        const nodes = defaultCriteriaNodes(criteria);
+        const completionExpression = nodes.map((n) => n.id).join(" && ");
+        const sourceRevision = "git:dev";
+        const environmentDigest = "sha256:dev-environment";
+        const plan = await runtime.lifecycle.createPlan({
+          taskContractId: task.id as never,
+          taskContractVersion: task.activeContractVersion,
+          sourceRevision,
+          criteria,
+          nodes,
+          completionExpression,
+        });
+        try {
+          await persistPlanToPrisma(db, {
+            id: plan.id,
+            taskId: task.id,
+            contractVersion: plan.taskContractVersion,
+            sourceRevision: plan.sourceRevision,
+            completionExpression: plan.completionExpression,
+            nodes: plan.nodes.map((n) => ({
+              id: n.id,
+              kind: n.kind,
+              required: n.required,
+              specification: n.specification,
+              timeout: n.timeout,
+              retryPolicy: n.retryPolicy,
+              acceptanceCriterionId: n.acceptanceCriterionId,
+              dependsOn: n.dependsOn,
+            })),
+            edges: plan.edges,
+          });
+        } catch (persistErr) {
+          console.warn("verification plan prisma persist degraded", persistErr);
+        }
+
+        const evaluation = await runtime.lifecycle.evaluate(
+          plan.id,
+          sourceRevision,
+          environmentDigest,
+          null,
+        );
+        try {
+          await persistResultsToPrisma(db, evaluation.results);
+        } catch (persistErr) {
+          console.warn("verification results prisma persist degraded", persistErr);
+        }
+
+        for (const r of evaluation.results) {
+          await emit({
+            eventType: r.status === "pass" ? "verification.node_passed" : "verification.node_failed",
+            aggregateType: "verification_result",
+            aggregateId: r.id,
+            aggregateSequence: 1,
+            correlationId: task.id,
+            payload: { node_id: r.nodeId, status: r.status },
           });
         }
-        // All pass.
-        for (const [nodeName, kind] of [["parse", "command"], ["diagnostics", "diagnostic"], ["narrow_tests", "command"]] as const) {
-          const r = await db.verificationResult.create({
+
+        const allPassed =
+          evaluation.allRequiredPassed && evaluation.completionExpressionSatisfied;
+        await emit({
+          eventType: "verification.plan_completed",
+          aggregateType: "verification_plan",
+          aggregateId: plan.id,
+          aggregateSequence: 1,
+          correlationId: task.id,
+          payload: { status: allPassed ? "all_passed" : "failed" },
+        });
+
+        if (!allPassed) {
+          await db.task.update({
+            where: { id: task.id },
             data: {
-              id: uuid(), planId, nodeId: `${planId}-${nodeName}`, attempt: 1, status: "pass",
-              sourceRevision: "git:dev", environmentDigest: "dev",
-              evidenceArtifact: `artifact://sha256/${randomUUID().replace(/-/g, "").slice(0, 64)}`,
+              status: "FAILED_VERIFICATION",
+              phase: "VERIFY",
               completedAt: new Date(),
+              terminalReasonJson: JSON.stringify({
+                reason: "required_predicates_failed",
+                blocked: evaluation.blocked,
+              }),
             },
           });
           await emit({
-            eventType: "verification.node_passed",
-            aggregateType: "verification_result", aggregateId: r.id, aggregateSequence: 1,
-            correlationId: task.id,
-            payload: { node_id: nodeName, kind },
+            eventType: "task.failed",
+            aggregateType: "task",
+            aggregateId: task.id,
+            aggregateSequence: 4,
+            payload: { phase: "VERIFY", status: "FAILED_VERIFICATION" },
           });
+          return;
         }
-        await emit({
-          eventType: "verification.plan_completed",
-          aggregateType: "verification_plan", aggregateId: planId, aggregateSequence: 1,
-          correlationId: task.id,
-          payload: { status: "all_passed" },
-        });
-        // Complete the task.
+
+        try {
+          await runtime.lifecycle.complete({
+            taskId: task.id as never,
+            planId: plan.id,
+            criteria,
+            findings: [],
+            sourceRevision,
+            environmentImageDigest: environmentDigest,
+            expiresAt: null,
+            unresolvedRisks: [],
+            acceptedRisks: [],
+            externalEffects: [],
+            costMicros: 0n,
+            durationSeconds: 0,
+            finalCheckpoint: {
+              hash: "sha256:" + "0".repeat(64),
+              uri: `artifact://sha256/${"0".repeat(64)}`,
+              mediaType: "application/json",
+              bytes: 0n,
+            } as never,
+          });
+        } catch (gateErr) {
+          await db.task.update({
+            where: { id: task.id },
+            data: {
+              status: "FAILED_VERIFICATION",
+              phase: "VERIFY",
+              completedAt: new Date(),
+              terminalReasonJson: JSON.stringify({
+                reason: "completion_gate_denied",
+                error: String(gateErr),
+              }),
+            },
+          });
+          await emit({
+            eventType: "task.failed",
+            aggregateType: "task",
+            aggregateId: task.id,
+            aggregateSequence: 4,
+            payload: { phase: "VERIFY", status: "FAILED_VERIFICATION" },
+          });
+          return;
+        }
+
         await db.task.update({
           where: { id: task.id },
-          data: { status: "COMPLETED", phase: "COMPLETE", completedAt: new Date() },
+          data: {
+            status: "COMPLETED",
+            phase: "COMPLETE",
+            completedAt: new Date(),
+            verificationPlanId: plan.id,
+          },
         });
         await emit({
           eventType: "task.completed",
-          aggregateType: "task", aggregateId: task.id, aggregateSequence: 4,
+          aggregateType: "task",
+          aggregateId: task.id,
+          aggregateSequence: 4,
           payload: { phase: "COMPLETE" },
         });
       }

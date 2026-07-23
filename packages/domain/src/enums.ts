@@ -481,6 +481,38 @@ export const reviewFindingLifecycleSchema = z.enum([
   "OUT_OF_SCOPE",
 ]);
 
+/** Allowed finding lifecycle transitions (§40.7). Terminal states are absorbing. */
+export const REVIEW_FINDING_TRANSITIONS: Readonly<
+  Record<ReviewFindingLifecycle, readonly ReviewFindingLifecycle[]>
+> = {
+  OPEN: ["ACCEPTED", "DISPUTED", "OUT_OF_SCOPE", "ACCEPTED_RISK"],
+  ACCEPTED: ["FIXED", "DISPUTED", "ACCEPTED_RISK", "OUT_OF_SCOPE"],
+  FIXED: ["VERIFIED", "DISPUTED", "OPEN"],
+  VERIFIED: ["RESOLVED"],
+  DISPUTED: ["OPEN", "ACCEPTED", "ACCEPTED_RISK", "OUT_OF_SCOPE", "RESOLVED"],
+  RESOLVED: [],
+  ACCEPTED_RISK: [],
+  OUT_OF_SCOPE: [],
+} as const;
+
+export const ReviewFindingTerminal: ReadonlySet<ReviewFindingLifecycle> = new Set([
+  "RESOLVED",
+  "ACCEPTED_RISK",
+  "OUT_OF_SCOPE",
+]);
+
+export function isReviewFindingTransitionAllowed(
+  from: ReviewFindingLifecycle,
+  to: ReviewFindingLifecycle,
+): boolean {
+  return REVIEW_FINDING_TRANSITIONS[from].includes(to);
+}
+
+/** Findings that still block completion. */
+export function findingBlocksCompletion(lifecycle: ReviewFindingLifecycle): boolean {
+  return lifecycle === "OPEN" || lifecycle === "ACCEPTED" || lifecycle === "FIXED" || lifecycle === "DISPUTED";
+}
+
 export const DelegationRole = {
   SCOUT: "scout",
   IMPLEMENTER: "implementer",

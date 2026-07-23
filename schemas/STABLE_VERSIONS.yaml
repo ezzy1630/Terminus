@@ -1,0 +1,27 @@
+# Schema / API freeze record (M12)
+#
+# Produced into artifacts/release-gate/schema-freeze.json by
+# scripts/write-schema-freeze-evidence.ts.
+
+public_api:
+  status: frozen_for_preview
+  note: "Additive fields only until 1.0; renames require migration entry."
+
+kernel_proto:
+  package: terminus.kernel.v1
+  version: "1"
+  path: proto/terminus/kernel/v1/kernel.proto
+
+database_schema:
+  migrations_dir: migrations/sqlite
+  policy: monotonic_add_only
+  note: "Downgrade is restore-from-backup; no reverse SQL."
+
+date: "2026-07-23"
+
+commit_policy:
+  freeze_ref: "schemas/STABLE_VERSIONS.yaml"
+  rule: >
+    Changes to frozen public surfaces require protocol-owner approval and an
+    updated freeze date in this file. Generated clients must pass
+    just codegen-check.

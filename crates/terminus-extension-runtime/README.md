@@ -1,10 +1,9 @@
-# terminus-extension-runtime
+WASI extension and process-isolated hosts for the Terminus kernel.
 
-WASI extension host (stub) for the Terminus kernel.
+## Behavior
 
-`WasiExtensionHost` reports whether a WASI runtime is available, validates
-`ExtensionManifest`s structurally, and (when a runtime is linked) executes
-extensions. In this build the host reports "WASI runtime not available in
-this build" and `execute` fails closed. Manifest validation is real and runs
-in every build so malformed manifests are rejected before reaching the host.
-See SPEC.md Section 35.
+- **Process host** — clears environment, verifies entrypoint content hashes,
+  enforces wall-clock and output caps, speaks JSON-RPC on stdio.
+- **WASI host** — validates Wasm magic + content hash; executes via isolated
+  `wasmtime` CLI when available; otherwise fails closed with `Unavailable`.
+- Never silently executes native in-process third-party code.

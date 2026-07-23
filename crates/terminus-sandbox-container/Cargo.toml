@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 terminus-sandbox = { workspace = true }
 terminus-kernel-protocol = { workspace = true }
+terminus-remote = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

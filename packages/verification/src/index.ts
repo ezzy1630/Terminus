@@ -22,6 +22,26 @@ import type {
   Micros,
 } from "@terminus/domain";
 import { ValidationError } from "@terminus/domain";
+import { parseNodeSpec } from "./node-spec.js";
+import type { NodeExecutor, NodeExecutorInput, PredicateExecutor } from "./registry.js";
+import { PredicateRegistry } from "./registry.js";
+
+export {
+  PredicateType,
+  ALL_PREDICATE_TYPES,
+  predicateTypeToNodeKind,
+  parseNodeSpec,
+  serializeNodeSpec,
+  requirePredicateType,
+  type VerificationNodeSpec,
+  type PredicateType,
+} from "./node-spec.js";
+export {
+  PredicateRegistry,
+  type NodeExecutor,
+  type NodeExecutorInput,
+  type PredicateExecutor,
+} from "./registry.js";
 
 // ────────────────────────── Plan builder ─────────────────────────────────────
 
@@ -88,19 +108,6 @@ function topoSort(nodes: readonly VerificationNode[]): readonly VerificationNode
   return out;
 }
 
-// ────────────────────────── Node executor ────────────────────────────────────
-
-export interface NodeExecutorInput {
-  readonly node: VerificationNode;
-  readonly workspaceRevision: string;
-  readonly environmentImageDigest: string | null;
-  readonly signal: AbortSignal | null;
-}
-
-export interface NodeExecutor {
-  execute(input: NodeExecutorInput): Promise<VerificationResult>;
-}
-
 // ────────────────────────── Engine ───────────────────────────────────────────
 
 export interface VerificationEngineDeps {
@@ -116,6 +123,8 @@ export interface EvaluationOptions {
    * up to this limit (§40.1).
    */
   readonly parallelism?: number | undefined;
+  /** Environment image digest stamped onto every result for binding validity. */
+  readonly environmentImageDigest?: string | null | undefined;
 }
 
 export interface EvaluationResult {
@@ -139,6 +148,7 @@ export class VerificationEngine {
       throw new ValidationError("plan has cycle");
     }
     const parallelism = Math.max(1, options.parallelism ?? 4);
+    const environmentImageDigest = options.environmentImageDigest ?? null;
     const results: VerificationResult[] = [];
     const blocked: string[] = [];
     const resultMap = new Map<string, VerificationResult>();
@@ -161,7 +171,9 @@ export class VerificationEngine {
       // Dispatch up to `parallelism` ready nodes in parallel.
       const batch = ready.slice(0, parallelism);
       const batchResults = await Promise.all(
-        batch.map((node) => this.evaluateNode(node, plan, workspaceRevision, signal, resultMap)),
+        batch.map((node) =>
+          this.evaluateNode(node, plan, workspaceRevision, environmentImageDigest, signal, resultMap),
+        ),
       );
       for (const r of batchResults) {
         results.push(r);
@@ -194,10 +206,13 @@ export class VerificationEngine {
     node: VerificationNode,
     plan: VerificationPlan,
     workspaceRevision: string,
+    environmentImageDigest: string | null,
     signal: AbortSignal | null,
     resultMap: ReadonlyMap<string, VerificationResult>,
   ): Promise<VerificationResult> {
     // Check dependencies: any failed/blocked/error dep blocks this node.
+    // Required dependency failure fails the graph; optional deps still block
+    // dependents (absence is explicit via status=blocked, never null).
     for (const d of node.dependsOn) {
       const r = resultMap.get(d);
       if (r && (r.status === "fail" || r.status === "error" || r.status === "blocked")) {
@@ -209,7 +224,7 @@ export class VerificationEngine {
           startedAt: this.deps.clock(),
           completedAt: this.deps.clock(),
           sourceRevision: workspaceRevision,
-          environmentImageDigest: null,
+          environmentImageDigest,
           commandOrQuery: node.specification,
           exitCode: null,
           structuredObservations: {},
@@ -231,17 +246,21 @@ export class VerificationEngine {
         const r = await executor.execute({
           node,
           workspaceRevision,
-          environmentImageDigest: null,
+          environmentImageDigest,
           signal,
         });
-        last = r;
-        if (r.status === "pass") return r;
-        if (r.status === "fail" || r.status === "error") {
-          // Retry with backoff (no actual wait in this stub; caller can
-          // override the executor to simulate).
+        // Stamp binding fields if the executor omitted them.
+        last = {
+          ...r,
+          sourceRevision: r.sourceRevision || workspaceRevision,
+          environmentImageDigest: r.environmentImageDigest ?? environmentImageDigest,
+          attempts: attempt,
+        };
+        if (last.status === "pass") return last;
+        if (last.status === "fail" || last.status === "error") {
           continue;
         }
-        return r;
+        return last;
       } catch (err) {
         const errorResult: VerificationResult = {
           id: this.deps.idSource(),
@@ -251,7 +270,7 @@ export class VerificationEngine {
           startedAt: this.deps.clock(),
           completedAt: this.deps.clock(),
           sourceRevision: workspaceRevision,
-          environmentImageDigest: null,
+          environmentImageDigest,
           commandOrQuery: node.specification,
           exitCode: null,
           structuredObservations: { error: err instanceof Error ? err.message : String(err) },
@@ -265,9 +284,8 @@ export class VerificationEngine {
         continue;
       }
     }
-    // Retries exhausted; return last result (or a synthesized error if none).
     if (last !== null) return last;
-    const exhausted: VerificationResult = {
+    return {
       id: this.deps.idSource(),
       planId: plan.id,
       nodeId: node.id,
@@ -275,7 +293,7 @@ export class VerificationEngine {
       startedAt: this.deps.clock(),
       completedAt: this.deps.clock(),
       sourceRevision: workspaceRevision,
-      environmentImageDigest: null,
+      environmentImageDigest,
       commandOrQuery: node.specification,
       exitCode: null,
       structuredObservations: { error: "retries exhausted without result" },
@@ -285,7 +303,6 @@ export class VerificationEngine {
       reasonIfSkipped: null,
       attempts: attempt,
     };
-    return exhausted;
   }
 
   /**
@@ -351,225 +368,6 @@ export class VerificationEngine {
     });
     void previousResults;
   }
-}
-
-// ────────────────────────── Predicate types (§40.2) ──────────────────────────
-
-/**
- * All 14 predicate types from SPEC §40.2 (with unit/integration/e2e split out
- * as separate constants per the F5 task description). Each predicate type maps
- * to one of the 5 {@link VerificationNodeKind} categories.
- */
-export const PredicateType = {
-  FILE_PARSES: "file_parses",
-  FORMATTER_CHECK: "formatter_check",
-  STATIC_DIAGNOSTICS: "static_diagnostics",
-  UNIT_TEST: "unit_test",
-  INTEGRATION_TEST: "integration_test",
-  E2E_TEST: "e2e_test",
-  PROPERTY_TEST: "property_test",
-  FUZZ_TEST: "fuzz_test",
-  SECURITY_SCANNER: "security_scanner",
-  PERFORMANCE_THRESHOLD: "performance_threshold",
-  SCHEMA_COMPATIBILITY: "schema_compatibility",
-  MIGRATION_DRY_RUN: "migration_dry_run",
-  DIFF_POLICY: "diff_policy",
-  ACCEPTANCE_QUERY: "acceptance_query",
-  DETACHED_REVIEW: "detached_review",
-  HUMAN_APPROVAL: "human_approval",
-  EXTERNAL_RECONCILIATION: "external_reconciliation",
-} as const;
-export type PredicateType = (typeof PredicateType)[keyof typeof PredicateType];
-
-export const ALL_PREDICATE_TYPES: readonly PredicateType[] = Object.freeze([
-  "file_parses",
-  "formatter_check",
-  "static_diagnostics",
-  "unit_test",
-  "integration_test",
-  "e2e_test",
-  "property_test",
-  "fuzz_test",
-  "security_scanner",
-  "performance_threshold",
-  "schema_compatibility",
-  "migration_dry_run",
-  "diff_policy",
-  "acceptance_query",
-  "detached_review",
-  "human_approval",
-  "external_reconciliation",
-]);
-
-/**
- * Maps a predicate type to the VerificationNodeKind category it falls under.
- * Used by the engine to dispatch to the right NodeExecutor.
- */
-export function predicateTypeToNodeKind(t: PredicateType): VerificationNode["kind"] {
-  switch (t) {
-    case "file_parses":
-    case "formatter_check":
-    case "static_diagnostics":
-    case "unit_test":
-    case "integration_test":
-    case "e2e_test":
-    case "property_test":
-    case "fuzz_test":
-    case "security_scanner":
-    case "performance_threshold":
-    case "schema_compatibility":
-    case "migration_dry_run":
-    case "diff_policy":
-    case "acceptance_query":
-      return "command";
-    case "detached_review":
-      return "diff_rule";
-    case "human_approval":
-      return "human";
-    case "external_reconciliation":
-      return "external_query";
-    default: {
-      // Exhaustive check — if a new predicate type is added without a mapping,
-      // fail loudly at compile time.
-      const _: never = t;
-      void _;
-      return "command";
-    }
-  }
-}
-
-/**
- * Optional structured specification attached to a verification node. The
- * plain `VerificationNode.specification` string carries the command/query;
- * this structured extension carries predicate-type and path metadata used by
- * the changed-code invalidator (§40.5) and the predicate registry (§40.2).
- */
-export interface VerificationNodeSpec {
-  readonly predicateType: PredicateType | null;
-  /** Workspace-relative paths this node observes / depends on. */
-  readonly paths: readonly string[];
-  /** Free-form structured observations produced by the predicate. */
-  readonly observations: Readonly<Record<string, unknown>>;
-}
-
-/**
- * A predicate executor runs a single predicate type and produces a
- * VerificationResult. Executors are registered per predicate type in a
- * {@link PredicateRegistry}; the engine can look up the executor for a node's
- * `specification_json.predicateType` and dispatch to it.
- */
-export interface PredicateExecutor {
-  readonly predicateType: PredicateType;
-  execute(input: NodeExecutorInput): Promise<VerificationResult>;
-}
-
-/**
- * Registry of predicate executors by predicate type. The engine can use this
- * as an alternative to {@link VerificationEngineDeps.executorFor} when nodes
- * carry `specification_json.predicateType`.
- */
-export class PredicateRegistry {
-  private readonly executors: Map<PredicateType, PredicateExecutor> = new Map();
-
-  register(executor: PredicateExecutor): void {
-    if (this.executors.has(executor.predicateType)) {
-      throw new ValidationError(
-        `predicate executor already registered for '${executor.predicateType}'`,
-      );
-    }
-    this.executors.set(executor.predicateType, executor);
-  }
-
-  get(predicateType: PredicateType): PredicateExecutor | null {
-    return this.executors.get(predicateType) ?? null;
-  }
-
-  require(predicateType: PredicateType): PredicateExecutor {
-    const e = this.executors.get(predicateType);
-    if (!e) {
-      throw new ValidationError(
-        `no executor registered for predicate '${predicateType}'`,
-      );
-    }
-    return e;
-  }
-
-  list(): readonly PredicateExecutor[] {
-    return [...this.executors.values()];
-  }
-
-  /** Returns true if a predicate type is registered. */
-  has(predicateType: PredicateType): boolean {
-    return this.executors.has(predicateType);
-  }
-
-  /**
-   * Returns a NodeExecutor that dispatches to the right predicate executor
-   * based on the node's structured spec. Falls back to the provided
-   * `fallback` if no predicate type is set or no executor is registered.
-   */
-  toNodeExecutor(fallback: NodeExecutor): NodeExecutor {
-    return {
-      execute: async (input: NodeExecutorInput): Promise<VerificationResult> => {
-        const spec = parseNodeSpec(input.node.specification);
-        if (spec.predicateType) {
-          const ex = this.get(spec.predicateType);
-          if (ex) return ex.execute(input);
-        }
-        return fallback.execute(input);
-      },
-    };
-  }
-}
-
-/**
- * Parses a VerificationNode's `specification` field into a structured
- * {@link VerificationNodeSpec}. The specification may be either:
- *   - a JSON string with the spec shape, or
- *   - a freeform command/query string (predicateType null, empty paths).
- */
-export function parseNodeSpec(specification: string): VerificationNodeSpec {
-  const trimmed = specification.trim();
-  if (trimmed.startsWith("{")) {
-    try {
-      const obj = JSON.parse(trimmed) as Record<string, unknown>;
-      const predicateTypeRaw = obj["predicateType"];
-      const pathsRaw = obj["paths"];
-      const observationsRaw = obj["observations"];
-      return {
-        predicateType:
-          predicateTypeRaw !== null &&
-          predicateTypeRaw !== undefined &&
-          typeof predicateTypeRaw === "string" &&
-          ALL_PREDICATE_TYPES.includes(predicateTypeRaw as PredicateType)
-            ? (predicateTypeRaw as PredicateType)
-            : null,
-        paths:
-          Array.isArray(pathsRaw) && pathsRaw.every((p) => typeof p === "string")
-            ? (pathsRaw as string[])
-            : [],
-        observations:
-          observationsRaw !== null &&
-          observationsRaw !== undefined &&
-          typeof observationsRaw === "object" &&
-          !Array.isArray(observationsRaw)
-            ? (observationsRaw as Record<string, unknown>)
-            : {},
-      };
-    } catch {
-      return { predicateType: null, paths: [], observations: {} };
-    }
-  }
-  return { predicateType: null, paths: [], observations: {} };
-}
-
-/** Serializes a {@link VerificationNodeSpec} back into a specification string. */
-export function serializeNodeSpec(spec: VerificationNodeSpec): string {
-  return JSON.stringify({
-    predicateType: spec.predicateType,
-    paths: spec.paths,
-    observations: spec.observations,
-  });
 }
 
 // ────────────────────────── Changed-code invalidation (§40.5) ────────────────
@@ -925,3 +723,11 @@ export type {
   ArtifactRef,
   ContentHash,
 };
+
+// Sibling modules — re-exported after engine definitions to keep ESM init order safe.
+export * from "./store.js";
+export * from "./binding.js";
+export * from "./completion-gate.js";
+export * from "./standard-predicates.js";
+export * from "./lifecycle.js";
+export * from "./harness-verify.js";

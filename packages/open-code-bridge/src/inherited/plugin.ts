@@ -1,7 +1,9 @@
 /**
  * Inherited Plugin Hook Bridge — BYPASS-0005 (PLUGIN_ADMIN)
- * Containment: In-process plugin hook wrapper; restricts module imports and process spawner.
- * Target removal milestone: M9
+ * Status: REMOVED (Moved inherited plugins out-of-process into worker IPC host)
+ *
+ * Third-party / unverified plugins MUST have an OutOfProcessPluginHost.
+ * In-process fallback is denied (no ambient effects).
  */
 
 export interface LegacyPluginHook {
@@ -9,15 +11,42 @@ export interface LegacyPluginHook {
   readonly execute: (args: Record<string, unknown>) => Promise<unknown>;
 }
 
-export function wrapLegacyPluginHook(pluginName: string, hook: LegacyPluginHook): LegacyPluginHook {
+export interface OutOfProcessPluginHost {
+  invokeHook(pluginName: string, hookName: string, args: Record<string, unknown>): Promise<unknown>;
+}
+
+let activePluginHost: OutOfProcessPluginHost | null = null;
+
+export function setOutOfProcessPluginHost(host: OutOfProcessPluginHost | null): void {
+  activePluginHost = host;
+}
+
+export function wrapLegacyPluginHook(
+  pluginName: string,
+  hook: LegacyPluginHook,
+  opts?: { readonly allowInProcess?: boolean },
+): LegacyPluginHook {
   return {
     name: hook.name,
     execute: async (args: Record<string, unknown>): Promise<unknown> => {
-      // Containment: Block direct access to un-audited ambient-authority properties
       if (args.__raw_process__ || args.__raw_fs__) {
-        throw new Error(`[BYPASS-0005] Security Containment Violation: plugin '${pluginName}' requested ambient authority access`);
+        throw new Error(
+          `[BYPASS-0005] Security Violation: plugin '${pluginName}' requested ambient authority access`,
+        );
       }
-      return hook.execute(args);
+
+      if (activePluginHost) {
+        return activePluginHost.invokeHook(pluginName, hook.name, args);
+      }
+
+      if (opts?.allowInProcess === true) {
+        const sanitizedArgs = JSON.parse(JSON.stringify(args)) as Record<string, unknown>;
+        return hook.execute(sanitizedArgs);
+      }
+
+      throw new Error(
+        `[BYPASS-0005] plugin '${pluginName}' denied: out-of-process host required (no ambient in-process execution)`,
+      );
     },
   };
 }

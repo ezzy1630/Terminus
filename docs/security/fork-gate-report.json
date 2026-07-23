@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "generated_at": "2026-07-23T20:02:40.865Z",
+  "substrate_owner": "security-runtime",
+  "bypass_summary": {
+    "total": 6,
+    "removed": 6,
+    "contained": 0,
+    "open": 0,
+    "secure_release_zero_bypasses": true
+  },
+  "divergence_budget": {
+    "max_modified_files": 25,
+    "actual_modified_files": 1,
+    "max_merge_conflict_hours": 8,
+    "actual_merge_conflict_hours": 0.5,
+    "within_budget": true
+  },
+  "effect_interception": {
+    "execution_kernel_rpc": true,
+    "filesystem_kernel_rpc": true,
+    "network_broker_client": true,
+    "secret_capabilities": true,
+    "out_of_process_plugins": true,
+    "terminus_git_rpc": true
+  },
+  "verdict": "PASS"
+}

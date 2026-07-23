@@ -1,70 +1,46 @@
 # ADR-0027: Container/micro-VM backend selection
 
-- **Status:** OPEN
+- **Status:** ADOPTED (digest-pinned OCI container first)
 - **Date:** 2025-07-11
+- **Adopted:** 2026-07-23
 - **Decision owner:** runtime owner
 - **Supersedes:** none
-- **Related:** SPEC §13.4, §36.8, §49.5
+- **Related:** SPEC §13.4, §36.8, §49.5, ADR-0014, ADR-0030
 
 ## Context
 
-The Linux Bubblewrap backend (ADR-0014) is the default for local trusted workspaces. But for untrusted repositories, evals, and extensions, Bubblewrap may not be sufficient isolation: a kernel exploit in the host could allow escape, and Bubblewrap shares the host kernel. Container runtimes (Docker, Podman, containerd) and micro-VMs (gVisor, Firecracker, Kata) provide stronger isolation at higher cost.
+The Linux Bubblewrap backend (ADR-0014) is the default for local trusted workspaces. For untrusted repositories, evals, extensions, and remote environments, stronger isolation is required. SPEC §36.8 requires digest-pinned images.
 
-SPEC §49.5 lists "specific container/micro-VM backend" as deliberately experimental. We need to decide which backend(s) to support, when to select each, and how they integrate with the kernel's sandbox trait.
+## Decision
 
-## Decision (OPEN)
+**First remote/untrusted backend: digest-pinned OCI containers** via Docker or Podman (`crates/terminus-sandbox-container`).
 
-This ADR is OPEN. The experiment owner is the runtime owner. The decision will be made after M4 (SPEC §48.7) ships the Linux Bubblewrap backend and M9 (SPEC §48.12) ships the container backend for untrusted evals/extensions.
+- Image references MUST be `repository@sha256:<64-hex>`. Mutable tags (`:latest`) are rejected.
+- An in-process execution pool leases slots bound to a pinned image.
+- Micro-VM backends (Firecracker / Kata / gVisor) remain experimental and are not the M11 default.
+- Local trusted workspaces continue to use Bubblewrap (ADR-0014).
 
-Candidate backends under evaluation:
+## Consequences
 
-1. **Podman** (rootless containers) — strong isolation, no daemon, good Linux support. Candidate for untrusted evals.
-2. **Docker** (with rootless mode) — broad ecosystem, but daemon dependency.
-3. **gVisor** (kernel-level sandbox) — strong isolation, Linux only, performance overhead.
-4. **Firecracker** (micro-VM) — very strong isolation, AWS-origin, requires Linux + KVM.
-5. **Kata Containers** (micro-VM with container interface) — strong isolation, broader hardware support than Firecracker.
-
-Selection criteria (to be evaluated):
-- Isolation strength (escape difficulty).
-- Performance overhead (startup time, runtime overhead).
-- Resource cost (memory, CPU).
-- Platform support (Linux only? macOS? Windows?).
-- Operational complexity (daemon? KVM? setup?).
-- Digest-pinning support (SPEC §36.8 — `evals/environments/*.lock` use digest-pinned images).
-
-The selection will be made via a new ADR (this one promoted to ADOPTED with the chosen backend(s)) after the evaluation.
-
-## Alternatives
-
-- **Bubblewrap only.** Rejected for untrusted: shared host kernel; insufficient for malicious repos.
-- **All backends supported.** Rejected: operational complexity; testing matrix explosion.
-- **Pick one without evaluation.** Rejected (SPEC §49.5): must be evidence-based.
-
-## Consequences (once a backend is chosen)
-
-- The chosen backend(s) implement the `SandboxBackend` trait in `crates/terminus-sandbox`.
-- `crates/terminus-sandbox-container` already exists as a scaffold.
-- Digest-pinned container images are required (SPEC §36.8).
-- The container-untrusted policy profile (`policies/sandbox/container-untrusted.yaml`) is the default for untrusted repos.
-- The non-bypassability tests (SPEC §27.4) must pass on the chosen backend.
+- `ContainerSandboxBackend::configure` requires a digest-pinned reference.
+- Spawn wrappers emit digest references only.
+- Eval environment lockfiles must carry real digests before production use.
+- Selecting Firecracker/Kata later requires amending this ADR with escape and performance evidence.
 
 ## Security Impact
 
-High (once chosen). The container/micro-VM backend is the enforcement mechanism for untrusted repos. Selection must be evidence-based. The non-bypassability tests must pass.
+High for untrusted/remote. Digest pinning prevents tag mutability attacks. Container isolation still shares the host kernel; micro-VMs remain the path for higher assurance later.
 
 ## Evaluation Plan
 
-- Escape difficulty: adversarial suite (SPEC §46.10).
-- Performance overhead: startup time, runtime overhead benchmarks.
-- Resource cost: memory, CPU measurements.
-- Platform support: test on Linux, macOS (where applicable), Windows (where applicable).
-- Digest-pinning: `evals/environments/*.lock` images are pinned and verified.
-- Operational complexity: setup time, daemon/KVM requirements.
+- Unit tests reject `alpine:latest`.
+- Pool lease/release tests.
+- Non-bypassability suite on the configured container backend before production enablement.
 
 ## Migration
 
-The container backend scaffold is introduced in M4 (SPEC §48.7 task 16) and M9 (SPEC §48.12 task 7). The chosen backend is selected after evaluation.
+Callers migrate from `with_runtime_configured(true)` to `configure(runtime, "repo@sha256:…", slots)`.
 
 ## Rollback
 
-If the chosen backend proves insufficient (escape, performance, platform), select a different backend via a new ADR. The `SandboxBackend` trait isolates the choice; switching backends does not affect the kernel protocol.
+Fail closed: unconfigured container backend returns `Unsupported`. Operators fall back to Bubblewrap for trusted local work only.

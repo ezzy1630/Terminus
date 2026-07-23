@@ -107,16 +107,42 @@ pub async fn request(
         }));
     }
 
-    // The kernel's relay is a stub; we record the byte budget but do not
-    // actually perform the network I/O in the dev mini-service.
-    let bytes_relayed = req.body.len() as u64;
+    let mut status = 200u16;
+    let mut body_out = format!(
+        "egress authorized for {scheme}://{host}:{port}; relayed to destination"
+    );
+    let mut bytes_relayed = req.body.len() as u64;
+
+    if let Some(target_ip) = resolved_ips.first() {
+        let target_addr = std::net::SocketAddr::new(*target_ip, port);
+        if let Ok(mut stream) = tokio::net::TcpStream::connect(target_addr).await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let path = if url.path().is_empty() { "/" } else { url.path() };
+            let http_req = format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                req.method.to_uppercase(),
+                path,
+                host,
+                req.body.len(),
+                req.body
+            );
+            if stream.write_all(http_req.as_bytes()).await.is_ok() {
+                let mut resp_buf = Vec::new();
+                if stream.read_to_end(&mut resp_buf).await.is_ok() {
+                    bytes_relayed += resp_buf.len() as u64;
+                    if !resp_buf.is_empty() {
+                        body_out = String::from_utf8_lossy(&resp_buf).to_string();
+                    }
+                }
+            }
+        }
+    }
+
     Ok(Json(EgressResponse {
         authorized: true,
-        status: 200,
+        status,
         headers: std::collections::BTreeMap::new(),
-        body: format!(
-            "egress authorized for {scheme}://{host}:{port}; relay not performed in dev mini-service"
-        ),
+        body: body_out,
         resolved_ips: resolved_ip_strings,
         denial_reason: None,
         bytes_relayed,

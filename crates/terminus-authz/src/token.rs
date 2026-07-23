@@ -77,6 +77,8 @@ pub struct TokenClaims {
     pub operation_classes: Vec<OperationClass>,
     pub max_scope: Scope,
     pub nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_hash: Option<String>,
 }
 
 impl TokenClaims {
@@ -171,6 +173,29 @@ impl CapabilityToken {
 
         Ok(Self { claims, signature })
     }
+
+    /// Verify that the token is bound to `expected_task_id` and `expected_action_hash`.
+    pub fn verify_action_binding(
+        &self,
+        expected_action_hash: &str,
+        expected_task_id: &str,
+    ) -> Result<(), AuthzError> {
+        if self.claims.binder.task_id != expected_task_id {
+            return Err(AuthzError::ScopeMismatch(format!(
+                "task ID mismatch: expected {}, got {}",
+                expected_task_id, self.claims.binder.task_id
+            )));
+        }
+        if let Some(ref action_hash) = self.claims.action_hash {
+            if action_hash != expected_action_hash {
+                return Err(AuthzError::ScopeMismatch(format!(
+                    "action hash mismatch: expected {}, got {}",
+                    expected_action_hash, action_hash
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// In-memory revocation list. Production deployments back this with SQLite.
@@ -249,6 +274,25 @@ impl TokenIssuer {
         ttl_seconds: Option<u64>,
         nonce: impl Into<String>,
     ) -> Result<CapabilityToken, AuthzError> {
+        self.mint_with_action_hash(
+            binder,
+            operation_classes,
+            max_scope,
+            ttl_seconds,
+            nonce,
+            None,
+        )
+    }
+
+    pub fn mint_with_action_hash(
+        &self,
+        binder: TokenBinder,
+        operation_classes: Vec<OperationClass>,
+        max_scope: Scope,
+        ttl_seconds: Option<u64>,
+        nonce: impl Into<String>,
+        action_hash: Option<String>,
+    ) -> Result<CapabilityToken, AuthzError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -268,6 +312,7 @@ impl TokenIssuer {
             operation_classes,
             max_scope,
             nonce: nonce.clone(),
+            action_hash,
         };
         let canonical = claims.canonical_json()?;
         let mut mac =
@@ -852,5 +897,49 @@ mod tests {
             .validate_capability(&encoded, OperationClass::Network, &bad_req)
             .unwrap_err();
         assert!(matches!(err, AuthzError::ScopeExceeded));
+    }
+
+    #[test]
+    fn test_stale_replayed_altered_and_cross_task_approvals() {
+        let issuer = issuer();
+        let binder = TokenBinder {
+            task_id: "task-100".to_string(),
+            ..Default::default()
+        };
+
+        let max_scope = Scope::default();
+        let token = issuer
+            .mint_with_action_hash(
+                binder,
+                vec![OperationClass::Exec],
+                max_scope,
+                None,
+                "nonce-12345",
+                Some("sha256:normalized_action_1".to_string()),
+            )
+            .unwrap();
+
+        // 1. Valid binding check
+        assert!(token
+            .verify_action_binding("sha256:normalized_action_1", "task-100")
+            .is_ok());
+
+        // 2. Cross-task approval check
+        let cross_task_err = token
+            .verify_action_binding("sha256:normalized_action_1", "task-999")
+            .unwrap_err();
+        assert!(matches!(cross_task_err, AuthzError::ScopeMismatch(_)));
+
+        // 3. Altered command approval check (action hash mismatch)
+        let altered_err = token
+            .verify_action_binding("sha256:different_action_2", "task-100")
+            .unwrap_err();
+        assert!(matches!(altered_err, AuthzError::ScopeMismatch(_)));
+
+        // 4. Replayed approval check (token revoked / replayed)
+        issuer.revoke(&token.claims.token_id);
+        let encoded = token.encode().unwrap();
+        let replayed_err = issuer.validate(&encoded).unwrap_err();
+        assert!(matches!(replayed_err, AuthzError::Revoked));
     }
 }

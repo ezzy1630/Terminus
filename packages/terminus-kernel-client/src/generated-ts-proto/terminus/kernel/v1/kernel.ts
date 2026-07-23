@@ -512,6 +512,11 @@ export interface KernelInfo {
   /** linux-bwrap | macos-sandbox | windows | container | microvm */
   supportedBackends: string[];
   supportedServices: string[];
+  /**
+   * Stable kernel identity for capability-token audience + mTLS SAN binding
+   * (SPEC §48.14). Format: `kernel:<opaque>`.
+   */
+  instanceId: string;
 }
 
 export interface KernelHealth {
@@ -528,6 +533,10 @@ export interface RegisterWorkspaceRequest {
   canonicalRoot: string;
   /** trusted | untrusted | restricted */
   trust: string;
+  /** Optional remote environment descriptor JSON (SPEC §48.14). Empty for local. */
+  remoteEnvironmentJson: string;
+  /** workspace | container | microvm | remote */
+  kind: string;
 }
 
 export interface WorkspaceEntryMessage {
@@ -5201,7 +5210,14 @@ export const JobState: MessageFns<JobState> = {
 };
 
 function createBaseKernelInfo(): KernelInfo {
-  return { version: "", protocolVersion: "", buildRevision: "", supportedBackends: [], supportedServices: [] };
+  return {
+    version: "",
+    protocolVersion: "",
+    buildRevision: "",
+    supportedBackends: [],
+    supportedServices: [],
+    instanceId: "",
+  };
 }
 
 export const KernelInfo: MessageFns<KernelInfo> = {
@@ -5220,6 +5236,9 @@ export const KernelInfo: MessageFns<KernelInfo> = {
     }
     for (const v of message.supportedServices) {
       writer.uint32(42).string(v!);
+    }
+    if (message.instanceId !== "") {
+      writer.uint32(50).string(message.instanceId);
     }
     return writer;
   },
@@ -5271,6 +5290,14 @@ export const KernelInfo: MessageFns<KernelInfo> = {
           message.supportedServices.push(reader.string());
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.instanceId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5290,6 +5317,7 @@ export const KernelInfo: MessageFns<KernelInfo> = {
     message.buildRevision = object.buildRevision ?? "";
     message.supportedBackends = object.supportedBackends?.map((e) => e) || [];
     message.supportedServices = object.supportedServices?.map((e) => e) || [];
+    message.instanceId = object.instanceId ?? "";
     return message;
   },
 };
@@ -5365,7 +5393,7 @@ export const KernelHealth: MessageFns<KernelHealth> = {
 };
 
 function createBaseRegisterWorkspaceRequest(): RegisterWorkspaceRequest {
-  return { context: undefined, rootUri: "", canonicalRoot: "", trust: "" };
+  return { context: undefined, rootUri: "", canonicalRoot: "", trust: "", remoteEnvironmentJson: "", kind: "" };
 }
 
 export const RegisterWorkspaceRequest: MessageFns<RegisterWorkspaceRequest> = {
@@ -5381,6 +5409,12 @@ export const RegisterWorkspaceRequest: MessageFns<RegisterWorkspaceRequest> = {
     }
     if (message.trust !== "") {
       writer.uint32(34).string(message.trust);
+    }
+    if (message.remoteEnvironmentJson !== "") {
+      writer.uint32(42).string(message.remoteEnvironmentJson);
+    }
+    if (message.kind !== "") {
+      writer.uint32(50).string(message.kind);
     }
     return writer;
   },
@@ -5424,6 +5458,22 @@ export const RegisterWorkspaceRequest: MessageFns<RegisterWorkspaceRequest> = {
           message.trust = reader.string();
           continue;
         }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.remoteEnvironmentJson = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.kind = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5444,6 +5494,8 @@ export const RegisterWorkspaceRequest: MessageFns<RegisterWorkspaceRequest> = {
     message.rootUri = object.rootUri ?? "";
     message.canonicalRoot = object.canonicalRoot ?? "";
     message.trust = object.trust ?? "";
+    message.remoteEnvironmentJson = object.remoteEnvironmentJson ?? "";
+    message.kind = object.kind ?? "";
     return message;
   },
 };

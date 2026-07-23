@@ -1,0 +1,55 @@
+# Security findings register (machine-readable)
+#
+# Consumed by scripts/produce-release-decision.ts and scripts/m12-exit-gate.ts.
+# Statuses: open | accepted | fixed
+# Residual accepted items require acceptance_rationale (SPEC §46.10 / §50.5).
+
+schema_version: 1
+updated: "2026-07-23"
+
+findings:
+  - id: FIND-001
+    severity: high
+    status: accepted
+    owner: security-owner
+    summary: External penetration test pending formal engagement for 0.1.0 preview.
+    acceptance_rationale: >
+      Accepted for 0.1.0 preview with compensating controls: kernel non-bypassability
+      suite, policy default-deny, sandbox secure-local-default, secret brokerage,
+      SBOM/cosign verification, and coordinated disclosure runbook. Formal external
+      assessment is scheduled before 1.0; see docs/security/external-assessment.md.
+
+  - id: FIND-002
+    severity: medium
+    status: accepted
+    owner: release-owner
+    summary: Full 24h soak requires a dedicated runner; CI runs a 30s smoke.
+    acceptance_rationale: >
+      Accepted for preview. CI executes scripts/soak-leak-test.sh with
+      TERMINUS_SOAK_SECONDS=30 and growth gate TERMINUS_SOAK_MAX_GROWTH_PCT.
+      Release owners MUST run TERMINUS_SOAK_SECONDS=86400 on a dedicated runner
+      before promoting beyond preview (SPEC §46.16).
+
+  - id: FIND-003
+    severity: low
+    status: fixed
+    owner: platform
+    summary: Rustfmt drift blocked check-all on several crates.
+    acceptance_rationale: ""
+
+  - id: FIND-004
+    severity: low
+    status: fixed
+    owner: eval-lab
+    summary: Ruff lint failures in forge_evals notebooks and graders.
+    acceptance_rationale: ""
+
+  - id: FIND-005
+    severity: low
+    status: accepted
+    owner: release-owner
+    summary: Local SBOM may use terminus-fallback-spdx when syft is absent.
+    acceptance_rationale: >
+      Accepted for developer machines. Release and CI publish jobs MUST generate
+      and sign SBOMs with syft (see .github/workflows/release.yml). Fallback SPDX
+      covers workspace crate inventory only.

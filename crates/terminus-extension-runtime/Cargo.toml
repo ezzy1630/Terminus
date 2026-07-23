@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "WASI extension host (stub) for the Terminus kernel."
+description = "WASI and process-isolated extension hosts for the Terminus kernel."
 
 [lints]
 workspace = true
@@ -15,3 +15,8 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

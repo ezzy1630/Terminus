@@ -57,10 +57,26 @@ impl GitOps {
         working_dir: Option<PathBuf>,
         args: &[&str],
     ) -> Result<Vec<u8>, GitError> {
-        let mut full_args = Vec::with_capacity(args.len() + 2);
-        // Disable untrusted hooks for the duration of this command.
-        full_args.push("-c");
-        full_args.push("core.hooksPath=/dev/null");
+        let mut full_args = Vec::with_capacity(args.len() + 16);
+        // Disable untrusted hooks, filters, credential helpers, and external pagers/editors.
+        full_args.extend_from_slice(&[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "filter.lfs.smudge=",
+            "-c",
+            "filter.lfs.clean=",
+            "-c",
+            "filter.lfs.process=",
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "core.editor=true",
+            "-c",
+            "core.attributesFile=/dev/null",
+        ]);
         full_args.extend_from_slice(args);
         let spawn = NormalizedSpawn {
             program: self.git_binary.clone(),
@@ -69,6 +85,7 @@ impl GitOps {
             working_dir,
             timeout_ms: 30_000,
             shell: false,
+            allocate_pty: false,
         };
         let (_outcome, mut rx) = self.process.spawn(spawn).await?;
         let mut stdout = Vec::new();
@@ -189,6 +206,7 @@ mod tests {
             working_dir: None,
             timeout_ms: 10_000,
             shell: false,
+            allocate_pty: false,
         };
         let (_o, mut rx) = mgr.spawn(init_spawn).await.unwrap();
         while rx.recv().await.is_some() {}
@@ -201,6 +219,7 @@ mod tests {
                 working_dir: Some(repo.clone()),
                 timeout_ms: 5_000,
                 shell: false,
+                allocate_pty: false,
             };
             let (_o, mut rx) = mgr.spawn(spawn).await.unwrap();
             while rx.recv().await.is_some() {}

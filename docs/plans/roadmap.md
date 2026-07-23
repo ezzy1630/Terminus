@@ -123,6 +123,8 @@ Cross-cutting owners: protocol, security, upstream integration, developer experi
 
 **Exit gate:** Remote and local tasks share the same domain/evidence semantics. Isolation and identity tests pass. Clients recover from disconnect without corrupting task state.
 
+**Remote backend (2026-07-23):** Single-tenant remote adopted (ADR-0030). `terminus-remote` + `@terminus/remote` ship identities, env descriptors, digest-pinned pool, quotas, artifact stream sessions, settlement-on-disconnect, collab handoff, audit redaction, and upgrade compatibility. Kernel mini-service supports `TERMINUS_KERNEL_MTLS=1`. Multi-tenant shared kernel remains deferred.
+
 ### M12 — Hardening and stable release (SPEC §48.15)
 
 **Objective:** Prove the product can be installed, upgraded, operated, secured, and maintained.
@@ -143,9 +145,9 @@ Cross-cutting owners: protocol, security, upstream integration, developer experi
 - M7 tasks: active (provider renderers, adapter SDK, router).
 - M8 tasks: active (verification engine, loop detector, orchestration).
 - M9 tasks: active (capability registry, MCP relay, extension host isolation).
-- M10 tasks: active (memory contracts, disabled by default).
+- M10 tasks: complete in `@terminus/memory` (disabled by default; fixture exit gate passes, product enablement still gated by ADR-0023).
 - M11 tasks: in progress (client integration & remote kernel scaffolding).
-- M12 tasks: not started (hardening and release freeze).
+- M12 tasks: active — release engineering scaffold complete (property/fuzz targets, fault-injection matrix, platform CI, drills, soak/canary evidence writers, findings register, schema freeze, four-owner decision). Stable promote still requires signed `TERMINUS_LINUX_EVIDENCE` from the dedicated Linux runner and recorded owner approvals.
 
 See `docs/plans/pr-sequence.md` for the first 40 PRs.
 

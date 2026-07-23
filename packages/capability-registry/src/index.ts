@@ -1,12 +1,10 @@
 /**
  * @terminus/capability-registry — capability descriptor, registry, lockfile,
- * activation lifecycle.
+ * activation lifecycle, skills, MCP admission.
  *
- * Per SPEC §12, §35: CapabilityRegistry with discover(), admit(descriptor),
- * activate(id, session, task), deactivate(id), revoke(id). Loads Agent Skills
- * (SKILL.md + terminus.skill.yaml). Pin descriptor hashes.
+ * SPEC §12, §35. Exit gate: no ambient effects; descriptor changes caught;
+ * external results independently verified (adapters elsewhere).
  */
-import { z } from "zod";
 import type {
   CapabilityDescriptor,
   CapabilityActivation,
@@ -18,8 +16,15 @@ import type {
   Rfc3339Timestamp,
 } from "@terminus/domain";
 import { ValidationError, ConflictError, PermissionError } from "@terminus/domain";
-
-// ────────────────────────── Repository ───────────────────────────────────────
+import { admissionFingerprint, diffDescriptors } from "./descriptor_diff.js";
+import {
+  buildLockfile,
+  lockfileKey,
+  MemoryLockfileStore,
+  type CapabilityLockfile,
+  type LockfileEntry,
+  type LockfileStore,
+} from "./lockfile.js";
 
 export interface CapabilityRepository {
   createDescriptor(d: CapabilityDescriptor): Promise<CapabilityDescriptor>;
@@ -35,54 +40,39 @@ export interface CapabilityRepository {
   updateActivation(a: CapabilityActivation): Promise<CapabilityActivation>;
 }
 
-// ────────────────────────── Lockfile ─────────────────────────────────────────
-
-export interface LockfileEntry {
-  readonly id: string;
-  readonly version: string;
-  readonly contentHash: ContentHash;
-  readonly signature: string | null;
-  readonly trustLevel: CapabilityTrustLevel;
-  readonly admittedAt: Rfc3339Timestamp;
-  readonly admittedBy: PrincipalId;
-}
-
-export interface CapabilityLockfile {
-  readonly entries: readonly LockfileEntry[];
-}
-
-export const lockfileEntrySchema = z.object({
-  id: z.string(),
-  version: z.string(),
-  contentHash: z.string(),
-  signature: z.string().nullable(),
-  trustLevel: z.enum(["builtin", "first_party", "verified_third_party", "untrusted"]),
-  admittedAt: z.string(),
-  admittedBy: z.string(),
-});
-
-export const capabilityLockfileSchema = z.object({
-  entries: z.array(lockfileEntrySchema),
-});
-
-// ────────────────────────── Service ──────────────────────────────────────────
-
 export interface CapabilityRegistryDeps {
   readonly repo: CapabilityRepository;
   readonly idSource: () => Uuid7;
   readonly clock: () => Rfc3339Timestamp;
+  readonly lockfileStore?: LockfileStore;
+  /** Optional sink for security events (descriptor_changed, etc.). */
+  readonly onSecurityEvent?: (event: {
+    readonly kind: string;
+    readonly detail: string;
+    readonly capabilityId: string;
+  }) => void;
 }
 
 export class CapabilityRegistry {
-  private readonly lockfile: Map<string, LockfileEntry> = new Map();
+  private readonly lockfileStore: LockfileStore;
+  private cache: Map<string, LockfileEntry> | null = null;
 
-  constructor(private readonly deps: CapabilityRegistryDeps) {}
+  constructor(private readonly deps: CapabilityRegistryDeps) {
+    this.lockfileStore = deps.lockfileStore ?? new MemoryLockfileStore();
+  }
 
-  /**
-   * Discover capability descriptors from a list of sources. Each source
-   * produces zero or more descriptors; the registry admits those that pass
-   * policy.
-   */
+  private async ensureCache(): Promise<Map<string, LockfileEntry>> {
+    if (this.cache) return this.cache;
+    const snap = await this.lockfileStore.load();
+    this.cache = new Map(snap.entries.map((e) => [lockfileKey(e.id, e.version), e]));
+    return this.cache;
+  }
+
+  private async persist(): Promise<void> {
+    const cache = await this.ensureCache();
+    await this.lockfileStore.save(buildLockfile([...cache.values()]));
+  }
+
   async discover(sources: readonly CapabilityDescriptor[]): Promise<readonly CapabilityDescriptor[]> {
     const admitted: CapabilityDescriptor[] = [];
     for (const d of sources) {
@@ -94,11 +84,14 @@ export class CapabilityRegistry {
     return admitted;
   }
 
-  /**
-   * Classify effects requested by a descriptor.
-   */
-  classifyEffects(descriptor: CapabilityDescriptor): readonly ("read_only" | "fs_mutate" | "network_egress" | "process_exec" | "secret_access")[] {
-    const effects: ("read_only" | "fs_mutate" | "network_egress" | "process_exec" | "secret_access")[] = [];
+  classifyEffects(
+    descriptor: CapabilityDescriptor,
+  ): readonly ("read_only" | "fs_mutate" | "network_egress" | "process_exec" | "secret_access")[] {
+    if (descriptor.effectClassification && descriptor.effectClassification.length > 0) {
+      return descriptor.effectClassification;
+    }
+    const effects: ("read_only" | "fs_mutate" | "network_egress" | "process_exec" | "secret_access")[] =
+      [];
     const fs = descriptor.filesystem as { read?: unknown[]; write?: unknown[] };
     if (fs && Array.isArray(fs.write) && fs.write.length > 0) {
       effects.push("fs_mutate");
@@ -119,13 +112,9 @@ export class CapabilityRegistry {
     return effects;
   }
 
-  /**
-   * Validate descriptor safety and check for prohibited capability combinations.
-   */
   validateDescriptorPolicy(descriptor: CapabilityDescriptor): void {
     const effects = this.classifyEffects(descriptor);
 
-    // Untrusted package lifecycle scripts prohibited (SPEC §35.10).
     if (descriptor.trustLevel === "untrusted" && descriptor.lifecycle?.disableScripts === false) {
       throw new ValidationError(
         "untrusted capabilities must disable package lifecycle scripts",
@@ -133,7 +122,6 @@ export class CapabilityRegistry {
       );
     }
 
-    // Prohibited combination: untrusted capability asking for both process execution and network egress
     if (
       descriptor.trustLevel === "untrusted" &&
       effects.includes("process_exec") &&
@@ -145,7 +133,6 @@ export class CapabilityRegistry {
       );
     }
 
-    // Prohibited combination: untrusted capability asking for raw secrets and process execution
     if (
       descriptor.trustLevel === "untrusted" &&
       effects.includes("secret_access") &&
@@ -160,46 +147,83 @@ export class CapabilityRegistry {
 
   /**
    * Admit a descriptor: validate hash, signature, and policy. Pin the
-   * descriptor hash in the lockfile.
+   * descriptor hash in the durable lockfile.
    */
   async admit(
     descriptor: CapabilityDescriptor,
     admittedBy: PrincipalId,
+    opts?: {
+      readonly toolDescriptorHashes?: Readonly<Record<string, ContentHash>>;
+      readonly forceReauthorize?: boolean;
+    },
   ): Promise<LockfileEntry> {
     this.validateDescriptorPolicy(descriptor);
+    const cache = await this.ensureCache();
+    const key = lockfileKey(descriptor.id, descriptor.version);
+    const existing = cache.get(key);
+    const fingerprint = admissionFingerprint(descriptor);
 
-    const existing = this.lockfile.get(`${descriptor.id}@${descriptor.version}`);
-    if (existing) {
-      if (existing.contentHash !== descriptor.contentHash) {
+    if (existing && !opts?.forceReauthorize) {
+      if (
+        existing.contentHash !== descriptor.contentHash ||
+        existing.admissionFingerprint !== fingerprint
+      ) {
+        this.deps.onSecurityEvent?.({
+          kind: "descriptor_changed",
+          detail: `hash mismatch for ${key}`,
+          capabilityId: descriptor.id,
+        });
         throw new ConflictError(
           "DESCRIPTOR_RUG_PULL",
-          `descriptor ${descriptor.id}@${descriptor.version} already admitted with different hash — re-authorization required`,
-          { existing: existing.contentHash, incoming: descriptor.contentHash },
+          `descriptor ${key} already admitted with different hash — re-authorization required`,
+          {
+            existing: existing.contentHash,
+            incoming: descriptor.contentHash,
+            existingFingerprint: existing.admissionFingerprint,
+            incomingFingerprint: fingerprint,
+          },
         );
       }
       return existing;
     }
-    if (descriptor.trustLevel === "verified_third_party" && descriptor.signature === null) {
-      throw new ValidationError(
-        "verified_third_party capabilities require a signature",
-        { id: descriptor.id },
-      );
+
+    if (existing && opts?.forceReauthorize) {
+      const prior = await this.deps.repo.getDescriptor(descriptor.id, descriptor.version);
+      if (prior) {
+        const diff = diffDescriptors(prior, descriptor);
+        if (diff.requiresReauthorization) {
+          this.deps.onSecurityEvent?.({
+            kind: "reauthorization",
+            detail: `re-admitting ${key}: ${diff.mutations.map((m) => m.field).join(",")}`,
+            capabilityId: descriptor.id,
+          });
+        }
+      }
     }
+
+    if (descriptor.trustLevel === "verified_third_party" && descriptor.signature === null) {
+      throw new ValidationError("verified_third_party capabilities require a signature", {
+        id: descriptor.id,
+      });
+    }
+
     const entry: LockfileEntry = {
       id: descriptor.id,
       version: descriptor.version,
       contentHash: descriptor.contentHash,
+      admissionFingerprint: fingerprint,
       signature: descriptor.signature,
       trustLevel: descriptor.trustLevel,
       admittedAt: this.deps.clock(),
       admittedBy,
+      toolDescriptorHashes: opts?.toolDescriptorHashes ?? {},
     };
-    this.lockfile.set(`${descriptor.id}@${descriptor.version}`, entry);
+    cache.set(key, entry);
     await this.deps.repo.createDescriptor(descriptor);
+    await this.persist();
     return entry;
   }
 
-  /** Activate a capability in a session/task context. Detects rug-pulls. */
   async activate(
     id: string,
     version: string,
@@ -211,15 +235,28 @@ export class CapabilityRegistry {
     if (descriptor === null) {
       throw new ValidationError("descriptor not found", { id, version });
     }
-    const lockfileEntry = this.lockfile.get(`${id}@${version}`);
+    const cache = await this.ensureCache();
+    const lockfileEntry = cache.get(lockfileKey(id, version));
     if (lockfileEntry === undefined) {
       throw new PermissionError("capability not admitted to lockfile", { id, version });
     }
-    if (lockfileEntry.contentHash !== descriptor.contentHash) {
+    const fingerprint = admissionFingerprint(descriptor);
+    if (
+      lockfileEntry.contentHash !== descriptor.contentHash ||
+      lockfileEntry.admissionFingerprint !== fingerprint
+    ) {
+      this.deps.onSecurityEvent?.({
+        kind: "descriptor_changed",
+        detail: `rug-pull on activate ${id}@${version}`,
+        capabilityId: id,
+      });
       throw new ConflictError(
         "DESCRIPTOR_RUG_PULL",
         `descriptor hash mismatch for ${id}@${version} — rug-pull detected, re-authorization required`,
-        { lockfile: lockfileEntry.contentHash, descriptor: descriptor.contentHash },
+        {
+          lockfile: lockfileEntry.contentHash,
+          descriptor: descriptor.contentHash,
+        },
       );
     }
     const activation: CapabilityActivation = {
@@ -237,7 +274,6 @@ export class CapabilityRegistry {
     return this.deps.repo.createActivation(activation);
   }
 
-  /** Deactivate a capability (soft — can be re-activated). */
   async deactivate(activationId: Uuid7): Promise<CapabilityActivation> {
     const a = await this.requireActivation(activationId);
     return this.deps.repo.updateActivation({
@@ -247,7 +283,6 @@ export class CapabilityRegistry {
     });
   }
 
-  /** Revoke a capability (hard — must be re-admitted to use again). */
   async revoke(activationId: Uuid7): Promise<CapabilityActivation> {
     const a = await this.requireActivation(activationId);
     const revoked = await this.deps.repo.updateActivation({
@@ -255,14 +290,21 @@ export class CapabilityRegistry {
       state: "revoked",
       deactivatedAt: this.deps.clock(),
     });
-    // Remove from lockfile.
-    this.lockfile.delete(`${a.capabilityId}@${a.capabilityVersion}`);
+    const cache = await this.ensureCache();
+    cache.delete(lockfileKey(a.capabilityId, a.capabilityVersion));
+    await this.persist();
     return revoked;
   }
 
-  /** Returns the current lockfile snapshot. */
-  snapshotLockfile(): CapabilityLockfile {
-    return { entries: [...this.lockfile.values()] };
+  async snapshotLockfile(): Promise<CapabilityLockfile> {
+    const cache = await this.ensureCache();
+    return buildLockfile([...cache.values()]);
+  }
+
+  /** Synchronous snapshot for tests that already warmed the cache via admit. */
+  snapshotLockfileSync(): CapabilityLockfile {
+    if (!this.cache) return buildLockfile([]);
+    return buildLockfile([...this.cache.values()]);
   }
 
   private async requireActivation(id: Uuid7): Promise<CapabilityActivation> {
@@ -272,85 +314,13 @@ export class CapabilityRegistry {
   }
 }
 
-// ────────────────────────── Skill file loader (interface only) ───────────────
-
-export interface SkillManifest {
-  readonly id: string;
-  readonly version: string;
-  readonly skillMdHash: ContentHash;
-  readonly compatibleHarness: string;
-  readonly requiredCapabilities: {
-    readonly filesystem: { readonly read: readonly string[]; readonly write: readonly string[] };
-    readonly network: readonly string[];
-    readonly secrets: readonly string[];
-  };
-  readonly tests: readonly string[];
-  readonly provenance: {
-    readonly source: string;
-    readonly publisher: string;
-    readonly signature: string | null;
-  };
-}
-
-export const skillManifestSchema = z.object({
-  id: z.string(),
-  version: z.string(),
-  skillMdHash: z.string() as unknown as z.ZodType<ContentHash>,
-  compatibleHarness: z.string(),
-  requiredCapabilities: z.object({
-    filesystem: z.object({ read: z.array(z.string()), write: z.array(z.string()) }),
-    network: z.array(z.string()),
-    secrets: z.array(z.string()),
-  }),
-  tests: z.array(z.string()),
-  provenance: z.object({
-    source: z.string(),
-    publisher: z.string(),
-    signature: z.string().nullable(),
-  }),
-});
-
-/**
- * Loads a `SkillManifest` from a `terminus.skill.yaml`-shaped object. Does NOT
- * read the filesystem — the caller supplies the parsed YAML.
- */
-export function loadSkillManifest(yaml: unknown): SkillManifest {
-  return skillManifestSchema.parse(yaml);
-}
-
-/** Converts a `SkillManifest` to a `CapabilityDescriptor`. */
-export function manifestToDescriptor(
-  manifest: SkillManifest,
-  source: string,
-  contentHash: ContentHash,
-): CapabilityDescriptor {
-  return {
-    id: manifest.id,
-    version: manifest.version,
-    kind: "skill" as CapabilityKind,
-    source,
-    contentHash,
-    signature: manifest.provenance.signature,
-    publisher: manifest.provenance.publisher,
-    trustLevel: manifest.provenance.signature ? "verified_third_party" : "untrusted",
-    entrypoint: null,
-    operations: [],
-    filesystem: {
-      read: manifest.requiredCapabilities.filesystem.read,
-      write: manifest.requiredCapabilities.filesystem.write,
-    },
-    network: { allow: manifest.requiredCapabilities.network },
-    secrets: manifest.requiredCapabilities.secrets,
-    subprocesses: {},
-    externalState: {},
-    resourceLimits: {},
-    modelVisibility: {},
-    configurationSchema: null,
-    compatibility: { compatibleHarness: manifest.compatibleHarness },
-  };
-}
-
+export * from "./hash.js";
+export * from "./lockfile.js";
+export * from "./descriptor_diff.js";
+export * from "./skill_discovery.js";
+export * from "./mcp_admission.js";
 export * from "./mcp_relay.js";
+export * from "./kernel_port.js";
 
 export type {
   CapabilityDescriptor,

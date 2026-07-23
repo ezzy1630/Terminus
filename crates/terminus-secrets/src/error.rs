@@ -8,6 +8,8 @@ pub enum SecretError {
     Denied(String),
     #[error("secret capability expired: {0}")]
     Expired(String),
+    #[error("secret capability revoked: {0}")]
+    CapabilityRevoked(String),
     #[error("invalid secret URI: {0}")]
     InvalidUri(String),
     #[error("provider unavailable: {0}")]

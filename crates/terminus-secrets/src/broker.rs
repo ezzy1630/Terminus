@@ -115,10 +115,10 @@ impl SecretProvider for InMemoryProvider {
     }
 }
 
-/// The secret broker holds a set of providers and an audit log.
 #[derive(Clone)]
 pub struct SecretBroker {
     providers: std::sync::Arc<Mutex<HashMap<String, std::sync::Arc<dyn SecretProvider>>>>,
+    revocations: std::sync::Arc<Mutex<std::collections::HashSet<String>>>,
     audit: std::sync::Arc<crate::audit::SecretAuditLog>,
 }
 
@@ -129,6 +129,10 @@ impl std::fmt::Debug for SecretBroker {
                 "providers_count",
                 &self.providers.lock().map(|g| g.len()).unwrap_or(0),
             )
+            .field(
+                "revocations_count",
+                &self.revocations.lock().map(|g| g.len()).unwrap_or(0),
+            )
             .field("audit", &self.audit)
             .finish()
     }
@@ -138,6 +142,7 @@ impl SecretBroker {
     pub fn new() -> Self {
         Self {
             providers: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            revocations: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
             audit: std::sync::Arc::new(crate::audit::SecretAuditLog::new()),
         }
     }
@@ -152,8 +157,24 @@ impl SecretBroker {
         }
     }
 
+    pub fn revoke(&self, uri: &str) {
+        if let Ok(mut g) = self.revocations.lock() {
+            g.insert(uri.to_string());
+        }
+    }
+
+    pub fn is_revoked(&self, uri: &str) -> bool {
+        self.revocations
+            .lock()
+            .map(|g| g.contains(uri))
+            .unwrap_or(false)
+    }
+
     /// Request a secret. Records the use in the audit log.
     pub fn request(&self, uri: &str, requested_by: &str) -> Result<SecretHandle, SecretError> {
+        if self.is_revoked(uri) {
+            return Err(SecretError::CapabilityRevoked(uri.to_string()));
+        }
         let (provider_name, _scope) = parse_uri(uri)?;
         let provider = {
             let g = self
@@ -248,5 +269,18 @@ mod tests {
         let s = format!("{handle:?}");
         assert!(s.contains("<redacted>"));
         assert!(!s.contains("ghp_xxx"));
+    }
+
+    #[test]
+    fn test_revocation_rejects_request() {
+        let broker = SecretBroker::new();
+        let provider = std::sync::Arc::new(InMemoryProvider::new());
+        provider.register("secret://github/repo-read", b"ghp_xxx".to_vec());
+        broker.register_provider("github", provider);
+        broker.revoke("secret://github/repo-read");
+        let err = broker
+            .request("secret://github/repo-read", "task-1")
+            .unwrap_err();
+        assert!(matches!(err, SecretError::CapabilityRevoked(_)));
     }
 }

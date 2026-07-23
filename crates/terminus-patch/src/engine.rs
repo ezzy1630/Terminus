@@ -393,7 +393,7 @@ impl PatchEngine {
         let safe = SafePath::new(&edit.path.relative_path)?;
         let resolved = self.resolver.resolve_strict(&safe)?;
         let original_bytes = std::fs::read(&resolved.host.host_path)?;
-        let text = String::from_utf8(original_bytes.clone()).map_err(|_| {
+        let text = String::from_utf8(original_bytes).map_err(|_| {
             PatchError::InvalidEdit(format!("{} is not valid UTF-8", edit.path.relative_path))
         })?;
         let lines: Vec<&str> = text.lines().collect();
@@ -407,7 +407,8 @@ impl PatchEngine {
                 lines.len()
             )));
         }
-        let mut new_lines: Vec<String> = lines[..start - 1].iter().map(|s| s.to_string()).collect();
+        let mut new_lines: Vec<String> =
+            lines[..start - 1].iter().map(ToString::to_string).collect();
         new_lines.push(String::from_utf8_lossy(&edit.replacement_utf8).to_string());
         for line in &lines[end..] {
             new_lines.push(line.to_string());
@@ -614,7 +615,8 @@ impl PatchEngine {
                 lines.len()
             )));
         }
-        let mut new_lines: Vec<String> = lines[..start - 1].iter().map(|s| s.to_string()).collect();
+        let mut new_lines: Vec<String> =
+            lines[..start - 1].iter().map(ToString::to_string).collect();
         for line in &lines[end..] {
             new_lines.push(line.to_string());
         }
@@ -708,19 +710,113 @@ impl PatchEngine {
         Ok(())
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     fn apply_unified_diff(
         &self,
-        _tx: &mut Transaction,
+        tx: &mut Transaction,
         edit: &UnifiedDiff,
-        _changed_files: &mut Vec<ChangedFile>,
+        changed_files: &mut Vec<ChangedFile>,
     ) -> Result<(), PatchError> {
-        // Unified diff application requires a git worktree context. We record
-        // the request but do not apply it here; this is a documented M5 gap.
-        let _ = edit;
-        Err(PatchError::InvalidEdit(
-            "unified_diff application requires git worktree context (M5)".to_string(),
-        ))
+        let diff_str = String::from_utf8_lossy(&edit.diff_utf8);
+        let diff_lines: Vec<&str> = diff_str.lines().collect();
+
+        // Extract target path from +++ b/<path> or --- a/<path>
+        let mut target_path = String::new();
+        for l in &diff_lines {
+            if l.starts_with("+++ b/") {
+                target_path = l.trim_start_matches("+++ b/").to_string();
+                break;
+            } else if l.starts_with("--- a/") && target_path.is_empty() {
+                target_path = l.trim_start_matches("--- a/").to_string();
+            }
+        }
+        if target_path.is_empty() {
+            target_path = "diff_patch.txt".to_string();
+        }
+
+        let original_hash = self.snapshot_if_existing(tx, &target_path)?;
+        let safe = SafePath::new(&target_path)?;
+        let resolved = self.resolver.resolve_strict(&safe)?;
+        let original_bytes = std::fs::read(&resolved.host.host_path).unwrap_or_default();
+        let original_text = String::from_utf8_lossy(&original_bytes).to_string();
+
+        let mut lines: Vec<String> = original_text.lines().map(ToString::to_string).collect();
+
+        let mut idx = 0;
+        let mut line_offset: i32 = 0;
+
+        while idx < diff_lines.len() {
+            let line = diff_lines[idx];
+            if line.starts_with("@@") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    let old_part = parts[1].trim_start_matches('-');
+                    let old_start: usize = old_part
+                        .split(',')
+                        .next()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1);
+
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_possible_wrap,
+                        clippy::cast_sign_loss
+                    )]
+                    let mut target_line = ((old_start as i32) - 1 + line_offset).max(0) as usize;
+                    idx += 1;
+
+                    while idx < diff_lines.len() && !diff_lines[idx].starts_with("@@") {
+                        let hunk_line = diff_lines[idx];
+                        if hunk_line.starts_with('-') {
+                            if target_line < lines.len() {
+                                lines.remove(target_line);
+                                line_offset -= 1;
+                            }
+                        } else if let Some(stripped) = hunk_line.strip_prefix('+') {
+                            let added_content = stripped.to_string();
+                            if target_line <= lines.len() {
+                                lines.insert(target_line, added_content);
+                            } else {
+                                lines.push(added_content);
+                            }
+                            target_line += 1;
+                            line_offset += 1;
+                        } else if hunk_line.starts_with(' ') {
+                            target_line += 1;
+                        }
+                        idx += 1;
+                    }
+                    continue;
+                }
+            }
+            idx += 1;
+        }
+
+        let new_text = if lines.is_empty() {
+            String::new()
+        } else {
+            lines.join("\n") + "\n"
+        };
+        let new_bytes = new_text.as_bytes();
+        if let Some(parent) = resolved.host.host_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&resolved.host.host_path, new_bytes)?;
+        let new_hash = sha256_hex(new_bytes);
+        tx.journal.push(JournalEntry::EditApplied {
+            relative_path: target_path.clone(),
+            edit: PatchEdit::UnifiedDiff(edit.clone()),
+            new_hash: new_hash.clone(),
+        });
+        changed_files.push(ChangedFile {
+            path: WorkspacePath {
+                workspace_id: String::new(),
+                relative_path: target_path,
+            },
+            old_sha256: format!("sha256:{original_hash}"),
+            new_sha256: format!("sha256:{new_hash}"),
+            operation: "unified_diff".to_string(),
+        });
+        Ok(())
     }
 
     fn verify_hash(

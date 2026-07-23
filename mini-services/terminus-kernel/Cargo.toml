@@ -71,9 +71,10 @@ url = "2"
 # bridge until prost-build codegen via buf is wired in CI (M3 completion).
 # The UDS binding + tonic server + capability-token RequestContext here prove
 # the transport contract; the HTTP bootstrap remains the default path.
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 prost-types = "0.13"
+terminus-remote = { path = "../../crates/terminus-remote" }
 
 [build-dependencies]
 tonic-build = "0.12"

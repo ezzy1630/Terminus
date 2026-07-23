@@ -14,6 +14,7 @@ pub enum SymbolKind {
     Constant,
     TypeAlias,
     Namespace,
+    Field,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

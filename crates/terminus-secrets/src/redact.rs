@@ -114,4 +114,43 @@ mod tests {
         assert_eq!(count, 0);
         assert_eq!(out, b"some content");
     }
+
+    #[test]
+    fn test_secret_never_leaks_in_prompts_logs_events_artifacts() {
+        let secret_token = "ghp_SECRET_TOKEN_BYTES_123456";
+        let mut r = Redactor::new();
+        r.add_literal("github_token", secret_token);
+
+        let contexts = [
+            ("prompt", format!("User prompt containing {secret_token}")),
+            ("tool_result", format!("Tool output: {secret_token}")),
+            (
+                "artifact",
+                format!("# Artifact Report\nKey: {secret_token}"),
+            ),
+            (
+                "event",
+                format!("{{\"event\": \"exec\", \"token\": \"{secret_token}\"}}"),
+            ),
+            (
+                "log",
+                format!("[ERROR] failed request with auth {secret_token}"),
+            ),
+            ("crash_report", format!("Panic at main.rs: {secret_token}")),
+        ];
+
+        for (kind, text) in contexts {
+            let (redacted_bytes, count) = r.redact(text.as_bytes());
+            assert!(count > 0, "secret must be detected in {kind}");
+            let redacted_str = String::from_utf8(redacted_bytes).unwrap();
+            assert!(
+                !redacted_str.contains(secret_token),
+                "secret bytes leaked in {kind}"
+            );
+            assert!(
+                redacted_str.contains("***REDACTED:github_token***"),
+                "missing redaction marker in {kind}"
+            );
+        }
+    }
 }

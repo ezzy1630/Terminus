@@ -37,6 +37,12 @@ upstream_prs: []
 
 # Sync log (most recent first).
 sync_log:
+  - date: "2026-07-23"
+    action: "substrate-effect-migration"
+    commit: "HEAD"
+    conflicts: 0
+    notes: >
+      Routed all 6 inherited OpenCode effect paths through kernel RPCs, secret capability brokers, out-of-process plugin hosts, and terminus-git. All bypass entries migrated to removed status.
   - date: "2026-07-22"
     action: "opencode-parity-closure"
     commit: "184da0e42edc12ea480d09c6620512f8b7a0e656"

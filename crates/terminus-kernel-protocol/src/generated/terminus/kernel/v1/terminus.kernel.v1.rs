@@ -707,6 +707,10 @@ pub struct KernelInfo {
     pub supported_backends: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, repeated, tag="5")]
     pub supported_services: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Stable kernel identity for capability-token audience + mTLS SAN binding
+    /// (SPEC §48.14). Format: `kernel:<opaque>`.
+    #[prost(string, tag="6")]
+    pub instance_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct KernelHealth {
@@ -734,6 +738,12 @@ pub struct RegisterWorkspaceRequest {
     /// trusted | untrusted | restricted
     #[prost(string, tag="4")]
     pub trust: ::prost::alloc::string::String,
+    /// Optional remote environment descriptor JSON (SPEC §48.14). Empty for local.
+    #[prost(string, tag="5")]
+    pub remote_environment_json: ::prost::alloc::string::String,
+    /// workspace | container | microvm | remote
+    #[prost(string, tag="6")]
+    pub kind: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WorkspaceEntryMessage {
