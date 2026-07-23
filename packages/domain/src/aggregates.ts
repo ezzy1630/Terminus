@@ -817,6 +817,9 @@ export interface CapabilityDescriptor {
   readonly modelVisibility: Readonly<Record<string, unknown>>;
   readonly configurationSchema: Readonly<Record<string, unknown>> | null;
   readonly compatibility: Readonly<Record<string, unknown>> | null;
+  readonly lifecycle?: { readonly disableScripts?: boolean; readonly isolateEnvironment?: boolean };
+  readonly toolSchemas?: readonly Readonly<Record<string, unknown>>[];
+  readonly effectClassification?: readonly ("read_only" | "fs_mutate" | "network_egress" | "process_exec" | "secret_access")[];
 }
 
 export interface CapabilityActivation {

@@ -95,6 +95,70 @@ export class CapabilityRegistry {
   }
 
   /**
+   * Classify effects requested by a descriptor.
+   */
+  classifyEffects(descriptor: CapabilityDescriptor): readonly ("read_only" | "fs_mutate" | "network_egress" | "process_exec" | "secret_access")[] {
+    const effects: ("read_only" | "fs_mutate" | "network_egress" | "process_exec" | "secret_access")[] = [];
+    const fs = descriptor.filesystem as { read?: unknown[]; write?: unknown[] };
+    if (fs && Array.isArray(fs.write) && fs.write.length > 0) {
+      effects.push("fs_mutate");
+    } else {
+      effects.push("read_only");
+    }
+    const net = descriptor.network as { allow?: unknown[] };
+    if (net && Array.isArray(net.allow) && net.allow.length > 0) {
+      effects.push("network_egress");
+    }
+    const sub = descriptor.subprocesses as { allow?: boolean; spawn?: unknown[] };
+    if (sub && (sub.allow === true || (Array.isArray(sub.spawn) && sub.spawn.length > 0))) {
+      effects.push("process_exec");
+    }
+    if (Array.isArray(descriptor.secrets) && descriptor.secrets.length > 0) {
+      effects.push("secret_access");
+    }
+    return effects;
+  }
+
+  /**
+   * Validate descriptor safety and check for prohibited capability combinations.
+   */
+  validateDescriptorPolicy(descriptor: CapabilityDescriptor): void {
+    const effects = this.classifyEffects(descriptor);
+
+    // Untrusted package lifecycle scripts prohibited (SPEC §35.10).
+    if (descriptor.trustLevel === "untrusted" && descriptor.lifecycle?.disableScripts === false) {
+      throw new ValidationError(
+        "untrusted capabilities must disable package lifecycle scripts",
+        { id: descriptor.id },
+      );
+    }
+
+    // Prohibited combination: untrusted capability asking for both process execution and network egress
+    if (
+      descriptor.trustLevel === "untrusted" &&
+      effects.includes("process_exec") &&
+      effects.includes("network_egress")
+    ) {
+      throw new PermissionError(
+        "prohibited capability combination: untrusted capability cannot request both process execution and network egress",
+        { id: descriptor.id, effects },
+      );
+    }
+
+    // Prohibited combination: untrusted capability asking for raw secrets and process execution
+    if (
+      descriptor.trustLevel === "untrusted" &&
+      effects.includes("secret_access") &&
+      effects.includes("process_exec")
+    ) {
+      throw new PermissionError(
+        "prohibited capability combination: untrusted capability cannot request both raw secrets and process execution",
+        { id: descriptor.id, effects },
+      );
+    }
+  }
+
+  /**
    * Admit a descriptor: validate hash, signature, and policy. Pin the
    * descriptor hash in the lockfile.
    */
@@ -102,12 +166,14 @@ export class CapabilityRegistry {
     descriptor: CapabilityDescriptor,
     admittedBy: PrincipalId,
   ): Promise<LockfileEntry> {
+    this.validateDescriptorPolicy(descriptor);
+
     const existing = this.lockfile.get(`${descriptor.id}@${descriptor.version}`);
     if (existing) {
       if (existing.contentHash !== descriptor.contentHash) {
         throw new ConflictError(
-          "ALREADY_EXISTS",
-          `descriptor ${descriptor.id}@${descriptor.version} already admitted with different hash`,
+          "DESCRIPTOR_RUG_PULL",
+          `descriptor ${descriptor.id}@${descriptor.version} already admitted with different hash — re-authorization required`,
           { existing: existing.contentHash, incoming: descriptor.contentHash },
         );
       }
@@ -133,7 +199,7 @@ export class CapabilityRegistry {
     return entry;
   }
 
-  /** Activate a capability in a session/task context. */
+  /** Activate a capability in a session/task context. Detects rug-pulls. */
   async activate(
     id: string,
     version: string,
@@ -151,8 +217,8 @@ export class CapabilityRegistry {
     }
     if (lockfileEntry.contentHash !== descriptor.contentHash) {
       throw new ConflictError(
-        "ALREADY_EXISTS",
-        `descriptor hash mismatch — re-admission required`,
+        "DESCRIPTOR_RUG_PULL",
+        `descriptor hash mismatch for ${id}@${version} — rug-pull detected, re-authorization required`,
         { lockfile: lockfileEntry.contentHash, descriptor: descriptor.contentHash },
       );
     }
@@ -283,6 +349,8 @@ export function manifestToDescriptor(
     compatibility: { compatibleHarness: manifest.compatibleHarness },
   };
 }
+
+export * from "./mcp_relay.js";
 
 export type {
   CapabilityDescriptor,

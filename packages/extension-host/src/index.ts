@@ -146,11 +146,18 @@ export class HookRunner {
     for (const cap of sorted) {
       const host = this.deps.hostFor(cap.extensionId);
       const start = this.deps.clock();
-      const outcome = await host.invoke({
-        capability: cap,
-        event,
-        timeoutMs: host.limits.wallClockMs,
-      });
+      let outcome: HookOutcome;
+      try {
+        outcome = await host.invoke({
+          capability: cap,
+          event,
+          timeoutMs: host.limits.wallClockMs,
+        });
+      } catch (err) {
+        // Crash isolation: convert plugin crash into fail-closed veto outcome (SPEC §35.9)
+        const errMsg = err instanceof Error ? err.message : String(err);
+        outcome = { kind: "veto", reason: `extension crashed during hook execution: ${errMsg}` };
+      }
       const elapsed = this.deps.clock() - start;
       if (elapsed > host.limits.wallClockMs) {
         throw new TimeoutError(`hook ${cap.extensionId}:${cap.kind}`, host.limits.wallClockMs);
@@ -185,6 +192,7 @@ export interface ExtensionInstallationInput {
   readonly signature: string | null;
   readonly publisher: string;
   readonly trustLevel: "builtin" | "first_party" | "verified_third_party" | "untrusted";
+  readonly lifecycleScripts?: { readonly preinstall?: string; readonly postinstall?: string; readonly prepare?: string };
 }
 
 export interface ExtensionInstallationResult {
@@ -212,7 +220,13 @@ export function validateInstallation(
   if (input.trustLevel === "verified_third_party" && input.signature === null) {
     throw new ValidationError("verified_third_party extensions require a signature");
   }
-  // Lifecycle scripts are denied by default (SPEC §35.10).
+  // Lifecycle scripts are denied by default for untrusted packages (SPEC §35.10).
+  if (input.trustLevel === "untrusted" && input.lifecycleScripts) {
+    const scripts = Object.keys(input.lifecycleScripts);
+    if (scripts.length > 0) {
+      throw new ValidationError(`untrusted package lifecycle scripts disabled by default: ${scripts.join(", ")}`);
+    }
+  }
   return {
     id: input.packageUri,
     version: "1.0.0",

@@ -75,6 +75,7 @@ export class GoogleRenderer extends BaseProviderRenderer {
   }
 
   async render(input: CanonicalRenderInput): Promise<RenderedProviderRequest> {
+    this.assertCompilationAuthority(input);
     const systemInstruction = renderSystemInstruction(input);
     const contents = renderContents(input);
     const tools = renderTools(input.toolSchemas);

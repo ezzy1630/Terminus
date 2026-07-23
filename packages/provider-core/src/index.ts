@@ -15,6 +15,7 @@ import type {
   TokenCount,
   Uuid7,
 } from "@terminus/domain";
+import { CompilationAuthorityError } from "@terminus/domain";
 import type { ContextFragment, ContextManifest } from "@terminus/context-ir";
 
 // ────────────────────────── Capability snapshots (§38.2) ─────────────────────
@@ -245,6 +246,10 @@ export interface CanonicalRenderInput {
   readonly outputReserveTokens: TokenCount;
   readonly hardInputLimit: TokenCount;
   readonly signal: AbortSignal | null;
+  /**
+   * Optional compiled manifest ID. Required for authority validation.
+   */
+  readonly manifestId?: Uuid7 | string | undefined;
 }
 
 export interface RenderedProviderRequest {
@@ -421,6 +426,18 @@ export abstract class BaseProviderRenderer implements ProviderRenderer {
       incompatibilities,
       downgradesRequired: downgrades,
     };
+  }
+
+  /**
+   * Asserts that the request was issued via Context Compiler compilation.
+   */
+  protected assertCompilationAuthority(input: CanonicalRenderInput): void {
+    if (!input.manifestId) {
+      throw new CompilationAuthorityError(
+        "Provider request bypassed Context Compiler execution — missing compiled manifest ID",
+        { providerId: this.providerId, model: input.model.modelKey },
+      );
+    }
   }
 
   abstract render(input: CanonicalRenderInput): Promise<RenderedProviderRequest>;

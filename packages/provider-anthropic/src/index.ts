@@ -86,6 +86,7 @@ export class AnthropicRenderer extends BaseProviderRenderer {
   }
 
   async render(input: CanonicalRenderInput): Promise<RenderedProviderRequest> {
+    this.assertCompilationAuthority(input);
     const system = renderSystemBlocks(input);
     const messages = renderMessages(input);
     const tools = renderTools(input.toolSchemas);

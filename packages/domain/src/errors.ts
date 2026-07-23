@@ -68,6 +68,8 @@ export const ErrorCode = {
   UNKNOWN_SETTLEMENT: "UNKNOWN_SETTLEMENT",
   STATE_TRANSITION_INVALID: "STATE_TRANSITION_INVALID",
   SCOPE_VIOLATION: "SCOPE_VIOLATION",
+  CONTEXT_COMPILER_BYPASS: "CONTEXT_COMPILER_BYPASS",
+  DESCRIPTOR_RUG_PULL: "DESCRIPTOR_RUG_PULL",
   INTERNAL: "INTERNAL",
 } as const;
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
@@ -94,6 +96,8 @@ export const errorCodeSchema = z.enum([
   "UNKNOWN_SETTLEMENT",
   "STATE_TRANSITION_INVALID",
   "SCOPE_VIOLATION",
+  "CONTEXT_COMPILER_BYPASS",
+  "DESCRIPTOR_RUG_PULL",
   "INTERNAL",
 ]);
 
@@ -134,7 +138,9 @@ export const CODE_CATEGORY: Readonly<Record<ErrorCode, ErrorCategory>> = {
   CURSOR_EXPIRED: "conflict",
   UNKNOWN_SETTLEMENT: "unknown_settlement",
   STATE_TRANSITION_INVALID: "validation",
-  SCOPE_VIOLATION: "policy_denied",
+  SCOPE_VIOLATION: "permission",
+  CONTEXT_COMPILER_BYPASS: "integrity",
+  DESCRIPTOR_RUG_PULL: "conflict",
   INTERNAL: "internal",
 } as const;
 
@@ -397,6 +403,18 @@ export class ScopeViolationError extends ForgeError {
       details: { path, scope },
     });
     this.name = "ScopeViolationError";
+  }
+}
+
+export class CompilationAuthorityError extends ForgeError {
+  constructor(reason: string, details?: Record<string, unknown>) {
+    super({
+      code: "CONTEXT_COMPILER_BYPASS",
+      message: `Provider request denied: ${reason}`,
+      details,
+      suggestedAction: "Route all provider requests through compileContext() in @terminus/context-compiler.",
+    });
+    this.name = "CompilationAuthorityError";
   }
 }
 

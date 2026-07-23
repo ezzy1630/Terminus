@@ -88,6 +88,7 @@ export class OpenAiRenderer extends BaseProviderRenderer {
   }
 
   async render(input: CanonicalRenderInput): Promise<RenderedProviderRequest> {
+    this.assertCompilationAuthority(input);
     const messages = renderMessages(input);
     const tools = renderTools(input.toolSchemas);
     const body: OpenAiRequestBody = {

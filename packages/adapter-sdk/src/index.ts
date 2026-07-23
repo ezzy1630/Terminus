@@ -179,5 +179,26 @@ export function validateAdapterResult(
   void z;
 }
 
+/**
+ * Independently verifies external harness adapter completion claims (Codex, Pi,
+ * Claude Code). Claims of success or passing tests are NOT trusted directly;
+ * they are checked by Terminus's verification engine against task criteria.
+ */
+export function verifyAdapterCompletion(
+  adapterResult: AdapterResult,
+  verificationPassed: boolean,
+): { readonly verifiedStatus: "completed" | "failed"; readonly reason: string } {
+  if (adapterResult.status === "completed" && !verificationPassed) {
+    return {
+      verifiedStatus: "failed",
+      reason: "adapter claimed completion but independent verification engine checks failed",
+    };
+  }
+  return {
+    verifiedStatus: adapterResult.status === "completed" ? "completed" : "failed",
+    reason: adapterResult.status === "completed" ? "all verification criteria satisfied" : "adapter reported failure",
+  };
+}
+
 export { ValidationError };
 export type { Uuid7, Rfc3339Timestamp, ContentHash, ArtifactRef };
