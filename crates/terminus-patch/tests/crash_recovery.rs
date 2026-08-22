@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use tempfile::tempdir;
 use terminus_fs::PathResolver;
 use terminus_kernel_protocol::{

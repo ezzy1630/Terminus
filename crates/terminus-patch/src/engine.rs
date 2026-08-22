@@ -149,6 +149,13 @@ impl PatchEngine {
                     let snapshot = Path::new(snapshot_path);
                     if snapshot.exists() {
                         std::fs::copy(snapshot, &resolved.host.host_path)?;
+                    } else {
+                        // An empty/missing snapshot records that the file did
+                        // not exist before this transaction created it, so
+                        // rollback must remove it.
+                        if resolved.host.exists {
+                            std::fs::remove_file(&resolved.host.host_path)?;
+                        }
                     }
                 }
             }
@@ -318,7 +325,7 @@ impl PatchEngine {
             PatchEdit::DeleteRange(e) => self.apply_delete_range(tx, baseline, e, changed_files),
             PatchEdit::MoveFile(e) => self.apply_move_file(tx, baseline, e, changed_files),
             PatchEdit::DeleteFile(e) => self.apply_delete_file(tx, baseline, e, changed_files),
-            PatchEdit::UnifiedDiff(e) => self.apply_unified_diff(tx, e, changed_files),
+            PatchEdit::UnifiedDiff(e) => self.apply_unified_diff(tx, baseline, e, changed_files),
         }
     }
 
@@ -330,6 +337,11 @@ impl PatchEngine {
         let safe = SafePath::new(relative_path)?;
         let resolved = self.resolver.resolve_strict(&safe)?;
         if !resolved.host.exists {
+            // Register the path with no snapshot file: if this transaction
+            // creates it, rollback must remove it again instead of leaving a
+            // created file behind while reporting "rolled_back".
+            tx.snapshots
+                .insert(relative_path.to_string(), PathBuf::new());
             return Ok(String::new());
         }
         let original_bytes = std::fs::read(&resolved.host.host_path)?;
@@ -366,6 +378,15 @@ impl PatchEngine {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&resolved.host.host_path, &edit.content)?;
+        // Created files have no prior snapshot; register an empty one so a
+        // validation-failure rollback removes the file instead of leaving it.
+        tx.snapshots
+            .insert(edit.path.relative_path.clone(), PathBuf::new());
+        tx.journal.push(JournalEntry::FileSnapshotted {
+            relative_path: edit.path.relative_path.clone(),
+            snapshot_path: String::new(),
+            original_hash: String::new(),
+        });
         let new_hash = sha256_hex(&edit.content);
         tx.journal.push(JournalEntry::EditApplied {
             relative_path: edit.path.relative_path.clone(),
@@ -713,6 +734,7 @@ impl PatchEngine {
     fn apply_unified_diff(
         &self,
         tx: &mut Transaction,
+        baseline: &WorkspaceBaseline,
         edit: &UnifiedDiff,
         changed_files: &mut Vec<ChangedFile>,
     ) -> Result<(), PatchError> {
@@ -734,6 +756,24 @@ impl PatchEngine {
         }
 
         let original_hash = self.snapshot_if_existing(tx, &target_path)?;
+        // A unified diff carries no expected_sha256 field; anchor it to the
+        // workspace baseline instead so a file changed since the transaction's
+        // baseline is rejected rather than silently overwritten.
+        if let Some(source) = baseline
+            .sources
+            .iter()
+            .find(|s| s.path.relative_path == target_path)
+        {
+            let bs = source.sha256.strip_prefix("sha256:").unwrap_or(&source.sha256);
+            let actual = original_hash.strip_prefix("sha256:").unwrap_or(&original_hash);
+            if !bs.is_empty() && bs != actual {
+                return Err(PatchError::StaleSource {
+                    path: target_path.clone(),
+                    expected: source.sha256.clone(),
+                    actual: original_hash,
+                });
+            }
+        }
         let safe = SafePath::new(&target_path)?;
         let resolved = self.resolver.resolve_strict(&safe)?;
         let original_bytes = std::fs::read(&resolved.host.host_path).unwrap_or_default();
@@ -761,7 +801,8 @@ impl PatchEngine {
                         clippy::cast_possible_wrap,
                         clippy::cast_sign_loss
                     )]
-                    let mut target_line = ((old_start as i32) - 1 + line_offset).max(0) as usize;
+                    let mut target_line =
+                        ((old_start as i64) - 1 + i64::from(line_offset)).max(0) as usize;
                     idx += 1;
 
                     while idx < diff_lines.len() && !diff_lines[idx].starts_with("@@") {
@@ -826,8 +867,14 @@ impl PatchEngine {
         actual_hash: &str,
         baseline: &WorkspaceBaseline,
     ) -> Result<(), PatchError> {
+        // Source-hash anchoring is mandatory (crate AGENTS.md): an empty
+        // expectation would silently turn a hash-anchored patch into an
+        // unconditional overwrite of whatever is on disk.
         if expected_sha256.is_empty() {
-            return Ok(());
+            return Err(PatchError::InvalidEdit(format!(
+                "edit on `{}` must specify expected_sha256",
+                path.relative_path
+            )));
         }
         let expected_stripped = expected_sha256
             .strip_prefix("sha256:")
@@ -875,15 +922,27 @@ impl PatchEngine {
             .leases
             .lock()
             .map_err(|e| PatchError::Aborted(format!("lease mutex: {e}")))?;
+        // Track what this call acquired so a partial conflict rolls back the
+        // leases taken so far; otherwise they would be held until process
+        // exit and block every future transaction touching those paths.
+        let mut acquired: Vec<String> = Vec::new();
         for p in paths {
-            if let Some(holder) = guard.get(p) {
-                if holder != tx_id {
-                    return Err(PatchError::Aborted(format!(
-                        "path `{p}` is locked by transaction `{holder}`"
-                    )));
+            let conflict = match guard.get(p) {
+                Some(holder) if holder.as_str() != tx_id => Some(holder.clone()),
+                Some(_) => None,
+                None => {
+                    guard.insert(p.clone(), tx_id.to_string());
+                    acquired.push(p.clone());
+                    None
                 }
-            } else {
-                guard.insert(p.clone(), tx_id.to_string());
+            };
+            if let Some(holder) = conflict {
+                for a in &acquired {
+                    guard.remove(a);
+                }
+                return Err(PatchError::Aborted(format!(
+                    "path `{p}` is locked by transaction `{holder}`"
+                )));
             }
         }
         Ok(())
@@ -898,17 +957,37 @@ impl PatchEngine {
     }
 }
 
-fn edit_target_path(edit: &PatchEdit) -> Option<&WorkspacePath> {
+fn edit_target_path(edit: &PatchEdit) -> Option<WorkspacePath> {
     match edit {
-        PatchEdit::ReplaceSymbol(e) => Some(&e.path),
-        PatchEdit::ReplaceRange(e) => Some(&e.path),
-        PatchEdit::ReplaceExactText(e) => Some(&e.path),
-        PatchEdit::Insert(e) => Some(&e.path),
-        PatchEdit::DeleteRange(e) => Some(&e.path),
-        PatchEdit::CreateFile(e) => Some(&e.path),
-        PatchEdit::MoveFile(e) => Some(&e.from),
-        PatchEdit::DeleteFile(e) => Some(&e.path),
-        PatchEdit::UnifiedDiff(_) => None,
+        PatchEdit::ReplaceSymbol(e) => Some(e.path.clone()),
+        PatchEdit::ReplaceRange(e) => Some(e.path.clone()),
+        PatchEdit::ReplaceExactText(e) => Some(e.path.clone()),
+        PatchEdit::Insert(e) => Some(e.path.clone()),
+        PatchEdit::DeleteRange(e) => Some(e.path.clone()),
+        PatchEdit::CreateFile(e) => Some(e.path.clone()),
+        PatchEdit::MoveFile(e) => Some(e.from.clone()),
+        PatchEdit::DeleteFile(e) => Some(e.path.clone()),
+        PatchEdit::UnifiedDiff(e) => {
+            // Extract the same target path apply_unified_diff will use so
+            // unified-diff edits participate in per-path leasing.
+            let s = String::from_utf8_lossy(&e.diff_utf8);
+            let mut target = String::new();
+            for l in s.lines() {
+                if let Some(p) = l.strip_prefix("+++ b/") {
+                    target = p.to_string();
+                    break;
+                } else if let Some(p) = l.strip_prefix("--- a/") {
+                    if target.is_empty() {
+                        target = p.to_string();
+                    }
+                }
+            }
+            if target.is_empty() {
+                None
+            } else {
+                Some(WorkspacePath::new("", target))
+            }
+        }
     }
 }
 
@@ -1245,5 +1324,87 @@ mod tests {
             )
             .unwrap();
         assert_eq!(resp.state, "applied");
+    }
+    #[test]
+    fn acquire_leases_rolls_back_partial_acquisition_on_conflict() {
+        let (_dir, engine) = engine();
+        {
+            let mut guard = engine.leases.lock().unwrap();
+            guard.insert("b.txt".to_string(), "tx-other".to_string());
+        }
+        let err = engine
+            .acquire_leases(
+                "tx-mine",
+                &["a.txt".to_string(), "b.txt".to_string()],
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("locked by transaction"));
+        // The lease taken on a.txt before the conflict must have been
+        // rolled back; otherwise it would be held until process exit.
+        let guard = engine.leases.lock().unwrap();
+        assert!(!guard.contains_key("a.txt"));
+        assert!(!guard.contains_key("b.txt") || guard["b.txt"] == "tx-other");
+    }
+    #[test]
+    fn rollback_removes_files_created_by_failed_transaction() {
+        let (dir, engine) = engine();
+        std::fs::write(dir.path().join("workspace/code.txt"), "fn main() {}\n").unwrap();
+        let create = PatchEdit::CreateFile(CreateFile {
+            path: ws_path("new_file.txt"),
+            must_not_exist: true,
+            content: b"created".to_vec(),
+            media_type: "text/plain".to_string(),
+        });
+        // Second edit fails hash verification, aborting the transaction.
+        let stale = PatchEdit::ReplaceExactText(ReplaceExactText {
+            path: ws_path("code.txt"),
+            expected_sha256: "sha256:deadbeef".to_string(),
+            expected_utf8: b"fn main() {}".to_vec(),
+            replacement_utf8: b"fn replaced() {}".to_vec(),
+            require_unique: true,
+        });
+        let result = engine.apply(
+            "tx-create-fail",
+            &baseline_for("ws-1"),
+            &[create, stale],
+            PatchCommitMode::ApplyToWorktree,
+            ValidationProfile::TaskDefault,
+        );
+        assert!(result.is_err());
+        assert!(!dir.path().join("workspace/new_file.txt").exists());
+        let content = std::fs::read_to_string(dir.path().join("workspace/code.txt")).unwrap();
+        assert_eq!(content, "fn main() {}\n");
+    }
+
+    #[test]
+    fn crash_recovery_removes_created_files() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("created.txt"), "created\n").unwrap();
+        let resolver = PathResolver::new(&ws).unwrap();
+        let journal_dir = tmp.path().join("journals");
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let engine =
+            PatchEngine::new(resolver, journal_dir.clone(), state_dir.clone()).unwrap();
+
+        let mut journal = JournalRecord::new("tx-created".to_string());
+        journal.push(JournalEntry::TransactionStarted {
+            transaction_id: "tx-created".to_string(),
+            baseline_workspace_id: "ws-1".to_string(),
+            edit_count: 1,
+        });
+        // Empty snapshot path records that created.txt did not pre-exist.
+        journal.push(JournalEntry::FileSnapshotted {
+            relative_path: "created.txt".to_string(),
+            snapshot_path: String::new(),
+            original_hash: String::new(),
+        });
+        journal.write_to(&journal_dir).unwrap();
+
+        let resp = engine.reconcile("tx-created").unwrap();
+        assert_eq!(resp.state, "rolled_back");
+        assert!(!ws.join("created.txt").exists());
     }
 }
