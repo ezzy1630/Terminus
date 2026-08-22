@@ -73,7 +73,13 @@ pub async fn start(
     let (job_id, _outcome, mut receiver) = state
         .kernel
         .jobs
-        .start(&ctx, &req.envelope.effect_intent, req.command.clone(), profile, req.durable)
+        .start(
+            &ctx,
+            &req.envelope.effect_intent,
+            req.command.clone(),
+            profile,
+            req.durable,
+        )
         .await
         .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
     // Drain the bounded event stream so the child is not left backpressured;

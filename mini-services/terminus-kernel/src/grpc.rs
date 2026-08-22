@@ -1439,7 +1439,9 @@ pub async fn serve_grpc_mtls(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     material
         .validate()
-        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.to_string().into() })?;
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+            error.to_string().into()
+        })?;
     let cert = tokio::fs::read(&material.cert_pem_path).await?;
     let key = tokio::fs::read(&material.key_pem_path).await?;
     let ca = tokio::fs::read(&material.client_ca_pem_path).await?;

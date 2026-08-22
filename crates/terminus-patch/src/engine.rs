@@ -764,8 +764,13 @@ impl PatchEngine {
             .iter()
             .find(|s| s.path.relative_path == target_path)
         {
-            let bs = source.sha256.strip_prefix("sha256:").unwrap_or(&source.sha256);
-            let actual = original_hash.strip_prefix("sha256:").unwrap_or(&original_hash);
+            let bs = source
+                .sha256
+                .strip_prefix("sha256:")
+                .unwrap_or(&source.sha256);
+            let actual = original_hash
+                .strip_prefix("sha256:")
+                .unwrap_or(&original_hash);
             if !bs.is_empty() && bs != actual {
                 return Err(PatchError::StaleSource {
                     path: target_path.clone(),
@@ -1333,10 +1338,7 @@ mod tests {
             guard.insert("b.txt".to_string(), "tx-other".to_string());
         }
         let err = engine
-            .acquire_leases(
-                "tx-mine",
-                &["a.txt".to_string(), "b.txt".to_string()],
-            )
+            .acquire_leases("tx-mine", &["a.txt".to_string(), "b.txt".to_string()])
             .unwrap_err();
         assert!(err.to_string().contains("locked by transaction"));
         // The lease taken on a.txt before the conflict must have been
@@ -1386,8 +1388,7 @@ mod tests {
         let journal_dir = tmp.path().join("journals");
         let state_dir = tmp.path().join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
-        let engine =
-            PatchEngine::new(resolver, journal_dir.clone(), state_dir.clone()).unwrap();
+        let engine = PatchEngine::new(resolver, journal_dir.clone(), state_dir.clone()).unwrap();
 
         let mut journal = JournalRecord::new("tx-created".to_string());
         journal.push(JournalEntry::TransactionStarted {

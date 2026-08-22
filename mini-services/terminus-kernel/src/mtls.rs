@@ -15,8 +15,8 @@ use terminus_remote::{Identity, MtlsMaterial};
 pub fn mtls_material_from_env() -> Result<MtlsMaterial, Box<dyn std::error::Error + Send + Sync>> {
     let cert = std::env::var("TERMINUS_KERNEL_MTLS_CERT")
         .map_err(|_| "TERMINUS_KERNEL_MTLS_CERT required")?;
-    let key =
-        std::env::var("TERMINUS_KERNEL_MTLS_KEY").map_err(|_| "TERMINUS_KERNEL_MTLS_KEY required")?;
+    let key = std::env::var("TERMINUS_KERNEL_MTLS_KEY")
+        .map_err(|_| "TERMINUS_KERNEL_MTLS_KEY required")?;
     let ca = std::env::var("TERMINUS_KERNEL_MTLS_CLIENT_CA")
         .map_err(|_| "TERMINUS_KERNEL_MTLS_CLIENT_CA required")?;
     let peer = std::env::var("TERMINUS_KERNEL_EXPECTED_PEER")

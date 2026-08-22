@@ -245,8 +245,14 @@ mod tests {
 
     #[test]
     fn matches_equal_and_rejects_unequal() {
-        assert!(constant_time_eq("terminus-kernel-dev-token", "terminus-kernel-dev-token"));
-        assert!(!constant_time_eq("terminus-kernel-dev-token", "terminus-kernel-dev-tokeN"));
+        assert!(constant_time_eq(
+            "terminus-kernel-dev-token",
+            "terminus-kernel-dev-token"
+        ));
+        assert!(!constant_time_eq(
+            "terminus-kernel-dev-token",
+            "terminus-kernel-dev-tokeN"
+        ));
         assert!(!constant_time_eq("short", "longer-token"));
         assert!(constant_time_eq("", ""));
     }

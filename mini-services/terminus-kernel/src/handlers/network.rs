@@ -133,7 +133,11 @@ pub async fn request(
         match tokio::net::TcpStream::connect(target_addr).await {
             Ok(mut stream) => {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let path = if url.path().is_empty() { "/" } else { url.path() };
+                let path = if url.path().is_empty() {
+                    "/"
+                } else {
+                    url.path()
+                };
                 let path_and_query = match url.query() {
                     Some(q) => format!("{path}?{q}"),
                     None => path.to_string(),
