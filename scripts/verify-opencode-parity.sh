@@ -31,16 +31,8 @@ bun install --frozen-lockfile --ignore-scripts || {
 }
 if [[ -f "$source_dir/node_modules/.bin/tsc" ]]; then
   cat << 'EOF' > "$source_dir/node_modules/.bin/tsgo"
-#!/usr/bin/env node
-const { execFileSync } = require("node:child_process");
-const path = require("node:path");
-const tscPath = path.join(__dirname, "tsc");
-try {
-  const tsgoPath = path.join(__dirname, "../@typescript/native-preview/bin/tsgo.js");
-  execFileSync(process.execPath, [tsgoPath, ...process.argv.slice(2)], { stdio: "inherit" });
-} catch {
-  execFileSync(process.execPath, [tscPath, ...process.argv.slice(2)], { stdio: "inherit" });
-}
+#!/usr/bin/env bash
+exec "$(dirname "$0")/tsc" "$@"
 EOF
   chmod +x "$source_dir/node_modules/.bin/tsgo"
 fi
