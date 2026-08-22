@@ -97,10 +97,7 @@ impl HardenedOptions {
         if self.no_new_privileges {
             v.push(EnforcementFeature::NoNewPrivs);
         }
-        if self.memory_limit_bytes.is_some()
-            || self.cpus.is_some()
-            || self.pids_limit.is_some()
-        {
+        if self.memory_limit_bytes.is_some() || self.cpus.is_some() || self.pids_limit.is_some() {
             v.push(EnforcementFeature::CgroupResourceLimits);
         }
         if network_deny {
@@ -288,7 +285,10 @@ impl SandboxBackend for ContainerSandboxBackend {
                     EnforcementFeature::MountNamespace,
                     EnforcementFeature::PidNamespace,
                 ],
-                unsupported: vec![EnforcementFeature::SeccompFilter, EnforcementFeature::NoNewPrivs],
+                unsupported: vec![
+                    EnforcementFeature::SeccompFilter,
+                    EnforcementFeature::NoNewPrivs,
+                ],
                 notes: vec![
                     "OCI runtime configured; image digest-pinned".to_string(),
                     format!(
@@ -380,9 +380,13 @@ mod hardened_tests {
         let backend = hardened_backend();
         let report = backend.enforcement_report();
         assert_eq!(report.status, EnforcementStatus::Enforced);
-        assert!(report.enforced.contains(&EnforcementFeature::FilesystemIsolation));
+        assert!(report
+            .enforced
+            .contains(&EnforcementFeature::FilesystemIsolation));
         assert!(report.enforced.contains(&EnforcementFeature::NoNewPrivs));
-        assert!(report.enforced.contains(&EnforcementFeature::CgroupResourceLimits));
+        assert!(report
+            .enforced
+            .contains(&EnforcementFeature::CgroupResourceLimits));
         // Seccomp stays degraded: implicit runtime defaults are not
         // argv-proven.
         assert!(report.degraded.contains(&EnforcementFeature::SeccompFilter));
@@ -394,8 +398,13 @@ mod hardened_tests {
             no_new_privileges: false,
             ..HardenedOptions::default()
         };
-        assert!(!options.flags(true).iter().any(|f| f.contains("no-new-privileges")));
-        assert!(!options.proven_features(true).contains(&EnforcementFeature::NoNewPrivs));
+        assert!(!options
+            .flags(true)
+            .iter()
+            .any(|f| f.contains("no-new-privileges")));
+        assert!(!options
+            .proven_features(true)
+            .contains(&EnforcementFeature::NoNewPrivs));
 
         let limits_off = HardenedOptions {
             memory_limit_bytes: None,
@@ -462,12 +471,9 @@ mod hardened_tests {
         .expect("hardened container must satisfy tier2");
         assert_eq!(sel.backend.id(), "container");
 
-        let plain = Arc::new(ContainerSandboxBackend::configure(
-            "docker",
-            digest_image(),
-            1,
-        )
-        .unwrap()) as Arc<dyn SandboxBackend>;
+        let plain =
+            Arc::new(ContainerSandboxBackend::configure("docker", digest_image(), 1).unwrap())
+                as Arc<dyn SandboxBackend>;
         assert!(terminus_sandbox::select_secure(
             &[plain],
             &SandboxProfile::default_restrictive(),

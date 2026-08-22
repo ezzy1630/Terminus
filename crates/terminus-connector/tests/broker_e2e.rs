@@ -1,4 +1,5 @@
-//! End-to-end connector broker conformance (ADR-0035 §2, roadmap Phase 4
+//! End-to-end connector broker conformance (ADR-0035 §2).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! exit gate: "credential use is exact-operation bound").
 
 use std::sync::Arc;
@@ -68,9 +69,10 @@ async fn fixture_stack() -> (ConnectorBroker, u16, TcpListener) {
     secret_broker.register_provider("github", provider);
 
     let grants = Arc::new(GrantStore::new());
-    let broker = ConnectorBroker::builder(secret_broker, grants, Arc::new(egress_for_port(port)), KEY)
-        .connector("fixture-api", AuthStyle::Bearer)
-        .build();
+    let broker =
+        ConnectorBroker::builder(secret_broker, grants, Arc::new(egress_for_port(port)), KEY)
+            .connector("fixture-api", AuthStyle::Bearer)
+            .build();
     (broker, port, listener)
 }
 
@@ -133,7 +135,10 @@ async fn happy_path_injects_credential_and_returns_receipt() {
     let grant = mint_grant(port);
     let op = operation("/repos/acme/widget/pulls", port);
 
-    let server = tokio::spawn(serve_once(listener, b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok".to_vec()));
+    let server = tokio::spawn(serve_once(
+        listener,
+        b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+    ));
     let receipt = broker.execute(&op, &grant).await.unwrap();
     let request_bytes = server.await.unwrap();
 
@@ -157,8 +162,10 @@ async fn replayed_grant_rejected_after_first_use() {
     let grant = mint_grant(port);
     let op = operation("/repos/acme/widget/pulls", port);
 
-    let server =
-        tokio::spawn(serve_once(listener, b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok".to_vec()));
+    let server = tokio::spawn(serve_once(
+        listener,
+        b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+    ));
     broker.execute(&op, &grant).await.unwrap();
     server.await.unwrap();
 
@@ -193,7 +200,10 @@ async fn method_change_rejected() {
     let mut op = operation("/repos/acme/widget/pulls", port);
     op.method = "DELETE".into();
     let err = broker.execute(&op, &grant).await.unwrap_err();
-    assert!(matches!(err, terminus_connector::ConnectorError::BindingMismatch(_)));
+    assert!(matches!(
+        err,
+        terminus_connector::ConnectorError::BindingMismatch(_)
+    ));
 }
 
 #[tokio::test]
@@ -234,7 +244,10 @@ async fn scheme_substitution_rejected_by_binding() {
     let mut rogue = operation("/repos/acme/widget/pulls", port);
     rogue.scheme = "https".into();
     let err = broker.execute(&rogue, &grant).await.unwrap_err();
-    assert!(matches!(err, terminus_connector::ConnectorError::BindingMismatch(_)));
+    assert!(matches!(
+        err,
+        terminus_connector::ConnectorError::BindingMismatch(_)
+    ));
 }
 
 #[tokio::test]
@@ -286,7 +299,11 @@ async fn egress_deny_blocks_before_consumption() {
     let op = operation("/repos/acme/widget/pulls", port);
     let err = broker.execute(&op, &grant).await.unwrap_err();
     assert!(matches!(err, terminus_connector::ConnectorError::Egress(_)));
-    assert_eq!(grants.consumed_count(), 0, "refused dispatch must not consume the grant");
+    assert_eq!(
+        grants.consumed_count(),
+        0,
+        "refused dispatch must not consume the grant"
+    );
 }
 
 #[tokio::test]
@@ -324,8 +341,14 @@ async fn echoed_credential_redacted_from_response() {
     let (broker, port, listener) = fixture_stack().await;
     let grant = mint_grant(port);
     let op = operation("/repos/acme/widget/pulls", port);
-    let echo_body = format!("token={{\"access_token\":\"{}\"}}\n", String::from_utf8(CREDENTIAL.to_vec()).unwrap());
-    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", echo_body.len());
+    let echo_body = format!(
+        "token={{\"access_token\":\"{}\"}}\n",
+        String::from_utf8(CREDENTIAL.to_vec()).unwrap()
+    );
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+        echo_body.len()
+    );
     let mut response = head.into_bytes();
     response.extend_from_slice(echo_body.as_bytes());
 

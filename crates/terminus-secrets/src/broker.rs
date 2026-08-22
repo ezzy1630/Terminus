@@ -43,16 +43,16 @@ impl SecretHandle {
     pub fn http_header_pair(&self, auth_scheme: &str) -> Result<(String, String), SecretError> {
         let value = String::from_utf8(self.value.clone())
             .map_err(|_| SecretError::InvalidGrant("credential is not valid UTF-8".into()))?;
-        Ok(("Authorization".to_string(), format!("{auth_scheme} {value}")))
+        Ok((
+            "Authorization".to_string(),
+            format!("{auth_scheme} {value}"),
+        ))
     }
 
     /// Build a named-header pair for APIs that use a custom key header
     /// (e.g. `X-Api-Key`). Same trusted-connector-only contract as
     /// [`SecretHandle::http_header_pair`].
-    pub fn named_header_pair(
-        &self,
-        header_name: &str,
-    ) -> Result<(String, String), SecretError> {
+    pub fn named_header_pair(&self, header_name: &str) -> Result<(String, String), SecretError> {
         if header_name.eq_ignore_ascii_case("authorization") {
             return self.http_header_pair("Bearer");
         }

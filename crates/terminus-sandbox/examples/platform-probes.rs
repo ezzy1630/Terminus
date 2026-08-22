@@ -7,11 +7,10 @@
 //!
 //! Usage: `cargo run -p terminus-sandbox --example platform-probes [out.json]`
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use std::path::PathBuf;
 use std::sync::Arc;
-use terminus_sandbox::{
-    run_probes, LocalRestrictiveBackend, Platform, SandboxBackend,
-};
+use terminus_sandbox::{run_probes, LocalRestrictiveBackend, Platform, SandboxBackend};
 
 fn main() {
     let out_path = std::env::args()
@@ -31,8 +30,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     backends.insert(
         0,
-        Arc::new(terminus_sandbox_linux::LinuxSandboxBackend::new())
-            as Arc<dyn SandboxBackend>,
+        Arc::new(terminus_sandbox_linux::LinuxSandboxBackend::new()) as Arc<dyn SandboxBackend>,
     );
 
     #[cfg(target_os = "macos")]
@@ -65,12 +63,15 @@ fn main() {
         all_probes.push(probes);
     }
 
-    let refs: Vec<(&dyn SandboxBackend, Platform, &[terminus_sandbox::ProbeResult])> =
-        backends
-            .iter()
-            .zip(all_probes.iter())
-            .map(|(b, p)| (b.as_ref(), platform, p.as_slice()))
-            .collect();
+    let refs: Vec<(
+        &dyn SandboxBackend,
+        Platform,
+        &[terminus_sandbox::ProbeResult],
+    )> = backends
+        .iter()
+        .zip(all_probes.iter())
+        .map(|(b, p)| (b.as_ref(), platform, p.as_slice()))
+        .collect();
     let matrix = terminus_sandbox::platform_matrix(&refs);
 
     let json = serde_json::to_vec_pretty(&matrix).expect("serialize matrix");

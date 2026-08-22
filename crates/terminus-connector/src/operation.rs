@@ -60,7 +60,10 @@ mod tests {
     #[test]
     fn literal_class_requires_exact_match() {
         assert!(path_matches_class("/repos/o/r/pulls", "/repos/o/r/pulls"));
-        assert!(!path_matches_class("/repos/o/r/pulls", "/repos/o/other/pulls"));
+        assert!(!path_matches_class(
+            "/repos/o/r/pulls",
+            "/repos/o/other/pulls"
+        ));
     }
 
     #[test]
@@ -81,10 +84,7 @@ mod tests {
 
     #[test]
     fn empty_wildcard_rejected() {
-        assert!(!path_matches_class(
-            "/repos/{owner}/x",
-            "/repos//x"
-        ));
+        assert!(!path_matches_class("/repos/{owner}/x", "/repos//x"));
     }
 
     #[test]

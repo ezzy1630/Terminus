@@ -82,8 +82,8 @@ pub struct ConnectorGrant {
 
 fn sign_claims(claims: &GrantClaims, key: &[u8]) -> Result<Vec<u8>, SecretError> {
     let claims_json = serde_json::to_vec(claims)?;
-    let mut mac =
-        HmacSha256::new_from_slice(key).map_err(|_| SecretError::InvalidGrant("hmac key".into()))?;
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|_| SecretError::InvalidGrant("hmac key".into()))?;
     mac.update(&claims_json);
     Ok(mac.finalize().into_bytes().to_vec())
 }
@@ -98,8 +98,9 @@ impl ConnectorGrant {
 
     /// Decode and verify a token string against `key`.
     pub fn decode_and_verify(s: &str, key: &[u8]) -> Result<Self, SecretError> {
-        let (claims_b64, sig_hex) =
-            s.split_once('.').ok_or_else(|| SecretError::InvalidGrant("malformed token".into()))?;
+        let (claims_b64, sig_hex) = s
+            .split_once('.')
+            .ok_or_else(|| SecretError::InvalidGrant("malformed token".into()))?;
         let claims_bytes = base64_url_decode(claims_b64)
             .map_err(|_| SecretError::InvalidGrant("bad claims encoding".into()))?;
         let signature =
@@ -364,7 +365,9 @@ impl GrantStore {
         };
         guard.insert(
             claims.grant_id.clone(),
-            ConsumedRecord { remaining_uses: remaining },
+            ConsumedRecord {
+                remaining_uses: remaining,
+            },
         );
         self.persist(&guard);
 
@@ -495,7 +498,14 @@ mod tests {
 
     fn mint() -> ConnectorGrant {
         issuer()
-            .mint(workload(), "secret://github/repo-read", b"canary-value", binding(), 300, 1)
+            .mint(
+                workload(),
+                "secret://github/repo-read",
+                b"canary-value",
+                binding(),
+                300,
+                1,
+            )
             .unwrap()
     }
 
@@ -666,7 +676,14 @@ mod tests {
 
     #[test]
     fn oversized_ttl_rejected() {
-        let err = issuer().mint(workload(), "secret://x/y", b"m", binding(), MAX_GRANT_TTL_SECS + 1, 1);
+        let err = issuer().mint(
+            workload(),
+            "secret://x/y",
+            b"m",
+            binding(),
+            MAX_GRANT_TTL_SECS + 1,
+            1,
+        );
         assert!(matches!(err, Err(SecretError::InvalidGrant(_))));
     }
 

@@ -82,14 +82,16 @@ pub struct ConnectorBrokerBuilder {
 
 impl std::fmt::Debug for ConnectorBrokerBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConnectorBrokerBuilder").finish_non_exhaustive()
+        f.debug_struct("ConnectorBrokerBuilder")
+            .finish_non_exhaustive()
     }
 }
 
 impl ConnectorBrokerBuilder {
     /// Register a connector descriptor at build time.
     pub fn connector(mut self, id: impl Into<String>, auth: AuthStyle) -> Self {
-        self.connectors.insert(id.into(), ConnectorDescriptor { auth });
+        self.connectors
+            .insert(id.into(), ConnectorDescriptor { auth });
         self
     }
 
@@ -188,8 +190,12 @@ impl ConnectorBroker {
         {
             return Err(ConnectorError::BindingMismatch(format!(
                 "destination {}:{}/{} != {}:{}/{}",
-                op.scheme, op.host, op.port,
-                binding.scheme, binding.destination_host, binding.destination_port
+                op.scheme,
+                op.host,
+                op.port,
+                binding.scheme,
+                binding.destination_host,
+                binding.destination_port
             )));
         }
         if op.method != binding.method {
@@ -220,9 +226,9 @@ impl ConnectorBroker {
         }
 
         // -- 3. Resolve credential inside the trusted boundary -----------
-        let handle =
-            self.secret_broker
-                .request(&claims.secret_uri, &claims.workload.workload_id)?;
+        let handle = self
+            .secret_broker
+            .request(&claims.secret_uri, &claims.workload.workload_id)?;
         if handle.digest() != claims.credential_digest {
             return Err(terminus_secrets::SecretError::InvalidGrant(
                 "credential rotated since grant issuance; mint a fresh grant".into(),

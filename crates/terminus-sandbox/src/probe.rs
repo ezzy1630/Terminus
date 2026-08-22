@@ -62,10 +62,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Run the full probe suite against one backend using `workspace_root` as
 /// the mapped workspace directory. Probes are best-effort per platform:
 /// anything unmeasurable is reported honestly as `Unmeasurable`.
-pub fn run_probes(
-    backend: &dyn crate::SandboxBackend,
-    workspace_root: &Path,
-) -> Vec<ProbeResult> {
+pub fn run_probes(backend: &dyn crate::SandboxBackend, workspace_root: &Path) -> Vec<ProbeResult> {
     let mut results = vec![
         filesystem_escape_probe(backend),
         ambient_secret_probe(backend),
@@ -161,9 +158,8 @@ fn filesystem_escape_probe(backend: &dyn crate::SandboxBackend) -> ProbeResult {
 
 fn ambient_secret_probe(backend: &dyn crate::SandboxBackend) -> ProbeResult {
     const BACKEND_PLACEHOLDER: &str = "";
-    let script = format!(
-        "if [ -n \"${PROBE_SECRET_VAR}\" ]; then echo LEAKED; else echo CLEAN; fi"
-    );
+    let script =
+        format!("if [ -n \"${PROBE_SECRET_VAR}\" ]; then echo LEAKED; else echo CLEAN; fi");
     match execute(backend, &script) {
         Ok(out) if out.contains("CLEAN") => ProbeResult {
             backend_id: BACKEND_PLACEHOLDER.to_string(),
@@ -257,11 +253,7 @@ fn network_egress_probe(backend: &dyn crate::SandboxBackend) -> ProbeResult {
 /// machine-readable platform support matrix consumed by release decision
 /// tooling (SPEC §19.5, §36: declarations derive from artifacts).
 pub fn platform_matrix(
-    entries: &[(
-        &dyn crate::SandboxBackend,
-        Platform,
-        &[ProbeResult],
-    )],
+    entries: &[(&dyn crate::SandboxBackend, Platform, &[ProbeResult])],
 ) -> serde_json::Value {
     let rows: Vec<serde_json::Value> = entries
         .iter()

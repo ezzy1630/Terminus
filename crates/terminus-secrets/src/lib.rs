@@ -24,7 +24,7 @@ pub use audit::{AuditEntry, SecretAuditLog};
 pub use broker::{InMemoryProvider, SecretBroker, SecretHandle, SecretMetadata, SecretProvider};
 pub use error::SecretError;
 pub use grant::{
-    ConsumedGrant, ConnectorGrant, GrantBinding, GrantClaims, GrantIssuer, GrantStore,
+    ConnectorGrant, ConsumedGrant, GrantBinding, GrantClaims, GrantIssuer, GrantStore,
     WorkloadIdentity, MAX_GRANT_TTL_SECS,
 };
 pub use redact::{RedactionPattern, Redactor};

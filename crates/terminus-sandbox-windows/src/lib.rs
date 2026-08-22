@@ -139,8 +139,8 @@ mod tests {
     fn secure_mode_falls_through_windows_to_container() {
         // On a Windows host with only the windows backend present, tier2
         // selection must fail closed...
-        let windows = Arc::new(WindowsSandboxBackend::with_mocked_platform(true))
-            as Arc<dyn SandboxBackend>;
+        let windows =
+            Arc::new(WindowsSandboxBackend::with_mocked_platform(true)) as Arc<dyn SandboxBackend>;
         assert!(terminus_sandbox::select_secure(
             &[windows],
             &SandboxProfile::default_restrictive(),

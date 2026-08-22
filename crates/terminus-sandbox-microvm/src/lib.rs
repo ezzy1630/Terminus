@@ -51,7 +51,7 @@ impl Hypervisor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MicroVmBackend {
     hypervisor: Hypervisor,
     /// Resolved absolute path to the hypervisor binary.
@@ -149,12 +149,14 @@ pub fn generate_machine_config(
             "microVM backend requires a pinned rootfs digest and guest kernel".into(),
         ));
     }
-    let rootfs = backend.rootfs_digest.as_ref().ok_or_else(|| {
-        SandboxError::Unsupported("missing rootfs digest".into())
-    })?;
-    let kernel = backend.kernel_path.as_ref().ok_or_else(|| {
-        SandboxError::Unsupported("missing guest kernel path".into())
-    })?;
+    let rootfs = backend
+        .rootfs_digest
+        .as_ref()
+        .ok_or_else(|| SandboxError::Unsupported("missing rootfs digest".into()))?;
+    let kernel = backend
+        .kernel_path
+        .as_ref()
+        .ok_or_else(|| SandboxError::Unsupported("missing guest kernel path".into()))?;
     let mut v = serde_json::json!({
         "boot-source": {
             "kernel_image_path": kernel.display().to_string(),
@@ -224,8 +226,7 @@ impl SandboxBackend for MicroVmBackend {
             degraded: vec![],
             unsupported: vec![],
             notes: vec![
-                "separate guest kernel: host processes cannot reach VM memory/syscalls"
-                    .to_string(),
+                "separate guest kernel: host processes cannot reach VM memory/syscalls".to_string(),
                 "read-only digest-pinned root drive; workspace material enters via \
                  brokered handles only"
                     .to_string(),
@@ -253,9 +254,7 @@ impl SandboxBackend for MicroVmBackend {
                 "ambient plugin authority not permitted".into(),
             ));
         }
-        generate_machine_config(self, profile)
-            .map(|_| ())
-            .map_err(|e| e)
+        generate_machine_config(self, profile).map(|_| ())
     }
 
     fn spawn_wrapper(
@@ -313,8 +312,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    const DIGEST: &str =
-        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn unconfigured() -> MicroVmBackend {
         MicroVmBackend {
@@ -439,16 +437,5 @@ mod tests {
         let cfg_idx = argv.iter().position(|a| a == "--config-file").unwrap();
         let cfg_text = std::fs::read_to_string(&argv[cfg_idx + 1]).unwrap();
         assert!(cfg_text.contains("is_read_only"));
-    }
-}
-
-impl Clone for MicroVmBackend {
-    fn clone(&self) -> Self {
-        Self {
-            hypervisor: self.hypervisor,
-            binary: self.binary.clone(),
-            rootfs_digest: self.rootfs_digest.clone(),
-            kernel_path: self.kernel_path.clone(),
-        }
     }
 }

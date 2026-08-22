@@ -102,10 +102,14 @@ fn make_fixture() -> Fixture {
     });
 
     let egress = localhost_policy(listener_port);
-    let kernel = KernelHandle::new_with_egress_policy(dir.path().to_path_buf(), egress, RateLimit {
-        bytes_per_second: 10_000_000,
-        max_total_bytes: 10_000_000,
-    })
+    let kernel = KernelHandle::new_with_egress_policy(
+        dir.path().to_path_buf(),
+        egress,
+        RateLimit {
+            bytes_per_second: 10_000_000,
+            max_total_bytes: 10_000_000,
+        },
+    )
     .unwrap();
 
     // Register the FIXTURE provider with canary material (fixture-only
@@ -121,10 +125,7 @@ fn make_fixture() -> Fixture {
         .register_provider("fixture", provider);
     kernel
         .connectors
-        .register_connector(
-            "fixture-api",
-            terminus_connector::AuthStyle::Bearer,
-        )
+        .register_connector("fixture-api", terminus_connector::AuthStyle::Bearer)
         .unwrap();
 
     Fixture {
@@ -240,7 +241,10 @@ async fn canary_never_reaches_any_persisted_surface() {
     // Surface 3: every file the kernel persisted during the flow.
     let mut scanner = fx.canary.scanner();
     // Also scan for the Authorization-style composite form.
-    let _ = scanner.register_literal("composite", format!("Bearer {}", fx.canary.as_str()).as_bytes());
+    let _ = scanner.register_literal(
+        "composite",
+        format!("Bearer {}", fx.canary.as_str()).as_bytes(),
+    );
     let dirty = scan_kernel_dir_for_canary(fx._dir.path(), &scanner);
     assert!(
         dirty.is_empty(),
@@ -283,7 +287,12 @@ async fn wrong_destination_grant_rejected_before_any_io() {
         .unwrap();
     let mut rogue = operation_for(&fx);
     rogue.host = "evil.example.com".into();
-    assert!(fx.kernel.connectors.execute(&ctx, &rogue, &grant).await.is_err());
+    assert!(fx
+        .kernel
+        .connectors
+        .execute(&ctx, &rogue, &grant)
+        .await
+        .is_err());
     // Nothing was consumed by the refused attempt.
     assert_eq!(fx.kernel.connectors.consumed_grants(), 0);
 }
@@ -309,7 +318,10 @@ async fn minting_requires_secret_operation_class() {
         .connectors
         .mint_grant(&ctx, SECRET_URI, binding_for(&fx), 300, 1)
         .unwrap_err();
-    assert_eq!(err.code(), terminus_kernel_protocol::ErrorCode::PermissionDenied);
+    assert_eq!(
+        err.code(),
+        terminus_kernel_protocol::ErrorCode::PermissionDenied
+    );
 }
 
 #[tokio::test]

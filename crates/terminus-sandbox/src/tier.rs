@@ -173,8 +173,12 @@ mod tests {
     #[test]
     fn tier_floor_accumulates() {
         assert_eq!(RiskTier::Tier0.required_features().len(), 1);
-        assert!(RiskTier::Tier2.required_features().contains(&EnforcementFeature::NoNewPrivs));
-        assert!(RiskTier::Tier3.required_features().contains(&EnforcementFeature::UserNamespace));
+        assert!(RiskTier::Tier2
+            .required_features()
+            .contains(&EnforcementFeature::NoNewPrivs));
+        assert!(RiskTier::Tier3
+            .required_features()
+            .contains(&EnforcementFeature::UserNamespace));
     }
 
     #[test]

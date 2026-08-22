@@ -22,27 +22,16 @@
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
-use terminus_sandbox::profile::{
-    FilesystemAccess, NetworkAccess, ProcessAccess, SandboxProfile,
-};
+use terminus_sandbox::profile::{FilesystemAccess, NetworkAccess, ProcessAccess, SandboxProfile};
 use terminus_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
 use terminus_sandbox::{SandboxBackend, SandboxError};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MacOsSandboxBackend {
     /// Resolved path to `sandbox-exec`. `None` means not available.
     sandbox_exec_path: Option<PathBuf>,
     /// Host directory that backs `workspace://` rules.
     workspace_root: Option<PathBuf>,
-}
-
-impl Default for MacOsSandboxBackend {
-    fn default() -> Self {
-        Self {
-            sandbox_exec_path: None,
-            workspace_root: None,
-        }
-    }
 }
 
 impl MacOsSandboxBackend {
@@ -143,12 +132,8 @@ pub fn generate_seatbelt_profile(
                 sb.push_str(&format!("(allow file-read* (subpath \"{host}\"))\n"));
             }
             FilesystemAccess::ReadWrite => {
-                sb.push_str(&format!(
-                    "(allow file-write* (subpath \"{host}\"))\n"
-                ));
-                sb.push_str(&format!(
-                    "(allow file-read* (subpath \"{host}\"))\n"
-                ));
+                sb.push_str(&format!("(allow file-write* (subpath \"{host}\"))\n"));
+                sb.push_str(&format!("(allow file-read* (subpath \"{host}\"))\n"));
             }
             FilesystemAccess::Deny => {
                 // Deny default already covers it; emit an explicit rule so
@@ -248,8 +233,7 @@ impl SandboxBackend for MacOsSandboxBackend {
                 ],
                 notes: vec![
                     "seatbelt CLI (sandbox-exec) not found on PATH".to_string(),
-                    "fail closed: use terminus-sandbox-container or a microVM backend"
-                        .to_string(),
+                    "fail closed: use terminus-sandbox-container or a microVM backend".to_string(),
                 ],
             }
         }
@@ -279,8 +263,7 @@ impl SandboxBackend for MacOsSandboxBackend {
             ));
         }
         // Generation must succeed for THIS profile before acceptance.
-        let _ =
-            generate_seatbelt_profile(profile, self.workspace_root.as_deref())?;
+        let _ = generate_seatbelt_profile(profile, self.workspace_root.as_deref())?;
         Ok(())
     }
 
@@ -294,10 +277,7 @@ impl SandboxBackend for MacOsSandboxBackend {
         // Write the profile to a private per-spawn file. mkstemp-style
         // naming under the OS temp dir keeps it out of the workspace and
         // unreachable to other users on single-user dev hosts.
-        let dir = std::env::temp_dir().join(format!(
-            "terminus-seatbelt-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("terminus-seatbelt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok()?;
         let profile_path = dir.join(format!(
             "profile-{}.sb",
@@ -353,10 +333,8 @@ fn which_sandbox_exec() -> Option<PathBuf> {
         candidates.push(system);
     }
     for candidate in candidates {
-        let dir = std::env::temp_dir().join(format!(
-            "terminus-seatbelt-probe-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("terminus-seatbelt-probe-{}", std::process::id()));
         if std::fs::create_dir_all(&dir).is_err() {
             continue;
         }
@@ -393,8 +371,7 @@ mod phase4_tests {
     use terminus_sandbox::SecretsAccess;
 
     fn backend() -> MacOsSandboxBackend {
-        MacOsSandboxBackend::with_mocked_sandbox_exec(true)
-            .with_workspace_root("/tmp/ws-root")
+        MacOsSandboxBackend::with_mocked_sandbox_exec(true).with_workspace_root("/tmp/ws-root")
     }
 
     #[test]
@@ -405,13 +382,10 @@ mod phase4_tests {
         // Read-only workspace root allowed to read...
         assert!(sb.contains("(allow file-read* (subpath \"/tmp/ws-root\"))"));
         // ...active worktree read-write...
-        assert!(sb.contains(
-            "(allow file-write* (subpath \"/tmp/ws-root/active-worktree\"))"
-        ));
+        assert!(sb.contains("(allow file-write* (subpath \"/tmp/ws-root/active-worktree\"))"));
         // ...protected paths explicitly denied...
         assert!(sb.contains("(deny file-read* (subpath \"/tmp/ws-root/.git\"))"));
-        assert!(sb
-            .contains("(deny file-write* (subpath \"/tmp/ws-root/credentials\"))"));
+        assert!(sb.contains("(deny file-write* (subpath \"/tmp/ws-root/credentials\"))"));
         // ...and network deny emits no socket allowance.
         assert!(!sb.contains("allow network-outbound (to *)"));
         assert!(sb.contains("network: denied by deny-default"));
@@ -434,8 +408,7 @@ mod phase4_tests {
     fn ambient_secrets_never_generate_a_profile() {
         let mut profile = SandboxProfile::default_restrictive();
         profile.secrets = SecretsAccess::AmbientEnvironment;
-        let err =
-            generate_seatbelt_profile(&profile, None).expect_err("ambient secrets refused");
+        let err = generate_seatbelt_profile(&profile, None).expect_err("ambient secrets refused");
         assert!(matches!(err, SandboxError::Misconfigured(_)));
     }
 
@@ -475,7 +448,9 @@ mod phase4_tests {
         let b = backend();
         let r = b.enforcement_report();
         assert_eq!(r.status, EnforcementStatus::Enforced);
-        assert!(r.enforced.contains(&EnforcementFeature::FilesystemIsolation));
+        assert!(r
+            .enforced
+            .contains(&EnforcementFeature::FilesystemIsolation));
         assert!(r.degraded.contains(&EnforcementFeature::SeccompFilter));
         assert!(
             r.unsupported.contains(&EnforcementFeature::UserNamespace),
@@ -514,10 +489,7 @@ mod live_probe_tests {
             // Honest skip: no evidence, no claim.
             return;
         }
-        let results = run_probes(
-            &backend,
-            &std::env::temp_dir(),
-        );
+        let results = run_probes(&backend, &std::env::temp_dir());
         let verdict = |k: ProbeKind| {
             results
                 .iter()
