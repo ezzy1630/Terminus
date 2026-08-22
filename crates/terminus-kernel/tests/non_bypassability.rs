@@ -575,10 +575,17 @@ fn nb_patch_apply_is_idempotent() {
         dirty_digest: String::new(),
         sources: vec![],
     };
+    // Source-hash anchoring is mandatory; pin the edit to the current content.
+    let expected_sha256 = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"initial content\n");
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    };
     let edits = vec![terminus_kernel_protocol::PatchEdit::ReplaceExactText(
         terminus_kernel_protocol::ReplaceExactText {
             path: WorkspacePath::new("ws-1", "file.txt"),
-            expected_sha256: String::new(),
+            expected_sha256,
             expected_utf8: b"initial content\n".to_vec(),
             replacement_utf8: b"updated content\n".to_vec(),
             require_unique: true,
