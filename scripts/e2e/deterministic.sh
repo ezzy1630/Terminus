@@ -146,3 +146,10 @@ start_control
 TERMINUS_E2E_CONTROL_URL="http://127.0.0.1:$CONTROL_PORT" \
   TERMINUS_E2E_CONTROL_TOKEN="$TERMINUS_CONTROL_TOKEN" \
   bun run "$ROOT/scripts/e2e/assert-restart.ts"
+
+echo "[e2e] verifying ARP v2 client parity (CLI ↔ graphical adapter) on the live daemon"
+TERMINUS_E2E_CONTROL_URL="http://127.0.0.1:$CONTROL_PORT" \
+  TERMINUS_E2E_CONTROL_TOKEN="$TERMINUS_CONTROL_TOKEN" \
+  bun test "$ROOT/tests/e2e/arp_v2_lifecycle.test.ts"
+
+echo "[e2e] PASS"
