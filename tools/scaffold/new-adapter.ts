@@ -36,6 +36,9 @@ writeFileSync(
   `adapter:
   id: ${id}
   version: 0.1.0
+  # Maturity tier (roadmap Phase 0): fixture | stub | experimental | preview | production.
+  # New adapters start as stubs; production requires live probe evidence.
+  status: stub
   inner_harness_version: pinned
   description: |
     TODO: one-paragraph description of the ${id} adapter. Note which Terminus

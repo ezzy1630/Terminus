@@ -18,6 +18,8 @@ const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
 const OUT_DIR = join(ROOT, "docs", "generated");
 
 const GENERATORS: Array<{ name: string; script: string; source: string }> = [
+  { name: "Component maturity registry", script: "tools/codegen/maturity.ts", source: "maturity.yaml" },
+  { name: "Static inventory", script: "tools/codegen/inventory.ts", source: "crates/, packages/, apps/, adapters/, python/" },
   { name: "Event catalog", script: "tools/codegen/events.ts", source: "schemas/events/catalog.yaml" },
   { name: "Tool schema catalog", script: "tools/codegen/tools.ts", source: "schemas/tools/*.json" },
   { name: "Configuration reference", script: "tools/codegen/config.ts", source: "packages/config/src/index.ts" },

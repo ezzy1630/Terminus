@@ -1,0 +1,173 @@
+# Component maturity registry (roadmap Phase 0: truth, reproducibility, freeze).
+#
+# Machine-readable source of truth for the maturity of every code component
+# in this repository. Consumed by:
+#   - tools/codegen/maturity.ts   (coverage validation + docs/generated/component-maturity.md)
+#   - scripts/check-declaration-consistency.ts (truth-check gate)
+#   - scripts/produce-release-decision.ts (limitations + platform support)
+#   - scripts/produce-system-card.ts (system card)
+#
+# Tiers (strictly ordered; a claim may never exceed its evidence):
+#   fixture       test double or benchmark corpus; never production-capable
+#   stub          declared contract only; implementation incomplete or no-op;
+#                 must never be discoverable as production-capable
+#   experimental  working implementation; conformance unproven; may change
+#                 without notice
+#   preview       working implementation with direct test coverage on a
+#                 load-bearing surface; not yet conformance-proven at HEAD
+#   production    conformance-tested at HEAD with signed evidence artifacts.
+#
+# NOTHING in this repository is `production` today: the default branch has no
+# associated CI run at HEAD and no signed evidence artifacts exist yet. That
+# is the Phase 0 finding this register records honestly. A component is
+# promoted ONLY by adding an `evidence` pointer to a reproducible artifact.
+
+schema_version: 1
+updated: "2026-08-22"
+
+components:
+  # ---------------- Rust crates (trusted/performance plane) ----------------
+  - { id: terminus-kernel, kind: rust-crate, path: crates/terminus-kernel, tier: experimental,
+      basis: "Service assembly substantive (13 service groups); full non-bypassability not proven at HEAD (no CI run)" }
+  - { id: terminus-kernel-protocol, kind: rust-crate, path: crates/terminus-kernel-protocol, tier: preview,
+      basis: "Codegen'd protocol types + error codes with unit tests" }
+  - { id: terminus-authz, kind: rust-crate, path: crates/terminus-authz, tier: experimental,
+      basis: "Signed/scoped capability tokens real; revocation + nonce state in-memory (audit 4.4)" }
+  - { id: terminus-policy, kind: rust-crate, path: crates/terminus-policy, tier: preview,
+      basis: "Strictest-wins command policy engine with unit tests" }
+  - { id: terminus-sandbox, kind: rust-crate, path: crates/terminus-sandbox, tier: preview,
+      basis: "Backend trait + LocalRestrictive with honest degraded reporting" }
+  - { id: terminus-sandbox-linux, kind: rust-crate, path: crates/terminus-sandbox-linux, tier: experimental,
+      basis: "Strongest platform path (real bwrap argv); needs current signed conformance evidence at HEAD" }
+  - { id: terminus-sandbox-macos, kind: rust-crate, path: crates/terminus-sandbox-macos, tier: stub,
+      basis: "Seatbelt profile generation not implemented; reports Degraded honestly" }
+  - { id: terminus-sandbox-windows, kind: rust-crate, path: crates/terminus-sandbox-windows, tier: stub,
+      basis: "AppContainer/Job Object wiring not implemented; reports Degraded honestly" }
+  - { id: terminus-sandbox-container, kind: rust-crate, path: crates/terminus-sandbox-container, tier: stub,
+      basis: "Wrapper emits docker argv only; enforcement report corrected (Phase 0) to Degraded until hardened OCI profiles land (Phase 4)" }
+  - { id: terminus-process, kind: rust-crate, path: crates/terminus-process, tier: preview,
+      basis: "Process groups, bounded capture w/ artifact spill, timeouts; worker primitive" }
+  - { id: terminus-jobs, kind: rust-crate, path: crates/terminus-jobs, tier: experimental,
+      basis: "Useful supervision but job state is process-local; durability claims prohibited until Phase 2 substrate exists (audit 4.5)" }
+  - { id: terminus-fs, kind: rust-crate, path: crates/terminus-fs, tier: preview,
+      basis: "Safe path resolution; traversal/symlink rejection tests" }
+  - { id: terminus-patch, kind: rust-crate, path: crates/terminus-patch, tier: preview,
+      basis: "Transactional edit engine with journal/snapshot/rollback tests" }
+  - { id: terminus-artifacts, kind: rust-crate, path: crates/terminus-artifacts, tier: preview,
+      basis: "CAS sha256 layout, atomic rename+fsync, SQLite metadata bridge tests" }
+  - { id: terminus-secrets, kind: rust-crate, path: crates/terminus-secrets, tier: stub,
+      basis: "Raw-value SecretHandle API + in-memory provider; north-star 'secrets never enter runtime context' unmet (audit 4.6); replacement in Phase 4" }
+  - { id: terminus-egress, kind: rust-crate, path: crates/terminus-egress, tier: experimental,
+      basis: "L4 broker real (DNS/IP/port/scheme/bytes); no L7 intent semantics yet (audit 4.7)" }
+  - { id: terminus-code-intel, kind: rust-crate, path: crates/terminus-code-intel, tier: experimental,
+      basis: "Tree-sitter symbol index with basic tests" }
+  - { id: terminus-extension-runtime, kind: rust-crate, path: crates/terminus-extension-runtime, tier: stub,
+      basis: "WASI extension host stub" }
+  - { id: terminus-git, kind: rust-crate, path: crates/terminus-git, tier: experimental,
+      basis: "Protected worktree/commit/merge operations, small test set" }
+  - { id: terminus-remote, kind: rust-crate, path: crates/terminus-remote, tier: experimental,
+      basis: "Execution pool + digest-pinned image primitives" }
+  - { id: terminus-kernel-testkit, kind: rust-crate, path: crates/terminus-kernel-testkit, tier: fixture,
+      basis: "Fakes/builders/in-memory stores for tests only" }
+
+  # ---------------- TypeScript packages (control/cognition plane) ----------------
+  - { id: domain, kind: ts-package, path: packages/domain, tier: preview,
+      basis: "Canonical types/state machines/typed errors consumed by every package" }
+  - { id: runtime-protocol, kind: ts-package, path: packages/runtime-protocol, tier: preview,
+      basis: "Semantic event types + SSE codec with tests" }
+  - { id: config, kind: ts-package, path: packages/config, tier: preview,
+      basis: "Layered typed configuration with JSON Schema codegen" }
+  - { id: public-api, kind: ts-package, path: packages/public-api, tier: preview,
+      basis: "HTTP API definitions/error envelope/SSE with generated client surface" }
+  - { id: aci, kind: ts-package, path: packages/aci, tier: experimental,
+      basis: "Agent-Computer Interface tools; unproven at HEAD" }
+  - { id: adapter-sdk, kind: ts-package, path: packages/adapter-sdk, tier: experimental,
+      basis: "Stdio JSON-RPC adapter SDK; maturity gate added in Phase 0; live probes never run" }
+  - { id: artifact-client, kind: ts-package, path: packages/artifact-client, tier: experimental,
+      basis: "Artifact ingest/get/link/gc client" }
+  - { id: capability-registry, kind: ts-package, path: packages/capability-registry, tier: experimental,
+      basis: "Skills/MCP/plugins activation lifecycle" }
+  - { id: context-compiler, kind: ts-package, path: packages/context-compiler, tier: experimental,
+      basis: "16-step assembly algorithm; manifest reproduction not proven end-to-end at HEAD" }
+  - { id: context-ir, kind: ts-package, path: packages/context-ir, tier: experimental,
+      basis: "Fragment/source-descriptor types" }
+  - { id: extension-host, kind: ts-package, path: packages/extension-host, tier: experimental,
+      basis: "WASI/process hosts, hook semantics" }
+  - { id: memory, kind: ts-package, path: packages/memory, tier: experimental,
+      basis: "Extraction/consolidation/retrieval with unit tests; promotion gates unproven on cohorts" }
+  - { id: model-router, kind: ts-package, path: packages/model-router, tier: experimental,
+      basis: "Deterministic routing/rate limiting/circuit breaker" }
+  - { id: observability, kind: ts-package, path: packages/observability, tier: experimental,
+      basis: "OTel spans/logging/metrics wrappers" }
+  - { id: open-code-bridge, kind: ts-package, path: packages/open-code-bridge, tier: experimental,
+      basis: "OpenCode compatibility facade governed by divergence budget" }
+  - { id: orchestration, kind: ts-package, path: packages/orchestration, tier: experimental,
+      basis: "Scheduler/delegation/worktrees/loop detection; expected-value gates unproven" }
+  - { id: policy-coordinator, kind: ts-package, path: packages/policy-coordinator, tier: experimental,
+      basis: "Bridges task contracts and kernel capability requests" }
+  - { id: provider-anthropic, kind: ts-package, path: packages/provider-anthropic, tier: experimental,
+      basis: "Provider renderer; golden/live conformance not recorded at HEAD" }
+  - { id: provider-cache, kind: ts-package, path: packages/provider-cache, tier: experimental,
+      basis: "Provider cache accounting" }
+  - { id: provider-conformance, kind: ts-package, path: packages/provider-conformance, tier: fixture,
+      basis: "Conformance kit used to test provider renderers" }
+  - { id: provider-core, kind: ts-package, path: packages/provider-core, tier: experimental,
+      basis: "Provider-neutral broker/capability snapshots/cost accounting" }
+  - { id: provider-economics, kind: ts-package, path: packages/provider-economics, tier: experimental,
+      basis: "Cost models/analytics" }
+  - { id: provider-google, kind: ts-package, path: packages/provider-google, tier: experimental,
+      basis: "Provider renderer; conformance not recorded at HEAD" }
+  - { id: provider-local, kind: ts-package, path: packages/provider-local, tier: experimental,
+      basis: "Local/open-weight provider renderer; conformance not recorded at HEAD" }
+  - { id: provider-openai, kind: ts-package, path: packages/provider-openai, tier: experimental,
+      basis: "Provider renderer; conformance not recorded at HEAD" }
+  - { id: public-client, kind: ts-package, path: packages/public-client, tier: experimental,
+      basis: "Generated-style TS client with SSE subscription" }
+  - { id: remote, kind: ts-package, path: packages/remote, tier: experimental,
+      basis: "Remote execution types/clients" }
+  - { id: session-runtime, kind: ts-package, path: packages/session-runtime, tier: experimental,
+      basis: "Session/thread/turn services; context epoch lifecycle" }
+  - { id: task-runtime, kind: ts-package, path: packages/task-runtime, tier: experimental,
+      basis: "Task lifecycle/contract versioning/scope ledger" }
+  - { id: terminus-kernel-client, kind: ts-package, path: packages/terminus-kernel-client, tier: experimental,
+      basis: "Typed kernel RPC client" }
+  - { id: testkit, kind: ts-package, path: packages/testkit, tier: fixture,
+      basis: "Fake provider/fake kernel/builders for tests only" }
+  - { id: verification, kind: ts-package, path: packages/verification, tier: experimental,
+      basis: "Verification DAG engine with predicate tests; completion-gate conformance unproven at HEAD" }
+
+  # ---------------- Clients / services ----------------
+  - { id: app-cli, kind: app, path: apps/cli, tier: experimental,
+      basis: "Non-interactive CLI for CI/automation" }
+  - { id: app-desktop, kind: app, path: apps/desktop, tier: experimental,
+      basis: "Electron desktop app; README test-count claims replaced by inventory (Phase 0)" }
+  - { id: app-ide-acp, kind: app, path: apps/ide-acp, tier: experimental,
+      basis: "ACP-over-stdio adapter for editors" }
+  - { id: app-tui, kind: app, path: apps/tui, tier: experimental,
+      basis: "Terminal client (primary per SPEC §43.4)" }
+  - { id: mini-service-control, kind: mini-service, path: mini-services/terminus-control, tier: experimental,
+      basis: "TS control plane HTTP service; authoritative stores remain process-local until Phase 2" }
+  - { id: mini-service-kernel, kind: mini-service, path: mini-services/terminus-kernel, tier: experimental,
+      basis: "Rust kernel HTTP mini-service outside root workspace (SPEC §42.5); checked via just kernel-mini-check" }
+
+  # ---------------- Evaluation laboratory ----------------
+  - { id: forge-evals, kind: python-package, path: python/forge_evals, tier: experimental,
+      basis: "Runners/graders/statistics/dashboards substantial; release-tier evals are fixture-mode until model-backed runs are wired (scripts/run-release-evals.sh)" }
+  - { id: eval-corpus, kind: eval-corpus, path: evals, tier: fixture,
+      basis: "Benchmark suites/tasks/graders/security fixtures — data, not production code" }
+
+  # ---------------- External harness adapters ----------------
+  - { id: adapter-fixture-agent, kind: adapter, path: adapters/fixture-agent, tier: fixture,
+      basis: "Deterministic no-model test double; replays recorded trajectories" }
+  - { id: adapter-claude-code, kind: adapter, path: adapters/claude-code, tier: stub,
+      basis: "Contract-stub runner (protocol only, no inner harness launch, lastVerified null)" }
+  - { id: adapter-codex, kind: adapter, path: adapters/codex, tier: stub,
+      basis: "Contract-stub runner returns completed without invoking Codex (audit 4.9)" }
+  - { id: adapter-oh-my-pi, kind: adapter, path: adapters/oh-my-pi, tier: stub,
+      basis: "adapter.yaml declaration only; runner not implemented" }
+  - { id: adapter-omnigent, kind: adapter, path: adapters/omnigent, tier: stub,
+      basis: "adapter.yaml declaration only; runner not implemented" }
+  - { id: adapter-openhands, kind: adapter, path: adapters/openhands, tier: stub,
+      basis: "adapter.yaml declaration only; runner not implemented" }
+  - { id: adapter-pi, kind: adapter, path: adapters/pi, tier: stub,
+      basis: "Contract-stub runner (protocol only, no inner harness launch, lastVerified null)" }

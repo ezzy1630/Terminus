@@ -2,7 +2,7 @@
 
 > A provider-neutral coding-agent operating system with a non-bypassable Rust effect kernel, an inspectable Context Compiler, evidence-based completion, and an eval gate for complexity.
 
-Terminus is built from the [complete product, architecture, security, and implementation specification](SPEC.md) (9,550 lines, 50 sections, 11 appendices). The system uses a fork-assisted strangler architecture: the durable contracts, evidence, context manifests, and Rust effect boundary survive any component replacement.
+Terminus is built from the [complete product, architecture, security, and implementation specification](SPEC.md). The system uses a fork-assisted strangler architecture: the durable contracts, evidence, context manifests, and Rust effect boundary survive any component replacement.
 
 ---
 
@@ -60,6 +60,10 @@ Terminus is built from the [complete product, architecture, security, and implem
 
 All effects cross the Rust kernel boundary. The control plane has no ambient authority. Plugins run in separate processes with capabilities. Secrets are short-lived process capabilities, never environment-wide values.
 
+### Component maturity and evidence
+
+Every component is classified `fixture | stub | experimental | preview | production` in the machine-readable [`maturity.yaml`](maturity.yaml) registry (generated view: [docs/generated/component-maturity.md](docs/generated/component-maturity.md)). No component is `production` yet: production requires conformance-tested signed evidence at HEAD. Static repository facts live in the generated [static inventory](docs/generated/inventory.md); executed-test evidence lives only in CI artifacts on an exact commit and under `artifacts/release-gate/`.
+
 ---
 
 ## Repository structure
@@ -71,8 +75,8 @@ terminus/
 │   ├── tui/                  # Terminal client (primary per SPEC §43.4)
 │   ├── cli/                  # Non-interactive CLI for CI/automation
 │   └── ide-acp/             # ACP adapter for editor integration
-├── packages/                 # 27 TypeScript packages (domain, context, providers, ...)
-├── crates/                   # 19 Rust crates (kernel, sandbox, process, patch, ...)
+├── packages/                 # TypeScript packages (domain, context, providers, ...)
+├── crates/                   # Rust crates (kernel, sandbox, process, patch, ...)
 ├── mini-services/
 │   ├── terminus-kernel/         # Rust kernel HTTP service (port 3040)
 │   └── terminus-control/        # TS control plane HTTP service (port 3050)
@@ -94,7 +98,7 @@ terminus/
 ├── AGENTS.md                 # Root repository instructions (Appendix G)
 ├── SECURITY.md               # Trust zones, threat model, non-bypassability
 ├── CONTRIBUTING.md           # Contribution guide + PR template
-├── SPEC.md                   # The 9,550-line normative specification
+├── SPEC.md                   # The normative specification
 └── justfile                  # Root task runner (SPEC §43.7)
 ```
 
@@ -188,29 +192,30 @@ cd apps/desktop && bun run dev:electron
 
 The non-bypassable effect kernel. All process, filesystem, network, secret, and patch operations cross this boundary.
 
-| Crate | Responsibility | Tests |
-|---|---|---:|
-| `terminus-kernel` | Service assembly (13 service groups) | 0 |
-| `terminus-kernel-protocol` | Request/response types, error codes | 13 |
-| `terminus-authz` | Capability tokens (HMAC, audience, nonce, revocation) | 5 |
-| `terminus-policy` | Command policy engine (strictest-wins rule evaluation) | 8 |
-| `terminus-sandbox` | Sandbox backend trait + `LocalRestrictive` | 3 |
-| `terminus-sandbox-linux` | Bubblewrap backend (real bwrap argv construction) | 18 |
-| `terminus-sandbox-macos` | Seatbelt detection + honest reporting | 4 |
-| `terminus-sandbox-windows` | AppContainer detection + honest reporting | 4 |
-| `terminus-sandbox-container` | Container/micro-VM backend stub | 2 |
-| `terminus-process` | Process manager (env_clear, PTY, process groups, timeout) | 6 |
-| `terminus-jobs` | Durable job state machine + recovery | 12 |
-| `terminus-fs` | Safe path resolution (traversal/symlink rejection) | 13 |
-| `terminus-patch` | Transactional edit engine (journal, snapshots, rollback) | 10 |
-| `terminus-artifacts` | CAS (sha256/ab/cd layout, atomic rename, SQLite metadata) | 25 |
-| `terminus-secrets` | Secret broker (short-lived handles, redaction) | 11 |
-| `terminus-egress` | Network egress proxy (allowlist, DNS, private-address denial) | 7 |
-| `terminus-code-intel` | Tree-sitter symbol index | 4 |
-| `terminus-extension-runtime` | WASI extension host stub | 4 |
-| `terminus-git` | Protected worktree/commit/merge operations | 3 |
-| `terminus-kernel-testkit` | Fakes, builders, in-memory stores | 7 |
-| **Total** | | **205** |
+> Test counts and per-crate inventory are generated from the source tree — see the [static inventory](docs/generated/inventory.md). Maturity per crate: [component maturity registry](docs/generated/component-maturity.md).
+
+| Crate | Responsibility |
+|---|---|
+| `terminus-kernel` | Service assembly (13 service groups) |
+| `terminus-kernel-protocol` | Request/response types, error codes |
+| `terminus-authz` | Capability tokens (HMAC, audience, nonce, revocation) |
+| `terminus-policy` | Command policy engine (strictest-wins rule evaluation) |
+| `terminus-sandbox` | Sandbox backend trait + `LocalRestrictive` |
+| `terminus-sandbox-linux` | Bubblewrap backend (real bwrap argv construction) |
+| `terminus-sandbox-macos` | Seatbelt detection + honest reporting |
+| `terminus-sandbox-windows` | AppContainer detection + honest reporting |
+| `terminus-sandbox-container` | Container/micro-VM backend stub |
+| `terminus-process` | Process manager (env_clear, PTY, process groups, timeout) |
+| `terminus-jobs` | Job state machine + reconciliation (process-local until Phase 2) |
+| `terminus-fs` | Safe path resolution (traversal/symlink rejection) |
+| `terminus-patch` | Transactional edit engine (journal, snapshots, rollback) |
+| `terminus-artifacts` | CAS (sha256 layout, atomic rename, SQLite metadata) |
+| `terminus-secrets` | Secret broker (handles, redaction; raw-value API slated for replacement in Phase 4) |
+| `terminus-egress` | Network egress proxy (allowlist, DNS, private-address denial) |
+| `terminus-code-intel` | Tree-sitter symbol index |
+| `terminus-extension-runtime` | WASI extension host stub |
+| `terminus-git` | Protected worktree/commit/merge operations |
+| `terminus-kernel-testkit` | Fakes, builders, in-memory stores |
 
 ### TypeScript — rapidly changing product/cognition (SPEC §43.2)
 
@@ -218,7 +223,7 @@ The control plane. Owns sessions, tasks, context compiler, providers, orchestrat
 
 | Package | Responsibility |
 |---|---|
-| `@terminus/domain` | Canonical types, state machines, typed errors (2,032 lines) |
+| `@terminus/domain` | Canonical types, state machines, typed errors |
 | `@terminus/runtime-protocol` | 40+ semantic event types, SSE encoder/decoder |
 | `@terminus/context-ir` | Context fragments, source descriptors, exactness classes |
 | `@terminus/context-compiler` | 16-step assembly algorithm, retrieval pipeline, budget allocator |
@@ -241,8 +246,9 @@ The control plane. Owns sessions, tasks, context compiler, providers, orchestrat
 | `@terminus/public-api` | HTTP API definitions, error envelope, SSE, 18 resource groups |
 | `@terminus/public-client` | Generated-style TypeScript client with SSE subscription |
 | `@terminus/open-code-bridge` | OpenCode compatibility facade, bypass register, divergence budget |
-| `@terminus/aci` | Agent-Computer Interface (7 tools, ToolRegistry, ProgressiveDisclosure) |
-| **Total** | **27 packages, 12,000+ lines, 0 typecheck errors** |
+| `@terminus/aci` | Agent-Computer Interface (ToolRegistry, ProgressiveDisclosure) |
+
+Package inventory and declared-test counts are generated — see the [static inventory](docs/generated/inventory.md).
 
 ### Python — offline/non-privileged research (SPEC §43.3)
 
@@ -256,7 +262,7 @@ The evaluation laboratory. Never on the production enforcement path.
 | `statistics/` | Paired t-test, bootstrap CI, multiple comparisons, effect size, non-inferiority |
 | `dashboards/` | Cohort, feature contribution, security report |
 | `research/` | Context ablations, ACI ablations, orchestration ablations, routing research |
-| **Total** | **51 modules, 12,711 lines, 200 tests passing** |
+> Module and test counts are generated — see the [static inventory](docs/generated/inventory.md).
 
 ### Data (SPEC §7.3, §29)
 
@@ -283,9 +289,7 @@ A production-quality Electron + Vite + React + TypeScript macOS-native desktop a
 - **Diff viewer** — unified + side-by-side, hunk accept/reject/restore, inline comments, ask-agent-to-revise
 - **Dynamic inspector** — sections appear only when relevant (Environment, Activity, Approvals, Computer Use, Subagents, Terminal, Changes, Verification)
 - **Onboarding** — 4-step flow (Welcome → Project → Tools → First task)
-- **Settings** — 14 categories with search, per-setting reset, immediate appearance preview
-- **112 tests passing** (API, components, layout, theme)
-- **13,532 lines** across 40 files
+- **Settings** — categories with search, per-setting reset, immediate appearance preview
 
 ```bash
 cd apps/desktop
@@ -345,7 +349,7 @@ Short-lived, audience-restricted, nonce-protected, revocable tokens bound to:
 - operation classes (Read, Patch, Exec, Job, Sandbox, Policy, Secret, Network, CodeIntel, Extension, Git, ArtifactIngest, Admin)
 - max scope (workspace_paths, network_destinations, secret_capabilities)
 
-**10 end-to-end tests** verify: operation-class enforcement, path-scope enforcement, network-destination enforcement, secret-capability enforcement, expiry, revocation, audience mismatch, signature tampering.
+End-to-end tests verify: operation-class enforcement, path-scope enforcement, network-destination enforcement, secret-capability enforcement, expiry, revocation, audience mismatch, signature tampering.
 
 ### Sandbox backends (SPEC §13.4, §36.5-§36.8)
 
@@ -479,13 +483,14 @@ just run            # Run control plane and kernel locally
 
 ### Testing
 
-| Layer | Tests | Command |
-|---|---:|---|
-| Rust crates | 205 | `cargo test --release` |
-| TS packages | 101 | `bun test packages/` |
-| Desktop app | 112 | `cd apps/desktop && bunx vitest run` |
-| Python eval | 200 | `cd python/forge_evals && .venv/bin/python -m pytest` |
-| Next.js | — | `bun run lint` (0 errors) |
+Declared test blocks are counted statically in the [static inventory](docs/generated/inventory.md); passing-run evidence is only meaningful per exact commit from CI artifacts. Run suites locally with:
+
+```bash
+just unit          # Rust + TS + Python unit tests
+just integration   # integration suites
+just e2e           # end-to-end task tests
+just eval-smoke    # deterministic eval suite
+```
 
 ### Architecture boundary checks (SPEC §42.5)
 
@@ -516,13 +521,13 @@ just boundary-check
 
 ### ADRs (Appendix H)
 
-30 Architecture Decision Records at `docs/decisions/`, each with Context, Decision, Status, Alternatives, Consequences, Security Impact, Evaluation Plan, Migration, Rollback.
+Architecture Decision Records at `docs/decisions/`, each with Context, Decision, Status, Alternatives, Consequences, Security Impact, Evaluation Plan, Migration, Rollback. The authoritative count lives in the [static inventory](docs/generated/inventory.md).
 
-Statuses: ADOPTED (1-5, 9-11, 13-25), PROVISIONAL (6-8, 26), EXPERIMENTAL (12, 27-30 OPEN).
+Statuses are recorded per ADR; consult each file's header for its current status.
 
 ### Runbooks (SPEC §47.9)
 
-12 runbooks at `docs/runbooks/`: database corruption, artifact store inconsistency, kernel/control version mismatch, sandbox unavailable, orphaned jobs, stuck external effect, leaked credential, compromised extension, provider outage, upstream merge conflict, eval regression, security incident.
+Runbooks at `docs/runbooks/`: database corruption, artifact store inconsistency, kernel/control version mismatch, sandbox unavailable, orphaned jobs, stuck external effect, leaked credential, compromised extension, provider outage, upstream merge conflict, eval regression, security incident.
 
 ### Risk register (SPEC §49.4)
 
@@ -538,7 +543,7 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## Reference
 
-- [SPEC.md](SPEC.md) — The complete 9,550-line normative specification
+- [SPEC.md](SPEC.md) — The complete normative specification
 - [AGENTS.md](AGENTS.md) — Root repository instructions (Appendix G)
 - [SECURITY.md](SECURITY.md) — Trust zones, threat model, non-bypassability
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution guide + PR template
