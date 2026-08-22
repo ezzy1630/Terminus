@@ -40,6 +40,8 @@
  *                                   Transition v2 task state (READY, RUNNING, etc.)
  *   propose-effect --task <id> --class <c> --intent <i>
  *                                   Propose transactional effect
+ *   advance-effect <id> --to <s>    Advance an effect to the next canonical
+ *                                   state (server enforces the state machine)
  *   commit-effect <id>              Commit prepared effect
  *   submit-claim --task <id> --statement <s>
  *                                   Submit an acceptance claim
@@ -62,6 +64,17 @@
  */
 const GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
 const PORT_PARAM = "XTransformPort=3050";
+// Bearer token for control planes that require auth (SPEC §30.8). The
+// well-known dev token is only used when TERMINUS_DEV=1 so production
+// deployments cannot accidentally authenticate with a public constant.
+function resolveToken(cliToken?: string): string {
+  if (cliToken && cliToken.length > 0) return cliToken;
+  const env = process.env.TERMINUS_TOKEN;
+  if (env && env.length > 0) return env;
+  if (process.env.TERMINUS_DEV === "1") return "terminus-control-dev-token";
+  return "";
+}
+let BEARER_TOKEN = "";
 
 interface Args {
   positional: string[];
@@ -95,7 +108,9 @@ function forgeUrl(path: string): string {
 }
 
 async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(forgeUrl(path));
+  const headers: Record<string, string> = {};
+  if (BEARER_TOKEN) headers.authorization = `Bearer ${BEARER_TOKEN}`;
+  const res = await fetch(forgeUrl(path), { headers });
   if (!res.ok) {
     const text = await res.text();
     process.stderr.write(`error: GET ${path} -> HTTP ${res.status}: ${text}\n`);
@@ -110,6 +125,7 @@ async function apiMutate<T>(
   idempotencyKey?: string,
 ): Promise<T> {
   const headers: Record<string, string> = { "content-type": "application/json" };
+  if (BEARER_TOKEN) headers.authorization = `Bearer ${BEARER_TOKEN}`;
   if (idempotencyKey) headers["x-idempotency-key"] = idempotencyKey;
   const res = await fetch(forgeUrl(path), {
     method: "POST",
@@ -163,18 +179,8 @@ async function waitTask(
   process.exit(3);
 }
 
-async function streamEvents(taskId?: string, cursor?: string): Promise<void> {
-  const params = new URLSearchParams();
-  if (taskId) params.set("task_id", taskId);
-  if (cursor) params.set("cursor", cursor);
-  const qs = params.toString();
-  const url = forgeUrl(`/v1/events${qs ? `?${qs}` : ""}`);
-  const res = await fetch(url, { headers: { accept: "text/event-stream" } });
-  if (!res.ok || !res.body) {
-    process.stderr.write(`error: SSE HTTP ${res.status}\n`);
-    process.exit(1);
-  }
-  const reader = res.body.getReader();
+async function streamSse(body: ReadableStream<Uint8Array>): Promise<void> {
+  const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let eventId = "";
@@ -210,6 +216,22 @@ async function streamEvents(taskId?: string, cursor?: string): Promise<void> {
   }
 }
 
+async function streamEvents(taskId?: string, cursor?: string): Promise<void> {
+  const params = new URLSearchParams();
+  if (taskId) params.set("task_id", taskId);
+  if (cursor) params.set("cursor", cursor);
+  const qs = params.toString();
+  const url = forgeUrl(`/v1/events${qs ? `?${qs}` : ""}`);
+  const headers: Record<string, string> = { accept: "text/event-stream" };
+  if (BEARER_TOKEN) headers.authorization = `Bearer ${BEARER_TOKEN}`;
+  const res = await fetch(url, { headers });
+  if (!res.ok || !res.body) {
+    process.stderr.write(`error: SSE HTTP ${res.status}\n`);
+    process.exit(1);
+  }
+  await streamSse(res.body);
+}
+
 function showHelp(): void {
   process.stdout.write(`
 Terminus CLI — non-interactive client for CI and automation (SPEC §42.1).
@@ -235,6 +257,22 @@ Commands:
   evals                           Eval suites + baselines (JSON)
   config                          Effective configuration (JSON)
 
+ARP v2 Commands:
+  health-v2                       v2 system health (JSON)
+  schema-registry                 v2 schema registry (JSON)
+  task-v2 <id>                    v2 task snapshot (JSON)
+  new-task-v2 --objective <o>     Create a canonical v2 task
+  transition-task-v2 <id> --status <s> [--expected-version <n>]
+                                  Transition the v2 task state machine
+  propose-effect --task <id> --class <c> --intent <i>
+                                  Propose a transactional effect
+  advance-effect <id> --to <s>    Advance an effect state (server-validated)
+  commit-effect <id> [--expected-version <n>]
+                                  Commit a VALIDATED effect
+  submit-claim --task <id> --statement <s>
+  record-evidence --claim <id> --summary <s> --result <r>
+  events-v2 [--task <id>] [--cursor <c>]   Stream v2 SSE envelopes as JSONL
+
 Options:
   --gateway <url>    Gateway base URL (env: TERMINUS_GATEWAY, default: http://127.0.0.1:81)
   --token <t>        Bearer token (env: TERMINUS_TOKEN)
@@ -248,6 +286,8 @@ Exit codes: 0=ok, 1=error, 2=usage, 3=timeout
 async function main(): Promise<void> {
   const { positional, flags } = parseArgs(process.argv.slice(2));
   const cmd = positional[0];
+
+  BEARER_TOKEN = resolveToken(typeof flags.token === "string" ? flags.token : undefined);
 
   if (!cmd || cmd === "help" || flags.help === true || flags.h === true) {
     showHelp();
@@ -394,6 +434,8 @@ async function main(): Promise<void> {
         const objective = requireFlag(flags, "objective");
         const mission = typeof flags.mission === "string" ? flags.mission : null;
         const mode = typeof flags.mode === "string" ? flags.mode : "interactive";
+        // JSON has no bigint: Micros travel as decimal strings on the wire
+        // and the control plane coerces them back to bigint at the boundary.
         const body = {
           missionId: mission,
           organizationId: "default-org",
@@ -403,7 +445,7 @@ async function main(): Promise<void> {
             mission: objective,
             scope: { resources: [], allowedEffectClasses: ["LOCAL_FS_WRITE", "LOCAL_PROCESS_SPAWN"], excludedPathsOrSystems: [] },
             acceptance: [{ claimId: "claim-1", statement: objective, evidenceRequirement: "DETERMINISTIC_TEST" }],
-            constraints: { security: ["NO_AMBIENT_SECRETS"], costMicros: 10000000n, timeoutSeconds: 3600 },
+            constraints: { security: ["NO_AMBIENT_SECRETS"], costMicros: "10000000", timeoutSeconds: 3600 },
             authorityCeiling: ["FS_WRITE", "PROCESS_SPAWN"],
             mode,
           },
@@ -444,6 +486,17 @@ async function main(): Promise<void> {
         printJson(await apiMutate(`/v2/effects/${id}/commit`, { id, expectedVersion: expVer }, idem));
         break;
       }
+      case "advance-effect": {
+        // Drive an effect through its canonical state machine
+        // (PROPOSED → POLICY_CHECKED → … → COMMITTED). The server enforces
+        // EFFECT_TRANSITIONS; illegal jumps are rejected with 409.
+        const id = positional[1];
+        if (!id) { process.stderr.write("error: advance-effect <id> --to <STATE>\n"); process.exit(2); }
+        const to = requireFlag(flags, "to");
+        const expVer = typeof flags["expected-version"] === "string" ? parseInt(flags["expected-version"], 10) : null;
+        printJson(await apiMutate(`/v2/effects/${id}/transition`, { targetState: to, expectedVersion: expVer }, idem));
+        break;
+      }
       case "submit-claim": {
         const taskId = requireFlag(flags, "task");
         const statement = requireFlag(flags, "statement");
@@ -467,11 +520,14 @@ async function main(): Promise<void> {
         if (cursor) params.set("cursor", cursor);
         const qs = params.toString();
         const url = forgeUrl(`/v2/events${qs ? `?${qs}` : ""}`);
-        const res = await fetch(url, { headers: { accept: "text/event-stream" } });
-        if (!res.ok) {
+        const headers: Record<string, string> = { accept: "text/event-stream" };
+        if (BEARER_TOKEN) headers.authorization = `Bearer ${BEARER_TOKEN}`;
+        const res = await fetch(url, { headers });
+        if (!res.ok || !res.body) {
           process.stderr.write(`error: SSE HTTP ${res.status}\n`);
           process.exit(1);
         }
+        await streamSse(res.body);
         break;
       }
       default:
