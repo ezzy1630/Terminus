@@ -29,15 +29,30 @@ cd "$source_dir"
 bun install --frozen-lockfile --ignore-scripts || {
   echo "[opencode-parity] dependency install reported optional-package failures; continuing to the typecheck" >&2
 }
-export PATH="$source_dir/node_modules/.bin:$PATH"
-if [[ -f "$source_dir/node_modules/.bin/tsc" ]]; then
+if [[ -d "$source_dir/node_modules/@typescript/native-preview/bin" ]]; then
+  cat << 'EOF' > "$source_dir/node_modules/@typescript/native-preview/bin/tsgo.js"
+#!/usr/bin/env node
+const { execFileSync } = require("node:child_process");
+const tscPath = require.resolve("typescript/bin/tsc", { paths: [__dirname, process.cwd()] });
+try {
+  execFileSync(process.execPath, [tscPath, ...process.argv.slice(2)], { stdio: "inherit" });
+} catch (err) {
+  process.exit(err.status ?? 1);
+}
+EOF
+fi
+if [[ -e "$source_dir/node_modules/.bin/tsgo" ]]; then
+  rm -f "$source_dir/node_modules/.bin/tsgo"
   cat << 'EOF' > "$source_dir/node_modules/.bin/tsgo"
 #!/usr/bin/env node
-const { spawnSync } = require("node:child_process");
-const res = spawnSync("tsc", process.argv.slice(2), { stdio: "inherit", shell: true });
-process.exit(res.status ?? 0);
+const { execFileSync } = require("node:child_process");
+const tscPath = require.resolve("typescript/bin/tsc", { paths: [__dirname, process.cwd()] });
+try {
+  execFileSync(process.execPath, [tscPath, ...process.argv.slice(2)], { stdio: "inherit" });
+} catch (err) {
+  process.exit(err.status ?? 1);
+}
 EOF
   chmod +x "$source_dir/node_modules/.bin/tsgo"
-  find "$source_dir/packages" -type d -name ".bin" -exec cp "$source_dir/node_modules/.bin/tsgo" {}/tsgo \; 2>/dev/null || true
 fi
 bun turbo typecheck
