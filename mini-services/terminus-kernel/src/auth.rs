@@ -179,16 +179,34 @@ fn required_operation_class(method: &axum::http::Method, path: &str) -> Option<O
     Some(op)
 }
 
-/// Add CORS headers to all responses. Allow-all for development; the Caddy
-/// gateway handles production.
+/// Add CORS headers to responses. The kernel serves privileged effects, so
+/// `Access-Control-Allow-Origin: *` would let any web page drive a local
+/// kernel (dev tokens are well-known under TERMINUS_DEV=1). Origins must be
+/// explicitly allowed via TERMINUS_KERNEL_CORS_ORIGIN; browser clients that
+/// go through the Caddy gateway are same-origin and need no CORS headers.
 pub async fn cors_layer(req: Request, next: Next) -> Response {
     let method = req.method().clone();
+    let origin_header = req
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|o| o.to_str().ok())
+        .map(ToString::to_string);
+    let allowed_origin = origin_header.filter(|origin| {
+        std::env::var("TERMINUS_KERNEL_CORS_ORIGIN")
+            .map(|allow| !allow.is_empty() && allow.split(',').any(|a| a.trim() == *origin))
+            .unwrap_or(false)
+    });
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
-    headers.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        axum::http::HeaderValue::from_static("*"),
-    );
+    if let Some(origin) = allowed_origin {
+        if let Ok(value) = axum::http::HeaderValue::from_str(origin.as_str()) {
+            headers.insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+            headers.insert(
+                axum::http::header::VARY,
+                axum::http::HeaderValue::from_static("Origin"),
+            );
+        }
+    }
     headers.insert(
         axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
         axum::http::HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"),

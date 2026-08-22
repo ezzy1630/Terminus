@@ -158,6 +158,26 @@ function resolveShell(): string {
   return process.env.SHELL ?? "/bin/zsh";
 }
 
+/**
+ * Credential-bearing env vars must never reach spawned terminal children:
+ * the renderer (and anything it runs) would otherwise inherit provider keys,
+ * broker tokens, and DB URLs wholesale. Everything else passes through so
+ * the interactive shell stays usable.
+ */
+const TERMINAL_ENV_DENY = /TOKEN|SECRET|PASSWORD|PASSWD|PASSKEY|API_KEY|APIKEY|PRIVATE_KEY|DATABASE_URL|CREDENTIAL/i;
+
+function sanitizedTerminalEnv(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (TERMINAL_ENV_DENY.test(k)) continue;
+    out[k] = v;
+  }
+  out.TERM = "xterm-256color";
+  out.TERMINUS_SHELL = "1";
+  return out;
+}
+
 function handleTerminalSpawn(
   event: IpcMainInvokeEvent,
   opts: { cwd?: string; command?: string; cols?: number; rows?: number },
@@ -176,7 +196,7 @@ function handleTerminalSpawn(
       cols: opts.cols && opts.cols > 0 ? opts.cols : 80,
       rows: opts.rows && opts.rows > 0 ? opts.rows : 24,
       cwd,
-      env: { ...process.env, TERM: "xterm-256color", TERMINUS_SHELL: "1" } as Record<string, string>,
+      env: sanitizedTerminalEnv(),
     });
     const session: PtySession = {
       id,

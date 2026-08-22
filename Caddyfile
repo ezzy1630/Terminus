@@ -1,4 +1,6 @@
-:81 {
+# Dev gateway binds loopback only: it forwards to arbitrary local kernel /
+# control ports and must never be reachable from other hosts.
+http://127.0.0.1:81 {
 	@transform_port_query {
 		query XTransformPort=*
 	}

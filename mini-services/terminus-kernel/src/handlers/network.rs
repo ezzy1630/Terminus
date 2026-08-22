@@ -107,35 +107,77 @@ pub async fn request(
         }));
     }
 
-    let mut status = 200u16;
-    let mut body_out = format!(
-        "egress authorized for {scheme}://{host}:{port}; relayed to destination"
-    );
-    let mut bytes_relayed = req.body.len() as u64;
+    let mut status = 0u16;
+    let mut body_out = String::new();
+    let mut relay_note: Option<String> = None;
+    let mut bytes_relayed = 0u64;
 
-    if let Some(target_ip) = resolved_ips.first() {
+    // The request line must be a bare HTTP token; a client-supplied method
+    // containing whitespace or control characters would inject headers into
+    // the outbound request.
+    let method_upper = req.method.to_ascii_uppercase();
+    if method_upper.is_empty() || !method_upper.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(ApiError::validation(
+            format!("invalid http method `{}`", req.method),
+            &trace_id.0,
+        ));
+    }
+
+    if scheme != "http" {
+        // Never downgrade a non-http URL (e.g. https) to plaintext TCP.
+        relay_note = Some(format!(
+            "{scheme} scheme authorized but not relayed by this broker (TLS not supported here); no request was sent"
+        ));
+    } else if let Some(target_ip) = resolved_ips.first() {
         let target_addr = std::net::SocketAddr::new(*target_ip, port);
-        if let Ok(mut stream) = tokio::net::TcpStream::connect(target_addr).await {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let path = if url.path().is_empty() { "/" } else { url.path() };
-            let http_req = format!(
-                "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-                req.method.to_uppercase(),
-                path,
-                host,
-                req.body.len(),
-                req.body
-            );
-            if stream.write_all(http_req.as_bytes()).await.is_ok() {
-                let mut resp_buf = Vec::new();
-                if stream.read_to_end(&mut resp_buf).await.is_ok() {
-                    bytes_relayed += resp_buf.len() as u64;
-                    if !resp_buf.is_empty() {
-                        body_out = String::from_utf8_lossy(&resp_buf).to_string();
+        match tokio::net::TcpStream::connect(target_addr).await {
+            Ok(mut stream) => {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let path = if url.path().is_empty() { "/" } else { url.path() };
+                let path_and_query = match url.query() {
+                    Some(q) => format!("{path}?{q}"),
+                    None => path.to_string(),
+                };
+                let http_req = format!(
+                    "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    method_upper,
+                    path_and_query,
+                    host,
+                    req.body.len(),
+                    req.body
+                );
+                match stream.write_all(http_req.as_bytes()).await {
+                    Ok(()) => {
+                        bytes_relayed += http_req.len() as u64;
+                        let mut resp_buf = Vec::new();
+                        match stream.read_to_end(&mut resp_buf).await {
+                            Ok(_) => {
+                                bytes_relayed += resp_buf.len() as u64;
+                                if !resp_buf.is_empty() {
+                                    body_out = String::from_utf8_lossy(&resp_buf).to_string();
+                                    status = body_out
+                                        .split_whitespace()
+                                        .nth(1)
+                                        .and_then(|s| s.parse::<u16>().ok())
+                                        .unwrap_or(0);
+                                }
+                            }
+                            Err(e) => {
+                                relay_note = Some(format!("relay read failed: {e}"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        relay_note = Some(format!("relay write failed: {e}"));
                     }
                 }
             }
+            Err(e) => {
+                relay_note = Some(format!("relay connect failed: {e}"));
+            }
         }
+    } else {
+        relay_note = Some("no resolved address to relay to".to_string());
     }
 
     Ok(Json(EgressResponse {
@@ -144,7 +186,7 @@ pub async fn request(
         headers: std::collections::BTreeMap::new(),
         body: body_out,
         resolved_ips: resolved_ip_strings,
-        denial_reason: None,
+        denial_reason: relay_note,
         bytes_relayed,
     }))
 }

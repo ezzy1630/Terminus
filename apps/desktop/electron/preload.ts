@@ -25,7 +25,12 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
 const TERMINUS_API_BASE = process.env.TERMINUS_API_BASE ?? "http://127.0.0.1:3050";
 const TERMINUS_GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
-const TERMINUS_TOKEN = process.env.TERMINUS_TOKEN ?? "terminus-control-dev-token";
+// No hardcoded fallback token: the well-known dev token must only be in play
+// when the operator actually configured it (TERMINUS_DEV=1 environments set
+// TERMINUS_TOKEN/TERMINUS_CONTROL_TOKEN explicitly). Production fails closed
+// at the control plane, and a baked-in constant would hand every renderer
+// (and anything it loads) a bearer credential.
+const TERMINUS_TOKEN = process.env.TERMINUS_TOKEN ?? process.env.TERMINUS_CONTROL_TOKEN ?? "";
 const PLATFORM = process.platform;
 
 // ────────────────────────── terminusDesktop ─────────────────────────────────────

@@ -70,7 +70,10 @@ function resolveApiToken(): string {
     return window.terminusDesktop.token;
   }
   const env = (import.meta.env.VITE_TERMINUS_TOKEN as string | undefined) ?? null;
-  return env ?? "terminus-control-dev-token";
+  // No hardcoded dev-token fallback: production control planes reject the
+  // well-known token, and a baked-in constant would ship a bearer credential
+  // inside the bundle. Operators set VITE_TERMINUS_TOKEN / TERMINUS_TOKEN.
+  return env ?? "";
 }
 
 // ────────────────────────── Errors ─────────────────────────────────────────
