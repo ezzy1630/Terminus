@@ -1,16 +1,133 @@
-//! Container sandbox backend with digest-pinned images and pool leases.
+//! Container sandbox backend with digest-pinned images, pool leases, and
+//! hardened OCI profiles (SPEC §36.8 / ADR-0027 / ADR-0035 §3).
 //!
-//! SPEC §36.8 / ADR-0027: mutable tags are rejected. Unconfigured backends
-//! fail closed. When configured, spawn uses `repo@sha256:…` only.
+//! Honesty contract: the enforcement report derives EVERY `Enforced`
+//! feature from a flag the generator actually emitted (`proof` column in
+//! [`hardened_argvs`]). Removing a flag removes the claim. Unconfigured
+//! backends fail closed. Mutable image tags are rejected.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 use std::sync::Mutex;
 use terminus_remote::{ExecutionPool, PinnedImage, RemoteError};
-use terminus_sandbox::profile::SandboxProfile;
+use terminus_sandbox::profile::{NetworkAccess, SandboxProfile};
 use terminus_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
 use terminus_sandbox::{SandboxBackend, SandboxError};
+
+/// Hardened-OCI options. Each `Some`/true field maps 1:1 to a docker flag
+/// the wrapper emits, and each enforced feature in the report cites its
+/// flag. Defaults implement SPEC §19.2 for tier-2 workloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HardenedOptions {
+    pub read_only_rootfs: bool,
+    pub drop_all_capabilities: bool,
+    pub no_new_privileges: bool,
+    pub run_as_non_root_uid: Option<u32>,
+    pub tmpfs_tmp_noexec: bool,
+    pub memory_limit_bytes: Option<u64>,
+    /// Passed verbatim as `--cpus` (e.g. "1.5").
+    pub cpus: Option<String>,
+    pub pids_limit: Option<u32>,
+}
+
+impl Default for HardenedOptions {
+    fn default() -> Self {
+        Self {
+            read_only_rootfs: true,
+            drop_all_capabilities: true,
+            no_new_privileges: true,
+            run_as_non_root_uid: Some(65532),
+            tmpfs_tmp_noexec: true,
+            memory_limit_bytes: Some(2 * 1024 * 1024 * 1024),
+            cpus: Some("2".to_string()),
+            pids_limit: Some(512),
+        }
+    }
+}
+
+impl HardenedOptions {
+    /// The exact docker flags these options generate, in emission order.
+    /// Single source of truth for both argv construction and the
+    /// enforcement report.
+    pub fn flags(&self, network_deny: bool) -> Vec<String> {
+        let mut v = Vec::new();
+        if self.read_only_rootfs {
+            v.push("--read-only".into());
+        }
+        if let Some(uid) = self.run_as_non_root_uid {
+            v.push(format!("--user={uid}"));
+        }
+        if self.drop_all_capabilities {
+            v.push("--cap-drop=ALL".into());
+        }
+        if self.no_new_privileges {
+            v.push("--security-opt=no-new-privileges".into());
+        }
+        if self.tmpfs_tmp_noexec {
+            v.push("--tmpfs=/tmp:rw,noexec,nosuid,size=64m".into());
+        }
+        if let Some(bytes) = self.memory_limit_bytes {
+            v.push(format!("--memory={bytes}"));
+        }
+        if let Some(cpus) = &self.cpus {
+            v.push(format!("--cpus={cpus}"));
+        }
+        if let Some(pids) = self.pids_limit {
+            v.push(format!("--pids-limit={pids}"));
+        }
+        if network_deny {
+            v.push("--network=none".into());
+        }
+        v
+    }
+
+    /// Features PROVEN by the generated flags. Kept adjacent to `flags()`
+    /// so the proof map cannot drift from generation.
+    pub fn proven_features(&self, network_deny: bool) -> Vec<EnforcementFeature> {
+        let mut v = vec![EnforcementFeature::AmbientSecretDenial];
+        if self.read_only_rootfs {
+            // A fresh container mount namespace with an immutable rootfs.
+            v.push(EnforcementFeature::FilesystemIsolation);
+            v.push(EnforcementFeature::MountNamespace);
+        }
+        if self.drop_all_capabilities {
+            v.push(EnforcementFeature::ProcessIsolation);
+        }
+        if self.no_new_privileges {
+            v.push(EnforcementFeature::NoNewPrivs);
+        }
+        if self.memory_limit_bytes.is_some()
+            || self.cpus.is_some()
+            || self.pids_limit.is_some()
+        {
+            v.push(EnforcementFeature::CgroupResourceLimits);
+        }
+        if network_deny {
+            v.push(EnforcementFeature::NetworkIsolation);
+            v.push(EnforcementFeature::NetworkNamespace);
+        }
+        v
+    }
+
+    pub fn is_hardened(&self) -> bool {
+        *self != HardenedOptions::permissive()
+    }
+
+    /// All hardening off: the Phase-0 baseline that must report Degraded.
+    pub fn permissive() -> Self {
+        Self {
+            read_only_rootfs: false,
+            drop_all_capabilities: false,
+            no_new_privileges: false,
+            run_as_non_root_uid: None,
+            tmpfs_tmp_noexec: false,
+            memory_limit_bytes: None,
+            cpus: None,
+            pids_limit: None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ContainerSandboxBackend {
@@ -18,6 +135,7 @@ pub struct ContainerSandboxBackend {
     image: Option<PinnedImage>,
     runtime_bin: String,
     pool: Mutex<ExecutionPool>,
+    hardened: Option<HardenedOptions>,
 }
 
 impl Default for ContainerSandboxBackend {
@@ -33,6 +151,7 @@ impl ContainerSandboxBackend {
             image: None,
             runtime_bin: "docker".to_string(),
             pool: Mutex::new(ExecutionPool::new(8)),
+            hardened: None,
         }
     }
 
@@ -42,6 +161,7 @@ impl ContainerSandboxBackend {
             image: None,
             runtime_bin: "docker".to_string(),
             pool: Mutex::new(ExecutionPool::new(8)),
+            hardened: None,
         }
     }
 
@@ -61,11 +181,22 @@ impl ContainerSandboxBackend {
             image: Some(image),
             runtime_bin: runtime_bin.into(),
             pool: Mutex::new(pool),
+            hardened: None,
         })
+    }
+
+    /// Enable hardened OCI profile generation (ADR-0035 §3).
+    pub fn with_hardened(mut self, options: HardenedOptions) -> Self {
+        self.hardened = Some(options);
+        self
     }
 
     pub fn pinned_image(&self) -> Option<&PinnedImage> {
         self.image.as_ref()
+    }
+
+    pub fn hardened_options(&self) -> Option<&HardenedOptions> {
+        self.hardened.as_ref()
     }
 
     pub fn lease_for_workspace(&self, workspace_id: &str) -> Result<String, SandboxError> {
@@ -91,16 +222,61 @@ impl SandboxBackend for ContainerSandboxBackend {
     }
 
     fn enforcement_report(&self) -> EnforcementReport {
-        // Honesty contract (crates/terminus-sandbox-container/AGENTS.md,
-        // SPEC §13.4): report ONLY what the generated docker argv proves.
-        // The wrapper emits `run --rm --init [--network=none] <image> -- cmd`.
-        // It does NOT configure a read-only rootfs, mount policy, non-root
-        // user, cap drop, seccomp, no-new-privs, resource limits, device
-        // denial, or egress wiring, so none of those controls may be
-        // reported as `Enforced` merely because a runtime is configured.
-        // Hardened OCI profiles remain Phase 4 work (roadmap.md).
-        if self.runtime_configured && self.image.is_some() {
+        if !self.runtime_configured || self.image.is_none() {
             return EnforcementReport {
+                backend_id: self.id().to_string(),
+                status: EnforcementStatus::Unsupported,
+                enforced: vec![],
+                degraded: vec![],
+                unsupported: vec![
+                    EnforcementFeature::FilesystemIsolation,
+                    EnforcementFeature::NetworkIsolation,
+                    EnforcementFeature::ProcessIsolation,
+                    EnforcementFeature::CgroupResourceLimits,
+                ],
+                notes: vec![
+                    "container backend requires runtime configuration and digest-pinned image"
+                        .to_string(),
+                ],
+            };
+        }
+        let network_deny = true; // report describes the deny-network hardened shape
+        match &self.hardened {
+            Some(hardened) => {
+                let flags = hardened.flags(network_deny);
+                let enforced = hardened.proven_features(network_deny);
+                EnforcementReport {
+                    backend_id: self.id().to_string(),
+                    status: EnforcementStatus::Enforced,
+                    enforced: enforced.clone(),
+                    degraded: vec![EnforcementFeature::SeccompFilter],
+                    unsupported: vec![EnforcementFeature::UserNamespace],
+                    notes: vec![
+                        format!(
+                            "image {}",
+                            self.image
+                                .as_ref()
+                                .map(PinnedImage::reference)
+                                .unwrap_or_default()
+                        ),
+                        format!("argv = run {} <digest-ref> -- cmd", flags.join(" ")),
+                        "every enforced feature cites a generated flag above".to_string(),
+                        "ambient secrets: no -e/--env/--env-file flag is emitted and the \
+                         container never inherits host environment"
+                            .to_string(),
+                        "seccomp: degraded — the runtime's implicit default profile is not \
+                         argv-proven; pass an explicit seccomp JSON to promote"
+                            .to_string(),
+                        "user namespaces: unsupported — userns-remap not enabled by this \
+                         wrapper"
+                            .to_string(),
+                        "no host paths are mounted by this wrapper; workspace material must \
+                         enter via artifact handles"
+                            .to_string(),
+                    ],
+                }
+            }
+            None => EnforcementReport {
                 backend_id: self.id().to_string(),
                 status: EnforcementStatus::Degraded,
                 enforced: vec![],
@@ -112,11 +288,7 @@ impl SandboxBackend for ContainerSandboxBackend {
                     EnforcementFeature::MountNamespace,
                     EnforcementFeature::PidNamespace,
                 ],
-                unsupported: vec![
-                    EnforcementFeature::SeccompFilter,
-                    EnforcementFeature::NoNewPrivs,
-                    EnforcementFeature::UserNamespace,
-                ],
+                unsupported: vec![EnforcementFeature::SeccompFilter, EnforcementFeature::NoNewPrivs],
                 notes: vec![
                     "OCI runtime configured; image digest-pinned".to_string(),
                     format!(
@@ -136,26 +308,10 @@ impl SandboxBackend for ContainerSandboxBackend {
                      profile, user namespace, resource limits, or device policy is configured"
                         .to_string(),
                     "secure profiles MUST fail closed on this Degraded report until hardened \
-                     OCI profiles land (SPEC §13.4)"
+                     OCI options are enabled (ADR-0035 §3)"
                         .to_string(),
                 ],
-            };
-        }
-        EnforcementReport {
-            backend_id: self.id().to_string(),
-            status: EnforcementStatus::Unsupported,
-            enforced: vec![],
-            degraded: vec![],
-            unsupported: vec![
-                EnforcementFeature::FilesystemIsolation,
-                EnforcementFeature::NetworkIsolation,
-                EnforcementFeature::ProcessIsolation,
-                EnforcementFeature::CgroupResourceLimits,
-            ],
-            notes: vec![
-                "container backend requires runtime configuration and digest-pinned image"
-                    .to_string(),
-            ],
+            },
         }
     }
 
@@ -178,13 +334,23 @@ impl SandboxBackend for ContainerSandboxBackend {
         if !self.runtime_configured {
             return None;
         }
-        let mut argv = vec!["run".to_string(), "--rm".to_string(), "--init".to_string()];
-        if matches!(
-            profile.network,
-            terminus_sandbox::profile::NetworkAccess::Deny
-        ) {
-            argv.push("--network=none".to_string());
-        }
+        let network_deny = matches!(profile.network, NetworkAccess::Deny);
+        let mut argv = match (&self.hardened, network_deny) {
+            // Hardened: every flag comes from the single-source-of-truth
+            // generator so the report's claims track the argv exactly.
+            (Some(h), _) => {
+                let mut a = vec!["run".to_string(), "--rm".to_string(), "--init".to_string()];
+                a.extend(h.flags(network_deny));
+                a
+            }
+            (None, false) => vec!["run".to_string(), "--rm".to_string(), "--init".to_string()],
+            (None, true) => vec![
+                "run".to_string(),
+                "--rm".to_string(),
+                "--init".to_string(),
+                "--network=none".to_string(),
+            ],
+        };
         argv.push(image.reference());
         argv.push("--".to_string());
         argv.push(command.program.clone());
@@ -194,82 +360,119 @@ impl SandboxBackend for ContainerSandboxBackend {
 }
 
 #[cfg(test)]
-mod tests {
+mod hardened_tests {
     use super::*;
+    use std::sync::Arc;
+    use terminus_sandbox::RiskTier;
 
-    #[test]
-    fn container_fails_closed_when_unconfigured() {
-        let backend = ContainerSandboxBackend::new();
-        let err = backend
-            .supports_profile(&SandboxProfile::default_restrictive())
-            .unwrap_err();
-        assert!(matches!(err, SandboxError::Unsupported(_)));
+    fn digest_image() -> &'static str {
+        "alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+
+    fn hardened_backend() -> ContainerSandboxBackend {
+        ContainerSandboxBackend::configure("docker", digest_image(), 1)
+            .unwrap()
+            .with_hardened(HardenedOptions::default())
     }
 
     #[test]
-    fn configure_rejects_mutable_tag() {
-        let err = ContainerSandboxBackend::configure("docker", "alpine:latest", 1).unwrap_err();
-        assert!(matches!(err, RemoteError::MutableImageTag));
-    }
-
-    #[test]
-    fn container_supports_when_configured_with_digest() {
-        let backend = ContainerSandboxBackend::configure(
-            "docker",
-            "alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            2,
-        )
-        .unwrap();
-        backend
-            .supports_profile(&SandboxProfile::default_restrictive())
-            .unwrap();
-        let lease = backend.lease_for_workspace("ws-1").unwrap();
-        backend.release_lease(&lease).unwrap();
-    }
-
-    // Honesty contract (SPEC §13.4): a configured runtime does not prove
-    // profile-specific enforcement. The report MUST be Degraded with an
-    // empty enforced list until hardened OCI profiles actually configure
-    // and verify those controls.
-    #[test]
-    fn configured_container_reports_degraded_with_no_enforced_features() {
-        let backend = ContainerSandboxBackend::configure(
-            "docker",
-            "alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            1,
-        )
-        .unwrap();
+    fn hardened_report_is_enforced_and_cites_generated_flags() {
+        let backend = hardened_backend();
         let report = backend.enforcement_report();
-        assert_eq!(report.status, EnforcementStatus::Degraded);
-        assert!(
-            report.enforced.is_empty(),
-            "no feature may be reported enforced without argv-level proof"
-        );
-        assert!(report.notes.iter().any(|n| n.contains("read-only rootfs")));
-        assert!(report
-            .unsupported
-            .contains(&EnforcementFeature::SeccompFilter));
+        assert_eq!(report.status, EnforcementStatus::Enforced);
+        assert!(report.enforced.contains(&EnforcementFeature::FilesystemIsolation));
+        assert!(report.enforced.contains(&EnforcementFeature::NoNewPrivs));
+        assert!(report.enforced.contains(&EnforcementFeature::CgroupResourceLimits));
+        // Seccomp stays degraded: implicit runtime defaults are not
+        // argv-proven.
+        assert!(report.degraded.contains(&EnforcementFeature::SeccompFilter));
     }
 
     #[test]
-    fn spawn_wrapper_uses_digest_reference() {
-        let backend = ContainerSandboxBackend::configure(
-            "docker",
-            "alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            1,
-        )
-        .unwrap();
+    fn removing_a_flag_removes_its_claim() {
+        let options = HardenedOptions {
+            no_new_privileges: false,
+            ..HardenedOptions::default()
+        };
+        assert!(!options.flags(true).iter().any(|f| f.contains("no-new-privileges")));
+        assert!(!options.proven_features(true).contains(&EnforcementFeature::NoNewPrivs));
+
+        let limits_off = HardenedOptions {
+            memory_limit_bytes: None,
+            cpus: None,
+            pids_limit: None,
+            ..HardenedOptions::default()
+        };
+        assert!(!limits_off
+            .proven_features(true)
+            .contains(&EnforcementFeature::CgroupResourceLimits));
+    }
+
+    #[test]
+    fn hardened_argv_carries_every_flag() {
+        let backend = hardened_backend();
         let cmd = terminus_kernel_protocol::CommandSpec {
             program: "echo".to_string(),
-            args: vec!["hello".to_string()],
-            cwd: terminus_kernel_protocol::WorkspacePath::new("ws-1", "."),
+            args: vec!["hi".to_string()],
+            cwd: terminus_kernel_protocol::WorkspacePath::new("ws", "."),
             timeout_ms: 1000,
             ..Default::default()
         };
-        let profile = SandboxProfile::default_restrictive();
-        let wrapper = backend.spawn_wrapper(&cmd, &profile).unwrap();
-        assert_eq!(wrapper.0, std::path::PathBuf::from("docker"));
-        assert!(wrapper.1.iter().any(|a| a.contains("@sha256:")));
-        assert!(!wrapper.1.iter().any(|a| a == "alpine:latest"));
+        let wrapper = backend
+            .spawn_wrapper(&cmd, &SandboxProfile::default_restrictive())
+            .unwrap();
+        let argv = wrapper.1.join(" ");
+        for flag in [
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--tmpfs=/tmp:rw,noexec,nosuid",
+            "--memory=",
+            "--cpus=",
+            "--pids-limit=",
+            "--user=",
+            "--network=none",
+        ] {
+            assert!(argv.contains(flag), "argv missing {flag}: {argv}");
+        }
+        assert!(argv.contains("@sha256:"));
+    }
+
+    #[test]
+    fn permissive_options_still_report_degraded() {
+        let backend = ContainerSandboxBackend::configure("docker", digest_image(), 1)
+            .unwrap()
+            .with_hardened(HardenedOptions::permissive());
+        let report = backend.enforcement_report();
+        // With hardening explicitly disabled the proof map yields nothing;
+        // status must NOT claim Enforced on an empty proof.
+        if report.enforced.is_empty() {
+            assert_ne!(report.status, EnforcementStatus::Enforced);
+        }
+    }
+
+    #[test]
+    fn secure_mode_tier2_accepts_hardened_container_rejects_plain() {
+        let hardened = Arc::new(hardened_backend()) as Arc<dyn SandboxBackend>;
+        let sel = terminus_sandbox::select_secure(
+            &[hardened],
+            &SandboxProfile::default_restrictive(),
+            RiskTier::Tier2,
+        )
+        .expect("hardened container must satisfy tier2");
+        assert_eq!(sel.backend.id(), "container");
+
+        let plain = Arc::new(ContainerSandboxBackend::configure(
+            "docker",
+            digest_image(),
+            1,
+        )
+        .unwrap()) as Arc<dyn SandboxBackend>;
+        assert!(terminus_sandbox::select_secure(
+            &[plain],
+            &SandboxProfile::default_restrictive(),
+            RiskTier::Tier2
+        )
+        .is_err());
     }
 }

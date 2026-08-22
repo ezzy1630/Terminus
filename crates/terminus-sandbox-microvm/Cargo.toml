@@ -1,18 +1,22 @@
 [package]
-name = "terminus-sandbox-windows"
+name = "terminus-sandbox-microvm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Platform sandbox backend stub (terminus-sandbox-windows)."
+description = "microVM sandbox backend selection (tier-3); fail-closed experimental per ADR-0027/ADR-0035."
 
 [lints]
 workspace = true
 
 [dependencies]
+terminus-kernel-protocol = { workspace = true }
 terminus-sandbox = { workspace = true }
 terminus-sandbox-container = { workspace = true }
-terminus-kernel-protocol = { workspace = true }
-thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

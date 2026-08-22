@@ -14,6 +14,7 @@ pub mod error;
 pub mod manager;
 pub mod profile;
 pub mod report;
+pub mod tier;
 
 pub use backend::{LocalRestrictiveBackend, SandboxBackend};
 pub use error::SandboxError;
@@ -23,3 +24,4 @@ pub use profile::{
     SecretsAccess,
 };
 pub use report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
+pub use tier::{select_secure, RiskTier, SecureSelection};

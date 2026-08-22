@@ -78,6 +78,26 @@ impl SandboxManager {
         &self.default_backend
     }
 
+    /// All registered fallback backends in registration order. Secure-mode
+    /// selection iterates these after the default.
+    pub fn fallback_backends(&self) -> &[Arc<dyn SandboxBackend>] {
+        &self.fallbacks
+    }
+
+    /// Secure-mode selection (ADR-0035 §7, SPEC §19.4): the chosen backend
+    /// must MEASURE-ENFORCE every control required by `min_tier`. Degraded
+    /// or unsupported candidates are rejected with named gaps; no silent
+    /// downgrade is possible.
+    pub fn select_secure(
+        &self,
+        profile: &SandboxProfile,
+        min_tier: crate::tier::RiskTier,
+    ) -> Result<crate::tier::SecureSelection, SandboxError> {
+        let mut candidates = vec![Arc::clone(&self.default_backend)];
+        candidates.extend(self.fallbacks.iter().cloned());
+        crate::tier::select_secure(&candidates, profile, min_tier)
+    }
+
     pub fn enforcement_report(&self) -> EnforcementReport {
         self.default_backend.enforcement_report()
     }
