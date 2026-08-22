@@ -25,17 +25,11 @@ modified_files:
     upstream_pr: "pending-upstream-fix"
     removal_milestone: "next-upstream-sync"
     conflict_hours: 0.5
-  - source: "packages/console/support/package.json"
-    reason: "Use standard tsc for console-support typechecking on Linux runners where native-preview tsgo binary fails."
-    owner: "upstream-team"
-    upstream_pr: "pending-upstream-fix"
-    removal_milestone: "next-upstream-sync"
-    conflict_hours: 0.1
 
 # Summary (auto-computed by tools/upstream-sync):
-#   total_modified_files: 2
-#   total_last_conflict_hours: 0.6
-#   within_budget: true (2 <= 25, 0.6 <= 8)
+#   total_modified_files: 1
+#   total_last_conflict_hours: 0.5
+#   within_budget: true (1 <= 25, 0.5 <= 8)
 #   bypass_register_open: 0
 
 # Upstream PRs proposed by Terminus (generic fixes).

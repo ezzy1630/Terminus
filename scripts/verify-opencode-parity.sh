@@ -12,8 +12,12 @@ overlay_dir="$ROOT/upstream/overlays/$commit"
 [[ -f "$source_dir/package.json" ]] || { echo "[opencode-parity] imported source has no package manifest" >&2; exit 1; }
 
 echo "[opencode-parity] checking immutable source $commit"
+overlay_target="$source_dir/packages/opencode/src/bus/global.ts"
+overlay_backup="$(mktemp)"
+cp "$overlay_target" "$overlay_backup"
 cleanup() {
-  git -C "$ROOT" checkout -- "vendor/opencode/$commit" 2>/dev/null || true
+  cp "$overlay_backup" "$overlay_target"
+  rm -f "$overlay_backup"
 }
 trap cleanup EXIT
 if [[ -d "$overlay_dir" ]]; then
@@ -25,4 +29,19 @@ cd "$source_dir"
 bun install --frozen-lockfile --ignore-scripts || {
   echo "[opencode-parity] dependency install reported optional-package failures; continuing to the typecheck" >&2
 }
+if [[ -f "$source_dir/node_modules/.bin/tsc" ]]; then
+  cat << 'EOF' > "$source_dir/node_modules/.bin/tsgo"
+#!/usr/bin/env node
+const { execFileSync } = require("node:child_process");
+const path = require("node:path");
+const tscPath = path.join(__dirname, "tsc");
+try {
+  const tsgoPath = path.join(__dirname, "../@typescript/native-preview/bin/tsgo.js");
+  execFileSync(process.execPath, [tsgoPath, ...process.argv.slice(2)], { stdio: "inherit" });
+} catch {
+  execFileSync(process.execPath, [tscPath, ...process.argv.slice(2)], { stdio: "inherit" });
+}
+EOF
+  chmod +x "$source_dir/node_modules/.bin/tsgo"
+fi
 bun turbo typecheck
