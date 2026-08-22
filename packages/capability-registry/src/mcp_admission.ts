@@ -131,7 +131,7 @@ export function computeMcpDescriptorHash(
 }
 
 export function parseMcpRegistration(raw: unknown): McpServerRegistration {
-  const parsed = mcpServerRegistrationSchema.parse(raw) as McpServerRegistration;
+  const parsed = mcpServerRegistrationSchema.parse(raw) as unknown as McpServerRegistration;
   const computed = computeMcpDescriptorHash(parsed);
   if (parsed.descriptorHash !== computed) {
     throw new ValidationError("MCP descriptor_hash does not match tool set", {

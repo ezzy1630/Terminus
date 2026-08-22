@@ -81,13 +81,13 @@ export const controlIdSchema = z
   .brand<"ControlId">();
 
 export function asKernelId(s: string): KernelId {
-  return kernelIdSchema.parse(s);
+  return kernelIdSchema.parse(s) as unknown as KernelId;
 }
 export function asServerId(s: string): ServerId {
-  return serverIdSchema.parse(s);
+  return serverIdSchema.parse(s) as unknown as ServerId;
 }
 export function asControlId(s: string): ControlId {
-  return controlIdSchema.parse(s);
+  return controlIdSchema.parse(s) as unknown as ControlId;
 }
 
 /** Helper: assert a string is a content-hash-formatted sha256. */

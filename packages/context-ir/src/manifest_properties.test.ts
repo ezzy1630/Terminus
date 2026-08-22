@@ -14,6 +14,7 @@ import type {
   ContentHash,
   ModelKey,
   Rfc3339Timestamp,
+  TokenCount,
   Uuid7,
 } from "@terminus/domain";
 
@@ -24,12 +25,12 @@ const HASH = `sha256:${"ab".repeat(32)}` as ContentHash;
 function fragment(id: string, authority: number): ContextFragment {
   return {
     id,
-    kind: "evidence",
+    kind: "code",
     contentRef: {
       hash: HASH,
-      uri: `artifact://sha256/${"ab".repeat(32)}`,
+      uri: `artifact://sha256/${"ab".repeat(32)}` as ContextFragment["contentRef"]["uri"],
       mediaType: "text/plain",
-      bytes: 0n,
+      bytes: 0n as ContextFragment["contentRef"]["bytes"],
     },
     source: {
       uri: "test://source",
@@ -92,7 +93,7 @@ function cachePlan(): ContextCachePlan {
     stablePrefixHash: HASH,
     volatileSuffixBoundary: 0,
     breakpoints: [],
-    predictedCachedTokens: 0n,
+    predictedCachedTokens: 0n as TokenCount,
   };
 }
 
@@ -107,12 +108,12 @@ function input(selected: ContextFragment[]): ManifestBuilderInput {
     omitted: [],
     cachePlan: cachePlan(),
     reserves: {
-      output: 100n,
-      reasoning: 0n,
-      toolResult: 0n,
-      recovery: 0n,
+      output: 100n as TokenCount,
+      reasoning: 0n as TokenCount,
+      toolResult: 0n as TokenCount,
+      recovery: 0n as TokenCount,
     },
-    predictedCachedTokens: 0n,
+    predictedCachedTokens: 0n as TokenCount,
     confidentialityDecisions: {},
     taintDecisions: {},
     experimentAssignments: [],

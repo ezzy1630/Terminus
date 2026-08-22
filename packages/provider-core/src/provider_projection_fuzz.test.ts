@@ -3,6 +3,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ProviderResponse } from "./index.js";
+import type { ModelKey } from "@terminus/domain";
 
 function tryProjectShape(raw: unknown): { ok: boolean; reason: string } {
   if (raw === null || typeof raw !== "object") {
@@ -41,7 +42,7 @@ describe("provider projection fuzz smoke", () => {
   test("minimal valid shape accepted", () => {
     const sample: ProviderResponse = {
       providerId: "local",
-      model: "local/test",
+      model: "local/test" as ModelKey,
       chunks: [{ kind: "text", text: "hi" }],
       observedAt: "2026-07-23T00:00:00Z",
     };

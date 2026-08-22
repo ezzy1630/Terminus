@@ -4,15 +4,8 @@
  * Exports the exit gate, provider gate result types, snapshot store,
  * and fixture factories for external test use.
  */
-export {
-  ExitGateResult,
-  ProviderGateResult,
-  runExitGate,
-  buildProviderGateResult,
-} from "./exit-gate.js";
+export { runExitGate, buildProviderGateResult } from "./exit-gate.js";
+export type { ExitGateResult, ProviderGateResult } from "./exit-gate.js";
 
-export {
-  VersionedSnapshot,
-  CapabilitySnapshotStore,
-  InMemorySnapshotStore,
-} from "./snapshot-store.js";
+export { InMemorySnapshotStore } from "./snapshot-store.js";
+export type { VersionedSnapshot, CapabilitySnapshotStore } from "./snapshot-store.js";

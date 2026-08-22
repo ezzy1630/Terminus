@@ -76,7 +76,7 @@ export function parseLockfile(raw: unknown): CapabilityLockfile {
       actual: parsed.lockfileHash,
     });
   }
-  return parsed as CapabilityLockfile;
+  return parsed as unknown as CapabilityLockfile;
 }
 
 export interface LockfileStore {

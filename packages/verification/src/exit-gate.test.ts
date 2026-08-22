@@ -5,6 +5,7 @@
 import { describe, test, expect } from "bun:test";
 import type {
   AcceptanceCriterion,
+  Micros,
   Uuid7,
   Rfc3339Timestamp,
   ArtifactRef,
@@ -31,7 +32,7 @@ function fakeTs(): Rfc3339Timestamp {
 }
 
 const checkpoint: ArtifactRef = {
-  hash: "sha256:" + "ab".repeat(32),
+  hash: ("sha256:" + "ab".repeat(32)) as ArtifactRef["hash"],
   uri: ("artifact://sha256/" + "ab".repeat(32)) as ArtifactRef["uri"],
   mediaType: "application/json",
   bytes: 0n as ArtifactRef["bytes"],
@@ -146,7 +147,7 @@ describe("M8 verification exit gate", () => {
         unresolvedRisks: [],
         acceptedRisks: [],
         externalEffects: [],
-        costMicros: 0n,
+        costMicros: 0n as Micros,
         durationSeconds: 1,
         finalCheckpoint: checkpoint,
       }),
@@ -196,7 +197,7 @@ describe("M8 verification exit gate", () => {
         unresolvedRisks: [],
         acceptedRisks: [],
         externalEffects: [],
-        costMicros: 0n,
+        costMicros: 0n as Micros,
         durationSeconds: 1,
         finalCheckpoint: checkpoint,
       }),
@@ -258,7 +259,7 @@ describe("M8 verification exit gate", () => {
       unresolvedRisks: [],
       acceptedRisks: [],
       externalEffects: [],
-      costMicros: 0n,
+      costMicros: 0n as Micros,
       durationSeconds: 1,
       finalCheckpoint: checkpoint,
     });
@@ -305,7 +306,7 @@ describe("M8 verification exit gate", () => {
       unresolvedRisks: [],
       acceptedRisks: [],
       externalEffects: [],
-      costMicros: 0n,
+      costMicros: 0n as Micros,
       durationSeconds: 1,
       finalCheckpoint: checkpoint,
     });

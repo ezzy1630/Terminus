@@ -384,7 +384,7 @@ describe("M9 exit gate", () => {
       hash: HASH_A,
       uri: "artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as ArtifactRef["uri"],
       mediaType: "application/json",
-      bytes: 10n,
+      bytes: 10n as ArtifactRef["bytes"],
     } satisfies ArtifactRef;
     const result = independentlyVerifyHarnessResult({
       adapterResult: {

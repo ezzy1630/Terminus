@@ -259,12 +259,12 @@ export const orchestrationConfigSchema = z.object({
       }),
     )
     .default({
-      tiny_bugfix: { spawnThreshold: 0.35, maxParallel: 1 },
-      parallelizable: { spawnThreshold: 0.05, maxParallel: 4 },
-      tightly_coupled: { spawnThreshold: 0.5, maxParallel: 1 },
-      unfamiliar_repository: { spawnThreshold: 0.08, maxParallel: 2 },
-      security_sensitive: { spawnThreshold: 0.4, maxParallel: 1 },
-      refactor: { spawnThreshold: 0.12, maxParallel: 2 },
+      tiny_bugfix: { spawnThreshold: 0.35, requirePositiveExpectedValue: true, maxParallel: 1 },
+      parallelizable: { spawnThreshold: 0.05, requirePositiveExpectedValue: true, maxParallel: 4 },
+      tightly_coupled: { spawnThreshold: 0.5, requirePositiveExpectedValue: true, maxParallel: 1 },
+      unfamiliar_repository: { spawnThreshold: 0.08, requirePositiveExpectedValue: true, maxParallel: 2 },
+      security_sensitive: { spawnThreshold: 0.4, requirePositiveExpectedValue: true, maxParallel: 1 },
+      refactor: { spawnThreshold: 0.12, requirePositiveExpectedValue: true, maxParallel: 2 },
     }),
 });
 

@@ -34,7 +34,6 @@ export {
   serializeNodeSpec,
   requirePredicateType,
   type VerificationNodeSpec,
-  type PredicateType,
 } from "./node-spec.js";
 export {
   PredicateRegistry,

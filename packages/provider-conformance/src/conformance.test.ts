@@ -7,7 +7,7 @@
  * partial-stream settlement, exit gate.
  */
 import { test, expect, describe } from "bun:test";
-import type { ModelKey, TokenCount, ContentHash, ConfidentialityLabel } from "@terminus/domain";
+import type { ModelKey, TokenCount, ContentHash, ConfidentialityLabel, Micros } from "@terminus/domain";
 import { micros } from "@terminus/domain";
 import type {
   ProviderCapabilitySnapshot,
@@ -223,14 +223,14 @@ describe("Provider conformance: token accounting (§38.14)", () => {
   test("OpenAI: extracts usage from last chunk", () => {
     const u = new OpenAiRenderer().extractUsage({ providerId:"openai", model:"gpt-4o" as ModelKey, chunks:[
       mkChunk("text",{text:"Hi"}), mkChunk("done",{usage:{inputTokens:50n as TokenCount,cachedInputTokens:10n as TokenCount,cacheWriteTokens:5n as TokenCount,outputTokens:20n as TokenCount,reasoningTokens:0n as TokenCount,toolSchemaTokens:5n as TokenCount,latencyMs:300,timeToFirstTokenMs:100}})], observedAt:"2026-01-01T00:00:00Z"});
-    expect(u.inputTokens).toBe(50n);
-    expect(u.cachedInputTokens).toBe(10n);
+    expect(u.inputTokens).toBe(50n as TokenCount);
+    expect(u.cachedInputTokens).toBe(10n as TokenCount);
   });
 
   test("Anthropic: extracts reasoning tokens", () => {
     const u = new AnthropicRenderer().extractUsage({ providerId:"anthropic", model:"claude" as ModelKey, chunks:[
       mkChunk("done",{usage:{inputTokens:100n as TokenCount,cachedInputTokens:20n as TokenCount,cacheWriteTokens:10n as TokenCount,outputTokens:30n as TokenCount,reasoningTokens:15n as TokenCount,toolSchemaTokens:3n as TokenCount,latencyMs:500,timeToFirstTokenMs:150}})], observedAt:"2026-01-01T00:00:00Z"});
-    expect(u.reasoningTokens).toBe(15n);
+    expect(u.reasoningTokens).toBe(15n as TokenCount);
   });
 });
 
@@ -283,7 +283,7 @@ describe("Provider conformance: confidentiality (§38.18)", () => {
   test("filterByConfidentiality: admits allowed, omits disallowed", () => {
     const policy: ConfidentialityPolicy = { allowedProviders: { public:["openai"], workspace:["openai"], secret_adjacent:[], secret:[] } };
     const frags = [mkFragment("a","authority","Public.","public"), mkFragment("b","code","Secret.","secret")];
-    const f = filterByConfidentiality(policy, "openai", frags as Parameters<typeof filterByConfidentiality>[2]);
+    const f = filterByConfidentiality(policy, "openai", frags as unknown as Parameters<typeof filterByConfidentiality>[2]);
     expect(f.admitted.length).toBe(1);
     expect(f.omitted.length).toBe(1);
   });
@@ -353,7 +353,7 @@ describe("Provider conformance: partial-stream settlement (§38.12)", () => {
 
   test("settlePartialStream: zero cost with no usage", () => {
     const r = settlePartialStream([mkChunk("text",{text:"x"})], "budget", openAiCapabilitySnapshot().economics);
-    expect(r.costAccrued).toBe(0n);
+    expect(r.costAccrued).toBe(0n as Micros);
   });
 });
 

@@ -122,7 +122,7 @@ describe("Adapter SDK Unit Tests", () => {
       hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as ArtifactRef["hash"],
       uri: "artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as ArtifactRef["uri"],
       mediaType: "application/json",
-      bytes: 1n,
+      bytes: 1n as ArtifactRef["bytes"],
     };
     const res = independentlyVerifyHarnessResult({
       adapterResult: {

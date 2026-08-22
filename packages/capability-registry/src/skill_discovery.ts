@@ -110,7 +110,7 @@ export const skillManifestSchema = z.object({
  */
 export function loadSkillManifest(yaml: unknown): SkillManifest {
   if (yaml !== null && typeof yaml === "object" && "skillMdHash" in (yaml as object)) {
-    return skillManifestSchema.parse(yaml);
+    return skillManifestSchema.parse(yaml) as SkillManifest;
   }
   const root = yaml as { skill?: unknown; forge?: { skill?: unknown } } | null;
   const inner = root?.skill ?? root?.forge?.skill ?? yaml;

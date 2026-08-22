@@ -34,14 +34,14 @@ import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { firstValueFrom } from "rxjs";
 import { createKernelUdsClients, type KernelUdsClients } from "./kernel-uds.js";
-import { PatchCommitMode } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
+import { PatchCommitMode, type RequestContext } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import {
   createVerificationRuntime,
   defaultCriteriaNodes,
   persistPlanToPrisma,
   persistResultsToPrisma,
 } from "./verification-runtime.js";
-import type { AcceptanceCriterion } from "../../../packages/domain/src/index.ts";
+import type { AcceptanceCriterion, Micros } from "../../../packages/domain/src/index.ts";
 
 // ────────────────────────── Configuration ──────────────────────────────────
 
@@ -106,7 +106,7 @@ function requireKernelUds(): KernelUdsClients {
   return kernelUds;
 }
 
-function kernelContext() {
+function kernelContext(): RequestContext {
   return {
     requestId: randomUUID(),
     idempotencyKey: randomUUID(),
@@ -116,6 +116,10 @@ function kernelContext() {
     actorId: SERVER_PRINCIPAL,
     traceparent: "",
     capabilityToken: process.env.TERMINUS_KERNEL_CAP_TOKEN ?? "",
+    workspaceId: "",
+    deadline: undefined,
+    resourceBudgets: undefined,
+    policyVersion: "",
   };
 }
 
@@ -1928,7 +1932,7 @@ const routes: Route[] = [
 
     if (Array.isArray(body.sessions)) {
       for (const s of body.sessions) {
-        await db.session.upsert({
+        const imported = await db.session.upsert({
           where: { id: s.id },
           create: {
             id: s.id,
@@ -1936,12 +1940,14 @@ const routes: Route[] = [
             ownerPrincipal: SERVER_PRINCIPAL,
             title: s.title,
             status: s.status,
+            defaultModelProfile: "implementer",
+            defaultPermissionProfile: "secure-local-default",
             createdAt: new Date(s.created_at),
             updatedAt: new Date(s.updated_at),
           },
           update: { title: s.title, status: s.status, updatedAt: new Date(s.updated_at) },
-        }).catch(() => {});
-        importedSessions += 1;
+        }).then(() => true).catch(() => false);
+        if (imported) importedSessions += 1;
       }
     }
 
@@ -1952,7 +1958,7 @@ const routes: Route[] = [
           data: { id: threadId, sessionId: t.session_id, status: "active" },
         }).catch(() => {});
 
-        await db.task.upsert({
+        const imported = await db.task.upsert({
           where: { id: t.id },
           create: {
             id: t.id,
@@ -1960,12 +1966,14 @@ const routes: Route[] = [
             threadId,
             status: t.status,
             phase: t.phase,
+            budgetJson: "{}",
+            scopeDigest: "",
             createdAt: new Date(t.created_at),
             completedAt: t.completed_at ? new Date(t.completed_at) : null,
           },
           update: { status: t.status, phase: t.phase, completedAt: t.completed_at ? new Date(t.completed_at) : null },
-        }).catch(() => {});
-        importedTasks += 1;
+        }).then(() => true).catch(() => false);
+        if (imported) importedTasks += 1;
       }
     }
 
@@ -2009,15 +2017,17 @@ const routes: Route[] = [
 
   // ────────────────────────── /side-effects (§28.6) ─────────────────────
   route("GET", "/v1/side-effects", async (_req, res) => {
-    const effects = await db.sideEffect.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
+    const effects = await db.sideEffect.findMany({ orderBy: { startedAt: "desc" }, take: 100 });
     sendJson(res, 200, {
       side_effects: effects.map((e) => ({
         id: e.id,
-        task_id: e.taskId,
-        kind: e.kind,
+        tool_call_id: e.toolCallId,
+        effect_type: e.effectType,
+        resource_uri: e.resourceUri,
         state: e.state,
         idempotency_key: e.idempotencyKey,
-        result: e.result,
+        reversibility: e.reversibility,
+        evidence_artifact: e.evidenceArtifact,
         started_at: e.startedAt?.toISOString() ?? null,
         settled_at: e.settledAt?.toISOString() ?? null,
       })),
@@ -2032,15 +2042,17 @@ const routes: Route[] = [
       where: { id: effectId },
       data: {
         state: body.result === "settled" ? "SETTLED" : "FAILED",
-        result: body.result,
+        reconciliationJson: JSON.stringify({
+          result: body.result,
+          justification: body.justification ?? null,
+        }),
         settledAt: new Date(),
       },
     });
     sendJson(res, 200, {
       id: updated.id,
-      task_id: updated.taskId,
       state: updated.state,
-      result: updated.result,
+      result: body.result,
       settled_at: updated.settledAt?.toISOString() ?? null,
     });
   }),
@@ -2370,7 +2382,7 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
             unresolvedRisks: [],
             acceptedRisks: [],
             externalEffects: [],
-            costMicros: 0n,
+            costMicros: 0n as Micros,
             durationSeconds: 0,
             finalCheckpoint: {
               hash: "sha256:" + "0".repeat(64),
@@ -2504,7 +2516,16 @@ const server = createServer(async (req, res) => {
     const m = r.pattern.exec(url.pathname);
     if (!m) continue;
     matchedRoute = r;
-    r.paramNames.forEach((n, i) => { matchedParams[n] = decodeURIComponent(m[i + 1] ?? ""); });
+    // Malformed percent-encoding (e.g. /v1/tasks/%zz) must degrade to a
+    // 404-style miss, not throw an unhandled rejection that kills the
+    // server: decodeURIComponent throws URIError on invalid sequences, and
+    // this loop runs outside the handler try/catch below.
+    try {
+      r.paramNames.forEach((n, i) => { matchedParams[n] = decodeURIComponent(m[i + 1] ?? ""); });
+    } catch {
+      matchedRoute = null;
+      break;
+    }
     break;
   }
 
