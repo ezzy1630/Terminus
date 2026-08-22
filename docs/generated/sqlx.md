@@ -12,6 +12,7 @@ compatibility and emits this note so `codegen-check` can detect drift.
 
 | File |
 |---|
+| `0002_verification_orchestration.sql` |
 | `0001_initial.sql` |
 
 If a future Rust crate adopts SQLx, replace this script with

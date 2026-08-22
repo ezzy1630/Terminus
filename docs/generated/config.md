@@ -4,7 +4,7 @@
 > Source of truth: `packages/config/src/index.ts` (zod schema).
 > Layered load order is documented in SPEC Appendix F.
 
-Total settings: **92**
+Total settings: **93**
 
 | Path | Type | Default |
 |---|---|---|
@@ -87,6 +87,7 @@ Total settings: **92**
 | `orchestration.loopProtection.editRevertCycles` | number | 2 |
 | `orchestration.loopProtection.turnsWithoutProgress` | number | 8 |
 | `orchestration.loopProtection.maximumTurns` | number | 50 |
+| `orchestration.cohorts` | record<string, …> | {"tiny_bugfix":{"spawnThreshold":0.35,"requirePositiveExpectedValue":true,"maxParallel":1},"parallelizable":{"spawnThreshold":0.05,"requirePositiveExpectedValue":true,"maxParallel":4},"tightly_coupled":{"spawnThreshold":0.5,"requirePositiveExpectedValue":true,"maxParallel":1},"unfamiliar_repository":{"spawnThreshold":0.08,"requirePositiveExpectedValue":true,"maxParallel":2},"security_sensitive":{"spawnThreshold":0.4,"requirePositiveExpectedValue":true,"maxParallel":1},"refactor":{"spawnThreshold":0.12,"requirePositiveExpectedValue":true,"maxParallel":2}} |
 | `verification.profiles` | record<string, …> | {} |
 | `extensions.installation.lifecycleScripts` | enum: "allow" | "deny" | "deny" |
 | `extensions.installation.requireLockfile` | boolean | true |

@@ -1,0 +1,27 @@
+# Static inventory
+
+> Auto-generated from the source tree by `tools/codegen/inventory.ts`.
+> Do not edit by hand — run `just codegen`.
+
+**Honesty boundary:** every count below is a STATIC source scan at HEAD.
+A declared test is not a passing run. Executed-test evidence lives in CI
+(workflow artifacts on the exact commit) and under `artifacts/release-gate/`.
+
+| Fact | Value | How derived |
+|---|---:|---|
+| SPEC.md lines | 9550 | wc of SPEC.md |
+| Rust crates | 21 | directories in crates/ |
+| TypeScript packages | 32 | directories in packages/ |
+| Client apps | 4 | directories in apps/ |
+| External harness adapters | 7 | directories in adapters/ |
+| Mini-services | 2 | directories in mini-services/ |
+| Declared Rust tests | 292 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
+| TypeScript test files | 44 | `*.test.{ts,tsx}` in packages/ + apps/ |
+| Declared TypeScript test blocks | 465 | `test(/it(` occurrences in those files |
+| Declared Python tests | 221 | `def test_*` in python/** |
+| ADRs | 32 | docs/decisions/ADR-*.md |
+| Runbooks | 15 | docs/runbooks/*.md |
+| SQLite migrations | 2 | migrations/sqlite/*.sql |
+
+Maturity classification of every component: see the
+[component maturity registry](component-maturity.md) (`maturity.yaml`).

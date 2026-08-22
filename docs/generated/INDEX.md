@@ -9,6 +9,8 @@
 
 | Generator | Source of truth | Output |
 |---|---|---|
+| Component maturity registry | `maturity.yaml` | `maturity.md` |
+| Static inventory | `crates/, packages/, apps/, adapters/, python/` | `inventory.md` |
 | Event catalog | `schemas/events/catalog.yaml` | `events.md` |
 | Tool schema catalog | `schemas/tools/*.json` | `tools.md` |
 | Configuration reference | `packages/config/src/index.ts` | `config.md` |
@@ -19,9 +21,11 @@
 
 | File | Size |
 |---|---:|
-| `config.md` | 5988 B |
-| `events.md` | 11644 B |
+| `component-maturity.md` | 10139 B |
+| `config.md` | 6601 B |
+| `events.md` | 12806 B |
+| `inventory.md` | 1285 B |
 | `public-api.md` | 2418 B |
-| `sqlx.md` | 706 B |
+| `sqlx.md` | 748 B |
 | `tools.md` | 7296 B |
 
