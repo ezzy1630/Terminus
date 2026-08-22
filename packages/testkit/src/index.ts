@@ -653,6 +653,9 @@ export function resetTestkitCounter(): void {
 /** Returns a zod schema that accepts any value (useful for round-trip tests). */
 export const anyValue = z.unknown();
 
+export * from "./arp_v2_fixture_server.js";
+export * from "./arp_v2_conformance.js";
+
 export type {
   Task,
   TaskContract,
@@ -668,3 +671,4 @@ export type {
   SelectionFeatures,
   ResourceUri,
 };
+

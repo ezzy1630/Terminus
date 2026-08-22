@@ -22,6 +22,14 @@ export {
 export * from "./adapters.js";
 export * from "./conformance.js";
 
+// Standards Boundary Adapters (SPEC §9.3)
+export * from "./acp_adapter.js";
+export * from "./mcp_adapter.js";
+export * from "./a2a_adapter.js";
+export * from "./agui_adapter.js";
+export * from "./atif_adapter.js";
+
+
 export const adapterCapabilityProfileSchema = {
   exactContextVisibility: ["full", "partial", "opaque"] as const,
   toolInterception: ["full", "partial", "none"] as const,

@@ -36,10 +36,61 @@ export type ServerId = string & Brand<"ServerId">;
 /** Control-plane identity (`control:<opaque>`). */
 export type ControlId = string & Brand<"ControlId">;
 
+// Canonical domain entity identifiers (SPEC §5 / ARP v2)
+export type OrganizationId = string & Brand<"OrganizationId">;
+export type DepartmentId = string & Brand<"DepartmentId">;
+export type OperatorId = string & Brand<"OperatorId">;
+export type MissionId = string & Brand<"MissionId">;
+export type TaskId = string & Brand<"TaskId">;
+export type WorkflowId = string & Brand<"WorkflowId">;
+export type WorkflowVersion = number & Brand<"WorkflowVersion">;
+export type NodeId = string & Brand<"NodeId">;
+export type NodeRunId = string & Brand<"NodeRunId">;
+export type ModelInvocationId = string & Brand<"ModelInvocationId">;
+export type WorkerId = string & Brand<"WorkerId">;
+export type SandboxLeaseId = string & Brand<"SandboxLeaseId">;
+export type CapabilityId = string & Brand<"CapabilityId">;
+export type AuthorizationId = string & Brand<"AuthorizationId">;
+export type ApprovalId = string & Brand<"ApprovalId">;
+export type EffectId = string & Brand<"EffectId">;
+export type ArtifactId = string & Brand<"ArtifactId">;
+export type EvidenceId = string & Brand<"EvidenceId">;
+export type ClaimId = string & Brand<"ClaimId">;
+export type DecisionId = string & Brand<"DecisionId">;
+export type QuestionId = string & Brand<"QuestionId">;
+export type RiskId = string & Brand<"RiskId">;
+export type ConnectorId = string & Brand<"ConnectorId">;
+export type ExtensionId = string & Brand<"ExtensionId">;
+
 export const uuid7Schema = z
   .string()
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
   .brand<"Uuid7">();
+
+export const organizationIdSchema = z.string().min(1).brand<"OrganizationId">();
+export const departmentIdSchema = z.string().min(1).brand<"DepartmentId">();
+export const operatorIdSchema = z.string().min(1).brand<"OperatorId">();
+export const missionIdSchema = z.string().min(1).brand<"MissionId">();
+export const taskIdSchema = z.string().min(1).brand<"TaskId">();
+export const workflowIdSchema = z.string().min(1).brand<"WorkflowId">();
+export const workflowVersionSchema = z.number().int().positive().brand<"WorkflowVersion">();
+export const nodeIdSchema = z.string().min(1).brand<"NodeId">();
+export const nodeRunIdSchema = z.string().min(1).brand<"NodeRunId">();
+export const modelInvocationIdSchema = z.string().min(1).brand<"ModelInvocationId">();
+export const workerIdSchema = z.string().min(1).brand<"WorkerId">();
+export const sandboxLeaseIdSchema = z.string().min(1).brand<"SandboxLeaseId">();
+export const capabilityIdSchema = z.string().min(1).brand<"CapabilityId">();
+export const authorizationIdSchema = z.string().min(1).brand<"AuthorizationId">();
+export const approvalIdSchema = z.string().min(1).brand<"ApprovalId">();
+export const effectIdSchema = z.string().min(1).brand<"EffectId">();
+export const artifactIdSchema = z.string().min(1).brand<"ArtifactId">();
+export const evidenceIdSchema = z.string().min(1).brand<"EvidenceId">();
+export const claimIdSchema = z.string().min(1).brand<"ClaimId">();
+export const decisionIdSchema = z.string().min(1).brand<"DecisionId">();
+export const questionIdSchema = z.string().min(1).brand<"QuestionId">();
+export const riskIdSchema = z.string().min(1).brand<"RiskId">();
+export const connectorIdSchema = z.string().min(1).brand<"ConnectorId">();
+export const extensionIdSchema = z.string().min(1).brand<"ExtensionId">();
 export const contentHashSchema = z
   .string()
   .regex(/^sha256:[0-9a-f]{64}$/)

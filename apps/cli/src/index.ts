@@ -31,6 +31,23 @@
  *   evals                           List eval suites + baselines as JSON
  *   config                          Print effective configuration as JSON
  *
+ * ARP v2 Commands:
+ *   health-v2                       Check v2 system health
+ *   schema-registry                 Get v2 schema registry metadata
+ *   task-v2 <id>                    Get v2 task snapshot
+ *   new-task-v2 --objective <o>     Create a canonical v2 proof-carrying task
+ *   transition-task-v2 <id> --status <s>
+ *                                   Transition v2 task state (READY, RUNNING, etc.)
+ *   propose-effect --task <id> --class <c> --intent <i>
+ *                                   Propose transactional effect
+ *   commit-effect <id>              Commit prepared effect
+ *   submit-claim --task <id> --statement <s>
+ *                                   Submit an acceptance claim
+ *   record-evidence --claim <id> --summary <s> --result <r>
+ *                                   Record evidence against claim
+ *   events-v2 [--task <id>] [--cursor <c>]
+ *                                   Stream ARP v2 resumable events
+ *
  * Options:
  *   --gateway <url>    Gateway base URL (default: http://127.0.0.1:81, env: TERMINUS_GATEWAY)
  *   --token <t>        Bearer token (env: TERMINUS_TOKEN)
@@ -358,10 +375,110 @@ async function main(): Promise<void> {
         printJson(await apiGet("/v1/configuration"));
         break;
       }
+      // ────────────────────── ARP v2 Commands ───────────────────────────────
+      case "health-v2": {
+        printJson(await apiGet("/v2/system/health"));
+        break;
+      }
+      case "schema-registry": {
+        printJson(await apiGet("/v2/system/schema-registry"));
+        break;
+      }
+      case "task-v2": {
+        const id = positional[1];
+        if (!id) { process.stderr.write("error: task-v2 <id>\n"); process.exit(2); }
+        printJson(await apiGet(`/v2/tasks/${id}`));
+        break;
+      }
+      case "new-task-v2": {
+        const objective = requireFlag(flags, "objective");
+        const mission = typeof flags.mission === "string" ? flags.mission : null;
+        const mode = typeof flags.mode === "string" ? flags.mode : "interactive";
+        const body = {
+          missionId: mission,
+          organizationId: "default-org",
+          departmentId: "default-dept",
+          contract: {
+            version: 1,
+            mission: objective,
+            scope: { resources: [], allowedEffectClasses: ["LOCAL_FS_WRITE", "LOCAL_PROCESS_SPAWN"], excludedPathsOrSystems: [] },
+            acceptance: [{ claimId: "claim-1", statement: objective, evidenceRequirement: "DETERMINISTIC_TEST" }],
+            constraints: { security: ["NO_AMBIENT_SECRETS"], costMicros: 10000000n, timeoutSeconds: 3600 },
+            authorityCeiling: ["FS_WRITE", "PROCESS_SPAWN"],
+            mode,
+          },
+        };
+        printJson(await apiMutate("/v2/tasks", body, idem));
+        break;
+      }
+      case "transition-task-v2": {
+        const id = positional[1];
+        if (!id) { process.stderr.write("error: transition-task-v2 <id>\n"); process.exit(2); }
+        const status = requireFlag(flags, "status");
+        const expVer = typeof flags["expected-version"] === "string" ? parseInt(flags["expected-version"], 10) : null;
+        printJson(await apiMutate(`/v2/tasks/${id}/transition`, { id, targetStatus: status, expectedVersion: expVer }, idem));
+        break;
+      }
+      case "propose-effect": {
+        const taskId = requireFlag(flags, "task");
+        const effectClass = requireFlag(flags, "class");
+        const intent = requireFlag(flags, "intent");
+        const worker = typeof flags.worker === "string" ? flags.worker : "local_worker";
+        const body = {
+          taskId,
+          attemptId: "att-1",
+          connectorOrWorker: worker,
+          intentType: intent,
+          canonicalParameters: {},
+          resourceHandles: [],
+          effectClass,
+          semanticIdempotencyKey: idem ?? `eff-${Date.now()}`,
+        };
+        printJson(await apiMutate("/v2/effects", body, idem));
+        break;
+      }
+      case "commit-effect": {
+        const id = positional[1];
+        if (!id) { process.stderr.write("error: commit-effect <id>\n"); process.exit(2); }
+        const expVer = typeof flags["expected-version"] === "string" ? parseInt(flags["expected-version"], 10) : null;
+        printJson(await apiMutate(`/v2/effects/${id}/commit`, { id, expectedVersion: expVer }, idem));
+        break;
+      }
+      case "submit-claim": {
+        const taskId = requireFlag(flags, "task");
+        const statement = requireFlag(flags, "statement");
+        const evidence = typeof flags.evidence === "string" ? flags.evidence : "DETERMINISTIC_TEST";
+        printJson(await apiMutate("/v2/claims", { taskId, statement, requiredEvidenceKind: evidence }, idem));
+        break;
+      }
+      case "record-evidence": {
+        const claimId = requireFlag(flags, "claim");
+        const summary = requireFlag(flags, "summary");
+        const result = requireFlag(flags, "result");
+        const body = { claimId, kind: "DETERMINISTIC_TEST", summary, verifierResult: result };
+        printJson(await apiMutate("/v2/evidence", body, idem));
+        break;
+      }
+      case "events-v2": {
+        const task = typeof flags.task === "string" ? flags.task : undefined;
+        const cursor = typeof flags.cursor === "string" ? flags.cursor : undefined;
+        const params = new URLSearchParams();
+        if (task) params.set("taskId", task);
+        if (cursor) params.set("cursor", cursor);
+        const qs = params.toString();
+        const url = forgeUrl(`/v2/events${qs ? `?${qs}` : ""}`);
+        const res = await fetch(url, { headers: { accept: "text/event-stream" } });
+        if (!res.ok) {
+          process.stderr.write(`error: SSE HTTP ${res.status}\n`);
+          process.exit(1);
+        }
+        break;
+      }
       default:
         process.stderr.write(`error: unknown command "${cmd}"\n`);
         showHelp();
         process.exit(2);
+
     }
   } catch (e) {
     process.stderr.write(`error: ${(e as Error).message}\n`);

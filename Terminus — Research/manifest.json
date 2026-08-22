@@ -1,0 +1,67 @@
+{
+  "title": "Terminus North-Star Harness Research",
+  "generated_at": "2026-08-21",
+  "research_cut": "2026-08-21",
+  "repository": "ezzy1630/Terminus",
+  "branch": "codex/release-blocker-closure",
+  "head": "64d385c7b9efedee96b229432937622aa1aba720",
+  "exa_search_results_reviewed": 470,
+  "research_workstreams": 15,
+  "scope_note": "Full SPEC and complete repository tree reviewed; architecture-critical implementation paths inspected. No local build/test execution in this environment.",
+  "files": [
+    {
+      "name": "README.md",
+      "bytes": 7212,
+      "words": 891,
+      "sha256": "7b28e92f9ad76b6888f82259461beadcc0a95498ad7207590999ee6945a9a2c9"
+    },
+    {
+      "name": "SPEC.md",
+      "bytes": 33929,
+      "words": 4208,
+      "sha256": "3bf44bf7f204f9872ddb7bdd6b309335b31bbcd9db5eb4a78ba77537a4fc64cb"
+    },
+    {
+      "name": "architecture.md",
+      "bytes": 27885,
+      "words": 3358,
+      "sha256": "9daf1764ce3a39f9fdcd71a993e05a9add308c47a0707126162e4027a9e85f3d"
+    },
+    {
+      "name": "evals.md",
+      "bytes": 16428,
+      "words": 1955,
+      "sha256": "933d488b048656ab86426c212adcf4e0b2f2f9674daad9c90fc16a234dc0a218"
+    },
+    {
+      "name": "research.md",
+      "bytes": 18701,
+      "words": 2411,
+      "sha256": "d24487fc29b4ef7fd728abb2c95126331dd281bcf6a8d5c1abd952c866190e8d"
+    },
+    {
+      "name": "roadmap.md",
+      "bytes": 14082,
+      "words": 1710,
+      "sha256": "394a9220595cd3f867c2dbfca15e6675bab81d4c1486f45ee0358fc7eddba166"
+    },
+    {
+      "name": "scorecard.md",
+      "bytes": 9596,
+      "words": 1124,
+      "sha256": "01439e3ea40424fb737eff3cacb07484c7f94037a5e0b1f7ebeee420286f8410"
+    },
+    {
+      "name": "sources.md",
+      "bytes": 13508,
+      "words": 1657,
+      "sha256": "7c05855c98987a22c4f1b31953964fbd84df28870c3c176c83e4369d2b37f90c"
+    },
+    {
+      "name": "terminus-audit.md",
+      "bytes": 16910,
+      "words": 2182,
+      "sha256": "aa5b0c3dbd2c52a1d8ae4657d9aa2d88f36e8123c051d0a1a5a3781b9558a4a1"
+    }
+  ]
+}

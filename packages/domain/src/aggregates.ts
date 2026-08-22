@@ -973,3 +973,535 @@ export const outputProfileConfigSchema = z.object({
   profile: z.enum(["terse", "explanatory", "teaching", "structured"]),
   stripBoilerplate: z.boolean(),
 });
+
+// ─────────────────────── ARP v2 Canonical Aggregates ─────────────────────────
+
+// 1. Organization & Federation (SPEC §4)
+
+export interface Organization {
+  readonly id: string;
+  readonly displayName: string;
+  readonly rootPolicyProfile: string;
+  readonly createdAt: Rfc3339Timestamp;
+}
+
+export const organizationSchema = z.object({
+  id: z.string().min(1),
+  displayName: z.string().min(1),
+  rootPolicyProfile: z.string().min(1),
+  createdAt: z.string(),
+});
+
+export interface Department {
+  readonly id: string;
+  readonly organizationId: string;
+  readonly displayName: string;
+  readonly policyProfile: string;
+  readonly defaultOperatorId: string | null;
+  readonly createdAt: Rfc3339Timestamp;
+}
+
+export const departmentSchema = z.object({
+  id: z.string().min(1),
+  organizationId: z.string().min(1),
+  displayName: z.string().min(1),
+  policyProfile: z.string().min(1),
+  defaultOperatorId: z.string().nullable(),
+  createdAt: z.string(),
+});
+
+export interface OperatorAgent {
+  readonly id: string;
+  readonly departmentId: string;
+  readonly displayName: string;
+  readonly capabilityScope: readonly string[];
+  readonly modelProfile: string;
+  readonly active: boolean;
+}
+
+export const operatorAgentSchema = z.object({
+  id: z.string().min(1),
+  departmentId: z.string().min(1),
+  displayName: z.string().min(1),
+  capabilityScope: z.array(z.string()),
+  modelProfile: z.string().min(1),
+  active: z.boolean(),
+});
+
+// 2. Resource Handle (SPEC §11)
+
+export interface ResourceHandle {
+  readonly objectId: string;
+  readonly objectType: string;
+  readonly version: number;
+  readonly scope: readonly string[];
+  readonly allowedOperations: readonly string[];
+  readonly principalBinding: string;
+  readonly taskBinding: string;
+  readonly authorityEpoch: number;
+  readonly provenance: string;
+  readonly trustLabel: string;
+  readonly expiry: Rfc3339Timestamp | null;
+  readonly integrityHash: string;
+}
+
+export const resourceHandleSchema = z.object({
+  objectId: z.string().min(1),
+  objectType: z.string().min(1),
+  version: z.number().int().nonnegative(),
+  scope: z.array(z.string()),
+  allowedOperations: z.array(z.string()),
+  principalBinding: z.string().min(1),
+  taskBinding: z.string().min(1),
+  authorityEpoch: z.number().int().nonnegative(),
+  provenance: z.string().min(1),
+  trustLabel: z.string().min(1),
+  expiry: z.string().nullable(),
+  integrityHash: z.string().min(1),
+});
+
+// 3. Claims & Evidence (SPEC §6, §28)
+
+export interface Claim {
+  readonly id: string;
+  readonly taskId: string;
+  readonly statement: string;
+  readonly requiredEvidenceKind: string;
+  readonly status: "PROPOSED" | "SATISFIED" | "DISPUTED" | "WAIVED";
+  readonly evidenceIds: readonly string[];
+  readonly waivedRationale: string | null;
+  readonly createdAt: Rfc3339Timestamp;
+  readonly updatedAt: Rfc3339Timestamp;
+}
+
+export const claimSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  statement: z.string().min(1),
+  requiredEvidenceKind: z.string().min(1),
+  status: z.enum(["PROPOSED", "SATISFIED", "DISPUTED", "WAIVED"]),
+  evidenceIds: z.array(z.string()),
+  waivedRationale: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export interface Evidence {
+  readonly id: string;
+  readonly claimId: string;
+  readonly kind: string;
+  readonly summary: string;
+  readonly sourceRevision: string | null;
+  readonly environmentHash: string | null;
+  readonly verifierResult: string;
+  readonly artifactRef: ArtifactRef | null;
+  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly observedAt: Rfc3339Timestamp;
+}
+
+export const evidenceSchema = z.object({
+  id: z.string().min(1),
+  claimId: z.string().min(1),
+  kind: z.string().min(1),
+  summary: z.string().min(1),
+  sourceRevision: z.string().nullable(),
+  environmentHash: z.string().nullable(),
+  verifierResult: z.string().min(1),
+  artifactRef: artifactRefSchema.nullable(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  observedAt: z.string(),
+});
+
+// 4. Mission & Task v2 (SPEC §6, §7)
+
+export interface Mission {
+  readonly id: string;
+  readonly organizationId: string;
+  readonly departmentId: string;
+  readonly createdBy: string;
+  readonly objective: string;
+  readonly acceptanceCriteria: readonly string[];
+  readonly createdAt: Rfc3339Timestamp;
+}
+
+export const missionSchema = z.object({
+  id: z.string().min(1),
+  organizationId: z.string().min(1),
+  departmentId: z.string().min(1),
+  createdBy: z.string().min(1),
+  objective: z.string().min(1),
+  acceptanceCriteria: z.array(z.string()),
+  createdAt: z.string(),
+});
+
+export interface TaskContractV2 {
+  readonly version: number;
+  readonly mission: string;
+  readonly scope: {
+    readonly resources: readonly ResourceHandle[];
+    readonly allowedEffectClasses: readonly string[];
+    readonly excludedPathsOrSystems: readonly string[];
+  };
+  readonly acceptance: readonly {
+    readonly claimId: string;
+    readonly statement: string;
+    readonly evidenceRequirement: string;
+  }[];
+  readonly constraints: {
+    readonly security: readonly string[];
+    readonly costMicros: bigint;
+    readonly timeoutSeconds: number;
+  };
+  readonly authorityCeiling: readonly string[];
+  readonly mode: string;
+}
+
+export const taskContractV2Schema = z.object({
+  version: z.number().int().positive(),
+  mission: z.string().min(1),
+  scope: z.object({
+    resources: z.array(resourceHandleSchema),
+    allowedEffectClasses: z.array(z.string()),
+    excludedPathsOrSystems: z.array(z.string()),
+  }),
+  acceptance: z.array(
+    z.object({
+      claimId: z.string().min(1),
+      statement: z.string().min(1),
+      evidenceRequirement: z.string().min(1),
+    }),
+  ),
+  constraints: z.object({
+    security: z.array(z.string()),
+    costMicros: z.bigint().nonnegative(),
+    timeoutSeconds: z.number().int().positive(),
+  }),
+  authorityCeiling: z.array(z.string()),
+  mode: z.string().min(1),
+});
+
+export interface TaskV2 {
+  readonly id: string;
+  readonly missionId: string | null;
+  readonly organizationId: string;
+  readonly departmentId: string;
+  readonly createdBy: string;
+  readonly contract: TaskContractV2;
+  readonly status:
+    | "DRAFT"
+    | "READY"
+    | "RUNNING"
+    | "WAITING_USER"
+    | "WAITING_AUTH"
+    | "WAITING_RESOURCE"
+    | "PAUSED"
+    | "VERIFYING"
+    | "COMPLETED"
+    | "PARTIAL"
+    | "BLOCKED"
+    | "CANCELLED"
+    | "FAILED";
+  readonly version: number;
+  readonly createdAt: Rfc3339Timestamp;
+  readonly updatedAt: Rfc3339Timestamp;
+  readonly completedAt: Rfc3339Timestamp | null;
+}
+
+export const taskV2Schema = z.object({
+  id: z.string().min(1),
+  missionId: z.string().nullable(),
+  organizationId: z.string().min(1),
+  departmentId: z.string().min(1),
+  createdBy: z.string().min(1),
+  contract: taskContractV2Schema,
+  status: z.enum([
+    "DRAFT",
+    "READY",
+    "RUNNING",
+    "WAITING_USER",
+    "WAITING_AUTH",
+    "WAITING_RESOURCE",
+    "PAUSED",
+    "VERIFYING",
+    "COMPLETED",
+    "PARTIAL",
+    "BLOCKED",
+    "CANCELLED",
+    "FAILED",
+  ]),
+  version: z.number().int().nonnegative(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  completedAt: z.string().nullable(),
+});
+
+// 5. Workflow IR Entities (SPEC §8)
+
+export interface GuardedEdge {
+  readonly sourceNodeId: string;
+  readonly targetNodeId: string;
+  readonly condition: string | null;
+}
+
+export const guardedEdgeSchema = z.object({
+  sourceNodeId: z.string().min(1),
+  targetNodeId: z.string().min(1),
+  condition: z.string().nullable(),
+});
+
+export interface WorkflowNode {
+  readonly id: string;
+  readonly kind:
+    | "deterministic"
+    | "model_judgment"
+    | "human"
+    | "connector"
+    | "effect"
+    | "verifier"
+    | "subworkflow";
+  readonly owner: string;
+  readonly inputs: Readonly<Record<string, unknown>>;
+  readonly outputs: Readonly<Record<string, unknown>>;
+  readonly requiredCapabilities: readonly string[];
+  readonly effectClass: string | null;
+  readonly timeoutSeconds: number;
+  readonly compensationNodeId: string | null;
+}
+
+export const workflowNodeSchema = z.object({
+  id: z.string().min(1),
+  kind: z.enum([
+    "deterministic",
+    "model_judgment",
+    "human",
+    "connector",
+    "effect",
+    "verifier",
+    "subworkflow",
+  ]),
+  owner: z.string().min(1),
+  inputs: z.record(z.string(), z.unknown()).default({}),
+  outputs: z.record(z.string(), z.unknown()).default({}),
+  requiredCapabilities: z.array(z.string()).default([]),
+  effectClass: z.string().nullable().default(null),
+  timeoutSeconds: z.number().int().positive().default(60),
+  compensationNodeId: z.string().nullable().default(null),
+});
+
+export interface Workflow {
+  readonly id: string;
+  readonly version: number;
+  readonly taskId: string;
+  readonly nodes: readonly WorkflowNode[];
+  readonly edges: readonly GuardedEdge[];
+  readonly createdAt: Rfc3339Timestamp;
+}
+
+export const workflowSchema = z.object({
+  id: z.string().min(1),
+  version: z.number().int().positive(),
+  taskId: z.string().min(1),
+  nodes: z.array(workflowNodeSchema),
+  edges: z.array(guardedEdgeSchema),
+  createdAt: z.string(),
+});
+
+export interface NodeRun {
+  readonly id: string;
+  readonly workflowId: string;
+  readonly nodeId: string;
+  readonly attemptId: string;
+  readonly status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  readonly inputs: Readonly<Record<string, unknown>>;
+  readonly outputs: Readonly<Record<string, unknown>> | null;
+  readonly error: string | null;
+  readonly startedAt: Rfc3339Timestamp | null;
+  readonly settledAt: Rfc3339Timestamp | null;
+}
+
+export const nodeRunSchema = z.object({
+  id: z.string().min(1),
+  workflowId: z.string().min(1),
+  nodeId: z.string().min(1),
+  attemptId: z.string().min(1),
+  status: z.enum(["PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]),
+  inputs: z.record(z.string(), z.unknown()).default({}),
+  outputs: z.record(z.string(), z.unknown()).nullable().default(null),
+  error: z.string().nullable().default(null),
+  startedAt: z.string().nullable().default(null),
+  settledAt: z.string().nullable().default(null),
+});
+
+// 6. Transactional Effect Record & Authorization Instance (SPEC §14, §16)
+
+export interface AuthorizationInstance {
+  readonly id: string;
+  readonly principal: string;
+  readonly taskId: string;
+  readonly taskVersion: number;
+  readonly effectClass: string;
+  readonly maxScope: readonly string[];
+  readonly useLimit: number;
+  readonly consumedCount: number;
+  readonly expiry: Rfc3339Timestamp;
+  readonly humanApprovalId: string | null;
+}
+
+export const authorizationInstanceSchema = z.object({
+  id: z.string().min(1),
+  principal: z.string().min(1),
+  taskId: z.string().min(1),
+  taskVersion: z.number().int().nonnegative(),
+  effectClass: z.string().min(1),
+  maxScope: z.array(z.string()),
+  useLimit: z.number().int().positive(),
+  consumedCount: z.number().int().nonnegative(),
+  expiry: z.string(),
+  humanApprovalId: z.string().nullable(),
+});
+
+export interface EffectRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly principal: string;
+  readonly connectorOrWorker: string;
+  readonly intentType: string;
+  readonly canonicalParameters: Readonly<Record<string, unknown>>;
+  readonly resourceHandles: readonly ResourceHandle[];
+  readonly effectClass: string;
+  readonly semanticIdempotencyKey: string;
+  readonly authorizationId: string | null;
+  readonly policyDecisionId: string | null;
+  readonly state:
+    | "PROPOSED"
+    | "POLICY_CHECKED"
+    | "AUTHORIZATION_REQUIRED"
+    | "AUTHORIZED"
+    | "PREPARED"
+    | "DISPATCHED"
+    | "OBSERVED"
+    | "VALIDATED"
+    | "COMMITTED"
+    | "DENIED"
+    | "CANCELLED"
+    | "UNCERTAIN"
+    | "RECONCILING"
+    | "COMPENSATING"
+    | "COMPENSATED"
+    | "RESIDUE"
+    | "MANUAL_RECONCILE";
+  readonly uncertaintyReason: string | null;
+  readonly compensationRef: string | null;
+  readonly version: number;
+  readonly createdAt: Rfc3339Timestamp;
+  readonly settledAt: Rfc3339Timestamp | null;
+}
+
+export const effectRecordSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  attemptId: z.string().min(1),
+  principal: z.string().min(1),
+  connectorOrWorker: z.string().min(1),
+  intentType: z.string().min(1),
+  canonicalParameters: z.record(z.string(), z.unknown()),
+  resourceHandles: z.array(resourceHandleSchema),
+  effectClass: z.string().min(1),
+  semanticIdempotencyKey: z.string().min(1),
+  authorizationId: z.string().nullable(),
+  policyDecisionId: z.string().nullable(),
+  state: z.enum([
+    "PROPOSED",
+    "POLICY_CHECKED",
+    "AUTHORIZATION_REQUIRED",
+    "AUTHORIZED",
+    "PREPARED",
+    "DISPATCHED",
+    "OBSERVED",
+    "VALIDATED",
+    "COMMITTED",
+    "DENIED",
+    "CANCELLED",
+    "UNCERTAIN",
+    "RECONCILING",
+    "COMPENSATING",
+    "COMPENSATED",
+    "RESIDUE",
+    "MANUAL_RECONCILE",
+  ]),
+  uncertaintyReason: z.string().nullable(),
+  compensationRef: z.string().nullable(),
+  version: z.number().int().nonnegative(),
+  createdAt: z.string(),
+  settledAt: z.string().nullable(),
+});
+
+// 7. Questions, Decisions, Risks & Attention (SPEC §4.2, §29.3)
+
+export interface Question {
+  readonly id: string;
+  readonly taskId: string;
+  readonly prompt: string;
+  readonly options: readonly string[];
+  readonly selectedOption: string | null;
+  readonly rationale: string | null;
+  readonly status: "PENDING" | "ANSWERED" | "DISMISSED";
+  readonly createdAt: Rfc3339Timestamp;
+  readonly resolvedAt: Rfc3339Timestamp | null;
+}
+
+export const questionSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  prompt: z.string().min(1),
+  options: z.array(z.string()).default([]),
+  selectedOption: z.string().nullable().default(null),
+  rationale: z.string().nullable().default(null),
+  status: z.enum(["PENDING", "ANSWERED", "DISMISSED"]),
+  createdAt: z.string(),
+  resolvedAt: z.string().nullable().default(null),
+});
+
+export interface Decision {
+  readonly id: string;
+  readonly taskId: string;
+  readonly questionId: string | null;
+  readonly statement: string;
+  readonly alternativesConsidered: readonly string[];
+  readonly rationale: string;
+  readonly provenance: string;
+  readonly recordedAt: Rfc3339Timestamp;
+}
+
+export const decisionSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  questionId: z.string().nullable().default(null),
+  statement: z.string().min(1),
+  alternativesConsidered: z.array(z.string()).default([]),
+  rationale: z.string().min(1),
+  provenance: z.string().min(1),
+  recordedAt: z.string(),
+});
+
+export interface Risk {
+  readonly id: string;
+  readonly taskId: string;
+  readonly riskClass: "LOW" | "NORMAL" | "HIGH" | "CRITICAL";
+  readonly statement: string;
+  readonly mitigation: string | null;
+  readonly status: "IDENTIFIED" | "MITIGATED" | "ACCEPTED" | "TRIGGERED";
+  readonly recordedAt: Rfc3339Timestamp;
+}
+
+export const riskSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  riskClass: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]),
+  statement: z.string().min(1),
+  mitigation: z.string().nullable().default(null),
+  status: z.enum(["IDENTIFIED", "MITIGATED", "ACCEPTED", "TRIGGERED"]),
+  recordedAt: z.string(),
+});
+

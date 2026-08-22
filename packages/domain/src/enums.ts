@@ -581,7 +581,280 @@ export function isTurnTransitionAllowed(from: TurnState, to: TurnState): boolean
   return TURN_TRANSITIONS[from].includes(to);
 }
 
+// ───────────────────── ARP v2 / Canonical State Machines ─────────────────────
+
+/** Canonical Task Status per SPEC §7 (ARP v2). */
+export const TaskStatusV2 = {
+  DRAFT: "DRAFT",
+  READY: "READY",
+  RUNNING: "RUNNING",
+  WAITING_USER: "WAITING_USER",
+  WAITING_AUTH: "WAITING_AUTH",
+  WAITING_RESOURCE: "WAITING_RESOURCE",
+  PAUSED: "PAUSED",
+  VERIFYING: "VERIFYING",
+  COMPLETED: "COMPLETED",
+  PARTIAL: "PARTIAL",
+  BLOCKED: "BLOCKED",
+  CANCELLED: "CANCELLED",
+  FAILED: "FAILED",
+} as const;
+export type TaskStatusV2 = (typeof TaskStatusV2)[keyof typeof TaskStatusV2];
+export const taskStatusV2Schema = z.enum([
+  "DRAFT",
+  "READY",
+  "RUNNING",
+  "WAITING_USER",
+  "WAITING_AUTH",
+  "WAITING_RESOURCE",
+  "PAUSED",
+  "VERIFYING",
+  "COMPLETED",
+  "PARTIAL",
+  "BLOCKED",
+  "CANCELLED",
+  "FAILED",
+]);
+
+export const TASK_V2_TRANSITIONS: Readonly<Record<TaskStatusV2, readonly TaskStatusV2[]>> = {
+  DRAFT: ["READY", "CANCELLED"],
+  READY: ["RUNNING", "CANCELLED"],
+  RUNNING: [
+    "WAITING_USER",
+    "WAITING_AUTH",
+    "WAITING_RESOURCE",
+    "PAUSED",
+    "VERIFYING",
+    "BLOCKED",
+    "CANCELLED",
+    "FAILED",
+  ],
+  WAITING_USER: ["RUNNING", "CANCELLED", "FAILED"],
+  WAITING_AUTH: ["RUNNING", "CANCELLED", "FAILED"],
+  WAITING_RESOURCE: ["RUNNING", "CANCELLED", "FAILED"],
+  PAUSED: ["RUNNING", "CANCELLED"],
+  VERIFYING: ["COMPLETED", "PARTIAL", "BLOCKED", "CANCELLED", "FAILED", "RUNNING"],
+  BLOCKED: ["RUNNING", "CANCELLED", "FAILED"],
+  COMPLETED: [],
+  PARTIAL: [],
+  CANCELLED: [],
+  FAILED: [],
+} as const;
+
+export const TaskV2TerminalStatus: ReadonlySet<TaskStatusV2> = new Set<TaskStatusV2>([
+  "COMPLETED",
+  "PARTIAL",
+  "CANCELLED",
+  "FAILED",
+]);
+
+export function isTaskV2Terminal(status: TaskStatusV2): boolean {
+  return TaskV2TerminalStatus.has(status);
+}
+
+export function isTaskV2TransitionAllowed(from: TaskStatusV2, to: TaskStatusV2): boolean {
+  return TASK_V2_TRANSITIONS[from].includes(to);
+}
+
+/** Claim status per SPEC §6, §28 (ARP v2). */
+export const ClaimStatus = {
+  PROPOSED: "PROPOSED",
+  SATISFIED: "SATISFIED",
+  DISPUTED: "DISPUTED",
+  WAIVED: "WAIVED",
+} as const;
+export type ClaimStatus = (typeof ClaimStatus)[keyof typeof ClaimStatus];
+export const claimStatusSchema = z.enum(["PROPOSED", "SATISFIED", "DISPUTED", "WAIVED"]);
+
+/** Evidence classification per SPEC §28.2 (ARP v2). */
+export const EvidenceKind = {
+  DETERMINISTIC_TEST: "DETERMINISTIC_TEST",
+  STATIC_ANALYSIS: "STATIC_ANALYSIS",
+  RUNTIME_TRACE: "RUNTIME_TRACE",
+  VISUAL_EVIDENCE: "VISUAL_EVIDENCE",
+  EXTERNAL_RECEIPT: "EXTERNAL_RECEIPT",
+  INDEPENDENT_REVIEW: "INDEPENDENT_REVIEW",
+  USER_ACCEPTANCE: "USER_ACCEPTANCE",
+  BENCHMARK_MEASUREMENT: "BENCHMARK_MEASUREMENT",
+} as const;
+export type EvidenceKind = (typeof EvidenceKind)[keyof typeof EvidenceKind];
+export const evidenceKindSchema = z.enum([
+  "DETERMINISTIC_TEST",
+  "STATIC_ANALYSIS",
+  "RUNTIME_TRACE",
+  "VISUAL_EVIDENCE",
+  "EXTERNAL_RECEIPT",
+  "INDEPENDENT_REVIEW",
+  "USER_ACCEPTANCE",
+  "BENCHMARK_MEASUREMENT",
+]);
+
+/** Transactional Effect Ledger 17-state machine per SPEC §16.1 (ARP v2). */
+export const EffectState = {
+  PROPOSED: "PROPOSED",
+  POLICY_CHECKED: "POLICY_CHECKED",
+  AUTHORIZATION_REQUIRED: "AUTHORIZATION_REQUIRED",
+  AUTHORIZED: "AUTHORIZED",
+  PREPARED: "PREPARED",
+  DISPATCHED: "DISPATCHED",
+  OBSERVED: "OBSERVED",
+  VALIDATED: "VALIDATED",
+  COMMITTED: "COMMITTED",
+  DENIED: "DENIED",
+  CANCELLED: "CANCELLED",
+  UNCERTAIN: "UNCERTAIN",
+  RECONCILING: "RECONCILING",
+  COMPENSATING: "COMPENSATING",
+  COMPENSATED: "COMPENSATED",
+  RESIDUE: "RESIDUE",
+  MANUAL_RECONCILE: "MANUAL_RECONCILE",
+} as const;
+export type EffectState = (typeof EffectState)[keyof typeof EffectState];
+export const effectStateSchema = z.enum([
+  "PROPOSED",
+  "POLICY_CHECKED",
+  "AUTHORIZATION_REQUIRED",
+  "AUTHORIZED",
+  "PREPARED",
+  "DISPATCHED",
+  "OBSERVED",
+  "VALIDATED",
+  "COMMITTED",
+  "DENIED",
+  "CANCELLED",
+  "UNCERTAIN",
+  "RECONCILING",
+  "COMPENSATING",
+  "COMPENSATED",
+  "RESIDUE",
+  "MANUAL_RECONCILE",
+]);
+
+export const EFFECT_TRANSITIONS: Readonly<Record<EffectState, readonly EffectState[]>> = {
+  PROPOSED: ["POLICY_CHECKED", "DENIED", "CANCELLED"],
+  POLICY_CHECKED: ["AUTHORIZATION_REQUIRED", "AUTHORIZED", "DENIED", "CANCELLED"],
+  AUTHORIZATION_REQUIRED: ["AUTHORIZED", "DENIED", "CANCELLED"],
+  AUTHORIZED: ["PREPARED", "CANCELLED"],
+  PREPARED: ["DISPATCHED", "CANCELLED"],
+  DISPATCHED: ["OBSERVED", "UNCERTAIN", "CANCELLED"],
+  OBSERVED: ["VALIDATED", "COMPENSATING", "UNCERTAIN"],
+  VALIDATED: ["COMMITTED", "COMPENSATING"],
+  COMMITTED: [],
+  DENIED: [],
+  CANCELLED: [],
+  UNCERTAIN: ["RECONCILING", "MANUAL_RECONCILE"],
+  RECONCILING: ["OBSERVED", "VALIDATED", "COMPENSATING", "MANUAL_RECONCILE", "COMMITTED"],
+  COMPENSATING: ["COMPENSATED", "RESIDUE", "MANUAL_RECONCILE"],
+  COMPENSATED: [],
+  RESIDUE: ["MANUAL_RECONCILE"],
+  MANUAL_RECONCILE: ["COMMITTED", "COMPENSATED", "RESIDUE"],
+} as const;
+
+export const EffectTerminalStatus: ReadonlySet<EffectState> = new Set<EffectState>([
+  "COMMITTED",
+  "DENIED",
+  "CANCELLED",
+  "COMPENSATED",
+]);
+
+export function isEffectTerminal(state: EffectState): boolean {
+  return EffectTerminalStatus.has(state);
+}
+
+export function isEffectTransitionAllowed(from: EffectState, to: EffectState): boolean {
+  return EFFECT_TRANSITIONS[from].includes(to);
+}
+
+/** Workflow node kinds per SPEC §8.1. */
+export const WorkflowNodeKind = {
+  DETERMINISTIC: "deterministic",
+  MODEL_JUDGMENT: "model_judgment",
+  HUMAN: "human",
+  CONNECTOR: "connector",
+  EFFECT: "effect",
+  VERIFIER: "verifier",
+  SUBWORKFLOW: "subworkflow",
+} as const;
+export type WorkflowNodeKind = (typeof WorkflowNodeKind)[keyof typeof WorkflowNodeKind];
+export const workflowNodeKindSchema = z.enum([
+  "deterministic",
+  "model_judgment",
+  "human",
+  "connector",
+  "effect",
+  "verifier",
+  "subworkflow",
+]);
+
+/** Trust classes per SPEC §12.1. */
+export const TrustClass = {
+  SYSTEM_TRUSTED: "SYSTEM_TRUSTED",
+  USER_TRUSTED: "USER_TRUSTED",
+  ORG_SIGNED: "ORG_SIGNED",
+  PROJECT_SIGNED: "PROJECT_SIGNED",
+  VERIFIED_EXTERNAL: "VERIFIED_EXTERNAL",
+  UNTRUSTED_REPOSITORY: "UNTRUSTED_REPOSITORY",
+  UNTRUSTED_TOOL: "UNTRUSTED_TOOL",
+  UNTRUSTED_WEB: "UNTRUSTED_WEB",
+  UNTRUSTED_UI: "UNTRUSTED_UI",
+  MODEL_GENERATED: "MODEL_GENERATED",
+} as const;
+export type TrustClass = (typeof TrustClass)[keyof typeof TrustClass];
+export const trustClassSchema = z.enum([
+  "SYSTEM_TRUSTED",
+  "USER_TRUSTED",
+  "ORG_SIGNED",
+  "PROJECT_SIGNED",
+  "VERIFIED_EXTERNAL",
+  "UNTRUSTED_REPOSITORY",
+  "UNTRUSTED_TOOL",
+  "UNTRUSTED_WEB",
+  "UNTRUSTED_UI",
+  "MODEL_GENERATED",
+]);
+
+/** Attention signals per SPEC §29.3. */
+export const AttentionSignalKind = {
+  APPROVAL_REQUIRED: "APPROVAL_REQUIRED",
+  UNCERTAIN_EFFECT: "UNCERTAIN_EFFECT",
+  BUDGET_WARNING: "BUDGET_WARNING",
+  RECOVERY_BLOCKED: "RECOVERY_BLOCKED",
+  USER_QUESTION: "USER_QUESTION",
+} as const;
+export type AttentionSignalKind = (typeof AttentionSignalKind)[keyof typeof AttentionSignalKind];
+export const attentionSignalKindSchema = z.enum([
+  "APPROVAL_REQUIRED",
+  "UNCERTAIN_EFFECT",
+  "BUDGET_WARNING",
+  "RECOVERY_BLOCKED",
+  "USER_QUESTION",
+]);
+
+/** Operating modes per SPEC §6, §30. */
+export const TaskExecutionMode = {
+  INTERACTIVE: "interactive",
+  AUTONOMOUS: "autonomous",
+  HIGH_ASSURANCE: "high_assurance",
+  REVIEW: "review",
+  RESEARCH: "research",
+  INCIDENT: "incident",
+  LOCAL: "local",
+  FLEET: "fleet",
+} as const;
+export type TaskExecutionMode = (typeof TaskExecutionMode)[keyof typeof TaskExecutionMode];
+export const taskExecutionModeSchema = z.enum([
+  "interactive",
+  "autonomous",
+  "high_assurance",
+  "review",
+  "research",
+  "incident",
+  "local",
+  "fleet",
+]);
+
 /** Assert all values of a string union are handled; use in exhaustive switches. */
 export function assertNever(x: never): never {
   throw new Error(`unexpected value: ${JSON.stringify(x)}`);
 }
+

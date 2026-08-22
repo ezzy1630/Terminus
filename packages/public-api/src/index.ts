@@ -742,3 +742,10 @@ export const IDEMPOTENCY_HEADER = "x-idempotency-key";
 export function requireIdempotency(method: string): boolean {
   return method !== "GET" && method !== "HEAD";
 }
+
+// ────────────────────────── ARP v2 Exports ───────────────────────────────────
+
+export * from "./v2_endpoints.js";
+export * from "./idempotency.js";
+export * from "./gateway.js";
+
