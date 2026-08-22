@@ -21,16 +21,47 @@
  * occurred." The Computer Use section is omitted entirely when no
  * session is active — we don't render an empty placeholder.
  */
-import { memo, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, FileDiff, GitBranch, Monitor, ShieldAlert, Sparkles, UsersRound, Workflow } from "lucide-react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { BadgeCheck, ChevronDown, ChevronRight, FileDiff, GitBranch, Monitor, ShieldAlert, Sparkles, UsersRound, Workflow } from "lucide-react";
 import { cn } from "../lib/cn";
 import { useSelectedTask, useSelectedTaskEvents, normalizeTaskStatus } from "../hooks/use-terminus";
 import { derivePendingApprovals, deriveSubagentActivity, deriveVerificationActivity, extractUnifiedDiffs } from "../lib/task-surface";
 import { statusLabel, StatusIndicator } from "./StatusIndicator";
 import { ComputerUsePiP, type ComputerUseState } from "./ComputerUsePiP";
 import { ComputerUsePlaceholder } from "./ComputerUsePlaceholder";
+import TaskV2Panel from "./TaskV2Panel";
+import { arpV2 } from "../lib/api-v2";
 import { formatDistanceToNowStrict } from "date-fns";
 import type { TerminusSseEvent } from "../types";
+
+/**
+ * Canonical ARP v2 inspector section. Renders only when the selected task
+ * id also exists on the canonical /v2 surface (e.g. created via the CLI's
+ * `new-task-v2`); otherwise the section is omitted entirely.
+ */
+const TaskV2Section = memo(function TaskV2Section({ taskId }: { taskId: string }): JSX.Element | null {
+  const [canonical, setCanonical] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setCanonical(false);
+    arpV2.getTask(taskId)
+      .then((snapshot) => {
+        if (!cancelled) setCanonical(snapshot !== null);
+      })
+      .catch(() => {
+        if (!cancelled) setCanonical(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId]);
+  if (!canonical) return null;
+  return (
+    <InspectorSection title="ARP v2" icon={<BadgeCheck size={12} />} defaultOpen>
+      <TaskV2Panel taskId={taskId} />
+    </InspectorSection>
+  );
+});
 
 interface InspectorProps {
   className?: string;
@@ -216,6 +247,11 @@ function InspectorImpl({
           </div>
         </div>
       </InspectorSection>
+
+      {/* Canonical ARP v2 section — the same /v2 surface the CLI uses.
+          Hidden entirely unless the selected task has a canonical
+          counterpart (SPEC §11: no empty sections). */}
+      <TaskV2Section taskId={task.id} />
 
       {hasPatchEvidence ? (
         <InspectorSection title="Changes" icon={<FileDiff size={12} />} summary="Ready" defaultOpen>
