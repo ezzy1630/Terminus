@@ -263,6 +263,16 @@ impl ProcessManager {
                         child_guard.pid = None;
                         child_guard.stdin = None;
                         drop(child_guard);
+                        // The group is dead and its pipe ends are closed, so
+                        // both capture tasks reach EOF promptly; reap them
+                        // instead of leaving them running detached and racing
+                        // release_managed below.
+                        if let Some(t) = stdout_task {
+                            let _ = t.await;
+                        }
+                        if let Some(t) = stderr_task {
+                            let _ = t.await;
+                        }
                         let _ = tx_clone
                             .send(ProcessEvent::Exited(ProcessExited {
                                 exit_code: -1,
@@ -284,6 +294,17 @@ impl ProcessManager {
                     child_guard.pid = None;
                     child_guard.stdin = None;
                     drop(child_guard);
+                    // wait() failed, so pipe closure is not guaranteed; abort
+                    // the capture tasks deterministically and reap them rather
+                    // than leaving detached tasks behind.
+                    if let Some(t) = stdout_task {
+                        t.abort();
+                        let _ = t.await;
+                    }
+                    if let Some(t) = stderr_task {
+                        t.abort();
+                        let _ = t.await;
+                    }
                     let _ = tx_clone
                         .send(ProcessEvent::Exited(ProcessExited {
                             exit_code: -1,
