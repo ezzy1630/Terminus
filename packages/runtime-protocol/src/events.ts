@@ -72,6 +72,10 @@ export const EVENT_TYPES = [
   "task.activated",
   "task.completed",
   "task.failed",
+  "task.aborted",
+  "task.failed_verification",
+  "task.budget_exhausted",
+  "task.policy_denied",
   "task.contract_updated",
   "task.scope_entry_recorded",
   "turn.started",
@@ -157,6 +161,34 @@ export const taskFailedPayloadSchema = z.object({
   failureCode: z.string(),
 });
 export type TaskFailedPayload = z.infer<typeof taskFailedPayloadSchema>;
+
+export const taskAbortedPayloadSchema = z.object({
+  taskId: z.string(),
+  reason: z.string(),
+});
+export type TaskAbortedPayload = z.infer<typeof taskAbortedPayloadSchema>;
+
+export const taskFailedVerificationPayloadSchema = z.object({
+  taskId: z.string(),
+  reason: z.string(),
+});
+export type TaskFailedVerificationPayload = z.infer<
+  typeof taskFailedVerificationPayloadSchema
+>;
+
+export const taskBudgetExhaustedPayloadSchema = z.object({
+  taskId: z.string(),
+  reason: z.string(),
+});
+export type TaskBudgetExhaustedPayload = z.infer<
+  typeof taskBudgetExhaustedPayloadSchema
+>;
+
+export const taskPolicyDeniedPayloadSchema = z.object({
+  taskId: z.string(),
+  reason: z.string(),
+});
+export type TaskPolicyDeniedPayload = z.infer<typeof taskPolicyDeniedPayloadSchema>;
 
 export const taskContractUpdatedPayloadSchema = z.object({
   taskId: z.string(),
@@ -431,6 +463,10 @@ export interface EventPayloadMap {
   "task.activated": TaskActivatedPayload;
   "task.completed": TaskCompletedPayload;
   "task.failed": TaskFailedPayload;
+  "task.aborted": TaskAbortedPayload;
+  "task.failed_verification": TaskFailedVerificationPayload;
+  "task.budget_exhausted": TaskBudgetExhaustedPayload;
+  "task.policy_denied": TaskPolicyDeniedPayload;
   "task.contract_updated": TaskContractUpdatedPayload;
   "task.scope_entry_recorded": TaskScopeEntryRecordedPayload;
   "turn.started": TurnStartedPayload;
@@ -575,6 +611,10 @@ export function payloadSchemaFor(type: EventType): z.ZodType<Readonly<Record<str
     "task.activated": taskActivatedPayloadSchema,
     "task.completed": taskCompletedPayloadSchema,
     "task.failed": taskFailedPayloadSchema,
+    "task.aborted": taskAbortedPayloadSchema,
+    "task.failed_verification": taskFailedVerificationPayloadSchema,
+    "task.budget_exhausted": taskBudgetExhaustedPayloadSchema,
+    "task.policy_denied": taskPolicyDeniedPayloadSchema,
     "task.contract_updated": taskContractUpdatedPayloadSchema,
     "task.scope_entry_recorded": taskScopeEntryRecordedPayloadSchema,
     "turn.started": turnStartedPayloadSchema,

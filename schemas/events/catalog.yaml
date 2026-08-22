@@ -222,6 +222,42 @@
   pii: low
   retention: audit
 
+- type: task.aborted
+  version: 1
+  aggregate: task
+  payload:
+    task_id: {type: uuid, required: true}
+    reason: {type: string, required: true}
+  pii: low
+  retention: audit
+
+- type: task.failed_verification
+  version: 1
+  aggregate: task
+  payload:
+    task_id: {type: uuid, required: true}
+    reason: {type: string, required: true}
+  pii: low
+  retention: audit
+
+- type: task.budget_exhausted
+  version: 1
+  aggregate: task
+  payload:
+    task_id: {type: uuid, required: true}
+    reason: {type: string, required: true}
+  pii: low
+  retention: audit
+
+- type: task.policy_denied
+  version: 1
+  aggregate: task
+  payload:
+    task_id: {type: uuid, required: true}
+    reason: {type: string, required: true}
+  pii: low
+  retention: audit
+
 - type: policy.evaluated
   version: 1
   aggregate: policy_decision

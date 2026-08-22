@@ -29,7 +29,7 @@ import {
   TaskStatus as TS,
   TASK_TRANSITIONS,
 } from "@terminus/domain";
-import type { EventSink } from "@terminus/runtime-protocol";
+import type { EventSink, EventType } from "@terminus/runtime-protocol";
 
 // ────────────────────────── Repository ───────────────────────────────────────
 
@@ -51,7 +51,17 @@ export interface TaskServiceDeps {
 }
 
 export class TaskService {
+  /** Per-task monotonic event sequence (SPEC §28.9); scoped to this
+   * service instance. */
+  private readonly sequences = new Map<string, number>();
+
   constructor(private readonly deps: TaskServiceDeps) {}
+
+  private nextSequence(aggregateId: string): number {
+    const next = (this.sequences.get(aggregateId) ?? 0) + 1;
+    this.sequences.set(aggregateId, next);
+    return next;
+  }
 
   async createTask(input: {
     readonly sessionId: Uuid7;
@@ -84,7 +94,7 @@ export class TaskService {
       },
       {
         aggregateId: saved.id,
-        aggregateSequence: 1,
+        aggregateSequence: this.nextSequence(saved.id),
         actor: { kind: "user", id: input.principal },
         occurredAt: now,
       },
@@ -122,7 +132,7 @@ export class TaskService {
       },
       {
         aggregateId: saved.id,
-        aggregateSequence: 2,
+        aggregateSequence: this.nextSequence(saved.id),
         actor: { kind: "user", id: principal },
         occurredAt: this.deps.clock(),
       },
@@ -165,28 +175,54 @@ export class TaskService {
       completedAt: to === "COMPLETED" || to === "FAILED" || to === "ABORTED" ? this.deps.clock() : null,
     };
     const saved = await this.deps.repo.updateTask(updated);
-    const eventType =
-      to === "COMPLETED" ? "task.completed" : to === "FAILED" ? "task.failed" : "task.activated";
-    await this.deps.events.emit(
-      eventType,
-      eventType === "task.completed"
-        ? {
-            taskId: saved.id,
-            finalRevision: "<unknown>",
-            completionRecordHash: "<unknown>",
-            costMicros: 0n,
-            durationSeconds: 0,
-          }
-        : eventType === "task.failed"
-          ? { taskId: saved.id, reason: "transitioned to FAILED", failureCode: "TASK_FAILED" }
-          : { taskId: saved.id, contractVersion: saved.contract.version },
-      {
-        aggregateId: saved.id,
-        aggregateSequence: 3,
-        actor: { kind: "user", id: principal },
-        occurredAt: this.deps.clock(),
-      },
-    );
+    const terminalEvent = ((): {
+      type: EventType;
+      payload: Record<string, unknown>;
+    } | null => {
+      switch (to) {
+        case "COMPLETED":
+          return null;
+        case "FAILED":
+          return {
+            type: "task.failed",
+            payload: { taskId: saved.id, reason: "transitioned to FAILED", failureCode: "TASK_FAILED" },
+          };
+        case "ABORTED":
+          return { type: "task.aborted", payload: { taskId: saved.id, reason: "transitioned to ABORTED" } };
+        case "FAILED_VERIFICATION":
+          return {
+            type: "task.failed_verification",
+            payload: { taskId: saved.id, reason: "verification did not pass" },
+          };
+        case "BUDGET_EXHAUSTED":
+          return {
+            type: "task.budget_exhausted",
+            payload: { taskId: saved.id, reason: "task budget exhausted" },
+          };
+        case "POLICY_DENIED":
+          return {
+            type: "task.policy_denied",
+            payload: { taskId: saved.id, reason: "policy denied a required effect" },
+          };
+        default:
+          return {
+            type: "task.activated",
+            payload: { taskId: saved.id, contractVersion: saved.contract.version },
+          };
+      }
+    })();
+    if (terminalEvent) {
+      await this.deps.events.emit(
+        terminalEvent.type,
+        terminalEvent.payload as never,
+        {
+          aggregateId: saved.id,
+          aggregateSequence: this.nextSequence(saved.id),
+          actor: { kind: "user", id: principal },
+          occurredAt: this.deps.clock(),
+        },
+      );
+    }
     return saved;
   }
 
@@ -217,7 +253,7 @@ export class TaskService {
       },
       {
         aggregateId: taskId,
-        aggregateSequence: 4,
+        aggregateSequence: this.nextSequence(taskId),
         actor: { kind: "user", id: principal },
         occurredAt: full.observedAt,
       },
