@@ -738,6 +738,10 @@ export interface AllocationResult {
   readonly selected: readonly ScoredCandidate[];
   readonly omitted: readonly { readonly result: RetrievalResult; readonly reason: string }[];
   readonly totalEstimatedTokens: number;
+  /** True when hard-required fragments alone exceed budget.hardInputLimit.
+   * Callers must surface this (fail or truncate upstream); allocation never
+   * silently drops hard-required fragments to fit. */
+  readonly overHardLimit: boolean;
 }
 
 /** Returns the estimated token cost of a fragment for a given model key. */
@@ -796,8 +800,13 @@ export function allocateBudget(
     (sum, s) => sum + tokenCostFor(s.result.fragment, modelKey, providerId),
     0,
   );
-  void budget;
-  return { selected, omitted, totalEstimatedTokens: total };
+  const hardLimit = Number(budget.hardInputLimit);
+  return {
+    selected,
+    omitted,
+    totalEstimatedTokens: total,
+    overHardLimit: hardLimit > 0 && total > hardLimit,
+  };
 }
 
 // ────────────────────────── Cache epoch plan ─────────────────────────────────

@@ -848,3 +848,32 @@ describe("Durable goal state", () => {
     expect(summary).toContain("Budget");
   });
 });
+// ──────────────────────── Property 3b: hard-limit overflow surfaced ──────────
+
+describe("allocateBudget hard-input-limit", () => {
+  test("flags overHardLimit when hard-required fragments exceed the limit", () => {
+    const huge = makeFragment("required:huge", 100, 60_000);
+    const scored: ScoredCandidate[] = [
+      { result: makeResult(huge), utility: Number.POSITIVE_INFINITY, hardRequired: true },
+    ];
+    const result = allocateBudget(scored, standardBudget(), {
+      preserveDependencies: true,
+      preserveCompleteEpisodes: true,
+      hardIncludeRequired: true,
+    }, MODEL_KEY);
+    expect(result.overHardLimit).toBe(true);
+    // Hard-required fragments are still never silently dropped.
+    expect(result.selected.length).toBe(1);
+  });
+
+  test("reports overHardLimit=false within the limit", () => {
+    const small = makeFragment("required:small", 90, 100);
+    const result = allocateBudget(
+      [{ result: makeResult(small), utility: Number.POSITIVE_INFINITY, hardRequired: true }],
+      standardBudget(),
+      { preserveDependencies: true, preserveCompleteEpisodes: true, hardIncludeRequired: true },
+      MODEL_KEY,
+    );
+    expect(result.overHardLimit).toBe(false);
+  });
+});
