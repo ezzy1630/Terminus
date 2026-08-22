@@ -2559,9 +2559,15 @@ const server = createServer(async (req, res) => {
     }
   }
 
-  // 8. Commit idempotency record.
+  // 8. Commit idempotency record. A failure here must not become an
+  // unhandled rejection that kills the server; the replay guarantee simply
+  // degrades for this request and the error is logged.
   if (mut && idempotencyKey) {
-    await commitIdempotency(res, matchedRoute.method, idempotencyKey);
+    try {
+      await commitIdempotency(res, matchedRoute.method, idempotencyKey);
+    } catch (err) {
+      console.error("idempotency commit error", err);
+    }
   }
 });
 

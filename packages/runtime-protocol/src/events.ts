@@ -549,12 +549,17 @@ export type EventFilter = {
 
 // ────────────────────────── SSE encoder/decoder ──────────────────────────────
 
-/** SSE-encode an event into a string suitable for `text/event-stream`. */
+/** SSE-encode an event into a string suitable for `text/event-stream`.
+ * BigInt payload fields (e.g. costMicros) are serialized as decimal strings
+ * because JSON.stringify throws on bigint; consumers parse them as integers. */
 export function encodeSseEvent(event: AnyTypedEvent): string {
   const lines: string[] = [];
   lines.push(`id: ${event.eventId}`);
   lines.push(`event: ${event.eventType}`);
-  lines.push(`data: ${JSON.stringify(event)}`);
+  const json = JSON.stringify(event, (_key, value: unknown) =>
+    typeof value === "bigint" ? value.toString() : value,
+  );
+  lines.push(`data: ${json}`);
   return lines.join("\n") + "\n\n";
 }
 
