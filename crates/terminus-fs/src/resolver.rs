@@ -137,6 +137,7 @@ impl PathResolver {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use tempfile::tempdir;
 
@@ -200,6 +201,7 @@ mod tests {
         assert!(!resolved.host.exists);
     }
 
+    #[cfg(unix)]
     #[test]
     fn denies_symlink_escape() {
         let (dir, resolver) = make_resolver();
@@ -212,6 +214,7 @@ mod tests {
         assert!(matches!(err, PathError::SymlinkEscape(_)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn allows_symlink_inside_workspace() {
         let (dir, resolver) = make_resolver();
