@@ -75,7 +75,7 @@ boundary-check:
 check-all: check kernel-mini-check codegen-check truth-check unit integration security
 
 # Regenerate all derived contracts.
-codegen: codegen-proto codegen-public-api codegen-events codegen-tools codegen-config codegen-sqlx codegen-docs
+codegen: codegen-proto codegen-public-api codegen-events codegen-tools codegen-config codegen-v2-schemas codegen-sqlx codegen-docs
 
 # Verify no generated drift.
 codegen-check:
@@ -117,6 +117,10 @@ codegen-tools:
 # Config codegen (JSON Schema, docs, sample config).
 codegen-config:
     bun run tools/codegen/config.ts
+
+# ARP v2 canonical schema registry (JSON Schema 2020-12 + registry manifest).
+codegen-v2-schemas:
+    bun run tools/codegen/v2-schemas.ts
 
 # SQLx offline query metadata.
 codegen-sqlx:

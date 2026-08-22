@@ -1,0 +1,57 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/decision.json",
+  "title": "Decision",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "questionId": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "statement": {
+      "type": "string",
+      "minLength": 1
+    },
+    "alternativesConsidered": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provenance": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recordedAt": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "taskId",
+    "statement",
+    "rationale",
+    "provenance",
+    "recordedAt"
+  ]
+}

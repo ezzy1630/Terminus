@@ -1,0 +1,60 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/risk.json",
+  "title": "Risk",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "riskClass": {
+      "type": "string",
+      "enum": [
+        "LOW",
+        "NORMAL",
+        "HIGH",
+        "CRITICAL"
+      ]
+    },
+    "statement": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mitigation": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "IDENTIFIED",
+        "MITIGATED",
+        "ACCEPTED",
+        "TRIGGERED"
+      ]
+    },
+    "recordedAt": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "taskId",
+    "riskClass",
+    "statement",
+    "status",
+    "recordedAt"
+  ]
+}

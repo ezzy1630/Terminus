@@ -1,0 +1,31 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/guarded-edge.json",
+  "title": "GuardedEdge",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "sourceNodeId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "targetNodeId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "condition": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "sourceNodeId",
+    "targetNodeId",
+    "condition"
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/authorization-instance.json",
+  "title": "AuthorizationInstance",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "principal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskVersion": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "effectClass": {
+      "type": "string",
+      "minLength": 1
+    },
+    "maxScope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "useLimit": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "consumedCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "expiry": {
+      "type": "string"
+    },
+    "humanApprovalId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "principal",
+    "taskId",
+    "taskVersion",
+    "effectClass",
+    "maxScope",
+    "useLimit",
+    "consumedCount",
+    "expiry",
+    "humanApprovalId"
+  ]
+}

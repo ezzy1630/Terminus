@@ -1,0 +1,109 @@
+{
+  "protocolVersion": 2,
+  "draft": "https://json-schema.org/draft/2020-12/schema",
+  "sourceOfTruth": "packages/domain/src/aggregates.ts (zod)",
+  "generator": "tools/codegen/v2-schemas.ts",
+  "notes": [
+    "bigint constraint values are emitted as {} (JSON Schema has no bigint type); canonical values are Micros integers serialized as strings on the wire."
+  ],
+  "schemas": [
+    {
+      "name": "mission",
+      "title": "Mission",
+      "path": "schemas/generated/v2/mission.json",
+      "sha256": "sha256:7f8ed8e2daedca058f1961e944fe25ade1285858ca51303127e65ed2ebec60c2",
+      "bytes": 847
+    },
+    {
+      "name": "task-contract-v2",
+      "title": "TaskContractV2",
+      "path": "schemas/generated/v2/task-contract-v2.json",
+      "sha256": "sha256:d2547b5408822139bb488cdc193278869bf103b0a0d12279abb1ea72876e7357",
+      "bytes": 4366
+    },
+    {
+      "name": "task-v2",
+      "title": "TaskV2",
+      "path": "schemas/generated/v2/task-v2.json",
+      "sha256": "sha256:44178c042e32fa2bfe6afe1a8a7af9f3fdea96b251d521c711bfaff123086cce",
+      "bytes": 6459
+    },
+    {
+      "name": "workflow-node",
+      "title": "WorkflowNode",
+      "path": "schemas/generated/v2/workflow-node.json",
+      "sha256": "sha256:8ee228eef9b1c62580bf5ed6f4405ff6459501f6a3f4b4f4bec47874783b9f93",
+      "bytes": 1537
+    },
+    {
+      "name": "guarded-edge",
+      "title": "GuardedEdge",
+      "path": "schemas/generated/v2/guarded-edge.json",
+      "sha256": "sha256:bf13db6d04969aa35815aab9e9b88f8d0dd972e8e26fb103523752205be35261",
+      "bytes": 563
+    },
+    {
+      "name": "workflow",
+      "title": "Workflow",
+      "path": "schemas/generated/v2/workflow.json",
+      "sha256": "sha256:5ca68a0279d994777a6ed1c49f5fac3bf710c247d2a78cc5293d4c7a55771c8a",
+      "bytes": 3144
+    },
+    {
+      "name": "node-run",
+      "title": "NodeRun",
+      "path": "schemas/generated/v2/node-run.json",
+      "sha256": "sha256:70963e4170307e13bbe1d8adde7779b100bc74c41c509bfa28c19c4bc4ccac1a",
+      "bytes": 1653
+    },
+    {
+      "name": "claim",
+      "title": "Claim",
+      "path": "schemas/generated/v2/claim.json",
+      "sha256": "sha256:6f5d88db777ded3650aca4e6c7ee176fc977464c5e99e0102c65ea7026fc746a",
+      "bytes": 1143
+    },
+    {
+      "name": "evidence",
+      "title": "Evidence",
+      "path": "schemas/generated/v2/evidence.json",
+      "sha256": "sha256:cbd79d792ac1ea18da714cca6d2e8d526f60416b8eaafbd63edf00cf373907d5",
+      "bytes": 1756
+    },
+    {
+      "name": "authorization-instance",
+      "title": "AuthorizationInstance",
+      "path": "schemas/generated/v2/authorization-instance.json",
+      "sha256": "sha256:334948d888f591e5b9f58ea083bc50a07cb411bac9c0b41408a4b8a359be43cf",
+      "bytes": 1302
+    },
+    {
+      "name": "effect-record",
+      "title": "EffectRecord",
+      "path": "schemas/generated/v2/effect-record.json",
+      "sha256": "sha256:467d1a175bc30a141e4a91a53e26810c0d031f0069827a3103c4fd30239349da",
+      "bytes": 4552
+    },
+    {
+      "name": "question",
+      "title": "Question",
+      "path": "schemas/generated/v2/question.json",
+      "sha256": "sha256:2acb02dfa56d2e6c9c5ad2b9a746e4231756ac08105be70abb45edf68e59728a",
+      "bytes": 1280
+    },
+    {
+      "name": "decision",
+      "title": "Decision",
+      "path": "schemas/generated/v2/decision.json",
+      "sha256": "sha256:8808d4d272ec3134bf8dfa858f63a00e291135dbee59ec4f968f6abb08119143",
+      "bytes": 998
+    },
+    {
+      "name": "risk",
+      "title": "Risk",
+      "path": "schemas/generated/v2/risk.json",
+      "sha256": "sha256:be6ee632270e46ae08b925b0958b498653386d96558b16a54a50e7e433d845df",
+      "bytes": 1006
+    }
+  ]
+}

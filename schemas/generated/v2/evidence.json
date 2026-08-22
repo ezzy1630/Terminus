@@ -1,0 +1,98 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/evidence.json",
+  "title": "Evidence",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "claimId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceRevision": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "environmentHash": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "verifierResult": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifactRef": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "hash": {
+              "type": "string"
+            },
+            "uri": {
+              "type": "string"
+            },
+            "mediaType": {
+              "type": "string"
+            },
+            "bytes": {}
+          },
+          "required": [
+            "hash",
+            "uri",
+            "mediaType",
+            "bytes"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "metadata": {
+      "default": {},
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    },
+    "observedAt": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "claimId",
+    "kind",
+    "summary",
+    "sourceRevision",
+    "environmentHash",
+    "verifierResult",
+    "artifactRef",
+    "observedAt"
+  ]
+}
