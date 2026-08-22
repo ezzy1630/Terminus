@@ -21,11 +21,13 @@ import {
   predicateTypeToNodeKind,
   parseNodeSpec,
   serializeNodeSpec,
+  evaluateCompletionExpression,
   type NodeExecutor,
   type NodeExecutorInput,
   type FlakyTestPolicy,
   type PredicateExecutor,
 } from "./index.js";
+import { ValidationError } from "@terminus/domain";
 
 function fakeUuid(n: number): Uuid7 {
   const tail = n.toString(16).padStart(12, "0");
@@ -422,5 +424,29 @@ describe("PredicateRegistry", () => {
     const spec = parseNodeSpec("bun test");
     expect(spec.predicateType).toBeNull();
     expect(spec.paths).toEqual([]);
+  });
+});
+
+describe("evaluateCompletionExpression tokenizer", () => {
+  const pass = (nodeId: string): [string, VerificationResult] => [
+    nodeId,
+    passResult(fakeUuid(3), nodeId),
+  ];
+
+  test("rejects a lone & or | instead of looping forever", () => {
+    // Regression: a single '&' or '|' previously stalled the atom scanner
+    // without advancing the index, hanging the process on an empty-token
+    // infinite loop.
+    for (const bad of ["a & b", "a | b", "&", "|", "a && b | c"]) {
+      expect(() => evaluateCompletionExpression(bad, new Map())).toThrow(ValidationError);
+    }
+  });
+
+  test("still accepts well-formed && / || expressions", () => {
+    const results = new Map([pass("parse"), pass("tests")]);
+    expect(evaluateCompletionExpression("parse && tests", results)).toBe(true);
+    expect(evaluateCompletionExpression("parse || tests", results)).toBe(true);
+    expect(evaluateCompletionExpression("!parse && tests", results)).toBe(false);
+    expect(evaluateCompletionExpression("(!missing) && tests", results)).toBe(true);
   });
 });

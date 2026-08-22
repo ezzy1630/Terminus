@@ -44,7 +44,7 @@ pub async fn require_bearer(
             ));
         }
     };
-    if bearer != state.bearer_token {
+    if !constant_time_eq(bearer, &state.bearer_token) {
         return Err(ApiError::new(
             terminus_kernel_protocol::ErrorCode::CapabilityTokenInvalid,
             terminus_kernel_protocol::ErrorCategory::Permission,
@@ -207,4 +207,29 @@ pub async fn cors_layer(req: Request, next: Next) -> Response {
         *resp.status_mut() = StatusCode::NO_CONTENT;
     }
     resp
+}
+
+/// Byte-wise constant-time equality for secret comparisons. Length
+/// differences still return early (only the length leaks, never content);
+/// equal-length inputs always compare every byte so response timing does not
+/// reveal how many leading bytes of the bearer token matched.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn matches_equal_and_rejects_unequal() {
+        assert!(constant_time_eq("terminus-kernel-dev-token", "terminus-kernel-dev-token"));
+        assert!(!constant_time_eq("terminus-kernel-dev-token", "terminus-kernel-dev-tokeN"));
+        assert!(!constant_time_eq("short", "longer-token"));
+        assert!(constant_time_eq("", ""));
+    }
 }

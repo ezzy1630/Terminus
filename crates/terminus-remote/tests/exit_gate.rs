@@ -1,5 +1,6 @@
 //! Exit-gate integration: local/remote equivalence, identity isolation,
 //! disconnect cannot corrupt task state.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
 use terminus_remote::{

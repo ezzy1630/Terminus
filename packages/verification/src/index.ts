@@ -651,6 +651,13 @@ function tokenize(expr: string): readonly string[] {
     } else {
       let j = i;
       while (j < expr.length && !/[\s&|!()]/.test(expr[j]!)) j++;
+      // A lone `&` or `|` stops the atom scan without advancing, which would
+      // loop forever emitting empty tokens. Only `&&` / `||` are grammar.
+      if (j === i) {
+        throw new ValidationError(
+          `invalid character ${JSON.stringify(c)} in completion expression (use && and ||)`,
+        );
+      }
       out.push(expr.slice(i, j));
       i = j;
     }

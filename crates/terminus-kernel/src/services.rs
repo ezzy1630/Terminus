@@ -78,6 +78,11 @@ pub struct KernelHandle {
     pub approvals: Arc<ApprovalStore>,
 }
 
+/// The retired known-default capability-signing secret. It must never be
+/// honored as a signing key: it was published in the source tree, so any
+/// caller could forge admin tokens with it (SPEC §36.6).
+const RETIRED_DEFAULT_CAPABILITY_SECRET: &str = "kernel-default-secret-please-rotate";
+
 impl std::fmt::Debug for KernelHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KernelHandle").finish_non_exhaustive()
@@ -119,8 +124,30 @@ impl KernelHandle {
         };
         let sandbox_manager = Arc::new(sandbox_manager);
         let secret_broker = Arc::new(SecretBroker::new());
-        let issuer_secret = std::env::var("TERMINUS_KERNEL_CAPABILITY_SECRET")
-            .unwrap_or_else(|_| "kernel-default-secret-please-rotate".to_string());
+        // SPEC §36.6: the capability-signing key must never be a known
+        // constant — anyone who reads the public source could otherwise forge
+        // admin tokens (HMAC-SHA256 with a public key). When the operator does
+        // not supply TERMINUS_KERNEL_CAPABILITY_SECRET we generate an
+        // ephemeral random key: tokens remain self-consistent within this
+        // process, but cannot be forged or predicted across restarts. The
+        // retired default constant is rejected even if explicitly set.
+        let issuer_secret = match std::env::var("TERMINUS_KERNEL_CAPABILITY_SECRET") {
+            Ok(s) if !s.is_empty() && s != RETIRED_DEFAULT_CAPABILITY_SECRET => s,
+            _ => {
+                tracing::warn!(
+                    "TERMINUS_KERNEL_CAPABILITY_SECRET unset or set to the retired \
+                     default constant; generating an ephemeral capability-signing \
+                     key (minted tokens will not survive a restart)"
+                );
+                let mut buf = [0u8; 32];
+                getrandom::fill(&mut buf).map_err(|e| {
+                    KernelAssemblyError::Misconfigured(format!(
+                        "secure RNG unavailable for ephemeral capability-signing key: {e}"
+                    ))
+                })?;
+                hex::encode(buf)
+            }
+        };
         let token_issuer = Arc::new(TokenIssuer::new(
             issuer_secret.into_bytes(),
             info.instance_id().to_string(),

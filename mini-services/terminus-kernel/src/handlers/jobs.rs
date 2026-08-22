@@ -6,7 +6,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -15,6 +15,7 @@ use terminus_jobs::{JobRecord, JobState};
 use terminus_kernel_protocol::CommandSpec;
 
 use crate::api::Envelope;
+use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
 use crate::state::AppState;
 use crate::trace_id::TraceId;
@@ -30,6 +31,10 @@ pub struct StartJobRequest {
     pub session_id: String,
     #[serde(default)]
     pub task_id: String,
+    #[serde(default)]
+    pub sandbox_profile_id: String,
+    #[serde(default)]
+    pub durable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,40 +45,47 @@ pub struct StartJobResponse {
 
 pub async fn start(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: axum::body::Bytes,
 ) -> Result<Json<StartJobResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: StartJobRequest =
+    let mut req: StartJobRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
-    let job_id = terminus_kernel_protocol::new_id();
-    let command_str = if req.command_str.is_empty() {
-        format!("{} {}", req.command.program, req.command.args.join(" "))
+    // The kernel re-validates the capability token (§31.3 step 3) against the
+    // requested operation class and scope; a body-supplied token can never
+    // grant more authority than the middleware-validated header token.
+    req.envelope.inject_capability_token(&cap_token);
+    let mut ctx = req.envelope.request_context.clone();
+    if !req.session_id.is_empty() {
+        ctx.session_id = req.session_id.clone();
+    }
+    if !req.task_id.is_empty() {
+        ctx.task_id = req.task_id.clone();
+    }
+    let profile = if req.sandbox_profile_id.is_empty() {
+        "secure-local-default"
     } else {
-        req.command_str
+        req.sandbox_profile_id.as_str()
     };
-    let session_id = if req.session_id.is_empty() {
-        req.envelope.request_context.session_id.clone()
-    } else {
-        req.session_id
-    };
-    let task_id = if req.task_id.is_empty() {
-        req.envelope.request_context.task_id.clone()
-    } else {
-        req.task_id
-    };
-    let record = JobRecord::new(&job_id, &session_id, &task_id, &command_str);
-    let manager = state.kernel.jobs.manager().clone();
-    manager
-        .create(record)
+    // Durable jobs must go through the same §31.3 pipeline as every other
+    // effect: capability → policy → approval → sandbox → audit. Spawning via
+    // the raw process manager here would bypass policy and sandbox entirely.
+    let (job_id, _outcome, mut receiver) = state
+        .kernel
+        .jobs
+        .start(&ctx, &req.envelope.effect_intent, req.command.clone(), profile, req.durable)
         .await
-        .map_err(|e| ApiError::internal(format!("job create: {e}"), &trace_id.0))?;
-    let spawn = terminus_process::NormalizedSpawn::from_spec(&req.command)
-        .map_err(|e| ApiError::validation(format!("command spec: {e}"), &trace_id.0))?;
-    manager
-        .start(&job_id, spawn)
+        .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
+    // Drain the bounded event stream so the child is not left backpressured;
+    // reconnecting consumers read through the durable job record instead.
+    tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+    let state_now = state
+        .kernel
+        .jobs
+        .manager()
+        .state(&job_id)
         .await
-        .map_err(|e| ApiError::internal(format!("job start: {e}"), &trace_id.0))?;
-    let state_now = manager.state(&job_id).await.unwrap_or(JobState::Running);
+        .unwrap_or(JobState::Running);
     Ok(Json(StartJobResponse {
         job_id,
         state: state_now.as_str().to_string(),

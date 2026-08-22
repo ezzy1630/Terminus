@@ -39,8 +39,11 @@ const APPS_DIR = join(ROOT, "apps");
 // Packages that may import `node:crypto` for content hashing. SPEC §42.5
 // names `@terminus/artifact-client`. We additionally allow `@terminus/context-ir`
 // because its SHA-256 hashes are content-addressed IR fingerprints
-// (SPEC §28.1) — the same architectural justification.
-const CRYPTO_ALLOW = new Set(["artifact-client", "context-ir"]);
+// (SPEC §28.1) — the same architectural justification — and
+// `@terminus/capability-registry`, which hashes capability descriptors,
+// skill payloads, and MCP server configs into `sha256:<hex>` lockfile pins
+// used for rug-pull detection (SPEC §35.5, ADR-0017, ADR-0018).
+const CRYPTO_ALLOW = new Set(["artifact-client", "context-ir", "capability-registry"]);
 
 interface Violation {
   rule: string;
@@ -353,8 +356,16 @@ function checkNoRawSqlOutsideRepositories(): void {
 // Rule 6: direct process execution forbidden in packages/*
 // ───────────────────────────────────────────────────────────────────────────
 
+// Actual process-creation sinks only. Bare `exec(`/`spawn(` must NOT be
+// matched here: legitimate brokered code legitimately contains
+// `kernel.exec(...)`, `port.spawn(...)` (KernelProcessPort / AdapterProcessPort),
+// interface methods named exec/spawn, and `RegExp.prototype.exec`.
+// Direct child_process usage is already banned by Rule 1's import ban;
+// this rule catches the remaining no-static-import paths: Bun's global
+// spawn APIs and dynamic imports of child_process.
 const PROCESS_EXEC_PATTERNS = [
-  /\bexec\(|\bspawn\(|\bexecSync\(|\bspawnSync\(/,
+  /\bBun\.spawn(Sync)?\(/,
+  /\bimport\(\s*["'](node:)?child_process["']/,
 ];
 
 function checkNoDirectProcessExec(): void {

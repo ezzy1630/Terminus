@@ -1581,6 +1581,7 @@ dependencies = [
 name = "terminus-kernel"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "hex",
  "serde",
  "serde_json",

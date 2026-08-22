@@ -7,6 +7,7 @@
 //! Socket I/O lives in `mini-services/terminus-kernel` (rustls/tonic).
 
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod artifact_stream;
 pub mod audit;

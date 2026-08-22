@@ -138,9 +138,16 @@ impl AppState {
             }
         }
 
+        let bearer_token_source;
         let bearer_token = match env::var("TERMINUS_KERNEL_TOKEN") {
-            Ok(t) if !t.is_empty() => t,
-            _ if dev_mode => DEFAULT_BEARER_TOKEN.to_string(),
+            Ok(t) if !t.is_empty() => {
+                bearer_token_source = "TERMINUS_KERNEL_TOKEN".to_string();
+                t
+            }
+            _ if dev_mode => {
+                bearer_token_source = "dev default (TERMINUS_DEV=1)".to_string();
+                DEFAULT_BEARER_TOKEN.to_string()
+            }
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -148,18 +155,31 @@ impl AppState {
                 ));
             }
         };
+        let dev_capability_token_source = if !dev_mode {
+            "not minted (production mints scoped tokens on approval)".to_string()
+        } else {
+            format!(
+                "minted by this kernel instance{}",
+                match env::var("TERMINUS_KERNEL_CAP_TOKEN_FILE") {
+                    Ok(p) if !p.is_empty() => format!("; published to {p}"),
+                    _ => String::new(),
+                }
+            )
+        };
 
         let started_at = chrono::Utc::now().to_rfc3339();
         let build_commit = env::var("TERMINUS_BUILD_COMMIT").unwrap_or_else(|_| "dev".to_string());
 
         info!(%started_at, %build_commit, data_dir = %data_dir.display(), "kernel mini-service initialized");
+        // Never log credential bytes. Point operators at where the values
+        // live instead (env vars / optional 0600 token file).
         info!(
-            "bearer token (Authorization: Bearer ...): {}",
-            &bearer_token
+            "bearer token configured from {} (send as 'Authorization: Bearer ...')",
+            bearer_token_source
         );
         info!(
-            "dev capability token (x-capability-token: ...): {}",
-            &dev_capability_token
+            "dev capability token configured from {} (send as 'x-capability-token: ...')",
+            dev_capability_token_source
         );
 
         Ok(Self {
