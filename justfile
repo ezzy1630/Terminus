@@ -72,7 +72,7 @@ boundary-check:
     bun run tools/boundary-check.ts
 
 # Full local validation.
-check-all: check kernel-mini-check codegen-check unit integration security
+check-all: check kernel-mini-check codegen-check truth-check unit integration security
 
 # Regenerate all derived contracts.
 codegen: codegen-proto codegen-public-api codegen-events codegen-tools codegen-config codegen-sqlx codegen-docs
@@ -221,11 +221,28 @@ schema-freeze-evidence:
     bun run scripts/write-schema-freeze-evidence.ts
 
 # Four-owner machine-readable release decision (SPEC §50.10).
-release-decision:
+release-decision: platform-matrix
     bun run scripts/produce-release-decision.ts
 
+# Evidence-derived platform/backend support matrix (roadmap Phase 0). A
+# platform is "supported" only with conformance evidence bound to HEAD.
+platform-matrix:
+    bun run scripts/produce-platform-matrix.ts
+
+# Cross-check source declarations against release metadata and CI config.
+truth-check:
+    bun run scripts/check-declaration-consistency.ts
+
+# First system card: maturity, platform support, limitations, missing infra.
+system-card:
+    bun run scripts/produce-system-card.ts
+
+# Signed baseline evaluation evidence bound to HEAD (roadmap Phase 0).
+eval-baseline:
+    bash scripts/run-eval-baseline.sh
+
 # Aggregate M12 exit-gate evidence report.
-m12-exit-gate: fuzz-smoke fault-injection release-drills soak canary eval-release sbom-verify schema-freeze-evidence release-decision
+m12-exit-gate: fuzz-smoke fault-injection release-drills soak canary eval-release sbom-verify schema-freeze-evidence release-decision system-card
     bun run scripts/m12-exit-gate.ts
 
 # Release gate (SPEC §46.18, §50). Every dependency is mandatory; missing

@@ -2,6 +2,14 @@
 /**
  * Produce SPEC §50.10 machine-readable release decision YAML.
  *
+ * Roadmap Phase 0 truth rules enforced here:
+ *   - supported_platforms come ONLY from artifacts/release-gate/platform-support.json
+ *     (evidence-derived); a missing matrix yields an EMPTY support list plus a
+ *     recorded limitation — never a broad hard-coded claim;
+ *   - known_limitations are seeded from the security findings register AND
+ *     every stub-tier component in maturity.yaml, so an empty limitations
+ *     list can only occur when there is genuinely nothing to disclose.
+ *
  * Owner approvals via env:
  *   TERMINUS_RELEASE_OWNER_APPROVAL
  *   TERMINUS_SECURITY_OWNER_APPROVAL
@@ -23,10 +31,18 @@ type FindingsRegister = {
   findings?: Finding[];
 };
 
+type MaturityComponent = {
+  id?: string;
+  tier?: string;
+  basis?: string;
+};
+
 const ROOT = join(import.meta.dir, "..");
 const OUT_DIR = join(ROOT, "artifacts", "release-gate");
 const OUT_PATH = join(OUT_DIR, "release-decision.yaml");
 const FINDINGS_PATH = join(ROOT, "docs", "security", "findings-register.yaml");
+const MATURITY_PATH = join(ROOT, "maturity.yaml");
+const PLATFORM_MATRIX_PATH = join(OUT_DIR, "platform-support.json");
 const MIGRATIONS_DIR = join(ROOT, "migrations", "sqlite");
 
 function envOrEmpty(name: string): string {
@@ -72,6 +88,49 @@ function loadFindings(): { known_limitations: string[]; accepted_risks: string[]
   return { known_limitations, accepted_risks };
 }
 
+function loadStubLimitations(): string[] {
+  if (!existsSync(MATURITY_PATH)) return [];
+  try {
+    const parsed = Bun.YAML.parse(readFileSync(MATURITY_PATH, "utf8")) as {
+      components?: MaturityComponent[];
+    };
+    return (parsed.components ?? [])
+      .filter((c) => c.tier === "stub")
+      .map((c) => `MATURITY-STUB ${c.id}: ${c.basis?.trim() ?? "declared stub"}`);
+  } catch {
+    return [];
+  }
+}
+
+type PlatformMatrix = {
+  supported_platforms?: string[];
+  unverified_or_degraded_platforms?: string[];
+  platforms?: Record<string, { status?: string; basis?: string }>;
+};
+
+function loadPlatformSupport(): { supported: string[]; limitations: string[] } {
+  const limitations: string[] = [];
+  if (!existsSync(PLATFORM_MATRIX_PATH)) {
+    limitations.push(
+      "PLATFORM-MATRIX absent: no evidence-derived platform support matrix was produced; all platform support claims are withheld (run scripts/produce-platform-matrix.ts)",
+    );
+    return { supported: [], limitations };
+  }
+  let parsed: PlatformMatrix;
+  try {
+    parsed = JSON.parse(readFileSync(PLATFORM_MATRIX_PATH, "utf8")) as PlatformMatrix;
+  } catch {
+    limitations.push("PLATFORM-MATRIX invalid: platform-support.json does not parse");
+    return { supported: [], limitations };
+  }
+  const details = parsed.platforms ?? {};
+  for (const name of parsed.unverified_or_degraded_platforms ?? []) {
+    const entry = details[name];
+    limitations.push(`PLATFORM ${name} (${entry?.status ?? "unknown"}): ${entry?.basis ?? ""}`);
+  }
+  return { supported: parsed.supported_platforms ?? [], limitations };
+}
+
 function yamlQuote(s: string): string {
   return JSON.stringify(s);
 }
@@ -81,7 +140,15 @@ function yamlList(items: string[], indent: string): string {
   return items.map((i) => `${indent}- ${yamlQuote(i)}`).join("\n");
 }
 
-const { known_limitations, accepted_risks } = loadFindings();
+const findings = loadFindings();
+const stubLimitations = loadStubLimitations();
+const platformSupport = loadPlatformSupport();
+const known_limitations = [
+  ...findings.known_limitations,
+  ...stubLimitations,
+  ...platformSupport.limitations,
+];
+const accepted_risks = findings.accepted_risks;
 const schemaVersion = countMigrations();
 const commit =
   process.env.TERMINUS_RELEASE_COMMIT ??
@@ -89,14 +156,9 @@ const commit =
   "unknown";
 const version = process.env.TERMINUS_RELEASE_VERSION ?? "0.1.0";
 
-const supportedPlatforms = [
-  "linux-x86_64",
-  "linux-arm64",
-  "linux-container",
-  "macos-arm64",
-  "macos-x86_64",
-  "windows-x86_64",
-];
+// Roadmap Phase 0: platform support is evidence-derived. No matrix, no
+// support claims.
+const supportedPlatforms = platformSupport.supported;
 
 const doc = `release:
   version: ${yamlQuote(version)}
@@ -105,7 +167,7 @@ const doc = `release:
     terminus_kernel_v1: "1"
   database_schema_version: ${schemaVersion}
   supported_platforms:
-${supportedPlatforms.map((p) => `    - ${yamlQuote(p)}`).join("\n")}
+${yamlList(supportedPlatforms, "    ")}
   security_profile: ${yamlQuote(process.env.TERMINUS_SECURITY_PROFILE ?? "secure-local-default")}
   evaluation_report: ${yamlQuote(process.env.TERMINUS_EVALUATION_REPORT ?? "artifacts/release-gate/eval-release.json")}
   divergence_report: ${yamlQuote(process.env.TERMINUS_DIVERGENCE_REPORT ?? "upstream/divergence-budget.yaml")}
