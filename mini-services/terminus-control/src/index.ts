@@ -42,6 +42,31 @@ import {
   persistResultsToPrisma,
 } from "./verification-runtime.js";
 import type { AcceptanceCriterion, Micros } from "../../../packages/domain/src/index.ts";
+import {
+  authorizationInstanceSchema,
+  claimSchema,
+  decisionSchema,
+  effectRecordSchema,
+  evidenceSchema,
+  questionSchema,
+  taskContractV2Schema,
+  taskV2Schema,
+  workflowSchema,
+  nodeRunSchema,
+  isEffectTransitionAllowed,
+  isTaskV2TransitionAllowed,
+  missionSchema,
+  nowTimestamp,
+  type Claim,
+  type Decision,
+  type EffectRecord,
+  type Evidence,
+  type Question,
+  type TaskContractV2,
+  type TaskV2,
+} from "../../../packages/domain/src/index.ts";
+import { ARP_V2_COMMAND_TYPES, ARP_V2_EVENT_TYPES } from "../../../packages/runtime-protocol/src/index.ts";
+import { z } from "zod";
 
 // ────────────────────────── Configuration ──────────────────────────────────
 
@@ -632,6 +657,181 @@ function normalizeApprovalDecision(raw: string): string | null {
       return null;
   }
 }
+
+// ────────────────────────── ARP v2 canonical domain (SPEC §5–§16) ──────────
+
+/**
+ * Canonical ARP v2 aggregate store.
+ *
+ * Aggregates live in memory and are event-sourced through the semantic
+ * event log (`semantic_events` rows with `schemaVersion = 2`): every
+ * mutation emits a v2 envelope whose payload carries the full post-state
+ * snapshot, and startup replays those rows to rebuild state across
+ * restarts. This keeps the canonical domain durable without widening the
+ * Prisma schema; dedicated v2 tables remain future work.
+ *
+ * Wire encoding: `Micros` bigint values are decimal strings in JSON
+ * (JSON has no bigint); request bodies may send them as strings or
+ * numbers and they are coerced back to bigint at this boundary.
+ */
+
+/** Deep transform: bigint → decimal string so JSON.stringify is total. */
+function jsonSafe(value: unknown): unknown {
+  if (typeof value === "bigint") return value.toString();
+  if (Array.isArray(value)) return value.map(jsonSafe);
+  if (value instanceof Date) return value.toISOString();
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = jsonSafe(v);
+    return out;
+  }
+  return value;
+}
+
+const microsWireSchema = z.union([
+  z.string().regex(/^\d+$/),
+  z.number().int().nonnegative(),
+]).transform((v) => BigInt(v));
+
+/** Request-body contract schema: identical to the domain schema except that costMicros accepts JSON-safe input. */
+const taskContractV2WireSchema = taskContractV2Schema.extend({
+  constraints: taskContractV2Schema.shape.constraints.extend({ costMicros: microsWireSchema }),
+});
+
+const taskV2ReviveSchema = taskV2Schema.extend({ contract: taskContractV2WireSchema });
+
+interface ArpV2State {
+  tasks: Map<string, TaskV2>;
+  effects: Map<string, EffectRecord>;
+  claims: Map<string, Claim>;
+  evidences: Map<string, Evidence>;
+  questions: Map<string, Question>;
+  decisions: Map<string, Decision>;
+}
+
+const arpV2: ArpV2State = {
+  tasks: new Map(),
+  effects: new Map(),
+  claims: new Map(),
+  evidences: new Map(),
+  questions: new Map(),
+  decisions: new Map(),
+};
+
+function arpV2StoreFor(aggregateType: string): Map<string, unknown> | null {
+  switch (aggregateType) {
+    case "task": return arpV2.tasks as Map<string, unknown>;
+    case "effect": return arpV2.effects as Map<string, unknown>;
+    case "claim": return arpV2.claims as Map<string, unknown>;
+    case "evidence": return arpV2.evidences as Map<string, unknown>;
+    case "question": return arpV2.questions as Map<string, unknown>;
+    case "decision": return arpV2.decisions as Map<string, unknown>;
+    default: return null;
+  }
+}
+
+/** Per-aggregate sequence for v2 envelopes (recomputed on replay). */
+const arpV2Sequences = new Map<string, number>();
+
+/**
+ * Emit a canonical ARP v2 envelope. The full post-state snapshot rides in
+ * the payload so the event log alone reconstructs the aggregate store.
+ */
+async function emitV2(params: {
+  eventType: string;
+  aggregateType: string;
+  aggregateId: string;
+  snapshot: unknown;
+  idempotencyKey?: string | null;
+  correlationId?: string | null;
+}): Promise<void> {
+  const seqKey = `${params.aggregateType}:${params.aggregateId}`;
+  const nextSeq = (arpV2Sequences.get(seqKey) ?? 0) + 1;
+  arpV2Sequences.set(seqKey, nextSeq);
+  const ev: StoredEvent = {
+    eventId: bus.nextEventId(),
+    schemaVersion: 2,
+    eventType: params.eventType,
+    aggregateType: params.aggregateType,
+    aggregateId: params.aggregateId,
+    aggregateSequence: nextSeq,
+    occurredAt: new Date(),
+    actorJson: JSON.stringify({ kind: "system", id: SERVER_PRINCIPAL }),
+    correlationId: params.correlationId ?? params.aggregateId,
+    causationId: null,
+    idempotencyKey: params.idempotencyKey ?? null,
+    payloadJson: JSON.stringify(jsonSafe({ snapshot: params.snapshot })),
+    artifactRefsJson: JSON.stringify([]),
+    traceId: null,
+  };
+  await bus.publish(ev);
+}
+
+/** Rebuild the in-memory v2 aggregates from the persisted event log. */
+async function replayArpV2(): Promise<void> {
+  let rows: Array<{ aggregateType: string; aggregateId: string; aggregateSequence: number; payloadJson: string }> = [];
+  try {
+    rows = await db.semanticEvent.findMany({
+      where: { schemaVersion: 2 },
+      orderBy: [{ occurredAt: "asc" }, { aggregateSequence: "asc" }],
+      take: 10_000,
+    });
+  } catch (err) {
+    console.error("[terminus-control] arp-v2 replay failed; starting with empty canonical store", err);
+    return;
+  }
+  for (const row of rows) {
+    const seqKey = `${row.aggregateType}:${row.aggregateId}`;
+    arpV2Sequences.set(seqKey, Math.max(arpV2Sequences.get(seqKey) ?? 0, row.aggregateSequence));
+    const parsed = safeParse<{ snapshot?: unknown }>(row.payloadJson, {});
+    if (!parsed.snapshot || typeof parsed.snapshot !== "object") continue;
+    const store = arpV2StoreFor(row.aggregateType);
+    if (!store) continue;
+    // Tasks carry the only bigint field; revive Micros from wire strings.
+    if (row.aggregateType === "task") {
+      const revived = taskV2ReviveSchema.safeParse(parsed.snapshot);
+      if (revived.success) store.set(row.aggregateId, revived.data);
+    } else {
+      store.set(row.aggregateId, parsed.snapshot);
+    }
+  }
+  console.log(`[terminus-control] arp-v2 replay: ${arpV2.tasks.size} tasks, ${arpV2.effects.size} effects, ${arpV2.claims.size} claims`);
+}
+
+/** Serialize a stored event into an ARP v2 envelope for SSE consumers. */
+function storedEventToEnvelopeV2(ev: StoredEvent): Record<string, unknown> {
+  return {
+    eventId: ev.eventId,
+    eventType: ev.eventType,
+    schemaVersion: 2,
+    aggregateType: ev.aggregateType,
+    aggregateId: ev.aggregateId,
+    aggregateSequence: ev.aggregateSequence,
+    occurredAt: ev.occurredAt instanceof Date ? ev.occurredAt.toISOString() : String(ev.occurredAt),
+    actor: safeParse(ev.actorJson, { kind: "system", id: SERVER_PRINCIPAL }),
+    correlationId: ev.correlationId,
+    causationId: ev.causationId,
+    idempotencyKey: ev.idempotencyKey,
+    payload: safeParse(ev.payloadJson, {}),
+    artifactRefs: safeParse(ev.artifactRefsJson, []),
+    traceId: ev.traceId,
+  };
+}
+
+/** Static registry served at GET /v2/system/schema-registry (mirrors tools/codegen/v2-schemas.ts). */
+const V2_SCHEMA_REGISTRY_ENTRIES: ReadonlyArray<readonly [string, z.ZodType]> = [
+  ["mission", missionSchema],
+  ["task-contract-v2", taskContractV2Schema],
+  ["task-v2", taskV2Schema],
+  ["workflow", workflowSchema],
+  ["node-run", nodeRunSchema],
+  ["claim", claimSchema],
+  ["evidence", evidenceSchema],
+  ["authorization-instance", authorizationInstanceSchema],
+  ["effect-record", effectRecordSchema],
+  ["question", questionSchema],
+  ["decision", decisionSchema],
+];
 
 // ────────────────────────── Route handlers ─────────────────────────────────
 
@@ -2056,6 +2256,436 @@ const routes: Route[] = [
       settled_at: updated.settledAt?.toISOString() ?? null,
     });
   }),
+
+  // ────────────────────────── ARP v2 (/v2, SPEC §32) ─────────────────────
+  route("GET", "/v2/system/health", async (_req, res) => {
+    let kernelReady = false;
+    try {
+      const kernelHealth = await requireKernelUds().info.Health({});
+      kernelReady = kernelHealth.state === "healthy" || kernelHealth.state === "ok";
+    } catch {
+      kernelReady = false;
+    }
+    sendJson(res, 200, {
+      status: kernelReady ? "ok" : "degraded",
+      version: "0.1.0",
+      protocolVersion: 2,
+      uptimeSeconds: Math.floor(process.uptime()),
+      ready: kernelReady,
+    });
+  }),
+  route("GET", "/v2/system/schema-registry", async (_req, res) => {
+    const schemas: Record<string, unknown> = {};
+    for (const [name, schema] of V2_SCHEMA_REGISTRY_ENTRIES) {
+      schemas[name] = z.toJSONSchema(schema, { io: "input", unrepresentable: "any" });
+    }
+    sendJson(res, 200, {
+      protocolVersion: 2 as const,
+      supportedEventTypes: [...ARP_V2_EVENT_TYPES],
+      supportedCommandTypes: [...ARP_V2_COMMAND_TYPES],
+      schemas: jsonSafe(schemas),
+    });
+  }),
+  route("POST", "/v2/tasks", async (req, res) => {
+    const parsed = z.object({
+      missionId: z.string().nullable().default(null),
+      organizationId: z.string().default("default-org"),
+      departmentId: z.string().default("default-dept"),
+      contract: taskContractV2WireSchema,
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_TASK_CONTRACT", `invalid v2 task request: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
+    }
+    const { missionId, organizationId, departmentId, contract } = parsed.data;
+    const nowIso = nowTimestamp();
+    const task: TaskV2 = {
+      id: uuid(),
+      missionId,
+      organizationId,
+      departmentId,
+      createdBy: SERVER_PRINCIPAL,
+      contract: contract as TaskContractV2,
+      status: "DRAFT",
+      version: 1,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      completedAt: null,
+    };
+    arpV2.tasks.set(task.id, task);
+    await emitV2({
+      eventType: "task.created",
+      aggregateType: "task",
+      aggregateId: task.id,
+      snapshot: task,
+      idempotencyKey: req.headers["x-idempotency-key"] as string | undefined ?? null,
+    });
+    sendJson(res, 201, jsonSafe(task));
+  }),
+  route("GET", "/v2/tasks/:id", async (_req, res, params) => {
+    const task = arpV2.tasks.get(String(params.id));
+    if (!task) return sendError(res, 404, "TASK_NOT_FOUND", "v2 task not found", "not_found");
+    sendJson(res, 200, jsonSafe(task));
+  }),
+  route("GET", "/v2/tasks", async (_req, res) => {
+    const tasks = [...arpV2.tasks.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    sendJson(res, 200, { tasks: jsonSafe(tasks) });
+  }),
+  route("POST", "/v2/tasks/:id/transition", async (req, res, params) => {
+    const id = String(params.id);
+    const task = arpV2.tasks.get(id);
+    if (!task) return sendError(res, 404, "TASK_NOT_FOUND", "v2 task not found", "not_found");
+    const parsed = z.object({
+      id: z.string().optional(),
+      targetStatus: z.enum(["DRAFT", "READY", "RUNNING", "WAITING_USER", "WAITING_AUTH", "WAITING_RESOURCE", "PAUSED", "VERIFYING", "COMPLETED", "PARTIAL", "BLOCKED", "CANCELLED", "FAILED"]),
+      expectedVersion: z.number().int().nonnegative().nullable().default(null),
+      reason: z.string().nullable().default(null),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_TRANSITION_REQUEST", `invalid transition request: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
+    }
+    const { targetStatus, expectedVersion, reason } = parsed.data;
+    if (expectedVersion !== null && expectedVersion !== task.version) {
+      return sendError(res, 409, "VERSION_CONFLICT", `expected version ${expectedVersion} but task is at version ${task.version}`, "conflict", { expected_version: expectedVersion, actual_version: task.version });
+    }
+    if (!isTaskV2TransitionAllowed(task.status, targetStatus)) {
+      return sendError(res, 409, "ILLEGAL_TRANSITION", `illegal task transition ${task.status} -> ${targetStatus}`, "conflict", { from: task.status, to: targetStatus });
+    }
+    const terminal = targetStatus === "COMPLETED" || targetStatus === "PARTIAL" || targetStatus === "CANCELLED" || targetStatus === "FAILED";
+    const updated: TaskV2 = {
+      ...task,
+      status: targetStatus,
+      version: task.version + 1,
+      updatedAt: nowTimestamp(),
+      completedAt: terminal ? nowTimestamp() : null,
+    };
+    arpV2.tasks.set(id, updated);
+    await emitV2({
+      eventType: `task.${targetStatus.toLowerCase()}`,
+      aggregateType: "task",
+      aggregateId: id,
+      snapshot: updated,
+      correlationId: id,
+    });
+    void reason;
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("POST", "/v2/tasks/:id/contract", async (req, res, params) => {
+    const id = String(params.id);
+    const task = arpV2.tasks.get(id);
+    if (!task) return sendError(res, 404, "TASK_NOT_FOUND", "v2 task not found", "not_found");
+    const parsed = z.object({
+      contract: taskContractV2WireSchema,
+      expectedVersion: z.number().int().nonnegative().nullable().default(null),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_TASK_CONTRACT", `invalid contract update: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
+    }
+    if (parsed.data.expectedVersion !== null && parsed.data.expectedVersion !== task.version) {
+      return sendError(res, 409, "VERSION_CONFLICT", `expected version ${parsed.data.expectedVersion} but task is at version ${task.version}`, "conflict");
+    }
+    const updated: TaskV2 = {
+      ...task,
+      contract: parsed.data.contract as TaskContractV2,
+      version: task.version + 1,
+      updatedAt: nowTimestamp(),
+    };
+    arpV2.tasks.set(id, updated);
+    await emitV2({ eventType: "task.contract_updated", aggregateType: "task", aggregateId: id, snapshot: updated, correlationId: id });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("POST", "/v2/effects", async (req, res) => {
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      attemptId: z.string().min(1),
+      connectorOrWorker: z.string().min(1),
+      intentType: z.string().min(1),
+      canonicalParameters: z.record(z.string(), z.unknown()),
+      resourceHandles: z.array(z.unknown()).default([]),
+      effectClass: z.string().min(1),
+      semanticIdempotencyKey: z.string().min(1),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_EFFECT_REQUEST", `invalid effect proposal: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
+    }
+    const body = parsed.data;
+    if (!arpV2.tasks.has(body.taskId)) {
+      return sendError(res, 404, "TASK_NOT_FOUND", `v2 task ${body.taskId} not found`, "not_found");
+    }
+    const existing = [...arpV2.effects.values()].find((e) => e.semanticIdempotencyKey === body.semanticIdempotencyKey);
+    if (existing) return sendJson(res, 200, jsonSafe(existing));
+    const effect: EffectRecord = {
+      id: uuid(),
+      taskId: body.taskId,
+      attemptId: body.attemptId,
+      principal: SERVER_PRINCIPAL,
+      connectorOrWorker: body.connectorOrWorker,
+      intentType: body.intentType,
+      canonicalParameters: body.canonicalParameters,
+      resourceHandles: body.resourceHandles as EffectRecord["resourceHandles"],
+      effectClass: body.effectClass,
+      semanticIdempotencyKey: body.semanticIdempotencyKey,
+      authorizationId: null,
+      policyDecisionId: null,
+      state: "PROPOSED",
+      uncertaintyReason: null,
+      compensationRef: null,
+      version: 0,
+      createdAt: nowTimestamp(),
+      settledAt: null,
+    };
+    arpV2.effects.set(effect.id, effect);
+    await emitV2({
+      eventType: "effect.proposed",
+      aggregateType: "effect",
+      aggregateId: effect.id,
+      snapshot: effect,
+      idempotencyKey: body.semanticIdempotencyKey,
+      correlationId: effect.taskId,
+    });
+    sendJson(res, 201, jsonSafe(effect));
+  }),
+  route("GET", "/v2/effects/:id", async (_req, res, params) => {
+    const effect = arpV2.effects.get(String(params.id));
+    if (!effect) return sendError(res, 404, "EFFECT_NOT_FOUND", "v2 effect not found", "not_found");
+    sendJson(res, 200, jsonSafe(effect));
+  }),
+  route("GET", "/v2/effects", async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://x");
+    const taskId = url.searchParams.get("taskId");
+    const all = [...arpV2.effects.values()]
+      .filter((e) => !taskId || e.taskId === taskId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    sendJson(res, 200, { effects: jsonSafe(all) });
+  }),
+  route("POST", "/v2/effects/:id/transition", async (req, res, params) => {
+    const id = String(params.id);
+    const effect = arpV2.effects.get(id);
+    if (!effect) return sendError(res, 404, "EFFECT_NOT_FOUND", "v2 effect not found", "not_found");
+    const parsed = z.object({
+      targetState: z.enum(["PROPOSED", "POLICY_CHECKED", "AUTHORIZATION_REQUIRED", "AUTHORIZED", "PREPARED", "DISPATCHED", "OBSERVED", "VALIDATED", "COMMITTED", "DENIED", "CANCELLED", "UNCERTAIN", "RECONCILING", "COMPENSATING", "COMPENSATED", "RESIDUE", "MANUAL_RECONCILE"]),
+      expectedVersion: z.number().int().nonnegative().nullable().default(null),
+      reason: z.string().nullable().default(null),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_TRANSITION_REQUEST", `invalid effect transition: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
+    }
+    const { targetState, expectedVersion } = parsed.data;
+    if (expectedVersion !== null && expectedVersion !== effect.version) {
+      return sendError(res, 409, "VERSION_CONFLICT", `expected version ${expectedVersion} but effect is at version ${effect.version}`, "conflict", { expected_version: expectedVersion, actual_version: effect.version });
+    }
+    if (!isEffectTransitionAllowed(effect.state, targetState)) {
+      return sendError(res, 409, "ILLEGAL_TRANSITION", `illegal effect transition ${effect.state} -> ${targetState}`, "conflict", { from: effect.state, to: targetState });
+    }
+    const settled = targetState === "COMMITTED" || targetState === "DENIED" || targetState === "CANCELLED" || targetState === "COMPENSATED";
+    const updated: EffectRecord = {
+      ...effect,
+      state: targetState,
+      version: effect.version + 1,
+      settledAt: settled ? nowTimestamp() : null,
+    };
+    arpV2.effects.set(id, updated);
+    await emitV2({
+      eventType: `effect.${targetState.toLowerCase()}`,
+      aggregateType: "effect",
+      aggregateId: id,
+      snapshot: updated,
+      correlationId: effect.taskId,
+    });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  // Semantic alias: authorize an authorization-gated effect (POLICY_CHECKED |
+  // AUTHORIZATION_REQUIRED → AUTHORIZED). Strict — no state skipping.
+  route("POST", "/v2/effects/:id/authorize", async (req, res, params) => {
+    const effect = arpV2.effects.get(String(params.id));
+    if (!effect) return sendError(res, 404, "EFFECT_NOT_FOUND", "v2 effect not found", "not_found");
+    const parsed = z.object({ authorizationId: z.string().min(1) }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_AUTHORIZATION", "authorizationId is required", "validation");
+    }
+    if (effect.state !== "POLICY_CHECKED" && effect.state !== "AUTHORIZATION_REQUIRED") {
+      return sendError(res, 409, "ILLEGAL_TRANSITION", `effect in state ${effect.state} cannot be authorized`, "conflict", { from: effect.state });
+    }
+    const updated: EffectRecord = { ...effect, state: "AUTHORIZED", authorizationId: parsed.data.authorizationId, version: effect.version + 1 };
+    arpV2.effects.set(effect.id, updated);
+    await emitV2({ eventType: "effect.authorized", aggregateType: "effect", aggregateId: effect.id, snapshot: updated, correlationId: effect.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  // Semantic alias: commit a validated effect (VALIDATED → COMMITTED). Strict.
+  route("POST", "/v2/effects/:id/commit", async (req, res, params) => {
+    const id = String(params.id);
+    const effect = arpV2.effects.get(id);
+    if (!effect) return sendError(res, 404, "EFFECT_NOT_FOUND", "v2 effect not found", "not_found");
+    const parsed = z.object({ expectedVersion: z.number().int().nonnegative().nullable().default(null) }).safeParse(await jsonBody(req));
+    if (parsed.success && parsed.data.expectedVersion !== null && parsed.data.expectedVersion !== effect.version) {
+      return sendError(res, 409, "VERSION_CONFLICT", `expected version ${parsed.data.expectedVersion} but effect is at version ${effect.version}`, "conflict");
+    }
+    if (effect.state !== "VALIDATED") {
+      return sendError(res, 409, "ILLEGAL_TRANSITION", `effect in state ${effect.state} cannot be committed; it must reach VALIDATED first`, "conflict", { from: effect.state });
+    }
+    const updated: EffectRecord = { ...effect, state: "COMMITTED", version: effect.version + 1, settledAt: nowTimestamp() };
+    arpV2.effects.set(id, updated);
+    await emitV2({ eventType: "effect.committed", aggregateType: "effect", aggregateId: id, snapshot: updated, correlationId: effect.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("POST", "/v2/effects/:id/reconcile", async (req, res, params) => {
+    const id = String(params.id);
+    const effect = arpV2.effects.get(id);
+    if (!effect) return sendError(res, 404, "EFFECT_NOT_FOUND", "v2 effect not found", "not_found");
+    const parsed = z.object({
+      observedOutcome: z.string().min(1),
+      evidenceArtifactHash: z.string().nullable().default(null),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_RECONCILIATION", `invalid reconciliation: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
+    }
+    const outcomeTargets: Record<string, string> = {
+      observed: "OBSERVED",
+      validated: "VALIDATED",
+      compensating: "COMPENSATING",
+      manual_reconcile: "MANUAL_RECONCILE",
+      committed: "COMMITTED",
+    };
+    const target = outcomeTargets[parsed.data.observedOutcome.toLowerCase()];
+    if (!target) {
+      return sendError(res, 400, "INVALID_RECONCILIATION", `unknown observedOutcome "${parsed.data.observedOutcome}"`, "validation");
+    }
+    if (effect.state === "UNCERTAIN") {
+      const entered: EffectRecord = { ...effect, state: "RECONCILING", version: effect.version + 1 };
+      arpV2.effects.set(id, entered);
+      await emitV2({ eventType: "effect.reconciling", aggregateType: "effect", aggregateId: id, snapshot: entered, correlationId: effect.taskId });
+    }
+    const current = arpV2.effects.get(id)!;
+    if (!isEffectTransitionAllowed(current.state, target as EffectRecord["state"])) {
+      return sendError(res, 409, "ILLEGAL_TRANSITION", `illegal reconciliation ${current.state} -> ${target}`, "conflict", { from: current.state, to: target });
+    }
+    const updated: EffectRecord = { ...current, state: target as EffectRecord["state"], version: current.version + 1 };
+    arpV2.effects.set(id, updated);
+    await emitV2({ eventType: `effect.${target.toLowerCase()}`, aggregateType: "effect", aggregateId: id, snapshot: updated, correlationId: effect.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("POST", "/v2/claims", async (req, res) => {
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      statement: z.string().min(1),
+      requiredEvidenceKind: z.string().min(1),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_CLAIM", `invalid claim: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
+    }
+    if (!arpV2.tasks.has(parsed.data.taskId)) {
+      return sendError(res, 404, "TASK_NOT_FOUND", `v2 task ${parsed.data.taskId} not found`, "not_found");
+    }
+    const nowIso = nowTimestamp();
+    const claim: Claim = {
+      id: uuid(),
+      taskId: parsed.data.taskId,
+      statement: parsed.data.statement,
+      requiredEvidenceKind: parsed.data.requiredEvidenceKind,
+      status: "PROPOSED",
+      evidenceIds: [],
+      waivedRationale: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    arpV2.claims.set(claim.id, claim);
+    await emitV2({ eventType: "claim.proposed", aggregateType: "claim", aggregateId: claim.id, snapshot: claim, correlationId: claim.taskId });
+    sendJson(res, 201, jsonSafe(claim));
+  }),
+  route("POST", "/v2/claims/:id/waive", async (req, res, params) => {
+    const id = String(params.id);
+    const claim = arpV2.claims.get(id);
+    if (!claim) return sendError(res, 404, "CLAIM_NOT_FOUND", "v2 claim not found", "not_found");
+    const parsed = z.object({ rationale: z.string().min(1) }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_WAIVER", "a non-empty rationale is required to waive a claim", "validation");
+    }
+    const updated: Claim = { ...claim, status: "WAIVED", waivedRationale: parsed.data.rationale, updatedAt: nowTimestamp() };
+    arpV2.claims.set(id, updated);
+    await emitV2({ eventType: "claim.waived", aggregateType: "claim", aggregateId: id, snapshot: updated, correlationId: claim.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("POST", "/v2/evidence", async (req, res) => {
+    const parsed = z.object({
+      claimId: z.string().min(1),
+      kind: z.string().min(1),
+      summary: z.string().min(1),
+      verifierResult: z.string().min(1),
+      sourceRevision: z.string().nullable().default(null),
+      environmentHash: z.string().nullable().default(null),
+      metadata: z.record(z.string(), z.unknown()).default({}),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_EVIDENCE", `invalid evidence record: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
+    }
+    const claim = arpV2.claims.get(parsed.data.claimId);
+    if (!claim) return sendError(res, 404, "CLAIM_NOT_FOUND", `v2 claim ${parsed.data.claimId} not found`, "not_found");
+    const evidence: Evidence = {
+      id: uuid(),
+      claimId: claim.id,
+      kind: parsed.data.kind,
+      summary: parsed.data.summary,
+      sourceRevision: parsed.data.sourceRevision,
+      environmentHash: parsed.data.environmentHash,
+      verifierResult: parsed.data.verifierResult,
+      artifactRef: null,
+      metadata: parsed.data.metadata,
+      observedAt: nowTimestamp(),
+    };
+    arpV2.evidences.set(evidence.id, evidence);
+    await emitV2({ eventType: "evidence.recorded", aggregateType: "evidence", aggregateId: evidence.id, snapshot: evidence, correlationId: claim.taskId });
+    // A passing verifier satisfies the claim it evidences (SPEC §6).
+    if (parsed.data.verifierResult.toLowerCase() === "pass" && claim.status === "PROPOSED") {
+      const satisfied: Claim = { ...claim, status: "SATISFIED", evidenceIds: [...claim.evidenceIds, evidence.id], updatedAt: nowTimestamp() };
+      arpV2.claims.set(claim.id, satisfied);
+      await emitV2({ eventType: "claim.satisfied", aggregateType: "claim", aggregateId: claim.id, snapshot: satisfied, correlationId: claim.taskId });
+    }
+    sendJson(res, 201, jsonSafe(evidence));
+  }),
+  route("GET", "/v2/events", async (req, res) => {
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      "connection": "keep-alive",
+      "access-control-allow-origin": CONTROL_CORS_ORIGIN,
+      "access-control-allow-headers": CORS_ALLOW_HEADERS,
+      "x-accel-buffering": "no",
+    });
+    const url = new URL(req.url ?? "", "http://x");
+    const cursor = url.searchParams.get("cursor");
+    const taskId = url.searchParams.get("taskId");
+    const aggregateType = url.searchParams.get("aggregateType");
+
+    const filter = (ev: StoredEvent) => {
+      if (ev.schemaVersion !== 2) return false;
+      if (aggregateType && ev.aggregateType !== aggregateType) return false;
+      if (taskId) {
+        return ev.aggregateId === taskId
+          || ev.correlationId === taskId
+          || (ev.payloadJson.includes(taskId) && ev.aggregateType !== "evidence");
+      }
+      return true;
+    };
+
+    if (cursor) {
+      const replayed = await bus.replay(cursor, filter);
+      for (const ev of replayed) {
+        res.write(`id: ${ev.eventId}\nevent: ${ev.eventType}\ndata: ${JSON.stringify(storedEventToEnvelopeV2(ev))}\n\n`);
+      }
+    }
+
+    const unsubscribe = bus.subscribe(filter, (ev) => {
+      res.write(`id: ${ev.eventId}\nevent: ${ev.eventType}\ndata: ${JSON.stringify(storedEventToEnvelopeV2(ev))}\n\n`);
+    });
+
+    const heartbeat = setInterval(() => {
+      try { res.write(`:heartbeat ${Date.now()}\n\n`); } catch { /* ignore */ }
+    }, 15_000);
+
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
+  }),
 ];
 
 /** JSON.parse with a fallback so a corrupt stored value never crashes the API. */
@@ -2581,6 +3211,8 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`[terminus-control] CORS origin: ${CONTROL_CORS_ORIGIN}`);
   console.log(`[terminus-control] auth: bearer token (TERMINUS_CONTROL_TOKEN)`);
 });
+
+void replayArpV2();
 
 process.on("SIGINT", () => { void db.$disconnect(); process.exit(0); });
 process.on("SIGTERM", () => { void db.$disconnect(); process.exit(0); });
