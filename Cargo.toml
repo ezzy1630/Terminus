@@ -58,6 +58,7 @@ terminus-process = { path = "crates/terminus-process", version = "0.1.0" }
 terminus-jobs = { path = "crates/terminus-jobs", version = "0.1.0" }
 terminus-patch = { path = "crates/terminus-patch", version = "0.1.0" }
 terminus-secrets = { path = "crates/terminus-secrets", version = "0.1.0" }
+terminus-connector = { path = "crates/terminus-connector", version = "0.1.0" }
 terminus-egress = { path = "crates/terminus-egress", version = "0.1.0" }
 terminus-code-intel = { path = "crates/terminus-code-intel", version = "0.1.0" }
 terminus-extension-runtime = { path = "crates/terminus-extension-runtime", version = "0.1.0" }

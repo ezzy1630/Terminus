@@ -21,6 +21,7 @@ terminus-process = { workspace = true }
 terminus-jobs = { workspace = true }
 terminus-patch = { workspace = true }
 terminus-secrets = { workspace = true }
+terminus-connector = { workspace = true }
 terminus-egress = { workspace = true }
 terminus-code-intel = { workspace = true }
 terminus-extension-runtime = { workspace = true }

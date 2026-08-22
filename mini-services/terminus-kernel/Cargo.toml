@@ -39,6 +39,7 @@ terminus-process = { path = "../../crates/terminus-process" }
 terminus-jobs = { path = "../../crates/terminus-jobs" }
 terminus-patch = { path = "../../crates/terminus-patch" }
 terminus-secrets = { path = "../../crates/terminus-secrets" }
+terminus-connector = { path = "../../crates/terminus-connector" }
 terminus-egress = { path = "../../crates/terminus-egress" }
 terminus-code-intel = { path = "../../crates/terminus-code-intel" }
 terminus-extension-runtime = { path = "../../crates/terminus-extension-runtime" }

@@ -194,6 +194,14 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/secrets/request", post(handlers::secrets::request))
         .route("/v1/secrets/audit", post(handlers::secrets::audit))
         .route("/v1/secrets/redact", post(handlers::secrets::redact))
+        .route(
+            "/v1/connectors/grants/mint",
+            post(handlers::connectors::mint_grant),
+        )
+        .route(
+            "/v1/connectors/execute",
+            post(handlers::connectors::execute),
+        )
         // ----- NetworkService -----
         .route("/v1/network/request", post(handlers::network::request))
         .route("/v1/network/allowlist", get(handlers::network::allowlist))

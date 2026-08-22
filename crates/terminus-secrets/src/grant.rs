@@ -158,6 +158,33 @@ impl GrantIssuer {
         ttl_secs: u64,
         use_limit: u32,
     ) -> Result<ConnectorGrant, SecretError> {
+        let digest = credential_digest(credential_material);
+        self.mint_for_digest(workload, secret_uri, &digest, binding, ttl_secs, use_limit)
+    }
+
+    /// Mint from a pre-computed SHA-256 hex digest of the credential
+    /// material. For callers that hold only the digest (e.g. the kernel
+    /// service boundary, where raw material stays inside the secrets
+    /// crate). The digest must be 64 lowercase hex chars.
+    pub fn mint_for_digest(
+        &self,
+        workload: WorkloadIdentity,
+        secret_uri: &str,
+        credential_hex_digest: &str,
+        binding: GrantBinding,
+        ttl_secs: u64,
+        use_limit: u32,
+    ) -> Result<ConnectorGrant, SecretError> {
+        const HEX_DIGITS: &[u8] = b"0123456789abcdef";
+        if credential_hex_digest.len() != 64
+            || !credential_hex_digest
+                .bytes()
+                .all(|b| HEX_DIGITS.contains(&b))
+        {
+            return Err(SecretError::InvalidGrant(
+                "credential digest must be 64 lowercase hex chars".into(),
+            ));
+        }
         if ttl_secs == 0 || ttl_secs > MAX_GRANT_TTL_SECS {
             return Err(SecretError::InvalidGrant(format!(
                 "grant TTL must be in 1..={MAX_GRANT_TTL_SECS} seconds"
@@ -167,7 +194,7 @@ impl GrantIssuer {
         let claims = GrantClaims {
             grant_id: format!("grt-{}", mint_grant_id()),
             secret_uri: secret_uri.to_string(),
-            credential_digest: credential_digest(credential_material),
+            credential_digest: credential_hex_digest.to_string(),
             workload,
             binding,
             issued_at_unix: now,

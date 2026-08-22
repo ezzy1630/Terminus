@@ -24,8 +24,8 @@ pub use ledger::{
     KernelAuthorizationInstance, KernelEffectLedger, KernelEffectRecord, KernelEffectState,
 };
 pub use services::{
-    validate_capability_for_op, validate_request_pipeline, ArtifactIngestService,
-    CodeIntelligenceService, ExtensionRuntimeService, FileService, JobService, KernelHandle,
+    validate_capability_for_op, validate_request_pipeline, ArtifactIngestService, CodeIntelligenceService,
+    ConnectorService, ExtensionRuntimeService, FileService, JobService, KernelHandle,
     KernelInfoService, NetworkService, PatchService, PolicyService, ProcessService, SandboxService,
     SecretService, WorkspaceEntry, WorkspaceService,
 };

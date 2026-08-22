@@ -38,6 +38,7 @@ use std::sync::Arc;
 use terminus_artifacts::ArtifactStore;
 use terminus_authz::{OperationClass, Scope, TokenIssuer, TokenRevoker};
 use terminus_code_intel::CodeIntelService;
+use terminus_connector::ConnectorBroker;
 use terminus_egress::EgressProxy;
 use terminus_extension_runtime::WasiExtensionHost;
 use terminus_fs::PathResolver;
@@ -51,7 +52,7 @@ use terminus_patch::PatchEngine;
 use terminus_policy::{Constraint, Decision, NormalizedCommand, PolicyEngine, TaintSource};
 use terminus_process::{ProcessManager, SpawnLease};
 use terminus_sandbox::{EnforcementStatus, SandboxManager, SandboxProfile};
-use terminus_secrets::SecretBroker;
+use terminus_secrets::{GrantIssuer, GrantStore, SecretBroker, WorkloadIdentity};
 
 /// The top-level kernel handle. Cloning is cheap — everything behind `Arc`.
 #[derive(Clone)]
@@ -65,6 +66,9 @@ pub struct KernelHandle {
     pub sandboxes: SandboxService,
     pub policies: PolicyService,
     pub secrets: SecretService,
+    /// L7 connector broker service (ADR-0035). Credentialed external
+    /// operations execute here; raw credentials never cross the API.
+    pub connectors: ConnectorService,
     pub network: NetworkService,
     pub code_intel: CodeIntelligenceService,
     pub extensions: ExtensionRuntimeService,
@@ -207,7 +211,37 @@ impl KernelHandle {
             ),
             sandboxes: SandboxService::new(sandbox_manager),
             policies: PolicyService::new(policy_engine),
-            secrets: SecretService::new(secret_broker, Arc::clone(&token_issuer)),
+            secrets: SecretService::new(Arc::clone(&secret_broker), Arc::clone(&token_issuer)),
+            connectors: {
+                // ADR-0035: grants are signed with an independent ephemeral
+                // key (never the capability-token key) so compromise of one
+                // signer does not forge the other's authority.
+                let mut grant_key = [0u8; 32];
+                getrandom::fill(&mut grant_key).map_err(|e| {
+                    KernelAssemblyError::Misconfigured(format!(
+                        "secure RNG unavailable for connector grant-signing key: {e}"
+                    ))
+                })?;
+                let grants = Arc::new(GrantStore::with_storage(
+                    data_dir.join("state").join("connector-grants.json"),
+                ));
+                let issuer = Arc::new(GrantIssuer::new(grant_key.to_vec()));
+                let broker = ConnectorBroker::builder(
+                    Arc::clone(&secret_broker),
+                    Arc::clone(&grants),
+                    Arc::clone(&egress),
+                    grant_key.to_vec(),
+                )
+                .build();
+                ConnectorService::new(
+                    Arc::new(broker),
+                    Arc::clone(&issuer),
+                    grants,
+                    Arc::clone(&secret_broker),
+                    Arc::clone(&token_issuer),
+                    grant_key.to_vec(),
+                )
+            },
             network: NetworkService::new(egress, Arc::clone(&token_issuer)),
             code_intel: CodeIntelligenceService::new(code_intel, Arc::clone(&token_issuer)),
             extensions: ExtensionRuntimeService::new(extension_host, Arc::clone(&token_issuer)),
@@ -1771,6 +1805,181 @@ impl SecretService {
                     false,
                 )
             })
+    }
+}
+
+// ---------- ConnectorService ----------
+
+/// L7 connector broker service (ADR-0035 §2). Credentialed external
+/// operations run inside the kernel's trusted boundary: callers present an
+/// opaque `ConnectorGrant` plus the canonical operation; the credential is
+/// resolved, injected, dispatched, and scrubbed here. Raw material never
+/// crosses this service's API.
+#[derive(Clone)]
+pub struct ConnectorService {
+    broker: Arc<ConnectorBroker>,
+    issuer: Arc<GrantIssuer>,
+    grants: Arc<GrantStore>,
+    secret_broker: Arc<SecretBroker>,
+    token_issuer: Arc<TokenIssuer>,
+    signing_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for ConnectorService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectorService")
+            .field("broker", &self.broker)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ConnectorService {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        broker: Arc<ConnectorBroker>,
+        issuer: Arc<GrantIssuer>,
+        grants: Arc<GrantStore>,
+        secret_broker: Arc<SecretBroker>,
+        token_issuer: Arc<TokenIssuer>,
+        signing_key: Vec<u8>,
+    ) -> Self {
+        Self {
+            broker,
+            issuer,
+            grants,
+            secret_broker,
+            token_issuer,
+            signing_key,
+        }
+    }
+
+    /// Decode + verify an encoded grant against the service's signing key.
+    /// The key itself never leaves the service.
+    pub fn decode_grant(
+        &self,
+        encoded: &str,
+    ) -> Result<terminus_secrets::ConnectorGrant, terminus_secrets::SecretError> {
+        terminus_secrets::ConnectorGrant::decode_and_verify(encoded, &self.signing_key)
+    }
+
+    /// Direct accessor for the underlying L7 broker (mini-service wiring).
+    pub fn broker(&self) -> &Arc<ConnectorBroker> {
+        &self.broker
+    }
+
+    /// Mint a short-lived connector grant bound to the workload identity of
+    /// `requested_by`. The grant carries a digest of the current credential
+    /// — never the credential itself (SPEC §17.3).
+    pub fn mint_grant(
+        &self,
+        ctx: &RequestContext,
+        uri: &str,
+        binding: terminus_secrets::GrantBinding,
+        ttl_secs: u64,
+        use_limit: u32,
+    ) -> KernelResult<terminus_secrets::ConnectorGrant> {
+        // Secret-class capability is required to mint: a grant is one step
+        // from raw use.
+        let requested_scope = Scope {
+            workspace_paths: Vec::new(),
+            network_destinations: vec![format!(
+                "{}:{}",
+                binding.destination_host, binding.destination_port
+            )],
+            secret_capabilities: vec![uri.to_string()],
+        };
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Secret,
+            &requested_scope,
+        )?;
+        let handle = self
+            .secret_broker
+            .request(uri, &binding.task_id)
+            .map_err(|e| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                    terminus_kernel_protocol::ErrorCategory::Permission,
+                    format!("{e}"),
+                    false,
+                )
+            })?;
+        let digest = handle.digest();
+        drop(handle);
+        let workload = WorkloadIdentity {
+            workload_id: ctx.actor_id.clone(),
+            principal: ctx.actor_id.clone(),
+            task_id: ctx.task_id.clone(),
+        };
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "grant.minted",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            actor_id = %ctx.actor_id,
+            secret_uri = %uri,
+            effect_id = %binding.effect_id,
+            "connector grant minted"
+        );
+        self.issuer
+            .mint_for_digest(workload, uri, &digest, binding, ttl_secs, use_limit)
+            .map_err(|e| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::InvalidRequest,
+                    terminus_kernel_protocol::ErrorCategory::Validation,
+                    format!("{e}"),
+                    false,
+                )
+            })
+    }
+
+    /// Execute one grant-bound operation through the trusted connector
+    /// path. Requires the `Network` operation class scoped to the exact
+    /// destination. Returns the typed receipt only.
+    pub async fn execute(
+        &self,
+        ctx: &RequestContext,
+        op: &terminus_connector::CanonicalOperation,
+        grant: &terminus_secrets::ConnectorGrant,
+    ) -> KernelResult<terminus_connector::ConnectorReceipt> {
+        let dest = format!("{}:{}", op.host, op.port);
+        let requested_scope = Scope {
+            workspace_paths: Vec::new(),
+            network_destinations: vec![dest],
+            secret_capabilities: Vec::new(),
+        };
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Network,
+            &requested_scope,
+        )?;
+        let receipt = self.broker.execute(op, grant).await.map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                format!("{e}"),
+                false,
+            )
+        })?;
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "connector.executed",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            actor_id = %ctx.actor_id,
+            grant_id = %receipt.grant_id,
+            outcome = ?receipt.outcome,
+            status_code = ?receipt.status_code,
+            response_redactions = receipt.response_redactions,
+            "connector operation executed"
+        );
+        Ok(receipt)
+    }
+
+    pub fn consumed_grants(&self) -> usize {
+        self.grants.consumed_count()
     }
 }
 

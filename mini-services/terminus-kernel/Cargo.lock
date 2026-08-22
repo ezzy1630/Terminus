@@ -1518,6 +1518,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminus-connector"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "terminus-egress",
+ "terminus-secrets",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "terminus-egress"
 version = "0.1.0"
 dependencies = [
@@ -1589,6 +1604,7 @@ dependencies = [
  "terminus-artifacts",
  "terminus-authz",
  "terminus-code-intel",
+ "terminus-connector",
  "terminus-egress",
  "terminus-extension-runtime",
  "terminus-fs",
@@ -1629,6 +1645,7 @@ dependencies = [
  "terminus-artifacts",
  "terminus-authz",
  "terminus-code-intel",
+ "terminus-connector",
  "terminus-egress",
  "terminus-extension-runtime",
  "terminus-fs",
