@@ -16,12 +16,19 @@ plugins:
   - remote: buf.build/community/neoeinstein-prost:v0.5.0
     revision: 1
     out: crates/terminus-kernel-protocol/src/generated
-  - remote: buf.build/bufbuild/es
+  # Remote plugins are version-pinned (roadmap Phase 0): floating remote
+  # plugins made `just codegen-check` drift without any repo change.
+  # Bump pins in a dedicated toolchain PR together with regenerated files.
+  - remote: buf.build/bufbuild/es:v2.14.0
+    revision: 1
     out: packages/terminus-kernel-client/src/generated
     opt:
       - target=js+dts
       - import_extension=.js
-  - remote: buf.build/community/stephenh-ts-proto
+  # Remote plugin is version-pinned (roadmap Phase 0): floating remote
+  # plugins made `just codegen-check` drift without any repo change.
+  # Bump this pin in a dedicated toolchain PR together with regenerated files.
+  - remote: buf.build/community/stephenh-ts-proto:v2.12.0
     out: packages/terminus-kernel-client/src/generated-ts-proto
     opt:
       - esModuleInterop=true
