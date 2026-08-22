@@ -27,7 +27,9 @@ function main(): void {
     console.error(`[codegen-sqlx] migrations directory missing: ${MIGRATIONS_DIR}`);
     process.exit(1);
   }
-  const sql = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql"));
+  const sql = readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
   if (sql.length === 0) {
     console.error("[codegen-sqlx] no *.sql files in migrations/sqlite/ — refusing to emit");
     process.exit(1);
