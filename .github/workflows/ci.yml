@@ -136,7 +136,7 @@ jobs:
           docker run --rm \
             -v "$PWD":/src -w /src \
             rust:bookworm \
-            bash -lc 'cargo build --workspace --all-targets --locked'
+            bash -lc 'apt-get update -qq && apt-get install -y -qq protobuf-compiler && cargo build --workspace --all-targets --locked'
 
 
   # ---------- Tests (Linux x86_64 = full) ----------
@@ -231,7 +231,7 @@ jobs:
       - name: Python audit (pip-audit)
         run: cd python && uv run --extra dev pip-audit --skip-editable
       - name: Path traversal / secret redaction tests
-        run: cargo test --workspace --test security
+        run: cargo test --workspace --test capability_token_e2e --test non_bypassability --test policy_wiring --test path_properties --test redaction_properties
 
   # ---------- Linux enforcement host gate ----------
   # Both enforcement jobs require delegated host controls (writable cgroup
