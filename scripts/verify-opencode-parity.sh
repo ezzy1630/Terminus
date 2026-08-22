@@ -12,12 +12,8 @@ overlay_dir="$ROOT/upstream/overlays/$commit"
 [[ -f "$source_dir/package.json" ]] || { echo "[opencode-parity] imported source has no package manifest" >&2; exit 1; }
 
 echo "[opencode-parity] checking immutable source $commit"
-overlay_target="$source_dir/packages/opencode/src/bus/global.ts"
-overlay_backup="$(mktemp)"
-cp "$overlay_target" "$overlay_backup"
 cleanup() {
-  cp "$overlay_backup" "$overlay_target"
-  rm -f "$overlay_backup"
+  git -C "$ROOT" checkout -- "vendor/opencode/$commit" 2>/dev/null || true
 }
 trap cleanup EXIT
 if [[ -d "$overlay_dir" ]]; then

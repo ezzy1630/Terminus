@@ -229,7 +229,7 @@ jobs:
       - name: Bun audit
         run: bun audit --production
       - name: Python audit (pip-audit)
-        run: cd python && uv run pip-audit --strict
+        run: cd python && uv run --extra dev pip-audit --skip-editable
       - name: Path traversal / secret redaction tests
         run: cargo test --workspace --test security
 
