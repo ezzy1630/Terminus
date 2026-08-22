@@ -17,6 +17,9 @@ const CAPABILITY_PROFILE = {
   cancellation: "best_effort",
   modelSelection: "constrained",
   nativeCompaction: false,
+  // Roadmap Phase 0: contract stub. This runner speaks the protocol but
+  // does not launch the real inner harness; it has never been probed.
+  maturity: "stub",
   observedByProbe: null,
   lastVerified: null,
 } as const;

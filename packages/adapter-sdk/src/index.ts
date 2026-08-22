@@ -42,11 +42,28 @@ export interface AdapterRegistry {
   disable(adapterId: string, reason: string): Promise<void>;
 }
 
+/**
+ * Roadmap Phase 0 (truth-first): a stub must never be discoverable as
+ * production-capable. Registration with `maturity: "production"` requires
+ * live probe evidence (`lastVerified`); anything less is rejected.
+ */
+export function assertRegistrableMaturity(adapter: ExternalAdapter): void {
+  const { maturity, lastVerified } = adapter.capabilityProfile;
+  if (maturity === "production" && lastVerified === null) {
+    throw new ValidationError(
+      `adapter "${adapter.adapterId}" declares maturity "production" but has never been ` +
+        `verified by a live capability probe (lastVerified is null). Run the conformance ` +
+        `probe and record evidence before production registration (SPEC §35.12, roadmap Phase 0).`,
+    );
+  }
+}
+
 export class InMemoryAdapterRegistry implements AdapterRegistry {
   private readonly adapters = new Map<string, ExternalAdapter>();
   private readonly disabled = new Map<string, string>();
 
   async register(adapter: ExternalAdapter): Promise<void> {
+    assertRegistrableMaturity(adapter);
     this.adapters.set(adapter.adapterId, adapter);
   }
 
@@ -163,7 +180,18 @@ export function runCapabilityProbe(
   probedAt: Rfc3339Timestamp,
 ): CapabilityProbeReport {
   const observed: AdapterCapabilityProfile = {
-    ...observedChecklist,
+    exactContextVisibility: observedChecklist.exactContextVisibility,
+    toolInterception: observedChecklist.toolInterception,
+    filesystemEnforcement: observedChecklist.filesystemEnforcement,
+    networkEnforcement: observedChecklist.networkEnforcement,
+    secretIsolation: observedChecklist.secretIsolation,
+    sessionResume: observedChecklist.sessionResume,
+    typedResults: observedChecklist.typedResults,
+    artifactExport: observedChecklist.artifactExport,
+    cancellation: observedChecklist.cancellation,
+    modelSelection: observedChecklist.modelSelection,
+    nativeCompaction: observedChecklist.nativeCompaction,
+    maturity: declared.maturity,
     observedByProbe: probedAt,
     lastVerified: declared.lastVerified,
   };

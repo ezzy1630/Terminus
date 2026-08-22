@@ -3,6 +3,12 @@
  */
 import type { Uuid7, Rfc3339Timestamp, ContentHash, ArtifactRef } from "@terminus/domain";
 
+/**
+ * Component maturity (roadmap Phase 0). A stub must never be discoverable
+ * as production-capable; the adapter registry enforces this.
+ */
+export type AdapterMaturity = "fixture" | "stub" | "experimental" | "preview" | "production";
+
 export interface AdapterCapabilityProfile {
   readonly exactContextVisibility: "full" | "partial" | "opaque";
   readonly toolInterception: "full" | "partial" | "none";
@@ -15,7 +21,14 @@ export interface AdapterCapabilityProfile {
   readonly cancellation: "reliable" | "best_effort" | "none";
   readonly modelSelection: "controlled" | "constrained" | "opaque";
   readonly nativeCompaction: boolean;
+  /** How far this adapter implementation has actually gotten. */
+  readonly maturity: AdapterMaturity;
   readonly observedByProbe: Rfc3339Timestamp | null;
+  /**
+   * Timestamp of the last live conformance probe against the real inner
+   * harness. `null` means the adapter has never been verified — it MUST NOT
+   * be registered with `maturity: "production"` (SPEC §35.12, roadmap Phase 0).
+   */
   readonly lastVerified: Rfc3339Timestamp | null;
 }
 

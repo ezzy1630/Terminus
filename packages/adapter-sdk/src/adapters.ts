@@ -1,15 +1,30 @@
 /**
  * Concrete external harness adapters — Codex, Pi, Claude Code (third).
+ *
+ * Phase 0 honesty (roadmap.md): every shipped runner except the fixture
+ * agent is a contract stub — it speaks the protocol but does not launch a
+ * real inner harness and has never been probed live. They are declared
+ * `maturity: "stub"` with `lastVerified: null`; the registry rejects any
+ * production claim that lacks probe evidence.
  */
 import type { Rfc3339Timestamp } from "@terminus/domain";
 import { StdioJsonRpcAdapter, type AdapterProcessPort } from "./stdio_adapter.js";
-import type { AdapterCapabilityProfile, ExternalAdapter } from "./types.js";
+import type { AdapterCapabilityProfile, AdapterMaturity, ExternalAdapter } from "./types.js";
 
 function profile(
-  partial: Omit<AdapterCapabilityProfile, "observedByProbe" | "lastVerified">,
+  partial: Omit<
+    AdapterCapabilityProfile,
+    "observedByProbe" | "lastVerified" | "maturity"
+  >,
+  maturity: AdapterMaturity,
   probedAt: Rfc3339Timestamp | null = null,
 ): AdapterCapabilityProfile {
-  return { ...partial, observedByProbe: probedAt, lastVerified: probedAt };
+  return {
+    ...partial,
+    maturity,
+    observedByProbe: probedAt,
+    lastVerified: probedAt,
+  };
 }
 
 export const CODEX_DECLARED_PROFILE = profile({
@@ -24,7 +39,7 @@ export const CODEX_DECLARED_PROFILE = profile({
   cancellation: "reliable",
   modelSelection: "constrained",
   nativeCompaction: true,
-});
+}, "stub");
 
 export const PI_DECLARED_PROFILE = profile({
   exactContextVisibility: "partial",
@@ -38,7 +53,7 @@ export const PI_DECLARED_PROFILE = profile({
   cancellation: "best_effort",
   modelSelection: "constrained",
   nativeCompaction: false,
-});
+}, "stub");
 
 export const CLAUDE_CODE_DECLARED_PROFILE = profile({
   exactContextVisibility: "partial",
@@ -52,7 +67,7 @@ export const CLAUDE_CODE_DECLARED_PROFILE = profile({
   cancellation: "reliable",
   modelSelection: "constrained",
   nativeCompaction: true,
-});
+}, "stub");
 
 export const FIXTURE_DECLARED_PROFILE = profile({
   exactContextVisibility: "full",
@@ -66,7 +81,7 @@ export const FIXTURE_DECLARED_PROFILE = profile({
   cancellation: "reliable",
   modelSelection: "controlled",
   nativeCompaction: false,
-});
+}, "fixture");
 
 export function createCodexAdapter(
   port: AdapterProcessPort,

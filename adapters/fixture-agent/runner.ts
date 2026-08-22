@@ -58,6 +58,7 @@ const CAPABILITY_PROFILE = {
   cancellation: "reliable",
   modelSelection: "controlled",
   nativeCompaction: false,
+  maturity: "fixture",
   observedByProbe: null,
   lastVerified: null,
 } as const;

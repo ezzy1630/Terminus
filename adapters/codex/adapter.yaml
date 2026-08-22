@@ -1,6 +1,7 @@
 adapter:
   id: codex
   version: 0.1.0
+  status: stub
   inner_harness_version: pinned
   description: |
     OpenAI Codex adapter. Codex is a strong implementer with native
@@ -20,29 +21,14 @@ adapter:
     cancellation: reliable
     model_selection: constrained
     native_compaction: true
-  observed_by_probe:
-    # Probed 2025-01-15 against Codex v0.1.0. Discrepancies vs declared
-    # capabilities are listed in `discrepancies` and surfaced in the UI.
-    probe_version: terminus-probe-1.0
-    probed_at: "2025-01-15T00:00:00Z"
-    probed_capabilities:
-      exact_context_visibility: partial
-      tool_interception: partial
-      filesystem_enforcement: none  # discrepancy: outer_sandbox declared, none observed
-      network_enforcement: none     # discrepancy
-      secret_isolation: none        # discrepancy
-      session_resume: native
-      typed_results: native
-      artifact_export: partial
-      cancellation: reliable
-      model_selection: opaque       # discrepancy: constrained declared, opaque observed
-      native_compaction: true
-  discrepancies:
-    - "filesystem_enforcement: declared outer_sandbox, observed none — Terminus MUST supply outer sandbox"
-    - "network_enforcement: declared outer_sandbox, observed none — Terminus MUST supply outer sandbox"
-    - "secret_isolation: declared outer_broker, observed none — Terminus MUST broker secrets"
-    - "model_selection: declared constrained, observed opaque — Terminus MUST control model selection"
-  last_verified: "2025-01-15T00:00:00Z"
+  # Roadmap Phase 0 truth fix: no live capability probe has ever been run
+  # against this adapter. The previously recorded "probe" block and its
+  # discrepancy list were unreproducible placeholders and have been removed.
+  # Capabilities above are declared design intent only; observed_by_probe is
+  # filled exclusively by a real terminus-probe conformance run.
+  observed_by_probe: null
+  discrepancies: []
+  last_verified: null
   result_schema: terminus.worker.v1
   notes: |
     The adapter is enabled only when Terminus can supply the missing

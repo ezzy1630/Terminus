@@ -1,6 +1,7 @@
 adapter:
   id: fixture-agent
   version: 0.1.0
+  status: fixture
   inner_harness_version: pinned
   description: |
     Terminus fixture agent. A deterministic, no-model adapter used by the
@@ -25,23 +26,14 @@ adapter:
     cancellation: reliable
     model_selection: controlled
     native_compaction: false
-  observed_by_probe:
-    probe_version: terminus-probe-1.0
-    probed_at: "2025-01-15T00:00:00Z"
-    probed_capabilities:
-      exact_context_visibility: full
-      tool_interception: full
-      filesystem_enforcement: native
-      network_enforcement: native
-      secret_isolation: native
-      session_resume: native
-      typed_results: native
-      artifact_export: complete
-      cancellation: reliable
-      model_selection: controlled
-      native_compaction: false
+  # Roadmap Phase 0 truth fix: no live capability probe has ever been run
+  # against this adapter. The previously recorded "probe" block and its
+  # discrepancy list were unreproducible placeholders and have been removed.
+  # Capabilities above are declared design intent only; observed_by_probe is
+  # filled exclusively by a real terminus-probe conformance run.
+  observed_by_probe: null
   discrepancies: []
-  last_verified: "2025-01-15T00:00:00Z"
+  last_verified: null
   result_schema: terminus.worker.v1
   notes: |
     The fixture agent is enabled only in the eval lab. It is the

@@ -6,8 +6,10 @@ import {
   independentlyVerifyHarnessResult,
   runCapabilityProbe,
   createPiAdapter,
+  InMemoryAdapterRegistry,
   type AdapterCapabilityProfile,
   type AdapterProcessPort,
+  type ExternalAdapter,
 } from "./index.js";
 
 import type { ArtifactRef, Rfc3339Timestamp } from "@terminus/domain";
@@ -25,6 +27,7 @@ describe("Adapter SDK Unit Tests", () => {
     cancellation: "reliable",
     modelSelection: "controlled",
     nativeCompaction: true,
+    maturity: "fixture",
     observedByProbe: "2026-07-22T14:50:00Z" as Rfc3339Timestamp,
     lastVerified: "2026-07-22T14:50:00Z" as Rfc3339Timestamp,
   };
@@ -142,5 +145,59 @@ describe("Adapter SDK Unit Tests", () => {
       workspaceInspectArtifact: artifact,
     });
     expect(res.verifiedStatus).toBe("completed");
+  });
+});
+
+describe("Adapter maturity gate (roadmap Phase 0)", () => {
+  const stubAdapter = (maturity: AdapterCapabilityProfile["maturity"], lastVerified: Rfc3339Timestamp | null): ExternalAdapter => ({
+    adapterId: "test-adapter",
+    version: "0.1.0",
+    capabilityProfile: {
+      exactContextVisibility: "partial",
+      toolInterception: "partial",
+      filesystemEnforcement: "outer_sandbox",
+      networkEnforcement: "outer_sandbox",
+      secretIsolation: "outer_broker",
+      sessionResume: "emulated",
+      typedResults: "parsed",
+      artifactExport: "partial",
+      cancellation: "best_effort",
+      modelSelection: "opaque",
+      nativeCompaction: false,
+      maturity,
+      observedByProbe: lastVerified,
+      lastVerified,
+    },
+    enabled: true,
+    launch: () => Promise.resolve(),
+    // biome-ignore lint/correctness/useYield: test double
+    streamEvents: async function* () {},
+    cancel: () => Promise.resolve(),
+    collectResult: () =>
+      Promise.reject(new Error("not implemented in test double")),
+  });
+
+  test("registry rejects production without probe evidence", async () => {
+    const registry = new InMemoryAdapterRegistry();
+    await expect(
+      registry.register(stubAdapter("production", null)),
+    ).rejects.toThrow("lastVerified is null");
+  });
+
+  test("registry accepts production with probe evidence", async () => {
+    const registry = new InMemoryAdapterRegistry();
+    await registry.register(
+      stubAdapter("production", "2026-08-01T00:00:00Z" as Rfc3339Timestamp),
+    );
+    expect(await registry.get("test-adapter")).not.toBeNull();
+  });
+
+  test("stubs and fixtures register but never as production-capable", async () => {
+    const registry = new InMemoryAdapterRegistry();
+    await registry.register(stubAdapter("stub", null));
+    const adapter = await registry.get("test-adapter");
+    expect(adapter).not.toBeNull();
+    expect(adapter?.capabilityProfile.maturity).toBe("stub");
+    expect(adapter?.capabilityProfile.lastVerified).toBeNull();
   });
 });
