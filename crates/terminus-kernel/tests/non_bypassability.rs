@@ -516,6 +516,85 @@ async fn nb_revoked_token_is_rejected() {
     assert_eq!(err.code(), ErrorCode::CapabilityTokenRevoked);
 }
 
+// ---------- §13.4 secure profile fails closed on a degraded backend ----------
+
+// Phase 0 (roadmap.md): secure-mode rejection of degraded profiles must be
+// pinned by a test. On macOS/Windows the assembled kernel's default backend
+// is `local-restrictive`, which honestly reports Degraded; the secure
+// profile MUST be rejected with SANDBOX_DEGRADED, while the explicitly
+// named `degraded-local` profile may proceed.
+#[cfg(not(target_os = "linux"))]
+#[tokio::test]
+async fn nb_secure_profile_rejects_degraded_backend() {
+    let (_dir, kernel) = make_kernel();
+    let token = mint_admin_token(&kernel);
+    let ctx = ctx_with_token(&token);
+    let mut public_env = std::collections::BTreeMap::new();
+    if let Ok(path) = std::env::var("PATH") {
+        public_env.insert("PATH".to_string(), path);
+    }
+    let command = CommandSpec {
+        program: "pnpm".to_string(),
+        args: vec!["test".to_string()],
+        cwd: WorkspacePath::new("ws-1", "."),
+        public_env,
+        timeout_ms: 1_000,
+        ..Default::default()
+    };
+    let err = kernel
+        .processes
+        .start_in_profile(&ctx, &empty_intent(), command, "secure-local-default")
+        .await
+        .expect_err("secure profile MUST fail closed on a degraded backend");
+    // Fail-closed has two layers and either may fire first: a backend that
+    // cannot produce a network-isolating wrapper at all rejects with
+    // SANDBOX_UNAVAILABLE; one that wraps but reports degraded enforcement
+    // rejects with SANDBOX_DEGRADED. Both are SPEC §13.4 rejections.
+    assert!(matches!(
+        err.code(),
+        ErrorCode::SandboxDegraded | ErrorCode::SandboxUnavailable
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn nb_secure_profile_proceeds_only_when_enforced() {
+    // On Linux the kernel prefers the Bubblewrap backend. When it reports
+    // Enforced the secure profile proceeds; otherwise it must fail closed.
+    let (_dir, kernel) = make_kernel();
+    let token = mint_admin_token(&kernel);
+    let ctx = ctx_with_token(&token);
+    let mut public_env = std::collections::BTreeMap::new();
+    if let Ok(path) = std::env::var("PATH") {
+        public_env.insert("PATH".to_string(), path);
+    }
+    let command = CommandSpec {
+        program: "pnpm".to_string(),
+        args: vec!["test".to_string()],
+        cwd: WorkspacePath::new("ws-1", "."),
+        public_env,
+        timeout_ms: 1_000,
+        ..Default::default()
+    };
+    let status = kernel.sandboxes.enforcement_report().status;
+    let result = kernel
+        .processes
+        .start_in_profile(&ctx, &empty_intent(), command, "secure-local-default")
+        .await;
+    if matches!(status, terminus_sandbox::EnforcementStatus::Enforced) {
+        assert!(
+            result.is_ok(),
+            "enforced backend MUST accept the secure profile"
+        );
+    } else {
+        let err = result.expect_err("non-enforced backend MUST fail closed");
+        assert!(matches!(
+            err.code(),
+            ErrorCode::SandboxDegraded | ErrorCode::SandboxUnavailable
+        ));
+    }
+}
+
 // ---------- §27.4 attempt 13: process cancellation kills process tree ----------
 
 #[tokio::test]

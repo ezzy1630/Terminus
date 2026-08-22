@@ -91,26 +91,34 @@ impl SandboxBackend for ContainerSandboxBackend {
     }
 
     fn enforcement_report(&self) -> EnforcementReport {
+        // Honesty contract (crates/terminus-sandbox-container/AGENTS.md,
+        // SPEC §13.4): report ONLY what the generated docker argv proves.
+        // The wrapper emits `run --rm --init [--network=none] <image> -- cmd`.
+        // It does NOT configure a read-only rootfs, mount policy, non-root
+        // user, cap drop, seccomp, no-new-privs, resource limits, device
+        // denial, or egress wiring, so none of those controls may be
+        // reported as `Enforced` merely because a runtime is configured.
+        // Hardened OCI profiles remain Phase 4 work (roadmap.md).
         if self.runtime_configured && self.image.is_some() {
             return EnforcementReport {
                 backend_id: self.id().to_string(),
-                status: EnforcementStatus::Enforced,
-                enforced: vec![
-                    EnforcementFeature::FilesystemIsolation,
+                status: EnforcementStatus::Degraded,
+                enforced: vec![],
+                degraded: vec![
                     EnforcementFeature::NetworkIsolation,
+                    EnforcementFeature::FilesystemIsolation,
                     EnforcementFeature::ProcessIsolation,
                     EnforcementFeature::CgroupResourceLimits,
                     EnforcementFeature::MountNamespace,
                     EnforcementFeature::PidNamespace,
                 ],
-                degraded: vec![],
                 unsupported: vec![
                     EnforcementFeature::SeccompFilter,
                     EnforcementFeature::NoNewPrivs,
                     EnforcementFeature::UserNamespace,
                 ],
                 notes: vec![
-                    "OCI runtime configured".to_string(),
+                    "OCI runtime configured; image digest-pinned".to_string(),
                     format!(
                         "image {}",
                         self.image
@@ -118,6 +126,18 @@ impl SandboxBackend for ContainerSandboxBackend {
                             .map(PinnedImage::reference)
                             .unwrap_or_default()
                     ),
+                    "argv = run --rm --init [--network=none] <digest-ref> -- cmd".to_string(),
+                    "network isolation applies only when the profile denies network \
+                     (--network=none); it cannot be verified from static configuration"
+                        .to_string(),
+                    "degraded: no read-only rootfs or workspace mount policy is configured"
+                        .to_string(),
+                    "degraded: no --cap-drop ALL, --security-opt no-new-privileges, seccomp \
+                     profile, user namespace, resource limits, or device policy is configured"
+                        .to_string(),
+                    "secure profiles MUST fail closed on this Degraded report until hardened \
+                     OCI profiles land (SPEC §13.4)"
+                        .to_string(),
                 ],
             };
         }
@@ -205,6 +225,30 @@ mod tests {
             .unwrap();
         let lease = backend.lease_for_workspace("ws-1").unwrap();
         backend.release_lease(&lease).unwrap();
+    }
+
+    // Honesty contract (SPEC §13.4): a configured runtime does not prove
+    // profile-specific enforcement. The report MUST be Degraded with an
+    // empty enforced list until hardened OCI profiles actually configure
+    // and verify those controls.
+    #[test]
+    fn configured_container_reports_degraded_with_no_enforced_features() {
+        let backend = ContainerSandboxBackend::configure(
+            "docker",
+            "alpine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            1,
+        )
+        .unwrap();
+        let report = backend.enforcement_report();
+        assert_eq!(report.status, EnforcementStatus::Degraded);
+        assert!(
+            report.enforced.is_empty(),
+            "no feature may be reported enforced without argv-level proof"
+        );
+        assert!(report.notes.iter().any(|n| n.contains("read-only rootfs")));
+        assert!(report
+            .unsupported
+            .contains(&EnforcementFeature::SeccompFilter));
     }
 
     #[test]
