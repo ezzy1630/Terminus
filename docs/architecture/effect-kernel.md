@@ -14,10 +14,72 @@ This document is the deep dive for the Rust effect kernel (SPEC §13, §31, §36
 | SandboxService | Construct/teardown sandboxes; report capabilities | `terminus-sandbox` |
 | PolicyService | Evaluate effect policy; return decision | `terminus-policy` |
 | SecretService | Issue/revoke capabilities; inject at exec; redact output | `terminus-secrets` |
+| ConnectorService | L7 connector broker: grant-bound credentialed external operations | `terminus-connector` |
 | NetworkService | Egress proxy; destination allowlist; DNS brokering | `terminus-egress` |
 | GitService | Protected worktree/commit/merge operations | `terminus-git` |
 | CodeIntelService | Tree-sitter symbols, structural search, LSP/DAP facade | `terminus-code-intel` |
 | ExtensionService | WASI/process extension host; capability enforcement | `terminus-extension-runtime` |
+
+## Phase 4: secrets, connectors and sandbox TCB (ADR-0035)
+
+Roadmap Phase 4 closes the two remaining trust gaps: raw credential
+exposure and unproven enforcement claims.
+
+**Opaque connector grants.** `SecretHandle::value()` is crate-private and
+`as_env_pair()` no longer exists; the only sanctioned raw-material consumer
+is the L7 connector path inside this boundary. Callers receive
+[`ConnectorGrant`](../../crates/terminus-secrets/src/grant.rs) — an HMAC-signed,
+short-lived token bound to connector id, destination host/port/scheme,
+method + path class, task id, effect id, expiry and use limit. Grants carry
+a SHA-256 digest of the credential, never the credential. Consumption is
+atomic and durable (`GrantStore`, temp-file + rename), so replay across
+retries or process restarts fails closed.
+
+**L7 connector broker.** `ConnectorService` → `ConnectorBroker::execute`
+validates every binding field before any side effect, resolves the
+credential through the secret broker inside the trusted zone, authorizes the
+connection through the L4 egress proxy (`terminus-egress` remains the lower
+layer), consumes the grant immediately before wire dispatch, scrubs echoed
+credential material from responses, and returns a hashed typed receipt.
+Models, tools, extensions and artifacts never see credential bytes.
+`https` destinations fail closed with `TlsUnavailable` until a validated TLS
+transport lands — credentials are never sent in plaintext.
+
+**Sandbox enforcement truth.** Backends report what they MEASURE:
+
+- `terminus-sandbox-container` generates hardened OCI argv
+  (`--read-only --cap-drop=ALL --security-opt=no-new-privileges --user …
+  --tmpfs… --memory… --cpus… --pids-limit… [--network=none]`); every
+  `Enforced` claim cites a generated flag. Without hardened options the
+  report stays Degraded and secure modes refuse it.
+- `terminus-sandbox-macos` translates `SandboxProfile` into a deny-default
+  Seatbelt program with per-rule `(subpath …)` allowances and launches all
+  payloads under `/usr/bin/env -i` so ambient environment cannot reach them.
+  Availability is proven functionally (running a trivial profile), not by
+  flag probes.
+- `terminus-sandbox-windows` intentionally has no AppContainer wiring (Win32
+  FFI requires a dedicated unsafe ADR per SPEC §44.2) and reports
+  Unsupported always; restrictive profiles route to container/microVM
+  fallbacks.
+- `terminus-sandbox-microvm` provides tier-3 selection (hypervisor detection,
+  digest-pinned rootfs, generated machine config without NICs under Deny);
+  experimental per ADR-0027, fail-closed when unconfigured.
+
+**Tier policy and secure mode.** `RiskTier` (0–4, SPEC §19.1) defines
+accumulating control floors;
+`SandboxManager::select_secure(profile, tier)` admits only backends whose
+enforcement report MEASURES those controls as Enforced, naming the gap for
+every rejection. Degraded acceptance in secure modes is impossible.
+
+**Effective-control probes.** `just platform-probes` runs canary payloads
+through each backend's real wrapper (filesystem escape, network egress,
+ambient-secret read) and writes
+`docs/generated/platform-probes.json`. Unmeasurable never counts as
+enforcement; release declarations derive from this artifact.
+
+**Canary gate.** `just security` includes `secret_canary_e2e`: a credential
+canary traverses mint → grant → trusted execution and must appear in no
+grant token, receipt, or persisted kernel file.
 | ArtifactService | Content-addressed ingest, streaming, GC | `terminus-artifacts` |
 | AuthService | Kernel instance identity; short-lived capability tokens | `terminus-authz` |
 
