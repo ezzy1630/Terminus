@@ -664,6 +664,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "terminus-kernel-protocol",
  "thiserror",
 ]

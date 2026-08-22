@@ -52,6 +52,10 @@ import type {
   DelegationResultStatus,
   OutputProfile,
   ApprovalDecision,
+  WorkflowStatus,
+  NodeRunStatus,
+  AttemptStatus,
+  LeaseStatus,
 } from "./enums.js";
 
 // ─────────────────────────── Workspace (§28.2) ───────────────────────────────
@@ -1503,5 +1507,129 @@ export const riskSchema = z.object({
   mitigation: z.string().nullable().default(null),
   status: z.enum(["IDENTIFIED", "MITIGATED", "ACCEPTED", "TRIGGERED"]),
   recordedAt: z.string(),
+});
+
+// 8. Worker Leases & Fencing Epochs (SPEC §10, §14)
+
+export interface WorkerLease {
+  readonly id: string;
+  readonly taskId: string;
+  readonly workerId: string;
+  readonly fencingToken: number;
+  readonly status: LeaseStatus;
+  readonly acquiredAt: Rfc3339Timestamp;
+  readonly expiresAt: Rfc3339Timestamp;
+  readonly releasedAt: Rfc3339Timestamp | null;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+export const workerLeaseSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  workerId: z.string().min(1),
+  fencingToken: z.number().int().positive(),
+  status: z.enum(["ACQUIRED", "RENEWED", "RELEASED", "EXPIRED", "FENCED"]),
+  acquiredAt: z.string(),
+  expiresAt: z.string(),
+  releasedAt: z.string().nullable().default(null),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+
+// 9. Task Attempt & Execution Lifecycle (SPEC §5, §6)
+
+export interface TaskAttempt {
+  readonly id: string;
+  readonly taskId: string;
+  readonly attemptNumber: number;
+  readonly workerId: string;
+  readonly fencingToken: number;
+  readonly status: AttemptStatus;
+  readonly startedAt: Rfc3339Timestamp;
+  readonly settledAt: Rfc3339Timestamp | null;
+  readonly error: string | null;
+}
+
+export const taskAttemptSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  attemptNumber: z.number().int().positive(),
+  workerId: z.string().min(1),
+  fencingToken: z.number().int().positive(),
+  status: z.enum(["STARTING", "RUNNING", "RECOVERING", "COMPLETED", "FAILED", "ABORTED"]),
+  startedAt: z.string(),
+  settledAt: z.string().nullable().default(null),
+  error: z.string().nullable().default(null),
+});
+
+// 10. Transactional Outbox & Inbox (SPEC §10, §29)
+
+export interface OutboxMessage {
+  readonly id: string;
+  readonly aggregateType: string;
+  readonly aggregateId: string;
+  readonly sequence: number;
+  readonly eventType: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly idempotencyKey: string | null;
+  readonly createdAt: Rfc3339Timestamp;
+  readonly publishedAt: Rfc3339Timestamp | null;
+  readonly delivered: boolean;
+}
+
+export const outboxMessageSchema = z.object({
+  id: z.string().min(1),
+  aggregateType: z.string().min(1),
+  aggregateId: z.string().min(1),
+  sequence: z.number().int().nonnegative(),
+  eventType: z.string().min(1),
+  payload: z.record(z.string(), z.unknown()),
+  idempotencyKey: z.string().nullable().default(null),
+  createdAt: z.string(),
+  publishedAt: z.string().nullable().default(null),
+  delivered: z.boolean().default(false),
+});
+
+export interface InboxMessage {
+  readonly id: string;
+  readonly idempotencyKey: string;
+  readonly source: string;
+  readonly messageType: string;
+  readonly payloadHash: string;
+  readonly receivedAt: Rfc3339Timestamp;
+  readonly processedAt: Rfc3339Timestamp | null;
+  readonly status: "PENDING" | "PROCESSED" | "FAILED" | "DUPLICATE";
+}
+
+export const inboxMessageSchema = z.object({
+  id: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  source: z.string().min(1),
+  messageType: z.string().min(1),
+  payloadHash: z.string().min(1),
+  receivedAt: z.string(),
+  processedAt: z.string().nullable().default(null),
+  status: z.enum(["PENDING", "PROCESSED", "FAILED", "DUPLICATE"]),
+});
+
+// 11. Budget Consumption Tracking (SPEC §37.2, §46.9)
+
+export interface BudgetConsumption {
+  readonly taskId: string;
+  readonly consumedCostMicros: bigint;
+  readonly consumedComputeSeconds: number;
+  readonly consumedInputTokens: bigint;
+  readonly consumedOutputTokens: bigint;
+  readonly consumedApprovals: number;
+  readonly lastUpdatedAt: Rfc3339Timestamp;
+}
+
+export const budgetConsumptionSchema = z.object({
+  taskId: z.string().min(1),
+  consumedCostMicros: z.bigint().nonnegative(),
+  consumedComputeSeconds: z.number().int().nonnegative(),
+  consumedInputTokens: z.bigint().nonnegative(),
+  consumedOutputTokens: z.bigint().nonnegative(),
+  consumedApprovals: z.number().int().nonnegative(),
+  lastUpdatedAt: z.string(),
 });
 

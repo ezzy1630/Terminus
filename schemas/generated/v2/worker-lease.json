@@ -1,0 +1,69 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/worker-lease.json",
+  "title": "WorkerLease",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workerId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fencingToken": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ACQUIRED",
+        "RENEWED",
+        "RELEASED",
+        "EXPIRED",
+        "FENCED"
+      ]
+    },
+    "acquiredAt": {
+      "type": "string"
+    },
+    "expiresAt": {
+      "type": "string"
+    },
+    "releasedAt": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "metadata": {
+      "default": {},
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    }
+  },
+  "required": [
+    "id",
+    "taskId",
+    "workerId",
+    "fencingToken",
+    "status",
+    "acquiredAt",
+    "expiresAt"
+  ]
+}

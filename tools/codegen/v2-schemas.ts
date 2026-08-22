@@ -34,6 +34,11 @@ import {
   questionSchema,
   decisionSchema,
   riskSchema,
+  workerLeaseSchema,
+  taskAttemptSchema,
+  outboxMessageSchema,
+  inboxMessageSchema,
+  budgetConsumptionSchema,
 } from "../../packages/domain/src/aggregates.ts";
 
 const ROOT = process.env.TERMINUS_ROOT ?? join(import.meta.dir, "..", "..");
@@ -63,6 +68,11 @@ const SCHEMAS: ReadonlyArray<readonly [string, string, z.ZodType]> = [
   ["question", "Question", questionSchema],
   ["decision", "Decision", decisionSchema],
   ["risk", "Risk", riskSchema],
+  ["worker-lease", "WorkerLease", workerLeaseSchema],
+  ["task-attempt", "TaskAttempt", taskAttemptSchema],
+  ["outbox-message", "OutboxMessage", outboxMessageSchema],
+  ["inbox-message", "InboxMessage", inboxMessageSchema],
+  ["budget-consumption", "BudgetConsumption", budgetConsumptionSchema],
 ];
 
 function main(): void {

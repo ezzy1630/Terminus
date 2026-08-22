@@ -17,8 +17,13 @@ import {
   authorizationInstanceSchema,
   questionSchema,
   decisionSchema,
+  riskSchema,
+  workerLeaseSchema,
+  taskAttemptSchema,
+  budgetConsumptionSchema,
   approvalDecisionSchema,
   taskStatusV2Schema,
+  workflowStatusSchema,
 } from "@terminus/domain";
 
 // ────────────────────────── Snapshot Schemas ─────────────────────────────────
@@ -49,6 +54,18 @@ export type QuestionSnapshot = z.infer<typeof QuestionSnapshot>;
 
 export const DecisionSnapshot = decisionSchema;
 export type DecisionSnapshot = z.infer<typeof DecisionSnapshot>;
+
+export const RiskSnapshot = riskSchema;
+export type RiskSnapshot = z.infer<typeof RiskSnapshot>;
+
+export const WorkerLeaseSnapshot = workerLeaseSchema;
+export type WorkerLeaseSnapshot = z.infer<typeof WorkerLeaseSnapshot>;
+
+export const TaskAttemptSnapshot = taskAttemptSchema;
+export type TaskAttemptSnapshot = z.infer<typeof TaskAttemptSnapshot>;
+
+export const BudgetConsumptionSnapshot = budgetConsumptionSchema;
+export type BudgetConsumptionSnapshot = z.infer<typeof BudgetConsumptionSnapshot>;
 
 // ────────────────────────── Endpoint Declarations ────────────────────────────
 
@@ -283,6 +300,90 @@ export const RecordDecisionV2 = {
   response: DecisionSnapshot,
 };
 
+// /v2/risks
+export const RecordRiskV2 = {
+  method: "POST" as const,
+  path: "/v2/risks",
+  request: z.object({
+    taskId: z.string(),
+    riskClass: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]),
+    statement: z.string().min(1),
+    mitigation: z.string().nullable().default(null),
+  }),
+  response: RiskSnapshot,
+};
+
+export const MitigateRiskV2 = {
+  method: "POST" as const,
+  path: "/v2/risks/{id}/mitigate",
+  request: z.object({
+    id: z.string(),
+    mitigation: z.string().min(1),
+  }),
+  response: RiskSnapshot,
+};
+
+// /v2/leases
+export const AcquireLeaseV2 = {
+  method: "POST" as const,
+  path: "/v2/leases/acquire",
+  request: z.object({
+    taskId: z.string(),
+    workerId: z.string(),
+    durationSeconds: z.number().int().positive().default(30),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  }),
+  response: WorkerLeaseSnapshot,
+};
+
+export const RenewLeaseV2 = {
+  method: "POST" as const,
+  path: "/v2/leases/{id}/renew",
+  request: z.object({
+    id: z.string(),
+    fencingToken: z.number().int().positive(),
+    durationSeconds: z.number().int().positive().default(30),
+  }),
+  response: WorkerLeaseSnapshot,
+};
+
+export const ReleaseLeaseV2 = {
+  method: "POST" as const,
+  path: "/v2/leases/{id}/release",
+  request: z.object({
+    id: z.string(),
+    fencingToken: z.number().int().positive(),
+  }),
+  response: WorkerLeaseSnapshot,
+};
+
+// /v2/workflows transitions
+export const TransitionWorkflowV2 = {
+  method: "POST" as const,
+  path: "/v2/workflows/{id}/transition",
+  request: z.object({
+    id: z.string(),
+    targetStatus: workflowStatusSchema,
+    reason: z.string().nullable().default(null),
+  }),
+  response: WorkflowSnapshot,
+};
+
+// /v2/tasks/{id}/budget
+export const ConsumeBudgetV2 = {
+  method: "POST" as const,
+  path: "/v2/tasks/{id}/budget/consume",
+  request: z.object({
+    id: z.string(),
+    costMicros: z.bigint().nonnegative().default(0n),
+    computeSeconds: z.number().int().nonnegative().default(0),
+    inputTokens: z.bigint().nonnegative().default(0n),
+    outputTokens: z.bigint().nonnegative().default(0n),
+    approvals: z.number().int().nonnegative().default(0),
+  }),
+  response: BudgetConsumptionSnapshot,
+};
+
 // /v2/events (SSE)
 export const SubscribeEventsV2 = {
   method: "GET" as const,
@@ -306,6 +407,7 @@ export const V2_ENDPOINTS = {
   UpdateTaskContractV2,
   CreateWorkflowV2,
   ExecuteWorkflowNodeV2,
+  TransitionWorkflowV2,
   SubmitClaimV2,
   WaiveClaimV2,
   RecordEvidenceV2,
@@ -317,7 +419,14 @@ export const V2_ENDPOINTS = {
   AskQuestionV2,
   AnswerQuestionV2,
   RecordDecisionV2,
+  RecordRiskV2,
+  MitigateRiskV2,
+  AcquireLeaseV2,
+  RenewLeaseV2,
+  ReleaseLeaseV2,
+  ConsumeBudgetV2,
   SubscribeEventsV2,
 } as const;
 
 export type V2EndpointName = keyof typeof V2_ENDPOINTS;
+

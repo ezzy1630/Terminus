@@ -49,12 +49,22 @@ import {
   effectRecordSchema,
   evidenceSchema,
   questionSchema,
+  riskSchema,
+  workerLeaseSchema,
+  taskAttemptSchema,
+  budgetConsumptionSchema,
   taskContractV2Schema,
   taskV2Schema,
   workflowSchema,
+  workflowNodeSchema,
+  guardedEdgeSchema,
   nodeRunSchema,
   isEffectTransitionAllowed,
   isTaskV2TransitionAllowed,
+  isWorkflowTransitionAllowed,
+  isNodeRunTransitionAllowed,
+  isAttemptTransitionAllowed,
+  isLeaseTransitionAllowed,
   missionSchema,
   nowTimestamp,
   type Claim,
@@ -62,11 +72,20 @@ import {
   type EffectRecord,
   type Evidence,
   type Question,
+  type Risk,
+  type WorkerLease,
+  type TaskAttempt,
+  type BudgetConsumption,
+  type Workflow,
+  type WorkflowNode,
+  type GuardedEdge,
+  type NodeRun,
   type TaskContractV2,
   type TaskV2,
 } from "../../../packages/domain/src/index.ts";
 import { ARP_V2_COMMAND_TYPES, ARP_V2_EVENT_TYPES } from "../../../packages/runtime-protocol/src/index.ts";
 import { z } from "zod";
+
 
 // ────────────────────────── Configuration ──────────────────────────────────
 
@@ -707,6 +726,12 @@ interface ArpV2State {
   evidences: Map<string, Evidence>;
   questions: Map<string, Question>;
   decisions: Map<string, Decision>;
+  workflows: Map<string, Workflow>;
+  nodeRuns: Map<string, NodeRun>;
+  workerLeases: Map<string, WorkerLease>;
+  attempts: Map<string, TaskAttempt>;
+  risks: Map<string, Risk>;
+  budgets: Map<string, BudgetConsumption>;
 }
 
 const arpV2: ArpV2State = {
@@ -716,6 +741,12 @@ const arpV2: ArpV2State = {
   evidences: new Map(),
   questions: new Map(),
   decisions: new Map(),
+  workflows: new Map(),
+  nodeRuns: new Map(),
+  workerLeases: new Map(),
+  attempts: new Map(),
+  risks: new Map(),
+  budgets: new Map(),
 };
 
 function arpV2StoreFor(aggregateType: string): Map<string, unknown> | null {
@@ -726,6 +757,12 @@ function arpV2StoreFor(aggregateType: string): Map<string, unknown> | null {
     case "evidence": return arpV2.evidences as Map<string, unknown>;
     case "question": return arpV2.questions as Map<string, unknown>;
     case "decision": return arpV2.decisions as Map<string, unknown>;
+    case "workflow": return arpV2.workflows as Map<string, unknown>;
+    case "node_run": return arpV2.nodeRuns as Map<string, unknown>;
+    case "lease": return arpV2.workerLeases as Map<string, unknown>;
+    case "attempt": return arpV2.attempts as Map<string, unknown>;
+    case "risk": return arpV2.risks as Map<string, unknown>;
+    case "budget": return arpV2.budgets as Map<string, unknown>;
     default: return null;
   }
 }
@@ -787,15 +824,27 @@ async function replayArpV2(): Promise<void> {
     if (!parsed.snapshot || typeof parsed.snapshot !== "object") continue;
     const store = arpV2StoreFor(row.aggregateType);
     if (!store) continue;
-    // Tasks carry the only bigint field; revive Micros from wire strings.
+    // Tasks and budgets carry bigint fields; revive Micros from wire strings.
     if (row.aggregateType === "task") {
       const revived = taskV2ReviveSchema.safeParse(parsed.snapshot);
       if (revived.success) store.set(row.aggregateId, revived.data);
+    } else if (row.aggregateType === "budget") {
+      const b = parsed.snapshot as Record<string, unknown>;
+      const revived: BudgetConsumption = {
+        taskId: String(b.taskId),
+        consumedCostMicros: BigInt(String(b.consumedCostMicros ?? 0)),
+        consumedComputeSeconds: Number(b.consumedComputeSeconds ?? 0),
+        consumedInputTokens: BigInt(String(b.consumedInputTokens ?? 0)),
+        consumedOutputTokens: BigInt(String(b.consumedOutputTokens ?? 0)),
+        consumedApprovals: Number(b.consumedApprovals ?? 0),
+        lastUpdatedAt: String(b.lastUpdatedAt ?? nowTimestamp()),
+      };
+      store.set(row.aggregateId, revived);
     } else {
       store.set(row.aggregateId, parsed.snapshot);
     }
   }
-  console.log(`[terminus-control] arp-v2 replay: ${arpV2.tasks.size} tasks, ${arpV2.effects.size} effects, ${arpV2.claims.size} claims`);
+  console.log(`[terminus-control] arp-v2 replay: ${arpV2.tasks.size} tasks, ${arpV2.effects.size} effects, ${arpV2.claims.size} claims, ${arpV2.workflows.size} workflows, ${arpV2.workerLeases.size} leases`);
 }
 
 /** Serialize a stored event into an ARP v2 envelope for SSE consumers. */
@@ -823,6 +872,8 @@ const V2_SCHEMA_REGISTRY_ENTRIES: ReadonlyArray<readonly [string, z.ZodType]> = 
   ["mission", missionSchema],
   ["task-contract-v2", taskContractV2Schema],
   ["task-v2", taskV2Schema],
+  ["workflow-node", workflowNodeSchema],
+  ["guarded-edge", guardedEdgeSchema],
   ["workflow", workflowSchema],
   ["node-run", nodeRunSchema],
   ["claim", claimSchema],
@@ -831,6 +882,10 @@ const V2_SCHEMA_REGISTRY_ENTRIES: ReadonlyArray<readonly [string, z.ZodType]> = 
   ["effect-record", effectRecordSchema],
   ["question", questionSchema],
   ["decision", decisionSchema],
+  ["risk", riskSchema],
+  ["worker-lease", workerLeaseSchema],
+  ["task-attempt", taskAttemptSchema],
+  ["budget-consumption", budgetConsumptionSchema],
 ];
 
 // ────────────────────────── Route handlers ─────────────────────────────────
@@ -2640,6 +2695,417 @@ const routes: Route[] = [
       await emitV2({ eventType: "claim.satisfied", aggregateType: "claim", aggregateId: claim.id, snapshot: satisfied, correlationId: claim.taskId });
     }
     sendJson(res, 201, jsonSafe(evidence));
+  }),
+  // ────────────────────────── /v2/workflows ─────────────────────────────────
+  route("POST", "/v2/workflows", async (req, res) => {
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      nodes: z.array(workflowNodeSchema).min(1),
+      edges: z.array(guardedEdgeSchema).default([]),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_WORKFLOW", `invalid workflow: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
+    }
+    if (!arpV2.tasks.has(parsed.data.taskId)) {
+      return sendError(res, 404, "TASK_NOT_FOUND", `v2 task ${parsed.data.taskId} not found`, "not_found");
+    }
+    const nodeIds = new Set(parsed.data.nodes.map((n) => n.id));
+    if (nodeIds.size !== parsed.data.nodes.length) {
+      return sendError(res, 400, "DUPLICATE_NODES", "workflow contains duplicate node IDs", "validation");
+    }
+    for (const e of parsed.data.edges) {
+      if (!nodeIds.has(e.sourceNodeId) || !nodeIds.has(e.targetNodeId)) {
+        return sendError(res, 400, "INVALID_EDGE", `edge connects unknown node (${e.sourceNodeId} -> ${e.targetNodeId})`, "validation");
+      }
+    }
+    const nowIso = nowTimestamp();
+    const workflow: Workflow = {
+      id: uuid(),
+      version: 1,
+      taskId: parsed.data.taskId,
+      nodes: parsed.data.nodes,
+      edges: parsed.data.edges,
+      createdAt: nowIso,
+    };
+    arpV2.workflows.set(workflow.id, workflow);
+    await emitV2({ eventType: "workflow.created", aggregateType: "workflow", aggregateId: workflow.id, snapshot: workflow, correlationId: workflow.taskId });
+    sendJson(res, 201, jsonSafe(workflow));
+  }),
+  route("GET", "/v2/workflows/:id", async (_req, res, params) => {
+    const wf = arpV2.workflows.get(String(params.id));
+    if (!wf) return sendError(res, 404, "WORKFLOW_NOT_FOUND", "workflow not found", "not_found");
+    sendJson(res, 200, jsonSafe(wf));
+  }),
+  route("POST", "/v2/workflows/:id/nodes/:nodeId/execute", async (req, res, params) => {
+    const wf = arpV2.workflows.get(String(params.id));
+    if (!wf) return sendError(res, 404, "WORKFLOW_NOT_FOUND", "workflow not found", "not_found");
+    const node = wf.nodes.find((n) => n.id === params.nodeId);
+    if (!node) return sendError(res, 404, "NODE_NOT_FOUND", `node ${params.nodeId} not found in workflow`, "not_found");
+    const parsed = z.object({
+      attemptId: z.string().min(1),
+      inputs: z.record(z.string(), z.unknown()).default({}),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_NODE_EXECUTION", "invalid node execution request", "validation");
+    }
+    const nowIso = nowTimestamp();
+    const nodeRun: NodeRun = {
+      id: uuid(),
+      workflowId: wf.id,
+      nodeId: node.id,
+      attemptId: parsed.data.attemptId,
+      status: "RUNNING",
+      inputs: { ...node.inputs, ...parsed.data.inputs },
+      outputs: null,
+      error: null,
+      startedAt: nowIso,
+      settledAt: null,
+    };
+    arpV2.nodeRuns.set(nodeRun.id, nodeRun);
+    await emitV2({ eventType: "workflow.node_started", aggregateType: "node_run", aggregateId: nodeRun.id, snapshot: nodeRun, correlationId: wf.taskId });
+    sendJson(res, 201, jsonSafe(nodeRun));
+  }),
+  route("POST", "/v2/workflows/:id/nodes/:nodeRunId/complete", async (req, res, params) => {
+    const run = arpV2.nodeRuns.get(String(params.nodeRunId));
+    if (!run) return sendError(res, 404, "NODE_RUN_NOT_FOUND", "node run not found", "not_found");
+    if (!isNodeRunTransitionAllowed(run.status, "COMPLETED")) {
+      return sendError(res, 409, "ILLEGAL_TRANSITION", `cannot transition node run from ${run.status} to COMPLETED`, "conflict");
+    }
+    const parsed = z.object({ outputs: z.record(z.string(), z.unknown()).default({}) }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_COMPLETION", "invalid completion outputs", "validation");
+    const updated: NodeRun = { ...run, status: "COMPLETED", outputs: parsed.data.outputs, settledAt: nowTimestamp() };
+    arpV2.nodeRuns.set(run.id, updated);
+    await emitV2({ eventType: "workflow.node_completed", aggregateType: "node_run", aggregateId: run.id, snapshot: updated, correlationId: run.workflowId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("POST", "/v2/workflows/:id/nodes/:nodeRunId/fail", async (req, res, params) => {
+    const run = arpV2.nodeRuns.get(String(params.nodeRunId));
+    if (!run) return sendError(res, 404, "NODE_RUN_NOT_FOUND", "node run not found", "not_found");
+    if (!isNodeRunTransitionAllowed(run.status, "FAILED")) {
+      return sendError(res, 409, "ILLEGAL_TRANSITION", `cannot transition node run from ${run.status} to FAILED`, "conflict");
+    }
+    const parsed = z.object({ error: z.string().min(1) }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_FAILURE", "error message is required", "validation");
+    const updated: NodeRun = { ...run, status: "FAILED", error: parsed.data.error, settledAt: nowTimestamp() };
+    arpV2.nodeRuns.set(run.id, updated);
+    await emitV2({ eventType: "workflow.node_failed", aggregateType: "node_run", aggregateId: run.id, snapshot: updated, correlationId: run.workflowId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  // ────────────────────────── /v2/leases ────────────────────────────────────
+  route("POST", "/v2/leases/acquire", async (req, res) => {
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      workerId: z.string().min(1),
+      ttlSeconds: z.number().int().positive().default(30),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_LEASE_REQUEST", "invalid lease acquire payload", "validation");
+    const { taskId, workerId, ttlSeconds } = parsed.data;
+    if (!arpV2.tasks.has(taskId)) return sendError(res, 404, "TASK_NOT_FOUND", `task ${taskId} not found`, "not_found");
+
+    // Monotonic fencing token per task
+    let maxFencingToken = 0;
+    for (const lease of arpV2.workerLeases.values()) {
+      if (lease.taskId === taskId) {
+        maxFencingToken = Math.max(maxFencingToken, lease.fencingToken);
+        if (lease.status === "ACQUIRED" || lease.status === "RENEWED") {
+          const fenced: WorkerLease = { ...lease, status: "FENCED" };
+          arpV2.workerLeases.set(lease.id, fenced);
+          await emitV2({ eventType: "lease.fenced", aggregateType: "lease", aggregateId: lease.id, snapshot: fenced, correlationId: taskId });
+        }
+      }
+    }
+
+    const now = new Date();
+    const expires = new Date(now.getTime() + ttlSeconds * 1000);
+    const newLease: WorkerLease = {
+      id: uuid(),
+      taskId,
+      workerId,
+      fencingToken: maxFencingToken + 1,
+      status: "ACQUIRED",
+      acquiredAt: now.toISOString(),
+      renewedAt: now.toISOString(),
+      expiresAt: expires.toISOString(),
+    };
+    arpV2.workerLeases.set(newLease.id, newLease);
+    await emitV2({ eventType: "lease.acquired", aggregateType: "lease", aggregateId: newLease.id, snapshot: newLease, correlationId: taskId });
+    sendJson(res, 201, jsonSafe(newLease));
+  }),
+  route("POST", "/v2/leases/renew", async (req, res) => {
+    const parsed = z.object({
+      leaseId: z.string().min(1),
+      fencingToken: z.number().int().positive(),
+      workerId: z.string().min(1),
+      ttlSeconds: z.number().int().positive().default(30),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_RENEW_REQUEST", "invalid lease renew payload", "validation");
+    const { leaseId, fencingToken, workerId, ttlSeconds } = parsed.data;
+    const lease = arpV2.workerLeases.get(leaseId);
+    if (!lease) return sendError(res, 404, "LEASE_NOT_FOUND", "lease not found", "not_found");
+    if (lease.workerId !== workerId || lease.fencingToken !== fencingToken) {
+      return sendError(res, 409, "FENCING_ERROR", "worker or fencing token mismatch", "conflict");
+    }
+    if (!isLeaseTransitionAllowed(lease.status, "RENEWED")) {
+      return sendError(res, 409, "ILLEGAL_TRANSITION", `cannot renew lease in status ${lease.status}`, "conflict");
+    }
+    const now = new Date();
+    const expires = new Date(now.getTime() + ttlSeconds * 1000);
+    const updated: WorkerLease = {
+      ...lease,
+      status: "RENEWED",
+      renewedAt: now.toISOString(),
+      expiresAt: expires.toISOString(),
+    };
+    arpV2.workerLeases.set(lease.id, updated);
+    await emitV2({ eventType: "lease.renewed", aggregateType: "lease", aggregateId: lease.id, snapshot: updated, correlationId: lease.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("POST", "/v2/leases/release", async (req, res) => {
+    const parsed = z.object({
+      leaseId: z.string().min(1),
+      fencingToken: z.number().int().positive(),
+      workerId: z.string().min(1),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_RELEASE_REQUEST", "invalid lease release payload", "validation");
+    const { leaseId, fencingToken, workerId } = parsed.data;
+    const lease = arpV2.workerLeases.get(leaseId);
+    if (!lease) return sendError(res, 404, "LEASE_NOT_FOUND", "lease not found", "not_found");
+    if (lease.workerId !== workerId || lease.fencingToken !== fencingToken) {
+      return sendError(res, 409, "FENCING_ERROR", "worker or fencing token mismatch", "conflict");
+    }
+    const updated: WorkerLease = { ...lease, status: "RELEASED" };
+    arpV2.workerLeases.set(lease.id, updated);
+    await emitV2({ eventType: "lease.released", aggregateType: "lease", aggregateId: lease.id, snapshot: updated, correlationId: lease.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("GET", "/v2/leases/:taskId", async (_req, res, params) => {
+    const active = [...arpV2.workerLeases.values()]
+      .filter((l) => l.taskId === params.taskId && (l.status === "ACQUIRED" || l.status === "RENEWED"))
+      .pop();
+    if (!active) return sendError(res, 404, "NO_ACTIVE_LEASE", `no active lease for task ${params.taskId}`, "not_found");
+    sendJson(res, 200, jsonSafe(active));
+  }),
+  // ────────────────────────── /v2/tasks/:id/attempts ────────────────────────
+  route("POST", "/v2/tasks/:id/attempts/start", async (req, res, params) => {
+    const taskId = String(params.id);
+    const parsed = z.object({
+      workerId: z.string().min(1),
+      fencingToken: z.number().int().positive(),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_ATTEMPT_REQUEST", "invalid start attempt payload", "validation");
+    const { workerId, fencingToken } = parsed.data;
+    const lease = [...arpV2.workerLeases.values()]
+      .find((l) => l.taskId === taskId && l.workerId === workerId && l.fencingToken === fencingToken && (l.status === "ACQUIRED" || l.status === "RENEWED"));
+    if (!lease) {
+      return sendError(res, 403, "FENCING_ERROR", "worker does not hold active valid lease with matching fencing token", "auth");
+    }
+    const attempts = [...arpV2.attempts.values()].filter((a) => a.taskId === taskId);
+    const attempt: TaskAttempt = {
+      id: uuid(),
+      taskId,
+      attemptNumber: attempts.length + 1,
+      workerId,
+      fencingToken,
+      status: "RUNNING",
+      startedAt: nowTimestamp(),
+      settledAt: null,
+      error: null,
+    };
+    arpV2.attempts.set(attempt.id, attempt);
+    await emitV2({ eventType: "attempt.started", aggregateType: "attempt", aggregateId: attempt.id, snapshot: attempt, correlationId: taskId });
+    sendJson(res, 201, jsonSafe(attempt));
+  }),
+  route("POST", "/v2/tasks/:id/attempts/:attemptId/settle", async (req, res, params) => {
+    const attempt = arpV2.attempts.get(String(params.attemptId));
+    if (!attempt) return sendError(res, 404, "ATTEMPT_NOT_FOUND", "attempt not found", "not_found");
+    const parsed = z.object({
+      status: z.enum(["COMPLETED", "FAILED"]),
+      error: z.string().nullable().default(null),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_SETTLEMENT", "invalid settlement payload", "validation");
+    if (!isAttemptTransitionAllowed(attempt.status, parsed.data.status)) {
+      return sendError(res, 409, "ILLEGAL_TRANSITION", `cannot transition attempt from ${attempt.status} to ${parsed.data.status}`, "conflict");
+    }
+    const updated: TaskAttempt = {
+      ...attempt,
+      status: parsed.data.status,
+      error: parsed.data.error,
+      settledAt: nowTimestamp(),
+    };
+    arpV2.attempts.set(attempt.id, updated);
+    const eventType = parsed.data.status === "COMPLETED" ? "attempt.completed" : "attempt.failed";
+    await emitV2({ eventType, aggregateType: "attempt", aggregateId: attempt.id, snapshot: updated, correlationId: attempt.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  // ────────────────────────── /v2/questions ─────────────────────────────────
+  route("POST", "/v2/questions", async (req, res) => {
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      prompt: z.string().min(1),
+      options: z.array(z.string()).default([]),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_QUESTION", "invalid question payload", "validation");
+    const q: Question = {
+      id: uuid(),
+      taskId: parsed.data.taskId,
+      prompt: parsed.data.prompt,
+      options: parsed.data.options,
+      selectedOption: null,
+      rationale: null,
+      status: "PENDING",
+      createdAt: nowTimestamp(),
+      resolvedAt: null,
+    };
+    arpV2.questions.set(q.id, q);
+    await emitV2({ eventType: "question.asked", aggregateType: "question", aggregateId: q.id, snapshot: q, correlationId: q.taskId });
+    sendJson(res, 201, jsonSafe(q));
+  }),
+  route("POST", "/v2/questions/:id/answer", async (req, res, params) => {
+    const q = arpV2.questions.get(String(params.id));
+    if (!q) return sendError(res, 404, "QUESTION_NOT_FOUND", "question not found", "not_found");
+    const parsed = z.object({
+      selectedOption: z.string().min(1),
+      rationale: z.string().nullable().default(null),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_ANSWER", "invalid question answer payload", "validation");
+    const updated: Question = {
+      ...q,
+      selectedOption: parsed.data.selectedOption,
+      rationale: parsed.data.rationale,
+      status: "ANSWERED",
+      resolvedAt: nowTimestamp(),
+    };
+    arpV2.questions.set(q.id, updated);
+    await emitV2({ eventType: "question.answered", aggregateType: "question", aggregateId: q.id, snapshot: updated, correlationId: q.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("POST", "/v2/questions/:id/dismiss", async (_req, res, params) => {
+    const q = arpV2.questions.get(String(params.id));
+    if (!q) return sendError(res, 404, "QUESTION_NOT_FOUND", "question not found", "not_found");
+    const updated: Question = { ...q, status: "DISMISSED", resolvedAt: nowTimestamp() };
+    arpV2.questions.set(q.id, updated);
+    await emitV2({ eventType: "question.dismissed", aggregateType: "question", aggregateId: q.id, snapshot: updated, correlationId: q.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  // ────────────────────────── /v2/decisions ─────────────────────────────────
+  route("POST", "/v2/decisions", async (req, res) => {
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      statement: z.string().min(1),
+      rationale: z.string().min(1),
+      provenance: z.string().min(1),
+      questionId: z.string().nullable().default(null),
+      alternativesConsidered: z.array(z.string()).default([]),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_DECISION", "invalid decision payload", "validation");
+    const d: Decision = {
+      id: uuid(),
+      taskId: parsed.data.taskId,
+      questionId: parsed.data.questionId,
+      statement: parsed.data.statement,
+      alternativesConsidered: parsed.data.alternativesConsidered,
+      rationale: parsed.data.rationale,
+      provenance: parsed.data.provenance,
+      recordedAt: nowTimestamp(),
+    };
+    arpV2.decisions.set(d.id, d);
+    await emitV2({ eventType: "decision.recorded", aggregateType: "decision", aggregateId: d.id, snapshot: d, correlationId: d.taskId });
+    sendJson(res, 201, jsonSafe(d));
+  }),
+  // ────────────────────────── /v2/risks ─────────────────────────────────────
+  route("POST", "/v2/risks", async (req, res) => {
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      riskClass: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]),
+      statement: z.string().min(1),
+      mitigation: z.string().nullable().default(null),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_RISK", "invalid risk payload", "validation");
+    const r: Risk = {
+      id: uuid(),
+      taskId: parsed.data.taskId,
+      riskClass: parsed.data.riskClass,
+      statement: parsed.data.statement,
+      mitigation: parsed.data.mitigation,
+      status: parsed.data.mitigation ? "MITIGATED" : "IDENTIFIED",
+      recordedAt: nowTimestamp(),
+    };
+    arpV2.risks.set(r.id, r);
+    await emitV2({ eventType: "risk.recorded", aggregateType: "risk", aggregateId: r.id, snapshot: r, correlationId: r.taskId });
+    sendJson(res, 201, jsonSafe(r));
+  }),
+  route("POST", "/v2/risks/:id/mitigate", async (req, res, params) => {
+    const r = arpV2.risks.get(String(params.id));
+    if (!r) return sendError(res, 404, "RISK_NOT_FOUND", "risk not found", "not_found");
+    const parsed = z.object({ mitigation: z.string().min(1) }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_MITIGATION", "mitigation text is required", "validation");
+    const updated: Risk = { ...r, mitigation: parsed.data.mitigation, status: "MITIGATED" };
+    arpV2.risks.set(r.id, updated);
+    await emitV2({ eventType: "risk.mitigated", aggregateType: "risk", aggregateId: r.id, snapshot: updated, correlationId: r.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  // ────────────────────────── /v2/tasks/:id/budget ──────────────────────────
+  route("POST", "/v2/tasks/:id/budget/consume", async (req, res, params) => {
+    const taskId = String(params.id);
+    const task = arpV2.tasks.get(taskId);
+    if (!task) return sendError(res, 404, "TASK_NOT_FOUND", `task ${taskId} not found`, "not_found");
+    const parsed = z.object({
+      costMicros: z.union([z.string(), z.number()]).transform((v) => BigInt(v)).default(0n),
+      computeSeconds: z.number().default(0),
+      inputTokens: z.union([z.string(), z.number()]).transform((v) => BigInt(v)).default(0n),
+      outputTokens: z.union([z.string(), z.number()]).transform((v) => BigInt(v)).default(0n),
+      approvals: z.number().int().default(0),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) return sendError(res, 400, "INVALID_BUDGET_CONSUMPTION", "invalid budget consumption delta", "validation");
+
+    const current = arpV2.budgets.get(taskId) ?? {
+      taskId,
+      consumedCostMicros: 0n,
+      consumedComputeSeconds: 0,
+      consumedInputTokens: 0n,
+      consumedOutputTokens: 0n,
+      consumedApprovals: 0,
+      lastUpdatedAt: nowTimestamp(),
+    };
+    const updated: BudgetConsumption = {
+      taskId,
+      consumedCostMicros: current.consumedCostMicros + parsed.data.costMicros,
+      consumedComputeSeconds: current.consumedComputeSeconds + parsed.data.computeSeconds,
+      consumedInputTokens: current.consumedInputTokens + parsed.data.inputTokens,
+      consumedOutputTokens: current.consumedOutputTokens + parsed.data.outputTokens,
+      consumedApprovals: current.consumedApprovals + parsed.data.approvals,
+      lastUpdatedAt: nowTimestamp(),
+    };
+
+    const costLimit = task.contract.constraints.costMicros;
+    if (costLimit > 0n && updated.consumedCostMicros > costLimit) {
+      arpV2.budgets.set(taskId, updated);
+      await emitV2({
+        eventType: "budget.exhausted",
+        aggregateType: "budget",
+        aggregateId: taskId,
+        snapshot: updated,
+        correlationId: taskId,
+      });
+      return sendError(res, 429, "BUDGET_EXHAUSTED", `cost budget exceeded: ${updated.consumedCostMicros} > ${costLimit}`, "rate_limit");
+    }
+
+    arpV2.budgets.set(taskId, updated);
+    await emitV2({ eventType: "budget.consumed", aggregateType: "budget", aggregateId: taskId, snapshot: updated, correlationId: taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("GET", "/v2/tasks/:id/budget", async (_req, res, params) => {
+    const taskId = String(params.id);
+    const b = arpV2.budgets.get(taskId) ?? {
+      taskId,
+      consumedCostMicros: 0n,
+      consumedComputeSeconds: 0,
+      consumedInputTokens: 0n,
+      consumedOutputTokens: 0n,
+      consumedApprovals: 0,
+      lastUpdatedAt: nowTimestamp(),
+    };
+    sendJson(res, 200, jsonSafe(b));
   }),
   route("GET", "/v2/events", async (req, res) => {
     res.writeHead(200, {

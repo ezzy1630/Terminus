@@ -198,25 +198,97 @@ impl CapabilityToken {
     }
 }
 
-/// In-memory revocation list. Production deployments back this with SQLite.
+/// Revocation list with optional durable file backing and epoch fencing.
 #[derive(Debug, Default)]
 pub struct RevocationList {
     revoked: Mutex<HashSet<String>>,
+    fenced_epochs: Mutex<HashMap<String, u64>>,
+    storage_path: Option<std::path::PathBuf>,
 }
 
 impl RevocationList {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            revoked: Mutex::new(HashSet::new()),
+            fenced_epochs: Mutex::new(HashMap::new()),
+            storage_path: None,
+        }
+    }
+
+    pub fn with_storage(storage_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            revoked: Mutex::new(HashSet::new()),
+            fenced_epochs: Mutex::new(HashMap::new()),
+            storage_path: Some(storage_path.into()),
+        }
+    }
+
+    fn persist_state(&self, revoked: &HashSet<String>, fenced_epochs: &HashMap<String, u64>) {
+        if let Some(path) = &self.storage_path {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            #[derive(Serialize)]
+            struct PersistedRevocations<'a> {
+                revoked: &'a HashSet<String>,
+                fenced_epochs: &'a HashMap<String, u64>,
+            }
+            let payload = PersistedRevocations {
+                revoked,
+                fenced_epochs,
+            };
+            if let Ok(json) = serde_json::to_vec_pretty(&payload) {
+                let tmp = format!("{}.tmp-{}", path.display(), std::process::id());
+                if std::fs::write(&tmp, &json).is_ok() {
+                    let _ = std::fs::rename(&tmp, path);
+                }
+            }
+        }
+    }
+
+    /// Load persisted revocations and epoch fencing from storage path.
+    pub fn load_persisted(&self) -> usize {
+        if let Some(path) = &self.storage_path {
+            if path.exists() {
+                if let Ok(data) = std::fs::read(path) {
+                    #[derive(Deserialize)]
+                    struct PersistedRevocations {
+                        revoked: HashSet<String>,
+                        fenced_epochs: Option<HashMap<String, u64>>,
+                    }
+                    if let Ok(p) = serde_json::from_slice::<PersistedRevocations>(&data) {
+                        let count = p.revoked.len();
+                        let mut r_guard = match self.revoked.lock() {
+                            Ok(g) => g,
+                            Err(e) => e.into_inner(),
+                        };
+                        *r_guard = p.revoked;
+                        if let Some(fe) = p.fenced_epochs {
+                            let mut fe_guard = match self.fenced_epochs.lock() {
+                                Ok(g) => g,
+                                Err(e) => e.into_inner(),
+                            };
+                            *fe_guard = fe;
+                        }
+                        return count;
+                    }
+                }
+            }
+        }
+        0
     }
 
     pub fn revoke(&self, token_id: &str) {
-        // Poisoned mutex indicates a panic in another thread holding the lock;
-        // we still recover the inner data so the kernel can continue.
         let mut guard = match self.revoked.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
         guard.insert(token_id.to_string());
+        let fe_guard = match self.fenced_epochs.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        self.persist_state(&guard, &fe_guard);
     }
 
     pub fn is_revoked(&self, token_id: &str) -> bool {
@@ -225,6 +297,34 @@ impl RevocationList {
             Err(p) => p.into_inner(),
         };
         guard.contains(token_id)
+    }
+
+    pub fn fence_epoch(&self, task_id: &str, min_valid_epoch: u64) {
+        let mut fe_guard = match self.fenced_epochs.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let current = fe_guard.entry(task_id.to_string()).or_insert(0);
+        if min_valid_epoch > *current {
+            *current = min_valid_epoch;
+        }
+        let r_guard = match self.revoked.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        self.persist_state(&r_guard, &fe_guard);
+    }
+
+    pub fn is_epoch_fenced(&self, task_id: &str, epoch: u64) -> bool {
+        let fe_guard = match self.fenced_epochs.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(&min_epoch) = fe_guard.get(task_id) {
+            epoch < min_epoch
+        } else {
+            false
+        }
     }
 
     pub fn revoked_count(&self) -> usize {
@@ -257,6 +357,21 @@ impl TokenIssuer {
             kernel_instance_id: kernel_instance_id.into(),
             default_ttl_seconds,
             revocation: std::sync::Arc::new(RevocationList::new()),
+            used_nonces: std::sync::Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn with_revocation(
+        secret: Vec<u8>,
+        kernel_instance_id: impl Into<String>,
+        default_ttl_seconds: u64,
+        revocation: std::sync::Arc<RevocationList>,
+    ) -> Self {
+        Self {
+            secret,
+            kernel_instance_id: kernel_instance_id.into(),
+            default_ttl_seconds,
+            revocation,
             used_nonces: std::sync::Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -941,5 +1056,25 @@ mod tests {
         let encoded = token.encode().unwrap();
         let replayed_err = issuer.validate(&encoded).unwrap_err();
         assert!(matches!(replayed_err, AuthzError::Revoked));
+    }
+
+    #[test]
+    fn persistent_revocation_and_fencing_survive_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("revocations.json");
+
+        let rev1 = RevocationList::with_storage(&path);
+        rev1.revoke("tok-123");
+        rev1.fence_epoch("task-abc", 5);
+        assert!(rev1.is_revoked("tok-123"));
+        assert!(rev1.is_epoch_fenced("task-abc", 4));
+        assert!(!rev1.is_epoch_fenced("task-abc", 5));
+
+        let rev2 = RevocationList::with_storage(&path);
+        let loaded = rev2.load_persisted();
+        assert_eq!(loaded, 1);
+        assert!(rev2.is_revoked("tok-123"));
+        assert!(rev2.is_epoch_fenced("task-abc", 4));
+        assert!(!rev2.is_epoch_fenced("task-abc", 5));
     }
 }

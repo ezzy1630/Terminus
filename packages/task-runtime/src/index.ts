@@ -337,3 +337,14 @@ export const TASK_TERMINAL_STATES: ReadonlySet<TaskStatus> = new Set<TaskStatus>
 export { isTaskTransitionAllowed, isTaskTerminal };
 
 export type { Task, TaskContract, AcceptanceCriterion, AllowedScope, ScopeLedgerEntry };
+
+// ───────────────────── Phase 2 Durable Task Substrate ────────────────────────
+
+export * from "./types.js";
+export * from "./repository.js";
+export * from "./outbox.js";
+export * from "./leases.js";
+export * from "./workflows.js";
+export * from "./decisions.js";
+export * from "./substrate.js";
+

@@ -1,0 +1,60 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/inbox-message.json",
+  "title": "InboxMessage",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "messageType": {
+      "type": "string",
+      "minLength": 1
+    },
+    "payloadHash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "receivedAt": {
+      "type": "string"
+    },
+    "processedAt": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "PROCESSED",
+        "FAILED",
+        "DUPLICATE"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "idempotencyKey",
+    "source",
+    "messageType",
+    "payloadHash",
+    "receivedAt",
+    "status"
+  ]
+}

@@ -94,6 +94,21 @@ export const ARP_V2_EVENT_TYPES = [
   "workflow.node_completed",
   "workflow.node_failed",
   "workflow.completed",
+  "workflow.paused",
+  "workflow.resumed",
+  "workflow.cancelled",
+
+  // Worker Lease lifecycle
+  "lease.acquired",
+  "lease.renewed",
+  "lease.released",
+  "lease.fenced",
+
+  // Task Attempt lifecycle
+  "attempt.started",
+  "attempt.recovering",
+  "attempt.completed",
+  "attempt.failed",
 
   // Claim lifecycle
   "claim.proposed",
@@ -138,8 +153,13 @@ export const ARP_V2_EVENT_TYPES = [
   "question.dismissed",
   "decision.recorded",
   "risk.detected",
+  "risk.recorded",
   "risk.mitigated",
   "attention.signaled",
+
+  // Budget
+  "budget.consumed",
+  "budget.exhausted",
 
   // Organization & Operator
   "operator.registered",
@@ -320,6 +340,107 @@ export const attentionSignaledPayloadSchema = z.object({
 });
 export type AttentionSignaledPayload = z.infer<typeof attentionSignaledPayloadSchema>;
 
+// Lease Payloads
+export const leaseAcquiredPayloadSchema = z.object({
+  leaseId: z.string(),
+  taskId: z.string(),
+  workerId: z.string(),
+  fencingToken: z.number().int().positive(),
+  expiresAt: z.string(),
+});
+export type LeaseAcquiredPayload = z.infer<typeof leaseAcquiredPayloadSchema>;
+
+export const leaseRenewedPayloadSchema = z.object({
+  leaseId: z.string(),
+  taskId: z.string(),
+  workerId: z.string(),
+  fencingToken: z.number().int().positive(),
+  expiresAt: z.string(),
+});
+export type LeaseRenewedPayload = z.infer<typeof leaseRenewedPayloadSchema>;
+
+export const leaseReleasedPayloadSchema = z.object({
+  leaseId: z.string(),
+  taskId: z.string(),
+  workerId: z.string(),
+  fencingToken: z.number().int().positive(),
+});
+export type LeaseReleasedPayload = z.infer<typeof leaseReleasedPayloadSchema>;
+
+export const leaseFencedPayloadSchema = z.object({
+  leaseId: z.string(),
+  taskId: z.string(),
+  supersededByToken: z.number().int().positive(),
+});
+export type LeaseFencedPayload = z.infer<typeof leaseFencedPayloadSchema>;
+
+// Attempt Payloads
+export const attemptStartedPayloadSchema = z.object({
+  attemptId: z.string(),
+  taskId: z.string(),
+  attemptNumber: z.number().int().positive(),
+  workerId: z.string(),
+  fencingToken: z.number().int().positive(),
+});
+export type AttemptStartedPayload = z.infer<typeof attemptStartedPayloadSchema>;
+
+export const attemptRecoveringPayloadSchema = z.object({
+  attemptId: z.string(),
+  taskId: z.string(),
+  reason: z.string(),
+});
+export type AttemptRecoveringPayload = z.infer<typeof attemptRecoveringPayloadSchema>;
+
+export const attemptCompletedPayloadSchema = z.object({
+  attemptId: z.string(),
+  taskId: z.string(),
+  attemptNumber: z.number().int().positive(),
+});
+export type AttemptCompletedPayload = z.infer<typeof attemptCompletedPayloadSchema>;
+
+export const attemptFailedPayloadSchema = z.object({
+  attemptId: z.string(),
+  taskId: z.string(),
+  attemptNumber: z.number().int().positive(),
+  error: z.string(),
+});
+export type AttemptFailedPayload = z.infer<typeof attemptFailedPayloadSchema>;
+
+// Risk & Budget Payloads
+export const riskRecordedPayloadSchema = z.object({
+  riskId: z.string(),
+  taskId: z.string(),
+  riskClass: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]),
+  statement: z.string(),
+  mitigation: z.string().nullable().default(null),
+});
+export type RiskRecordedPayload = z.infer<typeof riskRecordedPayloadSchema>;
+
+export const riskMitigatedPayloadSchema = z.object({
+  riskId: z.string(),
+  taskId: z.string(),
+  mitigation: z.string(),
+});
+export type RiskMitigatedPayload = z.infer<typeof riskMitigatedPayloadSchema>;
+
+export const budgetConsumedPayloadSchema = z.object({
+  taskId: z.string(),
+  consumedCostMicros: z.bigint(),
+  consumedComputeSeconds: z.number(),
+  consumedInputTokens: z.bigint(),
+  consumedOutputTokens: z.bigint(),
+  consumedApprovals: z.number(),
+});
+export type BudgetConsumedPayload = z.infer<typeof budgetConsumedPayloadSchema>;
+
+export const budgetExhaustedPayloadSchema = z.object({
+  taskId: z.string(),
+  limitKind: z.string(),
+  consumed: z.string(),
+  limit: z.string(),
+});
+export type BudgetExhaustedPayload = z.infer<typeof budgetExhaustedPayloadSchema>;
+
 // ────────────────────────── Event Payload Map ────────────────────────────────
 
 export interface ArpV2PayloadMap {
@@ -344,6 +465,19 @@ export interface ArpV2PayloadMap {
   "workflow.node_completed": WorkflowNodeCompletedPayload;
   "workflow.node_failed": WorkflowNodeFailedPayload;
   "workflow.completed": Readonly<Record<string, unknown>>;
+  "workflow.paused": { readonly workflowId: string };
+  "workflow.resumed": { readonly workflowId: string };
+  "workflow.cancelled": { readonly workflowId: string; readonly reason?: string | undefined };
+
+  "lease.acquired": LeaseAcquiredPayload;
+  "lease.renewed": LeaseRenewedPayload;
+  "lease.released": LeaseReleasedPayload;
+  "lease.fenced": LeaseFencedPayload;
+
+  "attempt.started": AttemptStartedPayload;
+  "attempt.recovering": AttemptRecoveringPayload;
+  "attempt.completed": AttemptCompletedPayload;
+  "attempt.failed": AttemptFailedPayload;
 
   "claim.proposed": ClaimProposedPayload;
   "claim.satisfied": ClaimStatusChangedPayload;
@@ -384,8 +518,12 @@ export interface ArpV2PayloadMap {
   "question.dismissed": Readonly<Record<string, unknown>>;
   "decision.recorded": DecisionRecordedPayload;
   "risk.detected": Readonly<Record<string, unknown>>;
-  "risk.mitigated": Readonly<Record<string, unknown>>;
+  "risk.recorded": RiskRecordedPayload;
+  "risk.mitigated": RiskMitigatedPayload;
   "attention.signaled": AttentionSignaledPayload;
+
+  "budget.consumed": BudgetConsumedPayload;
+  "budget.exhausted": BudgetExhaustedPayload;
 
   "operator.registered": Readonly<Record<string, unknown>>;
   "operator.message_sent": Readonly<Record<string, unknown>>;

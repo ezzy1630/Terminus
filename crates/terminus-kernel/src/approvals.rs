@@ -121,15 +121,63 @@ pub struct ApprovalRequest {
     pub ttl_seconds: u64,
 }
 
-/// In-memory approval store. Production deployments back this with SQLite.
+/// Approval store with optional durable file backing.
 #[derive(Debug, Default)]
 pub struct ApprovalStore {
     records: Mutex<HashMap<String, ApprovalRecord>>,
+    storage_path: Option<std::path::PathBuf>,
 }
 
 impl ApprovalStore {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            records: Mutex::new(HashMap::new()),
+            storage_path: None,
+        }
+    }
+
+    pub fn with_storage(storage_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            records: Mutex::new(HashMap::new()),
+            storage_path: Some(storage_path.into()),
+        }
+    }
+
+    fn persist_state(&self, records: &HashMap<String, ApprovalRecord>) {
+        if let Some(path) = &self.storage_path {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let list: Vec<&ApprovalRecord> = records.values().collect();
+            if let Ok(json) = serde_json::to_vec_pretty(&list) {
+                let tmp = format!("{}.tmp-{}", path.display(), std::process::id());
+                if std::fs::write(&tmp, &json).is_ok() {
+                    let _ = std::fs::rename(&tmp, path);
+                }
+            }
+        }
+    }
+
+    /// Load persisted records from the storage path into the store.
+    pub fn load_persisted(&self) -> usize {
+        if let Some(path) = &self.storage_path {
+            if path.exists() {
+                if let Ok(data) = std::fs::read(path) {
+                    if let Ok(records) = serde_json::from_slice::<Vec<ApprovalRecord>>(&data) {
+                        let count = records.len();
+                        let mut guard = match self.records.lock() {
+                            Ok(g) => g,
+                            Err(p) => p.into_inner(),
+                        };
+                        for r in records {
+                            guard.insert(r.id.clone(), r);
+                        }
+                        return count;
+                    }
+                }
+            }
+        }
+        0
     }
 
     /// Create a new pending approval record. Returns the record id.
@@ -161,6 +209,7 @@ impl ApprovalStore {
             Err(p) => p.into_inner(),
         };
         guard.insert(record.id.clone(), record.clone());
+        self.persist_state(&guard);
         record
     }
 
@@ -191,7 +240,9 @@ impl ApprovalStore {
         record.resolved_at = Some(now_unix());
         record.resolved_by = Some(resolved_by.into());
         record.rationale = Some(rationale.into());
-        Some(record.clone())
+        let res = record.clone();
+        self.persist_state(&guard);
+        Some(res)
     }
 
     /// Look up an approval by id.
@@ -239,7 +290,9 @@ impl ApprovalStore {
                 // was the last permitted one).
                 record.status = ApprovalStatus::Exhausted;
             }
-            return Some(record.clone());
+            let res = record.clone();
+            self.persist_state(&guard);
+            return Some(res);
         }
         None
     }
@@ -267,7 +320,9 @@ impl ApprovalStore {
         };
         let record = guard.get_mut(approval_id)?;
         record.status = ApprovalStatus::Revoked;
-        Some(record.clone())
+        let res = record.clone();
+        self.persist_state(&guard);
+        Some(res)
     }
 
     /// Number of records in the store (any status). Useful for tests.
@@ -464,5 +519,23 @@ mod tests {
             &["secret://github/x".into()],
         );
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn persistent_approval_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("approvals.json");
+        let store1 = ApprovalStore::with_storage(&path);
+        let rec = store1.create(req("sha256:persist"));
+        store1.resolve(&rec.id, true, "user-1", "ok");
+        assert!(store1.is_valid("sha256:persist"));
+
+        let store2 = ApprovalStore::with_storage(&path);
+        let loaded = store2.load_persisted();
+        assert_eq!(loaded, 1);
+        assert!(store2.is_valid("sha256:persist"));
+        let consumed = store2.consume("sha256:persist").expect("consumed");
+        assert_eq!(consumed.use_count, 1);
+        assert!(!store2.is_valid("sha256:persist"));
     }
 }

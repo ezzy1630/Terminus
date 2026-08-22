@@ -2,6 +2,7 @@ use crate::error::JobError;
 use crate::record::JobRecord;
 use crate::state::JobState;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use terminus_process::{NormalizedSpawn, ProcessManager, SpawnOutcome};
 use tokio::sync::Mutex;
@@ -11,6 +12,7 @@ use tokio::sync::Mutex;
 pub struct JobManager {
     process_manager: Arc<ProcessManager>,
     jobs: Arc<Mutex<HashMap<String, JobRecord>>>,
+    storage_path: Option<PathBuf>,
 }
 
 impl JobManager {
@@ -18,13 +20,60 @@ impl JobManager {
         Self {
             process_manager,
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            storage_path: None,
         }
+    }
+
+    pub fn with_storage(
+        process_manager: Arc<ProcessManager>,
+        storage_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            process_manager,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            storage_path: Some(storage_path.into()),
+        }
+    }
+
+    async fn persist_state(&self, jobs: &HashMap<String, JobRecord>) -> Result<(), JobError> {
+        if let Some(path) = &self.storage_path {
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let records: Vec<&JobRecord> = jobs.values().collect();
+            let json = serde_json::to_vec_pretty(&records)?;
+            let tmp_path = format!("{}.tmp-{}", path.display(), std::process::id());
+            tokio::fs::write(&tmp_path, &json).await?;
+            tokio::fs::rename(&tmp_path, path).await?;
+        }
+        Ok(())
+    }
+
+    /// Load persisted job records from the storage file into memory.
+    pub async fn load_persisted(&self) -> Result<usize, JobError> {
+        if let Some(path) = &self.storage_path {
+            if path.exists() {
+                let data = tokio::fs::read(path).await?;
+                if !data.is_empty() {
+                    let records: Vec<JobRecord> = serde_json::from_slice(&data)?;
+                    let count = records.len();
+                    let mut jobs = self.jobs.lock().await;
+                    for r in records {
+                        jobs.insert(r.id.clone(), r);
+                    }
+                    return Ok(count);
+                }
+            }
+        }
+        Ok(0)
     }
 
     /// Register a new job in the `Created` state.
     pub async fn create(&self, record: JobRecord) -> Result<String, JobError> {
         let id = record.id.clone();
-        self.jobs.lock().await.insert(id.clone(), record);
+        let mut jobs = self.jobs.lock().await;
+        jobs.insert(id.clone(), record);
+        self.persist_state(&jobs).await?;
         Ok(id)
     }
 
@@ -45,6 +94,7 @@ impl JobManager {
         let (outcome, _rx) = self.process_manager.spawn(spawn).await?;
         record.state = record.state.transition(JobState::Running)?;
         record.process_identity = Some(outcome.process_id.clone());
+        self.persist_state(&jobs).await?;
         Ok(outcome)
     }
 
@@ -64,11 +114,14 @@ impl JobManager {
         record.started_at = Some(now_rfc3339());
         record.resolved_executable = outcome.resolved_executable.clone();
         record.process_identity = Some(outcome.process_id.clone());
+        self.persist_state(&jobs).await?;
         Ok(())
     }
 
     pub async fn remove(&self, job_id: &str) {
-        self.jobs.lock().await.remove(job_id);
+        let mut jobs = self.jobs.lock().await;
+        jobs.remove(job_id);
+        let _ = self.persist_state(&jobs).await;
     }
 
     pub async fn input(&self, job_id: &str, bytes: &[u8]) -> Result<JobState, JobError> {
@@ -112,7 +165,9 @@ impl JobManager {
             .ok_or_else(|| JobError::NotFound(job_id.to_string()))?;
         record.state = record.state.transition(JobState::Exited)?;
         record.settled_at = Some(now_rfc3339());
-        Ok(record.state)
+        let final_state = record.state;
+        self.persist_state(&jobs).await?;
+        Ok(final_state)
     }
 
     /// Mark a job as exited with the given exit info.
@@ -125,7 +180,9 @@ impl JobManager {
         if record.state == JobState::Running || record.state == JobState::Stopping {
             record.state = JobState::Exited;
             record.settled_at = Some(now_rfc3339());
-            Ok(record.state)
+            let final_state = record.state;
+            self.persist_state(&jobs).await?;
+            Ok(final_state)
         } else {
             Err(JobError::InvalidTransition {
                 from: record.state.as_str().to_string(),
@@ -141,7 +198,9 @@ impl JobManager {
             .get_mut(job_id)
             .ok_or_else(|| JobError::NotFound(job_id.to_string()))?;
         record.state = record.state.transition(JobState::Orphaned)?;
-        Ok(record.state)
+        let final_state = record.state;
+        self.persist_state(&jobs).await?;
+        Ok(final_state)
     }
 
     /// Reconcile after a kernel restart: if the process identity is no
@@ -173,7 +232,9 @@ impl JobManager {
                     };
                     record.settled_at = Some(now_rfc3339());
                 }
-                return Ok(record.state);
+                let final_state = record.state;
+                self.persist_state(&jobs).await?;
+                return Ok(final_state);
             }
         }
         let jobs = self.jobs.lock().await;
@@ -206,6 +267,7 @@ impl JobManager {
                 true
             }
         });
+        let _ = self.persist_state(&jobs).await;
         removed
     }
 
@@ -326,5 +388,25 @@ mod tests {
         mgr.mark_orphaned(&id).await.unwrap();
         assert_eq!(mgr.state(&id).await.unwrap(), JobState::Orphaned);
         let _ = mgr.stop(&id, "test").await; // Stopping from Orphaned is invalid.
+    }
+
+    #[tokio::test]
+    async fn persistent_job_survives_reload() {
+        let dir = tempdir().unwrap();
+        let store = ArtifactStore::open(dir.path()).unwrap();
+        let process = Arc::new(ProcessManager::new(Arc::new(store)));
+        let storage_path = dir.path().join("jobs.json");
+
+        let mgr1 = JobManager::with_storage(process.clone(), &storage_path);
+        let id = terminus_kernel_protocol::new_id();
+        let record = JobRecord::new(id.clone(), "sess-1", "task-1", "echo persistent");
+        mgr1.create(record).await.unwrap();
+        assert_eq!(mgr1.state(&id).await.unwrap(), JobState::Created);
+
+        // Create a second manager instance pointing to the same storage path and reload
+        let mgr2 = JobManager::with_storage(process, &storage_path);
+        let loaded = mgr2.load_persisted().await.unwrap();
+        assert_eq!(loaded, 1);
+        assert_eq!(mgr2.state(&id).await.unwrap(), JobState::Created);
     }
 }

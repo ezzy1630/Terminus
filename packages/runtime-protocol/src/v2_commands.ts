@@ -67,6 +67,14 @@ export const ARP_V2_COMMAND_TYPES = [
   "workflow.execute_node",
   "workflow.complete_node",
   "workflow.fail_node",
+  "workflow.pause",
+  "workflow.resume",
+  "workflow.cancel",
+
+  // Worker Lease Commands
+  "lease.acquire",
+  "lease.renew",
+  "lease.release",
 
   // Claim & Evidence Commands
   "claim.submit",
@@ -87,10 +95,16 @@ export const ARP_V2_COMMAND_TYPES = [
   "approval.request",
   "approval.resolve",
 
-  // Question Commands
+  // Question & Decision Commands
   "question.ask",
   "question.answer",
   "question.dismiss",
+  "decision.record",
+
+  // Risk & Budget Commands
+  "risk.record",
+  "risk.mitigate",
+  "budget.consume",
 
   // Capability Commands
   "capability.register",
@@ -224,6 +238,63 @@ export const answerQuestionCommandPayloadSchema = z.object({
 });
 export type AnswerQuestionCommandPayload = z.infer<typeof answerQuestionCommandPayloadSchema>;
 
+export const recordDecisionCommandPayloadSchema = z.object({
+  taskId: z.string(),
+  questionId: z.string().nullable().default(null),
+  statement: z.string().min(1),
+  alternativesConsidered: z.array(z.string()).default([]),
+  rationale: z.string().min(1),
+  provenance: z.string().min(1),
+});
+export type RecordDecisionCommandPayload = z.infer<typeof recordDecisionCommandPayloadSchema>;
+
+// Lease Commands
+export const acquireLeaseCommandPayloadSchema = z.object({
+  taskId: z.string(),
+  workerId: z.string(),
+  durationSeconds: z.number().int().positive().default(30),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type AcquireLeaseCommandPayload = z.infer<typeof acquireLeaseCommandPayloadSchema>;
+
+export const renewLeaseCommandPayloadSchema = z.object({
+  leaseId: z.string(),
+  fencingToken: z.number().int().positive(),
+  durationSeconds: z.number().int().positive().default(30),
+});
+export type RenewLeaseCommandPayload = z.infer<typeof renewLeaseCommandPayloadSchema>;
+
+export const releaseLeaseCommandPayloadSchema = z.object({
+  leaseId: z.string(),
+  fencingToken: z.number().int().positive(),
+});
+export type ReleaseLeaseCommandPayload = z.infer<typeof releaseLeaseCommandPayloadSchema>;
+
+// Risk & Budget Commands
+export const recordRiskCommandPayloadSchema = z.object({
+  taskId: z.string(),
+  riskClass: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]),
+  statement: z.string().min(1),
+  mitigation: z.string().nullable().default(null),
+});
+export type RecordRiskCommandPayload = z.infer<typeof recordRiskCommandPayloadSchema>;
+
+export const mitigateRiskCommandPayloadSchema = z.object({
+  riskId: z.string(),
+  mitigation: z.string().min(1),
+});
+export type MitigateRiskCommandPayload = z.infer<typeof mitigateRiskCommandPayloadSchema>;
+
+export const consumeBudgetCommandPayloadSchema = z.object({
+  taskId: z.string(),
+  costMicros: z.bigint().nonnegative().default(0n),
+  computeSeconds: z.number().int().nonnegative().default(0),
+  inputTokens: z.bigint().nonnegative().default(0n),
+  outputTokens: z.bigint().nonnegative().default(0n),
+  approvals: z.number().int().nonnegative().default(0),
+});
+export type ConsumeBudgetCommandPayload = z.infer<typeof consumeBudgetCommandPayloadSchema>;
+
 // ────────────────────────── Command Payload Map ──────────────────────────────
 
 export interface ArpV2CommandPayloadMap {
@@ -238,6 +309,13 @@ export interface ArpV2CommandPayloadMap {
   "workflow.execute_node": ExecuteNodeCommandPayload;
   "workflow.complete_node": { readonly nodeRunId: string; readonly outputs: Record<string, unknown> };
   "workflow.fail_node": { readonly nodeRunId: string; readonly error: string };
+  "workflow.pause": { readonly workflowId: string };
+  "workflow.resume": { readonly workflowId: string };
+  "workflow.cancel": { readonly workflowId: string; readonly reason?: string | undefined };
+
+  "lease.acquire": AcquireLeaseCommandPayload;
+  "lease.renew": RenewLeaseCommandPayload;
+  "lease.release": ReleaseLeaseCommandPayload;
 
   "claim.submit": SubmitClaimCommandPayload;
   "claim.waive": WaiveClaimCommandPayload;
@@ -258,6 +336,11 @@ export interface ArpV2CommandPayloadMap {
   "question.ask": AskQuestionCommandPayload;
   "question.answer": AnswerQuestionCommandPayload;
   "question.dismiss": { readonly questionId: string };
+  "decision.record": RecordDecisionCommandPayload;
+
+  "risk.record": RecordRiskCommandPayload;
+  "risk.mitigate": MitigateRiskCommandPayload;
+  "budget.consume": ConsumeBudgetCommandPayload;
 
   "capability.register": { readonly capabilityId: string; readonly descriptor: Record<string, unknown> };
   "capability.revoke": { readonly capabilityId: string; readonly reason: string };

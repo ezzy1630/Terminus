@@ -104,6 +104,41 @@
       "path": "schemas/generated/v2/risk.json",
       "sha256": "sha256:be6ee632270e46ae08b925b0958b498653386d96558b16a54a50e7e433d845df",
       "bytes": 1006
+    },
+    {
+      "name": "worker-lease",
+      "title": "WorkerLease",
+      "path": "schemas/generated/v2/worker-lease.json",
+      "sha256": "sha256:68deee09659fd3ce931af7f092f4c7458ad1fb967857086e25bd050d19a6ee63",
+      "bytes": 1237
+    },
+    {
+      "name": "task-attempt",
+      "title": "TaskAttempt",
+      "path": "schemas/generated/v2/task-attempt.json",
+      "sha256": "sha256:81606a7af7319b92d895fa37cbd0d044ab51dbc710d7009397ea5749640c8ef7",
+      "bytes": 1331
+    },
+    {
+      "name": "outbox-message",
+      "title": "OutboxMessage",
+      "path": "schemas/generated/v2/outbox-message.json",
+      "sha256": "sha256:5e0c616c4508f0eed0b24d1be2ad6cccdb85bd1ff3952e843754c29c5d1d49e8",
+      "bytes": 1324
+    },
+    {
+      "name": "inbox-message",
+      "title": "InboxMessage",
+      "path": "schemas/generated/v2/inbox-message.json",
+      "sha256": "sha256:17b0f668173369ff3e001ecff3b5276c2a3298cb9af2ba15146c80cb844ad1c8",
+      "bytes": 1054
+    },
+    {
+      "name": "budget-consumption",
+      "title": "BudgetConsumption",
+      "path": "schemas/generated/v2/budget-consumption.json",
+      "sha256": "sha256:4d1561b3e7ba0fad9ac79792106b34ddbb5fd88074d031fb07a7a6a65984ece1",
+      "bytes": 842
     }
   ]
 }

@@ -853,6 +853,185 @@ export const taskExecutionModeSchema = z.enum([
   "fleet",
 ]);
 
+// ───────────────────── Workflow state machine (SPEC §8) ──────────────────────
+
+export const WorkflowStatus = {
+  DRAFT: "DRAFT",
+  COMPILED: "COMPILED",
+  VALIDATED: "VALIDATED",
+  RUNNING: "RUNNING",
+  PAUSED: "PAUSED",
+  COMPLETED: "COMPLETED",
+  FAILED: "FAILED",
+  CANCELLED: "CANCELLED",
+} as const;
+export type WorkflowStatus = (typeof WorkflowStatus)[keyof typeof WorkflowStatus];
+export const workflowStatusSchema = z.enum([
+  "DRAFT",
+  "COMPILED",
+  "VALIDATED",
+  "RUNNING",
+  "PAUSED",
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+]);
+
+export const WORKFLOW_TRANSITIONS: Readonly<Record<WorkflowStatus, readonly WorkflowStatus[]>> = {
+  DRAFT: ["COMPILED", "CANCELLED"],
+  COMPILED: ["VALIDATED", "CANCELLED"],
+  VALIDATED: ["RUNNING", "CANCELLED"],
+  RUNNING: ["PAUSED", "COMPLETED", "FAILED", "CANCELLED"],
+  PAUSED: ["RUNNING", "CANCELLED"],
+  COMPLETED: [],
+  FAILED: [],
+  CANCELLED: [],
+} as const;
+
+export const WorkflowTerminalStatus: ReadonlySet<WorkflowStatus> = new Set<WorkflowStatus>([
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+]);
+
+export function isWorkflowTerminal(status: WorkflowStatus): boolean {
+  return WorkflowTerminalStatus.has(status);
+}
+
+export function isWorkflowTransitionAllowed(from: WorkflowStatus, to: WorkflowStatus): boolean {
+  return WORKFLOW_TRANSITIONS[from].includes(to);
+}
+
+// ───────────────────── Node Run state machine (SPEC §8.1) ─────────────────────
+
+export const NodeRunStatus = {
+  PENDING: "PENDING",
+  RUNNING: "RUNNING",
+  SUSPENDED: "SUSPENDED",
+  COMPLETED: "COMPLETED",
+  FAILED: "FAILED",
+  SKIPPED: "SKIPPED",
+  CANCELLED: "CANCELLED",
+} as const;
+export type NodeRunStatus = (typeof NodeRunStatus)[keyof typeof NodeRunStatus];
+export const nodeRunStatusSchema = z.enum([
+  "PENDING",
+  "RUNNING",
+  "SUSPENDED",
+  "COMPLETED",
+  "FAILED",
+  "SKIPPED",
+  "CANCELLED",
+]);
+
+export const NODE_RUN_TRANSITIONS: Readonly<Record<NodeRunStatus, readonly NodeRunStatus[]>> = {
+  PENDING: ["RUNNING", "SKIPPED", "CANCELLED"],
+  RUNNING: ["SUSPENDED", "COMPLETED", "FAILED", "CANCELLED"],
+  SUSPENDED: ["RUNNING", "FAILED", "CANCELLED"],
+  COMPLETED: [],
+  FAILED: [],
+  SKIPPED: [],
+  CANCELLED: [],
+} as const;
+
+export const NodeRunTerminalStatus: ReadonlySet<NodeRunStatus> = new Set<NodeRunStatus>([
+  "COMPLETED",
+  "FAILED",
+  "SKIPPED",
+  "CANCELLED",
+]);
+
+export function isNodeRunTerminal(status: NodeRunStatus): boolean {
+  return NodeRunTerminalStatus.has(status);
+}
+
+export function isNodeRunTransitionAllowed(from: NodeRunStatus, to: NodeRunStatus): boolean {
+  return NODE_RUN_TRANSITIONS[from].includes(to);
+}
+
+// ───────────────────── Task Attempt state machine (SPEC §5, §6) ───────────────
+
+export const AttemptStatus = {
+  STARTING: "STARTING",
+  RUNNING: "RUNNING",
+  RECOVERING: "RECOVERING",
+  COMPLETED: "COMPLETED",
+  FAILED: "FAILED",
+  ABORTED: "ABORTED",
+} as const;
+export type AttemptStatus = (typeof AttemptStatus)[keyof typeof AttemptStatus];
+export const attemptStatusSchema = z.enum([
+  "STARTING",
+  "RUNNING",
+  "RECOVERING",
+  "COMPLETED",
+  "FAILED",
+  "ABORTED",
+]);
+
+export const ATTEMPT_TRANSITIONS: Readonly<Record<AttemptStatus, readonly AttemptStatus[]>> = {
+  STARTING: ["RUNNING", "FAILED", "ABORTED"],
+  RUNNING: ["RECOVERING", "COMPLETED", "FAILED", "ABORTED"],
+  RECOVERING: ["RUNNING", "COMPLETED", "FAILED", "ABORTED"],
+  COMPLETED: [],
+  FAILED: [],
+  ABORTED: [],
+} as const;
+
+export const AttemptTerminalStatus: ReadonlySet<AttemptStatus> = new Set<AttemptStatus>([
+  "COMPLETED",
+  "FAILED",
+  "ABORTED",
+]);
+
+export function isAttemptTerminal(status: AttemptStatus): boolean {
+  return AttemptTerminalStatus.has(status);
+}
+
+export function isAttemptTransitionAllowed(from: AttemptStatus, to: AttemptStatus): boolean {
+  return ATTEMPT_TRANSITIONS[from].includes(to);
+}
+
+// ───────────────────── Worker Lease state machine (SPEC §10, §14) ────────────
+
+export const LeaseStatus = {
+  ACQUIRED: "ACQUIRED",
+  RENEWED: "RENEWED",
+  RELEASED: "RELEASED",
+  EXPIRED: "EXPIRED",
+  FENCED: "FENCED",
+} as const;
+export type LeaseStatus = (typeof LeaseStatus)[keyof typeof LeaseStatus];
+export const leaseStatusSchema = z.enum([
+  "ACQUIRED",
+  "RENEWED",
+  "RELEASED",
+  "EXPIRED",
+  "FENCED",
+]);
+
+export const LEASE_TRANSITIONS: Readonly<Record<LeaseStatus, readonly LeaseStatus[]>> = {
+  ACQUIRED: ["RENEWED", "RELEASED", "EXPIRED", "FENCED"],
+  RENEWED: ["RENEWED", "RELEASED", "EXPIRED", "FENCED"],
+  RELEASED: [],
+  EXPIRED: [],
+  FENCED: [],
+} as const;
+
+export const LeaseTerminalStatus: ReadonlySet<LeaseStatus> = new Set<LeaseStatus>([
+  "RELEASED",
+  "EXPIRED",
+  "FENCED",
+]);
+
+export function isLeaseTerminal(status: LeaseStatus): boolean {
+  return LeaseTerminalStatus.has(status);
+}
+
+export function isLeaseTransitionAllowed(from: LeaseStatus, to: LeaseStatus): boolean {
+  return LEASE_TRANSITIONS[from].includes(to);
+}
+
 /** Assert all values of a string union are handled; use in exhaustive switches. */
 export function assertNever(x: never): never {
   throw new Error(`unexpected value: ${JSON.stringify(x)}`);
