@@ -17,23 +17,55 @@ pub struct SecretMetadata {
 
 /// A short-lived handle to a secret value. The value is held in memory and
 /// wiped (zeroed) on drop.
+///
+/// ADR-0035 §1: raw-value access is crate-private. The only sanctioned
+/// consumer outside this crate is the L7 connector broker
+/// (`terminus-connector`), via [`SecretHandle::http_header_pair`], which
+/// injects the credential into the exact bound request. Models, tools,
+/// artifacts, and logs never receive the material.
 pub struct SecretHandle {
     pub metadata: SecretMetadata,
     value: Vec<u8>,
 }
 
 impl SecretHandle {
-    pub fn value(&self) -> &[u8] {
-        &self.value
+    /// SHA-256 digest of the credential material. Safe to persist with the
+    /// grant claims; reveals nothing about the value.
+    pub fn digest(&self) -> String {
+        crate::grant::credential_digest(&self.value)
     }
 
-    /// Returns the env var name + value to inject into a child process. The
-    /// caller is responsible for not logging this.
-    pub fn as_env_pair(&self, var_name: &str) -> (String, String) {
-        (
-            var_name.to_string(),
-            String::from_utf8_lossy(&self.value).to_string(),
-        )
+    /// Build an HTTP header pair injecting the credential. This accessor is
+    /// part of the Phase-4 trusted computing base (ADR-0035): the ONLY
+    /// sanctioned caller is the L7 connector broker while executing the
+    /// grant-bound request. The returned pair MUST be placed directly into
+    /// the outgoing request and MUST NOT be logged, serialized, or stored.
+    pub fn http_header_pair(&self, auth_scheme: &str) -> Result<(String, String), SecretError> {
+        let value = String::from_utf8(self.value.clone())
+            .map_err(|_| SecretError::InvalidGrant("credential is not valid UTF-8".into()))?;
+        Ok(("Authorization".to_string(), format!("{auth_scheme} {value}")))
+    }
+
+    /// Build a named-header pair for APIs that use a custom key header
+    /// (e.g. `X-Api-Key`). Same trusted-connector-only contract as
+    /// [`SecretHandle::http_header_pair`].
+    pub fn named_header_pair(
+        &self,
+        header_name: &str,
+    ) -> Result<(String, String), SecretError> {
+        if header_name.eq_ignore_ascii_case("authorization") {
+            return self.http_header_pair("Bearer");
+        }
+        let value = String::from_utf8(self.value.clone())
+            .map_err(|_| SecretError::InvalidGrant("credential is not valid UTF-8".into()))?;
+        Ok((header_name.to_string(), value))
+    }
+
+    /// Replace the in-memory bytes with zeros.
+    fn wipe(&mut self) {
+        for byte in self.value.iter_mut() {
+            *byte = 0;
+        }
     }
 }
 
@@ -41,9 +73,7 @@ impl Drop for SecretHandle {
     fn drop(&mut self) {
         // Best-effort wipe. We can't guarantee the compiler won't have moved
         // the bytes, but we zero what we still own.
-        for byte in self.value.iter_mut() {
-            *byte = 0;
-        }
+        self.wipe();
     }
 }
 
@@ -57,13 +87,17 @@ impl std::fmt::Debug for SecretHandle {
 }
 
 /// A provider trait that produces a `SecretHandle` for a URI. Production
-/// deployments wire this to OAuth2, vault, etc.
+/// deployments wire this to workload identities, OAuth2 token exchange, or
+/// vault dynamic credentials (SPEC §17.2).
 pub trait SecretProvider: Send + Sync {
     fn resolve(&self, uri: &str) -> Result<SecretHandle, SecretError>;
 }
 
-/// An in-memory provider for tests. Maps `secret://provider/scope` to a
-/// static value.
+/// **Fixture-only** in-memory provider (maturity: `fixture`, ADR-0035 §1).
+/// Maps `secret://provider/scope` to a static value. Production wiring MUST
+/// use a provider that mints short-lived, operation-scoped credentials;
+/// registering this provider in a production kernel configuration is a
+/// conformance violation.
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryProvider {
     entries: std::sync::Arc<Mutex<HashMap<String, Vec<u8>>>>,
@@ -219,7 +253,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_returns_handle() {
+    fn request_returns_metadata_only_handle() {
         let broker = SecretBroker::new();
         let provider = std::sync::Arc::new(InMemoryProvider::new());
         provider.register("secret://github/repo-read", b"ghp_xxx".to_vec());
@@ -227,7 +261,35 @@ mod tests {
         let handle = broker
             .request("secret://github/repo-read", "task-1")
             .unwrap();
-        assert_eq!(handle.value(), b"ghp_xxx");
+        assert_eq!(handle.metadata.uri, "secret://github/repo-read");
+    }
+
+    #[test]
+    fn digest_is_stable_and_value_free() {
+        let broker = SecretBroker::new();
+        let provider = std::sync::Arc::new(InMemoryProvider::new());
+        provider.register("secret://github/repo-read", b"ghp_xxx".to_vec());
+        broker.register_provider("github", provider);
+        let handle = broker
+            .request("secret://github/repo-read", "task-1")
+            .unwrap();
+        let digest = handle.digest();
+        assert!(!digest.contains("ghp"));
+        assert_eq!(digest.len(), 64);
+    }
+
+    #[test]
+    fn header_pair_injects_scheme() {
+        let broker = SecretBroker::new();
+        let provider = std::sync::Arc::new(InMemoryProvider::new());
+        provider.register("secret://github/repo-read", b"ghp_xxx".to_vec());
+        broker.register_provider("github", provider);
+        let handle = broker
+            .request("secret://github/repo-read", "task-1")
+            .unwrap();
+        let (name, value) = handle.http_header_pair("Bearer").unwrap();
+        assert_eq!(name, "Authorization");
+        assert_eq!(value, "Bearer ghp_xxx");
     }
 
     #[test]

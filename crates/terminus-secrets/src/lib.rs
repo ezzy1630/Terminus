@@ -16,9 +16,16 @@
 mod audit;
 mod broker;
 mod error;
+mod grant;
 mod redact;
+mod residue;
 
 pub use audit::{AuditEntry, SecretAuditLog};
-pub use broker::{SecretBroker, SecretHandle, SecretMetadata};
+pub use broker::{InMemoryProvider, SecretBroker, SecretHandle, SecretMetadata, SecretProvider};
 pub use error::SecretError;
+pub use grant::{
+    ConsumedGrant, ConnectorGrant, GrantBinding, GrantClaims, GrantIssuer, GrantStore,
+    WorkloadIdentity, MAX_GRANT_TTL_SECS,
+};
 pub use redact::{RedactionPattern, Redactor};
+pub use residue::{CanaryMaterial, ResidueHit, ResidueScanner, ResidueSurface};

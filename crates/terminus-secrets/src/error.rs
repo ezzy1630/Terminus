@@ -14,6 +14,10 @@ pub enum SecretError {
     InvalidUri(String),
     #[error("provider unavailable: {0}")]
     ProviderUnavailable(String),
+    #[error("invalid connector grant: {0}")]
+    InvalidGrant(String),
+    #[error("grant binding mismatch: {0}")]
+    BindingMismatch(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
