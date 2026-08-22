@@ -21,7 +21,7 @@
 
 | File | Size |
 |---|---:|
-| `component-maturity.md` | 10139 B |
+| `component-maturity.md` | 10774 B |
 | `config.md` | 6601 B |
 | `events.md` | 12806 B |
 | `inventory.md` | 1285 B |

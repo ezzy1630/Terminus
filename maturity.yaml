@@ -36,15 +36,19 @@ components:
   - { id: terminus-policy, kind: rust-crate, path: crates/terminus-policy, tier: preview,
       basis: "Strictest-wins command policy engine with unit tests" }
   - { id: terminus-sandbox, kind: rust-crate, path: crates/terminus-sandbox, tier: preview,
-      basis: "Backend trait + LocalRestrictive with honest degraded reporting" }
+      basis: "Backend trait + tier policy + secure-mode fail-closed selection + effective-control probes (ADR-0035)" }
   - { id: terminus-sandbox-linux, kind: rust-crate, path: crates/terminus-sandbox-linux, tier: experimental,
       basis: "Strongest platform path (real bwrap argv); needs current signed conformance evidence at HEAD" }
-  - { id: terminus-sandbox-macos, kind: rust-crate, path: crates/terminus-sandbox-macos, tier: stub,
-      basis: "Seatbelt profile generation not implemented; reports Degraded honestly" }
+  - { id: terminus-sandbox-macos, kind: rust-crate, path: crates/terminus-sandbox-macos, tier: experimental,
+      basis: "Real Seatbelt profile generation + env -i payload allowlist; live effective-control probes Enforced on dev hosts (ADR-0035 §4)" }
   - { id: terminus-sandbox-windows, kind: rust-crate, path: crates/terminus-sandbox-windows, tier: stub,
-      basis: "AppContainer/Job Object wiring not implemented; reports Degraded honestly" }
-  - { id: terminus-sandbox-container, kind: rust-crate, path: crates/terminus-sandbox-container, tier: stub,
-      basis: "Wrapper emits docker argv only; enforcement report corrected (Phase 0) to Degraded until hardened OCI profiles land (Phase 4)" }
+      basis: "Native AppContainer intentionally absent (unsafe FFI needs dedicated ADR); fail-closed WSL2/container fallback only (ADR-0035 §5)" }
+  - { id: terminus-sandbox-container, kind: rust-crate, path: crates/terminus-sandbox-container, tier: experimental,
+      basis: "Hardened OCI profiles with argv-proven enforcement report; permissive mode stays Degraded (ADR-0035 §3)" }
+  - { id: terminus-sandbox-microvm, kind: rust-crate, path: crates/terminus-sandbox-microvm, tier: stub,
+      basis: "Tier-3 backend selection skeleton: hypervisor detection + pinned rootfs + machine-config generation; fail-closed, EXPERIMENTAL per ADR-0027" }
+  - { id: terminus-connector, kind: rust-crate, path: crates/terminus-connector, tier: experimental,
+      basis: "L7 connector broker: grant-bound credential injection, exact-operation binding, response scrubbing; https fails closed pending TLS transport" }
   - { id: terminus-process, kind: rust-crate, path: crates/terminus-process, tier: preview,
       basis: "Process groups, bounded capture w/ artifact spill, timeouts; worker primitive" }
   - { id: terminus-jobs, kind: rust-crate, path: crates/terminus-jobs, tier: experimental,
@@ -55,8 +59,8 @@ components:
       basis: "Transactional edit engine with journal/snapshot/rollback tests" }
   - { id: terminus-artifacts, kind: rust-crate, path: crates/terminus-artifacts, tier: preview,
       basis: "CAS sha256 layout, atomic rename+fsync, SQLite metadata bridge tests" }
-  - { id: terminus-secrets, kind: rust-crate, path: crates/terminus-secrets, tier: stub,
-      basis: "Raw-value SecretHandle API + in-memory provider; north-star 'secrets never enter runtime context' unmet (audit 4.6); replacement in Phase 4" }
+  - { id: terminus-secrets, kind: rust-crate, path: crates/terminus-secrets, tier: experimental,
+      basis: "Opaque ConnectorGrants (workload identity + exact-operation binding) + residue scanner; raw-value API crate-private, InMemoryProvider fixture-only (ADR-0035 §1)" }
   - { id: terminus-egress, kind: rust-crate, path: crates/terminus-egress, tier: experimental,
       basis: "L4 broker real (DNS/IP/port/scheme/bytes); no L7 intent semantics yet (audit 4.7)" }
   - { id: terminus-code-intel, kind: rust-crate, path: crates/terminus-code-intel, tier: experimental,

@@ -9,8 +9,8 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 |---|---:|
 | `production` | 0 |
 | `preview` | 11 |
-| `experimental` | 41 |
-| `stub` | 11 |
+| `experimental` | 45 |
+| `stub` | 9 |
 | `fixture` | 5 |
 
 | Component | Kind | Path | Tier | Basis |
@@ -27,10 +27,8 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `adapter-openhands` | adapter | `adapters/openhands` | `stub` | adapter.yaml declaration only; runner not implemented |
 | `adapter-pi` | adapter | `adapters/pi` | `stub` | Contract-stub runner (protocol only, no inner harness launch, lastVerified null) |
 | `terminus-extension-runtime` | rust-crate | `crates/terminus-extension-runtime` | `stub` | WASI extension host stub |
-| `terminus-sandbox-container` | rust-crate | `crates/terminus-sandbox-container` | `stub` | Wrapper emits docker argv only; enforcement report corrected (Phase 0) to Degraded until hardened OCI profiles land (Phase 4) |
-| `terminus-sandbox-macos` | rust-crate | `crates/terminus-sandbox-macos` | `stub` | Seatbelt profile generation not implemented; reports Degraded honestly |
-| `terminus-sandbox-windows` | rust-crate | `crates/terminus-sandbox-windows` | `stub` | AppContainer/Job Object wiring not implemented; reports Degraded honestly |
-| `terminus-secrets` | rust-crate | `crates/terminus-secrets` | `stub` | Raw-value SecretHandle API + in-memory provider; north-star 'secrets never enter runtime context' unmet (audit 4.6); replacement in Phase 4 |
+| `terminus-sandbox-microvm` | rust-crate | `crates/terminus-sandbox-microvm` | `stub` | Tier-3 backend selection skeleton: hypervisor detection + pinned rootfs + machine-config generation; fail-closed, EXPERIMENTAL per ADR-0027 |
+| `terminus-sandbox-windows` | rust-crate | `crates/terminus-sandbox-windows` | `stub` | Native AppContainer intentionally absent (unsafe FFI needs dedicated ADR); fail-closed WSL2/container fallback only (ADR-0035 §5) |
 | `app-cli` | app | `apps/cli` | `experimental` | Non-interactive CLI for CI/automation |
 | `app-desktop` | app | `apps/desktop` | `experimental` | Electron desktop app; README test-count claims replaced by inventory (Phase 0) |
 | `app-ide-acp` | app | `apps/ide-acp` | `experimental` | ACP-over-stdio adapter for editors |
@@ -40,12 +38,16 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `forge-evals` | python-package | `python/forge_evals` | `experimental` | Runners/graders/statistics/dashboards substantial; release-tier evals are fixture-mode until model-backed runs are wired (scripts/run-release-evals.sh) |
 | `terminus-authz` | rust-crate | `crates/terminus-authz` | `experimental` | Signed/scoped capability tokens real; revocation + nonce state in-memory (audit 4.4) |
 | `terminus-code-intel` | rust-crate | `crates/terminus-code-intel` | `experimental` | Tree-sitter symbol index with basic tests |
+| `terminus-connector` | rust-crate | `crates/terminus-connector` | `experimental` | L7 connector broker: grant-bound credential injection, exact-operation binding, response scrubbing; https fails closed pending TLS transport |
 | `terminus-egress` | rust-crate | `crates/terminus-egress` | `experimental` | L4 broker real (DNS/IP/port/scheme/bytes); no L7 intent semantics yet (audit 4.7) |
 | `terminus-git` | rust-crate | `crates/terminus-git` | `experimental` | Protected worktree/commit/merge operations, small test set |
 | `terminus-jobs` | rust-crate | `crates/terminus-jobs` | `experimental` | Useful supervision but job state is process-local; durability claims prohibited until Phase 2 substrate exists (audit 4.5) |
 | `terminus-kernel` | rust-crate | `crates/terminus-kernel` | `experimental` | Service assembly substantive (13 service groups); full non-bypassability not proven at HEAD (no CI run) |
 | `terminus-remote` | rust-crate | `crates/terminus-remote` | `experimental` | Execution pool + digest-pinned image primitives |
+| `terminus-sandbox-container` | rust-crate | `crates/terminus-sandbox-container` | `experimental` | Hardened OCI profiles with argv-proven enforcement report; permissive mode stays Degraded (ADR-0035 §3) |
 | `terminus-sandbox-linux` | rust-crate | `crates/terminus-sandbox-linux` | `experimental` | Strongest platform path (real bwrap argv); needs current signed conformance evidence at HEAD |
+| `terminus-sandbox-macos` | rust-crate | `crates/terminus-sandbox-macos` | `experimental` | Real Seatbelt profile generation + env -i payload allowlist; live effective-control probes Enforced on dev hosts (ADR-0035 §4) |
+| `terminus-secrets` | rust-crate | `crates/terminus-secrets` | `experimental` | Opaque ConnectorGrants (workload identity + exact-operation binding) + residue scanner; raw-value API crate-private, InMemoryProvider fixture-only (ADR-0035 §1) |
 | `aci` | ts-package | `packages/aci` | `experimental` | Agent-Computer Interface tools; unproven at HEAD |
 | `adapter-sdk` | ts-package | `packages/adapter-sdk` | `experimental` | Stdio JSON-RPC adapter SDK; maturity gate added in Phase 0; live probes never run |
 | `artifact-client` | ts-package | `packages/artifact-client` | `experimental` | Artifact ingest/get/link/gc client |
@@ -78,7 +80,7 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `terminus-patch` | rust-crate | `crates/terminus-patch` | `preview` | Transactional edit engine with journal/snapshot/rollback tests |
 | `terminus-policy` | rust-crate | `crates/terminus-policy` | `preview` | Strictest-wins command policy engine with unit tests |
 | `terminus-process` | rust-crate | `crates/terminus-process` | `preview` | Process groups, bounded capture w/ artifact spill, timeouts; worker primitive |
-| `terminus-sandbox` | rust-crate | `crates/terminus-sandbox` | `preview` | Backend trait + LocalRestrictive with honest degraded reporting |
+| `terminus-sandbox` | rust-crate | `crates/terminus-sandbox` | `preview` | Backend trait + tier policy + secure-mode fail-closed selection + effective-control probes (ADR-0035) |
 | `config` | ts-package | `packages/config` | `preview` | Layered typed configuration with JSON Schema codegen |
 | `domain` | ts-package | `packages/domain` | `preview` | Canonical types/state machines/typed errors consumed by every package |
 | `public-api` | ts-package | `packages/public-api` | `preview` | HTTP API definitions/error envelope/SSE with generated client surface |
