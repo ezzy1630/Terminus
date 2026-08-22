@@ -29,11 +29,15 @@ cd "$source_dir"
 bun install --frozen-lockfile --ignore-scripts || {
   echo "[opencode-parity] dependency install reported optional-package failures; continuing to the typecheck" >&2
 }
+export PATH="$source_dir/node_modules/.bin:$PATH"
 if [[ -f "$source_dir/node_modules/.bin/tsc" ]]; then
   cat << 'EOF' > "$source_dir/node_modules/.bin/tsgo"
-#!/usr/bin/env bash
-exec "$(dirname "$0")/tsc" "$@"
+#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const res = spawnSync("tsc", process.argv.slice(2), { stdio: "inherit", shell: true });
+process.exit(res.status ?? 0);
 EOF
   chmod +x "$source_dir/node_modules/.bin/tsgo"
+  find "$source_dir/packages" -type d -name ".bin" -exec cp "$source_dir/node_modules/.bin/tsgo" {}/tsgo \; 2>/dev/null || true
 fi
 bun turbo typecheck
