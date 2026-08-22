@@ -14,7 +14,7 @@ use crate::operation::CanonicalOperation;
 use crate::receipt::{ConnectorReceipt, Outcome};
 use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use terminus_egress::EgressProxy;
 use terminus_secrets::{ConnectorGrant, GrantStore, Redactor, SecretBroker};
@@ -48,7 +48,7 @@ pub struct ConnectorBroker {
     grants: Arc<GrantStore>,
     egress: Arc<EgressProxy>,
     signing_key: Vec<u8>,
-    connectors: HashMap<String, ConnectorDescriptor>,
+    connectors: RwLock<HashMap<String, ConnectorDescriptor>>,
     max_request_bytes: usize,
     max_response_bytes: usize,
     timeout: Duration,
@@ -56,8 +56,13 @@ pub struct ConnectorBroker {
 
 impl std::fmt::Debug for ConnectorBroker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names = self
+            .connectors
+            .read()
+            .map(|g| g.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
         f.debug_struct("ConnectorBroker")
-            .field("connectors", &self.connectors.keys().collect::<Vec<_>>())
+            .field("connectors", &names)
             .field("max_request_bytes", &self.max_request_bytes)
             .field("max_response_bytes", &self.max_response_bytes)
             .finish_non_exhaustive()
@@ -109,7 +114,7 @@ impl ConnectorBrokerBuilder {
             grants: self.grants,
             egress: self.egress,
             signing_key: self.signing_key,
-            connectors: self.connectors,
+            connectors: RwLock::new(self.connectors),
             max_request_bytes: self.max_request_bytes,
             max_response_bytes: self.max_response_bytes,
             timeout: self.timeout,
@@ -139,7 +144,7 @@ impl ConnectorBroker {
     /// Register a connector descriptor. `auth` decides how the resolved
     /// credential is injected into the outgoing request.
     pub fn register_connector(
-        &mut self,
+        &self,
         id: impl Into<String>,
         auth: AuthStyle,
     ) -> Result<(), ConnectorError> {
@@ -151,7 +156,10 @@ impl ConnectorBroker {
                 )));
             }
         }
-        self.connectors.insert(id.into(), ConnectorDescriptor { auth });
+        self.connectors
+            .write()
+            .map_err(|_| ConnectorError::Protocol("connector registry poisoned".into()))?
+            .insert(id.into(), ConnectorDescriptor { auth });
         Ok(())
     }
 
@@ -167,7 +175,10 @@ impl ConnectorBroker {
         // -- 1. Pre-flight binding checks (no state mutation yet) --------
         let descriptor = self
             .connectors
+            .read()
+            .map_err(|_| ConnectorError::Protocol("connector registry poisoned".into()))?
             .get(&binding.connector_id)
+            .cloned()
             .ok_or_else(|| ConnectorError::UnknownConnector(binding.connector_id.clone()))?;
         // Exact-operation binding: destination must match the mint-time
         // pin before any DNS resolution, credential work, or consumption.

@@ -149,8 +149,9 @@ integration:
 
 # Local-capable security suite (per-PR subset).
 security:
-    cargo test --workspace --test capability_token_e2e --test non_bypassability --test policy_wiring
+    cargo test --workspace --test capability_token_e2e --test non_bypassability --test policy_wiring --test secret_canary_e2e
     bun run test:security
+    just platform-probes
     cargo deny check
 
 # End-to-end task tests.
@@ -239,6 +240,12 @@ release-decision: platform-matrix
 # platform is "supported" only with conformance evidence bound to HEAD.
 platform-matrix:
     bun run scripts/produce-platform-matrix.ts
+
+# Effective-control sandbox probes (roadmap Phase 4, ADR-0035 §8): runs
+# canary payloads through each available backend and writes the measured
+# platform support matrix. "Configured" is not "Enforced".
+platform-probes:
+    cargo run -p terminus-sandbox --example platform-probes -- docs/generated/platform-probes.json
 
 # Cross-check source declarations against release metadata and CI config.
 truth-check:

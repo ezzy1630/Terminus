@@ -97,6 +97,22 @@ impl KernelHandle {
     /// Build a kernel with all defaults. `data_dir` is the on-disk root for
     /// artifacts, journals, state.
     pub fn new(data_dir: PathBuf) -> Result<Self, KernelAssemblyError> {
+        Self::new_with_egress_policy(
+            data_dir,
+            terminus_egress::EgressPolicy::default(),
+            terminus_egress::RateLimit::default(),
+        )
+    }
+
+    /// Build a kernel with an explicit L4 egress policy. Local development
+    /// and conformance harnesses use this to allowlist fixture destinations
+    /// without weakening the production default (deny-all + private-IP
+    /// denial).
+    pub fn new_with_egress_policy(
+        data_dir: PathBuf,
+        egress_policy: terminus_egress::EgressPolicy,
+        rate_limit: terminus_egress::RateLimit,
+    ) -> Result<Self, KernelAssemblyError> {
         let artifact_store = Arc::new(ArtifactStore::open(data_dir.join("artifacts"))?);
         let process_manager = Arc::new(ProcessManager::new(Arc::clone(&artifact_store)));
         let job_manager = Arc::new(JobManager::new(Arc::clone(&process_manager)));
@@ -163,10 +179,7 @@ impl KernelHandle {
             terminus_code_intel::InMemorySymbolIndex::new(),
         )));
         let extension_host = Arc::new(WasiExtensionHost::new());
-        let egress = Arc::new(EgressProxy::new(
-            terminus_egress::EgressPolicy::default(),
-            terminus_egress::RateLimit::default(),
-        ));
+        let egress = Arc::new(EgressProxy::new(egress_policy, rate_limit));
         let egress_broker_root = data_dir.join("egress-brokers");
         let workspace_resolver = Arc::new(PathResolver::new(&data_dir)?);
         let patch_engine = PatchEngine::new(
@@ -1851,6 +1864,24 @@ impl ConnectorService {
             token_issuer,
             signing_key,
         }
+    }
+
+    /// Register a connector descriptor at runtime. Local development and
+    /// conformance harnesses register fixture connectors this way;
+    /// production wiring registers them from configuration.
+    pub fn register_connector(
+        &self,
+        id: impl Into<String>,
+        auth: terminus_connector::AuthStyle,
+    ) -> KernelResult<()> {
+        self.broker.register_connector(id, auth).map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidRequest,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                format!("{e}"),
+                false,
+            )
+        })
     }
 
     /// Decode + verify an encoded grant against the service's signing key.

@@ -896,6 +896,9 @@ dependencies = [
  "serde",
  "serde_json",
  "terminus-kernel-protocol",
+ "terminus-sandbox-linux",
+ "terminus-sandbox-macos",
+ "terminus-sandbox-windows",
  "thiserror",
  "tracing",
 ]

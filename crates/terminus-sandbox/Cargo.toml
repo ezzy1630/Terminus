@@ -15,3 +15,8 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+terminus-sandbox-linux = { workspace = true }
+terminus-sandbox-macos = { workspace = true }
+terminus-sandbox-windows = { workspace = true }

@@ -115,9 +115,23 @@ pub fn generate_seatbelt_profile(
     sb.push_str("(version 1)\n");
     sb.push_str("(deny default)\n");
     // Minimal system plumbing required for ANY process to start and run.
+    sb.push_str("; darwin userland plumbing: read-only system trees only\n");
     sb.push_str("(allow sysctl-read)\n");
     sb.push_str("(allow mach-lookup)\n");
     sb.push_str("(allow iokit-get-properties)\n");
+    for tree in [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/System",
+        "/Library/Developer",
+        "/private/var/db/dyld",
+        "/private/etc",
+    ] {
+        sb.push_str(&format!("(allow file-read* (subpath \"{tree}\"))\n"));
+    }
+    sb.push_str("(allow file-read* file-write* (literal \"/dev/null\"))\n");
+    sb.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
 
     // ---- filesystem -----------------------------------------------------
     for rule in &profile.filesystem {
@@ -293,10 +307,25 @@ impl SandboxBackend for MacOsSandboxBackend {
                 .as_nanos()
         ));
         std::fs::write(&profile_path, sb_text).ok()?;
+        // Seatbelt constrains filesystem/network/process rights but does
+        // NOT scrub environment variables. Ambient-secret denial is
+        // therefore enforced structurally: every payload launches under
+        // `env -i` with a fixed allowlist (ADR-0035 §4; brokered secrets
+        // arrive via handles, never environment).
+        let home = self
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/var/empty"));
         let mut argv = vec![
             "-f".to_string(),
             profile_path.display().to_string(),
             "--".to_string(),
+            "/usr/bin/env".to_string(),
+            "-i".to_string(),
+            format!("HOME={}", home.display()),
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+            "TERM=dumb".to_string(),
+            "__CF_USER_TEXT_ENCODING=0x0:0:0".to_string(),
         ];
         argv.push(command.program.clone());
         argv.extend(command.args.clone());
@@ -304,48 +333,63 @@ impl SandboxBackend for MacOsSandboxBackend {
     }
 }
 
-/// Resolve `sandbox-exec` on `$PATH`.
+/// Resolve `sandbox-exec` and prove it WORKS by executing a trivial deny-
+/// default profile (`/bin/true`). Flag-based probing is unreliable: modern
+/// sandbox-exec rejects `--version`/`-h` with exit 64 while remaining fully
+/// functional.
 fn which_sandbox_exec() -> Option<PathBuf> {
-    let probe = CommandProbe::run("sandbox-exec", &["--version"])
-        .or_else(|| CommandProbe::run("sandbox-exec", &["-h"]))?;
-    if probe.status_success() {
-        Some(PathBuf::from("sandbox-exec"))
-    } else {
-        None
+    const PROBE_PROFILE: &str = "(version 1)\n(deny default)\n(allow file-read*)\n(allow process-exec)\n(allow mach-lookup)\n(allow sysctl-read)\n";
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let c = dir.join("sandbox-exec");
+            if c.is_file() {
+                candidates.push(c);
+            }
+        }
     }
-}
-
-// Tiny indirection so the probe stays swappable in tests.
-struct CommandProbe;
-
-impl CommandProbe {
-    fn run(program: &str, args: &[&str]) -> Option<ProbeOutput> {
-        let output = std::process::Command::new(program)
-            .args(args)
-            .stdout(std::process::Stdio::piped())
+    let system = PathBuf::from("/usr/bin/sandbox-exec");
+    if system.is_file() && !candidates.contains(&system) {
+        candidates.push(system);
+    }
+    for candidate in candidates {
+        let dir = std::env::temp_dir().join(format!(
+            "terminus-seatbelt-probe-{}",
+            std::process::id()
+        ));
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let profile_path = dir.join("probe.sb");
+        if std::fs::write(&profile_path, PROBE_PROFILE).is_err() {
+            continue;
+        }
+        let ok = std::process::Command::new(&candidate)
+            .args([
+                "-f",
+                profile_path.display().to_string().as_str(),
+                "--",
+                "/bin/sh",
+                "-c",
+                "exit 0",
+            ])
+            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        Some(ProbeOutput {
-            success: output.status.success(),
-        })
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let _ = std::fs::remove_file(&profile_path);
+        if ok {
+            return Some(candidate);
+        }
     }
+    None
 }
 
-struct ProbeOutput {
-    success: bool,
-}
-
-impl ProbeOutput {
-    fn status_success(&self) -> bool {
-        self.success
-    }
-}
-
-use std::sync::Arc;
 #[cfg(test)]
 mod phase4_tests {
     use super::*;
+    use std::sync::Arc;
     use terminus_sandbox::SecretsAccess;
 
     fn backend() -> MacOsSandboxBackend {
@@ -371,6 +415,10 @@ mod phase4_tests {
         // ...and network deny emits no socket allowance.
         assert!(!sb.contains("allow network-outbound (to *)"));
         assert!(sb.contains("network: denied by deny-default"));
+        // System read trees are allowed (read-only mounts); user data is
+        // not.
+        assert!(sb.contains("(allow file-read* (subpath \"/usr\"))"));
+        assert!(!sb.contains("(allow file-read* (subpath \"/var/folders\"))"));
     }
 
     #[test]
@@ -409,8 +457,16 @@ mod phase4_tests {
         let profile_path = PathBuf::from(&argv[1]);
         let text = std::fs::read_to_string(&profile_path).unwrap();
         assert!(text.contains("(deny default)"));
+        // Payloads launch under `env -i` so ambient secrets cannot leak.
         assert_eq!(argv[2], "--");
-        assert_eq!(argv[3], "echo");
+        assert_eq!(argv[3], "/usr/bin/env");
+        assert!(argv.contains(&"-i".to_string()));
+        assert!(argv.contains(&"PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_string()));
+        let prog_idx = argv
+            .iter()
+            .position(|a| a == "echo")
+            .expect("original program preserved after env allowlist");
+        assert!(prog_idx > argv.iter().position(|a| a == "--").unwrap());
         let _ = std::fs::remove_file(&profile_path);
     }
 
@@ -439,5 +495,39 @@ mod phase4_tests {
         )
         .unwrap_err();
         assert!(format!("{err}").contains("tier2"));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod live_probe_tests {
+    use super::*;
+    use terminus_sandbox::probe::{run_probes, ProbeKind, ProbeVerdict};
+
+    /// Effective-control verification on THIS host (SPEC §19.3): when
+    /// sandbox-exec exists, the generated profile must measurably block a
+    /// filesystem escape and ambient-secret reads. Skipped honestly when
+    /// the CLI is absent.
+    #[test]
+    fn live_seatbelt_blocks_escape_and_ambient_secrets() {
+        let backend = MacOsSandboxBackend::new();
+        if !backend.is_seatbelt_available() {
+            // Honest skip: no evidence, no claim.
+            return;
+        }
+        let results = run_probes(
+            &backend,
+            &std::env::temp_dir(),
+        );
+        let verdict = |k: ProbeKind| {
+            results
+                .iter()
+                .find(|r| r.probe == k)
+                .map(|r| (r.verdict.clone(), r.detail.clone()))
+                .unwrap_or_else(|| (ProbeVerdict::Unmeasurable, "missing".into()))
+        };
+        let (fs_v, fs_d) = verdict(ProbeKind::FilesystemEscape);
+        assert_eq!(fs_v, ProbeVerdict::Enforced, "fs escape: {fs_d}");
+        let (env_v, env_d) = verdict(ProbeKind::AmbientSecretDenial);
+        assert_eq!(env_v, ProbeVerdict::Enforced, "ambient secret: {env_d}");
     }
 }
