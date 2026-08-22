@@ -39,6 +39,9 @@ import {
   outboxMessageSchema,
   inboxMessageSchema,
   budgetConsumptionSchema,
+  resourceHandleSchema,
+  approvalPresentationSchema,
+  sequencePolicyRuleSchema,
 } from "../../packages/domain/src/aggregates.ts";
 
 const ROOT = process.env.TERMINUS_ROOT ?? join(import.meta.dir, "..", "..");
@@ -63,7 +66,10 @@ const SCHEMAS: ReadonlyArray<readonly [string, string, z.ZodType]> = [
   ["node-run", "NodeRun", nodeRunSchema],
   ["claim", "Claim", claimSchema],
   ["evidence", "Evidence", evidenceSchema],
+  ["resource-handle", "ResourceHandle", resourceHandleSchema],
   ["authorization-instance", "AuthorizationInstance", authorizationInstanceSchema],
+  ["approval-presentation", "ApprovalPresentation", approvalPresentationSchema],
+  ["sequence-policy-rule", "SequencePolicyRule", sequencePolicyRuleSchema],
   ["effect-record", "EffectRecord", effectRecordSchema],
   ["question", "Question", questionSchema],
   ["decision", "Decision", decisionSchema],

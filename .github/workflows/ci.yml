@@ -234,10 +234,18 @@ jobs:
         run: cargo test --workspace --test security
 
   # ---------- Linux enforcement host gate ----------
+  # Both enforcement jobs require delegated host controls (writable cgroup
+  # hierarchy + unprivileged user namespaces for bubblewrap). GitHub-hosted
+  # Ubuntu runners deny both, so they can only report their environment as
+  # Degraded here. They stay visible but non-blocking; the AUTHORITATIVE
+  # evidence path is the dedicated Linux runner (linux-evidence.yml +
+  # TERMINUS_LINUX_EVIDENCE), and release-check still fails closed when that
+  # signed evidence is absent (SPEC §46.18).
   linux-enforcement-preflight:
     name: Linux enforcement prerequisites
     runs-on: ubuntu-latest
     needs: setup
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
@@ -254,6 +262,7 @@ jobs:
     needs: setup
     permissions:
       contents: read
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
@@ -344,5 +353,8 @@ jobs:
           fetch-depth: 0
       - uses: jdx/mise-action@v2
       - run: just bootstrap
+      # Compare against the local origin/main ref: the repository is private,
+      # so buf's remote-clone template cannot authenticate without extra
+      # credentials. fetch-depth: 0 guarantees the ref exists.
       - name: buf breaking (against main)
-        run: buf breaking proto --against "https://github.com/${{ github.repository }}.git#branch=main,subdir=proto"
+        run: buf breaking proto --against ".git#branch=origin/main,subdir=proto"

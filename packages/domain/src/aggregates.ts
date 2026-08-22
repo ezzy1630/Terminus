@@ -1349,6 +1349,7 @@ export interface AuthorizationInstance {
   readonly consumedCount: number;
   readonly expiry: Rfc3339Timestamp;
   readonly humanApprovalId: string | null;
+  readonly approvalHash: string | null;
 }
 
 export const authorizationInstanceSchema = z.object({
@@ -1362,6 +1363,59 @@ export const authorizationInstanceSchema = z.object({
   consumedCount: z.number().int().nonnegative(),
   expiry: z.string(),
   humanApprovalId: z.string().nullable(),
+  approvalHash: z.string().nullable().default(null),
+});
+
+export interface ApprovalPresentation {
+  readonly approvalId: string;
+  readonly taskId: string;
+  readonly semanticAction: string;
+  readonly targetResource: string;
+  readonly dataLeavingSystem: readonly string[];
+  readonly identityUsed: string;
+  readonly reversibility: "REVERSIBLE" | "COMPENSABLE" | "IRREVERSIBLE" | "READ_ONLY" | "UNKNOWN";
+  readonly consequences: string;
+  readonly evidencePreconditions: readonly string[];
+  readonly exactScope: readonly string[];
+  readonly durationSeconds: number;
+  readonly reason: string;
+  readonly approvalHash: string;
+}
+
+export const approvalPresentationSchema = z.object({
+  approvalId: z.string().min(1),
+  taskId: z.string().min(1),
+  semanticAction: z.string().min(1),
+  targetResource: z.string().min(1),
+  dataLeavingSystem: z.array(z.string()).default([]),
+  identityUsed: z.string().min(1),
+  reversibility: z.enum(["REVERSIBLE", "COMPENSABLE", "IRREVERSIBLE", "READ_ONLY", "UNKNOWN"]),
+  consequences: z.string().min(1),
+  evidencePreconditions: z.array(z.string()).default([]),
+  exactScope: z.array(z.string()).default([]),
+  durationSeconds: z.number().int().nonnegative().default(300),
+  reason: z.string().min(1),
+  approvalHash: z.string().min(1),
+});
+
+export interface SequencePolicyRule {
+  readonly id: string;
+  readonly description: string;
+  readonly targetEffectType: string;
+  readonly requiredPrecedingEvents: readonly string[];
+  readonly requiredAdmittedClaims: readonly string[];
+  readonly separationOfDuty: boolean;
+  readonly enforcement: "HARD_DENY" | "PROMPT" | "WARN";
+}
+
+export const sequencePolicyRuleSchema = z.object({
+  id: z.string().min(1),
+  description: z.string().min(1),
+  targetEffectType: z.string().min(1),
+  requiredPrecedingEvents: z.array(z.string()).default([]),
+  requiredAdmittedClaims: z.array(z.string()).default([]),
+  separationOfDuty: z.boolean().default(false),
+  enforcement: z.enum(["HARD_DENY", "PROMPT", "WARN"]).default("HARD_DENY"),
 });
 
 export interface EffectRecord {

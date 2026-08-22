@@ -396,13 +396,25 @@ export class StateTransitionError extends ForgeError {
 }
 
 export class ScopeViolationError extends ForgeError {
-  constructor(path: string, scope: string) {
+  constructor(messageOrPath: string, scope?: string, details?: Record<string, unknown>) {
     super({
       code: "SCOPE_VIOLATION",
-      message: `Effect outside allowed scope: ${path} (scope: ${scope})`,
-      details: { path, scope },
+      message: scope ? `Effect outside allowed scope: ${messageOrPath} (scope: ${scope})` : messageOrPath,
+      details: { path: messageOrPath, scope, ...details },
     });
     this.name = "ScopeViolationError";
+  }
+}
+
+export class StaleHandleError extends ForgeError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super({
+      code: "STALE_SOURCE_VERSION",
+      message,
+      details,
+      suggestedAction: "Reacquire fresh resource handle before retrying.",
+    });
+    this.name = "StaleHandleError";
   }
 }
 

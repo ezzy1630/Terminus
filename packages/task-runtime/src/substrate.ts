@@ -26,6 +26,11 @@ import { TransactionalOutbox, TransactionalInbox } from "./outbox.js";
 import { WorkerLeaseManager } from "./leases.js";
 import { WorkflowEngine } from "./workflows.js";
 import { DecisionRiskBudgetManager } from "./decisions.js";
+import { EffectLedger } from "./effects.js";
+import { AuthorizationManager } from "./authorizations.js";
+import { ResourceHandleManager } from "./handles.js";
+import { SequencePolicyEvaluator } from "./sequence-policy.js";
+import { AdmissionService } from "./admission.js";
 
 export class TaskSubstrateError extends Error {
   constructor(message: string, public readonly details?: Record<string, unknown>) {
@@ -40,6 +45,11 @@ export class DurableTaskSubstrate {
   readonly leases: WorkerLeaseManager;
   readonly workflows: WorkflowEngine;
   readonly decisions: DecisionRiskBudgetManager;
+  readonly effects: EffectLedger;
+  readonly authorizations: AuthorizationManager;
+  readonly handles: ResourceHandleManager;
+  readonly sequencePolicy: SequencePolicyEvaluator;
+  readonly admission: AdmissionService;
 
   constructor(
     readonly repo: DurableTaskRepository,
@@ -52,6 +62,11 @@ export class DurableTaskSubstrate {
     this.leases = new WorkerLeaseManager(this.repo, this.outbox, undefined, this.clock);
     this.workflows = new WorkflowEngine(this.repo, this.outbox, undefined, undefined, this.clock);
     this.decisions = new DecisionRiskBudgetManager(this.repo, this.outbox, undefined, undefined, undefined, this.clock);
+    this.effects = new EffectLedger(this.repo, this.outbox);
+    this.authorizations = new AuthorizationManager(this.repo, this.outbox);
+    this.handles = new ResourceHandleManager(this.repo);
+    this.sequencePolicy = new SequencePolicyEvaluator(this.repo);
+    this.admission = new AdmissionService(this.repo, this.effects, this.sequencePolicy);
   }
 
   async createTask(input: {

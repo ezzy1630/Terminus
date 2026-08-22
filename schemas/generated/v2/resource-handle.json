@@ -1,0 +1,82 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/resource-handle.json",
+  "title": "ResourceHandle",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "objectId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "objectType": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowedOperations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "principalBinding": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskBinding": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authorityEpoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "provenance": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trustLabel": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expiry": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "integrityHash": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "objectId",
+    "objectType",
+    "version",
+    "scope",
+    "allowedOperations",
+    "principalBinding",
+    "taskBinding",
+    "authorityEpoch",
+    "provenance",
+    "trustLabel",
+    "expiry",
+    "integrityHash"
+  ]
+}

@@ -70,6 +70,7 @@ import {
   type Claim,
   type Decision,
   type EffectRecord,
+  type AuthorizationInstance,
   type Evidence,
   type Question,
   type Risk,
@@ -722,6 +723,7 @@ const taskV2ReviveSchema = taskV2Schema.extend({ contract: taskContractV2WireSch
 interface ArpV2State {
   tasks: Map<string, TaskV2>;
   effects: Map<string, EffectRecord>;
+  authorizations: Map<string, AuthorizationInstance>;
   claims: Map<string, Claim>;
   evidences: Map<string, Evidence>;
   questions: Map<string, Question>;
@@ -737,6 +739,7 @@ interface ArpV2State {
 const arpV2: ArpV2State = {
   tasks: new Map(),
   effects: new Map(),
+  authorizations: new Map(),
   claims: new Map(),
   evidences: new Map(),
   questions: new Map(),
@@ -753,6 +756,7 @@ function arpV2StoreFor(aggregateType: string): Map<string, unknown> | null {
   switch (aggregateType) {
     case "task": return arpV2.tasks as Map<string, unknown>;
     case "effect": return arpV2.effects as Map<string, unknown>;
+    case "authorization": return arpV2.authorizations as Map<string, unknown>;
     case "claim": return arpV2.claims as Map<string, unknown>;
     case "evidence": return arpV2.evidences as Map<string, unknown>;
     case "question": return arpV2.questions as Map<string, unknown>;
@@ -2616,6 +2620,123 @@ const routes: Route[] = [
     const updated: EffectRecord = { ...current, state: target as EffectRecord["state"], version: current.version + 1 };
     arpV2.effects.set(id, updated);
     await emitV2({ eventType: `effect.${target.toLowerCase()}`, aggregateType: "effect", aggregateId: id, snapshot: updated, correlationId: effect.taskId });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("POST", "/v2/authorizations", async (req, res) => {
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      taskVersion: z.number().int().nonnegative().default(1),
+      effectClass: z.string().min(1),
+      maxScope: z.array(z.string()).default([]),
+      useLimit: z.number().int().positive().default(1),
+      expiry: z.string().default(new Date(Date.now() + 300_000).toISOString()),
+      approvalHash: z.string().nullable().default(null),
+      humanApprovalId: z.string().nullable().default(null),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_AUTHORIZATION_REQUEST", `invalid authorization request: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
+    }
+    const body = parsed.data;
+    if (!arpV2.tasks.has(body.taskId)) {
+      return sendError(res, 404, "TASK_NOT_FOUND", `v2 task ${body.taskId} not found`, "not_found");
+    }
+    const authz: AuthorizationInstance = {
+      id: uuid(),
+      principal: SERVER_PRINCIPAL,
+      taskId: body.taskId,
+      taskVersion: body.taskVersion,
+      effectClass: body.effectClass,
+      maxScope: body.maxScope,
+      useLimit: body.useLimit,
+      consumedCount: 0,
+      expiry: body.expiry,
+      humanApprovalId: body.humanApprovalId,
+      approvalHash: body.approvalHash,
+    };
+    arpV2.authorizations.set(authz.id, authz);
+    await emitV2({
+      eventType: "authorization.created",
+      aggregateType: "authorization",
+      aggregateId: authz.id,
+      snapshot: authz,
+      correlationId: authz.taskId,
+    });
+    sendJson(res, 201, jsonSafe(authz));
+  }),
+  route("GET", "/v2/authorizations/:id", async (_req, res, params) => {
+    const authz = arpV2.authorizations.get(String(params.id));
+    if (!authz) return sendError(res, 404, "AUTHORIZATION_NOT_FOUND", "v2 authorization not found", "not_found");
+    sendJson(res, 200, jsonSafe(authz));
+  }),
+  route("GET", "/v2/authorizations", async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://x");
+    const taskId = url.searchParams.get("taskId");
+    const all = [...arpV2.authorizations.values()]
+      .filter((a) => !taskId || a.taskId === taskId);
+    sendJson(res, 200, { authorizations: jsonSafe(all) });
+  }),
+  route("POST", "/v2/authorizations/:id/consume", async (req, res, params) => {
+    const id = String(params.id);
+    const authz = arpV2.authorizations.get(id);
+    if (!authz) return sendError(res, 404, "AUTHORIZATION_NOT_FOUND", "v2 authorization not found", "not_found");
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      taskVersion: z.number().int().nonnegative(),
+      effectClass: z.string().min(1),
+      approvalHash: z.string().nullable().default(null),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_CONSUME_REQUEST", "invalid consume request", "validation");
+    }
+    const { taskId, taskVersion, effectClass, approvalHash } = parsed.data;
+    if (authz.taskId !== taskId) {
+      return sendError(res, 403, "CROSS_TASK_REJECTED", `authorization ${id} is bound to task ${authz.taskId}`, "forbidden");
+    }
+    if (authz.taskVersion !== taskVersion) {
+      return sendError(res, 409, "STALE_VERSION_REJECTED", `authorization ${id} is bound to task version ${authz.taskVersion}`, "conflict");
+    }
+    if (new Date().toISOString() >= authz.expiry) {
+      return sendError(res, 410, "EXPIRED_AUTHORIZATION", `authorization ${id} is expired`, "gone");
+    }
+    if (authz.consumedCount >= authz.useLimit) {
+      return sendError(res, 409, "EXHAUSTED_AUTHORIZATION", `authorization ${id} reached use limit ${authz.useLimit}`, "conflict");
+    }
+    if (authz.effectClass !== effectClass && authz.effectClass !== "ADMIN") {
+      return sendError(res, 403, "EFFECT_CLASS_MISMATCH", `authorization authorizes ${authz.effectClass}, requested ${effectClass}`, "forbidden");
+    }
+    if (authz.approvalHash && approvalHash && authz.approvalHash !== approvalHash) {
+      return sendError(res, 409, "APPROVAL_HASH_MISMATCH", "approval proposal was modified prior to execution", "conflict");
+    }
+    const updated: AuthorizationInstance = {
+      ...authz,
+      consumedCount: authz.consumedCount + 1,
+    };
+    arpV2.authorizations.set(id, updated);
+    await emitV2({
+      eventType: "authorization.consumed",
+      aggregateType: "authorization",
+      aggregateId: id,
+      snapshot: updated,
+      correlationId: authz.taskId,
+    });
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("POST", "/v2/authorizations/:id/revoke", async (req, res, params) => {
+    const id = String(params.id);
+    const authz = arpV2.authorizations.get(id);
+    if (!authz) return sendError(res, 404, "AUTHORIZATION_NOT_FOUND", "v2 authorization not found", "not_found");
+    const updated: AuthorizationInstance = {
+      ...authz,
+      useLimit: authz.consumedCount,
+    };
+    arpV2.authorizations.set(id, updated);
+    await emitV2({
+      eventType: "authorization.revoked",
+      aggregateType: "authorization",
+      aggregateId: id,
+      snapshot: updated,
+      correlationId: authz.taskId,
+    });
     sendJson(res, 200, jsonSafe(updated));
   }),
   route("POST", "/v2/claims", async (req, res) => {

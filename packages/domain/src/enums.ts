@@ -765,6 +765,25 @@ export function isEffectTransitionAllowed(from: EffectState, to: EffectState): b
   return EFFECT_TRANSITIONS[from].includes(to);
 }
 
+/** Effect classes per SPEC §7.2. */
+export const EffectClass = {
+  READ_ONLY: "READ_ONLY",
+  BUFFERABLE_LOCAL: "BUFFERABLE_LOCAL",
+  REVERSIBLE_EXTERNAL: "REVERSIBLE_EXTERNAL",
+  COMPENSABLE_EXTERNAL: "COMPENSABLE_EXTERNAL",
+  IRREVERSIBLE: "IRREVERSIBLE",
+  UNKNOWN_SEMANTICS: "UNKNOWN_SEMANTICS",
+} as const;
+export type EffectClass = (typeof EffectClass)[keyof typeof EffectClass];
+export const effectClassSchema = z.enum([
+  "READ_ONLY",
+  "BUFFERABLE_LOCAL",
+  "REVERSIBLE_EXTERNAL",
+  "COMPENSABLE_EXTERNAL",
+  "IRREVERSIBLE",
+  "UNKNOWN_SEMANTICS",
+]);
+
 /** Workflow node kinds per SPEC §8.1. */
 export const WorkflowNodeKind = {
   DETERMINISTIC: "deterministic",

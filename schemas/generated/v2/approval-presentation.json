@@ -1,0 +1,88 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/approval-presentation.json",
+  "title": "ApprovalPresentation",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "approvalId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "semanticAction": {
+      "type": "string",
+      "minLength": 1
+    },
+    "targetResource": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dataLeavingSystem": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "identityUsed": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reversibility": {
+      "type": "string",
+      "enum": [
+        "REVERSIBLE",
+        "COMPENSABLE",
+        "IRREVERSIBLE",
+        "READ_ONLY",
+        "UNKNOWN"
+      ]
+    },
+    "consequences": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidencePreconditions": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "exactScope": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "durationSeconds": {
+      "default": 300,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "approvalHash": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "approvalId",
+    "taskId",
+    "semanticAction",
+    "targetResource",
+    "identityUsed",
+    "reversibility",
+    "consequences",
+    "reason",
+    "approvalHash"
+  ]
+}

@@ -71,11 +71,32 @@
       "bytes": 1756
     },
     {
+      "name": "resource-handle",
+      "title": "ResourceHandle",
+      "path": "schemas/generated/v2/resource-handle.json",
+      "sha256": "sha256:4f37aec50d52e4a38ce597eafeba4660064b13b57a90c839fecce7049d27a41f",
+      "bytes": 1511
+    },
+    {
       "name": "authorization-instance",
       "title": "AuthorizationInstance",
       "path": "schemas/generated/v2/authorization-instance.json",
-      "sha256": "sha256:334948d888f591e5b9f58ea083bc50a07cb411bac9c0b41408a4b8a359be43cf",
-      "bytes": 1302
+      "sha256": "sha256:cb5e9a679061306d9802f553941882d0173635eb1c4154db0e51dc10fb8a9661",
+      "bytes": 1472
+    },
+    {
+      "name": "approval-presentation",
+      "title": "ApprovalPresentation",
+      "path": "schemas/generated/v2/approval-presentation.json",
+      "sha256": "sha256:42dcd2eb0c10b8cca926f974761e4312d561eac83adfea136fd8bc7d6ee62d9f",
+      "bytes": 1685
+    },
+    {
+      "name": "sequence-policy-rule",
+      "title": "SequencePolicyRule",
+      "path": "schemas/generated/v2/sequence-policy-rule.json",
+      "sha256": "sha256:0eb68be98a24e64684394ff74e70168fb76e275355acadb00cf9a4f348188c8a",
+      "bytes": 1005
     },
     {
       "name": "effect-record",

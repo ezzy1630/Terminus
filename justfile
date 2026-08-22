@@ -21,6 +21,11 @@ bootstrap:
     echo "[bootstrap] verifying Rust toolchain..."
     cargo --version
     rustc --version
+    # mise-managed toolchains do not always ship default components; the
+    # lint gates below require rustfmt and clippy. No-op where present.
+    if command -v rustup >/dev/null 2>&1; then
+      rustup component add rustfmt clippy
+    fi
     echo "[bootstrap] installing Rust workspace deps..."
     cargo fetch
     echo "[bootstrap] installing TS workspace deps..."
@@ -176,7 +181,9 @@ eval-full:
 upstream-check:
     #!/usr/bin/env bash
     set -eu
-    python3 scripts/verify-upstream-divergence.py
+    # The divergence verifier needs pyyaml; run under the pinned python env
+    # so the dependency comes from the locked uv environment, not the host.
+    uv run --project python python scripts/verify-upstream-divergence.py
     bun test packages/open-code-bridge
     bash scripts/verify-opencode-parity.sh
 

@@ -21,6 +21,13 @@ import type {
   BudgetConsumption,
   OutboxMessage,
   InboxMessage,
+  EffectRecord,
+  AuthorizationInstance,
+  ResourceHandle,
+  ApprovalPresentation,
+  SequencePolicyRule,
+  EffectState,
+  EffectClass,
   TaskStatusV2,
   WorkflowStatus,
   NodeRunStatus,
@@ -79,6 +86,28 @@ export interface DurableTaskRepository {
   getBudgetConsumption(taskId: string): Promise<BudgetConsumption | null>;
   saveBudgetConsumption(consumption: BudgetConsumption, outboxMessage?: OutboxMessage): Promise<BudgetConsumption>;
 
+  // Phase 3: Transactional Effect Ledger & Authorization
+  createEffectRecord(effect: EffectRecord, outboxMessage?: OutboxMessage): Promise<EffectRecord>;
+  getEffectRecord(id: string): Promise<EffectRecord | null>;
+  getEffectBySemanticKey(semanticKey: string): Promise<EffectRecord | null>;
+  updateEffectRecord(effect: EffectRecord, outboxMessage?: OutboxMessage): Promise<EffectRecord>;
+  listEffects(taskId: string): Promise<readonly EffectRecord[]>;
+
+  createAuthorization(authz: AuthorizationInstance, outboxMessage?: OutboxMessage): Promise<AuthorizationInstance>;
+  getAuthorization(id: string): Promise<AuthorizationInstance | null>;
+  updateAuthorization(authz: AuthorizationInstance, outboxMessage?: OutboxMessage): Promise<AuthorizationInstance>;
+  listAuthorizations(taskId: string): Promise<readonly AuthorizationInstance[]>;
+
+  saveResourceHandle(handle: ResourceHandle, outboxMessage?: OutboxMessage): Promise<ResourceHandle>;
+  getResourceHandle(objectId: string): Promise<ResourceHandle | null>;
+  listResourceHandles(taskBinding: string): Promise<readonly ResourceHandle[]>;
+
+  saveSequencePolicyRule(rule: SequencePolicyRule): Promise<void>;
+  listSequencePolicyRules(): Promise<readonly SequencePolicyRule[]>;
+
+  saveApprovalPresentation(presentation: ApprovalPresentation, outboxMessage?: OutboxMessage): Promise<ApprovalPresentation>;
+  getApprovalPresentation(approvalId: string): Promise<ApprovalPresentation | null>;
+
   // Outbox & Inbox
   saveOutboxMessage(message: OutboxMessage): Promise<void>;
   listPendingOutboxMessages(): Promise<readonly OutboxMessage[]>;
@@ -93,3 +122,4 @@ export interface DurableTaskRepository {
   replayFromEvents(events: readonly EventEnvelopeV2[]): Promise<void>;
   clear(): Promise<void>;
 }
+

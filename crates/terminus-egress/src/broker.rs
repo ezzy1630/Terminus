@@ -188,7 +188,7 @@ async fn relay(
                 let count = read?;
                 if count == 0 {
                     client_open = false;
-                    remote.shutdown().await?;
+                    let _ = remote.shutdown().await;
                     continue;
                 }
                 forward(&mut remote, &client_buffer[..count], proxy).await?;
@@ -197,7 +197,7 @@ async fn relay(
                 let count = read?;
                 if count == 0 {
                     remote_open = false;
-                    client.shutdown().await?;
+                    let _ = client.shutdown().await;
                     continue;
                 }
                 forward(client, &remote_buffer[..count], proxy).await?;

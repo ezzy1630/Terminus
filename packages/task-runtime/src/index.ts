@@ -348,3 +348,12 @@ export * from "./workflows.js";
 export * from "./decisions.js";
 export * from "./substrate.js";
 
+// ───────────────────── Phase 3 Transactional Effects & Authority ──────────────
+
+export * from "./effects.js";
+export * from "./authorizations.js";
+export * from "./handles.js";
+export * from "./sequence-policy.js";
+export * from "./admission.js";
+
+

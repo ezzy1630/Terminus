@@ -9,7 +9,7 @@ import type { OutboxMessage, InboxMessage, Rfc3339Timestamp } from "@terminus/do
 import { nowTimestamp } from "@terminus/domain";
 import type { DurableTaskRepository } from "./types.js";
 
-function sha256Hex(ascii: string): string {
+export function sha256Hex(ascii: string): string {
   function rightRotate(value: number, amount: number): number {
     return (value >>> amount) | (value << (32 - amount));
   }

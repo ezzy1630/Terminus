@@ -17,6 +17,12 @@ import type {
   BudgetConsumption,
   OutboxMessage,
   InboxMessage,
+  EffectRecord,
+  AuthorizationInstance,
+  ResourceHandle,
+  ApprovalPresentation,
+  SequencePolicyRule,
+  EffectState,
   Rfc3339Timestamp,
 } from "@terminus/domain";
 import type { EventEnvelopeV2 } from "@terminus/runtime-protocol";
@@ -45,6 +51,13 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
   private readonly budgets = new Map<string, BudgetConsumption>();
   private readonly outbox = new Map<string, OutboxMessage>();
   private readonly inbox = new Map<string, InboxMessage>();
+
+  // Phase 3: Effects, Authorizations, Handles, Sequence Policy, Approvals
+  private readonly effects = new Map<string, EffectRecord>();
+  private readonly authorizations = new Map<string, AuthorizationInstance>();
+  private readonly resourceHandles = new Map<string, ResourceHandle>();
+  private readonly sequencePolicyRules: SequencePolicyRule[] = [];
+  private readonly approvalPresentations = new Map<string, ApprovalPresentation>();
 
   async createTaskV2(task: TaskV2, outboxMessage?: OutboxMessage): Promise<TaskV2> {
     this.tasks.set(task.id, clone(task));
@@ -278,6 +291,115 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
     return clone(consumption);
   }
 
+  // Phase 3: Transactional Effect Ledger & Authorization
+  async createEffectRecord(effect: EffectRecord, outboxMessage?: OutboxMessage): Promise<EffectRecord> {
+    this.effects.set(effect.id, clone(effect));
+    if (outboxMessage) {
+      this.outbox.set(outboxMessage.id, clone(outboxMessage));
+    }
+    return clone(effect);
+  }
+
+  async getEffectRecord(id: string): Promise<EffectRecord | null> {
+    const e = this.effects.get(id);
+    return e ? clone(e) : null;
+  }
+
+  async getEffectBySemanticKey(semanticKey: string): Promise<EffectRecord | null> {
+    for (const e of this.effects.values()) {
+      if (e.semanticIdempotencyKey === semanticKey) {
+        return clone(e);
+      }
+    }
+    return null;
+  }
+
+  async updateEffectRecord(effect: EffectRecord, outboxMessage?: OutboxMessage): Promise<EffectRecord> {
+    this.effects.set(effect.id, clone(effect));
+    if (outboxMessage) {
+      this.outbox.set(outboxMessage.id, clone(outboxMessage));
+    }
+    return clone(effect);
+  }
+
+  async listEffects(taskId: string): Promise<readonly EffectRecord[]> {
+    return Array.from(this.effects.values())
+      .filter((e) => e.taskId === taskId)
+      .map(clone);
+  }
+
+  async createAuthorization(authz: AuthorizationInstance, outboxMessage?: OutboxMessage): Promise<AuthorizationInstance> {
+    this.authorizations.set(authz.id, clone(authz));
+    if (outboxMessage) {
+      this.outbox.set(outboxMessage.id, clone(outboxMessage));
+    }
+    return clone(authz);
+  }
+
+  async getAuthorization(id: string): Promise<AuthorizationInstance | null> {
+    const a = this.authorizations.get(id);
+    return a ? clone(a) : null;
+  }
+
+  async updateAuthorization(authz: AuthorizationInstance, outboxMessage?: OutboxMessage): Promise<AuthorizationInstance> {
+    this.authorizations.set(authz.id, clone(authz));
+    if (outboxMessage) {
+      this.outbox.set(outboxMessage.id, clone(outboxMessage));
+    }
+    return clone(authz);
+  }
+
+  async listAuthorizations(taskId: string): Promise<readonly AuthorizationInstance[]> {
+    return Array.from(this.authorizations.values())
+      .filter((a) => a.taskId === taskId)
+      .map(clone);
+  }
+
+  async saveResourceHandle(handle: ResourceHandle, outboxMessage?: OutboxMessage): Promise<ResourceHandle> {
+    this.resourceHandles.set(handle.objectId, clone(handle));
+    if (outboxMessage) {
+      this.outbox.set(outboxMessage.id, clone(outboxMessage));
+    }
+    return clone(handle);
+  }
+
+  async getResourceHandle(objectId: string): Promise<ResourceHandle | null> {
+    const h = this.resourceHandles.get(objectId);
+    return h ? clone(h) : null;
+  }
+
+  async listResourceHandles(taskBinding: string): Promise<readonly ResourceHandle[]> {
+    return Array.from(this.resourceHandles.values())
+      .filter((h) => h.taskBinding === taskBinding)
+      .map(clone);
+  }
+
+  async saveSequencePolicyRule(rule: SequencePolicyRule): Promise<void> {
+    const idx = this.sequencePolicyRules.findIndex((r) => r.id === rule.id);
+    if (idx >= 0) {
+      this.sequencePolicyRules[idx] = clone(rule);
+    } else {
+      this.sequencePolicyRules.push(clone(rule));
+    }
+  }
+
+  async listSequencePolicyRules(): Promise<readonly SequencePolicyRule[]> {
+    return this.sequencePolicyRules.map(clone);
+  }
+
+  async saveApprovalPresentation(presentation: ApprovalPresentation, outboxMessage?: OutboxMessage): Promise<ApprovalPresentation> {
+    this.approvalPresentations.set(presentation.approvalId, clone(presentation));
+    if (outboxMessage) {
+      this.outbox.set(outboxMessage.id, clone(outboxMessage));
+    }
+    return clone(presentation);
+  }
+
+  async getApprovalPresentation(approvalId: string): Promise<ApprovalPresentation | null> {
+    const ap = this.approvalPresentations.get(approvalId);
+    return ap ? clone(ap) : null;
+  }
+
   async saveOutboxMessage(message: OutboxMessage): Promise<void> {
     this.outbox.set(message.id, clone(message));
   }
@@ -362,21 +484,13 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
         case "task.failed": {
           const current = this.tasks.get(ev.aggregateId);
           if (current) {
-            const toStatus = p.toStatus as TaskV2["status"];
-            const version = (p.version as number) ?? current.version + 1;
-            const completedAt =
-              toStatus === "COMPLETED" ||
-              toStatus === "PARTIAL" ||
-              toStatus === "CANCELLED" ||
-              toStatus === "FAILED"
-                ? ev.occurredAt
-                : current.completedAt;
+            const status = ev.eventType.replace("task.", "").toUpperCase() as TaskV2["status"];
             this.tasks.set(ev.aggregateId, {
               ...current,
-              status: toStatus,
-              version,
+              status,
+              version: (p.version as number) ?? current.version + 1,
               updatedAt: ev.occurredAt,
-              completedAt,
+              completedAt: ["COMPLETED", "FAILED", "CANCELLED"].includes(status) ? ev.occurredAt : null,
             });
           }
           break;
@@ -385,8 +499,8 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
         case "lease.renewed": {
           const lease: WorkerLease = {
             id: (p.leaseId as string) ?? ev.aggregateId,
-            taskId: (p.taskId as string) ?? ev.aggregateId,
-            workerId: (p.workerId as string) ?? ev.actor.id,
+            taskId: (p.taskId as string) ?? "",
+            workerId: (p.workerId as string) ?? "",
             fencingToken: (p.fencingToken as number) ?? 1,
             status: ev.eventType === "lease.acquired" ? "ACQUIRED" : "RENEWED",
             acquiredAt: ev.occurredAt,
@@ -397,40 +511,60 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
           this.leases.set(lease.id, lease);
           break;
         }
-        case "lease.released": {
-          const leaseId = (p.leaseId as string) ?? ev.aggregateId;
-          const current = this.leases.get(leaseId);
-          if (current) {
-            this.leases.set(leaseId, {
-              ...current,
-              status: "RELEASED",
-              releasedAt: ev.occurredAt,
-            });
-          }
-          break;
-        }
+        case "lease.released":
         case "lease.fenced": {
           const leaseId = (p.leaseId as string) ?? ev.aggregateId;
           const current = this.leases.get(leaseId);
           if (current) {
             this.leases.set(leaseId, {
               ...current,
-              status: "FENCED",
+              status: ev.eventType === "lease.released" ? "RELEASED" : "FENCED",
               releasedAt: ev.occurredAt,
             });
           }
           break;
         }
         case "workflow.created": {
-          const wf: Workflow = {
-            id: (p.workflowId as string) ?? ev.aggregateId,
+          const w: Workflow = {
+            id: ev.aggregateId,
             version: (p.version as number) ?? 1,
             taskId: (p.taskId as string) ?? "",
-            nodes: [],
-            edges: [],
+            nodes: (p.nodes as readonly any[]) ?? [],
+            edges: (p.edges as readonly any[]) ?? [],
             createdAt: ev.occurredAt,
           };
-          this.workflows.set(wf.id, wf);
+          this.workflows.set(w.id, w);
+          break;
+        }
+        case "workflow.node_started": {
+          const nr: NodeRun = {
+            id: (p.nodeRunId as string) ?? `nr-${Date.now()}`,
+            workflowId: ev.aggregateId,
+            nodeId: (p.nodeId as string) ?? "",
+            attemptId: (p.attemptId as string) ?? "",
+            status: "RUNNING",
+            inputs: (p.inputs as Record<string, unknown>) ?? {},
+            outputs: null,
+            error: null,
+            startedAt: ev.occurredAt,
+            settledAt: null,
+          };
+          this.nodeRuns.set(nr.id, nr);
+          break;
+        }
+        case "workflow.node_completed":
+        case "workflow.node_failed": {
+          const nrId = p.nodeRunId as string;
+          const current = this.nodeRuns.get(nrId);
+          if (current) {
+            this.nodeRuns.set(nrId, {
+              ...current,
+              status: ev.eventType === "workflow.node_completed" ? "COMPLETED" : "FAILED",
+              outputs: (p.outputs as Record<string, unknown> | null) ?? current.outputs,
+              error: (p.error as string | null) ?? current.error,
+              settledAt: ev.occurredAt,
+            });
+          }
           break;
         }
         case "attempt.started": {
@@ -564,6 +698,103 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
           });
           break;
         }
+        // Phase 3: Effect Ledger & Authorization Replay
+        case "effect.proposed": {
+          const eff: EffectRecord = {
+            id: (p.effectId as string) ?? ev.aggregateId,
+            taskId: (p.taskId as string) ?? "",
+            attemptId: (p.attemptId as string) ?? "",
+            principal: ev.actor.id,
+            connectorOrWorker: (p.connectorOrWorker as string) ?? "unknown",
+            intentType: (p.intentType as string) ?? "",
+            canonicalParameters: (p.canonicalParameters as Record<string, unknown>) ?? {},
+            resourceHandles: (p.resourceHandles as readonly ResourceHandle[]) ?? [],
+            effectClass: (p.effectClass as string) ?? "READ_ONLY",
+            semanticIdempotencyKey: (p.semanticIdempotencyKey as string) ?? "",
+            authorizationId: null,
+            policyDecisionId: null,
+            state: "PROPOSED",
+            uncertaintyReason: null,
+            compensationRef: null,
+            version: 1,
+            createdAt: ev.occurredAt,
+            settledAt: null,
+          };
+          this.effects.set(eff.id, eff);
+          break;
+        }
+        case "effect.policy_checked":
+        case "effect.authorization_required":
+        case "effect.authorized":
+        case "effect.prepared":
+        case "effect.dispatched":
+        case "effect.observed":
+        case "effect.validated":
+        case "effect.committed":
+        case "effect.denied":
+        case "effect.cancelled":
+        case "effect.uncertain":
+        case "effect.reconciling":
+        case "effect.compensating":
+        case "effect.compensated":
+        case "effect.residue":
+        case "effect.manual_reconcile": {
+          const effId = (p.effectId as string) ?? ev.aggregateId;
+          const current = this.effects.get(effId);
+          if (current) {
+            const toState = (p.toState as EffectState) ?? ev.eventType.replace("effect.", "").toUpperCase() as EffectState;
+            this.effects.set(effId, {
+              ...current,
+              state: toState,
+              authorizationId: (p.authorizationId as string | null) ?? current.authorizationId,
+              policyDecisionId: (p.policyDecisionId as string | null) ?? current.policyDecisionId,
+              uncertaintyReason: (p.uncertaintyReason as string | null) ?? current.uncertaintyReason,
+              compensationRef: (p.compensationRef as string | null) ?? current.compensationRef,
+              version: current.version + 1,
+              settledAt: ["COMMITTED", "DENIED", "CANCELLED", "COMPENSATED"].includes(toState) ? ev.occurredAt : null,
+            });
+          }
+          break;
+        }
+        case "authorization.created": {
+          const authz: AuthorizationInstance = {
+            id: (p.authorizationId as string) ?? ev.aggregateId,
+            principal: ev.actor.id,
+            taskId: (p.taskId as string) ?? "",
+            taskVersion: (p.taskVersion as number) ?? 1,
+            effectClass: (p.effectClass as string) ?? "READ_ONLY",
+            maxScope: (p.maxScope as readonly string[]) ?? [],
+            useLimit: (p.useLimit as number) ?? 1,
+            consumedCount: 0,
+            expiry: ((p.expiry as string) ?? ev.occurredAt) as Rfc3339Timestamp,
+            humanApprovalId: (p.humanApprovalId as string | null) ?? null,
+            approvalHash: (p.approvalHash as string | null) ?? null,
+          };
+          this.authorizations.set(authz.id, authz);
+          break;
+        }
+        case "authorization.consumed": {
+          const authzId = (p.authorizationId as string) ?? ev.aggregateId;
+          const current = this.authorizations.get(authzId);
+          if (current) {
+            this.authorizations.set(authzId, {
+              ...current,
+              consumedCount: (p.consumedCount as number) ?? current.consumedCount + 1,
+            });
+          }
+          break;
+        }
+        case "authorization.revoked": {
+          const authzId = (p.authorizationId as string) ?? ev.aggregateId;
+          const current = this.authorizations.get(authzId);
+          if (current) {
+            this.authorizations.set(authzId, {
+              ...current,
+              useLimit: current.consumedCount,
+            });
+          }
+          break;
+        }
       }
     }
   }
@@ -580,5 +811,10 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
     this.budgets.clear();
     this.outbox.clear();
     this.inbox.clear();
+    this.effects.clear();
+    this.authorizations.clear();
+    this.resourceHandles.clear();
+    this.sequencePolicyRules.length = 0;
+    this.approvalPresentations.clear();
   }
 }

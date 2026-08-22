@@ -1,0 +1,52 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/sequence-policy-rule.json",
+  "title": "SequencePolicyRule",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "targetEffectType": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requiredPrecedingEvents": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requiredAdmittedClaims": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "separationOfDuty": {
+      "default": false,
+      "type": "boolean"
+    },
+    "enforcement": {
+      "default": "HARD_DENY",
+      "type": "string",
+      "enum": [
+        "HARD_DENY",
+        "PROMPT",
+        "WARN"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "description",
+    "targetEffectType"
+  ]
+}
