@@ -29,8 +29,8 @@ cd "$source_dir"
 bun install --frozen-lockfile --ignore-scripts || {
   echo "[opencode-parity] dependency install reported optional-package failures; continuing to the typecheck" >&2
 }
-if [[ -d "$source_dir/node_modules/@typescript/native-preview/bin" ]]; then
-  cat << 'EOF' > "$source_dir/node_modules/@typescript/native-preview/bin/tsgo.js"
+find "$source_dir" \( -name "tsgo.js" -o -name "tsgo" \) 2>/dev/null | while read -r f; do
+  cat << 'EOF' > "$f"
 #!/usr/bin/env node
 const { execFileSync } = require("node:child_process");
 const tscPath = require.resolve("typescript/bin/tsc", { paths: [__dirname, process.cwd()] });
@@ -40,19 +40,6 @@ try {
   process.exit(err.status ?? 1);
 }
 EOF
-fi
-if [[ -e "$source_dir/node_modules/.bin/tsgo" ]]; then
-  rm -f "$source_dir/node_modules/.bin/tsgo"
-  cat << 'EOF' > "$source_dir/node_modules/.bin/tsgo"
-#!/usr/bin/env node
-const { execFileSync } = require("node:child_process");
-const tscPath = require.resolve("typescript/bin/tsc", { paths: [__dirname, process.cwd()] });
-try {
-  execFileSync(process.execPath, [tscPath, ...process.argv.slice(2)], { stdio: "inherit" });
-} catch (err) {
-  process.exit(err.status ?? 1);
-}
-EOF
-  chmod +x "$source_dir/node_modules/.bin/tsgo"
-fi
+  chmod +x "$f"
+done
 bun turbo typecheck
