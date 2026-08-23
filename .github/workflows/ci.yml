@@ -314,6 +314,14 @@ jobs:
           TERMINUS_SECURITY_OWNER_APPROVAL: "ci-security-owner"
           TERMINUS_PROTOCOL_OWNER_APPROVAL: "ci-protocol-owner"
           TERMINUS_EVALUATION_OWNER_APPROVAL: "ci-evaluation-owner"
+          # M12 is the documented local evidence subset. Stable release
+          # validation intentionally omits this override and rejects fixture
+          # eval evidence until a live release harness is available.
+          TERMINUS_RELEASE_ALLOW_FIXTURE_EVAL: "1"
+          # These are explicit M12 local-subset fallbacks. Stable release
+          # validation intentionally leaves both disabled.
+          TERMINUS_RELEASE_ALLOW_PLACEHOLDER_METRICS: "1"
+          TERMINUS_RELEASE_ALLOW_SBOM_FALLBACK: "1"
         run: |
           export TERMINUS_RELEASE_COMMIT="${GITHUB_SHA}"
           export TERMINUS_RELEASE_RUN_STARTED_AT="$(date -u +%s)"

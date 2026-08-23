@@ -18,14 +18,21 @@ mode=""
 PY="${ROOT}/python/forge_evals"
 export PYTHONPATH="${PY}${PYTHONPATH:+:$PYTHONPATH}"
 
-if python3 - <<'PY'
+# Use the locked evaluation environment rather than the runner's system
+# interpreter. The release probe imports PyYAML and other package dependencies
+# that are intentionally not installed globally on CI hosts.
+run_python() {
+  uv run --project "${ROOT}/python" python "$@"
+}
+
+if run_python - <<'PY'
 import importlib.util
 import sys
 spec = importlib.util.find_spec("forge_evals.baselines")
 sys.exit(0 if spec is not None else 1)
 PY
 then
-  if python3 - <<'PY'
+  if run_python - <<'PY'
 from forge_evals.baselines import BASELINES, all_baseline_ids
 
 ids = all_baseline_ids()

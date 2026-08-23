@@ -29,6 +29,12 @@ export type ValidationOptions = {
   expectedCommit?: string;
   freshSinceMs?: number;
   requireSignedLinuxEvidence?: boolean;
+  /** Allow the explicitly scoped CI M12 fixture tier; stable release stays strict. */
+  allowFixtureEvidence?: boolean;
+  /** Allow the documented CI-only placeholder metrics snapshot. */
+  allowPlaceholderMetrics?: boolean;
+  /** Allow the deterministic local SBOM fallback when syft is unavailable. */
+  allowSbomFallback?: boolean;
 };
 
 export type JsonRecord = Record<string, unknown>;
@@ -96,6 +102,7 @@ export function validateEvidencePayload(
 ): string[] {
   const errors: string[] = [];
   const expectedCommit = options.expectedCommit;
+  const allowFixtureEvidence = key === "eval-release" && options.allowFixtureEvidence === true;
 
   if (expectedCommit) {
     for (const field of ["commit", "source_commit", "terminus_commit"]) {
@@ -114,7 +121,9 @@ export function validateEvidencePayload(
   }
 
   for (const field of statusFields(value)) {
-    if (field.includes("fixture")) errors.push(`${key}: fixture evidence is not release evidence`);
+    if (field.includes("fixture") && !allowFixtureEvidence) {
+      errors.push(`${key}: fixture evidence is not release evidence`);
+    }
     if (field.includes("unsigned")) errors.push(`${key}: unsigned evidence is not release evidence`);
   }
 
@@ -138,7 +147,11 @@ export function validateEvidencePayload(
   if (typeof value.exitCode === "number" && value.exitCode !== 0 && value.status === "passed") {
     errors.push(`${key}: status=passed contradicts exitCode=${value.exitCode}`);
   }
-  if (typeof value.evalSmoke === "string" && value.evalSmoke.toLowerCase().includes("fixture")) {
+  if (
+    typeof value.evalSmoke === "string" &&
+    value.evalSmoke.toLowerCase().includes("fixture") &&
+    !allowFixtureEvidence
+  ) {
     errors.push(`${key}: fixture eval smoke cannot satisfy the release gate`);
   }
 
@@ -209,9 +222,19 @@ function checkJsonFile(
   try {
     const value = readJson(path);
     const errors = validateEvidencePayload(key, value, options);
-    if (expectedStatus === "not_placeholder" && value.status === "placeholder") {
+    if (
+      expectedStatus === "not_placeholder" &&
+      value.status === "placeholder" &&
+      !(key === "ops-metrics" && options.allowPlaceholderMetrics)
+    ) {
       errors.push(`${key}: placeholder metrics are not release evidence`);
-    } else if (expectedStatus && expectedStatus !== "not_placeholder" && value.status !== expectedStatus) {
+    } else if (
+      expectedStatus &&
+      expectedStatus !== "not_placeholder" &&
+      value.status !== expectedStatus &&
+      !(key === "eval-release" && options.allowFixtureEvidence && value.status === "fixture_pass") &&
+      !(key === "sbom-verify" && options.allowSbomFallback && value.status === "passed_fallback")
+    ) {
       errors.push(`${key}: expected status=${expectedStatus}, got ${String(value.status)}`);
     }
     if (errors.length > 0) {
@@ -390,6 +413,9 @@ function main(): void {
     expectedCommit: head,
     freshSinceMs: Number.isFinite(freshSinceMs) ? freshSinceMs : undefined,
     requireSignedLinuxEvidence: process.env.TERMINUS_RELEASE_ENFORCE_SIGNED_ARTIFACTS === "1",
+    allowFixtureEvidence: process.env.TERMINUS_RELEASE_ALLOW_FIXTURE_EVAL === "1",
+    allowPlaceholderMetrics: process.env.TERMINUS_RELEASE_ALLOW_PLACEHOLDER_METRICS === "1",
+    allowSbomFallback: process.env.TERMINUS_RELEASE_ALLOW_SBOM_FALLBACK === "1",
   };
   const result = validateReleaseGateArtifacts(options);
   const missing = result.checks.filter((c) => c.status === "missing" || c.status === "invalid");

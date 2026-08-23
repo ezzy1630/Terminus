@@ -35,6 +35,20 @@ describe("release gate validators", () => {
     expect(errors.some((error) => error.includes("signature"))).toBe(true);
   });
 
+  test("allows fixture eval evidence only for the explicit local M12 option", () => {
+    const errors = validateEvidencePayload(
+      "eval-release",
+      {
+        status: "fixture_pass",
+        pass: true,
+        generatedAt: "2026-08-22T00:00:00.000Z",
+      },
+      { allowFixtureEvidence: true },
+    );
+
+    expect(errors).toEqual([]);
+  });
+
   test("rejects contradictory platform and decision artifacts", () => {
     const matrix = {
       commit: HEAD,

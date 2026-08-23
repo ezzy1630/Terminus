@@ -126,6 +126,12 @@ Stable release requires:
 - [x] Artifacts are signed with SBOM/provenance.
 - [x] Preview soak has no unresolved blocker.
 
+The GitHub M12 job is a local evidence subset and explicitly opts into
+fixture-tier evaluation evidence, placeholder metrics, and the deterministic
+local SBOM fallback. Stable release validation does not set those overrides:
+`produce-release-decision.ts` and `m12-exit-gate.ts` remain fail-closed until
+live release-tier evidence is available.
+
 ## Final acceptance statement (SPEC ?50.10)
 
 The release owner, security owner, protocol owner, and evaluation owner MUST sign a machine-readable release decision:

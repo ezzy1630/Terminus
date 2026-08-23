@@ -149,10 +149,17 @@ function validateEvaluationReport(): string[] {
     throw new Error(`evaluation report is invalid: ${String(error)}`);
   }
   const status = typeof report.status === "string" ? report.status.toLowerCase() : "";
-  if (status.includes("fixture") || report.pass === false || status === "failed") {
+  const fixtureAllowed = process.env.TERMINUS_RELEASE_ALLOW_FIXTURE_EVAL === "1";
+  if ((status.includes("fixture") && !fixtureAllowed) || report.pass === false || status === "failed") {
     throw new Error(`evaluation report is not release evidence: status=${status || "missing"}`);
   }
-  return [];
+  const limitations = Array.isArray(report.limitations)
+    ? report.limitations.filter((value): value is string => typeof value === "string")
+    : [];
+  if (status.includes("fixture")) {
+    limitations.push("deterministic fixture eval evidence is CI-scoped; live release eval is required before stable promotion");
+  }
+  return limitations;
 }
 
 function requireOwnerApprovals(): Record<string, string> {
