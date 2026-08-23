@@ -625,6 +625,7 @@ mod tests {
         assert_eq!(report.status, EnforcementStatus::Degraded);
     }
 
+    #[cfg(unix)]
     #[test]
     fn with_bwrap_path_accepts_existing_bwrap_binary() {
         // `/bin/sh` definitely exists on a unix test environment. Even
