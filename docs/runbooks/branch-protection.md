@@ -12,21 +12,26 @@ to `main` unless another branch becomes an active release target.
 Verified on 2026-08-23 for `ezzy1630/Terminus`:
 
 - the repository is public;
-- no ruleset exists;
-- `main` has no branch-protection rule.
+- the active `main-protection` ruleset applies to `refs/heads/main`;
+- the ruleset blocks deletion and non-fast-forward updates;
+- pull requests must pass the configured required checks and keep the branch
+  up to date;
+- administrators retain an emergency bypass, and code-owner approval is not
+  required while `@ezzy1630` is the sole owner.
 
 Re-check before changing the settings:
 
 ```bash
-gh api repos/ezzy1630/Terminus/rulesets --jq '.[].name'
-gh api repos/ezzy1630/Terminus/branches/main/protection --jq '.required_status_checks.contexts'
+gh api repos/ezzy1630/Terminus/rulesets \
+  --jq '.[] | select(.name == "main-protection") | {id,enforcement,conditions,rules,bypass_actors}'
 ```
 
-The second command returns HTTP 404 until branch protection is configured.
+The legacy `branches/main/protection` endpoint may still return HTTP 404 because
+this repository uses a ruleset rather than legacy branch-protection settings.
 
 ## Procedure
 
-1. Open **Settings → Rules → Rulesets → New branch ruleset** for `main`.
+1. Open **Settings → Rules → Rulesets → main-protection** for `main`.
 2. Enable:
    - pull requests before merging;
    - required status checks;
@@ -41,22 +46,21 @@ The second command returns HTTP 404 until branch protection is configured.
    - `Integration tests`
    - `Security scans`
    - `End-to-end public path`
-   - `M12 release-gate evidence`
-   - `Upstream OpenCode parity`
-   - `Protobuf breaking-change check`
-4. Do not require the informational platform entries, the container build, the
-   conditional eval smoke job, or the nightly Linux enforcement probes.
+4. Do not require the informational platform entries, the container build,
+   `M12 release-gate evidence`, `Upstream OpenCode parity`,
+   `Protobuf breaking-change check`, the conditional eval smoke job, or the
+   nightly Linux enforcement probes.
 5. Leave an emergency administrator bypass available and record any use of it.
    Do not require code-owner approval while `@ezzy1630` is the sole owner.
 
 ## Verification
 
 Open a pull request against `main` and confirm that the required checks appear
-in the merge box. Then verify the configured contexts:
+in the merge box. Then verify the ruleset:
 
 ```bash
-gh api repos/ezzy1630/Terminus/branches/main/protection \
-  --jq '.required_status_checks.contexts'
+gh api repos/ezzy1630/Terminus/rulesets \
+  --jq '.[] | select(.name == "main-protection") | .rules[]'
 ```
 
 ## Rollback
