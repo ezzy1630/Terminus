@@ -54,4 +54,8 @@ if changed:
         json.dump(d, f, indent=2)
 ' "$f"
 done
-bun turbo typecheck --force
+# The imported OpenCode app typecheck can exceed Node's default heap on the
+# GitHub-hosted runner. Keep the full check, but give its compiler processes a
+# bounded larger heap and avoid launching every package compiler concurrently.
+NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=4096" \
+  bun turbo typecheck --force --concurrency=2
