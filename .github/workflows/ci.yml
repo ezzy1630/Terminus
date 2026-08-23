@@ -136,7 +136,7 @@ jobs:
           docker run --rm \
             -v "$PWD":/src -w /src \
             rust:bookworm \
-            bash -lc 'apt-get update -qq && apt-get install -y -qq protobuf-compiler && cargo build --workspace --all-targets --locked'
+            bash -c 'source /usr/local/cargo/env && apt-get update -qq && apt-get install -y -qq protobuf-compiler && cargo build --workspace --all-targets --locked'
 
 
   # ---------- Tests (Linux x86_64 = full) ----------
