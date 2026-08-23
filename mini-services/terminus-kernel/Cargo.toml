@@ -47,7 +47,7 @@ terminus-git = { path = "../../crates/terminus-git" }
 terminus-authz = { path = "../../crates/terminus-authz" }
 
 # HTTP stack.
-axum = { version = "0.7", features = ["json", "http1", "tokio"] }
+axum = { version = "0.8", features = ["json", "http1", "tokio"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5" }
 hyper = { version = "1", features = ["http1", "server"] }
@@ -61,7 +61,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 uuid = { version = "1", features = ["v7", "serde"] }
@@ -73,12 +73,12 @@ url = "2"
 # The UDS binding + tonic server + capability-token RequestContext here prove
 # the transport contract; the HTTP bootstrap remains the default path.
 tonic = { version = "0.12", features = ["tls"] }
-prost = "0.13"
-prost-types = "0.13"
+prost = "0.14"
+prost-types = "0.14"
 terminus-remote = { path = "../../crates/terminus-remote" }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.14"
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
