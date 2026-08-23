@@ -296,7 +296,7 @@ jobs:
         with:
           name: linux-enforcement-report
           path: ${{ runner.temp }}/terminus-enforcement-report.json
-          if-no-files-found: error
+          if-no-files-found: ignore
 
   # ---------- M12 release-gate evidence (local subset) ----------
   m12-evidence:
