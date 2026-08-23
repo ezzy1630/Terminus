@@ -137,6 +137,28 @@ export const contextFragmentSchema = z.object({
   selectionFeatures: selectionFeaturesSchema,
 });
 
+export const contextManifestEntrySchema = z.object({
+  fragmentId: z.string(),
+  role: z.string(),
+  order: z.number().int().nonnegative(),
+  artifactHash: z.string(),
+  estimatedTokens: z.number().int().nonnegative(),
+  required: z.boolean(),
+  cacheBreakpoint: z.boolean(),
+});
+
+export const contextManifestOmissionSchema = z.object({
+  fragmentId: z.string(),
+  reason: z.string().min(1),
+});
+
+export const contextCachePlanSchema = z.object({
+  stablePrefixHash: z.string(),
+  volatileSuffixBoundary: z.number().int().nonnegative(),
+  breakpoints: z.array(z.number().int().nonnegative()),
+  predictedCachedTokens: z.bigint(),
+});
+
 // ─────────────────── World State Registry (§33.5) ────────────────────────────
 
 export const WorldStateSection = [
@@ -206,6 +228,17 @@ export interface ContextEpochSnapshot {
   readonly continuationId: string | null;
   readonly startedAt: Rfc3339Timestamp;
 }
+
+export const contextEpochSnapshotSchema = z.object({
+  epochId: z.string(),
+  threadId: z.string(),
+  sequence: z.number().int().nonnegative(),
+  baselineHash: z.string(),
+  provider: z.string(),
+  model: z.string(),
+  continuationId: z.string().nullable(),
+  startedAt: z.string(),
+});
 
 // ───────────────────────── Context directive ─────────────────────────────────
 
@@ -277,6 +310,7 @@ export interface ManifestBuilderInput {
   readonly confidentialityDecisions: Readonly<Record<string, ConfidentialityLabel>>;
   readonly taintDecisions: Readonly<Record<string, InjectionRisk>>;
   readonly experimentAssignments: readonly string[];
+  readonly decisionRecord?: Readonly<Record<string, unknown>> | undefined;
   readonly occurredAt: Rfc3339Timestamp;
 }
 
@@ -288,6 +322,8 @@ export interface ManifestBuilderInput {
  * `persistBeforeSend`.
  */
 export function buildManifest(input: ManifestBuilderInput): Omit<ContextManifest, "id"> {
+  contextEpochSnapshotSchema.parse(input.epoch);
+  for (const fragment of input.selected) contextFragmentSchema.parse(fragment);
   const entries: ContextManifest["fragments"][number][] = input.selected.map(
     (frag, idx) => ({
       fragmentId: frag.id,
@@ -299,7 +335,7 @@ export function buildManifest(input: ManifestBuilderInput): Omit<ContextManifest
       cacheBreakpoint: false,
     }),
   );
-  return {
+  const manifest = {
     providerAttemptId: null,
     epochId: input.epoch.epochId,
     compilerVersion: input.compilerVersion,
@@ -318,8 +354,13 @@ export function buildManifest(input: ManifestBuilderInput): Omit<ContextManifest
     confidentialityDecisions: input.confidentialityDecisions,
     taintDecisions: input.taintDecisions,
     experimentAssignments: input.experimentAssignments,
+    decisionRecord: input.decisionRecord,
     createdAt: input.occurredAt,
   };
+  contextManifestEntrySchema.array().parse(manifest.fragments);
+  contextManifestOmissionSchema.array().parse(manifest.omitted);
+  contextCachePlanSchema.parse(manifest.cachePlan);
+  return manifest;
 }
 
 // ───────────────────────── Helpers ───────────────────────────────────────────
@@ -370,8 +411,34 @@ export function isFreshAgainst(
  * (content identities MUST use `sha256:<hex>`).
  */
 export function computeStablePrefixHash(stableFragments: readonly ContextFragment[]): ContentHash {
-  const lines = stableFragments.map((f) => `${f.id}:${f.contentRef.hash}`).sort();
+  // Prefix identity is order-sensitive. Sorting here would make two provider
+  // requests with different semantic order appear cache-compatible.
+  const lines = stableFragments.map((f) => `${f.id}:${f.contentRef.hash}`);
   const joined = lines.join("\n");
   const hex = createHash("sha256").update(joined, "utf8").digest("hex");
   return `sha256:${hex}` as ContentHash;
+}
+
+/** Content identity used by every in-band fragment and artifact boundary. */
+export function computeContentHash(content: string | Uint8Array): ContentHash {
+  const hex = createHash("sha256").update(content).digest("hex");
+  return `sha256:${hex}` as ContentHash;
+}
+
+/** Canonical JSON for durable manifests and replay hashes. */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortJson(value), (_key, nested) =>
+    typeof nested === "bigint" ? nested.toString() : nested,
+  );
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJson);
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(record).sort().map((key) => [key, sortJson(record[key])]),
+    );
+  }
+  return value;
 }

@@ -12,7 +12,7 @@
  *  - Ablation (what if we removed this fragment?)
  */
 
-import type { Uuid7, TokenCount } from "@terminus/domain";
+import type { Uuid7, TokenCount, ContentHash } from "@terminus/domain";
 import type {
   ContextFragment,
   ContextManifest,
@@ -25,6 +25,7 @@ import type {
   ProviderCapabilitySnapshot,
   ModelCapabilitySnapshot,
 } from "@terminus/provider-core";
+import { canonicalJson, computeContentHash } from "@terminus/context-ir";
 
 // ──────────────────────── Ablation specification ─────────────────────────────
 
@@ -61,6 +62,7 @@ export interface ReplayResult {
   readonly rendered: RenderedProviderRequest;
   readonly fragmentCount: number;
   readonly estimatedTokens: number;
+  readonly renderedRequestHash: ContentHash;
   /** The ablation spec that was applied, if any. */
   readonly ablation: AblationSpec | null;
 }
@@ -77,6 +79,7 @@ export interface ReplayResult {
 export async function replayContext(
   input: ReplayInput,
 ): Promise<ReplayResult> {
+  assertManifestSelection(input.manifest, input.selectedFragments);
   const cachePlan: ContextCachePlan = {
     stablePrefixHash: input.manifest.cachePlan.stablePrefixHash,
     volatileSuffixBoundary: input.manifest.cachePlan.volatileSuffixBoundary,
@@ -97,7 +100,7 @@ export async function replayContext(
     outputProfile: "terse",
     reasoningReserveTokens: input.manifest.reasoningReserveTokens,
     outputReserveTokens: input.manifest.outputReserveTokens,
-    hardInputLimit: input.manifest.recoveryMarginTokens,
+    hardInputLimit: replayHardInputLimit(input.manifest),
     signal: input.signal,
     manifestId: input.manifest.id,
   });
@@ -115,6 +118,7 @@ export async function replayContext(
     rendered,
     fragmentCount: input.selectedFragments.length,
     estimatedTokens,
+    renderedRequestHash: hashRenderedRequest(rendered),
     ablation: null,
   };
 }
@@ -129,6 +133,7 @@ export async function replayWithAblation(
   input: ReplayInput,
   ablation: AblationSpec,
 ): Promise<ReplayResult> {
+  assertManifestSelection(input.manifest, input.selectedFragments);
   const removeSet = new Set(ablation.removeFragmentIds);
   let fragments = input.selectedFragments.filter(
     (frag) => !removeSet.has(frag.id),
@@ -158,7 +163,7 @@ export async function replayWithAblation(
     outputProfile: "terse",
     reasoningReserveTokens: input.manifest.reasoningReserveTokens,
     outputReserveTokens: input.manifest.outputReserveTokens,
-    hardInputLimit: input.manifest.recoveryMarginTokens,
+    hardInputLimit: replayHardInputLimit(input.manifest),
     signal: input.signal,
     manifestId: input.manifest.id,
   });
@@ -176,6 +181,7 @@ export async function replayWithAblation(
     rendered,
     fragmentCount: fragments.length,
     estimatedTokens,
+    renderedRequestHash: hashRenderedRequest(rendered),
     ablation,
   };
 }
@@ -236,4 +242,43 @@ export function standardAblations(
     worldStateAblation(fragments),
     documentationAblation(fragments),
   ];
+}
+
+function replayHardInputLimit(manifest: ContextManifest): TokenCount {
+  const record = manifest.decisionRecord;
+  const configured = record?.hardInputLimit;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured >= 0) {
+    return BigInt(Math.trunc(configured)) as TokenCount;
+  }
+  // Legacy manifests did not record the limit. Preserve a conservative
+  // recoverable fallback rather than pretending the recovery margin was an
+  // input limit.
+  return (manifest.outputReserveTokens + manifest.reasoningReserveTokens + manifest.recoveryMarginTokens) as TokenCount;
+}
+
+function assertManifestSelection(
+  manifest: ContextManifest,
+  fragments: readonly ContextFragment[],
+): void {
+  if (manifest.fragments.length !== fragments.length) {
+    throw new Error(
+      `replay selection does not match manifest ${manifest.id}: expected ${manifest.fragments.length} fragments, got ${fragments.length}`,
+    );
+  }
+  for (let index = 0; index < manifest.fragments.length; index += 1) {
+    const entry = manifest.fragments[index]!;
+    const fragment = fragments[index]!;
+    if (entry.fragmentId !== fragment.id || entry.artifactHash !== fragment.contentRef.hash) {
+      throw new Error(`replay selection mismatch at position ${index} for manifest ${manifest.id}`);
+    }
+  }
+}
+
+function hashRenderedRequest(rendered: RenderedProviderRequest): ContentHash {
+  return computeContentHash(canonicalJson({
+    providerId: rendered.providerId,
+    model: rendered.model,
+    body: rendered.body,
+    request: { ...rendered.request, signal: null },
+  }));
 }

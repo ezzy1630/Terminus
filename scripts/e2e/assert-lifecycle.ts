@@ -330,6 +330,24 @@ if (!Array.isArray(events) || events.length === 0) throw new Error("export did n
 if (!Array.isArray(manifests) || manifests.length === 0) throw new Error("export did not contain context manifests");
 if (!Array.isArray(verifications) || verifications.length === 0) throw new Error("export did not contain verification plans");
 
+const manifestEvent = events
+  .map((event) => asObject(event, "event"))
+  .find((event) => event.event_type === "context.manifest_persisted");
+if (manifestEvent === undefined) throw new Error("export did not contain context manifest evidence");
+const manifestId = stringField(manifestEvent, "aggregate_id", "manifest event");
+const manifestView = await api("GET", `/v1/context/manifests/${encodeURIComponent(manifestId)}`);
+if (stringField(manifestView, "epoch_id", "context manifest") === "") {
+  throw new Error(`context manifest was not bound to a durable epoch: ${JSON.stringify(manifestView)}`);
+}
+if (!stringField(manifestView, "rendered_request_hash", "context manifest").startsWith("sha256:")) {
+  throw new Error(`context manifest did not record the exact rendered request: ${JSON.stringify(manifestView)}`);
+}
+const manifestExperiment = asObject(manifestView.experiment, "context manifest experiment");
+const decisionRecord = asObject(manifestExperiment.decisionRecord, "context manifest decision record");
+if (!Array.isArray(decisionRecord.candidates) || !Array.isArray(decisionRecord.retrievalQueries)) {
+  throw new Error(`context manifest decision record was incomplete: ${JSON.stringify(manifestView)}`);
+}
+
 const imported = await api("POST", "/v1/system/import", exported);
 debug("import completed");
 if (imported.status !== "imported" || typeof imported.import_id !== "string") {
@@ -383,6 +401,7 @@ console.log(JSON.stringify({
   turn_id: turnId,
   thread_id: threadId,
   checkpoint_id: checkpointId,
+  context_manifest_id: manifestId,
   event_count: events.length,
   context_manifest_count: manifests.length,
   verification_plan_count: verifications.length,

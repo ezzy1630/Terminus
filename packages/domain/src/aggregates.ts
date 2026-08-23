@@ -492,6 +492,13 @@ export interface ContextManifest {
   readonly confidentialityDecisions: Readonly<Record<string, ConfidentialityLabel>>;
   readonly taintDecisions: Readonly<Record<string, InjectionRisk>>;
   readonly experimentAssignments: readonly string[];
+  /**
+   * Immutable compiler decision record. It contains the retrieval queries,
+   * candidate scores, evidence coverage, transforms, and policy decisions
+   * needed to explain and replay the invocation without consulting model
+   * recollection.
+   */
+  readonly decisionRecord?: Readonly<Record<string, unknown>> | undefined;
   readonly createdAt: Rfc3339Timestamp;
 }
 
@@ -963,6 +970,17 @@ export interface Checkpoint {
   readonly artifactHash: ContentHash;
   readonly canonicalStateHash: ContentHash;
   readonly summary: string;
+  /** Unsettled effects and approvals that must survive context compaction. */
+  readonly effectState?: readonly {
+    readonly effectId: string;
+    readonly state: string;
+    readonly idempotencyKey: string;
+  }[] | undefined;
+  readonly approvalState?: readonly {
+    readonly approvalId: string;
+    readonly state: string;
+    readonly operationHash: string;
+  }[] | undefined;
   readonly createdAt: Rfc3339Timestamp;
 }
 
@@ -1686,4 +1704,3 @@ export const budgetConsumptionSchema = z.object({
   consumedApprovals: z.number().int().nonnegative(),
   lastUpdatedAt: z.string(),
 });
-

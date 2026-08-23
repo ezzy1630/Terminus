@@ -2,21 +2,10 @@
 /**
  * Produce SPEC §50.10 machine-readable release decision YAML.
  *
- * Roadmap Phase 0 truth rules enforced here:
- *   - supported_platforms come ONLY from artifacts/release-gate/platform-support.json
- *     (evidence-derived); a missing matrix yields an EMPTY support list plus a
- *     recorded limitation — never a broad hard-coded claim;
- *   - known_limitations are seeded from the security findings register AND
- *     every stub-tier component in maturity.yaml, so an empty limitations
- *     list can only occur when there is genuinely nothing to disclose.
- *
- * Owner approvals via env:
- *   TERMINUS_RELEASE_OWNER_APPROVAL
- *   TERMINUS_SECURITY_OWNER_APPROVAL
- *   TERMINUS_PROTOCOL_OWNER_APPROVAL
- *   TERMINUS_EVALUATION_OWNER_APPROVAL
+ * Support, limitations, and approvals are release inputs. This script does
+ * not turn a build matrix or a declaration into evidence.
  */
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Finding = {
@@ -27,14 +16,19 @@ type Finding = {
   acceptance_rationale?: string;
 };
 
-type FindingsRegister = {
-  findings?: Finding[];
-};
+type JsonRecord = Record<string, unknown>;
 
-type MaturityComponent = {
-  id?: string;
-  tier?: string;
-  basis?: string;
+type FindingsRegister = { findings?: Finding[] };
+
+type MaturityComponent = { id?: string; tier?: string; basis?: string };
+
+type PlatformEntry = { status?: string; basis?: string; evidence?: string | null };
+
+type PlatformMatrix = {
+  commit?: string;
+  supported_platforms?: string[];
+  unverified_or_degraded_platforms?: string[];
+  platforms?: Record<string, PlatformEntry>;
 };
 
 const ROOT = join(import.meta.dir, "..");
@@ -46,142 +40,198 @@ const PLATFORM_MATRIX_PATH = join(OUT_DIR, "platform-support.json");
 const MIGRATIONS_DIR = join(ROOT, "migrations", "sqlite");
 
 function envOrEmpty(name: string): string {
-  const v = process.env[name];
-  return typeof v === "string" && v.length > 0 ? v : "";
+  const value = process.env[name];
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function currentCommit(): string {
+  const fromEnv = envOrEmpty("TERMINUS_RELEASE_COMMIT") || envOrEmpty("GITHUB_SHA");
+  if (fromEnv) return fromEnv;
+  const result = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: ROOT });
+  return result.stdout.toString().trim() || "unknown";
 }
 
 function countMigrations(): number {
   if (!existsSync(MIGRATIONS_DIR)) return 0;
-  return readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).length;
+  return readdirSync(MIGRATIONS_DIR).filter((file) => file.endsWith(".sql")).length;
 }
 
-function loadFindings(): { known_limitations: string[]; accepted_risks: string[] } {
-  const known_limitations: string[] = [];
-  const accepted_risks: string[] = [];
+function loadFindings(): { knownLimitations: string[]; acceptedRisks: string[] } {
   if (!existsSync(FINDINGS_PATH)) {
-    return { known_limitations, accepted_risks };
+    return {
+      knownLimitations: ["SECURITY-FINDINGS absent: the security findings register could not be read"],
+      acceptedRisks: [],
+    };
   }
-  const raw = readFileSync(FINDINGS_PATH, "utf8");
-  // Minimal YAML extraction without adding a dependency: parse via Bun JSON
-  // if the register is JSON-compatible, else line-scan accepted/open items.
-  let parsed: FindingsRegister | null = null;
+  let parsed: FindingsRegister;
   try {
-    parsed = Bun.YAML.parse(raw) as FindingsRegister;
-  } catch {
-    parsed = null;
+    parsed = Bun.YAML.parse(readFileSync(FINDINGS_PATH, "utf8")) as FindingsRegister;
+  } catch (error) {
+    throw new Error(`security findings register is invalid: ${String(error)}`);
   }
-  if (parsed?.findings && Array.isArray(parsed.findings)) {
-    for (const f of parsed.findings) {
-      const id = (f.id ?? "unknown").trim();
-      const summary = (f.summary ?? "").trim();
-      const line = `${id}: ${summary}`.trim();
-      if (f.status === "accepted") {
-        accepted_risks.push(line);
-        if (f.acceptance_rationale) {
-          known_limitations.push(`${id}: ${f.acceptance_rationale.trim()}`);
-        }
-      } else if (f.status === "open") {
-        known_limitations.push(line);
+  const knownLimitations: string[] = [];
+  const acceptedRisks: string[] = [];
+  for (const finding of parsed.findings ?? []) {
+    const id = (finding.id ?? "unknown").trim();
+    const summary = (finding.summary ?? "").trim();
+    const line = `${id}: ${summary}`.trim();
+    if (finding.status === "accepted") {
+      acceptedRisks.push(line);
+      if (finding.acceptance_rationale?.trim()) {
+        knownLimitations.push(`${id}: ${finding.acceptance_rationale.trim()}`);
       }
+    } else if (finding.status === "open") {
+      knownLimitations.push(line);
     }
   }
-  return { known_limitations, accepted_risks };
+  return { knownLimitations, acceptedRisks };
 }
 
 function loadStubLimitations(): string[] {
-  if (!existsSync(MATURITY_PATH)) return [];
+  if (!existsSync(MATURITY_PATH)) return ["MATURITY absent: component maturity could not be read"];
+  let parsed: { components?: MaturityComponent[] };
   try {
-    const parsed = Bun.YAML.parse(readFileSync(MATURITY_PATH, "utf8")) as {
-      components?: MaturityComponent[];
-    };
-    return (parsed.components ?? [])
-      .filter((c) => c.tier === "stub")
-      .map((c) => `MATURITY-STUB ${c.id}: ${c.basis?.trim() ?? "declared stub"}`);
-  } catch {
-    return [];
+    parsed = Bun.YAML.parse(readFileSync(MATURITY_PATH, "utf8")) as { components?: MaturityComponent[] };
+  } catch (error) {
+    throw new Error(`maturity registry is invalid: ${String(error)}`);
   }
+  return (parsed.components ?? [])
+    .filter((component) => component.tier === "stub")
+    .map((component) => `MATURITY-STUB ${component.id ?? "unknown"}: ${component.basis?.trim() || "declared stub"}`);
 }
 
-type PlatformMatrix = {
-  supported_platforms?: string[];
-  unverified_or_degraded_platforms?: string[];
-  platforms?: Record<string, { status?: string; basis?: string }>;
-};
-
-function loadPlatformSupport(): { supported: string[]; limitations: string[] } {
-  const limitations: string[] = [];
+function loadPlatformSupport(head: string): { supported: string[]; limitations: string[] } {
   if (!existsSync(PLATFORM_MATRIX_PATH)) {
-    limitations.push(
-      "PLATFORM-MATRIX absent: no evidence-derived platform support matrix was produced; all platform support claims are withheld (run scripts/produce-platform-matrix.ts)",
-    );
-    return { supported: [], limitations };
+    throw new Error("platform-support.json is missing; release support claims require the evidence matrix");
   }
-  let parsed: PlatformMatrix;
+  let matrix: PlatformMatrix;
   try {
-    parsed = JSON.parse(readFileSync(PLATFORM_MATRIX_PATH, "utf8")) as PlatformMatrix;
-  } catch {
-    limitations.push("PLATFORM-MATRIX invalid: platform-support.json does not parse");
-    return { supported: [], limitations };
+    matrix = JSON.parse(readFileSync(PLATFORM_MATRIX_PATH, "utf8")) as PlatformMatrix;
+  } catch (error) {
+    throw new Error(`platform-support.json is invalid: ${String(error)}`);
   }
-  const details = parsed.platforms ?? {};
-  for (const name of parsed.unverified_or_degraded_platforms ?? []) {
-    const entry = details[name];
-    limitations.push(`PLATFORM ${name} (${entry?.status ?? "unknown"}): ${entry?.basis ?? ""}`);
+  if (matrix.commit !== head) throw new Error(`platform matrix commit ${matrix.commit ?? "missing"} does not match HEAD ${head}`);
+  const platforms = matrix.platforms ?? {};
+  const supported = matrix.supported_platforms ?? [];
+  const degraded = matrix.unverified_or_degraded_platforms ?? [];
+  const supportedSet = new Set(supported);
+  const degradedSet = new Set(degraded);
+  const errors: string[] = [];
+  if (supportedSet.size !== supported.length) errors.push("supported_platforms contains duplicates");
+  if (degradedSet.size !== degraded.length) errors.push("unverified_or_degraded_platforms contains duplicates");
+  if (supportedSet.size + degradedSet.size !== supported.length + degraded.length) errors.push("platform lists overlap");
+  for (const [name, entry] of Object.entries(platforms)) {
+    if (entry.status === "supported" && !supportedSet.has(name)) errors.push(`${name} is supported but absent from supported_platforms`);
+    if (entry.status !== "supported" && !degradedSet.has(name)) errors.push(`${name} is not supported but absent from unverified_or_degraded_platforms`);
   }
-  return { supported: parsed.supported_platforms ?? [], limitations };
+  for (const name of supportedSet) {
+    if (platforms[name]?.status !== "supported") errors.push(`${name} has no supported evidence`);
+    if (!platforms[name]?.evidence) errors.push(`${name} has no evidence reference`);
+  }
+  for (const name of degradedSet) {
+    if (!platforms[name]) errors.push(`${name} is listed as degraded without platform evidence`);
+  }
+  if (errors.length > 0) throw new Error(`platform matrix is contradictory: ${errors.join("; ")}`);
+  const limitations = degraded.map((name) => {
+    const entry = platforms[name];
+    return `PLATFORM ${name} (${entry?.status ?? "unknown"}): ${entry?.basis ?? "no support evidence"}`;
+  });
+  return { supported, limitations };
 }
 
-function yamlQuote(s: string): string {
-  return JSON.stringify(s);
+function validateEvaluationReport(): string[] {
+  const reportPath = join(ROOT, process.env.TERMINUS_EVALUATION_REPORT ?? "artifacts/release-gate/eval-release.json");
+  if (!existsSync(reportPath)) return ["EVALUATION absent: release evaluation evidence was not produced"];
+  let report: JsonRecord;
+  try {
+    report = JSON.parse(readFileSync(reportPath, "utf8")) as JsonRecord;
+  } catch (error) {
+    throw new Error(`evaluation report is invalid: ${String(error)}`);
+  }
+  const status = typeof report.status === "string" ? report.status.toLowerCase() : "";
+  if (status.includes("fixture") || report.pass === false || status === "failed") {
+    throw new Error(`evaluation report is not release evidence: status=${status || "missing"}`);
+  }
+  return [];
+}
+
+function requireOwnerApprovals(): Record<string, string> {
+  const names = {
+    release_owner: "TERMINUS_RELEASE_OWNER_APPROVAL",
+    security_owner: "TERMINUS_SECURITY_OWNER_APPROVAL",
+    protocol_owner: "TERMINUS_PROTOCOL_OWNER_APPROVAL",
+    evaluation_owner: "TERMINUS_EVALUATION_OWNER_APPROVAL",
+  } as const;
+  const signatures = Object.fromEntries(
+    Object.entries(names).map(([owner, envName]) => [owner, envOrEmpty(envName)]),
+  );
+  const missing = Object.entries(signatures).filter(([, value]) => !value).map(([owner]) => owner);
+  if (missing.length > 0) throw new Error(`release decision is unsigned: missing ${missing.join(", ")}`);
+  return signatures;
+}
+
+function validateSignedLinuxEvidence(head: string): void {
+  if (process.env.TERMINUS_RELEASE_ENFORCE_SIGNED_ARTIFACTS !== "1") return;
+  const evidencePath = envOrEmpty("TERMINUS_LINUX_EVIDENCE");
+  const signaturePath = envOrEmpty("TERMINUS_LINUX_EVIDENCE_SIGNATURE");
+  const certificatePath = envOrEmpty("TERMINUS_LINUX_EVIDENCE_CERTIFICATE");
+  if (!evidencePath || !signaturePath || !certificatePath) throw new Error("signed Linux evidence paths are required");
+  if (!existsSync(evidencePath) || !existsSync(signaturePath) || !existsSync(certificatePath)) {
+    throw new Error("signed Linux evidence is incomplete");
+  }
+  const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as { terminus_commit?: string };
+  if (evidence.terminus_commit !== head) throw new Error("Linux evidence commit does not match HEAD");
+}
+
+export function buildReleaseDecision(): string {
+  const head = currentCommit();
+  if (head === "unknown") throw new Error("release commit is unknown");
+  const platformSupport = loadPlatformSupport(head);
+  const findings = loadFindings();
+  const knownLimitations = [
+    ...findings.knownLimitations,
+    ...loadStubLimitations(),
+    ...platformSupport.limitations,
+    ...validateEvaluationReport(),
+  ];
+  validateSignedLinuxEvidence(head);
+  const signatures = requireOwnerApprovals();
+  const version = envOrEmpty("TERMINUS_RELEASE_VERSION") || "0.1.0";
+  const securityProfile = envOrEmpty("TERMINUS_SECURITY_PROFILE") || "secure-local-default";
+  return `release:
+  version: ${JSON.stringify(version)}
+  commit: ${JSON.stringify(head)}
+  generated_at: ${JSON.stringify(new Date().toISOString())}
+  protocol_versions:
+    terminus_kernel_v1: "1"
+  database_schema_version: ${countMigrations()}
+  supported_platforms:
+${yamlList(platformSupport.supported, "    ")}
+  security_profile: ${JSON.stringify(securityProfile)}
+  evaluation_report: ${JSON.stringify(process.env.TERMINUS_EVALUATION_REPORT ?? "artifacts/release-gate/eval-release.json")}
+  divergence_report: ${JSON.stringify(process.env.TERMINUS_DIVERGENCE_REPORT ?? "upstream/divergence-budget.yaml")}
+  known_limitations:
+${yamlList([...new Set(knownLimitations)], "    ")}
+  accepted_risks:
+${yamlList([...new Set(findings.acceptedRisks)], "    ")}
+  signatures:
+    release_owner: ${JSON.stringify(signatures.release_owner)}
+    security_owner: ${JSON.stringify(signatures.security_owner)}
+    protocol_owner: ${JSON.stringify(signatures.protocol_owner)}
+    evaluation_owner: ${JSON.stringify(signatures.evaluation_owner)}
+`;
 }
 
 function yamlList(items: string[], indent: string): string {
   if (items.length === 0) return `${indent}[]`;
-  return items.map((i) => `${indent}- ${yamlQuote(i)}`).join("\n");
+  return items.map((item) => `${indent}- ${JSON.stringify(item)}`).join("\n");
 }
 
-const findings = loadFindings();
-const stubLimitations = loadStubLimitations();
-const platformSupport = loadPlatformSupport();
-const known_limitations = [
-  ...findings.known_limitations,
-  ...stubLimitations,
-  ...platformSupport.limitations,
-];
-const accepted_risks = findings.accepted_risks;
-const schemaVersion = countMigrations();
-const commit =
-  process.env.TERMINUS_RELEASE_COMMIT ??
-  process.env.GITHUB_SHA ??
-  "unknown";
-const version = process.env.TERMINUS_RELEASE_VERSION ?? "0.1.0";
+function main(): void {
+  mkdirSync(OUT_DIR, { recursive: true });
+  const document = buildReleaseDecision();
+  writeFileSync(OUT_PATH, document, "utf8");
+  console.log(`[release-decision] wrote ${OUT_PATH}`);
+}
 
-// Roadmap Phase 0: platform support is evidence-derived. No matrix, no
-// support claims.
-const supportedPlatforms = platformSupport.supported;
-
-const doc = `release:
-  version: ${yamlQuote(version)}
-  commit: ${yamlQuote(commit)}
-  protocol_versions:
-    terminus_kernel_v1: "1"
-  database_schema_version: ${schemaVersion}
-  supported_platforms:
-${yamlList(supportedPlatforms, "    ")}
-  security_profile: ${yamlQuote(process.env.TERMINUS_SECURITY_PROFILE ?? "secure-local-default")}
-  evaluation_report: ${yamlQuote(process.env.TERMINUS_EVALUATION_REPORT ?? "artifacts/release-gate/eval-release.json")}
-  divergence_report: ${yamlQuote(process.env.TERMINUS_DIVERGENCE_REPORT ?? "upstream/divergence-budget.yaml")}
-  known_limitations:
-${yamlList(known_limitations, "    ")}
-  accepted_risks:
-${yamlList(accepted_risks, "    ")}
-  signatures:
-    release_owner: ${yamlQuote(envOrEmpty("TERMINUS_RELEASE_OWNER_APPROVAL"))}
-    security_owner: ${yamlQuote(envOrEmpty("TERMINUS_SECURITY_OWNER_APPROVAL"))}
-    protocol_owner: ${yamlQuote(envOrEmpty("TERMINUS_PROTOCOL_OWNER_APPROVAL"))}
-    evaluation_owner: ${yamlQuote(envOrEmpty("TERMINUS_EVALUATION_OWNER_APPROVAL"))}
-`;
-
-mkdirSync(OUT_DIR, { recursive: true });
-writeFileSync(OUT_PATH, doc, "utf8");
-console.log(`[release-decision] wrote ${OUT_PATH} (schema_version=${schemaVersion})`);
+if (import.meta.main) main();

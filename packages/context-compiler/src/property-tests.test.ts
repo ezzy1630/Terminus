@@ -542,6 +542,17 @@ describe("Provenance DAG", () => {
     expect(ancestorsOfC.map((n) => n.id).sort()).toEqual(["a", "b"]);
     const descendantsOfA = dag.descendants("a");
     expect(descendantsOfA.map((n) => n.id).sort()).toEqual(["b", "c"]);
+
+    expect(() => dag.addNode({ ...nodeB, derivedFrom: ["c"] })).toThrow(
+      /provenance cycle rejected/,
+    );
+    expect(dag.get("b")).toEqual(nodeB);
+
+    // Replacing a node removes its old incoming edges without disturbing
+    // children that still derive from the replacement node.
+    dag.addNode({ ...nodeB, derivedFrom: [] });
+    expect(dag.descendants("a").map((n) => n.id)).toEqual([]);
+    expect(dag.ancestors("c").map((n) => n.id)).toEqual(["b"]);
   });
 });
 

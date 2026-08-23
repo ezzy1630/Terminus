@@ -34,6 +34,7 @@ import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { firstValueFrom } from "rxjs";
 import { createKernelUdsClients, type KernelUdsClients } from "./kernel-uds.js";
+import { createKernelArtifactClient, PrismaContextStore } from "./context-store.js";
 import { PatchCommitMode, type RequestContext } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import {
   createVerificationRuntime,
@@ -41,7 +42,17 @@ import {
   persistPlanToPrisma,
   persistResultsToPrisma,
 } from "./verification-runtime.js";
-import type { AcceptanceCriterion, Micros } from "../../../packages/domain/src/index.ts";
+import type {
+  AcceptanceCriterion,
+  Checkpoint,
+  ContentHash,
+  Episode,
+  Micros,
+  ModelKey,
+  Rfc3339Timestamp,
+  TokenCount,
+} from "../../../packages/domain/src/index.ts";
+import { generateUuid7 } from "../../../packages/domain/src/index.ts";
 import {
   authorizationInstanceSchema,
   claimSchema,
@@ -86,6 +97,33 @@ import {
 } from "../../../packages/domain/src/index.ts";
 import { ARP_V2_COMMAND_TYPES, ARP_V2_EVENT_TYPES } from "../../../packages/runtime-protocol/src/index.ts";
 import { z } from "zod";
+import {
+  compileContext,
+  type RetrievalMethod,
+  type RetrievalPipeline,
+  type RetrievalQuery,
+  type RetrievalResult,
+  type ContextBudget,
+  type TaskSnapshot,
+  type ThreadSnapshot,
+  type WorldStateSnapshot,
+} from "@terminus/context-compiler";
+import {
+  canonicalJson,
+  computeContentHash,
+  type ContextDirective,
+  type ContextEpochSnapshot,
+  type ContextFragment,
+} from "@terminus/context-ir";
+import { LocalRenderer } from "@terminus/provider-local";
+import type { ArtifactClient } from "@terminus/artifact-client";
+import type {
+  ModelCapabilitySnapshot,
+  ProviderCapabilitySnapshot,
+  ProviderResponse,
+  ProviderResponseChunk,
+  ConfidentialityPolicy,
+} from "@terminus/provider-core";
 
 
 // ────────────────────────── Configuration ──────────────────────────────────
@@ -318,8 +356,24 @@ async function emit(params: {
 
 // ────────────────────────── Helpers ────────────────────────────────────────
 
-function now(): string { return new Date().toISOString(); }
+function now(): Rfc3339Timestamp { return new Date().toISOString() as Rfc3339Timestamp; }
 function uuid(): string { return randomUUID(); }
+
+interface TaskContractHashInput {
+  readonly version: number;
+  readonly objective: string;
+  readonly userOutcome: string | null;
+  readonly nonGoals: readonly unknown[];
+  readonly constraints: readonly unknown[];
+  readonly assumptions: readonly unknown[];
+  readonly unknowns: readonly unknown[];
+  readonly allowedScope: unknown;
+  readonly changePolicy: unknown;
+}
+
+function taskContractHash(input: TaskContractHashInput): ContentHash {
+  return computeContentHash(canonicalJson(input));
+}
 
 /** Per-request raw body cache so auth/idempotency/handler can all read it. */
 const bodyCache = new WeakMap<IncomingMessage, Buffer>();
@@ -841,7 +895,7 @@ async function replayArpV2(): Promise<void> {
         consumedInputTokens: BigInt(String(b.consumedInputTokens ?? 0)),
         consumedOutputTokens: BigInt(String(b.consumedOutputTokens ?? 0)),
         consumedApprovals: Number(b.consumedApprovals ?? 0),
-        lastUpdatedAt: String(b.lastUpdatedAt ?? nowTimestamp()),
+        lastUpdatedAt: String(b.lastUpdatedAt ?? nowTimestamp()) as Rfc3339Timestamp,
       };
       store.set(row.aggregateId, revived);
     } else {
@@ -1170,6 +1224,17 @@ const routes: Route[] = [
       },
     });
     // Initial contract version 1.
+    const initialContract: TaskContractHashInput = {
+      version: 1,
+      objective: body.objective,
+      userOutcome: null,
+      nonGoals: body.non_goals ?? [],
+      constraints: [],
+      assumptions: [],
+      unknowns: [],
+      allowedScope: scope,
+      changePolicy: { mayExpandScope: false, scopeExpansionRequiresUser: true },
+    };
     await db.taskContractVersion.create({
       data: {
         task_id: id, version: 1,
@@ -1180,7 +1245,7 @@ const routes: Route[] = [
         unknownsJson: "[]",
         allowedScopeJson: JSON.stringify(scope),
         changePolicyJson: JSON.stringify({ mayExpandScope: false, scopeExpansionRequiresUser: true }),
-        contentHash: uuid(),
+        contentHash: taskContractHash(initialContract),
         createdBy: SERVER_PRINCIPAL,
       },
     });
@@ -1275,19 +1340,30 @@ const routes: Route[] = [
     const prevChangePolicy = prevContract
       ? safeParse(prevContract.changePolicyJson, { mayExpandScope: false, scopeExpansionRequiresUser: true })
       : { mayExpandScope: false, scopeExpansionRequiresUser: true };
+    const nextContract: TaskContractHashInput = {
+      version: nextVersion,
+      objective: body.objective ?? prevContract?.objective ?? "",
+      userOutcome: null,
+      nonGoals: body.non_goals ?? prevNonGoals,
+      constraints: body.constraints ?? prevConstraints,
+      assumptions: body.assumptions ?? prevAssumptions,
+      unknowns: body.unknowns ?? prevUnknowns,
+      allowedScope: body.allowed_scope ?? prevScope,
+      changePolicy: body.change_policy ?? prevChangePolicy,
+    };
     const newContract = await db.taskContractVersion.create({
       data: {
         task_id: task.id,
         version: nextVersion,
-        objective: body.objective ?? prevContract?.objective ?? "",
+        objective: nextContract.objective,
         userOutcome: null,
-        nonGoalsJson: JSON.stringify(body.non_goals ?? prevNonGoals),
-        constraintsJson: JSON.stringify(body.constraints ?? prevConstraints),
-        assumptionsJson: JSON.stringify(body.assumptions ?? prevAssumptions),
-        unknownsJson: JSON.stringify(body.unknowns ?? prevUnknowns),
-        allowedScopeJson: JSON.stringify(body.allowed_scope ?? prevScope),
-        changePolicyJson: JSON.stringify(body.change_policy ?? prevChangePolicy),
-        contentHash: uuid(),
+        nonGoalsJson: JSON.stringify(nextContract.nonGoals),
+        constraintsJson: JSON.stringify(nextContract.constraints),
+        assumptionsJson: JSON.stringify(nextContract.assumptions),
+        unknownsJson: JSON.stringify(nextContract.unknowns),
+        allowedScopeJson: JSON.stringify(nextContract.allowedScope),
+        changePolicyJson: JSON.stringify(nextContract.changePolicy),
+        contentHash: taskContractHash(nextContract),
         createdBy: SERVER_PRINCIPAL,
       },
     });
@@ -2649,7 +2725,7 @@ const routes: Route[] = [
       maxScope: body.maxScope,
       useLimit: body.useLimit,
       consumedCount: 0,
-      expiry: body.expiry,
+      expiry: body.expiry as Rfc3339Timestamp,
       humanApprovalId: body.humanApprovalId,
       approvalHash: body.approvalHash,
     };
@@ -2944,9 +3020,10 @@ const routes: Route[] = [
       workerId,
       fencingToken: maxFencingToken + 1,
       status: "ACQUIRED",
-      acquiredAt: now.toISOString(),
-      renewedAt: now.toISOString(),
-      expiresAt: expires.toISOString(),
+      acquiredAt: now.toISOString() as Rfc3339Timestamp,
+      expiresAt: expires.toISOString() as Rfc3339Timestamp,
+      releasedAt: null,
+      metadata: {},
     };
     arpV2.workerLeases.set(newLease.id, newLease);
     await emitV2({ eventType: "lease.acquired", aggregateType: "lease", aggregateId: newLease.id, snapshot: newLease, correlationId: taskId });
@@ -2974,8 +3051,7 @@ const routes: Route[] = [
     const updated: WorkerLease = {
       ...lease,
       status: "RENEWED",
-      renewedAt: now.toISOString(),
-      expiresAt: expires.toISOString(),
+      expiresAt: expires.toISOString() as Rfc3339Timestamp,
     };
     arpV2.workerLeases.set(lease.id, updated);
     await emitV2({ eventType: "lease.renewed", aggregateType: "lease", aggregateId: lease.id, snapshot: updated, correlationId: lease.taskId });
@@ -3280,6 +3356,325 @@ function safeParse<T>(text: string, fallback: T): T {
   try { return JSON.parse(text) as T; } catch { return fallback; }
 }
 
+function readStringArray(value: unknown): readonly string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeRiskClass(value: string): TaskSnapshot["contract"]["riskClass"] {
+  return value === "low" || value === "high" || value === "critical" ? value : "normal";
+}
+
+function localProviderSnapshot(observedAt: Rfc3339Timestamp): ProviderCapabilitySnapshot {
+  return {
+    providerId: "local",
+    observedAt,
+    source: "terminus-control/local-deterministic-v1",
+    context: {
+      advertisedTokens: 16_384,
+      testedSafeTokens: 8_192,
+      roleSupport: ["system", "user", "assistant", "tool"],
+      imageInput: false,
+      toolCalling: false,
+      parallelToolCalls: false,
+      structuredOutput: true,
+    },
+    continuation: {
+      nativeId: false,
+      crossRequest: false,
+      compaction: true,
+      compatibilityKey: "local-deterministic-v1",
+    },
+    caching: {
+      mode: "explicit_breakpoints",
+      exactPrefixRequired: true,
+      minimumTokens: 0,
+      ttlOptions: [],
+      toolOrderSensitive: false,
+      usageReporting: false,
+    },
+    reasoning: { supported: false, budgetControl: false, summaryAvailable: false },
+    economics: {
+      inputMicrosPerMillion: 0n as Micros,
+      cachedInputMicrosPerMillion: 0n as Micros,
+      outputMicrosPerMillion: 0n as Micros,
+      reasoningAccounting: false,
+    },
+    reliability: {
+      toolCallSuccess: 1,
+      structuredOutputSuccess: 1,
+      editCohortSuccess: 1,
+      latencyPercentiles: { p50: 0, p99: 0 },
+    },
+    policy: {
+      allowedConfidentiality: ["public", "workspace"],
+      retentionMode: "local_only",
+      region: null,
+    },
+  };
+}
+
+function makeContextBudget(
+  provider: ProviderCapabilitySnapshot,
+  taskBudget: TaskSnapshot["contract"]["budget"],
+): ContextBudget {
+  const hard = BigInt(provider.context.testedSafeTokens) as TokenCount;
+  const output = 1024n as TokenCount;
+  const reasoning = 0n as TokenCount;
+  const toolResult = 512n as TokenCount;
+  const recovery = 256n as TokenCount;
+  const reserved = output + reasoning + toolResult + recovery;
+  const optional = hard > reserved ? hard - reserved : 0n;
+  return {
+    modelAdvertisedTokens: BigInt(provider.context.advertisedTokens) as TokenCount,
+    testedSafeTokens: hard,
+    protocolOverheadTokens: 128n as TokenCount,
+    exactContextTokens: 0n as TokenCount,
+    optionalContextTarget: optional as TokenCount,
+    expectedToolResultReserve: toolResult,
+    outputReserve: output,
+    reasoningReserve: reasoning,
+    recoveryMargin: recovery,
+    hardInputLimit: hard,
+    hardCostMicros: taskBudget.modelMicros,
+  };
+}
+
+const EMPTY_CONTEXT_HASH = ("sha256:" + "0".repeat(64)) as ContentHash;
+
+interface EnsureContextEpochInput {
+  readonly db: PrismaClient;
+  readonly threadId: string;
+  readonly taskId: string;
+  readonly workspaceId: string;
+  readonly provider: ProviderCapabilitySnapshot;
+  readonly model: ModelCapabilitySnapshot;
+  readonly worldState: WorldStateSnapshot;
+  readonly artifacts: ArtifactClient;
+}
+
+/**
+ * Creates or resumes the durable context epoch before compilation. The epoch
+ * snapshot and baseline are kernel artifacts; Prisma stores only their URIs.
+ */
+async function ensureContextEpoch(
+  input: EnsureContextEpochInput,
+): Promise<ContextEpochSnapshot> {
+  const active = await input.db.contextEpoch.findFirst({
+    where: { threadId: input.threadId, state: "active" },
+    orderBy: { generation: "desc" },
+  });
+  if (active !== null && active.providerCompatibilityKey === input.provider.continuation.compatibilityKey) {
+    return {
+      epochId: active.id as ContextEpochSnapshot["epochId"],
+      threadId: active.threadId as ContextEpochSnapshot["threadId"],
+      sequence: active.generation,
+      baselineHash: active.baselineHash as ContentHash,
+      provider: input.provider.providerId,
+      model: input.model.modelKey,
+      continuationId: null,
+      startedAt: active.createdAt.toISOString() as Rfc3339Timestamp,
+    };
+  }
+
+  const snapshot = await ingestJsonArtifact(
+    input.artifacts,
+    {
+      taskId: input.taskId,
+      workspaceId: input.workspaceId,
+      provider: input.provider.providerId,
+      model: input.model.modelKey,
+      sourceVersions: input.worldState.sourceVersions,
+      sections: input.worldState.sections,
+      observedAt: input.worldState.observedAt,
+    },
+    "context-epoch-snapshot",
+    { taskId: input.taskId, workspaceId: input.workspaceId },
+  );
+  const latest = await input.db.contextEpoch.findFirst({
+    where: { threadId: input.threadId },
+    orderBy: { generation: "desc" },
+  });
+  const epochId = generateUuid7();
+  const generation = (latest?.generation ?? 0) + 1;
+  await input.db.$transaction(async (tx) => {
+    if (active !== null) {
+      await tx.contextEpoch.update({
+        where: { id: active.id },
+        data: {
+          state: "sealed",
+          sealedAt: new Date(),
+          sealReason: "provider compatibility changed",
+        },
+      });
+    }
+    await tx.contextEpoch.create({
+      data: {
+        id: epochId,
+        threadId: input.threadId,
+        generation,
+        providerCompatibilityKey: input.provider.continuation.compatibilityKey,
+        baselineArtifact: snapshot.uri,
+        baselineHash: EMPTY_CONTEXT_HASH,
+        snapshotArtifact: snapshot.uri,
+        state: "active",
+      },
+    });
+    await tx.thread.update({
+      where: { id: input.threadId },
+      data: { activeContextEpochId: epochId },
+    });
+  });
+  return {
+    epochId,
+    threadId: input.threadId as ContextEpochSnapshot["threadId"],
+    sequence: generation,
+    baselineHash: EMPTY_CONTEXT_HASH,
+    provider: input.provider.providerId,
+    model: input.model.modelKey,
+    continuationId: null,
+    startedAt: new Date().toISOString() as Rfc3339Timestamp,
+  };
+}
+
+async function ingestJsonArtifact(
+  artifacts: ArtifactClient,
+  value: unknown,
+  purpose: string,
+  scope: Readonly<Record<string, unknown>>,
+): Promise<Awaited<ReturnType<ArtifactClient["ingest"]>>> {
+  return artifacts.ingest(
+    new TextEncoder().encode(canonicalJson(value)),
+    { mediaType: "application/json", custom: { purpose, ...scope } },
+  );
+}
+
+/** Kernel-backed code-intelligence retrieval for the live compiler path. */
+function kernelRetrievalPipeline(
+  clients: KernelUdsClients,
+  baseContext: RequestContext,
+  observedAt: Rfc3339Timestamp,
+  modelKey: ModelKey,
+  sessionId: string,
+  taskId: string,
+): RetrievalPipeline {
+  const retrieve = async (queries: readonly RetrievalQuery[]): Promise<readonly RetrievalResult[]> => {
+    const results: RetrievalResult[] = [];
+    const seen = new Set<string>();
+    for (const query of queries) {
+      const response = await clients.codeIntel.Search({
+        context: {
+          ...baseContext,
+          requestId: randomUUID(),
+          idempotencyKey: `code-search:${randomUUID()}`,
+        },
+        // The kernel code-intel index stores workspace-relative paths. An
+        // empty filter asks it to search the authorized workspace index.
+        workspaceId: "",
+        query: query.text,
+        limit: 5,
+      });
+      if (response.truncated) {
+        throw new Error(
+          `code-intelligence retrieval truncated for query ${JSON.stringify(query.text)}${response.continuation === undefined ? " without a continuation token" : "; continuation RPC is unavailable"}`,
+        );
+      }
+      for (const hit of response.results) {
+        const id = `kernel-code:${hit.path}:${hit.line}:${hit.symbol}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const text = [
+          `# Code intelligence result`,
+          `path: ${hit.path}`,
+          `line: ${hit.line}`,
+          `symbol: ${hit.symbol}`,
+          `index method: ${hit.method}`,
+        ].join("\n");
+        const hash = computeContentHash(text);
+        const fragment: ContextFragment = {
+          id,
+          kind: "code",
+          contentRef: {
+            hash,
+            uri: `artifact://sha256/${hash.slice("sha256:".length)}` as ContextFragment["contentRef"]["uri"],
+            mediaType: "text/plain",
+            bytes: BigInt(new TextEncoder().encode(text).byteLength) as ContextFragment["contentRef"]["bytes"],
+          },
+          textContent: text,
+          source: {
+            uri: `workspace://${hit.path}`,
+            producer: "terminus-kernel-code-intel",
+            producerVersion: "v1",
+            observedAt,
+            observedBy: "kernel",
+            evidenceRefs: [],
+          },
+          sourceVersion: null,
+          authority: 55,
+          priority: 55,
+          trust: "derived",
+          confidentiality: "workspace",
+          injectionRisk: "low",
+          exactness: "recoverable_by_reference",
+          scope: {
+            workspaceId: null,
+            sessionId: sessionId as ContextFragment["scope"]["sessionId"],
+            taskId: taskId as ContextFragment["scope"]["taskId"],
+            pathPatterns: [hit.path],
+          },
+          freshness: { observedAt, sourceVersion: null, stale: false, staleReason: null },
+          dependencies: [],
+          invalidation: [{ kind: "file_changed", selector: hit.path }],
+          estimatedTokens: { [modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
+          selectionFeatures: {
+            relevance: query.suggestedMethods.includes(mapRetrievalMethod(hit.method)) ? 0.9 : 0.6,
+            novelty: 0.7,
+            coverage: 0.8,
+            uncertaintyReduction: 0.7,
+            riskReduction: 0.5,
+            modelCompatibility: 1,
+            redundancyPenalty: 0,
+            injectionPenalty: 0,
+          },
+        };
+        results.push({
+          fragment,
+          method: mapRetrievalMethod(hit.method),
+          rawScore: 1,
+          rerankedScore: 1,
+          sourceVersion: null,
+          reason: query.reason,
+        });
+      }
+    }
+    return results;
+  };
+  return {
+    retrieve: (queries) => retrieve(queries),
+    expandForGaps: (gaps) => retrieve(gaps.map((gap) => ({
+      text: gap.requirement,
+      reason: `evidence gap: ${gap.requirementId}`,
+      suggestedMethods: ["lexical_bm25"],
+    }))),
+  };
+}
+
+function mapRetrievalMethod(method: string): RetrievalMethod {
+  switch (method) {
+    case "tree_sitter":
+    case "lsp":
+    case "graph":
+      return method === "graph" ? "dependency_graph" : method;
+    case "lexical_bm25":
+      return method;
+    default:
+      return "lexical_bm25";
+  }
+}
+
 // ────────────────────────── Agent loop ─────────────────────────────────────
 
 /**
@@ -3287,12 +3682,18 @@ function safeParse<T>(text: string, fallback: T): T {
  * verification → completion. Each step emits semantic events so the UI can
  * observe the full trajectory.
  *
- * For the dev mini-service, the "provider" is a deterministic fake that
- * echoes the user input and proposes a single read tool call, then
- * completes. This is enough to demonstrate the full loop end-to-end.
+ * The local profile is deterministic, but it still uses the same artifact,
+ * compiler, renderer, manifest, and observation boundaries as a remote
+ * provider. No provider-visible bytes or effect records are fabricated.
  */
 async function agentLoop(turnId: string, userInput: string): Promise<void> {
-  const turn = await db.turn.findUnique({ where: { id: turnId } });
+  const turn = await db.turn.findUnique({
+    where: { id: turnId },
+    include: {
+      task: { include: { contractVersions: { orderBy: { version: "desc" }, take: 1 } } },
+      thread: { include: { session: { include: { workspace: true } } } },
+    },
+  });
   if (!turn) return;
   try {
     // 1. CONTEXT_COMPILING
@@ -3303,151 +3704,366 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
       correlationId: turn.taskId ?? undefined,
       payload: { phase: "context_compiling" },
     });
-    // Build a minimal context manifest and persist it.
-    const manifestId = uuid();
-    const baselineArtifact = `artifact://sha256/${randomUUID().replace(/-/g, "").slice(0, 64)}`;
-    const manifest = await db.contextManifest.create({
-      data: {
-        id: manifestId, providerAttemptId: null,
-        compilerVersion: "v1", policyVersion: "secure-local-default",
-        epochId: null, providerKey: "fake", modelKey: "fake-implementer",
-        manifestArtifact: baselineArtifact,
-        renderedRequestHash: randomUUID(),
-        estimatedTokensJson: JSON.stringify({ input: 1200, output: 800, reasoning: 0, tool_schema: 240, cached: 0 }),
-        cachePlanJson: JSON.stringify({ stable_prefix_hash: randomUUID(), volatile_suffix_hash: randomUUID() }),
-        experimentJson: JSON.stringify({ assignments: [] }),
-      },
-    });
-    // Add a few example fragments.
-    const fragments = [
-      { kind: "authority", sourceUri: "terminus://policy/secure-local-default", authority: 100, priority: 100, trust: "trusted", confidentiality: "public", injectionRisk: "none", exactness: "exact", selected: true, renderedPosition: 0, estimatedTokens: 80, selectionReason: "Hard-included authority", omissionReason: null },
-      { kind: "task_contract", sourceUri: `task://${turn.taskId}`, authority: 95, priority: 95, trust: "trusted", confidentiality: "workspace", injectionRisk: "none", exactness: "exact", selected: true, renderedPosition: 1, estimatedTokens: 200, selectionReason: "Hard-included task contract", omissionReason: null },
-      { kind: "world_state", sourceUri: "workspace://", authority: 80, priority: 80, trust: "derived", confidentiality: "workspace", injectionRisk: "low", exactness: "semantics_preserving", selected: true, renderedPosition: 2, estimatedTokens: 320, selectionReason: "Recomputed world state at epoch boundary", omissionReason: null },
-      { kind: "recent_episode", sourceUri: `turn://${turnId}/episode/0`, authority: 60, priority: 60, trust: "trusted", confidentiality: "workspace", injectionRisk: "low", exactness: "exact", selected: true, renderedPosition: 3, estimatedTokens: 180, selectionReason: "Recent complete episode", omissionReason: null },
-    ];
-    for (let i = 0; i < fragments.length; i++) {
-      const f = fragments[i]!;
-      await db.contextFragment.create({
-        data: {
-          id: uuid(), manifestId, fragmentKey: `frag-${i}`,
-          contentArtifact: `artifact://sha256/${randomUUID().replace(/-/g, "").slice(0, 64)}`,
-          invalidationJson: "[]",
-          sourceVersion: null,
-          ...f,
-        },
-      });
+    const task = turn.task;
+    const contractRow = task?.contractVersions[0];
+    if (task === null || contractRow === undefined) {
+      throw new Error(`turn ${turnId} has no active task contract`);
     }
-    await emit({
-      eventType: "context.manifest_persisted",
-      aggregateType: "context_manifest", aggregateId: manifestId, aggregateSequence: 1,
-      correlationId: turn.taskId ?? undefined,
-      payload: { turn_id: turnId, fragment_count: fragments.length, provider: "fake", model: "fake-implementer" },
-      artifactRefs: [manifest.manifestArtifact],
+    const criteriaRows = await db.acceptanceCriterion.findMany({
+      where: { taskId: task.id, contractVersion: contractRow.version },
+      orderBy: { criterionId: "asc" },
+    });
+    const budgetJson = safeParse<Record<string, unknown>>(task.budgetJson, {});
+    const scopeJson = safeParse<Record<string, unknown>>(task.scopeDigest, {});
+    const allowedScope = {
+      readPaths: readStringArray(scopeJson.read_paths ?? scopeJson.readPaths),
+      writePaths: readStringArray(scopeJson.write_paths ?? scopeJson.writePaths),
+      externalSystems: readStringArray(scopeJson.external_systems ?? scopeJson.externalSystems),
+    };
+    const taskSnapshot: TaskSnapshot = {
+      taskId: task.id as TaskSnapshot["taskId"],
+      contract: {
+        id: task.id as TaskSnapshot["contract"]["id"],
+        version: contractRow.version,
+        objective: contractRow.objective,
+        userOutcome: contractRow.userOutcome,
+        nonGoals: safeParse<string[]>(contractRow.nonGoalsJson, []),
+        acceptanceCriteria: criteriaRows.map((criterion) => ({
+          id: criterion.criterionId,
+          statement: criterion.statement,
+          verificationHint: criterion.verificationHint,
+          required: criterion.required,
+        })),
+        constraints: safeParse<string[]>(contractRow.constraintsJson, []),
+        assumptions: safeParse<string[]>(contractRow.assumptionsJson, []),
+        unknowns: safeParse<string[]>(contractRow.unknownsJson, []),
+        allowedScope,
+        riskClass: normalizeRiskClass(task.riskClass),
+        budget: {
+          modelMicros: BigInt(String(budgetJson.model_micros ?? 5_000_000)) as Micros,
+          computeSeconds: numberOr(budgetJson.compute_seconds, 600),
+          wallClockSeconds: numberOr(budgetJson.wall_clock_seconds, 3600),
+          humanApprovals: numberOr(budgetJson.human_approvals, 20),
+        },
+        changePolicy: safeParse(contractRow.changePolicyJson, {
+          mayExpandScope: false,
+          scopeExpansionRequiresUser: true,
+        }),
+      },
+      phase: task.phase,
+      changedFiles: [],
+      failingTests: [],
+      diagnostics: [],
+      unknowns: safeParse<string[]>(contractRow.unknownsJson, []),
+    };
+
+    const workspace = turn.thread.session.workspace;
+    const artifactContext: RequestContext = {
+      ...kernelContext(),
+      sessionId: turn.thread.sessionId,
+      taskId: task.id,
+      turnId,
+      workspaceId: workspace.id,
+      idempotencyKey: `context:${turnId}`,
+    };
+    const artifactClient = createKernelArtifactClient(requireKernelUds().artifacts, artifactContext);
+    const inputArtifact = await artifactClient.ingest(
+      new TextEncoder().encode(userInput),
+      {
+        mediaType: "text/plain",
+        custom: { purpose: "turn-input", sessionId: task.sessionId, taskId: task.id, turnId },
+      },
+    );
+    await db.turn.update({
+      where: { id: turnId },
+      data: { initiatingInputArtifact: inputArtifact.uri },
+    });
+    await db.episode.create({
+      data: {
+        id: uuid(),
+        turnId,
+        sequence: 1,
+        kind: "user_message",
+        modelVisible: true,
+        contentArtifact: inputArtifact.uri,
+        sourceVersionsJson: JSON.stringify({ input: inputArtifact.hash }),
+      },
     });
 
-    // 2. PROVIDER_RUNNING — create a provider attempt record.
+    const worldState: WorldStateSnapshot = {
+      observedAt: now(),
+      sourceVersions: {
+        [`task://${task.id}`]: contractRow.contentHash,
+        [`workspace://${workspace.id}`]: workspace.lastOpenedAt.toISOString(),
+        "policy://secure-local-default": "v1",
+      },
+      sections: {
+        request: { text: userInput, artifact: inputArtifact.uri },
+        task: { id: task.id, status: task.status, phase: task.phase, contractVersion: contractRow.version },
+        workspace: { id: workspace.id, rootUri: workspace.rootUri, trust: workspace.trust },
+        verification: { status: "pending", acceptanceCriteria: criteriaRows.map((criterion) => criterion.criterionId) },
+        memory: { enabled: false, reason: "memory precision/harm gate not promoted" },
+      },
+    };
+    const recentEpisodes: Episode[] = (await db.episode.findMany({
+      where: { turnId, modelVisible: true },
+      orderBy: { sequence: "asc" },
+      take: 16,
+    })).map((episode) => ({
+      id: episode.id as Episode["id"],
+      turnId: episode.turnId as Episode["turnId"],
+      sequence: episode.sequence,
+      kind: episode.kind as Episode["kind"],
+      contentRef: episode.contentArtifact?.startsWith("artifact://")
+        ? (`sha256:${episode.contentArtifact.slice("artifact://sha256/".length)}` as ContentHash)
+        : null,
+      providerAttemptId: null,
+      toolCallId: episode.toolCallId as Episode["toolCallId"],
+      occurredAt: episode.createdAt.toISOString() as Rfc3339Timestamp,
+    }));
+    const checkpointRow = await db.checkpoint.findFirst({
+      where: { threadId: turn.threadId },
+      orderBy: { createdAt: "desc" },
+    });
+    const approvalRows = await db.approval.findMany({
+      where: { taskId: task.id },
+      orderBy: { requestedAt: "asc" },
+    });
+    const checkpoint: Checkpoint | null = checkpointRow === null ? null : {
+      id: checkpointRow.id as Checkpoint["id"],
+      threadId: checkpointRow.threadId as Checkpoint["threadId"],
+      turnId: checkpointRow.taskId === null ? null : turnId as Checkpoint["turnId"],
+      episodeRange: safeParse(checkpointRow.lastCommittedSequencesJson, { from: 0, to: 0 }),
+      artifactHash: checkpointRow.checkpointArtifact.startsWith("artifact://")
+        ? (`sha256:${checkpointRow.checkpointArtifact.slice("artifact://sha256/".length)}` as ContentHash)
+        : checkpointRow.checkpointArtifact as ContentHash,
+      canonicalStateHash: checkpointRow.dirtyStateDigest as ContentHash ?? ("sha256:" + "0".repeat(64)) as ContentHash,
+      summary: "Durable checkpoint recovered from the control-plane store.",
+      effectState: safeParse<Array<{ effectId: string; state: string; idempotencyKey: string }>>(
+        checkpointRow.unsettledEffectsJson,
+        [],
+      ),
+      approvalState: approvalRows.map((approval) => ({
+        approvalId: approval.id,
+        state: approval.status,
+        operationHash: approval.operationHash,
+      })),
+      createdAt: checkpointRow.createdAt.toISOString() as Rfc3339Timestamp,
+    };
+    const localProvider = localProviderSnapshot(now());
+    const localModel: ModelCapabilitySnapshot = {
+      modelKey: "local/deterministic" as ModelKey,
+      providerId: localProvider.providerId,
+      snapshot: localProvider,
+      observedAt: localProvider.observedAt,
+    };
+    const contextBudget = makeContextBudget(localProvider, taskSnapshot.contract.budget);
+    const threadSnapshot: ThreadSnapshot = {
+      threadId: turn.threadId as ThreadSnapshot["threadId"],
+      sessionId: turn.thread.sessionId as ThreadSnapshot["sessionId"],
+      activeContextEpochId: turn.thread.activeContextEpochId as ThreadSnapshot["activeContextEpochId"],
+    };
+    const contextStore = new PrismaContextStore(
+      db,
+      artifactClient,
+      { sessionId: task.sessionId, taskId: task.id, turnId, workspaceId: workspace.id },
+    );
+    const contextEpoch = await ensureContextEpoch({
+      db,
+      threadId: turn.threadId,
+      taskId: task.id,
+      workspaceId: workspace.id,
+      provider: localProvider,
+      model: localModel,
+      worldState,
+      artifacts: artifactClient,
+    });
+    const confidentialityPolicy: ConfidentialityPolicy = {
+      allowedProviders: {
+        public: [localProvider.providerId],
+        workspace: [localProvider.providerId],
+        secret_adjacent: [],
+        secret: [],
+      },
+    };
+    const compiled = await compileContext({
+      task: taskSnapshot,
+      thread: threadSnapshot,
+      provider: localProvider,
+      model: localModel,
+      epoch: contextEpoch,
+      worldState,
+      recentEpisodes,
+      checkpoint,
+      userDirectives: [] as readonly ContextDirective[],
+      activeCapabilities: [],
+      budget: contextBudget,
+      experimentAssignments: [],
+      renderer: new LocalRenderer(),
+      confidentialityPolicy,
+      toolSchemas: [],
+      compactionPolicy: { enabled: false, targetTokens: Number(contextBudget.optionalContextTarget) },
+      store: contextStore,
+      retrievalPipeline: kernelRetrievalPipeline(
+        requireKernelUds(),
+        artifactContext,
+        worldState.observedAt,
+        localModel.modelKey,
+        task.sessionId,
+        task.id,
+      ),
+      signal: null,
+    });
+    const requestArtifact = compiled.renderedRequestArtifact;
+    if (requestArtifact === null) throw new Error("context store did not persist rendered provider request");
+    const baselineArtifact = await ingestJsonArtifact(
+      artifactClient,
+      {
+        epochId: contextEpoch.epochId,
+        stablePrefixHash: compiled.manifest.cachePlan.stablePrefixHash,
+        fragments: compiled.manifest.fragments.map((fragment) => ({
+          id: fragment.fragmentId,
+          hash: fragment.artifactHash,
+        })),
+      },
+      "context-epoch-baseline",
+      { taskId: task.id, turnId, workspaceId: workspace.id },
+    );
+    await db.contextEpoch.update({
+      where: { id: contextEpoch.epochId },
+      data: {
+        baselineHash: compiled.manifest.cachePlan.stablePrefixHash,
+        baselineArtifact: baselineArtifact.uri,
+      },
+    });
+    await emit({
+      eventType: "context.manifest_persisted",
+      aggregateType: "context_manifest", aggregateId: compiled.manifest.id, aggregateSequence: 1,
+      correlationId: turn.taskId ?? undefined,
+      payload: {
+        turn_id: turnId,
+        fragment_count: compiled.manifest.fragments.length,
+        provider: localProvider.providerId,
+        model: localModel.modelKey,
+        total_estimated_tokens: compiled.totalEstimatedTokens,
+        omitted_count: compiled.omitted.length,
+      },
+      artifactRefs: [requestArtifact.uri],
+    });
+
+    // 2. PROVIDER_RUNNING — create a durable attempt only after the exact
+    // manifest and rendered request have been persisted.
+    const midCompileTurn = await db.turn.findUnique({ where: { id: turnId } });
+    if (midCompileTurn?.state === "INTERRUPTED") return;
     await db.turn.update({ where: { id: turnId }, data: { state: "PROVIDER_RUNNING" } });
     const attemptId = uuid();
-    const requestArtifact = `artifact://sha256/${randomUUID().replace(/-/g, "").slice(0, 64)}`;
     const attempt = await db.providerAttempt.create({
       data: {
-        id: attemptId, turnId, attemptNumber: 1,
-        providerId: "fake", modelKey: "fake-implementer",
-        capabilitySnapshotHash: randomUUID(),
-        contextManifestId: manifestId, requestArtifact,
+        id: attemptId,
+        turnId,
+        attemptNumber: 1,
+        providerId: localProvider.providerId,
+        modelKey: localModel.modelKey,
+        capabilitySnapshotHash: compiled.manifest.providerCapabilityHash,
+        contextManifestId: compiled.manifest.id,
+        requestArtifact: requestArtifact.uri,
         status: "running",
       },
+    });
+    await db.contextManifest.update({
+      where: { id: compiled.manifest.id },
+      data: { providerAttemptId: attempt.id },
     });
     await emit({
       eventType: "turn.provider_running",
       aggregateType: "turn", aggregateId: turnId, aggregateSequence: 3,
       correlationId: turn.taskId ?? undefined,
-      payload: { provider_attempt_id: attemptId, provider: "fake", model: "fake-implementer" },
+      payload: {
+        provider_attempt_id: attemptId,
+        provider: localProvider.providerId,
+        model: localModel.modelKey,
+        context_manifest_id: compiled.manifest.id,
+      },
+      artifactRefs: [requestArtifact.uri],
     });
 
-    // Simulate provider latency.
-    await new Promise((r) => setTimeout(r, 400));
-
-    // Check for interruption between phases.
+    // Keep an observable deterministic provider boundary so interruption and
+    // recovery tests exercise the same state transition as a real transport.
+    await new Promise((resolve) => setTimeout(resolve, 400));
     const midTurn = await db.turn.findUnique({ where: { id: turnId } });
-    if (midTurn && midTurn.state === "INTERRUPTED") return;
+    if (midTurn?.state === "INTERRUPTED") return;
 
     // 3. RESPONSE_VALIDATING
     await db.turn.update({ where: { id: turnId }, data: { state: "RESPONSE_VALIDATING" } });
-    const responseArtifact = `artifact://sha256/${randomUUID().replace(/-/g, "").slice(0, 64)}`;
+    const responseText = `Acknowledged: ${userInput.slice(0, 200)}`;
+    const responseChunks: readonly ProviderResponseChunk[] = [
+      { kind: "text", text: responseText },
+      { kind: "done" },
+    ];
+    const providerResponse: ProviderResponse = {
+      providerId: localProvider.providerId,
+      model: localModel.modelKey,
+      chunks: responseChunks,
+      observedAt: now(),
+    };
+    const renderer = new LocalRenderer();
+    const projected = await renderer.projectResponse(providerResponse);
+    const usage = renderer.extractUsage(providerResponse);
+    const responseArtifactMeta = await artifactClient.ingest(
+      new TextEncoder().encode(projected.text),
+      {
+        mediaType: "text/plain",
+        custom: { purpose: "provider-response", providerAttemptId: attemptId },
+      },
+    );
+    await db.episode.create({
+      data: {
+        id: uuid(),
+        turnId,
+        sequence: 2,
+        kind: "model_message",
+        modelVisible: true,
+        contentArtifact: responseArtifactMeta.uri,
+        sourceVersionsJson: JSON.stringify({ providerAttemptId: attemptId, response: responseArtifactMeta.hash }),
+      },
+    });
     await db.providerAttempt.update({
       where: { id: attemptId },
       data: {
         status: "completed",
-        responseArtifact,
+        responseArtifact: responseArtifactMeta.uri,
         completedAt: new Date(),
-        usageJson: JSON.stringify({ input_tokens: 1200, output_tokens: 180, cached_input_tokens: 0, reasoning_tokens: 0, tool_schema_tokens: 240 }),
-        costMicros: 1200,
-        nativeContinuationJson: JSON.stringify({ continuation_id: randomUUID() }),
+        usageJson: JSON.stringify(jsonSafe(usage)),
+        costMicros: 0,
+        nativeContinuationJson: null,
       },
+    });
+    await contextStore.recordObservation(compiled.manifest.id, {
+      responseArtifact: responseArtifactMeta.uri,
+      usage: jsonSafe(usage),
+      projectedFinishReason: projected.finishReason,
     });
     await emit({
       eventType: "turn.response_validating",
       aggregateType: "turn", aggregateId: turnId, aggregateSequence: 4,
       correlationId: turn.taskId ?? undefined,
-      payload: { provider_attempt_id: attemptId, status: "completed", usage: { input: 1200, output: 180 } },
-      artifactRefs: [responseArtifact],
+      payload: {
+        provider_attempt_id: attemptId,
+        status: "completed",
+        usage: jsonSafe(usage),
+        finish_reason: projected.finishReason,
+      },
+      artifactRefs: [responseArtifactMeta.uri],
     });
 
-    // 4. TOOL_SETTLEMENT — record one synthetic tool call (read).
+    // 4. TOOL_SETTLEMENT — no tool call is recorded unless a provider
+    // response contains one and the kernel-backed effect path is invoked.
     await db.turn.update({ where: { id: turnId }, data: { state: "TOOL_SETTLEMENT" } });
-    const toolCallId = uuid();
-    const argsArtifact = `artifact://sha256/${randomUUID().replace(/-/g, "").slice(0, 64)}`;
-    const tc = await db.toolCall.create({
-      data: {
-        id: toolCallId, turnId, providerAttemptId: attemptId,
-        toolId: "read", toolVersion: "v1",
-        argumentsArtifact: argsArtifact,
-        normalizedOperationHash: randomUUID(),
-        state: "PROPOSED",
-      },
-    });
     await emit({
-      eventType: "tool.proposed",
-      aggregateType: "tool_call", aggregateId: toolCallId, aggregateSequence: 1,
+      eventType: "turn.tool_settlement",
+      aggregateType: "turn", aggregateId: turnId, aggregateSequence: 5,
       correlationId: turn.taskId ?? undefined,
-      payload: { turn_id: turnId, tool: "read", args_summary: { path: "src/example.ts" } },
-      artifactRefs: [argsArtifact],
-    });
-    // Policy decision (synthetic — allow).
-    const policyId = uuid();
-    await db.policyDecision.create({
-      data: {
-        id: policyId, toolCallId, effectType: "READ_LOCAL",
-        normalizedInputArtifact: argsArtifact, decision: "allow",
-        ruleIdsJson: JSON.stringify(["allow-read-tools"]),
-        constraintsJson: "{}", policyVersion: "secure-local-default",
-        explanation: "read on workspace path allowed by default rule",
-      },
-    });
-    await db.toolCall.update({ where: { id: toolCallId }, data: { state: "AUTHORIZED", policyDecisionId: policyId } });
-    await emit({
-      eventType: "tool.authorized",
-      aggregateType: "tool_call", aggregateId: toolCallId, aggregateSequence: 2,
-      correlationId: turn.taskId ?? undefined,
-      payload: { decision: "allow", rule_ids: ["allow-read-tools"] },
-    });
-    // Settle the tool call.
-    const resultArtifact = `artifact://sha256/${randomUUID().replace(/-/g, "").slice(0, 64)}`;
-    await db.toolCall.update({
-      where: { id: toolCallId },
-      data: {
-        state: "SETTLED", resultArtifact,
-        resultStatus: "success",
-        startedAt: new Date(), settledAt: new Date(),
-      },
-    });
-    await emit({
-      eventType: "tool.settled",
-      aggregateType: "tool_call", aggregateId: toolCallId, aggregateSequence: 3,
-      correlationId: turn.taskId ?? undefined,
-      payload: { status: "success", summary: "Read 1 file (412 lines)." },
-      artifactRefs: [resultArtifact],
+      payload: { provider_attempt_id: attemptId, tool_calls: projected.toolCalls.length },
     });
 
     // 5. FINALIZING

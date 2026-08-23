@@ -7,7 +7,7 @@ import type {
   TokenCount,
   Uuid7,
 } from "@terminus/domain";
-import type { ContextBudget, ContextManifest } from "@terminus/context-ir";
+import type { ContextBudget, ContextFragment, ContextManifest } from "@terminus/context-ir";
 import type {
   CanonicalRenderInput,
   CompatibilityResult,
@@ -27,6 +27,8 @@ import {
   compileContext,
   deduplicateAndValidate,
   deriveRetrievalQueries,
+  replayContext,
+  replayWithAblation,
   type CompileInput,
   type ContextStore,
   type RetrievalResult,
@@ -289,5 +291,63 @@ describe("Context Compiler", () => {
     expect(compiled.manifest.fragments.some((fragment) => fragment.required)).toBe(true);
     expect(compiled.rendered.request.blocks.length).toBeGreaterThan(0);
     expect(compiled.rendered.request.cachePlan.stablePrefixHash).toMatch(/^sha256:/);
+  });
+
+  test("replays the exact selected manifest and records ablation drift", async () => {
+    let storedManifest: ContextManifest | null = null;
+    let storedCandidates: readonly ContextFragment[] = [];
+    const store: ContextStore = {
+      async persistManifest(manifest, fragments = []) {
+        storedCandidates = fragments;
+        storedManifest = { id: MANIFEST_ID, ...manifest };
+        return storedManifest;
+      },
+      async getManifest(id) {
+        return storedManifest?.id === id ? storedManifest : null;
+      },
+      async recordObservation() {},
+    };
+    const input = compileInput(store);
+    const compiled = await compileContext(input);
+    const selected = compiled.manifest.fragments.map((entry) => {
+      const fragment = storedCandidates.find((candidate) => candidate.id === entry.fragmentId);
+      if (fragment === undefined) throw new Error(`missing replay candidate ${entry.fragmentId}`);
+      return fragment;
+    });
+    const replayed = await replayContext({
+      manifest: compiled.manifest,
+      selectedFragments: selected,
+      renderer: new FakeRenderer(),
+      provider: input.provider,
+      model: input.model,
+      epoch: null,
+      signal: null,
+    });
+    expect(replayed.fragmentCount).toBe(compiled.manifest.fragments.length);
+    expect(replayed.renderedRequestHash).toMatch(/^sha256:/);
+
+    const ablated = await replayWithAblation(
+      {
+        manifest: compiled.manifest,
+        selectedFragments: selected,
+        renderer: new FakeRenderer(),
+        provider: input.provider,
+        model: input.model,
+        epoch: null,
+        signal: null,
+      },
+      { label: "remove-first", removeFragmentIds: [selected[0]!.id] },
+    );
+    expect(ablated.fragmentCount).toBe(replayed.fragmentCount - 1);
+    expect(ablated.renderedRequestHash).not.toBe(replayed.renderedRequestHash);
+    await expect(replayContext({
+      manifest: compiled.manifest,
+      selectedFragments: selected.slice(1),
+      renderer: new FakeRenderer(),
+      provider: input.provider,
+      model: input.model,
+      epoch: null,
+      signal: null,
+    })).rejects.toThrow("replay selection does not match");
   });
 });

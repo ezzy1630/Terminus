@@ -13,14 +13,16 @@ Per SPEC §8 and §33. Pure data — no I/O.
 - Schemas: `contextFragmentSchema`, `sourceDescriptorSchema`,
   `freshnessSchema`, `invalidationRuleSchema`, `selectionFeaturesSchema`,
   `contextScopeSchema`, `worldStateObservationSchema`,
-  `worldStateSnapshotSchema`, `contextDirectiveSchema`.
+  `worldStateSnapshotSchema`, `contextDirectiveSchema`,
+  `contextEpochSnapshotSchema`, `contextManifestEntrySchema`,
+  `contextManifestOmissionSchema`, `contextCachePlanSchema`.
 - Types: `WorldStateSection`, `WorldStateObservation`, `WorldStateSnapshot`,
   `ContextEpochSnapshot`, `ContextDirective`, `ContextBudget`,
   `ManifestBuilderInput`.
 - Builder: `buildManifest(input)` constructs a `ContextManifest` from selected
   fragments, cache plan, and reserves.
 - Helpers: `isHardRequired`, `isConfidentialityAllowed`, `isFreshAgainst`,
-  `computeStablePrefixHash`.
+  `computeStablePrefixHash`, `computeContentHash`, `canonicalJson`.
 
 ## Dependencies
 
@@ -31,5 +33,7 @@ Per SPEC §8 and §33. Pure data — no I/O.
 - The Context IR is provider-neutral. Provider-specific shapes live in
   `@terminus/provider-*`.
 - A fragment's source URI + version MUST be sufficient to determine staleness.
+- Stable-prefix hashes preserve rendered order and use canonical SHA-256
+  content identity.
 - `buildManifest` does not persist; the caller persists before sending the
   provider request.

@@ -205,11 +205,53 @@ jobs:
             ${{ runner.temp }}/terminus-enforcement-report.json
           if-no-files-found: error
 
+  # ---------- Blocking release validation ----------
+  release-validation:
+    name: Blocking release validation
+    runs-on: ubuntu-latest
+    needs: [supply-chain-gate, build-artifacts, linux-enforcement-evidence]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-enforcement-evidence
+          path: ${{ runner.temp }}/linux-evidence
+          merge-multiple: true
+      - uses: jdx/mise-action@v2
+      - run: just bootstrap
+      - uses: sigstore/cosign-installer@v3
+      - name: Run the declared release checks
+        env:
+          TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
+          TERMINUS_RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+          TERMINUS_LINUX_EVIDENCE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json
+          TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json.sig
+          TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json.pem
+          TERMINUS_RELEASE_REQUIRE_LINUX: "1"
+          TERMINUS_RELEASE_ENFORCE_SIGNED_ARTIFACTS: "1"
+          TERMINUS_RELEASE_OWNER_APPROVAL: ${{ vars.TERMINUS_RELEASE_OWNER_APPROVAL }}
+          TERMINUS_SECURITY_OWNER_APPROVAL: ${{ vars.TERMINUS_SECURITY_OWNER_APPROVAL }}
+          TERMINUS_PROTOCOL_OWNER_APPROVAL: ${{ vars.TERMINUS_PROTOCOL_OWNER_APPROVAL }}
+          TERMINUS_EVALUATION_OWNER_APPROVAL: ${{ vars.TERMINUS_EVALUATION_OWNER_APPROVAL }}
+        run: |
+          export TERMINUS_RELEASE_RUN_STARTED_AT="$(date -u +%s)"
+          just release-check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-validation-evidence
+          path: artifacts/release-gate/
+          if-no-files-found: error
+
   # ---------- Aggregate + publish release ----------
   publish-release:
     name: Publish release with SBOM and provenance
     runs-on: ubuntu-latest
-    needs: [supply-chain-gate, build-artifacts, linux-enforcement-evidence]
+    needs: [supply-chain-gate, build-artifacts, linux-enforcement-evidence, release-validation]
     permissions:
       contents: write
       packages: write
@@ -272,47 +314,42 @@ jobs:
   release-decision:
     name: Machine-readable release decision (SPEC §50.10)
     runs-on: ubuntu-latest
-    needs: [publish-release, supply-chain-gate]
+    needs: [publish-release, release-validation, supply-chain-gate]
     steps:
       - uses: actions/checkout@v4
-      - name: Write release decision
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-enforcement-evidence
+          path: ${{ runner.temp }}/linux-evidence
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-validation-evidence
+          path: artifacts/release-gate
+          merge-multiple: true
+      - uses: jdx/mise-action@v2
+      - run: just bootstrap
+      - name: Produce evidence-derived release decision
         env:
-          RELEASE_OWNER_APPROVAL: ${{ vars.TERMINUS_RELEASE_OWNER_APPROVAL }}
-          SECURITY_OWNER_APPROVAL: ${{ vars.TERMINUS_SECURITY_OWNER_APPROVAL }}
-          PROTOCOL_OWNER_APPROVAL: ${{ vars.TERMINUS_PROTOCOL_OWNER_APPROVAL }}
-          EVALUATION_OWNER_APPROVAL: ${{ vars.TERMINUS_EVALUATION_OWNER_APPROVAL }}
+          TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
+          TERMINUS_RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+          TERMINUS_LINUX_EVIDENCE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json
+          TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json.sig
+          TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/linux-evidence/terminus-linux-evidence.json.pem
+          TERMINUS_RELEASE_ENFORCE_SIGNED_ARTIFACTS: "1"
+          TERMINUS_RELEASE_OWNER_APPROVAL: ${{ vars.TERMINUS_RELEASE_OWNER_APPROVAL }}
+          TERMINUS_SECURITY_OWNER_APPROVAL: ${{ vars.TERMINUS_SECURITY_OWNER_APPROVAL }}
+          TERMINUS_PROTOCOL_OWNER_APPROVAL: ${{ vars.TERMINUS_PROTOCOL_OWNER_APPROVAL }}
+          TERMINUS_EVALUATION_OWNER_APPROVAL: ${{ vars.TERMINUS_EVALUATION_OWNER_APPROVAL }}
         run: |
-          cat > release-decision.yaml <<EOF
-          release:
-            version: v${{ needs.supply-chain-gate.outputs.version }}
-            commit: ${{ github.sha }}
-            protocol_versions:
-              terminus_kernel_v1: "1"
-            database_schema_version: 1
-            supported_platforms:
-              - linux-x86_64
-              - linux-arm64
-              - linux-container
-              - macos-arm64
-              - macos-x86_64
-              - windows-x86_64
-            security_profile: secure-local-default
-            evaluation_report: artifacts/release-gate/eval-release.json
-            divergence_report: upstream/divergence-budget.yaml
-            known_limitations: []
-            accepted_risks:
-              - FIND-001
-              - FIND-002
-            signatures:
-              release_owner: "${RELEASE_OWNER_APPROVAL}"
-              security_owner: "${SECURITY_OWNER_APPROVAL}"
-              protocol_owner: "${PROTOCOL_OWNER_APPROVAL}"
-              evaluation_owner: "${EVALUATION_OWNER_APPROVAL}"
-          EOF
-          # Also stage under artifacts/release-gate for local gate parity.
-          mkdir -p artifacts/release-gate
-          cp release-decision.yaml artifacts/release-gate/release-decision.yaml
+          just platform-matrix
+          bun run scripts/produce-release-decision.ts
+          cp artifacts/release-gate/release-decision.yaml release-decision.yaml
       - uses: actions/upload-artifact@v4
         with:
           name: release-decision
-          path: release-decision.yaml
+          path: |
+            release-decision.yaml
+            artifacts/release-gate/platform-support.json

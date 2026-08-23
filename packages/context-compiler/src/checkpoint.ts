@@ -78,6 +78,17 @@ export interface CheckpointContent {
     readonly writePaths: readonly string[];
     readonly externalSystems: readonly string[];
   };
+  /** Durable effect/approval projections retained across compaction. */
+  readonly effectState?: readonly {
+    readonly effectId: string;
+    readonly state: string;
+    readonly idempotencyKey: string;
+  }[] | undefined;
+  readonly approvalState?: readonly {
+    readonly approvalId: string;
+    readonly state: string;
+    readonly operationHash: string;
+  }[] | undefined;
 }
 
 // ──────────────────────── Checkpoint generator ───────────────────────────────
@@ -102,6 +113,8 @@ export interface CheckpointGeneratorInput {
   }>;
   readonly openQuestions: readonly string[];
   readonly sourceVersions: Readonly<Record<string, string>>;
+  readonly effectState?: CheckpointContent["effectState"] | undefined;
+  readonly approvalState?: CheckpointContent["approvalState"] | undefined;
 }
 
 /**
@@ -138,6 +151,8 @@ export function generateCheckpointContent(
       writePaths: input.taskContract.allowedScope.writePaths,
       externalSystems: input.taskContract.allowedScope.externalSystems,
     },
+    ...(input.effectState === undefined ? {} : { effectState: input.effectState }),
+    ...(input.approvalState === undefined ? {} : { approvalState: input.approvalState }),
   };
 }
 
@@ -275,6 +290,21 @@ export class ProvenanceDag {
 
   /** Add a node. If a node with the same ID exists, it is replaced. */
   addNode(node: ProvenanceNode): void {
+    const previous = this.nodes.get(node.id);
+    if (previous !== undefined) {
+      for (const parentId of previous.derivedFrom) {
+        this.children.get(parentId)?.delete(node.id);
+      }
+      this.nodes.delete(node.id);
+    }
+    for (const parentId of node.derivedFrom) {
+      // The stored edge points parent -> child. Adding parentId -> node.id
+      // closes a cycle when node.id can already reach parentId.
+      if (parentId === node.id || this.reaches(node.id, parentId)) {
+        if (previous !== undefined) this.restoreNode(previous);
+        throw new Error(`provenance cycle rejected: ${parentId} -> ${node.id}`);
+      }
+    }
     this.nodes.set(node.id, node);
     for (const parentId of node.derivedFrom) {
       let childSet = this.children.get(parentId);
@@ -284,6 +314,28 @@ export class ProvenanceDag {
       }
       childSet.add(node.id);
     }
+  }
+
+  private restoreNode(node: ProvenanceNode): void {
+    this.nodes.set(node.id, node);
+    for (const parentId of node.derivedFrom) {
+      const children = this.children.get(parentId) ?? new Set<string>();
+      children.add(node.id);
+      this.children.set(parentId, children);
+    }
+  }
+
+  private reaches(startId: string, targetId: string): boolean {
+    const visited = new Set<string>();
+    const stack = [startId];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (current === undefined || visited.has(current)) continue;
+      if (current === targetId) return true;
+      visited.add(current);
+      for (const child of this.children.get(current) ?? []) stack.push(child);
+    }
+    return false;
   }
 
   /** Get a node by ID. */

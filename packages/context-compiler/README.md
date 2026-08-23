@@ -10,16 +10,20 @@ provider.
 ## Public API
 
 - `compileContext(input: CompileInput): Promise<CompiledContext>` — the main
-  entrypoint. Returns `{ rendered, manifest, warnings, omitted }`.
+  entrypoint. Returns the rendered request, manifest, warnings, omissions,
+  token-budget outcome, and optional request artifact.
 - `CompileInput`, `CompiledContext`, `ContextStore` interfaces.
 - Retrieval: `RetrievalPipeline`, `RetrievalQuery`, `RetrievalResult`,
-  `RetrievalMethod`, `deriveRetrievalQueries`, `deduplicateAndValidate`,
-  `DeterministicRetrieval` (fake).
+  `RetrievalMethod`, `deriveRetrievalQueries`, `deduplicateAndExplain`,
+  `deduplicateAndValidate`, `LexicalRetrieval`, `DeterministicRetrieval`
+  (explicit empty fallback for fixture-only callers).
 - Evidence: `EvidenceCoverageMatrix`, `EvidenceGap`, `buildEvidenceCoverage`.
 - Scoring: `ScoredCandidate`, `ScoringWeights`, `DEFAULT_WEIGHTS`,
   `scoreCandidates`.
 - Budget: `AllocationOptions`, `AllocationResult`, `allocateBudget`.
 - Cache: `planCacheEpoch`.
+- Replay and compaction: `replayContext`, `replayWithAblation`,
+  `compactContext`.
 
 ## Invariants
 
@@ -28,4 +32,8 @@ provider.
 - Complete episode integrity is preserved (a tool_call episode always includes
   both call and settled result).
 - The compiler MUST NOT silently pretend evidence coverage exists.
+- Every candidate, query, omission, transform, confidentiality decision, and
+  memory decision is recorded in the manifest decision record.
+- Over-hard-limit context fails before provider rendering; no truncation is
+  implicit.
 - No direct DB writes — accept a `ContextStore` interface.

@@ -18,8 +18,9 @@
  *  9. render provider-specific request via provider renderer
  *  10. build and persist manifest (durable before send)
  *
- * Returns `{ rendered, manifest }`. No direct DB writes — accept a
- * `ContextStore` interface.
+ * Returns the rendered request, durable manifest, omissions, budget outcome,
+ * and optional content-addressed request artifact. No direct DB writes —
+ * accept a `ContextStore` interface.
  */
 import { z } from "zod";
 import type {
@@ -46,16 +47,32 @@ import type {
   ContextDirective,
   ContextCachePlan,
 } from "@terminus/context-ir";
-import { buildManifest, computeStablePrefixHash, isConfidentialityAllowed } from "@terminus/context-ir";
+import {
+  buildManifest,
+  canonicalJson,
+  computeContentHash,
+  computeStablePrefixHash,
+} from "@terminus/context-ir";
 import type {
   ProviderCapabilitySnapshot,
   ModelCapabilitySnapshot,
   ProviderRenderer,
   RenderedProviderRequest,
   ConfidentialityPolicy,
+  ProviderToolSchema,
 } from "@terminus/provider-core";
 import { filterByConfidentiality } from "@terminus/provider-core";
 import { resolveTokenizer, reconcileUsage } from "./tokenizer.js";
+import { compactContext, type CompactionTransform } from "./compaction.js";
+export {
+  compactContext,
+} from "./compaction.js";
+export type {
+  CompactionInvariant,
+  CompactionTransform,
+  SemanticCompactionInput,
+  SemanticCompactionResult,
+} from "./compaction.js";
 export type { ModelTokenizer, ReconciledUsage, ModelTokenBreakdown } from "./tokenizer.js";
 export { resolveTokenizer, reconcileUsage };
 
@@ -200,6 +217,10 @@ export interface CompileInput {
   readonly experimentAssignments: readonly ExperimentAssignment[];
   readonly renderer: ProviderRenderer;
   readonly confidentialityPolicy: ConfidentialityPolicy;
+  /** Tool schemas are part of the exact provider-visible invocation. */
+  readonly toolSchemas?: readonly ProviderToolSchema[] | undefined;
+  /** Semantic compaction is opt-in and must preserve evidence links. */
+  readonly compactionPolicy?: CompactionPolicy | undefined;
   readonly store: ContextStore;
   /**
    * Optional retrieval pipeline. When supplied, this is used in preference
@@ -218,13 +239,26 @@ export interface CompiledContext {
   readonly manifest: ContextManifest;
   readonly warnings: readonly string[];
   readonly omitted: readonly { readonly fragmentId: string; readonly reason: string }[];
+  readonly totalEstimatedTokens: number;
+  /** True when hard-required fragments exceed the configured hard limit. */
+  readonly overHardLimit: boolean;
+  /** Content-addressed provider request, when the store persisted it. */
+  readonly renderedRequestArtifact: ArtifactRef | null;
+}
+
+export interface CompactionPolicy {
+  readonly enabled: boolean;
+  readonly targetTokens: number;
 }
 
 // ────────────────────────── ContextStore interface ───────────────────────────
 
 export interface ContextStore {
   /** Persist a manifest durably. Must complete before the provider request. */
-  persistManifest(manifest: Omit<ContextManifest, "id">): Promise<ContextManifest>;
+  persistManifest(
+    manifest: Omit<ContextManifest, "id">,
+    fragments?: readonly ContextFragment[],
+  ): Promise<ContextManifest>;
   /** Load a manifest by id. */
   getManifest(id: Uuid7): Promise<ContextManifest | null>;
   /** Record an observation record (post-attempt usage/cost). */
@@ -232,6 +266,11 @@ export interface ContextStore {
     manifestId: Uuid7,
     observation: Readonly<Record<string, unknown>>,
   ): Promise<void>;
+  /** Persist the exact rendered request before provider transport begins. */
+  recordRenderedRequest?(
+    manifestId: Uuid7,
+    rendered: RenderedProviderRequest,
+  ): Promise<ArtifactRef | null>;
 }
 
 // ────────────────────────── Retrieval ────────────────────────────────────────
@@ -536,37 +575,16 @@ function estimateTokens(text: string): number {
 
 /** Build an ArtifactRef with a stable, content-derived hash. */
 function makeArtifactRef(kind: string, text: string): ArtifactRef {
-  // Synchronous SHA-256 of the text. We avoid pulling in `node:crypto` here
-  // (which would couple this pure-logic package to a runtime). Instead we
-  // reuse the context-ir helper which already imports `node:crypto`.
-  // To avoid a circular dep, we compute a deterministic hash inline.
-  const hex = simpleHashHex(`${kind}:${text}`);
+  // The bytes sent to the kernel must have the same identity as the IR. The
+  // kind is metadata, not content, so it must not be mixed into the digest.
+  void kind;
+  const hash = computeContentHash(text);
   return {
-    hash: `sha256:${hex}` as ContentHash,
-    uri: `artifact://sha256/${hex}` as ArtifactUri,
+    hash,
+    uri: `artifact://sha256/${hash.slice("sha256:".length)}` as ArtifactUri,
     mediaType: "text/plain",
-    bytes: BigInt(text.length) as ByteCount,
+    bytes: BigInt(new TextEncoder().encode(text).byteLength) as ByteCount,
   };
-}
-
-/**
- * Deterministic hash. We deliberately do NOT use this as a security boundary
- * — the kernel re-hashes with its canonical sha256 before persisting. The
- * purpose here is to give each required fragment a stable, content-derived
- * identity so manifest entries round-trip correctly.
- */
-function simpleHashHex(input: string): string {
-  // FNV-1a 64-bit approximation, repeated to fill 64 hex chars.
-  let h1 = 0x811c9dc5;
-  let h2 = 0x1000193;
-  for (let i = 0; i < input.length; i++) {
-    const c = input.charCodeAt(i);
-    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
-    h2 = Math.imul(h2 ^ c, 0x85ebca77) >>> 0;
-  }
-  const part1 = (h1 >>> 0).toString(16).padStart(8, "0");
-  const part2 = (h2 >>> 0).toString(16).padStart(8, "0");
-  return (part1 + part2).repeat(4);
 }
 
 /** Build a SourceDescriptor for an internal resource URI. */
@@ -581,28 +599,302 @@ function makeSource(uri: string, producer: string, observedAt: Rfc3339Timestamp)
   };
 }
 
+// ──────────────────────── Runtime state projection ──────────────────────────
+
+/**
+ * Projects authoritative state into ordinary context candidates. The live
+ * control plane supplies this state from Prisma and kernel observations; the
+ * compiler owns the invariant that incomplete tool episodes never enter the
+ * candidate set.
+ */
+function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[] {
+  const modelKey = input.model.modelKey;
+  const scope: ContextScope = {
+    workspaceId: null,
+    sessionId: input.thread.sessionId,
+    taskId: input.task.taskId,
+    pathPatterns: [],
+  };
+  const features: SelectionFeatures = {
+    relevance: 0.8,
+    novelty: 0.5,
+    coverage: 0.6,
+    uncertaintyReduction: 0.7,
+    riskReduction: 0.7,
+    modelCompatibility: 1,
+    redundancyPenalty: 0,
+    injectionPenalty: 0,
+  };
+  const results: RetrievalResult[] = [];
+
+  for (const [section, value] of Object.entries(input.worldState.sections)) {
+    const text = `# World State: ${section}\n\n${safeWorldStateJson(section, value)}`;
+    const sourceUri = `world://${section}`;
+    const version = input.worldState.sourceVersions[sourceUri]
+      ?? input.worldState.sourceVersions[section]
+      ?? input.worldState.observedAt;
+    const evidenceRefs = worldStateEvidenceRefs(value);
+    const fragment = makeRuntimeFragment({
+      id: `runtime:world_state:${section}`,
+      kind: "world_state",
+      uri: sourceUri,
+      text,
+      sourceVersion: version,
+      authority: 70,
+      priority: 70,
+      trust: section === "request" ? "untrusted" : "derived",
+      confidentiality: section === "secrets" ? "secret_adjacent" : "workspace",
+      injectionRisk: section === "request" ? "medium" : "low",
+      exactness: section === "request" ? "recoverable_by_reference" : "semantics_preserving",
+      scope,
+      modelKey,
+      features,
+      observedAt: input.worldState.observedAt,
+      evidenceRefs,
+      invalidation: [{ kind: "ttl", selector: `world://${section}` }],
+    });
+    results.push({
+      fragment,
+      method: "exact_user_reference",
+      rawScore: 1,
+      rerankedScore: 1,
+      sourceVersion: version,
+      reason: `authoritative world state: ${section}`,
+    });
+  }
+
+  const toolEpisodeIds = new Map<string, { callId: string | null; resultId: string | null }>();
+  for (const episode of input.recentEpisodes) {
+    if (episode.toolCallId === null) continue;
+    const pair = toolEpisodeIds.get(episode.toolCallId) ?? { callId: null, resultId: null };
+    if (episode.kind === "tool_call") pair.callId = `runtime:episode:${episode.id}:tool_call`;
+    if (episode.kind === "tool_result") pair.resultId = `runtime:episode:${episode.id}:tool_result`;
+    toolEpisodeIds.set(episode.toolCallId, pair);
+  }
+  for (const episode of input.recentEpisodes) {
+    const isToolEpisode = episode.kind === "tool_call" || episode.kind === "tool_result";
+    if (isToolEpisode && episode.toolCallId !== null) {
+      const pair = toolEpisodeIds.get(episode.toolCallId);
+      const complete = pair !== undefined && pair.callId !== null && pair.resultId !== null;
+      if (!complete) continue;
+    }
+    const evidence = episode.contentRef === null
+      ? []
+      : [artifactRefFromContentHash(episode.contentRef)];
+    const text = [
+      `# Episode ${episode.sequence}: ${episode.kind}`,
+      `turn: ${episode.turnId}`,
+      episode.toolCallId === null ? null : `tool_call: ${episode.toolCallId}`,
+      episode.contentRef === null ? "content: unavailable" : `content: ${episode.contentRef}`,
+    ].filter((line): line is string => line !== null).join("\n");
+    const fragment = makeRuntimeFragment({
+      id: episode.kind === "tool_call"
+        ? `runtime:episode:${episode.id}:tool_call`
+        : episode.kind === "tool_result"
+          ? `runtime:episode:${episode.id}:tool_result`
+          : `runtime:episode:${episode.id}`,
+      kind: "recent_episode",
+      uri: `episode://${episode.id}`,
+      text,
+      sourceVersion: episode.contentRef,
+      authority: 45,
+      priority: 45,
+      trust: "derived",
+      confidentiality: "workspace",
+      injectionRisk: "low",
+      exactness: "recoverable_by_reference",
+      scope,
+      modelKey,
+      features,
+      observedAt: episode.occurredAt,
+      evidenceRefs: evidence,
+      dependencies: episode.kind !== "tool_result" || episode.toolCallId === null
+        ? []
+        : [toolEpisodeIds.get(episode.toolCallId)?.callId ?? ""].filter(Boolean),
+      invalidation: [{ kind: "ttl", selector: `episode://${episode.id}` }],
+    });
+    results.push({
+      fragment,
+      method: "exact_user_reference",
+      rawScore: 0.8,
+      rerankedScore: 0.8,
+      sourceVersion: episode.contentRef,
+      reason: "complete recent episode",
+    });
+  }
+
+  if (input.checkpoint !== null) {
+    const checkpointText = [
+      `# Checkpoint ${input.checkpoint.id}`,
+      input.checkpoint.summary,
+      `episode range: ${input.checkpoint.episodeRange.from}-${input.checkpoint.episodeRange.to}`,
+      `canonical state: ${input.checkpoint.canonicalStateHash}`,
+      `effect state: ${canonicalJson(input.checkpoint.effectState ?? [])}`,
+      `approval state: ${canonicalJson(input.checkpoint.approvalState ?? [])}`,
+    ].join("\n");
+    const fragment = makeRuntimeFragment({
+      id: `runtime:checkpoint:${input.checkpoint.id}`,
+      kind: "checkpoint",
+      uri: `checkpoint://${input.checkpoint.id}`,
+      text: checkpointText,
+      sourceVersion: input.checkpoint.canonicalStateHash,
+      authority: 78,
+      priority: 78,
+      trust: "trusted",
+      confidentiality: "workspace",
+      injectionRisk: "none",
+      exactness: "semantics_preserving",
+      scope,
+      modelKey,
+      features,
+      observedAt: input.checkpoint.createdAt,
+      evidenceRefs: [artifactRefFromContentHash(input.checkpoint.artifactHash)],
+      invalidation: [{ kind: "ttl", selector: `checkpoint://${input.checkpoint.id}` }],
+    });
+    results.push({
+      fragment,
+      method: "exact_user_reference",
+      rawScore: 0.9,
+      rerankedScore: 0.9,
+      sourceVersion: input.checkpoint.canonicalStateHash,
+      reason: "durable checkpoint",
+    });
+  }
+  return results;
+}
+
+interface RuntimeFragmentInput {
+  readonly id: string;
+  readonly kind: ContextFragment["kind"];
+  readonly uri: string;
+  readonly text: string;
+  readonly sourceVersion: string | null;
+  readonly authority: number;
+  readonly priority: number;
+  readonly trust: ContextFragment["trust"];
+  readonly confidentiality: ContextFragment["confidentiality"];
+  readonly injectionRisk: ContextFragment["injectionRisk"];
+  readonly exactness: ContextFragment["exactness"];
+  readonly scope: ContextScope;
+  readonly modelKey: ModelKey;
+  readonly features: SelectionFeatures;
+  readonly observedAt: Rfc3339Timestamp;
+  readonly evidenceRefs?: readonly ArtifactRef[] | undefined;
+  readonly dependencies?: readonly string[] | undefined;
+  readonly invalidation: ContextFragment["invalidation"];
+}
+
+function makeRuntimeFragment(input: RuntimeFragmentInput): ContextFragment {
+  return {
+    id: input.id,
+    kind: input.kind,
+    contentRef: makeTextArtifactRef(input.text),
+    textContent: input.text,
+    source: {
+      ...makeSource(input.uri, "runtime-state", input.observedAt),
+      evidenceRefs: input.evidenceRefs ?? [],
+    },
+    sourceVersion: input.sourceVersion,
+    authority: input.authority,
+    priority: input.priority,
+    trust: input.trust,
+    confidentiality: input.confidentiality,
+    injectionRisk: input.injectionRisk,
+    exactness: input.exactness,
+    scope: input.scope,
+    freshness: {
+      observedAt: input.observedAt,
+      sourceVersion: input.sourceVersion,
+      stale: false,
+      staleReason: null,
+    },
+    dependencies: input.dependencies ?? [],
+    invalidation: input.invalidation,
+    estimatedTokens: { [input.modelKey]: estimateTokens(input.text) },
+    selectionFeatures: input.features,
+  };
+}
+
+function makeTextArtifactRef(text: string): ArtifactRef {
+  const hash = computeContentHash(text);
+  return {
+    hash,
+    uri: `artifact://sha256/${hash.slice("sha256:".length)}` as ArtifactUri,
+    mediaType: "text/plain",
+    bytes: BigInt(new TextEncoder().encode(text).byteLength) as ByteCount,
+  };
+}
+
+function artifactRefFromContentHash(hash: ContentHash): ArtifactRef {
+  return {
+    hash,
+    uri: `artifact://sha256/${hash.replace(/^sha256:/, "")}` as ArtifactUri,
+    mediaType: "application/octet-stream",
+    bytes: 0n as ByteCount,
+  };
+}
+
+function worldStateEvidenceRefs(value: unknown): readonly ArtifactRef[] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+  const artifact = (value as { artifact?: unknown }).artifact;
+  if (typeof artifact !== "string" || !artifact.startsWith("artifact://sha256/")) return [];
+  const hex = artifact.slice("artifact://sha256/".length);
+  if (!/^[0-9a-f]{64}$/i.test(hex)) return [];
+  return [artifactRefFromContentHash(`sha256:${hex.toLowerCase()}` as ContentHash)];
+}
+
+function safeWorldStateJson(section: string, value: unknown): string {
+  if (section === "secrets" || section === "credentials") {
+    return "{\"availability\":\"brokered handles only; secret values omitted\"}";
+  }
+  try {
+    return canonicalJson(value);
+  } catch {
+    return "{\"error\":\"world state was not serializable\"}";
+  }
+}
+
 // ────────────────────────── Dedup + freshness ────────────────────────────────
 
-export function deduplicateAndValidate(
+export interface DeduplicationResult {
+  readonly accepted: readonly RetrievalResult[];
+  readonly omitted: readonly { readonly fragmentId: string; readonly reason: string }[];
+}
+
+export function deduplicateAndExplain(
   results: readonly RetrievalResult[],
   currentVersions: Readonly<Record<string, string>>,
-): readonly RetrievalResult[] {
+): DeduplicationResult {
   const seen = new Set<string>();
   const out: RetrievalResult[] = [];
+  const omitted: { fragmentId: string; reason: string }[] = [];
   for (const r of results) {
-    if (seen.has(r.fragment.id)) continue;
+    if (seen.has(r.fragment.id)) {
+      omitted.push({ fragmentId: r.fragment.id, reason: "duplicate candidate" });
+      continue;
+    }
     seen.add(r.fragment.id);
     // Mark stale if source version mismatches.
     if (r.fragment.sourceVersion !== null) {
       const cur = currentVersions[r.fragment.source.uri];
       if (cur !== undefined && cur !== r.fragment.sourceVersion) {
-        // Drop stale fragments silently; manifest will record the omission.
+        omitted.push({
+          fragmentId: r.fragment.id,
+          reason: `stale source version: expected ${cur}, observed ${r.fragment.sourceVersion}`,
+        });
         continue;
       }
     }
     out.push(r);
   }
-  return out;
+  return { accepted: out, omitted };
+}
+
+export function deduplicateAndValidate(
+  results: readonly RetrievalResult[],
+  currentVersions: Readonly<Record<string, string>>,
+): readonly RetrievalResult[] {
+  return deduplicateAndExplain(results, currentVersions).accepted;
 }
 
 // ────────────────────────── Evidence-coverage matrix ─────────────────────────
@@ -616,7 +908,8 @@ export function buildEvidenceCoverage(
   // One row per acceptance criterion.
   for (const ac of input.task.contract.acceptanceCriteria) {
     const matching = candidates
-      .filter((r) => r.fragment.kind === "code" || r.fragment.kind === "test")
+      .filter((r) => (r.fragment.kind === "code" || r.fragment.kind === "test")
+        && fragmentMatchesRequirement(r.fragment, ac.statement))
       .map((r) => r.fragment.id);
     const covered = matching.length > 0 || !ac.required;
     rows.push({
@@ -638,7 +931,8 @@ export function buildEvidenceCoverage(
   // One row per unknown.
   for (const u of input.task.contract.unknowns) {
     const matching = candidates
-      .filter((r) => r.fragment.kind === "documentation" || r.fragment.kind === "memory")
+      .filter((r) => (r.fragment.kind === "documentation" || r.fragment.kind === "memory")
+        && fragmentMatchesRequirement(r.fragment, u))
       .map((r) => r.fragment.id);
     const covered = matching.length > 0;
     rows.push({
@@ -662,6 +956,17 @@ export function buildEvidenceCoverage(
     gaps,
     hasCriticalGaps: gaps.some((g) => g.requiredEvidenceType.includes("code") || g.requiredEvidenceType.includes("test")),
   };
+}
+
+function fragmentMatchesRequirement(fragment: ContextFragment, requirement: string): boolean {
+  const haystack = `${fragment.source.uri} ${fragment.textContent ?? ""}`.toLowerCase();
+  const terms = requirement
+    .toLowerCase()
+    .split(/[^a-z0-9_]+/)
+    .filter((term) => term.length >= 3);
+  if (terms.length === 0) return false;
+  const matches = terms.filter((term) => haystack.includes(term)).length;
+  return matches >= Math.max(1, Math.ceil(terms.length * 0.25));
 }
 
 // ────────────────────────── Scoring (§33.10) ─────────────────────────────────
@@ -757,6 +1062,16 @@ function tokenCostFor(
   return tokenizer.estimateFragmentTokens(frag).totalTokens;
 }
 
+function isToolCallFragment(fragment: ContextFragment): boolean {
+  return fragment.id.startsWith("tool_call:") || fragment.id.includes(":tool_call");
+}
+
+function isToolResultFragment(fragment: ContextFragment): boolean {
+  return fragment.kind === "tool_result"
+    || fragment.id.startsWith("tool_result:")
+    || fragment.id.includes(":tool_result");
+}
+
 export function allocateBudget(
   scored: readonly ScoredCandidate[],
   budget: ContextBudget,
@@ -767,6 +1082,8 @@ export function allocateBudget(
   const selected: ScoredCandidate[] = [];
   const omitted: { result: RetrievalResult; reason: string }[] = [];
   let remaining = Number(budget.optionalContextTarget);
+  const byId = new Map(scored.map((candidate) => [candidate.result.fragment.id, candidate]));
+  const selectedIds = new Set<string>();
   // Hard-required first.
   const required = scored.filter((s) => s.hardRequired && options.hardIncludeRequired);
   const optional = scored
@@ -774,23 +1091,72 @@ export function allocateBudget(
     .sort((a, b) => b.utility - a.utility);
   for (const s of required) {
     selected.push(s);
+    selectedIds.add(s.result.fragment.id);
     remaining -= tokenCostFor(s.result.fragment, modelKey, providerId);
   }
-  for (const s of optional) {
-    const cost = tokenCostFor(s.result.fragment, modelKey, providerId);
-    if (cost <= remaining) {
-      // Preserve dependency closure: if any dependency is not already selected,
-      // try to include it; else omit.
-      const depsOk =
-        !options.preserveDependencies ||
-        s.result.fragment.dependencies.every((d) =>
-          selected.some((sel) => sel.result.fragment.id === d),
-        );
-      if (!depsOk) {
-        omitted.push({ result: s.result, reason: "dependency closure not satisfied" });
-        continue;
+
+  const dependencyClosure = (
+    candidate: ScoredCandidate,
+    visiting: ReadonlySet<string> = new Set(),
+  ): { readonly dependencies: readonly ScoredCandidate[]; readonly error: string | null } => {
+    const id = candidate.result.fragment.id;
+    if (visiting.has(id)) return { dependencies: [], error: `dependency cycle at ${id}` };
+    const nextVisiting = new Set(visiting);
+    nextVisiting.add(id);
+    const dependencies: ScoredCandidate[] = [];
+    for (const dependencyId of candidate.result.fragment.dependencies) {
+      if (selectedIds.has(dependencyId)) continue;
+      const dependency = byId.get(dependencyId);
+      if (dependency === undefined) {
+        return { dependencies: [], error: `missing dependency ${dependencyId}` };
       }
-      selected.push(s);
+      const nested = dependencyClosure(dependency, nextVisiting);
+      if (nested.error !== null) return nested;
+      for (const nestedDependency of nested.dependencies) {
+        if (!selectedIds.has(nestedDependency.result.fragment.id)
+          && !dependencies.some((item) => item.result.fragment.id === nestedDependency.result.fragment.id)) {
+          dependencies.push(nestedDependency);
+        }
+      }
+      if (!selectedIds.has(dependencyId)
+        && !dependencies.some((item) => item.result.fragment.id === dependencyId)) {
+        dependencies.push(dependency);
+      }
+    }
+    if (options.preserveCompleteEpisodes && isToolCallFragment(candidate.result.fragment)) {
+      for (const dependent of scored) {
+        if (!isToolResultFragment(dependent.result.fragment)
+          || !dependent.result.fragment.dependencies.includes(id)
+          || selectedIds.has(dependent.result.fragment.id)
+          || dependent.result.fragment.id === id) {
+          continue;
+        }
+        dependencies.push(dependent);
+      }
+    }
+    return { dependencies, error: null };
+  };
+
+  for (const s of optional) {
+    const closure = options.preserveDependencies
+      ? dependencyClosure(s)
+      : { dependencies: [], error: null };
+    if (closure.error !== null) {
+      omitted.push({ result: s.result, reason: `dependency closure not satisfied: ${closure.error}` });
+      continue;
+    }
+    const bundle = [...closure.dependencies, s]
+      .filter((candidate, index, all) => all.findIndex((item) => item.result.fragment.id === candidate.result.fragment.id) === index)
+      .filter((candidate) => !selectedIds.has(candidate.result.fragment.id));
+    const cost = bundle.reduce(
+      (sum, candidate) => sum + tokenCostFor(candidate.result.fragment, modelKey, providerId),
+      0,
+    );
+    if (cost <= remaining) {
+      for (const candidate of bundle) {
+        selected.push(candidate);
+        selectedIds.add(candidate.result.fragment.id);
+      }
       remaining -= cost;
     } else {
       omitted.push({ result: s.result, reason: "token budget exceeded" });
@@ -815,7 +1181,11 @@ export function planCacheEpoch(
   input: CompileInput,
   selected: readonly ScoredCandidate[],
 ): ContextCachePlan {
-  const stable = selected.filter((s) => s.result.fragment.exactness === "exact");
+  const stable: ScoredCandidate[] = [];
+  for (const candidate of selected) {
+    if (candidate.result.fragment.exactness !== "exact") break;
+    stable.push(candidate);
+  }
   const stableHash = computeStablePrefixHash(stable.map((s) => s.result.fragment));
   const volatileBoundary = stable.length;
   const breakpoints = stable.length > 0 ? [stable.length - 1] : [];
@@ -844,6 +1214,7 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
   // 3. Retrieval pipeline.
   const pipeline = resolveRetrievalPipeline(input);
   const retrieved = await pipeline.retrieve(queries, input);
+  const runtimeResults = collectRuntimeFragments(input);
 
   // Track tokenizer choice for manifest recording.
   const tokenizer = resolveTokenizer(input.provider.providerId, input.model.modelKey);
@@ -882,11 +1253,13 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
       reason: "acceptance_criterion",
     })),
   ];
-  // 4. Dedup + freshness.
-  const candidates = deduplicateAndValidate(
-    [...requiredResults, ...retrieved],
+  // 4. Dedup + freshness. Every omission remains explainable in the
+  // manifest; stale candidates are never silently discarded.
+  const firstPass = deduplicateAndExplain(
+    [...requiredResults, ...runtimeResults, ...retrieved],
     input.worldState.sourceVersions,
   );
+  const candidates = firstPass.accepted;
   // 5. Evidence-coverage.
   const coverage = buildEvidenceCoverage(input, candidates);
   let expanded: readonly RetrievalResult[] = [];
@@ -894,7 +1267,43 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     expanded = await pipeline.expandForGaps(coverage.gaps, input);
     warnings.push(`expanded retrieval for ${coverage.gaps.length} evidence gap(s)`);
   }
-  const all = deduplicateAndValidate([...candidates, ...expanded], input.worldState.sourceVersions);
+  const secondPass = deduplicateAndExplain(
+    [...candidates, ...expanded],
+    input.worldState.sourceVersions,
+  );
+  let all = secondPass.accepted;
+  const compactionTransforms: CompactionTransform[] = [];
+  if (input.compactionPolicy?.enabled === true) {
+    const compacted = compactContext({
+      fragments: all.map((result) => result.fragment),
+      modelKey: input.model.modelKey,
+      targetTokens: Math.max(1, input.compactionPolicy.targetTokens),
+      observedAt: input.worldState.observedAt,
+      invariants: [
+        {
+          id: "task-contract",
+          statement: input.task.contract.objective,
+          evidenceFragmentIds: required.taskContract.map((fragment) => fragment.id),
+        },
+      ],
+    });
+    const byId = new Map(all.map((result) => [result.fragment.id, result]));
+    all = compacted.fragments.map((fragment) => {
+      const original = byId.get(fragment.id);
+      return original ?? {
+        fragment,
+        method: "semantic" as const,
+        rawScore: 0.5,
+        rerankedScore: 0.5,
+        sourceVersion: fragment.sourceVersion,
+        reason: "semantic compaction",
+      };
+    });
+    compactionTransforms.push(...compacted.transforms);
+    if (compacted.transforms.length > 0) {
+      warnings.push(`semantic compaction applied to ${compacted.transforms.length} fragment group(s)`);
+    }
+  }
   // 6. Score.
   const scored = scoreCandidates(all, input);
   // 7. Allocate.
@@ -912,6 +1321,62 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     allocation.selected.map((s) => s.result.fragment),
   );
   const selectedFragments = confFiltered.admitted;
+  const hardSelectedIds = new Set(
+    allocation.selected
+      .filter((candidate) => candidate.hardRequired)
+      .map((candidate) => candidate.result.fragment.id),
+  );
+  const admittedIds = new Set(selectedFragments.map((fragment) => fragment.id));
+  const confidentialHardOmissions = [...hardSelectedIds].filter((id) => !admittedIds.has(id));
+  if (confidentialHardOmissions.length > 0) {
+    throw new Error(
+      `required context blocked by confidentiality policy: ${confidentialHardOmissions.join(", ")}`,
+    );
+  }
+  if (allocation.overHardLimit) {
+    warnings.push(
+      `hard input limit exceeded by ${allocation.totalEstimatedTokens - Number(input.budget.hardInputLimit)} tokens`,
+    );
+  }
+
+  const toolSchemas = input.toolSchemas ?? [];
+  const decisionRecord: Readonly<Record<string, unknown>> = {
+    retrievalQueries: queries.map((query) => ({
+      text: query.text,
+      reason: query.reason,
+      suggestedMethods: [...query.suggestedMethods],
+    })),
+    candidates: all.map((result) => ({
+      fragmentId: result.fragment.id,
+      kind: result.fragment.kind,
+      method: result.method,
+      rawScore: result.rawScore,
+      rerankedScore: result.rerankedScore,
+      sourceVersion: result.sourceVersion,
+      reason: result.reason,
+      estimatedTokens: result.fragment.estimatedTokens[input.model.modelKey] ?? 0,
+      authority: result.fragment.authority,
+      trust: result.fragment.trust,
+      confidentiality: result.fragment.confidentiality,
+      injectionRisk: result.fragment.injectionRisk,
+    })),
+    evidenceCoverage: coverage,
+    selected: allocation.selected.map((candidate) => candidate.result.fragment.id),
+    allocationOmissions: allocation.omitted.map((omission) => ({
+      fragmentId: omission.result.fragment.id,
+      reason: omission.reason,
+    })),
+    freshnessOmissions: [...firstPass.omitted, ...secondPass.omitted],
+    confidentialityOmissions: confFiltered.omitted,
+    transforms: compactionTransforms,
+    toolSchemas: toolSchemas.map((schema) => ({ id: schema.id, version: schema.version })),
+    memory: {
+      enabled: false,
+      reason: "durable memory remains disabled until its precision/harm gate passes",
+    },
+    hardInputLimit: Number(input.budget.hardInputLimit),
+    totalEstimatedTokens: allocation.totalEstimatedTokens,
+  };
 
   // 9. Build + persist manifest BEFORE send (SPEC §8.6, §33.13, ADR-0010)
   // Record tokenizer choice in the manifest.
@@ -951,17 +1416,29 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
       selectedFragments.map((f) => [f.id, f.injectionRisk]),
     ) as Record<string, ContextManifest["taintDecisions"][string]>,
     experimentAssignments: input.experimentAssignments.map((e) => e.experimentId),
+    decisionRecord,
     occurredAt: input.worldState.observedAt,
   };
   const builtManifest = buildManifest(manifestInput);
-  const manifest = await input.store.persistManifest(builtManifest);
+  const manifest = await input.store.persistManifest(
+    builtManifest,
+    all.map((result) => result.fragment),
+  );
+
+  if (allocation.overHardLimit) {
+    // The durable manifest records the exact over-budget decision, but no
+    // provider request is allowed to proceed with an unsafe input size.
+    throw new Error(
+      `context hard input limit exceeded: ${allocation.totalEstimatedTokens} > ${Number(input.budget.hardInputLimit)}`,
+    );
+  }
 
   // 10. Render with durable manifest authority.
   const rendered = await input.renderer.render({
     provider: input.provider,
     model: input.model,
     fragments: selectedFragments,
-    toolSchemas: [],
+    toolSchemas,
     cachePlan: {
       stablePrefixHash: cachePlan.stablePrefixHash,
       breakpoints: cachePlan.breakpoints,
@@ -974,12 +1451,21 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     signal: input.signal,
     manifestId: manifest.id,
   });
+  const renderedRequestArtifact = input.store.recordRenderedRequest === undefined
+    ? null
+    : await input.store.recordRenderedRequest(manifest.id, rendered);
 
   return {
     rendered,
     manifest,
     warnings,
     omitted: manifestInput.omitted,
+    totalEstimatedTokens: selectedFragments.reduce(
+      (sum, fragment) => sum + tokenCostFor(fragment, input.model.modelKey, input.provider.providerId),
+      0,
+    ),
+    overHardLimit: allocation.overHardLimit,
+    renderedRequestArtifact,
   };
 }
 
@@ -1170,7 +1656,7 @@ export class LexicalRetrieval implements RetrievalPipeline {
     // distinct queries against the same path produce distinct fragments
     // (avoids accidental dedup across queries).
     void q;
-    const hashHex = simpleHashHex(`${doc.path}:${snippet}`);
+    const hashHex = computeContentHash(snippet).slice("sha256:".length);
     const scope: ContextScope = {
       workspaceId: null,
       sessionId: null,
@@ -1282,14 +1768,8 @@ function extractSnippet(content: string, queryTokens: readonly string[], windowS
 // ────────────────────────── Helpers ──────────────────────────────────────────
 
 function hashSnapshot(s: ProviderCapabilitySnapshot): ContentHash {
-  // Deterministic hash of the snapshot for manifest recording.
-  const text = `${s.providerId}:${s.observedAt}:${s.policy.retentionMode}:${s.context.testedSafeTokens}`;
-  let h1 = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    h1 = Math.imul(h1 ^ text.charCodeAt(i), 0x01000193) >>> 0;
-  }
-  const hex = (h1 >>> 0).toString(16).padStart(8, "0").repeat(8);
-  return `sha256:${hex}` as ContentHash;
+  const text = canonicalJson(s);
+  return computeContentHash(text);
 }
 
 export type {
