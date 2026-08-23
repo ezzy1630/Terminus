@@ -8,7 +8,7 @@
 # are applied to a temporary copy during parity and remain budgeted here.
 
 version: 1
-last_updated: "2026-07-22"
+last_updated: "2026-08-22"
 owner: upstream-team
 
 budget:
@@ -25,11 +25,47 @@ modified_files:
     upstream_pr: "pending-upstream-fix"
     removal_milestone: "next-upstream-sync"
     conflict_hours: 0.5
+  - source: "packages/console/support/vite.config.ts"
+    reason: "Parity-only type compatibility overlay for duplicate Vite peer instances in the pinned Bun lockfile."
+    owner: "upstream-team"
+    upstream_pr: "pending-upstream-fix"
+    removal_milestone: "next-upstream-sync"
+    conflict_hours: 0.25
+  - source: "packages/enterprise/vite.config.ts"
+    reason: "Parity-only type compatibility overlay for duplicate Vite peer instances in the pinned Bun lockfile."
+    owner: "upstream-team"
+    upstream_pr: "pending-upstream-fix"
+    removal_milestone: "next-upstream-sync"
+    conflict_hours: 0.25
+  - source: "packages/console/app/vite.config.ts"
+    reason: "Parity-only type compatibility overlay for duplicate Vite peer instances in the pinned Bun lockfile."
+    owner: "upstream-team"
+    upstream_pr: "pending-upstream-fix"
+    removal_milestone: "next-upstream-sync"
+    conflict_hours: 0.25
+  - source: "packages/stats/app/vite.config.ts"
+    reason: "Parity-only type compatibility overlay for duplicate Vite peer instances in the pinned Bun lockfile."
+    owner: "upstream-team"
+    upstream_pr: "pending-upstream-fix"
+    removal_milestone: "next-upstream-sync"
+    conflict_hours: 0.25
+  - source: "packages/tui/src/component/dialog-move-session.tsx"
+    reason: "Parity-only narrowing for the generated project-directory response inferred as an empty object by the pinned SDK types."
+    owner: "upstream-team"
+    upstream_pr: "pending-upstream-fix"
+    removal_milestone: "next-upstream-sync"
+    conflict_hours: 0.5
+  - source: "packages/app/src/app.tsx"
+    reason: "Parity-only callback annotation for Solid Dynamic router-root inference in the pinned app source."
+    owner: "upstream-team"
+    upstream_pr: "pending-upstream-fix"
+    removal_milestone: "next-upstream-sync"
+    conflict_hours: 0.25
 
 # Summary (auto-computed by tools/upstream-sync):
-#   total_modified_files: 1
-#   total_last_conflict_hours: 0.5
-#   within_budget: true (1 <= 25, 0.5 <= 8)
+#   total_modified_files: 7
+#   total_last_conflict_hours: 2.25
+#   within_budget: true (7 <= 25, 2.25 <= 8)
 #   bypass_register_open: 0
 
 # Upstream PRs proposed by Terminus (generic fixes).

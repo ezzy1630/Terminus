@@ -13,8 +13,8 @@ old = '''  override emit(eventName: "event", event: GlobalEvent): boolean {
     return super.emit(eventName, event)
   }
 '''
-new = '''  override emit(eventName: string | symbol, ...args: any[]): boolean {
-    if (eventName !== "event") return super.emit(eventName, ...args)
+new = '''  override emit<K>(eventName: K | "event", ...args: K extends "event" ? [event: GlobalEvent] : never): boolean {
+    if (eventName !== "event") return (super.emit as (...args: any[]) => boolean)(eventName, ...args)
     const event = args[0] as GlobalEvent
     if (event.payload && typeof event.payload === "object" && !("id" in event.payload)) {
       event.payload.id = event.payload.syncEvent?.id ?? Identifier.create("evt", "ascending")

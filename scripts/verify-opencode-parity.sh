@@ -21,6 +21,9 @@ cleanup() {
   find "$source_dir" -name "package.json.bak" | while read -r f; do
     mv "$f" "${f%.bak}"
   done
+  find "$source_dir" -name "*.terminus-overlay.bak" -print0 | while IFS= read -r -d '' f; do
+    mv "$f" "${f%.terminus-overlay.bak}"
+  done
 }
 trap cleanup EXIT
 if [[ -d "$overlay_dir" ]]; then
