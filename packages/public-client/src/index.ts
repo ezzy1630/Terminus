@@ -459,7 +459,94 @@ export class ForgeClient {
   ): Promise<{ workflowId: string; witnessPaths: Array<{ pathId: string; nodeIds: string[]; coversMandatorySteps: string[] }> }> {
     return this.request("GET", `/v2/workflows/${encodeURIComponent(id)}/witness-paths`, { signal });
   }
+
+  // ────────────────────────── /models & /orchestration (Phase 8) ────────────
+
+  async listModelProfilesV2(
+    opts: { providerId?: string; confidentiality?: string } = {},
+    signal?: AbortSignal | null,
+  ): Promise<{ profiles: unknown[] }> {
+    return this.request("GET", "/v2/models/profiles", {
+      query: { providerId: opts.providerId ?? null, confidentiality: opts.confidentiality ?? null },
+      signal,
+    });
+  }
+
+  async getModelProfileV2(id: string, signal?: AbortSignal | null): Promise<unknown> {
+    return this.request("GET", `/v2/models/profiles/${encodeURIComponent(id)}`, { signal });
+  }
+
+  async routeModelStageV2(
+    input: {
+      stage: "classifier" | "implementer" | "reviewer" | "specialist" | "vision" | "local_safe";
+      confidentiality?: "public" | "workspace" | "secret_adjacent" | "secret";
+      allowedProviders?: string[];
+      implementerProviderId?: string | null;
+      requireOffline?: boolean;
+    },
+    signal?: AbortSignal | null,
+  ): Promise<unknown> {
+    return this.request("POST", "/v2/models/route", { body: input, signal });
+  }
+
+  async updateModelPosteriorV2(
+    input: {
+      modelKey: string;
+      toolCallsSucceeded: number;
+      toolCallsFailed: number;
+      structuredOutputSucceeded: boolean;
+      editCohortSucceeded: boolean;
+      latencyMs: number;
+      costMicros: bigint;
+      cacheHitRate: number;
+    },
+    signal?: AbortSignal | null,
+  ): Promise<unknown> {
+    return this.request("POST", "/v2/models/posterior/update", { body: input, signal });
+  }
+
+  async getModelPosteriorV2(modelKey: string, signal?: AbortSignal | null): Promise<unknown> {
+    return this.request("GET", `/v2/models/posterior/${encodeURIComponent(modelKey)}`, { signal });
+  }
+
+  async scheduleEVWorkerV2(
+    input: {
+      parentTaskId: string;
+      candidateObjective: string;
+      separability: number;
+      likelyFileOverlap: number;
+      isWriteWork: boolean;
+      currentUncertainty: number;
+      contextPressure: number;
+      riskClass: "low" | "medium" | "high" | "critical";
+      budgetRemainingRatio: number;
+      activeWorkerCount: number;
+    },
+    signal?: AbortSignal | null,
+  ): Promise<unknown> {
+    return this.request("POST", "/v2/orchestration/ev-schedule", { body: input, signal });
+  }
+
+  async checkStagnationV2(
+    input: { taskId: string; observations?: unknown[] },
+    signal?: AbortSignal | null,
+  ): Promise<unknown> {
+    return this.request("POST", "/v2/orchestration/stagnation/check", { body: input, signal });
+  }
+
+  async evaluateCleanReviewV2(
+    input: {
+      taskId: string;
+      reviewerProviderId: string;
+      implementerProviderId: string;
+      findings?: unknown[];
+    },
+    signal?: AbortSignal | null,
+  ): Promise<unknown> {
+    return this.request("POST", "/v2/orchestration/review/clean", { body: input, signal });
+  }
 }
+
 
 export class ForgeApiError extends Error {
   constructor(

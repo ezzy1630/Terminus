@@ -8,18 +8,18 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   evidence:
     name: Produce signed Linux enforcement evidence
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-terminus
         with:
           fetch-depth: 0
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
       - name: Install host enforcement dependencies
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
       - name: Delegate cgroup-v2 subtree to the kernel probe
@@ -43,7 +43,7 @@ jobs:
           '
           sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent/job
           sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
       - name: Build kernel probe binary
         run: |
           cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
@@ -71,7 +71,7 @@ jobs:
         run: bash scripts/verify-release-evidence.sh
       - name: Upload evidence bundle
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: linux-enforcement-evidence
           path: |

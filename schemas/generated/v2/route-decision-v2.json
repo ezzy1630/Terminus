@@ -1,0 +1,77 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/route-decision-v2.json",
+  "title": "RouteDecisionV2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "stage": {
+      "type": "string",
+      "enum": [
+        "classifier",
+        "implementer",
+        "reviewer",
+        "specialist",
+        "vision",
+        "local_safe"
+      ]
+    },
+    "chosenProfileId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "chosenModelKey": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidateScores": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "fallbackProfileIds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "expectedCostMicros": {},
+    "expectedLatencyMs": {
+      "type": "number",
+      "minimum": 0
+    },
+    "timestamp": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "stage",
+    "chosenProfileId",
+    "chosenModelKey",
+    "reason",
+    "candidateScores",
+    "fallbackProfileIds",
+    "expectedCostMicros",
+    "expectedLatencyMs",
+    "timestamp"
+  ]
+}

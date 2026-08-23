@@ -16,10 +16,10 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 | External harness adapters | 7 | directories in adapters/ |
 | Mini-services | 2 | directories in mini-services/ |
 | Declared Rust tests | 359 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
-| TypeScript test files | 60 | `*.test.{ts,tsx}` in packages/ + apps/ |
-| Declared TypeScript test blocks | 564 | `test(/it(` occurrences in those files |
+| TypeScript test files | 62 | `*.test.{ts,tsx}` in packages/ + apps/ |
+| Declared TypeScript test blocks | 579 | `test(/it(` occurrences in those files |
 | Declared Python tests | 221 | `def test_*` in python/** |
-| ADRs | 36 | docs/decisions/ADR-*.md |
+| ADRs | 37 | docs/decisions/ADR-*.md |
 | Runbooks | 15 | docs/runbooks/*.md |
 | SQLite migrations | 3 | migrations/sqlite/*.sql |
 

@@ -13,11 +13,9 @@ jobs:
     name: Fuzz corpus smoke (SPEC §46.4)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - run: just fuzz-smoke
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: fuzz-smoke-evidence
@@ -27,11 +25,9 @@ jobs:
     name: Fault-injection matrix (SPEC §46.9)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - run: just fault-injection
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: fault-injection-evidence
@@ -41,26 +37,37 @@ jobs:
     name: Soak/leak smoke (30s)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - name: Short soak
         env:
           TERMINUS_SOAK_SECONDS: "30"
         run: just soak
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: soak-leak-evidence
           path: artifacts/release-gate/soak-leak.json
 
+  # GitHub-hosted Ubuntu does not expose the delegated cgroup and namespace
+  # controls required for authoritative enforcement evidence. Keep these
+  # probes visible in scheduled/manual runs without spending PR capacity.
+  linux-enforcement-preflight-nightly:
+    name: Linux enforcement prerequisites (nightly)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: ./.github/actions/setup-terminus
+      - name: Install host enforcement dependencies
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq
+      - name: Verify delegated Linux controls
+        run: just linux-enforcement-prereqs
+
   linux-adversarial-nightly:
     name: Linux adversarial (nightly)
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
       - run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
       - name: Run enforcement probe
@@ -68,14 +75,22 @@ jobs:
           TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
           TERMINUS_KERNEL_BINARY: ${{ github.workspace }}/mini-services/terminus-kernel/target/release/terminus-kernel-mini
         run: bash scripts/run-linux-enforcement-probe.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: linux-enforcement-report-nightly
+          path: ${{ runner.temp }}/terminus-enforcement-report.json
+          if-no-files-found: ignore
 
   cargo-fuzz-optional:
     name: cargo-fuzz short campaign (optional)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
+        with:
+          toolchain: nightly
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Short fuzz each target

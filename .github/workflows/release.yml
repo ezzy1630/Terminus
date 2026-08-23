@@ -12,10 +12,7 @@ on:
         type: string
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   # ---------- Supply-chain gate (SPEC §46.14) ----------
@@ -25,11 +22,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-terminus
         with:
           fetch-depth: 0
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
       - name: cargo deny (licenses, advisories, bans, sources)
         run: cargo deny check
       - name: bun audit (npm advisories)
@@ -80,15 +75,12 @@ jobs:
             binary: terminus-kernel-mini.exe
     permissions:
       contents: read
-      packages: write
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-terminus
         with:
           fetch-depth: 0
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
       - name: Install Linux cross-linker
@@ -109,23 +101,23 @@ jobs:
         shell: bash
         run: node -e "const fs = require('node:fs'); const crypto = require('node:crypto'); const name = process.argv[1]; const digest = crypto.createHash('sha256').update(fs.readFileSync('dist/' + name)).digest('hex'); fs.writeFileSync('dist/' + name + '.sha256', digest + '  ' + name + '\\n');" "${{ matrix.artifact }}"
       - name: Generate SBOM (syft, SPDX-JSON)
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
         with:
           artifact-name: ${{ matrix.artifact }}.sbom.spdx.json
           format: spdx-json
           output-file: dist/${{ matrix.artifact }}.sbom.spdx.json
       - name: Sign artifact (cosign)
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
       - shell: bash
         run: |
           cosign sign-blob --yes dist/${{ matrix.artifact }} \
             --output-signature dist/${{ matrix.artifact }}.sig \
             --output-certificate dist/${{ matrix.artifact }}.pem
       - name: Attest build provenance (§46.15)
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-path: dist/${{ matrix.artifact }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
@@ -139,11 +131,9 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-terminus
         with:
           fetch-depth: 0
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
       - name: Install host enforcement dependencies
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
       - name: Delegate cgroup-v2 subtree to the kernel probe
@@ -167,7 +157,7 @@ jobs:
           '
           sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent/job
           sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
       - name: Build kernel probe binary
         run: |
           cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
@@ -193,7 +183,7 @@ jobs:
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/terminus-linux-evidence.json.pem
         run: bash scripts/verify-release-evidence.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: linux-enforcement-evidence
@@ -213,17 +203,15 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-terminus
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: linux-enforcement-evidence
           path: ${{ runner.temp }}/linux-evidence
           merge-multiple: true
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
       - name: Run the declared release checks
         env:
           TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
@@ -240,7 +228,7 @@ jobs:
         run: |
           export TERMINUS_RELEASE_RUN_STARTED_AT="$(date -u +%s)"
           just release-check
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: release-validation-evidence
@@ -254,17 +242,14 @@ jobs:
     needs: [supply-chain-gate, build-artifacts, linux-enforcement-evidence, release-validation]
     permissions:
       contents: write
-      packages: write
-      id-token: write
-      attestations: write
     environment: terminus-release
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist
           merge-multiple: true
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
       - name: Require recorded release approvals
         env:
           RELEASE_OWNER_APPROVAL: ${{ vars.TERMINUS_RELEASE_OWNER_APPROVAL }}
@@ -301,7 +286,7 @@ jobs:
           tar -czf release/generated-clients.tar.gz packages/terminus-kernel-client/src/generated
           tar -czf release/schemas.tar.gz schemas/
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           files: |
             release/*
@@ -316,21 +301,19 @@ jobs:
     runs-on: ubuntu-latest
     needs: [publish-release, release-validation, supply-chain-gate]
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-terminus
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: linux-enforcement-evidence
           path: ${{ runner.temp }}/linux-evidence
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-validation-evidence
           path: artifacts/release-gate
           merge-multiple: true
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
       - name: Produce evidence-derived release decision
         env:
           TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
@@ -347,7 +330,7 @@ jobs:
           just platform-matrix
           bun run scripts/produce-release-decision.ts
           cp artifacts/release-gate/release-decision.yaml release-decision.yaml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-decision
           path: |

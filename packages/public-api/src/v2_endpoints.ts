@@ -461,6 +461,103 @@ export const SubscribeEventsV2 = {
   response: z.never(), // SSE stream
 };
 
+// /v2/models
+export const ListModelProfilesV2 = {
+  method: "GET" as const,
+  path: "/v2/models/profiles",
+  request: z.object({
+    providerId: z.string().optional(),
+    confidentiality: z.enum(["public", "workspace", "secret_adjacent", "secret"]).optional(),
+  }).optional(),
+  response: z.object({
+    profiles: z.array(z.any()),
+  }),
+};
+
+export const GetModelProfileV2 = {
+  method: "GET" as const,
+  path: "/v2/models/profiles/:id",
+  request: z.void(),
+  response: z.any(),
+};
+
+export const RouteModelStageV2 = {
+  method: "POST" as const,
+  path: "/v2/models/route",
+  request: z.object({
+    stage: z.enum(["classifier", "implementer", "reviewer", "specialist", "vision", "local_safe"]),
+    confidentiality: z.enum(["public", "workspace", "secret_adjacent", "secret"]).default("workspace"),
+    allowedProviders: z.array(z.string()).optional(),
+    implementerProviderId: z.string().nullable().optional(),
+    requireOffline: z.boolean().default(false),
+  }),
+  response: z.any(),
+};
+
+export const UpdateModelPosteriorV2 = {
+  method: "POST" as const,
+  path: "/v2/models/posterior/update",
+  request: z.object({
+    modelKey: z.string().min(1),
+    toolCallsSucceeded: z.number().int().nonnegative(),
+    toolCallsFailed: z.number().int().nonnegative(),
+    structuredOutputSucceeded: z.boolean(),
+    editCohortSucceeded: z.boolean(),
+    latencyMs: z.number().nonnegative(),
+    costMicros: z.bigint().nonnegative(),
+    cacheHitRate: z.number().min(0).max(1),
+  }),
+  response: z.any(),
+};
+
+export const GetModelPosteriorV2 = {
+  method: "GET" as const,
+  path: "/v2/models/posterior/:modelKey",
+  request: z.void(),
+  response: z.any(),
+};
+
+// /v2/orchestration
+export const ScheduleEVWorkerV2 = {
+  method: "POST" as const,
+  path: "/v2/orchestration/ev-schedule",
+  request: z.object({
+    parentTaskId: z.string().min(1),
+    candidateObjective: z.string().min(1),
+    separability: z.number().min(0).max(1),
+    likelyFileOverlap: z.number().min(0).max(1),
+    isWriteWork: z.boolean(),
+    currentUncertainty: z.number().min(0).max(1),
+    contextPressure: z.number().min(0).max(1),
+    riskClass: z.enum(["low", "medium", "high", "critical"]),
+    budgetRemainingRatio: z.number().min(0).max(1),
+    activeWorkerCount: z.number().int().nonnegative(),
+  }),
+  response: z.any(),
+};
+
+export const CheckStagnationV2 = {
+  method: "POST" as const,
+  path: "/v2/orchestration/stagnation/check",
+  request: z.object({
+    taskId: z.string().min(1),
+    observations: z.array(z.any()).default([]),
+  }),
+  response: z.any(),
+};
+
+export const EvaluateCleanReviewV2 = {
+  method: "POST" as const,
+  path: "/v2/orchestration/review/clean",
+  request: z.object({
+    taskId: z.string().min(1),
+    reviewerProviderId: z.string().min(1),
+    implementerProviderId: z.string().min(1),
+    findings: z.array(z.any()).default([]),
+  }),
+  response: z.any(),
+};
+
 // ────────────────────────── V2 Endpoint Registry ─────────────────────────────
 
 export const V2_ENDPOINTS = {
@@ -494,8 +591,17 @@ export const V2_ENDPOINTS = {
   RenewLeaseV2,
   ReleaseLeaseV2,
   ConsumeBudgetV2,
+  ListModelProfilesV2,
+  GetModelProfileV2,
+  RouteModelStageV2,
+  UpdateModelPosteriorV2,
+  GetModelPosteriorV2,
+  ScheduleEVWorkerV2,
+  CheckStagnationV2,
+  EvaluateCleanReviewV2,
   SubscribeEventsV2,
 } as const;
 
 export type V2EndpointName = keyof typeof V2_ENDPOINTS;
+
 

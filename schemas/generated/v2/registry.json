@@ -181,6 +181,48 @@
       "path": "schemas/generated/v2/budget-consumption.json",
       "sha256": "sha256:4d1561b3e7ba0fad9ac79792106b34ddbb5fd88074d031fb07a7a6a65984ece1",
       "bytes": 842
+    },
+    {
+      "name": "model-profile",
+      "title": "ModelProfile",
+      "path": "schemas/generated/v2/model-profile.json",
+      "sha256": "sha256:e7835ec38c8904e4380b008daa2fa510f2ca4188bcf39c789dd72a209d822f0c",
+      "bytes": 5980
+    },
+    {
+      "name": "route-decision-v2",
+      "title": "RouteDecisionV2",
+      "path": "schemas/generated/v2/route-decision-v2.json",
+      "sha256": "sha256:efa0ed192220fb7c1b27ed76e4970c778bf66ee8d157644eea0b374bcdc7b5a8",
+      "bytes": 1419
+    },
+    {
+      "name": "model-cohort-posterior",
+      "title": "ModelCohortPosterior",
+      "path": "schemas/generated/v2/model-cohort-posterior.json",
+      "sha256": "sha256:6e460cbf9300cb4ddd1693d3534091047c092a8c82c2c428007ddfd6b51de538",
+      "bytes": 1540
+    },
+    {
+      "name": "delegation-contract-v2",
+      "title": "DelegationContractV2",
+      "path": "schemas/generated/v2/delegation-contract-v2.json",
+      "sha256": "sha256:9aaa069a6e2ef42fed7fbcd27e18b2bbe8376b9f88a9685dcf2d2483f0d60cd1",
+      "bytes": 2157
+    },
+    {
+      "name": "stagnation-report",
+      "title": "StagnationReport",
+      "path": "schemas/generated/v2/stagnation-report.json",
+      "sha256": "sha256:6dfade5df0b0ca22c67b65d61a7b0c7e0683713d16bdcb454f1492317db1052d",
+      "bytes": 1286
+    },
+    {
+      "name": "provider-continuation",
+      "title": "ProviderContinuation",
+      "path": "schemas/generated/v2/provider-continuation.json",
+      "sha256": "sha256:12ff279b6255c873927c3e05d06727f9cdd2b5d44e3d7cec950ab14ca7957f29",
+      "bytes": 1250
     }
   ]
 }

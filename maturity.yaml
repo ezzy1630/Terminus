@@ -100,13 +100,13 @@ components:
   - { id: memory, kind: ts-package, path: packages/memory, tier: experimental,
       basis: "Extraction/consolidation/retrieval with unit tests; promotion gates unproven on cohorts" }
   - { id: model-router, kind: ts-package, path: packages/model-router, tier: experimental,
-      basis: "Deterministic routing/rate limiting/circuit breaker" }
+      basis: "Deep model profiles (Anthropic, OpenAI, Google, Local), empirical Bayesian posteriors, stage-aware deterministic router, rate limiting, circuit breaker, resumable continuation" }
   - { id: observability, kind: ts-package, path: packages/observability, tier: experimental,
       basis: "OTel spans/logging/metrics wrappers" }
   - { id: open-code-bridge, kind: ts-package, path: packages/open-code-bridge, tier: experimental,
       basis: "OpenCode compatibility facade governed by divergence budget" }
   - { id: orchestration, kind: ts-package, path: packages/orchestration, tier: experimental,
-      basis: "Scheduler/delegation/worktrees/loop detection; expected-value gates unproven" }
+      basis: "Expected-value subagent scheduler, isolated candidate workspaces, clean-context reviewers, stagnation supervisor with 11-signal intervention ladder" }
   - { id: policy-coordinator, kind: ts-package, path: packages/policy-coordinator, tier: experimental,
       basis: "Bridges task contracts and kernel capability requests" }
   - { id: provider-anthropic, kind: ts-package, path: packages/provider-anthropic, tier: experimental,

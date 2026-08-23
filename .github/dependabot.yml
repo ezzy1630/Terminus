@@ -1,0 +1,68 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: cargo
+    directory: /mini-services/terminus-kernel
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      kernel-service-dependencies:
+        patterns:
+          - "*"
+
+  # Dependabot uses the npm ecosystem for package.json and Bun lockfiles.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      javascript-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      desktop-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: pip
+    directory: /python
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: pip
+    directory: /python/forge_evals
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      forge-evals-dependencies:
+        patterns:
+          - "*"

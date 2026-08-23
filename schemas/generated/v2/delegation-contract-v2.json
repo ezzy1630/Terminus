@@ -1,0 +1,114 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/delegation-contract-v2.json",
+  "title": "DelegationContractV2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parentTaskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "scout",
+        "implementer",
+        "reviewer",
+        "specialist"
+      ]
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authorityCeiling": {
+      "type": "object",
+      "properties": {
+        "allowedOperations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowedPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deniedEffects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "allowedOperations",
+        "allowedPaths",
+        "deniedEffects"
+      ]
+    },
+    "inputHandles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "expectedValue": {
+      "type": "number"
+    },
+    "outputSchemaVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidenceRequirements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "budgetMicros": {},
+    "deadline": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "writeIsolation": {
+      "type": "string",
+      "enum": [
+        "worktree",
+        "read_only",
+        "ephemeral_branch"
+      ]
+    },
+    "returnRoute": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "id",
+    "parentTaskId",
+    "role",
+    "objective",
+    "authorityCeiling",
+    "inputHandles",
+    "expectedValue",
+    "outputSchemaVersion",
+    "evidenceRequirements",
+    "budgetMicros",
+    "deadline",
+    "writeIsolation",
+    "returnRoute"
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/model-cohort-posterior.json",
+  "title": "ModelCohortPosterior",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "modelKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "toolCallAlpha": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "toolCallBeta": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "structuredOutputAlpha": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "structuredOutputBeta": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "editCohortAlpha": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "editCohortBeta": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "latencyLogMean": {
+      "type": "number"
+    },
+    "latencyLogVariance": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "observedCostMicros": {},
+    "observedCacheHitRate": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "sampleCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "lastUpdated": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "modelKey",
+    "toolCallAlpha",
+    "toolCallBeta",
+    "structuredOutputAlpha",
+    "structuredOutputBeta",
+    "editCohortAlpha",
+    "editCohortBeta",
+    "latencyLogMean",
+    "latencyLogVariance",
+    "observedCostMicros",
+    "observedCacheHitRate",
+    "sampleCount",
+    "lastUpdated"
+  ]
+}

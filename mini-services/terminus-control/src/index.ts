@@ -135,7 +135,19 @@ import {
   compileWorkflowDraft,
   validateWorkflow,
 } from "@terminus/workflow-compiler";
-
+import {
+  ProfileRegistry,
+  STANDARD_MODEL_PROFILES,
+  PosteriorTracker,
+  StageRouter,
+  ProviderContinuationManager,
+} from "@terminus/model-router";
+import {
+  ExpectedValueScheduler,
+  CleanContextReviewer,
+  StagnationSupervisor,
+  CandidateWorkspaceManager,
+} from "@terminus/orchestration";
 
 // ────────────────────────── Configuration ──────────────────────────────────
 
@@ -332,6 +344,16 @@ class EventBus {
 }
 
 const bus = new EventBus();
+
+// Phase 8 Subsystems (SPEC §26, §27)
+const profileRegistry = new ProfileRegistry(STANDARD_MODEL_PROFILES);
+const posteriorTracker = new PosteriorTracker();
+const stageRouter = new StageRouter(profileRegistry, posteriorTracker);
+const evScheduler = new ExpectedValueScheduler();
+const cleanReviewer = new CleanContextReviewer();
+const stagnationSupervisor = new StagnationSupervisor();
+const candidateWorkspaceManager = new CandidateWorkspaceManager();
+const providerContinuationManager = new ProviderContinuationManager();
 
 async function emit(params: {
   eventType: string;
@@ -3391,6 +3413,115 @@ const routes: Route[] = [
       lastUpdatedAt: nowTimestamp(),
     };
     sendJson(res, 200, jsonSafe(b));
+  }),
+  // ────────────────────────── /v2/models (Phase 8) ──────────────────────────
+  route("GET", "/v2/models/profiles", async (req, res) => {
+    const url = new URL(req.url ?? "", "http://x");
+    const providerId = url.searchParams.get("providerId");
+    const confidentiality = url.searchParams.get("confidentiality") as "public" | "workspace" | "secret_adjacent" | "secret" | null;
+
+    let profiles = profileRegistry.listAll();
+    if (providerId) {
+      profiles = profiles.filter((p) => p.providerId === providerId);
+    }
+    if (confidentiality) {
+      profiles = profiles.filter((p) => p.confidentialityPolicy.includes(confidentiality));
+    }
+    sendJson(res, 200, jsonSafe({ profiles }));
+  }),
+  route("GET", "/v2/models/profiles/:id", async (_req, res, params) => {
+    const profile = profileRegistry.getById(String(params.id));
+    if (!profile) {
+      return sendError(res, 404, "PROFILE_NOT_FOUND", `model profile ${params.id} not found`, "not_found");
+    }
+    sendJson(res, 200, jsonSafe(profile));
+  }),
+  route("POST", "/v2/models/route", async (req, res) => {
+    const parsed = z.object({
+      stage: z.enum(["classifier", "implementer", "reviewer", "specialist", "vision", "local_safe"]),
+      confidentiality: z.enum(["public", "workspace", "secret_adjacent", "secret"]).default("workspace"),
+      allowedProviders: z.array(z.string()).optional(),
+      implementerProviderId: z.string().nullable().optional(),
+      requireOffline: z.boolean().default(false),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_ROUTE_REQUEST", `invalid route request: ${parsed.error.message}`, "validation");
+    }
+    const decision = stageRouter.route(parsed.data);
+    sendJson(res, 200, jsonSafe(decision));
+  }),
+  route("POST", "/v2/models/posterior/update", async (req, res) => {
+    const parsed = z.object({
+      modelKey: z.string().min(1),
+      toolCallsSucceeded: z.number().int().nonnegative(),
+      toolCallsFailed: z.number().int().nonnegative(),
+      structuredOutputSucceeded: z.boolean(),
+      editCohortSucceeded: z.boolean(),
+      latencyMs: z.number().nonnegative(),
+      costMicros: z.bigint().nonnegative(),
+      cacheHitRate: z.number().min(0).max(1),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_OBSERVATION", `invalid observation: ${parsed.error.message}`, "validation");
+    }
+    const updated = posteriorTracker.recordObservation(parsed.data);
+    sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("GET", "/v2/models/posterior/:modelKey", async (_req, res, params) => {
+    const post = posteriorTracker.getOrCreate(String(params.modelKey));
+    sendJson(res, 200, jsonSafe(post));
+  }),
+  // ────────────────────────── /v2/orchestration (Phase 8) ───────────────────
+  route("POST", "/v2/orchestration/ev-schedule", async (req, res) => {
+    const parsed = z.object({
+      parentTaskId: z.string().min(1),
+      candidateObjective: z.string().min(1),
+      separability: z.number().min(0).max(1),
+      likelyFileOverlap: z.number().min(0).max(1),
+      isWriteWork: z.boolean(),
+      currentUncertainty: z.number().min(0).max(1),
+      contextPressure: z.number().min(0).max(1),
+      riskClass: z.enum(["low", "medium", "high", "critical"]),
+      budgetRemainingRatio: z.number().min(0).max(1),
+      activeWorkerCount: z.number().int().nonnegative(),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_SCHEDULE_REQUEST", `invalid EV schedule request: ${parsed.error.message}`, "validation");
+    }
+    const decision = evScheduler.evaluate(parsed.data);
+    sendJson(res, 200, jsonSafe(decision));
+  }),
+  route("POST", "/v2/orchestration/stagnation/check", async (req, res) => {
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      observations: z.array(z.any()).default([]),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_STAGNATION_CHECK", `invalid stagnation check: ${parsed.error.message}`, "validation");
+    }
+    for (const obs of parsed.data.observations) {
+      stagnationSupervisor.observe(obs);
+    }
+    const report = stagnationSupervisor.evaluate(parsed.data.taskId);
+    sendJson(res, 200, jsonSafe(report));
+  }),
+  route("POST", "/v2/orchestration/review/clean", async (req, res) => {
+    const parsed = z.object({
+      taskId: z.string().min(1),
+      reviewerProviderId: z.string().min(1),
+      implementerProviderId: z.string().min(1),
+      findings: z.array(z.any()).default([]),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_CLEAN_REVIEW", `invalid clean review request: ${parsed.error.message}`, "validation");
+    }
+    const report = cleanReviewer.evaluateFindings(
+      parsed.data.taskId,
+      parsed.data.reviewerProviderId,
+      parsed.data.implementerProviderId,
+      parsed.data.findings,
+    );
+    sendJson(res, 200, jsonSafe(report));
   }),
   route("GET", "/v2/events", async (req, res) => {
     res.writeHead(200, {

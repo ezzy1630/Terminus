@@ -108,7 +108,7 @@ See `.github/pull_request_template.md`. Every PR description includes:
 | Upstream OpenCode | upstream owner | affected package owner |
 | Release | release owner | security + protocol + eval owners |
 
-See `.github/CODEOWNERS` for the corresponding GitHub teams.
+See `.github/CODEOWNERS` for the current repository owner.
 
 ## Review requirements (SPEC §44.8)
 

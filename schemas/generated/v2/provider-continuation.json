@@ -1,0 +1,68 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/provider-continuation.json",
+  "title": "ProviderContinuation",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "modelKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "inputManifestHash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "toolStateEpoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "continuationToken": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retryCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "lastFailureKind": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "createdAt": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "taskId",
+    "modelKey",
+    "inputManifestHash",
+    "toolStateEpoch",
+    "continuationToken",
+    "retryCount",
+    "lastFailureKind",
+    "createdAt"
+  ]
+}

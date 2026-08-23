@@ -1,0 +1,283 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/model-profile.json",
+  "title": "ModelProfile",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "providerId": {
+      "type": "string",
+      "enum": [
+        "anthropic",
+        "openai",
+        "google",
+        "local",
+        "custom"
+      ]
+    },
+    "modelKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "contextLayout": {
+      "type": "object",
+      "properties": {
+        "systemPromptPlacement": {
+          "type": "string",
+          "enum": [
+            "top_level",
+            "system_message",
+            "developer_message"
+          ]
+        },
+        "maxContextTokens": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "testedSafeTokens": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "supportsImages": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "systemPromptPlacement",
+        "maxContextTokens",
+        "testedSafeTokens",
+        "supportsImages"
+      ]
+    },
+    "toolDialect": {
+      "type": "string",
+      "enum": [
+        "anthropic_tools",
+        "openai_function_calling",
+        "gemini_function_declarations",
+        "standard_json_schema"
+      ]
+    },
+    "editDialect": {
+      "type": "string",
+      "enum": [
+        "hash_anchored_diff",
+        "search_replace_blocks",
+        "whole_file",
+        "ast_transform",
+        "unified_diff"
+      ]
+    },
+    "reasoningEffortPolicy": {
+      "type": "string",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "budget_constrained"
+      ]
+    },
+    "continuationStrategy": {
+      "type": "string",
+      "enum": [
+        "native_token",
+        "server_history",
+        "client_replay"
+      ]
+    },
+    "compactionStrategy": {
+      "type": "string",
+      "enum": [
+        "structured_claims_with_evidence",
+        "rolling_summary",
+        "episodic_anchor"
+      ]
+    },
+    "cachingStrategy": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "automatic_prefix",
+            "explicit_breakpoints",
+            "explicit_resource"
+          ]
+        },
+        "minTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "exactPrefixRequired": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "mode",
+        "minTokens",
+        "exactPrefixRequired"
+      ]
+    },
+    "structuredOutputRepair": {
+      "type": "object",
+      "properties": {
+        "dialect": {
+          "type": "string",
+          "enum": [
+            "strict_json_schema",
+            "prompt_guided_json",
+            "grammar_constrained"
+          ]
+        },
+        "autoRepair": {
+          "type": "boolean"
+        },
+        "retryPromptTemplate": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dialect",
+        "autoRepair",
+        "retryPromptTemplate"
+      ]
+    },
+    "knownFailureMitigations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "economics": {
+      "type": "object",
+      "properties": {
+        "inputMicrosPerMillion": {},
+        "cachedInputMicrosPerMillion": {},
+        "outputMicrosPerMillion": {},
+        "reasoningAccounting": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "inputMicrosPerMillion",
+        "cachedInputMicrosPerMillion",
+        "outputMicrosPerMillion",
+        "reasoningAccounting"
+      ]
+    },
+    "latencyModel": {
+      "type": "object",
+      "properties": {
+        "p50Ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "p90Ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "p99Ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ttftMs": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "p50Ms",
+        "p90Ms",
+        "p99Ms",
+        "ttftMs"
+      ]
+    },
+    "confidentialityPolicy": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "public",
+          "workspace",
+          "secret_adjacent",
+          "secret"
+        ]
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "codingQuality": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "toolReliability": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "structuredOutput": {
+          "type": "boolean"
+        },
+        "contextTokens": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "securityReasoning": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        }
+      },
+      "required": [
+        "codingQuality",
+        "toolReliability",
+        "structuredOutput",
+        "contextTokens",
+        "securityReasoning"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "providerId",
+    "modelKey",
+    "version",
+    "contextLayout",
+    "toolDialect",
+    "editDialect",
+    "reasoningEffortPolicy",
+    "continuationStrategy",
+    "compactionStrategy",
+    "cachingStrategy",
+    "structuredOutputRepair",
+    "knownFailureMitigations",
+    "economics",
+    "latencyModel",
+    "confidentialityPolicy",
+    "capabilities"
+  ]
+}

@@ -17,36 +17,18 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Platform matrix (SPEC §46.13). The full test suite runs on Linux x86_64;
-# other platforms run build + a curated subset of tests. Flaky combinations
-# are marked continue-on-error so a single platform regression does not
-# block the whole pipeline. fail-fast is disabled so every platform
-# reports independently.
+# Platform matrix (SPEC §46.13). Each platform builds and runs its relevant
+# tests in the same VM so compiled output stays available to the test steps.
+# Linux x86_64 runs the full platform slice; other platforms run curated tests.
+# Flaky combinations are marked continue-on-error and fail-fast is disabled so
+# every platform reports independently.
 jobs:
-  # ---------- Toolchain setup (shared) ----------
-  setup:
-    name: Setup
-    runs-on: ubuntu-latest
-    outputs:
-      rust-cache-key: ${{ steps.rust-cache.outputs.key }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: jdx/mise-action@v2
-        with:
-          experimental: true
-      - run: just bootstrap
-
   # ---------- Architecture boundary checks (SPEC §42.5) ----------
   boundary-check:
     name: Architecture boundary checks
     runs-on: ubuntu-latest
-    needs: setup
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - name: Run boundary checks (§42.5)
         run: just boundary-check
 
@@ -54,11 +36,8 @@ jobs:
   lint-typecheck:
     name: Lint, typecheck, codegen drift
     runs-on: ubuntu-latest
-    needs: setup
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - name: Format check (Rust + TS)
         run: |
           cargo fmt --all -- --check
@@ -79,11 +58,10 @@ jobs:
       - name: Truth check (declaration consistency, roadmap Phase 0)
         run: just truth-check
 
-  # ---------- Build matrix (§46.13) ----------
-  build:
-    name: Build (${{ matrix.label }})
+  # ---------- Platform build + tests (§46.13) ----------
+  platform:
+    name: Platform (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
-    needs: setup
     strategy:
       fail-fast: false
       matrix:
@@ -92,45 +70,56 @@ jobs:
             label: linux-x86_64
             target: x86_64-unknown-linux-gnu
             continue-on-error: false
+            run-rust-tests: true
+            run-ts-tests: true
           - os: ubuntu-24.04-arm
             label: linux-arm64
             target: aarch64-unknown-linux-gnu
             continue-on-error: true  # arm runners can be flaky
+            run-rust-tests: true
+            run-ts-tests: false
           - os: macos-latest
             label: macos-arm64
             target: aarch64-apple-darwin
             continue-on-error: false
+            run-rust-tests: true
+            run-ts-tests: true
           - os: macos-15-intel
             label: macos-x86_64
             target: x86_64-apple-darwin
             continue-on-error: true  # Intel macOS runners are scarce
+            run-rust-tests: false
+            run-ts-tests: false
           - os: windows-latest
             label: windows-x86_64
             target: x86_64-pc-windows-msvc
             continue-on-error: false
+            run-rust-tests: true
+            run-ts-tests: true
     continue-on-error: ${{ matrix.continue-on-error }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - name: Build Rust workspace (${{ matrix.target }})
         shell: bash
         run: |
           rustup target add ${{ matrix.target }}
           cargo build --workspace --all-targets --locked
+      - name: Unit tests (Rust)
+        if: ${{ matrix.run-rust-tests }}
+        run: cargo test --workspace --lib --locked
       - name: Build TypeScript workspace
         run: bun run build
-      - name: Build Python package
-        run: cd python && uv sync
+      - name: Unit tests (TypeScript)
+        if: ${{ matrix.run-ts-tests }}
+        run: bun run test:unit
 
   # Container profile build (SPEC §46.13) — compile inside a pinned Linux image.
   build-container:
     name: Build (linux-container)
     runs-on: ubuntu-latest
-    needs: setup
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Build workspace inside rust:bookworm container
         run: |
           docker run --rm \
@@ -139,76 +128,19 @@ jobs:
             bash -c 'source /usr/local/cargo/env && apt-get update -qq && apt-get install -y -qq protobuf-compiler && cargo build --workspace --all-targets --locked'
 
 
-  # ---------- Tests (Linux x86_64 = full) ----------
-  unit-rust:
-    name: Unit tests (Rust, ${{ matrix.label }})
-    runs-on: ${{ matrix.os }}
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            label: linux-x86_64
-            continue-on-error: false
-          - os: ubuntu-24.04-arm
-            label: linux-arm64
-            continue-on-error: true
-          - os: macos-latest
-            label: macos-arm64
-            continue-on-error: false
-          - os: windows-latest
-            label: windows-x86_64
-            continue-on-error: false
-    continue-on-error: ${{ matrix.continue-on-error }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
-      - run: cargo test --workspace --lib --locked
-
-  unit-ts:
-    name: Unit tests (TypeScript, ${{ matrix.label }})
-    runs-on: ${{ matrix.os }}
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            label: linux-x86_64
-            continue-on-error: false
-          - os: macos-latest
-            label: macos-arm64
-            continue-on-error: false
-          - os: windows-latest
-            label: windows-x86_64
-            continue-on-error: false
-    continue-on-error: ${{ matrix.continue-on-error }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
-      - run: bun run test:unit
-
   unit-python:
     name: Unit tests (Python eval)
     runs-on: ubuntu-latest
-    needs: build
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - run: cd python && uv run pytest -q
 
   integration:
     name: Integration tests
     runs-on: ubuntu-latest
-    needs: [unit-rust, unit-ts]
+    needs: platform
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - run: cargo test --workspace --test '*' --locked
       - run: bun run test:integration
 
@@ -216,14 +148,8 @@ jobs:
   security:
     name: Security scans
     runs-on: ubuntu-latest
-    needs: setup
-    permissions:
-      contents: read
-      security-events: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - name: cargo deny (license + advisories + bans)
         run: cargo deny check
       - name: Bun audit
@@ -241,62 +167,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: integration
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - name: Run the supervised public API lifecycle and recovery path
         run: just e2e
-
-  # ---------- Linux enforcement host gate ----------
-  # Both enforcement jobs require delegated host controls (writable cgroup
-  # hierarchy + unprivileged user namespaces for bubblewrap). GitHub-hosted
-  # Ubuntu runners deny both, so they can only report their environment as
-  # Degraded here. They stay visible but non-blocking; the AUTHORITATIVE
-  # evidence path is the dedicated Linux runner (linux-evidence.yml +
-  # TERMINUS_LINUX_EVIDENCE), and release-check still fails closed when that
-  # signed evidence is absent (SPEC §46.18).
-  linux-enforcement-preflight:
-    name: Linux enforcement prerequisites
-    runs-on: ubuntu-latest
-    needs: setup
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
-      - name: Install host enforcement dependencies
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq
-      - name: Verify delegated Linux controls
-        run: just linux-enforcement-prereqs
-
-  # ---------- Linux adversarial enforcement ----------
-  linux-enforcement-adversarial:
-    name: Linux adversarial sandbox enforcement
-    runs-on: ubuntu-latest
-    needs: setup
-    permissions:
-      contents: read
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
-      - name: Install host enforcement dependencies
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
-      - name: Build kernel probe binary
-        run: cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
-      - name: Verify effective enforcement
-        env:
-          TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
-          TERMINUS_KERNEL_BINARY: ${{ github.workspace }}/mini-services/terminus-kernel/target/release/terminus-kernel-mini
-        run: bash scripts/run-linux-enforcement-probe.sh
-      - name: Upload enforcement report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-enforcement-report
-          path: ${{ runner.temp }}/terminus-enforcement-report.json
-          if-no-files-found: ignore
 
   # ---------- M12 release-gate evidence (local subset) ----------
   m12-evidence:
@@ -304,9 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [integration, security, e2e]
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - name: Produce M12 evidence bundle
         env:
           TERMINUS_SOAK_SECONDS: "30"
@@ -337,7 +208,7 @@ jobs:
           just release-decision
           just system-card
           bun run scripts/m12-exit-gate.ts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: m12-release-gate-evidence
@@ -350,35 +221,26 @@ jobs:
     needs: integration
     if: ${{ contains(github.event.pull_request.labels.*.name, 'agent-behavior') }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - run: just eval-smoke
 
   # ---------- Upstream parity ----------
   upstream-check:
     name: Upstream OpenCode parity
     runs-on: ubuntu-latest
-    needs: setup
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
+      - uses: ./.github/actions/setup-terminus
       - run: just upstream-check
 
   # ---------- Buf breaking-change check ----------
   proto-breaking:
     name: Protobuf breaking-change check
     runs-on: ubuntu-latest
-    needs: setup
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-terminus
         with:
           fetch-depth: 0
-      - uses: jdx/mise-action@v2
-      - run: just bootstrap
-      # Compare against the local origin/main ref: the repository is private,
-      # so buf's remote-clone template cannot authenticate without extra
-      # credentials. fetch-depth: 0 guarantees the ref exists.
+      # Compare against the local origin/main ref. fetch-depth: 0 guarantees
+      # the ref exists without requiring a separate authenticated clone.
       - name: buf breaking (against main)
         run: buf breaking proto --against ".git#branch=origin/main,subdir=proto"

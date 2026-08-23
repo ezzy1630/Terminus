@@ -1355,3 +1355,11 @@ export function decideForCohort(
 export function schedulerForCohort(cohort: TaskCohort): Scheduler {
   return new Scheduler(COHORT_SCHEDULER_CONFIG[cohort]);
 }
+
+// ────────────────────────── Phase 8 Exports (§27) ──────────────────────────
+
+export * from "./ev_scheduler.js";
+export * from "./clean_reviewer.js";
+export * from "./stagnation_supervisor.js";
+export * from "./candidate_workspace.js";
+

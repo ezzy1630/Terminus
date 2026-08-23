@@ -1,0 +1,64 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/stagnation-report.json",
+  "title": "StagnationReport",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stagnationScore": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "detectedSignals": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "turnCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "budgetBurnRatio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "recommendedIntervention": {
+      "type": "string",
+      "enum": [
+        "none",
+        "warn",
+        "force_checkpoint",
+        "change_strategy",
+        "spawn_scout",
+        "spawn_critic",
+        "request_user_decision",
+        "pause_for_intervention",
+        "terminate"
+      ]
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "taskId",
+    "stagnationScore",
+    "detectedSignals",
+    "turnCount",
+    "budgetBurnRatio",
+    "recommendedIntervention",
+    "rationale",
+    "timestamp"
+  ]
+}

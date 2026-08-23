@@ -1,0 +1,75 @@
+name: Set up Terminus
+description: Check out Terminus, install its pinned toolchain, restore caches, and bootstrap dependencies.
+
+inputs:
+  fetch-depth:
+    description: Git checkout depth.
+    required: false
+    default: "1"
+
+runs:
+  using: composite
+  steps:
+    - name: Check out repository
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      with:
+        fetch-depth: ${{ inputs.fetch-depth }}
+
+    - name: Install pinned toolchain
+      uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+      with:
+        experimental: true
+
+    - name: Restore Rust cache
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      with:
+        shared-key: terminus-${{ runner.os }}-${{ runner.arch }}
+        add-job-id-key: "false"
+        workspaces: |
+          . -> target
+          mini-services/terminus-kernel -> target
+        save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+    - name: Restore Bun cache
+      id: bun-cache
+      uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf
+      with:
+        path: ~/.bun/install/cache
+        key: terminus-bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/bun.lock', '**/bun.lockb') }}
+        restore-keys: |
+          terminus-bun-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Restore uv cache
+      id: uv-cache
+      uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf
+      with:
+        path: |
+          ~/.cache/uv
+          ~/Library/Caches/uv
+          ~/AppData/Local/uv/cache
+        key: terminus-uv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/uv.lock') }}
+        restore-keys: |
+          terminus-uv-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Bootstrap dependencies
+      shell: bash
+      run: just bootstrap
+
+    - name: Save Bun cache
+      if: ${{ success() && steps.bun-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      continue-on-error: true
+      uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf
+      with:
+        path: ~/.bun/install/cache
+        key: terminus-bun-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/bun.lock', '**/bun.lockb') }}
+
+    - name: Save uv cache
+      if: ${{ success() && steps.uv-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      continue-on-error: true
+      uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf
+      with:
+        path: |
+          ~/.cache/uv
+          ~/Library/Caches/uv
+          ~/AppData/Local/uv/cache
+        key: terminus-uv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/uv.lock') }}

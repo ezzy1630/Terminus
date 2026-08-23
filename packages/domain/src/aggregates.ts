@@ -1934,3 +1934,267 @@ export const budgetConsumptionSchema = z.object({
   consumedApprovals: z.number().int().nonnegative(),
   lastUpdatedAt: z.string(),
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. Phase 8: Model Profiles, Stage-Aware Routing & Orchestration (SPEC §26, §27)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ModelProfile {
+  readonly id: string;
+  readonly providerId: "anthropic" | "openai" | "google" | "local" | "custom";
+  readonly modelKey: string;
+  readonly version: string;
+  readonly contextLayout: {
+    readonly systemPromptPlacement: "top_level" | "system_message" | "developer_message";
+    readonly maxContextTokens: number;
+    readonly testedSafeTokens: number;
+    readonly supportsImages: boolean;
+  };
+  readonly toolDialect: "anthropic_tools" | "openai_function_calling" | "gemini_function_declarations" | "standard_json_schema";
+  readonly editDialect: "hash_anchored_diff" | "search_replace_blocks" | "whole_file" | "ast_transform" | "unified_diff";
+  readonly reasoningEffortPolicy: "none" | "low" | "medium" | "high" | "budget_constrained";
+  readonly continuationStrategy: "native_token" | "server_history" | "client_replay";
+  readonly compactionStrategy: "structured_claims_with_evidence" | "rolling_summary" | "episodic_anchor";
+  readonly cachingStrategy: {
+    readonly mode: "none" | "automatic_prefix" | "explicit_breakpoints" | "explicit_resource";
+    readonly minTokens: number;
+    readonly exactPrefixRequired: boolean;
+  };
+  readonly structuredOutputRepair: {
+    readonly dialect: "strict_json_schema" | "prompt_guided_json" | "grammar_constrained";
+    readonly autoRepair: boolean;
+    readonly retryPromptTemplate: string;
+  };
+  readonly knownFailureMitigations: readonly string[];
+  readonly economics: {
+    readonly inputMicrosPerMillion: bigint;
+    readonly cachedInputMicrosPerMillion: bigint;
+    readonly outputMicrosPerMillion: bigint;
+    readonly reasoningAccounting: boolean;
+  };
+  readonly latencyModel: {
+    readonly p50Ms: number;
+    readonly p90Ms: number;
+    readonly p99Ms: number;
+    readonly ttftMs: number;
+  };
+  readonly confidentialityPolicy: readonly ("public" | "workspace" | "secret_adjacent" | "secret")[];
+  readonly capabilities: {
+    readonly codingQuality: "low" | "medium" | "high";
+    readonly toolReliability: "low" | "medium" | "high";
+    readonly structuredOutput: boolean;
+    readonly contextTokens: number;
+    readonly securityReasoning: "low" | "medium" | "high";
+  };
+}
+
+export const modelProfileSchema = z.object({
+  id: z.string().min(1),
+  providerId: z.enum(["anthropic", "openai", "google", "local", "custom"]),
+  modelKey: z.string().min(1),
+  version: z.string().min(1),
+  contextLayout: z.object({
+    systemPromptPlacement: z.enum(["top_level", "system_message", "developer_message"]),
+    maxContextTokens: z.number().int().positive(),
+    testedSafeTokens: z.number().int().positive(),
+    supportsImages: z.boolean(),
+  }),
+  toolDialect: z.enum(["anthropic_tools", "openai_function_calling", "gemini_function_declarations", "standard_json_schema"]),
+  editDialect: z.enum(["hash_anchored_diff", "search_replace_blocks", "whole_file", "ast_transform", "unified_diff"]),
+  reasoningEffortPolicy: z.enum(["none", "low", "medium", "high", "budget_constrained"]),
+  continuationStrategy: z.enum(["native_token", "server_history", "client_replay"]),
+  compactionStrategy: z.enum(["structured_claims_with_evidence", "rolling_summary", "episodic_anchor"]),
+  cachingStrategy: z.object({
+    mode: z.enum(["none", "automatic_prefix", "explicit_breakpoints", "explicit_resource"]),
+    minTokens: z.number().int().nonnegative(),
+    exactPrefixRequired: z.boolean(),
+  }),
+  structuredOutputRepair: z.object({
+    dialect: z.enum(["strict_json_schema", "prompt_guided_json", "grammar_constrained"]),
+    autoRepair: z.boolean(),
+    retryPromptTemplate: z.string(),
+  }),
+  knownFailureMitigations: z.array(z.string()),
+  economics: z.object({
+    inputMicrosPerMillion: z.bigint().nonnegative(),
+    cachedInputMicrosPerMillion: z.bigint().nonnegative(),
+    outputMicrosPerMillion: z.bigint().nonnegative(),
+    reasoningAccounting: z.boolean(),
+  }),
+  latencyModel: z.object({
+    p50Ms: z.number().nonnegative(),
+    p90Ms: z.number().nonnegative(),
+    p99Ms: z.number().nonnegative(),
+    ttftMs: z.number().nonnegative(),
+  }),
+  confidentialityPolicy: z.array(z.enum(["public", "workspace", "secret_adjacent", "secret"])),
+  capabilities: z.object({
+    codingQuality: z.enum(["low", "medium", "high"]),
+    toolReliability: z.enum(["low", "medium", "high"]),
+    structuredOutput: z.boolean(),
+    contextTokens: z.number().int().positive(),
+    securityReasoning: z.enum(["low", "medium", "high"]),
+  }),
+});
+
+export interface RouteDecisionV2 {
+  readonly stage: "classifier" | "implementer" | "reviewer" | "specialist" | "vision" | "local_safe";
+  readonly chosenProfileId: string | null;
+  readonly chosenModelKey: string | null;
+  readonly reason: string;
+  readonly candidateScores: Readonly<Record<string, number>>;
+  readonly fallbackProfileIds: readonly string[];
+  readonly expectedCostMicros: bigint;
+  readonly expectedLatencyMs: number;
+  readonly timestamp: Rfc3339Timestamp;
+}
+
+export const routeDecisionV2Schema = z.object({
+  stage: z.enum(["classifier", "implementer", "reviewer", "specialist", "vision", "local_safe"]),
+  chosenProfileId: z.string().nullable(),
+  chosenModelKey: z.string().nullable(),
+  reason: z.string().min(1),
+  candidateScores: z.record(z.string(), z.number()),
+  fallbackProfileIds: z.array(z.string()),
+  expectedCostMicros: z.bigint().nonnegative(),
+  expectedLatencyMs: z.number().nonnegative(),
+  timestamp: z.string(),
+});
+
+export interface ModelCohortPosterior {
+  readonly modelKey: string;
+  readonly toolCallAlpha: number;
+  readonly toolCallBeta: number;
+  readonly structuredOutputAlpha: number;
+  readonly structuredOutputBeta: number;
+  readonly editCohortAlpha: number;
+  readonly editCohortBeta: number;
+  readonly latencyLogMean: number;
+  readonly latencyLogVariance: number;
+  readonly observedCostMicros: bigint;
+  readonly observedCacheHitRate: number;
+  readonly sampleCount: number;
+  readonly lastUpdated: Rfc3339Timestamp;
+}
+
+export const modelCohortPosteriorSchema = z.object({
+  modelKey: z.string().min(1),
+  toolCallAlpha: z.number().positive(),
+  toolCallBeta: z.number().positive(),
+  structuredOutputAlpha: z.number().positive(),
+  structuredOutputBeta: z.number().positive(),
+  editCohortAlpha: z.number().positive(),
+  editCohortBeta: z.number().positive(),
+  latencyLogMean: z.number(),
+  latencyLogVariance: z.number().positive(),
+  observedCostMicros: z.bigint().nonnegative(),
+  observedCacheHitRate: z.number().min(0).max(1),
+  sampleCount: z.number().int().nonnegative(),
+  lastUpdated: z.string(),
+});
+
+export interface DelegationContractV2 {
+  readonly id: string;
+  readonly parentTaskId: string;
+  readonly role: "scout" | "implementer" | "reviewer" | "specialist";
+  readonly objective: string;
+  readonly authorityCeiling: {
+    readonly allowedOperations: readonly string[];
+    readonly allowedPaths: readonly string[];
+    readonly deniedEffects: readonly string[];
+  };
+  readonly inputHandles: readonly string[];
+  readonly expectedValue: number;
+  readonly outputSchemaVersion: string;
+  readonly evidenceRequirements: readonly string[];
+  readonly budgetMicros: bigint;
+  readonly deadline: string | null;
+  readonly writeIsolation: "worktree" | "read_only" | "ephemeral_branch";
+  readonly returnRoute: string;
+}
+
+export const delegationContractV2Schema = z.object({
+  id: z.string().min(1),
+  parentTaskId: z.string().min(1),
+  role: z.enum(["scout", "implementer", "reviewer", "specialist"]),
+  objective: z.string().min(1),
+  authorityCeiling: z.object({
+    allowedOperations: z.array(z.string()),
+    allowedPaths: z.array(z.string()),
+    deniedEffects: z.array(z.string()),
+  }),
+  inputHandles: z.array(z.string()),
+  expectedValue: z.number(),
+  outputSchemaVersion: z.string().min(1),
+  evidenceRequirements: z.array(z.string()),
+  budgetMicros: z.bigint().nonnegative(),
+  deadline: z.string().nullable(),
+  writeIsolation: z.enum(["worktree", "read_only", "ephemeral_branch"]),
+  returnRoute: z.string().min(1),
+});
+
+export interface StagnationReport {
+  readonly taskId: string;
+  readonly stagnationScore: number;
+  readonly detectedSignals: readonly string[];
+  readonly turnCount: number;
+  readonly budgetBurnRatio: number;
+  readonly recommendedIntervention:
+    | "none"
+    | "warn"
+    | "force_checkpoint"
+    | "change_strategy"
+    | "spawn_scout"
+    | "spawn_critic"
+    | "request_user_decision"
+    | "pause_for_intervention"
+    | "terminate";
+  readonly rationale: string;
+  readonly timestamp: Rfc3339Timestamp;
+}
+
+export const stagnationReportSchema = z.object({
+  taskId: z.string().min(1),
+  stagnationScore: z.number().min(0).max(1),
+  detectedSignals: z.array(z.string()),
+  turnCount: z.number().int().nonnegative(),
+  budgetBurnRatio: z.number().min(0).max(1),
+  recommendedIntervention: z.enum([
+    "none",
+    "warn",
+    "force_checkpoint",
+    "change_strategy",
+    "spawn_scout",
+    "spawn_critic",
+    "request_user_decision",
+    "pause_for_intervention",
+    "terminate",
+  ]),
+  rationale: z.string().min(1),
+  timestamp: z.string(),
+});
+
+export interface ProviderContinuation {
+  readonly id: string;
+  readonly taskId: string;
+  readonly modelKey: string;
+  readonly inputManifestHash: string;
+  readonly toolStateEpoch: number;
+  readonly continuationToken: string | null;
+  readonly retryCount: number;
+  readonly lastFailureKind: string | null;
+  readonly createdAt: Rfc3339Timestamp;
+}
+
+export const providerContinuationSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  modelKey: z.string().min(1),
+  inputManifestHash: z.string().min(1),
+  toolStateEpoch: z.number().int().nonnegative(),
+  continuationToken: z.string().nullable(),
+  retryCount: z.number().int().nonnegative(),
+  lastFailureKind: z.string().nullable(),
+  createdAt: z.string(),
+});
+

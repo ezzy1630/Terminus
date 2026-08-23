@@ -56,10 +56,10 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `context-ir` | ts-package | `packages/context-ir` | `experimental` | Fragment/source-descriptor types |
 | `extension-host` | ts-package | `packages/extension-host` | `experimental` | WASI/process hosts, hook semantics |
 | `memory` | ts-package | `packages/memory` | `experimental` | Extraction/consolidation/retrieval with unit tests; promotion gates unproven on cohorts |
-| `model-router` | ts-package | `packages/model-router` | `experimental` | Deterministic routing/rate limiting/circuit breaker |
+| `model-router` | ts-package | `packages/model-router` | `experimental` | Deep model profiles (Anthropic, OpenAI, Google, Local), empirical Bayesian posteriors, stage-aware deterministic router, rate limiting, circuit breaker, resumable continuation |
 | `observability` | ts-package | `packages/observability` | `experimental` | OTel spans/logging/metrics wrappers |
 | `open-code-bridge` | ts-package | `packages/open-code-bridge` | `experimental` | OpenCode compatibility facade governed by divergence budget |
-| `orchestration` | ts-package | `packages/orchestration` | `experimental` | Scheduler/delegation/worktrees/loop detection; expected-value gates unproven |
+| `orchestration` | ts-package | `packages/orchestration` | `experimental` | Expected-value subagent scheduler, isolated candidate workspaces, clean-context reviewers, stagnation supervisor with 11-signal intervention ladder |
 | `policy-coordinator` | ts-package | `packages/policy-coordinator` | `experimental` | Bridges task contracts and kernel capability requests |
 | `provider-anthropic` | ts-package | `packages/provider-anthropic` | `experimental` | Provider renderer; golden/live conformance not recorded at HEAD |
 | `provider-cache` | ts-package | `packages/provider-cache` | `experimental` | Provider cache accounting |

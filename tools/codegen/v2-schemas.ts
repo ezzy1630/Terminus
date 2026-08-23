@@ -45,6 +45,12 @@ import {
   sourceSpanSchema,
   witnessPathSchema,
   staticValidationReportSchema,
+  modelProfileSchema,
+  routeDecisionV2Schema,
+  modelCohortPosteriorSchema,
+  delegationContractV2Schema,
+  stagnationReportSchema,
+  providerContinuationSchema,
 } from "../../packages/domain/src/aggregates.ts";
 
 const ROOT = process.env.TERMINUS_ROOT ?? join(import.meta.dir, "..", "..");
@@ -85,6 +91,12 @@ const SCHEMAS: ReadonlyArray<readonly [string, string, z.ZodType]> = [
   ["outbox-message", "OutboxMessage", outboxMessageSchema],
   ["inbox-message", "InboxMessage", inboxMessageSchema],
   ["budget-consumption", "BudgetConsumption", budgetConsumptionSchema],
+  ["model-profile", "ModelProfile", modelProfileSchema],
+  ["route-decision-v2", "RouteDecisionV2", routeDecisionV2Schema],
+  ["model-cohort-posterior", "ModelCohortPosterior", modelCohortPosteriorSchema],
+  ["delegation-contract-v2", "DelegationContractV2", delegationContractV2Schema],
+  ["stagnation-report", "StagnationReport", stagnationReportSchema],
+  ["provider-continuation", "ProviderContinuation", providerContinuationSchema],
 ];
 
 function main(): void {
