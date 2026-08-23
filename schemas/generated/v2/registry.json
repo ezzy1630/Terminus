@@ -32,29 +32,50 @@
       "name": "workflow-node",
       "title": "WorkflowNode",
       "path": "schemas/generated/v2/workflow-node.json",
-      "sha256": "sha256:8ee228eef9b1c62580bf5ed6f4405ff6459501f6a3f4b4f4bec47874783b9f93",
-      "bytes": 1537
+      "sha256": "sha256:cd8784de76b5cbd9347387dba29510ce340eb511a19b0c2fd4cb6b26dea4bdf5",
+      "bytes": 6747
     },
     {
       "name": "guarded-edge",
       "title": "GuardedEdge",
       "path": "schemas/generated/v2/guarded-edge.json",
-      "sha256": "sha256:bf13db6d04969aa35815aab9e9b88f8d0dd972e8e26fb103523752205be35261",
-      "bytes": 563
+      "sha256": "sha256:df5e9eaf0b44e1143dc6eaf19e3d707aa1ea55b17d026833f522c36f5eebf331",
+      "bytes": 1879
     },
     {
       "name": "workflow",
       "title": "Workflow",
       "path": "schemas/generated/v2/workflow.json",
-      "sha256": "sha256:5ca68a0279d994777a6ed1c49f5fac3bf710c247d2a78cc5293d4c7a55771c8a",
-      "bytes": 3144
+      "sha256": "sha256:3713859d0ffde1705f06e05ea62b0c22e1b460caa2ebe02318db434053bff1b0",
+      "bytes": 18827
     },
     {
       "name": "node-run",
       "title": "NodeRun",
       "path": "schemas/generated/v2/node-run.json",
-      "sha256": "sha256:70963e4170307e13bbe1d8adde7779b100bc74c41c509bfa28c19c4bc4ccac1a",
-      "bytes": 1653
+      "sha256": "sha256:f277ff08ed26c476e416cc40c75167de42ac64177f658a8356b7cde51d87a43f",
+      "bytes": 1779
+    },
+    {
+      "name": "source-span",
+      "title": "SourceSpan",
+      "path": "schemas/generated/v2/source-span.json",
+      "sha256": "sha256:b6b2e642a6d35beedb2d4dd2e279a559ba063eec062e25f622717fb0e3749c10",
+      "bytes": 882
+    },
+    {
+      "name": "witness-path",
+      "title": "WitnessPath",
+      "path": "schemas/generated/v2/witness-path.json",
+      "sha256": "sha256:e1bd19498204a7b3b425286384526abd25a11ca8c3bedc4fcb17adb8ba91b7f6",
+      "bytes": 546
+    },
+    {
+      "name": "static-validation-report",
+      "title": "StaticValidationReport",
+      "path": "schemas/generated/v2/static-validation-report.json",
+      "sha256": "sha256:d903576bce5404ccc0bc5fae39fff06682c01c93029a9f01593b6f58b4d2d48b",
+      "bytes": 5860
     },
     {
       "name": "claim",

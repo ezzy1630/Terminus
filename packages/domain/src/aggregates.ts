@@ -1259,16 +1259,204 @@ export const taskV2Schema = z.object({
 
 // 5. Workflow IR Entities (SPEC §8)
 
+export interface SourceSpan {
+  readonly sourcePath: string;
+  readonly startLine: number;
+  readonly startColumn: number;
+  readonly endLine: number;
+  readonly endColumn: number;
+  readonly text: string;
+}
+
+export const sourceSpanSchema = z.object({
+  sourcePath: z.string().min(1),
+  startLine: z.number().int().positive(),
+  startColumn: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  endColumn: z.number().int().positive(),
+  text: z.string(),
+});
+
+export interface AmbiguityStatus {
+  readonly isAmbiguous: boolean;
+  readonly reason?: string | undefined;
+  readonly requiredJudgment: "model" | "human";
+}
+
+export const ambiguityStatusSchema = z.object({
+  isAmbiguous: z.boolean(),
+  reason: z.string().optional(),
+  requiredJudgment: z.enum(["model", "human"]),
+});
+
+export interface TrustRequirement {
+  readonly minTrustLevel: string;
+  readonly requiredSignatures?: readonly string[] | undefined;
+}
+
+export const trustRequirementSchema = z.object({
+  minTrustLevel: z.string().min(1),
+  requiredSignatures: z.array(z.string()).optional(),
+});
+
+export interface Predicate {
+  readonly expression: string;
+  readonly dialect: "json_logic" | "predicate_expr" | "deterministic";
+  readonly deterministic: boolean;
+}
+
+export const predicateSchema = z.object({
+  expression: z.string().min(1),
+  dialect: z.enum(["json_logic", "predicate_expr", "deterministic"]).default("predicate_expr"),
+  deterministic: z.boolean().default(true),
+});
+
+export interface EvidenceRequirement {
+  readonly claimId: string;
+  readonly schema: string;
+  readonly verifierKind: string;
+}
+
+export const evidenceRequirementSchema = z.object({
+  claimId: z.string().min(1),
+  schema: z.string().min(1),
+  verifierKind: z.string().min(1),
+});
+
+export interface RetryPolicy {
+  readonly maxRetries: number;
+  readonly backoffMs: number;
+  readonly nonRetryableErrors?: readonly string[] | undefined;
+}
+
+export const retryPolicySchema = z.object({
+  maxRetries: z.number().int().nonnegative().default(0),
+  backoffMs: z.number().int().nonnegative().default(1000),
+  nonRetryableErrors: z.array(z.string()).optional(),
+});
+
+export interface ResourceBudget {
+  readonly maxCostMicros?: string | undefined;
+  readonly maxTokens?: number | undefined;
+  readonly maxWallClockSeconds?: number | undefined;
+}
+
+export const resourceBudgetSchema = z.object({
+  maxCostMicros: z.string().optional(),
+  maxTokens: z.number().int().positive().optional(),
+  maxWallClockSeconds: z.number().int().positive().optional(),
+});
+
+export interface TaintPolicy {
+  readonly allowTaintedInputs: boolean;
+  readonly sanitizeWith?: string | undefined;
+  readonly sinkClassification?: string | undefined;
+}
+
+export const taintPolicySchema = z.object({
+  allowTaintedInputs: z.boolean().default(false),
+  sanitizeWith: z.string().optional(),
+  sinkClassification: z.string().optional(),
+});
+
+export interface WitnessPath {
+  readonly pathId: string;
+  readonly nodeIds: readonly string[];
+  readonly coversMandatorySteps: readonly string[];
+}
+
+export const witnessPathSchema = z.object({
+  pathId: z.string().min(1),
+  nodeIds: z.array(z.string()),
+  coversMandatorySteps: z.array(z.string()),
+});
+
+export interface StaticValidationError {
+  readonly code: string;
+  readonly message: string;
+  readonly nodeId?: string | undefined;
+  readonly edge?: { readonly sourceNodeId: string; readonly targetNodeId: string } | undefined;
+  readonly sourceSpan?: SourceSpan | undefined;
+}
+
+export const staticValidationErrorSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  nodeId: z.string().optional(),
+  edge: z.object({ sourceNodeId: z.string(), targetNodeId: z.string() }).optional(),
+  sourceSpan: sourceSpanSchema.optional(),
+});
+
+export interface StaticValidationWarning {
+  readonly code: string;
+  readonly message: string;
+  readonly nodeId?: string | undefined;
+  readonly sourceSpan?: SourceSpan | undefined;
+}
+
+export const staticValidationWarningSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  nodeId: z.string().optional(),
+  sourceSpan: sourceSpanSchema.optional(),
+});
+
+export interface StaticValidationReport {
+  readonly valid: boolean;
+  readonly errors: readonly StaticValidationError[];
+  readonly warnings: readonly StaticValidationWarning[];
+  readonly reachability: {
+    readonly allReachable: boolean;
+    readonly unreachableNodeIds: readonly string[];
+    readonly deadEndNodeIds: readonly string[];
+  };
+  readonly loopBounds: {
+    readonly hasCycles: boolean;
+    readonly bounded: boolean;
+    readonly unboundedCycleNodeIds: readonly string[];
+  };
+  readonly taintFlow: {
+    readonly safe: boolean;
+    readonly violations: readonly string[];
+  };
+  readonly witnessPaths: readonly WitnessPath[];
+}
+
+export const staticValidationReportSchema = z.object({
+  valid: z.boolean(),
+  errors: z.array(staticValidationErrorSchema),
+  warnings: z.array(staticValidationWarningSchema),
+  reachability: z.object({
+    allReachable: z.boolean(),
+    unreachableNodeIds: z.array(z.string()),
+    deadEndNodeIds: z.array(z.string()),
+  }),
+  loopBounds: z.object({
+    hasCycles: z.boolean(),
+    bounded: z.boolean(),
+    unboundedCycleNodeIds: z.array(z.string()),
+  }),
+  taintFlow: z.object({
+    safe: z.boolean(),
+    violations: z.array(z.string()),
+  }),
+  witnessPaths: z.array(witnessPathSchema),
+});
+
 export interface GuardedEdge {
   readonly sourceNodeId: string;
   readonly targetNodeId: string;
   readonly condition: string | null;
+  readonly conditionType?: "deterministic" | "model_predicate" | undefined;
+  readonly sourceSpan?: SourceSpan | null | undefined;
 }
 
 export const guardedEdgeSchema = z.object({
   sourceNodeId: z.string().min(1),
   targetNodeId: z.string().min(1),
   condition: z.string().nullable(),
+  conditionType: z.enum(["deterministic", "model_predicate"]).optional().default("deterministic"),
+  sourceSpan: sourceSpanSchema.nullable().optional(),
 });
 
 export interface WorkflowNode {
@@ -1285,9 +1473,18 @@ export interface WorkflowNode {
   readonly inputs: Readonly<Record<string, unknown>>;
   readonly outputs: Readonly<Record<string, unknown>>;
   readonly requiredCapabilities: readonly string[];
+  readonly trustInputs?: readonly TrustRequirement[] | undefined;
+  readonly preconditions?: readonly Predicate[] | undefined;
+  readonly postconditions?: readonly Predicate[] | undefined;
   readonly effectClass: string | null;
+  readonly evidenceRequirements?: readonly EvidenceRequirement[] | undefined;
+  readonly retryPolicy?: RetryPolicy | undefined;
   readonly timeoutSeconds: number;
+  readonly budget?: ResourceBudget | undefined;
   readonly compensationNodeId: string | null;
+  readonly sourceSpan?: SourceSpan | null | undefined;
+  readonly ambiguityStatus?: AmbiguityStatus | null | undefined;
+  readonly taintPolicy?: TaintPolicy | undefined;
 }
 
 export const workflowNodeSchema = z.object({
@@ -1305,17 +1502,44 @@ export const workflowNodeSchema = z.object({
   inputs: z.record(z.string(), z.unknown()).default({}),
   outputs: z.record(z.string(), z.unknown()).default({}),
   requiredCapabilities: z.array(z.string()).default([]),
+  trustInputs: z.array(trustRequirementSchema).optional(),
+  preconditions: z.array(predicateSchema).optional(),
+  postconditions: z.array(predicateSchema).optional(),
   effectClass: z.string().nullable().default(null),
+  evidenceRequirements: z.array(evidenceRequirementSchema).optional(),
+  retryPolicy: retryPolicySchema.optional(),
   timeoutSeconds: z.number().int().positive().default(60),
+  budget: resourceBudgetSchema.optional(),
   compensationNodeId: z.string().nullable().default(null),
+  sourceSpan: sourceSpanSchema.nullable().optional(),
+  ambiguityStatus: ambiguityStatusSchema.nullable().optional(),
+  taintPolicy: taintPolicySchema.optional(),
+});
+
+export interface WorkflowSourceProvenance {
+  readonly sourceKind: "skill_markdown" | "prose_spec" | "json_ir" | "yaml_workflow" | "model_generated";
+  readonly sourcePath?: string | undefined;
+  readonly sourceHash?: string | undefined;
+  readonly compilerVersion: string;
+}
+
+export const workflowSourceProvenanceSchema = z.object({
+  sourceKind: z.enum(["skill_markdown", "prose_spec", "json_ir", "yaml_workflow", "model_generated"]),
+  sourcePath: z.string().optional(),
+  sourceHash: z.string().optional(),
+  compilerVersion: z.string().min(1),
 });
 
 export interface Workflow {
   readonly id: string;
   readonly version: number;
   readonly taskId: string;
+  readonly name?: string | undefined;
+  readonly description?: string | undefined;
   readonly nodes: readonly WorkflowNode[];
   readonly edges: readonly GuardedEdge[];
+  readonly sourceProvenance?: WorkflowSourceProvenance | undefined;
+  readonly staticAnalysis?: StaticValidationReport | undefined;
   readonly createdAt: Rfc3339Timestamp;
 }
 
@@ -1323,8 +1547,12 @@ export const workflowSchema = z.object({
   id: z.string().min(1),
   version: z.number().int().positive(),
   taskId: z.string().min(1),
+  name: z.string().optional(),
+  description: z.string().optional(),
   nodes: z.array(workflowNodeSchema),
   edges: z.array(guardedEdgeSchema),
+  sourceProvenance: workflowSourceProvenanceSchema.optional(),
+  staticAnalysis: staticValidationReportSchema.optional(),
   createdAt: z.string(),
 });
 
@@ -1337,6 +1565,7 @@ export interface NodeRun {
   readonly inputs: Readonly<Record<string, unknown>>;
   readonly outputs: Readonly<Record<string, unknown>> | null;
   readonly error: string | null;
+  readonly retryCount?: number | undefined;
   readonly startedAt: Rfc3339Timestamp | null;
   readonly settledAt: Rfc3339Timestamp | null;
 }
@@ -1350,6 +1579,7 @@ export const nodeRunSchema = z.object({
   inputs: z.record(z.string(), z.unknown()).default({}),
   outputs: z.record(z.string(), z.unknown()).nullable().default(null),
   error: z.string().nullable().default(null),
+  retryCount: z.number().int().nonnegative().optional().default(0),
   startedAt: z.string().nullable().default(null),
   settledAt: z.string().nullable().default(null),
 });

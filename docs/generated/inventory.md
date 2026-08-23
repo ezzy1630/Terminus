@@ -11,7 +11,7 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 |---|---:|---|
 | SPEC.md lines | 9550 | wc of SPEC.md |
 | Rust crates | 23 | directories in crates/ |
-| TypeScript packages | 32 | directories in packages/ |
+| TypeScript packages | 33 | directories in packages/ |
 | Client apps | 4 | directories in apps/ |
 | External harness adapters | 7 | directories in adapters/ |
 | Mini-services | 2 | directories in mini-services/ |
@@ -19,7 +19,7 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 | TypeScript test files | 53 | `*.test.{ts,tsx}` in packages/ + apps/ |
 | Declared TypeScript test blocks | 532 | `test(/it(` occurrences in those files |
 | Declared Python tests | 221 | `def test_*` in python/** |
-| ADRs | 35 | docs/decisions/ADR-*.md |
+| ADRs | 36 | docs/decisions/ADR-*.md |
 | Runbooks | 15 | docs/runbooks/*.md |
 | SQLite migrations | 3 | migrations/sqlite/*.sql |
 

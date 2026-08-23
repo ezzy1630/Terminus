@@ -64,6 +64,12 @@
         }
       ]
     },
+    "retryCount": {
+      "default": 0,
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
     "startedAt": {
       "default": null,
       "anyOf": [

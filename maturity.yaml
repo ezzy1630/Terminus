@@ -139,6 +139,8 @@ components:
       basis: "Fake provider/fake kernel/builders for tests only" }
   - { id: verification, kind: ts-package, path: packages/verification, tier: experimental,
       basis: "Verification DAG engine with predicate tests; completion-gate conformance unproven at HEAD" }
+  - { id: workflow-compiler, kind: ts-package, path: packages/workflow-compiler, tier: experimental,
+      basis: "Workflow IR, owner-test classifier, static validation suite, and deterministic controller (Phase 7)" }
 
   # ---------------- Clients / services ----------------
   - { id: app-cli, kind: app, path: apps/cli, tier: experimental,

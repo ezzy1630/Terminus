@@ -33,6 +33,9 @@ const API_GROUPS: Array<{ name: string; path: string; methods: string[]; descrip
   { name: "Resolve approval", path: "/v1/approvals/{id}/resolve", methods: ["POST"], description: "Allow or deny a pending privileged action (SPEC §32.4)." },
   { name: "Stop job", path: "/v1/jobs/{id}/stop", methods: ["POST"], description: "Terminate a durable process tree." },
   { name: "Verification plan", path: "/v1/verification/plans/{id}", methods: ["GET"], description: "DAG of evidence-producing predicates (SPEC §17, §40)." },
+  { name: "Compile workflow", path: "/v2/workflows/compile", methods: ["POST"], description: "Compile natural language skills and procedures into typed Workflow IR with source provenance (SPEC §8, §12)." },
+  { name: "Validate workflow", path: "/v2/workflows/validate", methods: ["POST"], description: "Static verification for reachability, loop bounds, taint flow, temporal safety, and witness paths." },
+  { name: "Workflow DAG & Witness Paths", path: "/v2/workflows/{id}/dag", methods: ["GET"], description: "Inspect compiled graph structure and formal mandatory-step witness paths." },
   { name: "Eval suites", path: "/v1/evals", methods: ["GET"], description: "Benchmark cohorts and baselines (SPEC §18, §41)." },
   { name: "Configuration", path: "/v1/configuration", methods: ["GET"], description: "Effective layered configuration (SPEC §43.5, Appendix F)." },
 ];

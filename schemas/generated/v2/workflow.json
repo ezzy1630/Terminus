@@ -17,6 +17,12 @@
       "type": "string",
       "minLength": 1
     },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
     "nodes": {
       "type": "array",
       "items": {
@@ -65,6 +71,83 @@
               "type": "string"
             }
           },
+          "trustInputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "minTrustLevel": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "requiredSignatures": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "minTrustLevel"
+              ]
+            }
+          },
+          "preconditions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "expression": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dialect": {
+                  "default": "predicate_expr",
+                  "type": "string",
+                  "enum": [
+                    "json_logic",
+                    "predicate_expr",
+                    "deterministic"
+                  ]
+                },
+                "deterministic": {
+                  "default": true,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "expression"
+              ]
+            }
+          },
+          "postconditions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "expression": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dialect": {
+                  "default": "predicate_expr",
+                  "type": "string",
+                  "enum": [
+                    "json_logic",
+                    "predicate_expr",
+                    "deterministic"
+                  ]
+                },
+                "deterministic": {
+                  "default": true,
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "expression"
+              ]
+            }
+          },
           "effectClass": {
             "default": null,
             "anyOf": [
@@ -76,11 +159,77 @@
               }
             ]
           },
+          "evidenceRequirements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "claimId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "schema": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "verifierKind": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "claimId",
+                "schema",
+                "verifierKind"
+              ]
+            }
+          },
+          "retryPolicy": {
+            "type": "object",
+            "properties": {
+              "maxRetries": {
+                "default": 0,
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "backoffMs": {
+                "default": 1000,
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "nonRetryableErrors": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "timeoutSeconds": {
             "default": 60,
             "type": "integer",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991
+          },
+          "budget": {
+            "type": "object",
+            "properties": {
+              "maxCostMicros": {
+                "type": "string"
+              },
+              "maxTokens": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "maxWallClockSeconds": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            }
           },
           "compensationNodeId": {
             "default": null,
@@ -92,6 +241,97 @@
                 "type": "null"
               }
             ]
+          },
+          "sourceSpan": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "sourcePath": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "startLine": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "startColumn": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "endLine": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "endColumn": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sourcePath",
+                  "startLine",
+                  "startColumn",
+                  "endLine",
+                  "endColumn",
+                  "text"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ambiguityStatus": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "isAmbiguous": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "requiredJudgment": {
+                    "type": "string",
+                    "enum": [
+                      "model",
+                      "human"
+                    ]
+                  }
+                },
+                "required": [
+                  "isAmbiguous",
+                  "requiredJudgment"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "taintPolicy": {
+            "type": "object",
+            "properties": {
+              "allowTaintedInputs": {
+                "default": false,
+                "type": "boolean"
+              },
+              "sanitizeWith": {
+                "type": "string"
+              },
+              "sinkClassification": {
+                "type": "string"
+              }
+            }
           }
         },
         "required": [
@@ -123,6 +363,61 @@
                 "type": "null"
               }
             ]
+          },
+          "conditionType": {
+            "default": "deterministic",
+            "type": "string",
+            "enum": [
+              "deterministic",
+              "model_predicate"
+            ]
+          },
+          "sourceSpan": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "sourcePath": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "startLine": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "startColumn": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "endLine": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "endColumn": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sourcePath",
+                  "startLine",
+                  "startColumn",
+                  "endLine",
+                  "endColumn",
+                  "text"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -131,6 +426,287 @@
           "condition"
         ]
       }
+    },
+    "sourceProvenance": {
+      "type": "object",
+      "properties": {
+        "sourceKind": {
+          "type": "string",
+          "enum": [
+            "skill_markdown",
+            "prose_spec",
+            "json_ir",
+            "yaml_workflow",
+            "model_generated"
+          ]
+        },
+        "sourcePath": {
+          "type": "string"
+        },
+        "sourceHash": {
+          "type": "string"
+        },
+        "compilerVersion": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "sourceKind",
+        "compilerVersion"
+      ]
+    },
+    "staticAnalysis": {
+      "type": "object",
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "nodeId": {
+                "type": "string"
+              },
+              "edge": {
+                "type": "object",
+                "properties": {
+                  "sourceNodeId": {
+                    "type": "string"
+                  },
+                  "targetNodeId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sourceNodeId",
+                  "targetNodeId"
+                ]
+              },
+              "sourceSpan": {
+                "type": "object",
+                "properties": {
+                  "sourcePath": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "startLine": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "startColumn": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "endLine": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "endColumn": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sourcePath",
+                  "startLine",
+                  "startColumn",
+                  "endLine",
+                  "endColumn",
+                  "text"
+                ]
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "nodeId": {
+                "type": "string"
+              },
+              "sourceSpan": {
+                "type": "object",
+                "properties": {
+                  "sourcePath": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "startLine": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "startColumn": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "endLine": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "endColumn": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sourcePath",
+                  "startLine",
+                  "startColumn",
+                  "endLine",
+                  "endColumn",
+                  "text"
+                ]
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "reachability": {
+          "type": "object",
+          "properties": {
+            "allReachable": {
+              "type": "boolean"
+            },
+            "unreachableNodeIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "deadEndNodeIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "allReachable",
+            "unreachableNodeIds",
+            "deadEndNodeIds"
+          ]
+        },
+        "loopBounds": {
+          "type": "object",
+          "properties": {
+            "hasCycles": {
+              "type": "boolean"
+            },
+            "bounded": {
+              "type": "boolean"
+            },
+            "unboundedCycleNodeIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "hasCycles",
+            "bounded",
+            "unboundedCycleNodeIds"
+          ]
+        },
+        "taintFlow": {
+          "type": "object",
+          "properties": {
+            "safe": {
+              "type": "boolean"
+            },
+            "violations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "safe",
+            "violations"
+          ]
+        },
+        "witnessPaths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pathId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "nodeIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "coversMandatorySteps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "pathId",
+              "nodeIds",
+              "coversMandatorySteps"
+            ]
+          }
+        }
+      },
+      "required": [
+        "valid",
+        "errors",
+        "warnings",
+        "reachability",
+        "loopBounds",
+        "taintFlow",
+        "witnessPaths"
+      ]
     },
     "createdAt": {
       "type": "string"

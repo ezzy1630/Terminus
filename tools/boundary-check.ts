@@ -42,8 +42,10 @@ const APPS_DIR = join(ROOT, "apps");
 // (SPEC §28.1) — the same architectural justification — and
 // `@terminus/capability-registry`, which hashes capability descriptors,
 // skill payloads, and MCP server configs into `sha256:<hex>` lockfile pins
-// used for rug-pull detection (SPEC §35.5, ADR-0017, ADR-0018).
-const CRYPTO_ALLOW = new Set(["artifact-client", "context-ir", "capability-registry"]);
+// used for rug-pull detection (SPEC §35.5, ADR-0017, ADR-0018), and
+// `@terminus/workflow-compiler`, which computes content hashes of compiled
+// workflow IR and source documents (SPEC §8.2, ADR-0036).
+const CRYPTO_ALLOW = new Set(["artifact-client", "context-ir", "capability-registry", "workflow-compiler"]);
 
 interface Violation {
   rule: string;

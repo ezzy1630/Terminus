@@ -413,6 +413,52 @@ export class ForgeClient {
       signal,
     });
   }
+
+  // ────────────────────────── /workflows (Phase 7) ───────────────────────
+
+  async compileWorkflow(
+    input: {
+      source: string;
+      sourceKind?: "skill_markdown" | "json_ir" | "prose_spec";
+      sourcePath?: string;
+      taskId?: string;
+      authorityCeiling?: string[];
+      mandatorySteps?: string[];
+      strictMode?: boolean;
+    },
+    idempotencyKey?: string,
+    signal?: AbortSignal | null,
+  ): Promise<{ workflow: unknown; report: Record<string, unknown> }> {
+    return this.request("POST", "/v2/workflows/compile", { body: input, idempotencyKey, signal });
+  }
+
+  async validateWorkflow(
+    input: {
+      nodes: unknown[];
+      edges: unknown[];
+      authorityCeiling?: string[];
+      mandatorySteps?: string[];
+      strictMode?: boolean;
+    },
+    idempotencyKey?: string,
+    signal?: AbortSignal | null,
+  ): Promise<Record<string, unknown>> {
+    return this.request("POST", "/v2/workflows/validate", { body: input, idempotencyKey, signal });
+  }
+
+  async getWorkflowDag(
+    id: string,
+    signal?: AbortSignal | null,
+  ): Promise<{ workflowId: string; nodes: Array<{ id: string; kind: string; owner: string; effectClass: string | null }>; edges: Array<{ sourceNodeId: string; targetNodeId: string; condition: string | null }> }> {
+    return this.request("GET", `/v2/workflows/${encodeURIComponent(id)}/dag`, { signal });
+  }
+
+  async getWorkflowWitnessPaths(
+    id: string,
+    signal?: AbortSignal | null,
+  ): Promise<{ workflowId: string; witnessPaths: Array<{ pathId: string; nodeIds: string[]; coversMandatorySteps: string[] }> }> {
+    return this.request("GET", `/v2/workflows/${encodeURIComponent(id)}/witness-paths`, { signal });
+  }
 }
 
 export class ForgeApiError extends Error {

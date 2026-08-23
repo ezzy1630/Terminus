@@ -9,7 +9,7 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 |---|---:|
 | `production` | 0 |
 | `preview` | 11 |
-| `experimental` | 45 |
+| `experimental` | 46 |
 | `stub` | 9 |
 | `fixture` | 5 |
 
@@ -74,6 +74,7 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `task-runtime` | ts-package | `packages/task-runtime` | `experimental` | Task lifecycle/contract versioning/scope ledger |
 | `terminus-kernel-client` | ts-package | `packages/terminus-kernel-client` | `experimental` | Typed kernel RPC client |
 | `verification` | ts-package | `packages/verification` | `experimental` | Verification DAG engine with predicate tests; completion-gate conformance unproven at HEAD |
+| `workflow-compiler` | ts-package | `packages/workflow-compiler` | `experimental` | Workflow IR, owner-test classifier, static validation suite, and deterministic controller (Phase 7) |
 | `terminus-artifacts` | rust-crate | `crates/terminus-artifacts` | `preview` | CAS sha256 layout, atomic rename+fsync, SQLite metadata bridge tests |
 | `terminus-fs` | rust-crate | `crates/terminus-fs` | `preview` | Safe path resolution; traversal/symlink rejection tests |
 | `terminus-kernel-protocol` | rust-crate | `crates/terminus-kernel-protocol` | `preview` | Codegen'd protocol types + error codes with unit tests |

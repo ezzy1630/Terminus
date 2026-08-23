@@ -23,6 +23,7 @@ import {
 } from "@terminus/domain";
 import type { DurableTaskRepository } from "./types.js";
 import { TransactionalOutbox } from "./outbox.js";
+import { validateWorkflow } from "@terminus/workflow-compiler";
 
 export class WorkflowError extends Error {
   constructor(message: string, public readonly details?: Record<string, unknown>) {
@@ -41,48 +42,12 @@ export class WorkflowEngine {
   ) {}
 
   private validateDag(nodes: readonly WorkflowNode[], edges: readonly GuardedEdge[]): void {
-    const nodeIds = new Set(nodes.map((n) => n.id));
-    if (nodeIds.size !== nodes.length) {
-      throw new WorkflowError("Duplicate node IDs found in workflow definition");
-    }
-
-    const adj = new Map<string, string[]>();
-    const inDegree = new Map<string, number>();
-    for (const n of nodes) {
-      adj.set(n.id, []);
-      inDegree.set(n.id, 0);
-    }
-
-    for (const e of edges) {
-      if (!nodeIds.has(e.sourceNodeId)) {
-        throw new WorkflowError(`Edge source node ${e.sourceNodeId} not found in workflow`);
-      }
-      if (!nodeIds.has(e.targetNodeId)) {
-        throw new WorkflowError(`Edge target node ${e.targetNodeId} not found in workflow`);
-      }
-      adj.get(e.sourceNodeId)!.push(e.targetNodeId);
-      inDegree.set(e.targetNodeId, (inDegree.get(e.targetNodeId) ?? 0) + 1);
-    }
-
-    // Kahn's algorithm for cycle detection
-    const queue: string[] = [];
-    for (const [id, deg] of inDegree.entries()) {
-      if (deg === 0) queue.push(id);
-    }
-
-    let visited = 0;
-    while (queue.length > 0) {
-      const u = queue.shift()!;
-      visited++;
-      for (const v of adj.get(u) ?? []) {
-        const d = (inDegree.get(v) ?? 0) - 1;
-        inDegree.set(v, d);
-        if (d === 0) queue.push(v);
-      }
-    }
-
-    if (visited !== nodes.length) {
-      throw new WorkflowError("Workflow graph contains cycles; must be a directed acyclic graph (DAG)");
+    const report = validateWorkflow({ nodes, edges });
+    if (!report.valid) {
+      const hasCycles = report.errors.some((e: { code: string }) => e.code === "UNBOUNDED_LOOP");
+      const errorMsg = report.errors.map((e: { code: string; message: string }) => `[${e.code}] ${e.message}`).join("; ");
+      const prefix = hasCycles ? "Workflow graph contains cycles; " : "Workflow graph failed static validation: ";
+      throw new WorkflowError(`${prefix}${errorMsg}`, { report });
     }
   }
 
@@ -91,7 +56,13 @@ export class WorkflowEngine {
     nodes: readonly WorkflowNode[],
     edges: readonly GuardedEdge[],
   ): Promise<Workflow> {
-    this.validateDag(nodes, edges);
+    const report = validateWorkflow({ nodes, edges });
+    if (!report.valid) {
+      const hasCycles = report.errors.some((e: { code: string }) => e.code === "UNBOUNDED_LOOP");
+      const errorMsg = report.errors.map((e: { code: string; message: string }) => `[${e.code}] ${e.message}`).join("; ");
+      const prefix = hasCycles ? "Workflow graph contains cycles; " : "Workflow graph failed static validation: ";
+      throw new WorkflowError(`${prefix}${errorMsg}`, { report });
+    }
 
     const now = this.clock();
     const workflow: Workflow = {
@@ -100,6 +71,7 @@ export class WorkflowEngine {
       taskId,
       nodes,
       edges,
+      staticAnalysis: report,
       createdAt: now,
     };
 

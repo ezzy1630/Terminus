@@ -150,6 +150,71 @@ export const CreateWorkflowV2 = {
   response: WorkflowSnapshot,
 };
 
+export const CompileWorkflowV2 = {
+  method: "POST" as const,
+  path: "/v2/workflows/compile",
+  request: z.object({
+    source: z.string(),
+    sourceKind: z.enum(["skill_markdown", "json_ir", "prose_spec"]).default("skill_markdown"),
+    sourcePath: z.string().optional(),
+    taskId: z.string().optional(),
+    authorityCeiling: z.array(z.string()).optional(),
+    mandatorySteps: z.array(z.string()).optional(),
+    strictMode: z.boolean().default(false),
+  }),
+  response: z.object({
+    workflow: WorkflowSnapshot,
+    report: z.record(z.string(), z.unknown()),
+  }),
+};
+
+export const ValidateWorkflowV2 = {
+  method: "POST" as const,
+  path: "/v2/workflows/validate",
+  request: z.object({
+    nodes: z.array(z.any()),
+    edges: z.array(z.any()),
+    authorityCeiling: z.array(z.string()).optional(),
+    mandatorySteps: z.array(z.string()).optional(),
+    strictMode: z.boolean().default(false),
+  }),
+  response: z.record(z.string(), z.unknown()),
+};
+
+export const GetWorkflowDagV2 = {
+  method: "GET" as const,
+  path: "/v2/workflows/{id}/dag",
+  request: z.object({ id: z.string() }),
+  response: z.object({
+    workflowId: z.string(),
+    nodes: z.array(z.object({
+      id: z.string(),
+      kind: z.string(),
+      owner: z.string(),
+      effectClass: z.string().nullable(),
+    })),
+    edges: z.array(z.object({
+      sourceNodeId: z.string(),
+      targetNodeId: z.string(),
+      condition: z.string().nullable(),
+    })),
+  }),
+};
+
+export const GetWorkflowWitnessPathsV2 = {
+  method: "GET" as const,
+  path: "/v2/workflows/{id}/witness-paths",
+  request: z.object({ id: z.string() }),
+  response: z.object({
+    workflowId: z.string(),
+    witnessPaths: z.array(z.object({
+      pathId: z.string(),
+      nodeIds: z.array(z.string()),
+      coversMandatorySteps: z.array(z.string()),
+    })),
+  }),
+};
+
 export const ExecuteWorkflowNodeV2 = {
   method: "POST" as const,
   path: "/v2/workflows/{id}/nodes/{nodeId}/execute",
@@ -406,6 +471,10 @@ export const V2_ENDPOINTS = {
   TransitionTaskV2,
   UpdateTaskContractV2,
   CreateWorkflowV2,
+  CompileWorkflowV2,
+  ValidateWorkflowV2,
+  GetWorkflowDagV2,
+  GetWorkflowWitnessPathsV2,
   ExecuteWorkflowNodeV2,
   TransitionWorkflowV2,
   SubmitClaimV2,

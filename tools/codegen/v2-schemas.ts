@@ -42,6 +42,9 @@ import {
   resourceHandleSchema,
   approvalPresentationSchema,
   sequencePolicyRuleSchema,
+  sourceSpanSchema,
+  witnessPathSchema,
+  staticValidationReportSchema,
 } from "../../packages/domain/src/aggregates.ts";
 
 const ROOT = process.env.TERMINUS_ROOT ?? join(import.meta.dir, "..", "..");
@@ -64,6 +67,9 @@ const SCHEMAS: ReadonlyArray<readonly [string, string, z.ZodType]> = [
   ["guarded-edge", "GuardedEdge", guardedEdgeSchema],
   ["workflow", "Workflow", workflowSchema],
   ["node-run", "NodeRun", nodeRunSchema],
+  ["source-span", "SourceSpan", sourceSpanSchema],
+  ["witness-path", "WitnessPath", witnessPathSchema],
+  ["static-validation-report", "StaticValidationReport", staticValidationReportSchema],
   ["claim", "Claim", claimSchema],
   ["evidence", "Evidence", evidenceSchema],
   ["resource-handle", "ResourceHandle", resourceHandleSchema],

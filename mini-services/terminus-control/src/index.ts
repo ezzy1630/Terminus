@@ -129,6 +129,12 @@ import type {
   ProviderResponseChunk,
   ConfidentialityPolicy,
 } from "@terminus/provider-core";
+import {
+  compileSkill,
+  compileWorkflowJson,
+  compileWorkflowDraft,
+  validateWorkflow,
+} from "@terminus/workflow-compiler";
 
 
 // ────────────────────────── Configuration ──────────────────────────────────
@@ -2920,14 +2926,9 @@ const routes: Route[] = [
     if (!arpV2.tasks.has(parsed.data.taskId)) {
       return sendError(res, 404, "TASK_NOT_FOUND", `v2 task ${parsed.data.taskId} not found`, "not_found");
     }
-    const nodeIds = new Set(parsed.data.nodes.map((n) => n.id));
-    if (nodeIds.size !== parsed.data.nodes.length) {
-      return sendError(res, 400, "DUPLICATE_NODES", "workflow contains duplicate node IDs", "validation");
-    }
-    for (const e of parsed.data.edges) {
-      if (!nodeIds.has(e.sourceNodeId) || !nodeIds.has(e.targetNodeId)) {
-        return sendError(res, 400, "INVALID_EDGE", `edge connects unknown node (${e.sourceNodeId} -> ${e.targetNodeId})`, "validation");
-      }
+    const report = validateWorkflow({ nodes: parsed.data.nodes, edges: parsed.data.edges });
+    if (!report.valid) {
+      return sendError(res, 400, "WORKFLOW_VALIDATION_FAILED", `workflow failed static validation: ${report.errors.map((e) => e.message).join("; ")}`, "validation", { report });
     }
     const nowIso = nowTimestamp();
     const workflow: Workflow = {
@@ -2936,16 +2937,89 @@ const routes: Route[] = [
       taskId: parsed.data.taskId,
       nodes: parsed.data.nodes,
       edges: parsed.data.edges,
+      staticAnalysis: report,
       createdAt: nowIso,
     };
     arpV2.workflows.set(workflow.id, workflow);
     await emitV2({ eventType: "workflow.created", aggregateType: "workflow", aggregateId: workflow.id, snapshot: workflow, correlationId: workflow.taskId });
     sendJson(res, 201, jsonSafe(workflow));
   }),
+  route("POST", "/v2/workflows/compile", async (req, res) => {
+    const parsed = z.object({
+      source: z.string().min(1),
+      sourceKind: z.enum(["skill_markdown", "json_ir", "prose_spec"]).default("skill_markdown"),
+      sourcePath: z.string().optional(),
+      taskId: z.string().optional(),
+      authorityCeiling: z.array(z.string()).optional(),
+      mandatorySteps: z.array(z.string()).optional(),
+      strictMode: z.boolean().default(false),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_COMPILE_REQUEST", "invalid compile parameters", "validation");
+    }
+    try {
+      let result;
+      if (parsed.data.sourceKind === "skill_markdown") {
+        result = compileSkill(parsed.data.source, {
+          sourcePath: parsed.data.sourcePath,
+          taskId: parsed.data.taskId,
+          authorityCeiling: parsed.data.authorityCeiling,
+          mandatorySteps: parsed.data.mandatorySteps,
+          strictMode: parsed.data.strictMode,
+        });
+      } else {
+        result = compileWorkflowJson(parsed.data.source, {
+          sourcePath: parsed.data.sourcePath,
+          taskId: parsed.data.taskId,
+          authorityCeiling: parsed.data.authorityCeiling,
+          mandatorySteps: parsed.data.mandatorySteps,
+          strictMode: parsed.data.strictMode,
+        });
+      }
+      arpV2.workflows.set(result.workflow.id, result.workflow);
+      await emitV2({ eventType: "workflow.compiled", aggregateType: "workflow", aggregateId: result.workflow.id, snapshot: result.workflow, correlationId: result.workflow.taskId });
+      sendJson(res, 200, jsonSafe({ workflow: result.workflow, report: result.report }));
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      return sendError(res, 400, "COMPILATION_FAILED", errorMsg, "validation");
+    }
+  }),
+  route("POST", "/v2/workflows/validate", async (req, res) => {
+    const parsed = z.object({
+      nodes: z.array(z.any()).min(1),
+      edges: z.array(z.any()).default([]),
+      authorityCeiling: z.array(z.string()).optional(),
+      mandatorySteps: z.array(z.string()).optional(),
+      strictMode: z.boolean().default(false),
+    }).safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "INVALID_VALIDATE_REQUEST", "invalid validation payload", "validation");
+    }
+    const report = validateWorkflow({
+      nodes: parsed.data.nodes,
+      edges: parsed.data.edges,
+      authorityCeiling: parsed.data.authorityCeiling,
+      mandatorySteps: parsed.data.mandatorySteps,
+    }, { strictMode: parsed.data.strictMode });
+    sendJson(res, 200, jsonSafe(report));
+  }),
   route("GET", "/v2/workflows/:id", async (_req, res, params) => {
     const wf = arpV2.workflows.get(String(params.id));
     if (!wf) return sendError(res, 404, "WORKFLOW_NOT_FOUND", "workflow not found", "not_found");
     sendJson(res, 200, jsonSafe(wf));
+  }),
+  route("GET", "/v2/workflows/:id/dag", async (_req, res, params) => {
+    const wf = arpV2.workflows.get(String(params.id));
+    if (!wf) return sendError(res, 404, "WORKFLOW_NOT_FOUND", "workflow not found", "not_found");
+    const nodes = wf.nodes.map((n) => ({ id: n.id, kind: n.kind, owner: n.owner, effectClass: n.effectClass }));
+    const edges = wf.edges.map((e) => ({ sourceNodeId: e.sourceNodeId, targetNodeId: e.targetNodeId, condition: e.condition }));
+    sendJson(res, 200, jsonSafe({ workflowId: wf.id, nodes, edges }));
+  }),
+  route("GET", "/v2/workflows/:id/witness-paths", async (_req, res, params) => {
+    const wf = arpV2.workflows.get(String(params.id));
+    if (!wf) return sendError(res, 404, "WORKFLOW_NOT_FOUND", "workflow not found", "not_found");
+    const witnessPaths = wf.staticAnalysis?.witnessPaths ?? [];
+    sendJson(res, 200, jsonSafe({ workflowId: wf.id, witnessPaths }));
   }),
   route("POST", "/v2/workflows/:id/nodes/:nodeId/execute", async (req, res, params) => {
     const wf = arpV2.workflows.get(String(params.id));

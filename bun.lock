@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "nextjs_tailwind_shadcn_ts",
@@ -92,6 +93,7 @@
       "name": "@terminus/aci",
       "version": "0.1.0",
       "dependencies": {
+        "@terminus/context-ir": "workspace:*",
         "@terminus/domain": "workspace:*",
         "@terminus/provider-core": "workspace:*",
         "zod": "^4.0.2",
@@ -346,6 +348,7 @@
         "@terminus/domain": "workspace:*",
         "@terminus/observability": "workspace:*",
         "@terminus/runtime-protocol": "workspace:*",
+        "@terminus/workflow-compiler": "workspace:*",
         "zod": "^4.0.2",
       },
     },
@@ -366,6 +369,16 @@
         "@terminus/adapter-sdk": "workspace:*",
         "@terminus/context-ir": "workspace:*",
         "@terminus/domain": "workspace:*",
+        "@terminus/runtime-protocol": "workspace:*",
+        "zod": "^4.0.2",
+      },
+    },
+    "packages/workflow-compiler": {
+      "name": "@terminus/workflow-compiler",
+      "version": "0.1.0",
+      "dependencies": {
+        "@terminus/domain": "workspace:*",
+        "@terminus/observability": "workspace:*",
         "@terminus/runtime-protocol": "workspace:*",
         "zod": "^4.0.2",
       },
@@ -1012,6 +1025,8 @@
     "@terminus/testkit": ["@terminus/testkit@workspace:packages/testkit"],
 
     "@terminus/verification": ["@terminus/verification@workspace:packages/verification"],
+
+    "@terminus/workflow-compiler": ["@terminus/workflow-compiler@workspace:packages/workflow-compiler"],
 
     "@testing-library/dom": ["@testing-library/dom@10.4.1", "", { "dependencies": { "@babel/code-frame": "^7.10.4", "@babel/runtime": "^7.12.5", "@types/aria-query": "^5.0.1", "aria-query": "5.3.0", "dom-accessibility-api": "^0.5.9", "lz-string": "^1.5.0", "picocolors": "1.1.1", "pretty-format": "^27.0.2" } }, "sha512-o4PXJQidqJl82ckFaXUeoAW+XysPLauYI43Abki5hABd853iMhitooc6znOnczgbTYmEP6U6/y1ZyKAIsvMKGg=="],
 

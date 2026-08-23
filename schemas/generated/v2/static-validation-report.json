@@ -1,0 +1,255 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/static-validation-report.json",
+  "title": "StaticValidationReport",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "valid": {
+      "type": "boolean"
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "nodeId": {
+            "type": "string"
+          },
+          "edge": {
+            "type": "object",
+            "properties": {
+              "sourceNodeId": {
+                "type": "string"
+              },
+              "targetNodeId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sourceNodeId",
+              "targetNodeId"
+            ]
+          },
+          "sourceSpan": {
+            "type": "object",
+            "properties": {
+              "sourcePath": {
+                "type": "string",
+                "minLength": 1
+              },
+              "startLine": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "startColumn": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "endLine": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "endColumn": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sourcePath",
+              "startLine",
+              "startColumn",
+              "endLine",
+              "endColumn",
+              "text"
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "nodeId": {
+            "type": "string"
+          },
+          "sourceSpan": {
+            "type": "object",
+            "properties": {
+              "sourcePath": {
+                "type": "string",
+                "minLength": 1
+              },
+              "startLine": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "startColumn": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "endLine": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "endColumn": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sourcePath",
+              "startLine",
+              "startColumn",
+              "endLine",
+              "endColumn",
+              "text"
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      }
+    },
+    "reachability": {
+      "type": "object",
+      "properties": {
+        "allReachable": {
+          "type": "boolean"
+        },
+        "unreachableNodeIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deadEndNodeIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "allReachable",
+        "unreachableNodeIds",
+        "deadEndNodeIds"
+      ]
+    },
+    "loopBounds": {
+      "type": "object",
+      "properties": {
+        "hasCycles": {
+          "type": "boolean"
+        },
+        "bounded": {
+          "type": "boolean"
+        },
+        "unboundedCycleNodeIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "hasCycles",
+        "bounded",
+        "unboundedCycleNodeIds"
+      ]
+    },
+    "taintFlow": {
+      "type": "object",
+      "properties": {
+        "safe": {
+          "type": "boolean"
+        },
+        "violations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "safe",
+        "violations"
+      ]
+    },
+    "witnessPaths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pathId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "nodeIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "coversMandatorySteps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "pathId",
+          "nodeIds",
+          "coversMandatorySteps"
+        ]
+      }
+    }
+  },
+  "required": [
+    "valid",
+    "errors",
+    "warnings",
+    "reachability",
+    "loopBounds",
+    "taintFlow",
+    "witnessPaths"
+  ]
+}
