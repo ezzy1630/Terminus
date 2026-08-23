@@ -374,6 +374,7 @@ mod phase4_tests {
         MacOsSandboxBackend::with_mocked_sandbox_exec(true).with_workspace_root("/tmp/ws-root")
     }
 
+    #[cfg(unix)]
     #[test]
     fn golden_profile_deny_default_with_rule_allowances() {
         let profile = SandboxProfile::default_restrictive();
