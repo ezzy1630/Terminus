@@ -15,6 +15,7 @@
  */
 import { z } from "zod";
 import type { ContentHash } from "@terminus/domain";
+import { computeContentHash } from "@terminus/context-ir";
 import type {
   ToolExecutor,
   ToolCallContext,
@@ -55,7 +56,17 @@ export interface SearchMatch {
   readonly path: string;
   readonly line: number;
   readonly column?: number | undefined;
-  readonly matchedBy: "path" | "ripgrep_lexical" | "bm25" | "treesitter_ast" | "lsp_definition" | "lsp_reference";
+  readonly matchedBy:
+    | "path"
+    | "ripgrep_lexical"
+    | "bm25"
+    | "treesitter_ast"
+    | "lsp_definition"
+    | "lsp_reference"
+    | "dependency_graph"
+    | "history"
+    | "test_impact"
+    | "ownership";
   readonly score: number;
   readonly symbolKind?: string | undefined;
   readonly snippet?: string | undefined;
@@ -80,6 +91,12 @@ export interface SearchResultData {
   readonly continuation: string | null;
 }
 
+export interface SearchIndexState {
+  readonly indexVersion: string;
+  readonly sourceVersion: string | null;
+  readonly isStale: boolean;
+}
+
 // ────────────────────────── Search Index Interface ───────────────────────────
 
 export interface SearchableItem {
@@ -91,8 +108,81 @@ export interface SearchableItem {
 
 export interface SearchProvider {
   listWorkspaceFiles(): Promise<readonly SearchableItem[]>;
+  getIndexState?(): Promise<SearchIndexState>;
   getLspReferences?(symbol: string): Promise<readonly SearchMatch[]>;
   getTreeSitterSymbols?(query: string): Promise<readonly SearchMatch[]>;
+  getCallHierarchy?(symbol: string): Promise<readonly SearchMatch[]>;
+  getRetrievalSignals?(query: string): Promise<readonly SearchMatch[]>;
+}
+
+interface SearchContinuation {
+  readonly offset: number;
+  readonly query: string;
+  readonly mode: SearchMode;
+  readonly scope: readonly string[];
+  readonly exclude: readonly string[];
+  readonly indexVersion: string;
+}
+
+function encodeContinuation(cursor: SearchContinuation): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeContinuation(raw: string): SearchContinuation {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+  } catch {
+    throw new Error("Invalid continuation token");
+  }
+  if (typeof parsed !== "object" || parsed === null) throw new Error("Invalid continuation token");
+  const value = parsed as Record<string, unknown>;
+  if (
+    typeof value.offset !== "number" || !Number.isInteger(value.offset) || value.offset < 0 ||
+    typeof value.query !== "string" ||
+    typeof value.mode !== "string" || !searchModeSchema.safeParse(value.mode).success ||
+    !Array.isArray(value.scope) || !value.scope.every((entry) => typeof entry === "string") ||
+    !Array.isArray(value.exclude) || !value.exclude.every((entry) => typeof entry === "string") ||
+    typeof value.indexVersion !== "string"
+  ) {
+    throw new Error("Invalid continuation token");
+  }
+  return {
+    offset: value.offset,
+    query: value.query,
+    mode: value.mode as SearchMode,
+    scope: value.scope as string[],
+    exclude: value.exclude as string[],
+    indexVersion: value.indexVersion,
+  };
+}
+
+function pathInScope(path: string, scopes: readonly string[]): boolean {
+  return scopes.length === 0 || scopes.some((scope) => {
+    const normalized = scope.replace(/\/$/, "");
+    return path === normalized || path.startsWith(`${normalized}/`);
+  });
+}
+
+function isExcluded(path: string, excludes: readonly string[]): boolean {
+  return excludes.some((entry) => {
+    const normalized = entry.replace(/\/$/, "");
+    return path === normalized || path.startsWith(`${normalized}/`);
+  });
+}
+
+function contentHash(content: string): ContentHash {
+  return computeContentHash(content);
+}
+
+function symbolKindForLine(line: string): string | undefined {
+  if (/^\s*(?:export\s+)?(?:async\s+)?function\s+/.test(line)) return "function";
+  if (/^\s*(?:export\s+)?(?:abstract\s+)?class\s+/.test(line)) return "class";
+  if (/^\s*(?:export\s+)?interface\s+/.test(line)) return "interface";
+  if (/^\s*(?:export\s+)?type\s+/.test(line)) return "type";
+  if (/^\s*(?:export\s+)?enum\s+/.test(line)) return "enum";
+  if (/^\s*(?:export\s+)?(?:const|let|var)\s+/.test(line)) return "variable";
+  return undefined;
 }
 
 // ────────────────────────── Reranking & BM25 Scoring ─────────────────────────
@@ -181,19 +271,34 @@ export class ProductionSearchExecutor implements ToolExecutor<SearchResultData> 
     const input = parseRes.data;
 
     const files = await this.provider.listWorkspaceFiles();
-
-    // Parse continuation offset
+    const fileVersions = new Map(files.map((file) => [file.path, contentHash(file.content)] as const));
+    const derivedSourceVersion = contentHash(
+      JSON.stringify(files.map((file) => [file.path, fileVersions.get(file.path)]).sort()),
+    );
+    const state = this.provider.getIndexState
+      ? await this.provider.getIndexState()
+      : { indexVersion: derivedSourceVersion, sourceVersion: derivedSourceVersion, isStale: false };
+    const scope = input.scope ?? [];
+    const exclude = input.exclude ?? [];
     let offset = 0;
     if (input.continuation) {
       try {
-        const decoded = JSON.parse(
-          Buffer.from(input.continuation, "base64").toString("utf-8"),
-        );
-        if (typeof decoded.offset === "number") {
-          offset = decoded.offset;
+        const cursor = decodeContinuation(input.continuation);
+        if (
+          cursor.query !== input.query ||
+          cursor.mode !== input.mode ||
+          JSON.stringify(cursor.scope) !== JSON.stringify(scope) ||
+          JSON.stringify(cursor.exclude) !== JSON.stringify(exclude) ||
+          cursor.indexVersion !== state.indexVersion
+        ) {
+          return errorResult("STALE_CONTINUATION: search index or query changed", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
         }
-      } catch {
-        return errorResult("Invalid continuation token", {
+        offset = cursor.offset;
+      } catch (error: unknown) {
+        return errorResult(error instanceof Error ? error.message : "Invalid continuation token", {
           toolCallId: ctx.toolCallId,
           traceId: ctx.traceId,
         });
@@ -202,80 +307,110 @@ export class ProductionSearchExecutor implements ToolExecutor<SearchResultData> 
 
     const rawMatches: SearchMatch[] = [];
     const queryLower = input.query.toLowerCase();
+    const pathMode = input.mode === "auto" || input.mode === "path";
+    const textMode = input.mode === "auto" || input.mode === "text";
+
+    if (input.mode === "symbol" || input.mode === "structural") {
+      if (!this.provider.getTreeSitterSymbols) {
+        return errorResult("AST structural retrieval is unavailable for this workspace", {
+          toolCallId: ctx.toolCallId,
+          traceId: ctx.traceId,
+        });
+      }
+    }
 
     for (const item of files) {
-      // Apply path scope filtering
-      if (input.scope && input.scope.length > 0) {
-        const inScope = input.scope.some((s) => item.path.startsWith(s));
-        if (!inScope) continue;
+      if (!pathInScope(item.path, scope) || isExcluded(item.path, exclude)) {
+        continue;
       }
-      if (input.exclude && input.exclude.length > 0) {
-        const isExcluded = input.exclude.some((e) => item.path.includes(e));
-        if (isExcluded) continue;
-      }
-
-      // Exact path match
-      if (item.path.toLowerCase().includes(queryLower)) {
+      const version = item.version ?? contentHash(item.content);
+      if (pathMode && item.path.toLowerCase().includes(queryLower)) {
         rawMatches.push({
           path: item.path,
           line: 1,
           matchedBy: "path",
-          score: 10.0 + (item.path.toLowerCase() === queryLower ? 5.0 : 0.0),
-          snippet: `File path matches: ${item.path}`,
-          version: item.version,
+          score: 10 + (item.path.toLowerCase() === queryLower ? 5 : 0),
+          snippet: input.includeSnippets ? `File path matches: ${item.path}` : undefined,
+          version,
         });
       }
-
-      // Content searching (Lexical BM25 + line matches)
+      if (!textMode) continue;
       const lines = item.content.split("\n");
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i]!;
-        if (line.toLowerCase().includes(queryLower)) {
-          const bm25 = calculateBm25Score(input.query, line);
-          
-          // Detect Tree-sitter symbol matches
-          let matchedBy: SearchMatch["matchedBy"] = "ripgrep_lexical";
-          let symbolKind: string | undefined;
-
-          if (/^\s*(?:export\s+)?(?:async\s+)?function\s+/.test(line)) {
-            matchedBy = "treesitter_ast";
-            symbolKind = "function";
-          } else if (/^\s*(?:export\s+)?(?:class|interface|type|enum)\s+/.test(line)) {
-            matchedBy = "treesitter_ast";
-            symbolKind = "class";
-          }
-
-          rawMatches.push({
-            path: item.path,
-            line: i + 1,
-            matchedBy,
-            symbolKind,
-            score: 1.0 + bm25 + (matchedBy === "treesitter_ast" ? 2.0 : 0.0),
-            snippet: input.includeSnippets ? line.trim() : undefined,
-            version: item.version,
-          });
-        }
+        if (!line.toLowerCase().includes(queryLower)) continue;
+        const symbolKind = symbolKindForLine(line);
+        if (input.mode === "symbol" && symbolKind === undefined) continue;
+        if (input.mode === "structural" && symbolKind === undefined) continue;
+        rawMatches.push({
+          path: item.path,
+          line: i + 1,
+          matchedBy: "ripgrep_lexical",
+          symbolKind,
+          score: (symbolKind !== undefined ? 3 : 1) + calculateBm25Score(input.query, line),
+          snippet: input.includeSnippets ? line.trim() : undefined,
+          version: fileVersions.get(item.path),
+        });
       }
     }
 
-    // LSP enrichment if provider is available
-    if ((input.mode === "lsp" || input.mode === "references") && this.provider.getLspReferences) {
-      const lspRefs = await this.provider.getLspReferences(input.query);
-      rawMatches.push(...lspRefs);
+    if (input.mode === "lsp" || input.mode === "references") {
+      if (!this.provider.getLspReferences) {
+        return errorResult("LSP retrieval is unavailable for this workspace", {
+          toolCallId: ctx.toolCallId,
+          traceId: ctx.traceId,
+        });
+      }
+      rawMatches.push(...await this.provider.getLspReferences(input.query));
+    }
+    if ((input.mode === "structural" || input.mode === "symbol") && this.provider.getTreeSitterSymbols) {
+      rawMatches.push(...await this.provider.getTreeSitterSymbols(input.query));
+    }
+    if (input.mode === "call_hierarchy") {
+      if (!this.provider.getCallHierarchy) {
+        return errorResult("call-hierarchy retrieval is unavailable for this workspace", {
+          toolCallId: ctx.toolCallId,
+          traceId: ctx.traceId,
+        });
+      }
+      rawMatches.push(...await this.provider.getCallHierarchy(input.query));
+    }
+    if (this.provider.getRetrievalSignals && input.mode !== "path") {
+      rawMatches.push(...await this.provider.getRetrievalSignals(input.query));
     }
 
-    if (input.mode === "structural" && this.provider.getTreeSitterSymbols) {
-      const astSyms = await this.provider.getTreeSitterSymbols(input.query);
-      rawMatches.push(...astSyms);
+    // A provider may expose overlapping channels. Keep the highest-scoring
+    // observation for one source location so facets and pagination are stable.
+    const deduplicated = new Map<string, SearchMatch>();
+    for (const match of rawMatches) {
+      if (
+        match.path.length === 0 ||
+        !Number.isInteger(match.line) ||
+        match.line < 1 ||
+        !Number.isFinite(match.score) ||
+        match.score < 0
+      ) {
+        continue;
+      }
+      if (!pathInScope(match.path, scope) || isExcluded(match.path, exclude)) continue;
+      const key = `${match.path}:${match.line}:${match.column ?? 0}`;
+      const sourceVersion = fileVersions.get(match.path);
+      const normalized: SearchMatch = {
+        ...match,
+        ...(sourceVersion === undefined ? {} : { version: sourceVersion }),
+      };
+      const previous = deduplicated.get(key);
+      if (previous === undefined || normalized.score > previous.score) deduplicated.set(key, normalized);
     }
+    const matches = [...deduplicated.values()];
 
     // Sort by raw score descending
-    rawMatches.sort((a, b) => b.score - a.score);
+    matches.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path) || a.line - b.line);
 
     // Apply diversity-aware reranking if enabled
     const reranked = input.diversityRerank
-      ? diversityRerank(rawMatches, rawMatches.length)
-      : rawMatches;
+      ? diversityRerank(matches, matches.length)
+      : matches;
 
     // Apply offset and limit
     const pageMatches = reranked.slice(offset, offset + input.limit);
@@ -283,13 +418,14 @@ export class ProductionSearchExecutor implements ToolExecutor<SearchResultData> 
 
     let continuationToken: string | null = null;
     if (hasMore) {
-      continuationToken = Buffer.from(
-        JSON.stringify({
-          offset: offset + input.limit,
-          query: input.query,
-          indexVersion: "idx-v1.0.0",
-        }),
-      ).toString("base64");
+      continuationToken = encodeContinuation({
+        offset: offset + input.limit,
+        query: input.query,
+        mode: input.mode,
+        scope,
+        exclude,
+        indexVersion: state.indexVersion,
+      });
     }
 
     // Compute facets
@@ -300,7 +436,7 @@ export class ProductionSearchExecutor implements ToolExecutor<SearchResultData> 
 
     const sourceVersionsMap: Record<string, string> = {};
 
-    for (const m of rawMatches) {
+    for (const m of matches) {
       uniqueFiles.add(m.path);
       if (m.symbolKind) {
         symbolKinds[m.symbolKind] = (symbolKinds[m.symbolKind] ?? 0) + 1;
@@ -320,21 +456,21 @@ export class ProductionSearchExecutor implements ToolExecutor<SearchResultData> 
       mode: input.mode,
       matches: pageMatches,
       facets: {
-        totalMatches: rawMatches.length,
+      totalMatches: matches.length,
         fileCount: uniqueFiles.size,
         symbolKinds,
         directories,
         isTestCount,
       },
-      indexVersion: "idx-v1.0.0",
-      isStale: false,
+      indexVersion: state.indexVersion,
+      isStale: state.isStale || (input.sourceVersion !== undefined && state.sourceVersion !== null && input.sourceVersion !== state.sourceVersion),
       continuation: continuationToken,
     };
 
     const result = okResult(data, {
       toolCallId: ctx.toolCallId,
       traceId: ctx.traceId,
-      summary: `Found ${rawMatches.length} matches across ${uniqueFiles.size} files for query "${input.query}"`,
+      summary: `${state.isStale ? "Stale index: " : ""}Found ${matches.length} matches across ${uniqueFiles.size} files for query "${input.query}"`,
       sourceVersions: sourceVersionsMap,
     });
 

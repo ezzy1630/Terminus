@@ -3,7 +3,7 @@
  * {@link PredicateCommandRunner} — this module never touches the filesystem
  * or process APIs directly (see packages/verification/AGENTS.md).
  */
-import type { VerificationResult, Uuid7, Rfc3339Timestamp } from "@terminus/domain";
+import type { ArtifactRef, VerificationResult, Uuid7, Rfc3339Timestamp } from "@terminus/domain";
 import { ValidationError, assertNever } from "@terminus/domain";
 import type { NodeExecutorInput, PredicateExecutor } from "./registry.js";
 import { PredicateRegistry } from "./registry.js";
@@ -13,6 +13,7 @@ import {
   parseNodeSpec,
   type PredicateType as PredicateTypeName,
 } from "./node-spec.js";
+import type { EvidenceArtifactWriter } from "./evidence.js";
 
 export interface PredicateCommandRequest {
   readonly predicateType: PredicateTypeName;
@@ -29,6 +30,7 @@ export interface PredicateCommandOutcome {
   readonly stdout: string;
   readonly stderr: string;
   readonly observations?: Readonly<Record<string, unknown>> | undefined;
+  readonly artifacts?: readonly ArtifactRef[] | undefined;
 }
 
 /** Injected runner — typically kernel Process/Job via the control plane. */
@@ -41,6 +43,7 @@ export interface StandardPredicateDeps {
   readonly idSource: () => Uuid7;
   readonly clock: () => Rfc3339Timestamp;
   readonly planId: () => Uuid7;
+  readonly artifactWriter?: EvidenceArtifactWriter | undefined;
 }
 
 function defaultCommand(predicateType: PredicateTypeName, paths: readonly string[]): string {
@@ -107,6 +110,26 @@ function makeExecutor(
         observations: spec.observations,
       });
       const pass = outcome.exitCode === 0;
+      const evidencePayload = new TextEncoder().encode(JSON.stringify({
+        predicateType,
+        command,
+        paths: spec.paths,
+        workspaceRevision: input.workspaceRevision,
+        environmentImageDigest: input.environmentImageDigest,
+        exitCode: outcome.exitCode,
+        stdout: outcome.stdout,
+        stderr: outcome.stderr,
+        observations: outcome.observations ?? {},
+      }));
+      const artifacts = outcome.artifacts !== undefined
+        ? outcome.artifacts
+        : deps.artifactWriter
+          ? [await deps.artifactWriter.write({
+              bytes: evidencePayload,
+              mediaType: "application/json",
+              metadata: { purpose: "verification-result", predicateType, nodeId: input.node.id },
+            })]
+          : [];
       return {
         id: deps.idSource(),
         planId: deps.planId(),
@@ -123,7 +146,7 @@ function makeExecutor(
           stderr: outcome.stderr,
           ...(outcome.observations ?? {}),
         },
-        artifacts: [],
+        artifacts,
         toolCallId: null,
         verifierVersion: "1.0.0",
         reasonIfSkipped: null,

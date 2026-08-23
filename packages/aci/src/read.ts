@@ -16,6 +16,7 @@
 import { z } from "zod";
 import type { ContentHash } from "@terminus/domain";
 import { ValidationError } from "@terminus/domain";
+import { computeContentHash } from "@terminus/context-ir";
 import type {
   ToolExecutor,
   ToolCallContext,
@@ -133,20 +134,107 @@ export interface ArtifactFile {
 export interface ReadProvider {
   readFile(path: string): Promise<WorkspaceFile | null>;
   readArtifact?(uri: string): Promise<ArtifactFile | null>;
+  /** Persist exact content when an inline response cannot satisfy its bound. */
+  spillArtifact?(input: {
+    readonly content: string | Uint8Array;
+    readonly mediaType: string;
+    readonly sourceUri: string;
+  }): Promise<ArtifactFile>;
 }
 
 // ────────────────────────── Implementation Helpers ───────────────────────────
 
 export function computeSha256(content: string | Uint8Array): ContentHash {
-  let hash = 0;
-  const str = typeof content === "string" ? content : new TextDecoder().decode(content);
-  for (let i = 0; i < str.length; i++) {
-    hash = (hash << 5) - hash + str.charCodeAt(i);
-    hash |= 0;
+  return computeContentHash(content);
+}
+
+interface ReadContinuation {
+  readonly kind: "workspace" | "artifact";
+  readonly path: string;
+  readonly mode: "full" | "artifact";
+  readonly version: ContentHash;
+  readonly maxBytes: number;
+  readonly nextStartLine: number;
+}
+
+function encodeReadContinuation(token: ReadContinuation): string {
+  return Buffer.from(JSON.stringify(token), "utf8").toString("base64url");
+}
+
+function decodeReadContinuation(raw: string): ReadContinuation {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+  } catch {
+    throw new ValidationError("Invalid continuation token");
   }
-  const hex = Math.abs(hash).toString(16).padStart(8, "0");
-  const fullHex = (hex + "0".repeat(64)).slice(0, 64);
-  return `sha256:${fullHex}` as ContentHash;
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new ValidationError("Invalid continuation token");
+  }
+  const value = parsed as Record<string, unknown>;
+  if (
+    (value.kind !== "workspace" && value.kind !== "artifact") ||
+    typeof value.path !== "string" ||
+    (value.mode !== "full" && value.mode !== "artifact") ||
+    typeof value.version !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/.test(value.version) ||
+    typeof value.maxBytes !== "number" ||
+    !Number.isInteger(value.maxBytes) ||
+    value.maxBytes < 1 ||
+    typeof value.nextStartLine !== "number" ||
+    !Number.isInteger(value.nextStartLine) ||
+    value.nextStartLine < 1
+  ) {
+    throw new ValidationError("Invalid continuation token");
+  }
+  return value as unknown as ReadContinuation;
+}
+
+function boundedLines(
+  lines: readonly string[],
+  startLine: number,
+  maxBytes: number,
+): { readonly content: string; readonly nextStartLine: number; readonly hasMore: boolean } {
+  let currentBytes = 0;
+  const selected: string[] = [];
+  for (let index = startLine - 1; index < lines.length; index++) {
+    const line = lines[index]!;
+    const lineBytes = Buffer.byteLength(line, "utf8") + (index < lines.length - 1 ? 1 : 0);
+    if (lineBytes > maxBytes && selected.length === 0) {
+      throw new ValidationError("OUTPUT_LIMIT_REQUIRES_ARTIFACT: a single line exceeds maxBytes");
+    }
+    if (currentBytes + lineBytes > maxBytes) {
+      return {
+        content: selected.join("\n"),
+        nextStartLine: index + 1,
+        hasMore: true,
+      };
+    }
+    selected.push(line);
+    currentBytes += lineBytes;
+  }
+  return { content: selected.join("\n"), nextStartLine: lines.length + 1, hasMore: false };
+}
+
+function describeArtifact(artifact: ArtifactFile): ArtifactDescriptor {
+  const actualBytes = typeof artifact.content === "string"
+    ? Buffer.byteLength(artifact.content, "utf8")
+    : artifact.content.byteLength;
+  if (computeSha256(artifact.content) !== artifact.hash) {
+    throw new ValidationError(`Artifact checksum mismatch: ${artifact.uri}`);
+  }
+  if (artifact.bytes !== actualBytes) {
+    throw new ValidationError(`Artifact byte count mismatch: ${artifact.uri}`);
+  }
+  if (!artifact.uri.startsWith("artifact://sha256/")) {
+    throw new ValidationError(`Artifact URI is not immutable: ${artifact.uri}`);
+  }
+  return {
+    uri: artifact.uri,
+    mediaType: artifact.mediaType,
+    bytes: artifact.bytes,
+    hash: artifact.hash,
+  };
 }
 
 export function parseOutline(content: string): readonly OutlineItem[] {
@@ -247,7 +335,84 @@ export class ProductionReadExecutor implements ToolExecutor<ReadResultData> {
         typeof art.content === "string"
           ? art.content
           : new TextDecoder().decode(art.content);
+      let artifact: ArtifactDescriptor;
+      try {
+        artifact = describeArtifact(art);
+      } catch (error: unknown) {
+        return errorResult(`Artifact checksum mismatch: ${art.uri}`, {
+          toolCallId: ctx.toolCallId,
+          traceId: ctx.traceId,
+        });
+      }
       const lines = textContent.split("\n");
+      const maxBytes = input.maxBytes ?? 32_768;
+      let startLine = 1;
+      if (input.continuation) {
+        try {
+          const cursor = decodeReadContinuation(input.continuation);
+          if (
+            cursor.kind !== "artifact" ||
+            cursor.path !== art.uri ||
+            cursor.version !== art.hash ||
+            cursor.maxBytes !== maxBytes
+          ) {
+            return errorResult("STALE_CONTINUATION: artifact changed or cursor target differs", {
+              toolCallId: ctx.toolCallId,
+              traceId: ctx.traceId,
+            });
+          }
+          startLine = cursor.nextStartLine;
+        } catch (error: unknown) {
+          return errorResult(error instanceof Error ? error.message : "Invalid continuation token", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+      }
+      let bounded: { readonly content: string; readonly nextStartLine: number; readonly hasMore: boolean };
+      try {
+        bounded = boundedLines(lines, startLine, maxBytes);
+      } catch (error: unknown) {
+        if (error instanceof ValidationError && error.message.startsWith("OUTPUT_LIMIT_REQUIRES_ARTIFACT")) {
+          const data: ReadResultData = {
+            uri: art.uri,
+            mode: "artifact",
+            version: art.hash,
+            lineCount: lines.length,
+            byteCount: art.bytes,
+            renderedMode: "artifact",
+            content: null,
+            outline: null,
+            symbols: null,
+            elisions: [],
+            dirtyRegions: null,
+            relatedTests: null,
+            diagnostics: null,
+            artifact,
+          };
+          return okResult(data, {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+            summary: `Read artifact ${art.uri} by immutable reference (${art.bytes} bytes)`,
+            sourceVersions: { [art.uri]: art.hash },
+            artifacts: [artifact],
+          });
+        }
+        return errorResult(error instanceof Error ? error.message : "artifact exceeds inline output bound", {
+          toolCallId: ctx.toolCallId,
+          traceId: ctx.traceId,
+        });
+      }
+      const continuation = bounded.hasMore
+        ? encodeReadContinuation({
+            kind: "artifact",
+            path: art.uri,
+            mode: "artifact",
+            version: art.hash,
+            maxBytes,
+            nextStartLine: bounded.nextStartLine,
+          })
+        : null;
 
       const data: ReadResultData = {
         uri: art.uri,
@@ -256,28 +421,44 @@ export class ProductionReadExecutor implements ToolExecutor<ReadResultData> {
         lineCount: lines.length,
         byteCount: art.bytes,
         renderedMode: "artifact",
-        content: textContent,
+        content: bounded.content,
         outline: null,
         symbols: null,
-        elisions: [],
+        elisions: [
+          ...(startLine > 1
+            ? [{ range: [1, startLine - 1] as readonly [number, number], reason: "omitted_prior_continuation" }]
+            : []),
+          ...(bounded.hasMore
+            ? [{ range: [bounded.nextStartLine, lines.length] as readonly [number, number], reason: "omitted_exceeds_max_bytes" }]
+            : []),
+        ],
         dirtyRegions: null,
         relatedTests: null,
         diagnostics: null,
-        artifact: {
-          uri: art.uri,
-          mediaType: art.mediaType,
-          bytes: art.bytes,
-          hash: art.hash,
-        },
+        artifact,
       };
 
-      return okResult(data, {
+      const result = okResult(data, {
         toolCallId: ctx.toolCallId,
         traceId: ctx.traceId,
-        summary: `Read artifact ${art.uri} (${art.bytes} bytes)`,
+        summary: bounded.hasMore
+          ? `Read artifact ${art.uri} partially (${art.bytes} bytes)`
+          : `Read artifact ${art.uri} (${art.bytes} bytes)`,
         sourceVersions: { [art.uri]: art.hash },
-        artifacts: [data.artifact!],
+        artifacts: [artifact],
       });
+      if (bounded.hasMore) {
+        return {
+          ...result,
+          status: "partial",
+          truncation: {
+            occurred: true,
+            reason: "exceeded_max_bytes_budget",
+            continuation,
+          },
+        };
+      }
+      return result;
     }
 
     // Workspace file read
@@ -289,7 +470,10 @@ export class ProductionReadExecutor implements ToolExecutor<ReadResultData> {
       });
     }
 
-    const version = (file.version ?? computeSha256(file.content)) as ContentHash;
+    // Content identity is always the hash of the bytes actually returned. A
+    // provider revision may still be useful to its caller, but it cannot be
+    // used as an edit/read cursor because it does not bind the content.
+    const version = computeSha256(file.content);
 
     if (input.expectedVersion && input.expectedVersion !== version) {
       return errorResult(
@@ -319,22 +503,39 @@ export class ProductionReadExecutor implements ToolExecutor<ReadResultData> {
     let outlineOutput: readonly OutlineItem[] | null = null;
     let symbolOutput: readonly SymbolInfo[] | null = null;
     let dirtyOutput: readonly DirtyRegion[] | null = null;
+    let artifactOutput: ArtifactDescriptor | null = null;
     let truncationOccurred = false;
     let continuationToken: string | null = null;
     let status: ToolResult<ReadResultData>["status"] = "success";
 
-    // Handle continuation cursor
+    // Handle continuation cursor. Cursors are bound to the exact target,
+    // rendering mode, and content hash; replaying one against a new file or a
+    // different query is an explicit stale error.
     let startLineOffset = 1;
     if (input.continuation) {
       try {
-        const parsedToken = JSON.parse(
-          Buffer.from(input.continuation, "base64").toString("utf-8"),
-        );
-        if (typeof parsedToken.nextStartLine === "number") {
-          startLineOffset = parsedToken.nextStartLine;
+        const cursor = decodeReadContinuation(input.continuation);
+        if (
+          cursor.kind !== "workspace" ||
+          cursor.path !== input.path ||
+          cursor.version !== version ||
+          cursor.maxBytes !== maxBytes
+        ) {
+          return errorResult("STALE_CONTINUATION: file changed or cursor target differs", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
         }
-      } catch {
-        return errorResult("Invalid continuation token", {
+        if (input.mode !== "auto" && input.mode !== cursor.mode) {
+          return errorResult("STALE_CONTINUATION: cursor mode differs from requested mode", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+        mode = cursor.mode;
+        startLineOffset = cursor.nextStartLine;
+      } catch (error: unknown) {
+        return errorResult(error instanceof Error ? error.message : "Invalid continuation token", {
           toolCallId: ctx.toolCallId,
           traceId: ctx.traceId,
         });
@@ -344,28 +545,50 @@ export class ProductionReadExecutor implements ToolExecutor<ReadResultData> {
     switch (mode) {
       case "full": {
         if (byteCount > maxBytes || startLineOffset > 1) {
-          let currentBytes = 0;
-          const extractedLines: string[] = [];
-          let endLine = startLineOffset - 1;
-
-          for (let i = startLineOffset - 1; i < lines.length; i++) {
-            const line = lines[i]!;
-            const lineBytes = Buffer.byteLength(line + "\n", "utf-8");
-            if (currentBytes + lineBytes > maxBytes && extractedLines.length > 0) {
-              truncationOccurred = true;
-              status = "partial";
-              const nextStartLine = i + 1;
-              continuationToken = Buffer.from(
-                JSON.stringify({ nextStartLine, path: input.path, hash: version }),
-              ).toString("base64");
+          let bounded: { readonly content: string; readonly nextStartLine: number; readonly hasMore: boolean };
+          try {
+            bounded = boundedLines(lines, startLineOffset, maxBytes);
+          } catch (error: unknown) {
+            if (
+              this.provider.spillArtifact &&
+              error instanceof ValidationError &&
+              error.message.startsWith("OUTPUT_LIMIT_REQUIRES_ARTIFACT")
+            ) {
+              try {
+                const spilled = await this.provider.spillArtifact({
+                  content: file.content,
+                  mediaType: "text/plain; charset=utf-8",
+                  sourceUri: `workspace://${input.path}`,
+                });
+                artifactOutput = describeArtifact(spilled);
+              } catch (spillError: unknown) {
+                return errorResult(spillError instanceof Error ? spillError.message : "artifact spill failed", {
+                  toolCallId: ctx.toolCallId,
+                  traceId: ctx.traceId,
+                });
+              }
+              contentOutput = null;
               break;
             }
-            extractedLines.push(line);
-            currentBytes += lineBytes;
-            endLine = i + 1;
+            return errorResult(error instanceof Error ? error.message : "file exceeds inline output bound", {
+              toolCallId: ctx.toolCallId,
+              traceId: ctx.traceId,
+            });
           }
-
-          contentOutput = extractedLines.join("\n");
+          contentOutput = bounded.content;
+          const endLine = bounded.hasMore ? bounded.nextStartLine - 1 : lineCount;
+          if (bounded.hasMore) {
+            truncationOccurred = true;
+            status = "partial";
+            continuationToken = encodeReadContinuation({
+              kind: "workspace",
+              path: input.path,
+              mode: "full",
+              version,
+              maxBytes,
+              nextStartLine: bounded.nextStartLine,
+            });
+          }
 
           if (startLineOffset > 1) {
             elisions.push({
@@ -400,7 +623,10 @@ export class ProductionReadExecutor implements ToolExecutor<ReadResultData> {
 
       case "range": {
         if (!input.ranges || input.ranges.length === 0) {
-          throw new ValidationError("ranges parameter is required for mode=range");
+          return errorResult("ranges parameter is required for mode=range", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
         }
         const extracted: string[] = [];
         let lastEnd = 0;
@@ -492,6 +718,33 @@ export class ProductionReadExecutor implements ToolExecutor<ReadResultData> {
       }
     }
 
+    // Every rendered projection, not only full-file mode, obeys the same hard
+    // bound. Preserve the exact projection in an immutable artifact when the
+    // provider can spill it; otherwise fail explicitly instead of dropping
+    // bytes or pretending the projection is complete.
+    if (contentOutput !== null && Buffer.byteLength(contentOutput, "utf8") > maxBytes) {
+      if (!this.provider.spillArtifact) {
+        return errorResult("OUTPUT_LIMIT_REQUIRES_ARTIFACT: rendered read exceeds maxBytes", {
+          toolCallId: ctx.toolCallId,
+          traceId: ctx.traceId,
+        });
+      }
+      try {
+        const spilled = await this.provider.spillArtifact({
+          content: contentOutput,
+          mediaType: "text/plain; charset=utf-8",
+          sourceUri: `workspace://${input.path}`,
+        });
+        artifactOutput = describeArtifact(spilled);
+        contentOutput = null;
+      } catch (spillError: unknown) {
+        return errorResult(spillError instanceof Error ? spillError.message : "artifact spill failed", {
+          toolCallId: ctx.toolCallId,
+          traceId: ctx.traceId,
+        });
+      }
+    }
+
     const data: ReadResultData = {
       uri: `workspace://${input.path}`,
       mode: input.mode,
@@ -506,7 +759,7 @@ export class ProductionReadExecutor implements ToolExecutor<ReadResultData> {
       dirtyRegions: dirtyOutput,
       relatedTests: input.includeRelated ? (file.relatedTests ?? null) : null,
       diagnostics: input.includeRelated ? (file.diagnostics ?? null) : null,
-      artifact: null,
+      artifact: artifactOutput,
     };
 
     const result = okResult(data, {
@@ -514,6 +767,7 @@ export class ProductionReadExecutor implements ToolExecutor<ReadResultData> {
       traceId: ctx.traceId,
       summary: `Read ${input.path} (${lineCount} lines, mode=${mode})`,
       sourceVersions: { [`workspace://${input.path}`]: version },
+      ...(artifactOutput === null ? {} : { artifacts: [artifactOutput] }),
     });
 
     if (truncationOccurred) {

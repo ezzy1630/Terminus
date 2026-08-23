@@ -13,6 +13,7 @@ import {
   type PatchProvider,
   type PatchTargetFile,
   type ToolCallContext,
+  type Diagnostic,
 } from "./index.js";
 
 function fakeUuid(n: number): Uuid7 {
@@ -62,6 +63,23 @@ class MockPatchProvider implements PatchProvider {
       this.committedFiles.set(p, val.content);
       this.files.set(p, { path: p, content: val.content, hash: val.hash });
     }
+  }
+
+  async rollbackFiles(files: ReadonlyMap<string, PatchTargetFile | null>): Promise<void> {
+    for (const [path, file] of files) {
+      if (file === null) {
+        this.files.delete(path);
+      } else {
+        this.files.set(path, file);
+      }
+      this.committedFiles.delete(path);
+    }
+  }
+
+  async validateSemanticDiff(
+    _files: ReadonlyMap<string, { content: string; hash: ContentHash }>,
+  ): Promise<readonly Diagnostic[]> {
+    return [];
   }
 }
 
@@ -134,6 +152,7 @@ describe("Patch Transactions & Anchors", () => {
           {
             op: "exact_text",
             path: "src/dup.ts",
+            observed_hash: computeSha256(dupContent),
             old_text: "const x = 1;",
             new_text: "const x = 2;",
           },
@@ -197,7 +216,76 @@ describe("Patch Transactions & Anchors", () => {
     );
 
     expect(res.status).toBe("error");
-    expect(res.summary).toContain("rolled back");
+    expect(res.summary).toContain("rollback completed");
     expect((await provider.getFile("src/main.ts"))!.content).toContain("return 1;");
+  });
+
+  test("rejects an operation that the selected edit dialect cannot represent", async () => {
+    const provider = new MockPatchProvider();
+    const executor = new ProductionPatchExecutor(provider);
+    const file = await provider.getFile("src/main.ts");
+    const res = await executor.execute(
+      {
+        dialect: "unified_diff",
+        operations: [{
+          op: "exact_text",
+          path: "src/main.ts",
+          observed_hash: file!.hash,
+          old_text: "return 1;",
+          new_text: "return 2;",
+        }],
+      },
+      mkCtx(),
+    );
+    expect(res.status).toBe("error");
+    expect(res.summary).toContain("PATCH_DIALECT_MISMATCH");
+  });
+
+  test("applies a hash-anchored unified diff", async () => {
+    const provider = new MockPatchProvider();
+    const executor = new ProductionPatchExecutor(provider);
+    const file = await provider.getFile("src/main.ts");
+    const res = await executor.execute(
+      {
+        dialect: "unified_diff",
+        operations: [{
+          op: "unified_diff",
+          path: "src/main.ts",
+          observed_hash: file!.hash,
+          diff: "@@ -1,3 +1,3 @@\n function alpha() {\n-  return 1;\n+  return 2;\n }\n",
+        }],
+      },
+      mkCtx(),
+    );
+    expect(res.status).toBe("success");
+    expect(provider.committedFiles.get("src/main.ts")).toContain("return 2;");
+  });
+
+  test("semantic validation rejects a candidate before commit", async () => {
+    const provider = new MockPatchProvider();
+    provider.validateSemanticDiff = async () => [{
+      severity: "error",
+      code: "semantic",
+      message: "import graph is inconsistent",
+      path: "src/main.ts",
+      range: { startLine: 1, endLine: 1 },
+    }];
+    const executor = new ProductionPatchExecutor(provider);
+    const file = await provider.getFile("src/main.ts");
+    const res = await executor.execute(
+      {
+        operations: [{
+          op: "exact_text",
+          path: "src/main.ts",
+          observed_hash: file!.hash,
+          old_text: "return 1;",
+          new_text: "return 2;",
+        }],
+      },
+      mkCtx(),
+    );
+    expect(res.status).toBe("error");
+    expect(res.summary).toContain("semantic validation failed");
+    expect(provider.committedFiles.has("src/main.ts")).toBe(false);
   });
 });

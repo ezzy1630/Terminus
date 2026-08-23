@@ -131,7 +131,7 @@ rules:
     description: Allow common local test runners in the workspace
     priority: 10
     match:
-      executable_any: ["pnpm", "pytest", "cargo", "go", "npm", "yarn", "bun"]
+      executable_any: ["pnpm", "pytest", "cargo", "go", "npm", "yarn", "bun", "just"]
     effect:
       kind: allow_with_constraints
       constraint:
@@ -151,7 +151,6 @@ rules:
     description: Prompt before any git push
     priority: 20
     match:
-      executable_any: ["git"]
       argv_contains_any: ["push"]
     effect:
       kind: prompt

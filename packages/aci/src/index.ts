@@ -15,6 +15,7 @@ import type {
   Micros,
 } from "@terminus/domain";
 import { ValidationError, NotFoundError } from "@terminus/domain";
+import { computeContentHash } from "@terminus/context-ir";
 import type { ConfidentialityLabel } from "@terminus/provider-core";
 
 // ────────────────────────── Re-export Tool Modules ────────────────────────────
@@ -186,6 +187,7 @@ export function okResult<T>(
     readonly summary: string;
     readonly sourceVersions?: Readonly<Record<string, string>> | undefined;
     readonly artifacts?: readonly ArtifactDescriptor[] | undefined;
+    readonly sideEffects?: readonly SideEffectDescriptor[] | undefined;
     readonly timing?: Partial<TimingInfo> | undefined;
     readonly confidentiality?: ConfidentialityLabel | undefined;
   },
@@ -198,7 +200,7 @@ export function okResult<T>(
     sourceVersions: opts.sourceVersions ?? {},
     truncation: { occurred: false, reason: null, continuation: null },
     diagnostics: [],
-    sideEffects: [],
+    sideEffects: opts.sideEffects ?? [],
     trust: "derived",
     confidentiality: opts.confidentiality ?? "workspace",
     timing: {
@@ -479,9 +481,8 @@ function scoreCard(card: CapabilityCard, q: string): number {
 
 // ────────────────────────── Default Tool Definitions (§34.2) ─────────────────
 
-function fakeHash(s: string): ContentHash {
-  const hex = (s + "0".repeat(64)).slice(0, 64).replace(/[^0-9a-f]/g, "0");
-  return `sha256:${hex}` as ContentHash;
+function definitionHash(s: string): ContentHash {
+  return computeContentHash(s);
 }
 
 const READ_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
@@ -561,6 +562,10 @@ const PATCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
           mustNotExist: { type: ["boolean", "null"] },
         },
       },
+    },
+    dialect: {
+      type: "string",
+      enum: ["canonical", "search_replace", "unified_diff", "ast"],
     },
     validation_profile: {
       type: "string",
@@ -694,7 +699,7 @@ export const READ: ToolDefinition = Object.freeze({
   maximumArtifactBytes: 16 * 1024 * 1024,
   defaultTimeoutMs: 10_000,
   policyTags: ["read", "filesystem"],
-  definitionHash: fakeHash("read@1.0.0"),
+  definitionHash: definitionHash("read@1.0.0"),
 });
 
 export const SEARCH: ToolDefinition = Object.freeze({
@@ -719,7 +724,7 @@ export const SEARCH: ToolDefinition = Object.freeze({
   maximumArtifactBytes: 1 * 1024 * 1024,
   defaultTimeoutMs: 15_000,
   policyTags: ["read", "search"],
-  definitionHash: fakeHash("search@1.0.0"),
+  definitionHash: definitionHash("search@1.0.0"),
 });
 
 export const PATCH: ToolDefinition = Object.freeze({
@@ -744,7 +749,7 @@ export const PATCH: ToolDefinition = Object.freeze({
   maximumArtifactBytes: 4 * 1024 * 1024,
   defaultTimeoutMs: 60_000,
   policyTags: ["write", "filesystem", "transactional"],
-  definitionHash: fakeHash("patch@1.0.0"),
+  definitionHash: definitionHash("patch@1.0.0"),
 });
 
 export const EXEC: ToolDefinition = Object.freeze({
@@ -769,7 +774,7 @@ export const EXEC: ToolDefinition = Object.freeze({
   maximumArtifactBytes: 16 * 1024 * 1024,
   defaultTimeoutMs: 30_000,
   policyTags: ["exec", "process", "sandboxed"],
-  definitionHash: fakeHash("exec@1.0.0"),
+  definitionHash: definitionHash("exec@1.0.0"),
 });
 
 export const JOB: ToolDefinition = Object.freeze({
@@ -794,7 +799,7 @@ export const JOB: ToolDefinition = Object.freeze({
   maximumArtifactBytes: 16 * 1024 * 1024,
   defaultTimeoutMs: 30_000,
   policyTags: ["exec", "process", "durable"],
-  definitionHash: fakeHash("job@1.0.0"),
+  definitionHash: definitionHash("job@1.0.0"),
 });
 
 export const INSPECT: ToolDefinition = Object.freeze({
@@ -820,7 +825,7 @@ export const INSPECT: ToolDefinition = Object.freeze({
   maximumArtifactBytes: 4 * 1024 * 1024,
   defaultTimeoutMs: 30_000,
   policyTags: ["read", "lsp", "diagnostics"],
-  definitionHash: fakeHash("inspect@1.0.0"),
+  definitionHash: definitionHash("inspect@1.0.0"),
 });
 
 export const CAPABILITY: ToolDefinition = Object.freeze({
@@ -845,7 +850,7 @@ export const CAPABILITY: ToolDefinition = Object.freeze({
   maximumArtifactBytes: 1 * 1024 * 1024,
   defaultTimeoutMs: 5_000,
   policyTags: ["capability", "activation"],
-  definitionHash: fakeHash("capability@1.0.0"),
+  definitionHash: definitionHash("capability@1.0.0"),
 });
 
 /** The 7 default always-visible tools (§34.2). */

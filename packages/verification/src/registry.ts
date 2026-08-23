@@ -56,15 +56,16 @@ export class PredicateRegistry {
     return this.executors.has(predicateType);
   }
 
-  toNodeExecutor(fallback: NodeExecutor): NodeExecutor {
+  toNodeExecutor(): NodeExecutor {
     return {
       execute: async (input: NodeExecutorInput): Promise<VerificationResult> => {
         const spec = parseNodeSpec(input.node.specification);
-        if (spec.predicateType) {
-          const ex = this.get(spec.predicateType);
-          if (ex) return ex.execute(input);
+        if (!spec.predicateType) {
+          throw new ValidationError(
+            `node '${input.node.id}' has no registered predicate type; freeform specifications cannot satisfy verification`,
+          );
         }
-        return fallback.execute(input);
+        return this.require(spec.predicateType).execute(input);
       },
     };
   }

@@ -45,7 +45,7 @@ build:
     # Next.js dashboard. The kernel mini-service builds via its own crate.
     bun run build:packages
     bun run build
-    cd python && uv run build
+    cd python && uv build
 
 # Fast lint/type/unit checks.
 check: boundary-check

@@ -47,7 +47,10 @@ describe("Phase 3: Transactional Effects and Authority", () => {
     authzManager = new AuthorizationManager(repo, outbox);
     handleManager = new ResourceHandleManager(repo);
     seqPolicy = new SequencePolicyEvaluator(repo);
-    admission = new AdmissionService(repo, ledger, seqPolicy);
+    admission = new AdmissionService(repo, ledger, seqPolicy, {
+      getAuthoritativeRevision: async () => "rev-base",
+      merge: async () => ({ mergeId: "merge-test", authoritativeRevision: "rev-admitted" }),
+    });
     substrate = new DurableTaskSubstrate(repo);
   });
 
@@ -421,14 +424,18 @@ describe("Phase 3: Transactional Effects and Authority", () => {
       await ledger.authorizeEffect(eff.id, "authz-f14");
       await ledger.prepareEffect(eff.id);
 
-      admission.registerCandidateBranch({
+      await admission.registerCandidateBranch({
         branchId: "branch-candidate-2",
         taskId: "task-f14",
         attemptId: "att-branch-2",
         actorPrincipal: "agent-b",
         worktreePath: "/tmp/worktree-branch-2",
         epoch: 1,
+        baseRevision: "rev-base",
+        headRevision: "rev-head",
+        scopeDigest: "sha256:" + "11".repeat(32),
         effectIds: [eff.id],
+        proof: null,
         status: "OPEN",
       });
 
@@ -638,14 +645,50 @@ describe("Phase 3: Transactional Effects and Authority", () => {
       await ledger.observeEffect(eff.id, { outcome: "SUCCESS" });
       await ledger.validateEffect(eff.id, true);
 
-      admission.registerCandidateBranch({
+      await admission.registerCandidateBranch({
         branchId: "cand-branch-1",
         taskId: "task-admit",
         attemptId: "att-cand-1",
         actorPrincipal: "agent-candidate",
         worktreePath: "/tmp/worktree-cand-1",
         epoch: 1,
+        baseRevision: "rev-base",
+        headRevision: "rev-head",
+        scopeDigest: "sha256:" + "22".repeat(32),
         effectIds: [eff.id],
+        proof: {
+          verificationPlanId: "plan-admit",
+          completionRecordDigest: "sha256:" + "33".repeat(32),
+          sourceRevision: "rev-head",
+          environmentImageDigest: "env:1",
+          completionExpressionSatisfied: true,
+          claims: [
+            {
+              claimId: "security.secret_scan_passed",
+              status: "SATISFIED",
+              evidence: [{
+                evidenceId: "e-secret",
+                artifactUri: "artifact://sha256/" + "44".repeat(32),
+                artifactHash: "sha256:" + "44".repeat(32),
+                sourceRevision: "rev-head",
+                environmentImageDigest: "env:1",
+                verifierResult: "pass",
+              }],
+            },
+            {
+              claimId: "tests.unit_passed",
+              status: "SATISFIED",
+              evidence: [{
+                evidenceId: "e-unit",
+                artifactUri: "artifact://sha256/" + "55".repeat(32),
+                artifactHash: "sha256:" + "55".repeat(32),
+                sourceRevision: "rev-head",
+                environmentImageDigest: "env:1",
+                verifierResult: "pass",
+              }],
+            },
+          ],
+        },
         status: "OPEN",
       });
 
@@ -663,6 +706,81 @@ describe("Phase 3: Transactional Effects and Authority", () => {
 
       const committed = await repo.getEffectRecord(eff.id);
       expect(committed?.state).toBe("COMMITTED");
+      expect((await repo.getCandidateBranch("cand-branch-1"))?.status).toBe("ADMITTED");
+    });
+
+    it("fails closed when a candidate has no immutable completion proof", async () => {
+      await admission.registerCandidateBranch({
+        branchId: "cand-no-proof",
+        taskId: "task-no-proof",
+        attemptId: "att-no-proof",
+        actorPrincipal: "agent-candidate",
+        worktreePath: "/tmp/candidate-no-proof",
+        epoch: 1,
+        baseRevision: "rev-base",
+        headRevision: "rev-head",
+        scopeDigest: "sha256:" + "66".repeat(32),
+        effectIds: [],
+        proof: null,
+        status: "OPEN",
+      });
+
+      await expect(admission.admitBranch({
+        branchId: "cand-no-proof",
+        taskId: "task-no-proof",
+        attemptId: "att-no-proof",
+        actorPrincipal: "agent-candidate",
+        reviewerPrincipal: "independent-reviewer",
+      })).rejects.toThrow(/completion proof/);
+      expect((await repo.getCandidateBranch("cand-no-proof"))?.status).toBe("OPEN");
+    });
+
+    it("rejects a proof whose candidate base is stale at admission", async () => {
+      await admission.registerCandidateBranch({
+        branchId: "cand-stale",
+        taskId: "task-stale-candidate",
+        attemptId: "att-stale-candidate",
+        actorPrincipal: "agent-candidate",
+        worktreePath: "/tmp/candidate-stale",
+        epoch: 1,
+        baseRevision: "rev-base",
+        headRevision: "rev-head",
+        scopeDigest: "sha256:" + "77".repeat(32),
+        effectIds: [],
+        proof: {
+          verificationPlanId: "plan-stale",
+          completionRecordDigest: "sha256:" + "88".repeat(32),
+          sourceRevision: "rev-head",
+          environmentImageDigest: "env:1",
+          completionExpressionSatisfied: true,
+          claims: [{
+            claimId: "tests.unit_passed",
+            status: "SATISFIED",
+            evidence: [{
+              evidenceId: "e-stale",
+              artifactUri: "artifact://sha256/" + "99".repeat(32),
+              artifactHash: "sha256:" + "99".repeat(32),
+              sourceRevision: "rev-head",
+              environmentImageDigest: "env:1",
+              verifierResult: "pass",
+            }],
+          }],
+        },
+        status: "OPEN",
+      });
+      const staleAdmission = new AdmissionService(repo, ledger, seqPolicy, {
+        getAuthoritativeRevision: async () => "rev-new",
+        merge: async () => ({ mergeId: "should-not-merge", authoritativeRevision: "rev-new" }),
+      });
+
+      await expect(staleAdmission.admitBranch({
+        branchId: "cand-stale",
+        taskId: "task-stale-candidate",
+        attemptId: "att-stale-candidate",
+        actorPrincipal: "agent-candidate",
+        reviewerPrincipal: "independent-reviewer",
+        requiredClaimsSatisfied: ["tests.unit_passed"],
+      })).rejects.toThrow(/stale/);
     });
   });
 });

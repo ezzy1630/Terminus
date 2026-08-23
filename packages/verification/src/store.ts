@@ -15,6 +15,7 @@ import type {
   ArtifactRef,
 } from "@terminus/domain";
 import { ValidationError } from "@terminus/domain";
+import type { ClaimEvidenceGraph } from "./evidence.js";
 
 /** One recorded attempt at evaluating a verification node. */
 export interface VerificationAttemptRecord {
@@ -47,6 +48,9 @@ export interface VerificationStore {
   saveResult(result: VerificationResult): Promise<VerificationResult>;
   listResults(planId: Uuid7): Promise<readonly VerificationResult[]>;
   deleteResults(planId: Uuid7, nodeIds: ReadonlySet<string>): Promise<void>;
+  saveEvidenceGraph(planId: Uuid7, graph: ClaimEvidenceGraph): Promise<void>;
+  getEvidenceGraph(planId: Uuid7): Promise<ClaimEvidenceGraph | null>;
+  deleteEvidenceGraph(planId: Uuid7): Promise<void>;
 
   saveCompletionRecord(record: CompletionRecord): Promise<CompletionRecord>;
   getCompletionRecord(taskId: Uuid7): Promise<CompletionRecord | null>;
@@ -61,6 +65,7 @@ export class InMemoryVerificationStore implements VerificationStore {
   private readonly taskIndex = new Map<string, Set<string>>();
   private readonly attempts: VerificationAttemptRecord[] = [];
   private readonly results = new Map<string, VerificationResult[]>();
+  private readonly evidenceGraphs = new Map<string, ClaimEvidenceGraph>();
   private readonly completions = new Map<string, CompletionRecord>();
 
   async savePlan(plan: VerificationPlan): Promise<VerificationPlan> {
@@ -124,6 +129,18 @@ export class InMemoryVerificationStore implements VerificationStore {
       planId,
       list.filter((r) => !nodeIds.has(r.nodeId)),
     );
+  }
+
+  async saveEvidenceGraph(planId: Uuid7, graph: ClaimEvidenceGraph): Promise<void> {
+    this.evidenceGraphs.set(planId, graph);
+  }
+
+  async getEvidenceGraph(planId: Uuid7): Promise<ClaimEvidenceGraph | null> {
+    return this.evidenceGraphs.get(planId) ?? null;
+  }
+
+  async deleteEvidenceGraph(planId: Uuid7): Promise<void> {
+    this.evidenceGraphs.delete(planId);
   }
 
   async saveCompletionRecord(record: CompletionRecord): Promise<CompletionRecord> {

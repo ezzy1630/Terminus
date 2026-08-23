@@ -26,7 +26,7 @@ import type {
   Rfc3339Timestamp,
 } from "@terminus/domain";
 import type { EventEnvelopeV2 } from "@terminus/runtime-protocol";
-import type { DurableTaskRepository } from "./types.js";
+import type { CandidateBranchRecord, DurableTaskRepository } from "./types.js";
 
 function clone<T>(value: T): T {
   if (value === null || typeof value !== "object") return value;
@@ -58,6 +58,7 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
   private readonly resourceHandles = new Map<string, ResourceHandle>();
   private readonly sequencePolicyRules: SequencePolicyRule[] = [];
   private readonly approvalPresentations = new Map<string, ApprovalPresentation>();
+  private readonly candidateBranches = new Map<string, CandidateBranchRecord>();
 
   async createTaskV2(task: TaskV2, outboxMessage?: OutboxMessage): Promise<TaskV2> {
     this.tasks.set(task.id, clone(task));
@@ -325,6 +326,33 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
   async listEffects(taskId: string): Promise<readonly EffectRecord[]> {
     return Array.from(this.effects.values())
       .filter((e) => e.taskId === taskId)
+      .map(clone);
+  }
+
+  async createCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord> {
+    if (this.candidateBranches.has(branch.branchId)) {
+      throw new Error(`candidate branch already exists: ${branch.branchId}`);
+    }
+    this.candidateBranches.set(branch.branchId, clone(branch));
+    return clone(branch);
+  }
+
+  async getCandidateBranch(branchId: string): Promise<CandidateBranchRecord | null> {
+    const branch = this.candidateBranches.get(branchId);
+    return branch ? clone(branch) : null;
+  }
+
+  async updateCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord> {
+    if (!this.candidateBranches.has(branch.branchId)) {
+      throw new Error(`candidate branch not found: ${branch.branchId}`);
+    }
+    this.candidateBranches.set(branch.branchId, clone(branch));
+    return clone(branch);
+  }
+
+  async listCandidateBranches(taskId: string): Promise<readonly CandidateBranchRecord[]> {
+    return [...this.candidateBranches.values()]
+      .filter((branch) => branch.taskId === taskId)
       .map(clone);
   }
 

@@ -1,7 +1,7 @@
 use crate::command::NormalizedCommand;
 use crate::decision::{Constraint, DecisionReport};
 use crate::error::PolicyError;
-use crate::rule::{Rule, RuleEffect, RuleSet};
+use crate::rule::{RuleEffect, RuleSet};
 use std::sync::Arc;
 
 /// The policy engine evaluates a `NormalizedCommand` against a `RuleSet` and
@@ -77,7 +77,7 @@ mod tests {
     use super::*;
     use crate::command::{EffectType, NetworkDestination};
     use crate::decision::Decision;
-    use crate::rule::{RuleEffect, RuleMatch};
+    use crate::rule::{Rule, RuleEffect, RuleMatch};
 
     fn rs() -> RuleSet {
         let mut rules = RuleSet::default();
@@ -136,6 +136,44 @@ mod tests {
         let report = engine.evaluate(&cmd);
         assert_eq!(report.decision, Decision::Allow);
         assert!(report.rule_ids.contains(&"allow-local-tests".to_string()));
+    }
+
+    #[test]
+    fn default_rule_set_allows_bounded_just_verification_recipes() {
+        let engine = PolicyEngine::new(crate::default_rule_set());
+        let mut command = NormalizedCommand::new("/usr/bin/just");
+        command.argv = vec!["check".into()];
+        command.effect_types.insert(EffectType::ExecuteLocal);
+
+        let report = engine.evaluate(&command);
+        assert_eq!(report.decision, Decision::AllowWithConstraints);
+        assert!(report.rule_ids.contains(&"allow-local-tests".to_string()));
+        assert_eq!(report.constraints.max_runtime_ms, Some(600_000));
+    }
+
+    #[test]
+    fn default_rule_set_allows_read_only_git_revision_lookup() {
+        let engine = PolicyEngine::new(crate::default_rule_set());
+        let mut command = NormalizedCommand::new("/usr/bin/git");
+        command.argv = vec!["rev-parse".into(), "HEAD".into()];
+        command.effect_types.insert(EffectType::ExecuteLocal);
+
+        let report = engine.evaluate(&command);
+        assert_eq!(report.decision, Decision::Allow);
+        assert!(!report.rule_ids.contains(&"prompt-git-push".to_string()));
+    }
+
+    #[test]
+    fn default_rule_set_prompts_git_push() {
+        let engine = PolicyEngine::new(crate::default_rule_set());
+        let mut command = NormalizedCommand::new("/usr/bin/git");
+        command.argv = vec!["push".into(), "origin".into(), "main".into()];
+        command.effect_types.insert(EffectType::ExecuteLocal);
+        command.effect_types.insert(EffectType::NetworkWrite);
+
+        let report = engine.evaluate(&command);
+        assert_eq!(report.decision, Decision::Prompt);
+        assert!(report.rule_ids.contains(&"prompt-git-push".to_string()));
     }
 
     #[test]

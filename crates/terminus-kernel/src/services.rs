@@ -175,9 +175,19 @@ impl KernelHandle {
         ));
         let revocation = token_issuer.revocation_list();
         let _revoker = Arc::new(TokenRevoker::new(revocation));
-        let code_intel = Arc::new(CodeIntelService::new(Arc::new(
-            terminus_code_intel::InMemorySymbolIndex::new(),
-        )));
+        let code_index =
+            terminus_code_intel::PersistentSymbolIndex::open(data_dir.join("code-intel.sqlite"))
+                .map_err(|error| {
+                    KernelAssemblyError::Misconfigured(format!("code-intel index: {error}"))
+                })?;
+        let code_intel = Arc::new(CodeIntelService::with_source(
+            Arc::new(code_index),
+            Arc::new(
+                terminus_code_intel::FileSystemWorkspaceSource::for_kernel_data_dir(
+                    data_dir.clone(),
+                ),
+            ),
+        ));
         let extension_host = Arc::new(WasiExtensionHost::new());
         let egress = Arc::new(EgressProxy::new(egress_policy, rate_limit));
         let egress_broker_root = data_dir.join("egress-brokers");
@@ -1231,6 +1241,17 @@ impl ProcessService {
                 if let Some(_consumed) = self.approvals.consume(&op_hash) {
                     // Approval granted — fall through to spawn.
                 } else {
+                    tracing::warn!(
+                        target: "terminus_kernel_audit",
+                        event = "approval_required",
+                        service = "process.start",
+                        request_id = %ctx.request_id,
+                        task_id = %ctx.task_id,
+                        program = %command.program,
+                        rule_ids = ?report.rule_ids,
+                        explanation = %report.explanation,
+                        "process start requires approval",
+                    );
                     return Err(KernelError::new(
                         terminus_kernel_protocol::ErrorCode::ApprovalRequired,
                         terminus_kernel_protocol::ErrorCategory::ApprovalRequired,
@@ -2123,12 +2144,6 @@ impl CodeIntelligenceService {
         }
     }
 
-    /// Direct accessor for the underlying `CodeIntelService`. Used by the
-    /// HTTP mini-service to call `find_references` and `diagnose_files`.
-    pub fn service(&self) -> &Arc<CodeIntelService> {
-        &self.inner
-    }
-
     pub fn inspect(
         &self,
         ctx: &RequestContext,
@@ -2155,6 +2170,54 @@ impl CodeIntelligenceService {
             "code-intel inspect authorized",
         );
         self.inner.inspect_symbol(symbol).map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::Internal,
+                terminus_kernel_protocol::ErrorCategory::Internal,
+                format!("{e}"),
+                false,
+            )
+        })
+    }
+
+    pub fn find_references(
+        &self,
+        ctx: &RequestContext,
+        _intent: &EffectIntent,
+        symbol: &str,
+    ) -> KernelResult<terminus_code_intel::ReferenceResult> {
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::CodeIntel,
+            &Scope::default(),
+        )?;
+        self.inner.find_references(symbol).map_err(|e| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::Internal,
+                terminus_kernel_protocol::ErrorCategory::Internal,
+                format!("{e}"),
+                false,
+            )
+        })
+    }
+
+    pub fn diagnose_files(
+        &self,
+        ctx: &RequestContext,
+        _intent: &EffectIntent,
+        paths: &[String],
+    ) -> KernelResult<Vec<terminus_code_intel::DiagnoseResult>> {
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::CodeIntel,
+            &Scope {
+                workspace_paths: paths.to_vec(),
+                network_destinations: Vec::new(),
+                secret_capabilities: Vec::new(),
+            },
+        )?;
+        self.inner.diagnose_files(paths).map_err(|e| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::Internal,
                 terminus_kernel_protocol::ErrorCategory::Internal,

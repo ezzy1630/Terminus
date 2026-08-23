@@ -19,6 +19,12 @@ import {
   bindAcceptanceCriteria,
   type BindingCoverageReport,
 } from "./binding.js";
+import {
+  buildClaimEvidenceGraph,
+  claimId,
+  isImmutableArtifact,
+  validateClaimEvidenceGraph,
+} from "./evidence.js";
 
 export interface CompletionGateInput {
   readonly taskId: Uuid7;
@@ -44,11 +50,13 @@ export interface CompletionGateInput {
 
 export type CompletionDenialReason =
   | "uncovered_criteria"
+  | "manual_criterion"
   | "required_predicate_failed"
   | "binding_invalid"
   | "completion_expression_unsatisfied"
   | "open_findings"
-  | "revision_mismatch";
+  | "revision_mismatch"
+  | "evidence_missing";
 
 export type CompletionGateDecision =
   | { readonly allow: true; readonly coverage: BindingCoverageReport }
@@ -70,11 +78,32 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
     };
   }
 
+  const nonAutomatedRequired = coverage.bindings.filter(
+    (binding) => binding.required && binding.disposition !== "predicate",
+  );
+  if (nonAutomatedRequired.length > 0) {
+    return {
+      allow: false,
+      reason: "manual_criterion",
+      detail: `required criteria have no independent predicate: ${nonAutomatedRequired.map((binding) => binding.criterionId).join(", ")}`,
+      coverage,
+    };
+  }
+
   if (input.sourceRevision !== input.plan.sourceRevision) {
     return {
       allow: false,
       reason: "revision_mismatch",
       detail: `plan revision '${input.plan.sourceRevision}' != final '${input.sourceRevision}'`,
+      coverage,
+    };
+  }
+
+  if (!isImmutableArtifact(input.finalCheckpoint)) {
+    return {
+      allow: false,
+      reason: "evidence_missing",
+      detail: "final checkpoint is not an immutable artifact reference",
       coverage,
     };
   }
@@ -104,6 +133,30 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
       allow: false,
       reason: "required_predicate_failed",
       detail: `required nodes not pass: ${requiredFailed.map((n) => n.id).join(", ")}`,
+      coverage,
+    };
+  }
+
+  const graph = buildClaimEvidenceGraph({
+    taskId: input.taskId,
+    criteria: input.criteria,
+    nodes: input.plan.nodes,
+    results: input.results,
+    observedAt: input.now,
+  });
+  const requiredClaimIds = coverage.bindings
+    .filter((binding) => binding.required && binding.disposition === "predicate")
+    .map((binding) => claimId(input.taskId, binding.criterionId));
+  const evidenceFailures = validateClaimEvidenceGraph(graph, {
+    sourceRevision: input.sourceRevision,
+    environmentImageDigest: input.environmentImageDigest,
+    requiredClaimIds,
+  });
+  if (evidenceFailures.length > 0) {
+    return {
+      allow: false,
+      reason: "evidence_missing",
+      detail: evidenceFailures.join("; "),
       coverage,
     };
   }

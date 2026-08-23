@@ -22,17 +22,21 @@ import {
   ChangedCodeInvalidator,
   evaluateCompletionExpression,
   VerificationEngine,
+  type ChangedCodeInvalidationInput,
   type EvaluationResult,
   type NodeExecutor,
 } from "./index.js";
 import type { VerificationAttemptRecord, VerificationStore } from "./store.js";
 import { serializeNodeSpec, type PredicateType } from "./node-spec.js";
+import { buildClaimEvidenceGraph } from "./evidence.js";
 
 export interface LifecycleDeps {
   readonly store: VerificationStore;
   readonly engine: VerificationEngine;
   readonly idSource: () => Uuid7;
   readonly clock: () => Rfc3339Timestamp;
+  /** Repository intelligence used to select affected tests/build checks. */
+  readonly dependencyIndex?: Partial<Omit<ChangedCodeInvalidationInput, "changedPaths">> | undefined;
 }
 
 export interface CreatePlanInput {
@@ -46,6 +50,7 @@ export interface CreatePlanInput {
 
 export class VerificationLifecycle {
   private readonly invalidated = new Map<string, Set<string>>();
+  private readonly criteriaByPlan = new Map<string, readonly AcceptanceCriterion[]>();
 
   constructor(private readonly deps: LifecycleDeps) {}
 
@@ -65,6 +70,7 @@ export class VerificationLifecycle {
     await this.deps.store.savePlan(plan);
     await this.deps.store.saveNodes(plan.id, plan.nodes);
     await this.deps.store.saveEdges(plan.id, plan.edges);
+    this.criteriaByPlan.set(plan.id, input.criteria);
     return plan;
   }
 
@@ -79,35 +85,56 @@ export class VerificationLifecycle {
   ): Promise<EvaluationResult> {
     const plan = await this.deps.store.getPlan(planId);
     if (plan === null) throw new ValidationError("verification plan not found", { planId });
+    if (workspaceRevision !== plan.sourceRevision) {
+      throw new ValidationError("verification must run against the plan's exact source revision", {
+        planRevision: plan.sourceRevision,
+        workspaceRevision,
+      });
+    }
+    if (environmentImageDigest.trim().length === 0) {
+      throw new ValidationError("verification requires an environment image digest");
+    }
 
     const result = await this.deps.engine.evaluate(plan, workspaceRevision, signal, {
       environmentImageDigest,
+      onAttempt: async (attemptResult) => {
+        const attempt: VerificationAttemptRecord = {
+          id: this.deps.idSource(),
+          planId: attemptResult.planId,
+          nodeId: attemptResult.nodeId,
+          attempt: attemptResult.attempts,
+          status: attemptResult.status,
+          sourceRevision: attemptResult.sourceRevision,
+          environmentImageDigest: attemptResult.environmentImageDigest,
+          evidence: attemptResult.artifacts,
+          toolCallId: attemptResult.toolCallId,
+          startedAt: attemptResult.startedAt,
+          completedAt: attemptResult.completedAt,
+          reason: attemptResult.reasonIfSkipped,
+          observations: attemptResult.structuredObservations,
+        };
+        await this.deps.store.saveAttempt(attempt);
+      },
     });
 
     const cleared = this.invalidated.get(planId) ?? new Set<string>();
     for (const r of result.results) {
-      const attempt: VerificationAttemptRecord = {
-        id: this.deps.idSource(),
-        planId: r.planId,
-        nodeId: r.nodeId,
-        attempt: r.attempts,
-        status: r.status,
-        sourceRevision: r.sourceRevision,
-        environmentImageDigest: r.environmentImageDigest,
-        evidence: r.artifacts,
-        toolCallId: r.toolCallId,
-        startedAt: r.startedAt,
-        completedAt: r.completedAt,
-        reason: r.reasonIfSkipped,
-        observations: r.structuredObservations,
-      };
-      await this.deps.store.saveAttempt(attempt);
       await this.deps.store.saveResult(r);
       // Fresh evaluation clears prior invalidation marks for that node.
       cleared.delete(r.nodeId);
     }
     if (cleared.size === 0) this.invalidated.delete(planId);
     else this.invalidated.set(planId, cleared);
+    const criteria = this.criteriaByPlan.get(planId);
+    if (criteria !== undefined) {
+      await this.deps.store.saveEvidenceGraph(planId, buildClaimEvidenceGraph({
+        taskId: plan.taskContractId,
+        criteria,
+        nodes: plan.nodes,
+        results: result.results,
+        observedAt: this.deps.clock(),
+      }));
+    }
     return result;
   }
 
@@ -124,12 +151,13 @@ export class VerificationLifecycle {
     const invalidator = new ChangedCodeInvalidator();
     const nodeIds = invalidator.invalidate(plan, {
       changedPaths,
-      symbolDependencies: new Map(),
-      testOwnership: new Map(),
-      buildGraph: new Map(),
+      symbolDependencies: this.deps.dependencyIndex?.symbolDependencies ?? new Map(),
+      testOwnership: this.deps.dependencyIndex?.testOwnership ?? new Map(),
+      buildGraph: this.deps.dependencyIndex?.buildGraph ?? new Map(),
     });
     if (nodeIds.size > 0) {
       await this.deps.store.deleteResults(planId, nodeIds);
+      await this.deps.store.deleteEvidenceGraph(planId);
       const set = this.invalidated.get(planId) ?? new Set<string>();
       for (const id of nodeIds) set.add(id);
       this.invalidated.set(planId, set);
@@ -199,6 +227,14 @@ export class VerificationLifecycle {
       this.deps.idSource,
       this.deps.clock,
     );
+    const evidenceGraph = buildClaimEvidenceGraph({
+      taskId: input.taskId,
+      criteria: input.criteria,
+      nodes: plan.nodes,
+      results,
+      observedAt: this.deps.clock(),
+    });
+    await this.deps.store.saveEvidenceGraph(input.planId, evidenceGraph);
     await this.deps.store.saveCompletionRecord(record);
     // Clear invalidation marks after successful completion.
     this.invalidated.delete(input.planId);

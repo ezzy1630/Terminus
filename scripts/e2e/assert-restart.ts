@@ -52,7 +52,12 @@ async function waitForCompletion(id: string): Promise<JsonObject> {
   const deadline = Date.now() + 15_000;
   let task = await api("GET", `/v1/tasks/${encodeURIComponent(id)}`);
   while (task.status !== "COMPLETED") {
-    if (task.status === "FAILED" || task.status === "ABORTED" || Date.now() >= deadline) {
+    if (
+      task.status === "FAILED"
+      || task.status === "FAILED_VERIFICATION"
+      || task.status === "ABORTED"
+      || Date.now() >= deadline
+    ) {
       throw new Error(`resumed task did not complete: ${JSON.stringify(task)}`);
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
@@ -90,7 +95,12 @@ const resumedTask = await api("POST", "/v1/tasks", {
   objective: "prove deterministic task resume after control-plane restart",
   non_goals: ["external side effects"],
   acceptance_criteria: [
-    { id: "restart", statement: "The resumed task reaches completion after a control-plane restart.", required: true },
+    {
+      id: "restart",
+      statement: "The resumed task reaches completion after a control-plane restart.",
+      verification_hint: "command: git rev-parse HEAD",
+      required: true,
+    },
   ],
   allowed_scope: { read_paths: ["/**"], write_paths: [], external_systems: [] },
 });

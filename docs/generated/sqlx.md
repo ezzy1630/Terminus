@@ -14,6 +14,7 @@ compatibility and emits this note so `codegen-check` can detect drift.
 |---|
 | `0001_initial.sql` |
 | `0002_verification_orchestration.sql` |
+| `0003_phase6_claim_evidence_admission.sql` |
 
 If a future Rust crate adopts SQLx, replace this script with
 `cargo sqlx prepare --workspace --check` and emit the resulting

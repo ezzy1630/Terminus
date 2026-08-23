@@ -288,6 +288,20 @@ impl SymbolIndex for PersistentSymbolIndex {
             let trimmed = line.trim_start();
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
 
+            // Keep references as source observations, not as a second lookup
+            // of declarations. This lets rename/impact callers distinguish a
+            // definition from every use site.
+            for (column, identifier) in identifiers_in_line(line) {
+                if is_language_keyword(identifier) {
+                    continue;
+                }
+                let reference_id = format!("{path}:{line_num}:{column}:{identifier}");
+                conn.execute(
+                    "INSERT OR REPLACE INTO references_table (id, symbol_name, path, line, snippet) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![reference_id, identifier, path, line_num, trimmed],
+                )?;
+            }
+
             // Extract imports
             if trimmed.starts_with("import ")
                 || trimmed.starts_with("use ")
@@ -490,7 +504,80 @@ impl SymbolIndex for PersistentSymbolIndex {
     }
 
     fn references(&self, name: &str) -> Result<Vec<Symbol>, CodeIntelError> {
-        self.lookup_symbol(name)
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex lock failed: {e}")))?;
+        let mut stmt = conn.prepare(
+            "SELECT symbol_name, path, line, snippet FROM references_table WHERE symbol_name = ?1 ORDER BY path, line",
+        )?;
+        let rows = stmt.query_map(params![name], |row| {
+            let path: String = row.get(1)?;
+            let line: u32 = row.get(2)?;
+            let snippet: String = row.get(3)?;
+            let mut symbol = Symbol::new(row.get::<_, String>(0)?, SymbolKind::Variable, path);
+            symbol.start_line = line;
+            symbol.end_line = line;
+            symbol.start_column = 1;
+            symbol.end_column = snippet.len() as u32;
+            symbol.signature = snippet;
+            Ok(symbol)
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    fn file_hash(&self, path: &str) -> Result<Option<String>, CodeIntelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex lock failed: {e}")))?;
+        let mut stmt = conn.prepare("SELECT content_hash FROM file_meta WHERE path = ?1")?;
+        let mut rows = stmt.query(params![path])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn indexed_paths(&self) -> Result<Vec<String>, CodeIntelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex lock failed: {e}")))?;
+        let mut stmt = conn.prepare("SELECT path FROM file_meta ORDER BY path")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut paths = Vec::new();
+        for row in rows {
+            paths.push(row?);
+        }
+        Ok(paths)
+    }
+
+    fn remove_file(&self, path: &str) -> Result<(), CodeIntelError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex lock failed: {e}")))?;
+        let transaction = conn.transaction()?;
+        transaction.execute("DELETE FROM symbols WHERE path = ?1", params![path])?;
+        transaction.execute(
+            "DELETE FROM references_table WHERE path = ?1",
+            params![path],
+        )?;
+        transaction.execute("DELETE FROM calls WHERE path = ?1", params![path])?;
+        transaction.execute("DELETE FROM imports WHERE source_path = ?1", params![path])?;
+        transaction.execute(
+            "DELETE FROM test_ownership WHERE source_path = ?1 OR test_path = ?1",
+            params![path],
+        )?;
+        transaction.execute("DELETE FROM file_meta WHERE path = ?1", params![path])?;
+        transaction.commit()?;
+        Ok(())
     }
 
     fn supported_languages(&self) -> Vec<String> {
@@ -500,6 +587,59 @@ impl SymbolIndex for PersistentSymbolIndex {
             "python".to_string(),
         ]
     }
+}
+
+fn identifiers_in_line(line: &str) -> Vec<(u32, &str)> {
+    let mut result = Vec::new();
+    let mut start: Option<usize> = None;
+    for (index, character) in line.char_indices() {
+        let valid = character == '_' || character.is_ascii_alphanumeric();
+        match (start, valid) {
+            (None, true) => start = Some(index),
+            (Some(begin), false) => {
+                result.push(((begin + 1) as u32, &line[begin..index]));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(begin) = start {
+        result.push(((begin + 1) as u32, &line[begin..]));
+    }
+    result
+}
+
+fn is_language_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "as" | "async"
+            | "await"
+            | "bool"
+            | "class"
+            | "const"
+            | "def"
+            | "else"
+            | "enum"
+            | "export"
+            | "fn"
+            | "for"
+            | "from"
+            | "function"
+            | "if"
+            | "impl"
+            | "import"
+            | "interface"
+            | "let"
+            | "match"
+            | "mod"
+            | "pub"
+            | "return"
+            | "struct"
+            | "type"
+            | "use"
+            | "var"
+            | "while"
+    )
 }
 
 #[cfg(test)]

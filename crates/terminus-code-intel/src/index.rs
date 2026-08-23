@@ -1,5 +1,6 @@
 use crate::error::CodeIntelError;
 use crate::symbols::{Symbol, SymbolKind};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -8,6 +9,13 @@ pub trait SymbolIndex: Send + Sync {
     fn index_file(&self, path: &str, content: &str) -> Result<(), CodeIntelError>;
     fn lookup_symbol(&self, name: &str) -> Result<Vec<Symbol>, CodeIntelError>;
     fn references(&self, name: &str) -> Result<Vec<Symbol>, CodeIntelError>;
+    /// Content hash of the last indexed snapshot for a path.
+    fn file_hash(&self, path: &str) -> Result<Option<String>, CodeIntelError>;
+    /// Paths represented by the indexed snapshot, including paths that may no
+    /// longer exist in the workspace.
+    fn indexed_paths(&self) -> Result<Vec<String>, CodeIntelError>;
+    /// Remove every indexed observation belonging to a path.
+    fn remove_file(&self, path: &str) -> Result<(), CodeIntelError>;
     fn supported_languages(&self) -> Vec<String>;
 }
 
@@ -17,6 +25,7 @@ pub trait SymbolIndex: Send + Sync {
 pub struct InMemorySymbolIndex {
     symbols: Mutex<HashMap<String, Vec<Symbol>>>,
     references: Mutex<HashMap<String, Vec<Symbol>>>,
+    file_hashes: Mutex<HashMap<String, String>>,
 }
 
 impl InMemorySymbolIndex {
@@ -44,6 +53,8 @@ impl InMemorySymbolIndex {
 
 impl SymbolIndex for InMemorySymbolIndex {
     fn index_file(&self, path: &str, content: &str) -> Result<(), CodeIntelError> {
+        self.remove_file(path)?;
+
         // Tiny heuristic: scan for `fn <name>`, `function <name>`, `def <name>`,
         // `class <name>`, `struct <name>`, `interface <name>`, `enum <name>`.
         let mut found = Vec::new();
@@ -90,6 +101,12 @@ impl SymbolIndex for InMemorySymbolIndex {
                 r.entry(sym.name.clone()).or_default().push(sym.clone());
             }
         }
+        if let Ok(mut hashes) = self.file_hashes.lock() {
+            hashes.insert(
+                path.to_string(),
+                format!("{:x}", Sha256::digest(content.as_bytes())),
+            );
+        }
         Ok(())
     }
 
@@ -107,6 +124,53 @@ impl SymbolIndex for InMemorySymbolIndex {
             .lock()
             .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex: {e}")))?;
         Ok(g.get(name).cloned().unwrap_or_default())
+    }
+
+    fn file_hash(&self, path: &str) -> Result<Option<String>, CodeIntelError> {
+        let hashes = self
+            .file_hashes
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex: {e}")))?;
+        Ok(hashes.get(path).cloned())
+    }
+
+    fn indexed_paths(&self) -> Result<Vec<String>, CodeIntelError> {
+        let hashes = self
+            .file_hashes
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex: {e}")))?;
+        let mut paths = hashes.keys().cloned().collect::<Vec<_>>();
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn remove_file(&self, path: &str) -> Result<(), CodeIntelError> {
+        let mut hashes = self
+            .file_hashes
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex: {e}")))?;
+        hashes.remove(path);
+        drop(hashes);
+
+        let mut symbols = self
+            .symbols
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex: {e}")))?;
+        symbols.retain(|_, entries| {
+            entries.retain(|symbol| symbol.path != path);
+            !entries.is_empty()
+        });
+        drop(symbols);
+
+        let mut references = self
+            .references
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex: {e}")))?;
+        references.retain(|_, entries| {
+            entries.retain(|symbol| symbol.path != path);
+            !entries.is_empty()
+        });
+        Ok(())
     }
 
     fn supported_languages(&self) -> Vec<String> {

@@ -93,6 +93,12 @@ export interface DurableTaskRepository {
   updateEffectRecord(effect: EffectRecord, outboxMessage?: OutboxMessage): Promise<EffectRecord>;
   listEffects(taskId: string): Promise<readonly EffectRecord[]>;
 
+  // Speculative candidate branches and their immutable admission proof.
+  createCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord>;
+  getCandidateBranch(branchId: string): Promise<CandidateBranchRecord | null>;
+  updateCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord>;
+  listCandidateBranches(taskId: string): Promise<readonly CandidateBranchRecord[]>;
+
   createAuthorization(authz: AuthorizationInstance, outboxMessage?: OutboxMessage): Promise<AuthorizationInstance>;
   getAuthorization(id: string): Promise<AuthorizationInstance | null>;
   updateAuthorization(authz: AuthorizationInstance, outboxMessage?: OutboxMessage): Promise<AuthorizationInstance>;
@@ -123,3 +129,41 @@ export interface DurableTaskRepository {
   clear(): Promise<void>;
 }
 
+export interface CandidateEvidenceRecord {
+  readonly evidenceId: string;
+  readonly artifactUri: string;
+  readonly artifactHash: string;
+  readonly sourceRevision: string;
+  readonly environmentImageDigest: string;
+  readonly verifierResult: "pass";
+}
+
+export interface CandidateClaimRecord {
+  readonly claimId: string;
+  readonly status: "SATISFIED" | "WAIVED";
+  readonly evidence: readonly CandidateEvidenceRecord[];
+}
+
+export interface CandidateCompletionProof {
+  readonly verificationPlanId: string;
+  readonly completionRecordDigest: string;
+  readonly sourceRevision: string;
+  readonly environmentImageDigest: string;
+  readonly completionExpressionSatisfied: true;
+  readonly claims: readonly CandidateClaimRecord[];
+}
+
+export interface CandidateBranchRecord {
+  readonly branchId: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly actorPrincipal: string;
+  readonly worktreePath: string;
+  readonly epoch: number;
+  readonly baseRevision: string;
+  readonly headRevision: string;
+  readonly scopeDigest: string;
+  readonly effectIds: readonly string[];
+  readonly proof: CandidateCompletionProof | null;
+  readonly status: "OPEN" | "ADMITTED" | "REJECTED";
+}

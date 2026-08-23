@@ -290,6 +290,21 @@ export class TaskService {
   }
 }
 
+export {
+  AdmissionService,
+  type AdmitBranchInput,
+  type CandidateAdmissionRepository,
+  type CandidateBranch,
+  type CandidateBranchMerger,
+  type CandidateEffectLedger,
+} from "./admission.js";
+export type {
+  CandidateBranchRecord,
+  CandidateClaimRecord,
+  CandidateCompletionProof,
+  CandidateEvidenceRecord,
+} from "./types.js";
+
 // ────────────────────────── Glob matcher ─────────────────────────────────────
 
 /** Simple glob matcher supporting `**` and `*`. */
@@ -355,5 +370,4 @@ export * from "./authorizations.js";
 export * from "./handles.js";
 export * from "./sequence-policy.js";
 export * from "./admission.js";
-
 

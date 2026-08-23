@@ -47,6 +47,14 @@ export TERMINUS_CONTROL_PORT="$CONTROL_PORT"
 mkdir -p "$TERMINUS_E2E_WORKSPACE_ROOT"
 mkdir -p "$TERMINUS_DATA"
 cp "$ROOT/scripts/e2e/fixtures/read.txt" "$TERMINUS_DATA/e2e-fixture.txt"
+# The kernel's isolated data root is the execution workspace used by this
+# harness. Give it a real immutable VCS baseline so verification can bind its
+# plan and admission proof to an actual revision instead of a synthetic token.
+git -C "$TERMINUS_DATA" init -q
+git -C "$TERMINUS_DATA" config user.email "terminus-e2e@example.invalid"
+git -C "$TERMINUS_DATA" config user.name "Terminus E2E"
+git -C "$TERMINUS_DATA" add e2e-fixture.txt
+git -C "$TERMINUS_DATA" commit -q -m "e2e baseline"
 
 if curl --noproxy '*' -sS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/v1/system/health" >/dev/null 2>&1; then
   echo "[e2e] port $CONTROL_PORT is already in use; refusing to share a control plane" >&2
@@ -58,7 +66,8 @@ DATABASE_URL="$DATABASE_URL" bun run "$ROOT/scripts/migrate.ts" >"$TMP_DIR/migra
 
 echo "[e2e] starting kernel"
 kernel_binary="$ROOT/mini-services/terminus-kernel/target/debug/terminus-kernel-mini"
-cargo build --manifest-path "$ROOT/mini-services/terminus-kernel/Cargo.toml" >"$TMP_DIR/kernel-build.log" 2>&1
+CARGO_TARGET_DIR="$ROOT/mini-services/terminus-kernel/target" \
+  cargo build --manifest-path "$ROOT/mini-services/terminus-kernel/Cargo.toml" >"$TMP_DIR/kernel-build.log" 2>&1
 if [[ ! -x "$kernel_binary" ]]; then
   echo "[e2e] kernel build did not produce an executable; see $TMP_DIR/kernel-build.log" >&2
   exit 1

@@ -6,7 +6,7 @@
  * valid continuation tokens, and artifact spill behavior.
  */
 import { describe, test, expect } from "bun:test";
-import type { Uuid7 } from "@terminus/domain";
+import type { Uuid7, ContentHash } from "@terminus/domain";
 import {
   ProductionReadExecutor,
   ProductionExecExecutor,
@@ -14,6 +14,7 @@ import {
   type ProcessKernelProvider,
   type WorkspaceFile,
   type ToolCallContext,
+  computeSha256,
 } from "./index.js";
 
 function fakeUuid(n: number): Uuid7 {
@@ -44,6 +45,24 @@ class MockReadProvider implements ReadProvider {
       return { path: "large.ts", content: lines.join("\n") };
     }
     return null;
+  }
+
+  async spillArtifact(input: {
+    readonly content: string | Uint8Array;
+    readonly mediaType: string;
+    readonly sourceUri: string;
+  }) {
+    const bytes = typeof input.content === "string"
+      ? Buffer.byteLength(input.content, "utf8")
+      : input.content.byteLength;
+    const hash = computeSha256(input.content);
+    return {
+      uri: `artifact://sha256/${hash.slice("sha256:".length)}`,
+      mediaType: input.mediaType,
+      bytes,
+      hash,
+      content: input.content,
+    };
   }
 }
 
@@ -94,6 +113,59 @@ describe("Truncation & Elision Boundary Tests", () => {
     expect(res.status).toBe("partial");
     expect(res.truncation.occurred).toBe(true);
     expect(res.truncation.continuation).not.toBeNull();
+  });
+
+  test("read continuation is bound to the original byte budget", async () => {
+    const readEx = new ProductionReadExecutor(new MockReadProvider());
+    const first = await readEx.execute(
+      { path: "large.ts", mode: "full", maxBytes: 1000 },
+      mkCtx(),
+    );
+    expect(first.truncation.continuation).not.toBeNull();
+
+    const replay = await readEx.execute(
+      {
+        path: "large.ts",
+        mode: "full",
+        maxBytes: 1200,
+        continuation: first.truncation.continuation,
+      },
+      mkCtx(),
+    );
+    expect(replay.status).toBe("error");
+    expect(replay.summary).toContain("STALE_CONTINUATION");
+  });
+
+  test("oversized rendered projections spill as exact immutable artifacts", async () => {
+    const readEx = new ProductionReadExecutor(new MockReadProvider());
+    const res = await readEx.execute(
+      { path: "large.ts", mode: "range", ranges: [{ startLine: 1, endLine: 100 }], maxBytes: 64 },
+      mkCtx(),
+    );
+    expect(res.status).toBe("success");
+    expect(res.data?.content).toBeNull();
+    expect(res.data?.artifact?.uri).toMatch(/^artifact:\/\/sha256\/[0-9a-f]{64}$/);
+    expect(res.artifacts).toHaveLength(1);
+    expect(res.truncation.occurred).toBe(false);
+  });
+
+  test("artifact checksum mismatches fail closed", async () => {
+    const provider: ReadProvider = {
+      async readFile() { return null; },
+      async readArtifact(uri) {
+        return {
+          uri,
+          mediaType: "text/plain",
+          bytes: 3,
+          hash: ("sha256:" + "0".repeat(64)) as ContentHash,
+          content: "bad",
+        };
+      },
+    };
+    const readEx = new ProductionReadExecutor(provider);
+    const res = await readEx.execute({ path: "artifact://sha256/" + "1".repeat(64) }, mkCtx());
+    expect(res.status).toBe("error");
+    expect(res.summary).toContain("Artifact checksum mismatch");
   });
 
   test("exec stdout spill creates artifact descriptor and flags truncation", async () => {

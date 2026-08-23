@@ -38,9 +38,14 @@ import { createKernelArtifactClient, PrismaContextStore } from "./context-store.
 import { PatchCommitMode, type RequestContext } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import {
   createVerificationRuntime,
+  createKernelPredicateRunner,
   defaultCriteriaNodes,
   persistPlanToPrisma,
   persistResultsToPrisma,
+  persistClaimEvidenceGraphToPrisma,
+  createPrismaCompletionAdmission,
+  resolveKernelEnvironmentDigest,
+  resolveWorkspaceRevision,
 } from "./verification-runtime.js";
 import type {
   AcceptanceCriterion,
@@ -2479,13 +2484,22 @@ const routes: Route[] = [
       return sendError(res, 400, "INVALID_TRANSITION_REQUEST", `invalid transition request: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`, "validation");
     }
     const { targetStatus, expectedVersion, reason } = parsed.data;
+    if (targetStatus === "COMPLETED") {
+      return sendError(
+        res,
+        409,
+        "COMPLETION_REQUIRES_ADMISSION",
+        "tasks may reach COMPLETED only through verification and candidate admission",
+        "policy",
+      );
+    }
     if (expectedVersion !== null && expectedVersion !== task.version) {
       return sendError(res, 409, "VERSION_CONFLICT", `expected version ${expectedVersion} but task is at version ${task.version}`, "conflict", { expected_version: expectedVersion, actual_version: task.version });
     }
     if (!isTaskV2TransitionAllowed(task.status, targetStatus)) {
       return sendError(res, 409, "ILLEGAL_TRANSITION", `illegal task transition ${task.status} -> ${targetStatus}`, "conflict", { from: task.status, to: targetStatus });
     }
-    const terminal = targetStatus === "COMPLETED" || targetStatus === "PARTIAL" || targetStatus === "CANCELLED" || targetStatus === "FAILED";
+    const terminal = targetStatus === "PARTIAL" || targetStatus === "CANCELLED" || targetStatus === "FAILED";
     const updated: TaskV2 = {
       ...task,
       status: targetStatus,
@@ -4097,8 +4111,34 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
           aggregateType: "task", aggregateId: task.id, aggregateSequence: 3,
           payload: { phase: "VERIFY" },
         });
-        // Real verification DAG + completion gate (M8). False completion is denied.
-        const runtime = createVerificationRuntime();
+        // Real verification DAG + completion gate (M8). Verification commands,
+        // source identity, environment identity, and evidence all cross the
+        // kernel/artifact boundary; no local always-pass fallback is allowed.
+        const verificationClients = requireKernelUds();
+        const verificationBaseContext: RequestContext = {
+          ...kernelContext(),
+          sessionId: turn.thread.sessionId,
+          taskId: task.id,
+          turnId,
+          workspaceId: workspace.id,
+        };
+        const verificationArtifactWriter = {
+          write: async (input: {
+            readonly bytes: Uint8Array;
+            readonly mediaType: string;
+            readonly metadata: Readonly<Record<string, unknown>>;
+          }) => {
+            const artifact = await artifactClient.ingest(input.bytes, {
+              mediaType: input.mediaType,
+              custom: input.metadata,
+            });
+            return artifactClient.toArtifactRef(artifact);
+          },
+        };
+        const runtime = createVerificationRuntime(
+          createKernelPredicateRunner(verificationClients, verificationBaseContext, workspace.id),
+          verificationArtifactWriter,
+        );
         const contractRows = await db.acceptanceCriterion.findMany({
           where: {
             taskId: task.id,
@@ -4113,8 +4153,12 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
         }));
         const nodes = defaultCriteriaNodes(criteria);
         const completionExpression = nodes.map((n) => n.id).join(" && ");
-        const sourceRevision = "git:dev";
-        const environmentDigest = "sha256:dev-environment";
+        const sourceRevision = await resolveWorkspaceRevision(
+          verificationClients,
+          verificationBaseContext,
+          workspace.id,
+        );
+        const environmentDigest = await resolveKernelEnvironmentDigest(verificationClients);
         const plan = await runtime.lifecycle.createPlan({
           taskContractId: task.id as never,
           taskContractVersion: task.activeContractVersion,
@@ -4123,28 +4167,34 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
           nodes,
           completionExpression,
         });
-        try {
-          await persistPlanToPrisma(db, {
-            id: plan.id,
-            taskId: task.id,
-            contractVersion: plan.taskContractVersion,
-            sourceRevision: plan.sourceRevision,
-            completionExpression: plan.completionExpression,
-            nodes: plan.nodes.map((n) => ({
-              id: n.id,
-              kind: n.kind,
-              required: n.required,
-              specification: n.specification,
-              timeout: n.timeout,
-              retryPolicy: n.retryPolicy,
-              acceptanceCriterionId: n.acceptanceCriterionId,
-              dependsOn: n.dependsOn,
-            })),
-            edges: plan.edges,
-          });
-        } catch (persistErr) {
-          console.warn("verification plan prisma persist degraded", persistErr);
-        }
+        const planArtifact = await ingestJsonArtifact(
+          artifactClient,
+          {
+            plan,
+            criteria,
+          },
+          "verification-plan",
+          { taskId: task.id, workspaceId: workspace.id },
+        );
+        await persistPlanToPrisma(db, {
+          id: plan.id,
+          taskId: task.id,
+          contractVersion: plan.taskContractVersion,
+          sourceRevision: plan.sourceRevision,
+          completionExpression: plan.completionExpression,
+          planArtifact: planArtifact.uri,
+          nodes: plan.nodes.map((n) => ({
+            id: n.id,
+            kind: n.kind,
+            required: n.required,
+            specification: n.specification,
+            timeout: n.timeout,
+            retryPolicy: n.retryPolicy,
+            acceptanceCriterionId: n.acceptanceCriterionId,
+            dependsOn: n.dependsOn,
+          })),
+          edges: plan.edges,
+        });
 
         const evaluation = await runtime.lifecycle.evaluate(
           plan.id,
@@ -4152,10 +4202,11 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
           environmentDigest,
           null,
         );
-        try {
-          await persistResultsToPrisma(db, evaluation.results);
-        } catch (persistErr) {
-          console.warn("verification results prisma persist degraded", persistErr);
+        const attempts = await runtime.store.listAttempts(plan.id);
+        await persistResultsToPrisma(db, evaluation.results, attempts);
+        const evidenceGraph = await runtime.store.getEvidenceGraph(plan.id);
+        if (evidenceGraph !== null) {
+          await persistClaimEvidenceGraphToPrisma(db, evidenceGraph);
         }
 
         for (const r of evaluation.results) {
@@ -4203,8 +4254,21 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
           return;
         }
 
+        const finalCheckpoint = await ingestJsonArtifact(
+          artifactClient,
+          {
+            taskId: task.id,
+            planId: plan.id,
+            sourceRevision,
+            environmentDigest,
+            results: evaluation.results,
+            claims: evidenceGraph?.claims ?? [],
+          },
+          "verification-completion",
+          { taskId: task.id, workspaceId: workspace.id },
+        );
         try {
-          await runtime.lifecycle.complete({
+          const completionRecord = await runtime.lifecycle.complete({
             taskId: task.id as never,
             planId: plan.id,
             criteria,
@@ -4217,12 +4281,76 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
             externalEffects: [],
             costMicros: 0n as Micros,
             durationSeconds: 0,
-            finalCheckpoint: {
-              hash: "sha256:" + "0".repeat(64),
-              uri: `artifact://sha256/${"0".repeat(64)}`,
-              mediaType: "application/json",
-              bytes: 0n,
-            } as never,
+            finalCheckpoint: artifactClient.toArtifactRef(finalCheckpoint),
+          });
+
+          if (evidenceGraph === null) {
+            throw new Error("completion admission requires a persisted claim/evidence graph");
+          }
+          const candidateBranchId = `completion:${task.id}:${plan.id}`;
+          const requiredClaimIds = new Set(
+            criteria.filter((criterion) => criterion.required).map((criterion) => `claim:${task.id}:${criterion.id}`),
+          );
+          const claims = evidenceGraph.claims
+            .filter(
+              (claim): claim is Claim & { readonly status: "SATISFIED" | "WAIVED" } =>
+                claim.status === "SATISFIED" || claim.status === "WAIVED",
+            )
+            .map((claim) => ({
+              claimId: claim.id,
+              status: claim.status,
+              evidence: evidenceGraph.evidence
+                .filter((evidence) => evidence.claimId === claim.id)
+                .map((evidence) => {
+                  if (evidence.artifactRef === null || evidence.sourceRevision === null || evidence.environmentHash === null) {
+                    throw new Error(`claim '${claim.id}' has incomplete admission evidence`);
+                  }
+                  return {
+                    evidenceId: evidence.id,
+                    artifactUri: evidence.artifactRef.uri,
+                    artifactHash: evidence.artifactRef.hash,
+                    sourceRevision: evidence.sourceRevision,
+                    environmentImageDigest: evidence.environmentHash,
+                    verifierResult: "pass" as const,
+                  };
+                }),
+            }))
+            .filter((claim) => requiredClaimIds.has(claim.claimId) || claim.status === "SATISFIED");
+          const completionRecordDigest = computeContentHash(
+            new TextEncoder().encode(canonicalJson(completionRecord)),
+          );
+          const admission = createPrismaCompletionAdmission(
+            db,
+            () => resolveWorkspaceRevision(verificationClients, verificationBaseContext, workspace.id),
+          );
+          await admission.registerCandidateBranch({
+            branchId: candidateBranchId,
+            taskId: task.id,
+            attemptId: turnId,
+            actorPrincipal: "agent:verification-runtime",
+            worktreePath: workspace.rootUri,
+            epoch: 1,
+            baseRevision: sourceRevision,
+            headRevision: sourceRevision,
+            scopeDigest: computeContentHash(task.scopeDigest),
+            effectIds: [],
+            proof: {
+              verificationPlanId: plan.id,
+              completionRecordDigest,
+              sourceRevision,
+              environmentImageDigest: environmentDigest,
+              completionExpressionSatisfied: true,
+              claims,
+            },
+            status: "OPEN",
+          });
+          await admission.admitBranch({
+            branchId: candidateBranchId,
+            taskId: task.id,
+            attemptId: turnId,
+            actorPrincipal: "agent:verification-runtime",
+            reviewerPrincipal: "principal:verification-reviewer",
+            requiredClaimsSatisfied: [...requiredClaimIds],
           });
         } catch (gateErr) {
           await db.task.update({
@@ -4271,6 +4399,35 @@ async function agentLoop(turnId: string, userInput: string): Promise<void> {
       where: { id: turnId },
       data: { state: "FAILED", completedAt: new Date(), terminalErrorJson: JSON.stringify({ message: String(err) }) },
     }).catch(() => {});
+    if (turn.taskId) {
+      const failedTask = await db.task.findUnique({
+        where: { id: turn.taskId },
+        select: { status: true },
+      }).catch(() => null);
+      if (failedTask?.status === "ACTIVE" || failedTask?.status === "VERIFYING") {
+        const status = failedTask.status === "VERIFYING" ? "FAILED_VERIFICATION" : "FAILED";
+        await db.task.update({
+          where: { id: turn.taskId },
+          data: {
+            status,
+            phase: failedTask.status === "VERIFYING" ? "VERIFY" : "IMPLEMENT",
+            completedAt: new Date(),
+            terminalReasonJson: JSON.stringify({
+              reason: failedTask.status === "VERIFYING" ? "verification_runtime_error" : "agent_loop_error",
+              error: String(err),
+            }),
+          },
+        }).catch(() => {});
+        await emit({
+          eventType: "task.failed",
+          aggregateType: "task",
+          aggregateId: turn.taskId,
+          aggregateSequence: 99,
+          correlationId: turn.taskId,
+          payload: { status, error: String(err) },
+        }).catch(() => {});
+      }
+    }
     await emit({
       eventType: "turn.failed",
       aggregateType: "turn", aggregateId: turnId, aggregateSequence: 99,

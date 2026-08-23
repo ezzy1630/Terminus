@@ -122,6 +122,8 @@ model Task {
   agents                Agent[]
   delegations           Delegation[]
   verificationPlans     VerificationPlan[]
+  claims                Claim[]
+  candidateBranches     CandidateBranch[]
   jobs                  Job[]
   capabilityActivations CapabilityActivation[]
 
@@ -650,6 +652,64 @@ model VerificationResult {
   @@unique([planId, nodeId, attempt])
   @@index([planId])
   @@map("verification_results")
+}
+
+model Claim {
+  id                   String     @id
+  taskId               String     @map("task_id")
+  statement            String
+  requiredEvidenceKind String     @map("required_evidence_kind")
+  status               String
+  evidenceIdsJson      String     @map("evidence_ids_json")
+  waivedRationale      String?    @map("waived_rationale")
+  createdAt            DateTime   @default(now()) @map("created_at")
+  updatedAt            DateTime   @updatedAt @map("updated_at")
+
+  task     Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  evidence Evidence[]
+
+  @@index([taskId, status])
+  @@map("claims")
+}
+
+model Evidence {
+  id               String   @id
+  claimId          String   @map("claim_id")
+  kind             String
+  summary          String
+  sourceRevision   String   @map("source_revision")
+  environmentHash  String?  @map("environment_hash")
+  verifierResult   String   @map("verifier_result")
+  artifactRef      String?  @map("artifact_ref")
+  metadataJson     String   @map("metadata_json")
+  observedAt       DateTime @map("observed_at")
+
+  claim Claim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  @@index([claimId])
+  @@map("evidence")
+}
+
+model CandidateBranch {
+  id                String   @id
+  taskId            String   @map("task_id")
+  attemptId         String   @map("attempt_id")
+  actorPrincipal    String   @map("actor_principal")
+  worktreePath      String   @map("worktree_path")
+  epoch             Int
+  baseRevision      String   @map("base_revision")
+  headRevision      String   @map("head_revision")
+  scopeDigest       String   @map("scope_digest")
+  effectIdsJson     String   @map("effect_ids_json")
+  proofJson         String?  @map("proof_json")
+  status            String
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, status])
+  @@map("candidate_branches")
 }
 
 // --- Memory ---------------------------------------------------------------

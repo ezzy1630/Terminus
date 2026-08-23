@@ -103,6 +103,7 @@ export interface InspectResultData {
   } | undefined;
   readonly references?: readonly { path: string; line: number; text: string }[] | undefined;
   readonly callHierarchy?: readonly CallHierarchyItem[] | undefined;
+  readonly typeHierarchy?: readonly CallHierarchyItem[] | undefined;
   readonly renamePlan?: readonly RenamePlanEdit[] | undefined;
   readonly failureAnalysis?: FailureAnalysis | undefined;
   readonly debuggerState?: DebuggerState | undefined;
@@ -117,9 +118,13 @@ export interface InspectResultData {
 
 export interface InspectProvider {
   getDiagnostics(paths?: readonly string[]): Promise<readonly Diagnostic[]>;
-  lookupSymbol?(name: string, path?: string): Promise<InspectResultData["symbol"] | null>;
-  findReferences?(symbol: string): Promise<readonly { path: string; line: number; text: string }[]>;
-  getWorkspaceDiff?(): Promise<{ modified: string[]; added: string[]; removed: string[] }>;
+  lookupSymbol(name: string, path?: string): Promise<InspectResultData["symbol"] | null>;
+  findReferences(symbol: string): Promise<readonly { path: string; line: number; text: string }[]>;
+  getWorkspaceDiff(): Promise<{ modified: string[]; added: string[]; removed: string[] }>;
+  getCallHierarchy?(symbol: string): Promise<readonly CallHierarchyItem[]>;
+  getTypeHierarchy?(symbol: string): Promise<readonly CallHierarchyItem[]>;
+  debugTest?(input: { readonly path?: string; readonly testSelector?: string }): Promise<DebuggerState | null>;
+  getTestStatus?(selector: string): Promise<readonly Diagnostic[]>;
   parseFailureArtifact?(uri: string): Promise<FailureAnalysis | null>;
 }
 
@@ -215,15 +220,7 @@ export class ProductionInspectExecutor implements ToolExecutor<InspectResultData
             traceId: ctx.traceId,
           });
         }
-        const sym = this.provider.lookupSymbol
-          ? await this.provider.lookupSymbol(input.symbol, input.path)
-          : {
-              name: input.symbol,
-              kind: "function",
-              path: input.path ?? "src/index.ts",
-              range: [10, 30] as [number, number],
-              signature: `function ${input.symbol}(): void`,
-            };
+        const sym = await this.provider.lookupSymbol(input.symbol, input.path);
 
         const data: InspectResultData = {
           op: "inspect_symbol",
@@ -245,9 +242,7 @@ export class ProductionInspectExecutor implements ToolExecutor<InspectResultData
             traceId: ctx.traceId,
           });
         }
-        const refs = this.provider.findReferences
-          ? await this.provider.findReferences(input.symbol)
-          : [];
+        const refs = await this.provider.findReferences(input.symbol);
 
         const data: InspectResultData = {
           op: "find_references",
@@ -262,6 +257,97 @@ export class ProductionInspectExecutor implements ToolExecutor<InspectResultData
         });
       }
 
+      case "definition": {
+        if (!input.symbol) {
+          return errorResult("symbol parameter required for definition", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+        const resolvedSymbol = await this.provider.lookupSymbol(input.symbol, input.path);
+        if (resolvedSymbol === undefined || resolvedSymbol === null) {
+          return errorResult(`definition not found for symbol ${input.symbol}`, {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+        const data: InspectResultData = {
+          op: "definition",
+          summary: `Definition for ${resolvedSymbol.name} is ${resolvedSymbol.path}:${resolvedSymbol.range[0]}`,
+          symbol: resolvedSymbol,
+        };
+        return okResult(data, { toolCallId: ctx.toolCallId, traceId: ctx.traceId, summary: data.summary });
+      }
+
+      case "call_hierarchy":
+      case "trace_function": {
+        const symbol = input.symbol ?? input.functionName;
+        if (!symbol) {
+          return errorResult("symbol or functionName parameter required for call hierarchy", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+        if (!this.provider.getCallHierarchy) {
+          return errorResult("call-hierarchy provider is unavailable", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+        const hierarchy = await this.provider.getCallHierarchy(symbol);
+        const data: InspectResultData = {
+          op: input.op,
+          summary: `Found ${hierarchy.length} call-hierarchy edges for ${symbol}`,
+          callHierarchy: hierarchy,
+        };
+        return okResult(data, { toolCallId: ctx.toolCallId, traceId: ctx.traceId, summary: data.summary });
+      }
+
+      case "type_hierarchy": {
+        if (!input.symbol) {
+          return errorResult("symbol parameter required for type_hierarchy", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+        if (!this.provider.getTypeHierarchy) {
+          return errorResult("type-hierarchy provider is unavailable", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+        const hierarchy = await this.provider.getTypeHierarchy(input.symbol);
+        const data: InspectResultData = {
+          op: input.op,
+          summary: `Found ${hierarchy.length} type-hierarchy items for ${input.symbol}`,
+          typeHierarchy: hierarchy,
+        };
+        return okResult(data, { toolCallId: ctx.toolCallId, traceId: ctx.traceId, summary: data.summary });
+      }
+
+      case "test_status": {
+        const selector = input.testSelector ?? input.path;
+        if (!selector) {
+          return errorResult("testSelector or path parameter required for test_status", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+        if (!this.provider.getTestStatus) {
+          return errorResult("test-status provider is unavailable", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+        const diagnostics = await this.provider.getTestStatus(selector);
+        const data: InspectResultData = {
+          op: "test_status",
+          summary: `Test status for ${selector}: ${diagnostics.length} diagnostic(s)`,
+          diagnostics,
+        };
+        return okResult(data, { toolCallId: ctx.toolCallId, traceId: ctx.traceId, summary: data.summary });
+      }
+
       case "rename_symbol": {
         if (!input.symbol || !input.newName) {
           return errorResult("symbol and newName parameters required for rename_symbol", {
@@ -269,9 +355,7 @@ export class ProductionInspectExecutor implements ToolExecutor<InspectResultData
             traceId: ctx.traceId,
           });
         }
-        const refs = this.provider.findReferences
-          ? await this.provider.findReferences(input.symbol)
-          : [];
+        const refs = await this.provider.findReferences(input.symbol);
 
         const renamePlan: RenamePlanEdit[] = refs.map((r) => ({
           path: r.path,
@@ -294,12 +378,18 @@ export class ProductionInspectExecutor implements ToolExecutor<InspectResultData
       }
 
       case "inspect_failure": {
+        if (!input.failureArtifact) {
+          return errorResult("failureArtifact is required for inspect_failure; synthetic failures are not evidence", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
         let fa: FailureAnalysis;
-        if (input.failureArtifact && this.provider.parseFailureArtifact) {
+        if (this.provider.parseFailureArtifact) {
           const parsed = await this.provider.parseFailureArtifact(input.failureArtifact);
           fa = parsed ?? parseStackTrace(input.failureArtifact);
         } else {
-          fa = parseStackTrace(input.failureArtifact ?? "AssertionError: expected true, got false\n  at testAuth (src/auth.ts:42:10)");
+          fa = parseStackTrace(input.failureArtifact);
         }
 
         const data: InspectResultData = {
@@ -316,9 +406,7 @@ export class ProductionInspectExecutor implements ToolExecutor<InspectResultData
       }
 
       case "workspace_diff": {
-        const diff = this.provider.getWorkspaceDiff
-          ? await this.provider.getWorkspaceDiff()
-          : { modified: [], added: [], removed: [] };
+        const diff = await this.provider.getWorkspaceDiff();
 
         const data: InspectResultData = {
           op: "workspace_diff",
@@ -334,23 +422,30 @@ export class ProductionInspectExecutor implements ToolExecutor<InspectResultData
       }
 
       case "debug_test": {
-        const frame: StackFrame = {
-          frameIndex: 0,
-          functionName: input.functionName ?? "testMain",
-          path: input.path ?? "tests/main.test.ts",
-          line: 15,
-        };
-
-        const dbg: DebuggerState = {
-          currentFrame: frame,
-          variables: { result: "null", status: '"pending"' },
-          callStack: [frame],
-          breakpointHit: true,
-        };
+        if (!this.provider.debugTest) {
+          return errorResult("debugger provider is unavailable", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
+        const debugInput: { path?: string; testSelector?: string } = {};
+        if (input.path !== undefined) {
+          debugInput.path = input.path;
+        }
+        if (input.testSelector !== undefined) {
+          debugInput.testSelector = input.testSelector;
+        }
+        const dbg = await this.provider.debugTest(debugInput);
+        if (dbg === null) {
+          return errorResult("debugger returned no paused test state", {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+          });
+        }
 
         const data: InspectResultData = {
           op: "debug_test",
-          summary: `Paused at breakpoint in ${frame.functionName} (${frame.path}:${frame.line})`,
+          summary: `Paused at breakpoint in ${dbg.currentFrame.functionName} (${dbg.currentFrame.path}:${dbg.currentFrame.line})`,
           debuggerState: dbg,
         };
 
@@ -362,14 +457,9 @@ export class ProductionInspectExecutor implements ToolExecutor<InspectResultData
       }
 
       default: {
-        const data: InspectResultData = {
-          op: input.op,
-          summary: `Completed inspect operation ${input.op}`,
-        };
-        return okResult(data, {
+        return errorResult(`Inspect operation '${input.op}' is not implemented by the configured provider`, {
           toolCallId: ctx.toolCallId,
           traceId: ctx.traceId,
-          summary: data.summary,
         });
       }
     }

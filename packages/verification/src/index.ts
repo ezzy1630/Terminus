@@ -41,6 +41,16 @@ export {
   type NodeExecutorInput,
   type PredicateExecutor,
 } from "./registry.js";
+export {
+  claimId,
+  buildClaimEvidenceGraph,
+  validateClaimEvidenceGraph,
+  contentArtifactRef,
+  isImmutableArtifact,
+  type ClaimEvidenceEdge,
+  type ClaimEvidenceGraph,
+  type EvidenceArtifactWriter,
+} from "./evidence.js";
 
 // ────────────────────────── Plan builder ─────────────────────────────────────
 
@@ -54,8 +64,12 @@ export interface VerificationPlanBuilderInput {
 }
 
 export function buildVerificationPlan(input: VerificationPlanBuilderInput): VerificationPlan {
+  if (input.sourceRevision.trim().length === 0) {
+    throw new ValidationError("verification plan requires a source revision");
+  }
   // Validate DAG: no cycles, all dependsOn references exist.
   const ids = new Set(input.nodes.map((n) => n.id));
+  validateCompletionExpression(input.completionExpression, ids);
   for (const n of input.nodes) {
     for (const d of n.dependsOn) {
       if (!ids.has(d)) {
@@ -124,6 +138,8 @@ export interface EvaluationOptions {
   readonly parallelism?: number | undefined;
   /** Environment image digest stamped onto every result for binding validity. */
   readonly environmentImageDigest?: string | null | undefined;
+  /** Durable sink for every attempt, including failures before a later pass. */
+  readonly onAttempt?: ((result: VerificationResult) => Promise<void> | void) | undefined;
 }
 
 export interface EvaluationResult {
@@ -171,7 +187,7 @@ export class VerificationEngine {
       const batch = ready.slice(0, parallelism);
       const batchResults = await Promise.all(
         batch.map((node) =>
-          this.evaluateNode(node, plan, workspaceRevision, environmentImageDigest, signal, resultMap),
+          this.evaluateNode(node, plan, workspaceRevision, environmentImageDigest, signal, resultMap, options.onAttempt),
         ),
       );
       for (const r of batchResults) {
@@ -208,6 +224,7 @@ export class VerificationEngine {
     environmentImageDigest: string | null,
     signal: AbortSignal | null,
     resultMap: ReadonlyMap<string, VerificationResult>,
+    onAttempt: ((result: VerificationResult) => Promise<void> | void) | undefined,
   ): Promise<VerificationResult> {
     // Check dependencies: any failed/blocked/error dep blocks this node.
     // Required dependency failure fails the graph; optional deps still block
@@ -233,6 +250,7 @@ export class VerificationEngine {
           reasonIfSkipped: "dependency did not pass",
           attempts: 0,
         };
+        await onAttempt?.(skipped);
         return skipped;
       }
     }
@@ -249,12 +267,26 @@ export class VerificationEngine {
           signal,
         });
         // Stamp binding fields if the executor omitted them.
+        const sourceMismatch = r.sourceRevision.length > 0 && r.sourceRevision !== workspaceRevision;
+        const environmentMismatch =
+          r.environmentImageDigest !== null &&
+          r.environmentImageDigest !== environmentImageDigest;
         last = {
           ...r,
+          status: sourceMismatch || environmentMismatch ? "error" : r.status,
           sourceRevision: r.sourceRevision || workspaceRevision,
           environmentImageDigest: r.environmentImageDigest ?? environmentImageDigest,
+          structuredObservations: sourceMismatch || environmentMismatch
+            ? {
+                ...r.structuredObservations,
+                bindingError: sourceMismatch
+                  ? `verifier returned source revision '${r.sourceRevision}', expected '${workspaceRevision}'`
+                  : `verifier returned environment '${r.environmentImageDigest}', expected '${environmentImageDigest}'`,
+              }
+            : r.structuredObservations,
           attempts: attempt,
         };
+        await onAttempt?.(last);
         if (last.status === "pass") return last;
         if (last.status === "fail" || last.status === "error") {
           continue;
@@ -280,6 +312,7 @@ export class VerificationEngine {
           attempts: attempt,
         };
         last = errorResult;
+        await onAttempt?.(errorResult);
         continue;
       }
     }
@@ -322,11 +355,27 @@ export class VerificationEngine {
     readonly finalCheckpoint: ArtifactRef;
   }): CompletionRecord {
     const unsatisfied = input.criteria.filter(
-      (c) => c.status === "unsatisfied",
+      (c) => c.status !== "satisfied",
     );
     if (unsatisfied.length > 0) {
-      throw new ValidationError("cannot build completion record: criteria unsatisfied", {
+      throw new ValidationError("cannot build completion record: criteria are not independently satisfied", {
         unsatisfied: unsatisfied.map((c) => c.id),
+      });
+    }
+    const missingEvidence = input.criteria.filter(
+      (criterion) => criterion.evidence.length === 0 || criterion.evidence.some((artifact) => {
+        const hash = artifact.hash as string;
+        const uri = artifact.uri as string;
+        return !/^sha256:[0-9a-f]{64}$/i.test(hash)
+          || !/^artifact:\/\/sha256\/[0-9a-f]{64}$/i.test(uri)
+          || uri.slice("artifact://sha256/".length).toLowerCase() !== hash.slice("sha256:".length).toLowerCase()
+          || typeof artifact.bytes !== "bigint"
+          || artifact.bytes < 0n;
+      }),
+    );
+    if (missingEvidence.length > 0) {
+      throw new ValidationError("cannot build completion record: satisfied criteria lack evidence", {
+        missingEvidence: missingEvidence.map((criterion) => criterion.id),
       });
     }
     return {
@@ -357,15 +406,17 @@ export class VerificationEngine {
     plan: VerificationPlan,
     changedPaths: readonly string[],
     previousResults: readonly VerificationResult[],
+    dependencies: Partial<ChangedCodeInvalidationInput> = {},
   ): ReadonlySet<string> {
     const invalidator = new ChangedCodeInvalidator();
-    return invalidator.invalidate(plan, {
+    const invalidated = invalidator.invalidate(plan, {
       changedPaths,
-      symbolDependencies: new Map(),
-      testOwnership: new Map(),
-      buildGraph: new Map(),
+      symbolDependencies: dependencies.symbolDependencies ?? new Map(),
+      testOwnership: dependencies.testOwnership ?? new Map(),
+      buildGraph: dependencies.buildGraph ?? new Map(),
     });
     void previousResults;
+    return invalidated;
   }
 }
 
@@ -623,7 +674,23 @@ export function evaluateCompletionExpression(
   // Tokenize: split on `&&`, `||`, `!`, `(`, `)`, and whitespace.
   const tokens = tokenize(expr);
   const parser = new ExprParser(tokens, results);
-  return parser.parseOr();
+  const result = parser.parseOr();
+  parser.assertEnd();
+  return result;
+}
+
+function validateCompletionExpression(expr: string, nodeIds: ReadonlySet<string>): void {
+  if (expr.trim().length === 0) return;
+  const tokens = tokenize(expr);
+  for (const token of tokens) {
+    if (token === "&&" || token === "||" || token === "!" || token === "(" || token === ")") continue;
+    if (!nodeIds.has(token)) {
+      throw new ValidationError(`completion expression references unknown node '${token}'`);
+    }
+  }
+  const parser = new ExprParser(tokens, new Map());
+  parser.parseOr();
+  parser.assertEnd();
 }
 
 function tokenize(expr: string): readonly string[] {
@@ -717,6 +784,13 @@ class ExprParser {
     if (t === null) throw new ValidationError("unexpected end of completion expression");
     const r = this.results.get(t);
     return r?.status === "pass";
+  }
+
+  assertEnd(): void {
+    const trailing = this.peek();
+    if (trailing !== null) {
+      throw new ValidationError(`unexpected token '${trailing}' in completion expression`);
+    }
   }
 }
 

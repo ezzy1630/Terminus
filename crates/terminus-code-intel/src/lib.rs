@@ -22,7 +22,8 @@ mod symbols;
 pub use error::CodeIntelError;
 pub use index::{InMemorySymbolIndex, SymbolIndex};
 pub use inspect::{
-    CodeIntelService, DiagnoseResult, InspectResult, ReferenceResult, WorkspaceDiff,
+    CodeIntelService, DiagnoseResult, FileSystemWorkspaceSource, InspectResult, ReferenceResult,
+    WorkspaceDiff, WorkspaceSource,
 };
 pub use persistent_index::{CallEdge, ImportEdge, PersistentSymbolIndex, TestOwnershipMapping};
 pub use symbols::{Symbol, SymbolKind};

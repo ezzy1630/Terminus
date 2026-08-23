@@ -18,8 +18,8 @@ import {
   criterionNode,
   evaluateCompletionGate,
   bindAcceptanceCriteria,
+  contentArtifactRef,
   type PredicateCommandRunner,
-  type NodeExecutor,
 } from "./index.js";
 
 function fakeUuid(n: number): Uuid7 {
@@ -38,7 +38,7 @@ const checkpoint: ArtifactRef = {
   bytes: 0n as ArtifactRef["bytes"],
 };
 
-function makeRuntime(runner: PredicateCommandRunner) {
+function makeRuntime(runner: PredicateCommandRunner, withArtifacts = true) {
   let planId = fakeUuid(1);
   const store = new InMemoryVerificationStore();
   const registry = createStandardPredicateRegistry({
@@ -46,31 +46,16 @@ function makeRuntime(runner: PredicateCommandRunner) {
     idSource: () => fakeUuid(Math.floor(Math.random() * 100000) + 10),
     clock: fakeTs,
     planId: () => planId,
+    ...(withArtifacts ? {
+      artifactWriter: {
+        async write(input: { readonly bytes: Uint8Array; readonly mediaType: string }) {
+          return contentArtifactRef(input.bytes, input.mediaType);
+        },
+      },
+    } : {}),
   });
-  const fallback: NodeExecutor = {
-    async execute(input) {
-      return {
-        id: fakeUuid(99),
-        planId,
-        nodeId: input.node.id,
-        status: "pass",
-        startedAt: fakeTs(),
-        completedAt: fakeTs(),
-        sourceRevision: input.workspaceRevision,
-        environmentImageDigest: input.environmentImageDigest,
-        commandOrQuery: input.node.specification,
-        exitCode: 0,
-        structuredObservations: {},
-        artifacts: [],
-        toolCallId: null,
-        verifierVersion: "1.0.0",
-        reasonIfSkipped: null,
-        attempts: 1,
-      };
-    },
-  };
   const engine = new VerificationEngine({
-    executorFor: () => registry.toNodeExecutor(fallback),
+    executorFor: () => registry.toNodeExecutor(),
     idSource: () => fakeUuid(Math.floor(Math.random() * 100000) + 10),
     clock: fakeTs,
   });
@@ -312,5 +297,74 @@ describe("M8 verification exit gate", () => {
     });
     expect(record.status).toBe("completed");
     expect(record.criteria[0]?.status).toBe("satisfied");
+  });
+
+  test("a passing predicate without immutable evidence cannot complete", async () => {
+    const runner: PredicateCommandRunner = {
+      async run() {
+        return { exitCode: 0, stdout: "ok", stderr: "" };
+      },
+    };
+    const { lifecycle, setPlanId } = makeRuntime(runner, false);
+    const criteria: AcceptanceCriterion[] = [
+      { id: "ac1", statement: "ok", verificationHint: null, required: true },
+    ];
+    const plan = await lifecycle.createPlan({
+      taskContractId: fakeUuid(2),
+      taskContractVersion: 1,
+      sourceRevision: "rev-a",
+      criteria,
+      nodes: [criterionNode({ id: "parse", criterionId: "ac1", predicateType: "file_parses", paths: ["."], required: true })],
+      completionExpression: "parse",
+    });
+    setPlanId(plan.id);
+    await lifecycle.evaluate(plan.id, "rev-a", "env:1", null);
+    await expect(lifecycle.complete({
+      taskId: fakeUuid(3),
+      planId: plan.id,
+      criteria,
+      findings: [],
+      sourceRevision: "rev-a",
+      environmentImageDigest: "env:1",
+      expiresAt: null,
+      unresolvedRisks: [],
+      acceptedRisks: [],
+      externalEffects: [],
+      costMicros: 0n as Micros,
+      durationSeconds: 1,
+      finalCheckpoint: checkpoint,
+    })).rejects.toThrow(/evidence|false completion/i);
+  });
+
+  test("a manual required criterion cannot complete without an independent predicate", async () => {
+    const { lifecycle } = makeRuntime({
+      async run() { return { exitCode: 0, stdout: "", stderr: "" }; },
+    });
+    const criteria: AcceptanceCriterion[] = [
+      { id: "manual", statement: "human says it is okay", verificationHint: "manual: inspect the UI", required: true },
+    ];
+    const plan = await lifecycle.createPlan({
+      taskContractId: fakeUuid(2),
+      taskContractVersion: 1,
+      sourceRevision: "rev-a",
+      criteria,
+      nodes: [],
+      completionExpression: "",
+    });
+    await expect(lifecycle.complete({
+      taskId: fakeUuid(3),
+      planId: plan.id,
+      criteria,
+      findings: [],
+      sourceRevision: "rev-a",
+      environmentImageDigest: "env:1",
+      expiresAt: null,
+      unresolvedRisks: [],
+      acceptedRisks: [],
+      externalEffects: [],
+      costMicros: 0n as Micros,
+      durationSeconds: 1,
+      finalCheckpoint: checkpoint,
+    })).rejects.toThrow(/manual|false completion/i);
   });
 });

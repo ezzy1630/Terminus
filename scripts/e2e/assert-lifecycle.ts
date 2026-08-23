@@ -108,7 +108,12 @@ async function waitForCompletion(taskId: string): Promise<JsonObject> {
   const deadline = Date.now() + 15_000;
   let task = await api("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
   while (task.status !== "COMPLETED") {
-    if (task.status === "FAILED" || task.status === "ABORTED" || Date.now() >= deadline) {
+    if (
+      task.status === "FAILED"
+      || task.status === "FAILED_VERIFICATION"
+      || task.status === "ABORTED"
+      || Date.now() >= deadline
+    ) {
       throw new Error(`task did not complete: ${JSON.stringify(task)}`);
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
@@ -208,7 +213,12 @@ const task = await api("POST", "/v1/tasks", {
   objective: "exercise the complete deterministic task lifecycle",
   non_goals: ["external side effects"],
   acceptance_criteria: [
-    { id: "lifecycle", statement: "The task reaches COMPLETED with verification evidence.", required: true },
+    {
+      id: "lifecycle",
+      statement: "The task reaches COMPLETED with verification evidence.",
+      verification_hint: "command: git rev-parse HEAD",
+      required: true,
+    },
   ],
   allowed_scope: { read_paths: ["/**"], write_paths: [], external_systems: [] },
 });
