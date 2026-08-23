@@ -784,9 +784,23 @@ mod tests {
         let (_dir, store) = store();
         let tmp = tempdir().unwrap();
         let mgr = ProcessManager::new(store);
+
+        #[cfg(windows)]
+        let program = std::env::var_os("ComSpec")
+            .unwrap_or_else(|| std::ffi::OsString::from("cmd.exe"))
+            .to_string_lossy()
+            .into_owned();
+        #[cfg(not(windows))]
+        let program = "pwd".to_string();
+
+        #[cfg(windows)]
+        let args = vec!["/C".to_string(), "cd".to_string()];
+        #[cfg(not(windows))]
+        let args = Vec::new();
+
         let spawn = NormalizedSpawn {
-            program: "pwd".into(),
-            args: vec![],
+            program,
+            args,
             env: std::collections::BTreeMap::new(),
             working_dir: Some(PathBuf::from(tmp.path())),
             timeout_ms: 5_000,
@@ -800,8 +814,9 @@ mod tests {
                 pwd_line.push_str(&String::from_utf8_lossy(&c.bytes));
             }
         }
+        let actual = std::fs::canonicalize(pwd_line.trim()).unwrap();
         let expected = std::fs::canonicalize(tmp.path()).unwrap();
-        assert_eq!(pwd_line.trim(), expected.to_string_lossy());
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]
