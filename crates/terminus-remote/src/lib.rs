@@ -11,6 +11,7 @@
 
 pub mod artifact_stream;
 pub mod audit;
+pub mod blueprint;
 pub mod collab;
 pub mod environment;
 pub mod error;
@@ -26,6 +27,10 @@ pub use artifact_stream::{
     ArtifactStreamManager, ChunkAppendResult, CommittedArtifact, ContinuationToken, StreamSession,
 };
 pub use audit::{export_audit, AuditExportBundle, AuditExportRequest};
+pub use blueprint::{
+    BlueprintBackend, BrokeredCredential, DependencyPin, EnvironmentBlueprint, NetworkPolicy,
+    PreparedEnvironmentPlan, ServiceBlueprint, ToolchainPin,
+};
 pub use collab::{CollaborationRegistry, CollaborationRole, HandoffRecord, SessionMembership};
 pub use environment::{EnvironmentBackend, RemoteEnvironmentDescriptor};
 pub use error::RemoteError;

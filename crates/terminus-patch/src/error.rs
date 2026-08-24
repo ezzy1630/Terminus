@@ -18,6 +18,10 @@ pub enum PatchError {
     AnchorNotFound(String),
     #[error("anchor not unique: {0}")]
     AnchorNotUnique(String),
+    #[error("anchor stale: {0}")]
+    AnchorStale(String),
+    #[error("anchor ambiguous: {0}")]
+    AnchorAmbiguous(String),
     #[error("validation failed: {0}")]
     ValidationFailed(String),
     #[error("invalid edit: {0}")]

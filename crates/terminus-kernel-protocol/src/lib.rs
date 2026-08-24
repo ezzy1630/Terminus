@@ -247,6 +247,7 @@ pub enum PatchCommitMode {
 pub enum PatchEdit {
     ReplaceSymbol(ReplaceSymbol),
     ReplaceRange(ReplaceRange),
+    ReplaceHashline(ReplaceHashline),
     ReplaceExactText(ReplaceExactText),
     Insert(InsertContent),
     DeleteRange(DeleteRange),
@@ -254,6 +255,16 @@ pub enum PatchEdit {
     MoveFile(MoveFile),
     DeleteFile(DeleteFile),
     UnifiedDiff(UnifiedDiff),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaceHashline {
+    pub path: WorkspacePath,
+    pub expected_sha256: String,
+    pub line_hashes: Vec<String>,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub replacement_utf8: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

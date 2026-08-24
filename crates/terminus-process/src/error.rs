@@ -16,6 +16,10 @@ pub enum ProcessError {
     Artifact(#[from] terminus_artifacts::ArtifactError),
     #[error("invalid command spec: {0}")]
     InvalidSpec(String),
+    #[error("process identity mismatch for pid {0}")]
+    IdentityMismatch(u32),
+    #[error("process identity unavailable: {0}")]
+    IdentityUnavailable(String),
     #[error("cancelled")]
     Cancelled,
 }

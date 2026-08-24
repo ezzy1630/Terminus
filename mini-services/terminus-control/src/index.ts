@@ -275,6 +275,33 @@ import {
   V2_ENDPOINTS,
   type ApprovalOperationV1 as ApprovalOperationRecord,
 } from "@terminus/public-api";
+import {
+  EffectSettlementService,
+  EventSubscriptionService,
+  ProviderSessionService,
+  parseAllowedScope as parseProjectionAllowedScope,
+  scopeExpansionResources as projectionScopeExpansionResources,
+  TaskProjectionService,
+  v2PathScopeProjection as projectionV2PathScopeProjection,
+  ToolEpisodeService,
+  TurnCoordinator,
+  TurnAdmissionError,
+  VerificationCoordinator,
+  ProviderExecutionUnavailableError,
+  ToolCycleBudgetExhaustedError,
+  ToolPolicyDeniedError,
+  type EffectAuthorizationInput,
+  type EffectSettlementInput,
+  type EffectUnknownInput,
+  type ProviderAttemptResponseInput,
+  type ProviderAttemptStartInput,
+  type ProviderExecutionInput,
+  type TaskProjectionContractRow,
+  type TaskProjectionTaskRow,
+  type TurnRow,
+  type TurnTaskSnapshot,
+  type VerificationTransitionInput,
+} from "./services/index.js";
 
 declare const __TERMINUS_CONTROL_BUILD_VERSION__: string;
 declare const __TERMINUS_CONTROL_BUILD_COMMIT__: string;
@@ -1064,6 +1091,14 @@ class EventBus {
 }
 
 const bus = new EventBus();
+
+const eventSubscriptionService = new EventSubscriptionService<StoredEvent>({
+  subscribeLive: (filter, push) => bus.subscribe(filter, push),
+  latestEventId: () => bus.latestEventId(),
+  oldestEventId: () => bus.oldestEventId(),
+  replay: (since, through, filter, push) => bus.replay(since, through, filter, push),
+  persistCursor: (streamName, lastEventId, lastSequence) => bus.persistCursor(streamName, lastEventId, lastSequence),
+});
 
 class AsyncMutex {
   private tail: Promise<void> = Promise.resolve();
@@ -2263,29 +2298,14 @@ interface V1AllowedScopeProjection {
 }
 
 function v1AllowedScopeProjection(value: unknown): V1AllowedScopeProjection {
-  const raw = value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-  return {
-    read_paths: readStringArray(raw.read_paths ?? raw.readPaths),
-    write_paths: readStringArray(raw.write_paths ?? raw.writePaths),
-    external_systems: readStringArray(raw.external_systems ?? raw.externalSystems),
-  };
+  return parseProjectionAllowedScope(value);
 }
 
 function scopeExpansionResources(
   previous: V1AllowedScopeProjection,
   next: V1AllowedScopeProjection,
 ): readonly string[] {
-  const additions = (prefix: string, before: readonly string[], after: readonly string[]): string[] => {
-    const known = new Set(before);
-    return after.filter((value) => !known.has(value)).map((value) => `${prefix}:${value}`);
-  };
-  return [
-    ...additions("read", previous.read_paths, next.read_paths),
-    ...additions("write", previous.write_paths, next.write_paths),
-    ...additions("external", previous.external_systems, next.external_systems),
-  ];
+  return projectionScopeExpansionResources(previous, next);
 }
 
 function scopeLedgerRows(input: {
@@ -2332,29 +2352,8 @@ class TaskLineageAdmissionError extends Error {
   }
 }
 
-class TurnAdmissionError extends Error {
-  constructor(
-    readonly reason:
-      | "task_not_found"
-      | "thread_mismatch"
-      | "state_conflict"
-      | "turn_active"
-      | "state_changed"
-      | "sequence_changed",
-    readonly detail: string | null = null,
-  ) {
-    super(reason);
-    this.name = "TurnAdmissionError";
-  }
-}
-
 function v2PathScopeProjection(contract: TaskContractV2): V1AllowedScopeProjection {
-  const scope = contract.scope.pathScope;
-  return {
-    read_paths: scope?.readPaths ?? [],
-    write_paths: scope?.writePaths ?? [],
-    external_systems: scope?.externalSystems ?? [],
-  };
+  return projectionV2PathScopeProjection(contract);
 }
 
 function derivedV2Authority(scope: V1AllowedScopeProjection): {
@@ -2621,118 +2620,272 @@ async function inspectV1TaskProjection(
     : "context_mismatch";
 }
 
+const taskProjectionService = new TaskProjectionService<Prisma.TransactionClient>({
+  source: {
+    readTask: async (taskId) => {
+      const task = await db.task.findUnique({
+        where: { id: taskId },
+        select: {
+          id: true,
+          sessionId: true,
+          threadId: true,
+          status: true,
+          activeContractVersion: true,
+          budgetJson: true,
+          createdAt: true,
+          updatedAt: true,
+          completedAt: true,
+        },
+      });
+      return task as TaskProjectionTaskRow | null;
+    },
+    readContract: async (taskId, version) => {
+      const contract = await db.taskContractVersion.findUnique({
+        where: { task_id_version: { task_id: taskId, version } },
+        include: { acceptanceCriteria: { orderBy: { criterionId: "asc" } } },
+      });
+      return contract as TaskProjectionContractRow | null;
+    },
+    listTaskIds: async () => (await db.task.findMany({ select: { id: true }, orderBy: { id: "asc" } })).map((task) => task.id),
+  },
+  store: {
+    get: (taskId) => arpV2.tasks.get(taskId),
+    set: (taskId, task) => { arpV2.tasks.set(taskId, task); },
+    publish: async (event) => emitV2({
+      eventType: event.eventType,
+      aggregateType: event.aggregateType,
+      aggregateId: event.aggregateId,
+      snapshot: event.snapshot,
+      correlationId: event.correlationId,
+    }),
+  },
+  bridge: {
+    createV1: (transaction, task, context) => createV1TaskProjection(transaction, task, context),
+    inspectV1: (taskId, context) => inspectV1TaskProjection(taskId, context),
+    projectStatus: (transaction, taskId, status) => projectV2StatusIntoV1(transaction, taskId, status),
+    projectContract: (transaction, taskId, contract) => projectV2ContractIntoV1(transaction, taskId, contract),
+  },
+});
+
 async function synchronizeV1TaskProjection(
   taskId: string,
   eventType = "task.v1_projection_recovered",
-): Promise<{ task: TaskV2; changed: boolean }> {
-  const task = await db.task.findUnique({ where: { id: taskId } });
-  if (!task) throw new Error(`v1 task ${taskId} is unavailable for v2 projection`);
-  const contract = await db.taskContractVersion.findUnique({
-    where: { task_id_version: { task_id: task.id, version: task.activeContractVersion } },
-    include: { acceptanceCriteria: { orderBy: { criterionId: "asc" } } },
-  });
-  if (!contract) {
-    throw new Error(`v1 task ${taskId} has no active contract version ${task.activeContractVersion}`);
-  }
-  const existing = arpV2.tasks.get(task.id);
-  const rawBudget = safeParse<Record<string, unknown>>(task.budgetJson, {});
-  const security = safeParse<string[]>(contract.constraintsJson, []);
-  const allowedScope = v1AllowedScopeProjection(safeParse<unknown>(contract.allowedScopeJson, {}));
-  const authority = derivedV2Authority(allowedScope);
-  const derivedContract: TaskContractV2 = {
-    version: contract.version,
-    mission: contract.objective,
-    scope: {
-      resources: [],
-      allowedEffectClasses: [...authority.allowedEffectClasses],
-      excludedPathsOrSystems: [],
-      pathScope: {
-        readPaths: [...allowedScope.read_paths],
-        writePaths: [...allowedScope.write_paths],
-        externalSystems: [...allowedScope.external_systems],
-      },
-    },
-    acceptance: contract.acceptanceCriteria.map((criterion) => ({
-      claimId: criterion.criterionId,
-      statement: criterion.statement,
-      evidenceRequirement: criterion.verificationHint ?? "DETERMINISTIC_TEST",
-    })),
-    constraints: {
-      security: security.includes("NO_AMBIENT_SECRETS")
-        ? security
-        : [...security, "NO_AMBIENT_SECRETS"],
-      costMicros: nonnegativeBigInt(rawBudget.model_micros, 5_000_000n),
-      timeoutSeconds: numberOr(rawBudget.wall_clock_seconds, 3_600),
-    },
-    authorityCeiling: [...authority.authorityCeiling],
-    mode: "interactive",
-  };
-  const retainedProjection = contract.v2ProjectionJson === null
-    ? null
-    : taskContractV2Schema.safeParse(safeParse<unknown>(contract.v2ProjectionJson, null));
-  const projectedContract = retainedProjection?.success === true
-    && retainedProjection.data.version === contract.version
-    ? retainedProjection.data
-    : derivedContract;
-  const contractChanged = existing === undefined
-    || JSON.stringify(jsonSafe(existing.contract)) !== JSON.stringify(jsonSafe(projectedContract));
-  const statusChanged = existing === undefined || !v1AndV2StatusesAgree(task.status, existing.status);
-  const conversationContext = {
-    sessionId: task.sessionId,
-    threadId: task.threadId,
-    attachedAt: task.createdAt.toISOString() as Rfc3339Timestamp,
-  };
-  const contextChanged = existing?.conversationContext?.sessionId !== conversationContext.sessionId
-    || existing?.conversationContext?.threadId !== conversationContext.threadId;
-  if (existing && !contractChanged && !statusChanged && !contextChanged) return { task: existing, changed: false };
-
-  const projected: TaskV2 = {
-    id: task.id,
-    missionId: existing?.missionId ?? null,
-    organizationId: existing?.organizationId ?? "default-org",
-    departmentId: existing?.departmentId ?? "default-dept",
-    createdBy: existing?.createdBy ?? contract.createdBy,
-    conversationContext,
-    contract: projectedContract,
-    status: statusChanged ? v1TaskStatusToV2(task.status) : existing.status,
-    version: (existing?.version ?? 0) + 1,
-    createdAt: task.createdAt.toISOString() as Rfc3339Timestamp,
-    updatedAt: task.updatedAt.toISOString() as Rfc3339Timestamp,
-    completedAt: task.completedAt === null
-      ? null
-      : task.completedAt.toISOString() as Rfc3339Timestamp,
-  };
-  await emitV2({
-    eventType,
-    aggregateType: "task",
-    aggregateId: task.id,
-    snapshot: projected,
-    correlationId: task.id,
-  });
-  arpV2.tasks.set(task.id, projected);
-  return { task: projected, changed: true };
+): Promise<{ readonly task: TaskV2; readonly changed: boolean }> {
+  return taskProjectionService.synchronize(taskId, eventType);
 }
 
 async function reconcileV1TaskProjections(): Promise<number> {
-  let changed = 0;
-  let cursor: string | null = null;
-  for (;;) {
-    const tasks: Array<{ id: string }> = await db.task.findMany({
-      select: { id: true },
-      orderBy: { id: "asc" },
-      take: 1_000,
-      ...(cursor === null ? {} : { cursor: { id: cursor }, skip: 1 }),
-    });
-    for (const task of tasks) {
-      const result = await synchronizeV1TaskProjection(task.id);
-      if (result.changed) changed += 1;
-    }
-    if (tasks.length < 1_000) break;
-    cursor = tasks.at(-1)?.id ?? null;
-    if (cursor === null) throw new Error("v1 task projection recovery lost its continuation cursor");
-  }
-  return changed;
+  return taskProjectionService.reconcile();
 }
+
+const effectSettlementService = new EffectSettlementService<Prisma.TransactionClient>({
+  appendEvent: async (event, mutation): Promise<void> => {
+    await emit({
+      eventType: event.eventType,
+      aggregateType: event.aggregateType,
+      aggregateId: event.aggregateId,
+      correlationId: event.correlationId,
+      payload: event.payload,
+      artifactRefs: event.artifactRefs === undefined ? undefined : [...event.artifactRefs],
+    }, mutation);
+  },
+  transaction: (tx) => ({
+    authorize: async (input: EffectAuthorizationInput) => {
+      await tx.policyDecision.create({
+        data: {
+          id: input.policyDecisionId,
+          toolCallId: input.toolCallId,
+          effectType: input.effectType,
+          normalizedInputArtifact: input.argumentsArtifactUri,
+          decision: "allow_with_constraints",
+          ruleIdsJson: JSON.stringify(["task-contract.scope", "kernel.secure-local-default"]),
+          constraintsJson: JSON.stringify({ workspace_id: input.workspaceId, resource_uri: input.resourceUri }),
+          policyVersion: "secure-local-default:v1",
+          explanation: "Task contract scope admitted; the kernel remains authoritative at dispatch.",
+        },
+      });
+      await tx.sideEffect.create({
+        data: {
+          id: input.sideEffectId,
+          toolCallId: input.toolCallId,
+          effectType: input.effectType,
+          resourceUri: input.resourceUri,
+          idempotencyKey: input.idempotencyKey,
+          state: "AUTHORIZED",
+          reversibility: input.reversibility,
+          requestArtifact: input.argumentsArtifactUri,
+        },
+      });
+      await tx.toolCall.update({
+        where: { id: input.toolCallId },
+        data: { state: "AUTHORIZED", policyDecisionId: input.policyDecisionId },
+      });
+    },
+    start: async (input: EffectAuthorizationInput) => {
+      const startedAt = new Date();
+      await tx.toolCall.update({ where: { id: input.toolCallId }, data: { state: "STARTED", startedAt } });
+      await tx.sideEffect.update({ where: { id: input.sideEffectId }, data: { state: "STARTED", startedAt } });
+    },
+    markUnknown: async (input: EffectUnknownInput) => {
+      await tx.toolCall.update({
+        where: { id: input.toolCallId },
+        data: {
+          state: "UNKNOWN",
+          settledAt: new Date(),
+          resultStatus: "unknown",
+          errorJson: JSON.stringify({ message: input.error, reconciliation_required: true }),
+        },
+      });
+      await tx.sideEffect.update({
+        where: { id: input.sideEffectId },
+        data: { state: "MANUAL_REVIEW", reconciliationJson: JSON.stringify({ message: input.error, reconciliation_required: true }) },
+      });
+    },
+    settle: async (input: EffectSettlementInput) => {
+      const latestEpisode = await tx.episode.findFirst({
+        where: { turnId: input.turnId },
+        orderBy: { sequence: "desc" },
+        select: { sequence: true },
+      });
+      const settledAt = new Date();
+      await tx.toolCall.update({
+        where: { id: input.toolCallId },
+        data: {
+          state: input.toolState,
+          resultArtifact: input.resultArtifactUri,
+          resultStatus: input.resultStatus,
+          settledAt,
+          errorJson: input.errorJson,
+        },
+      });
+      if (input.sideEffectId !== null) {
+        await tx.sideEffect.updateMany({
+          where: { toolCallId: input.toolCallId, id: input.sideEffectId },
+          data: { state: "SETTLED", evidenceArtifact: input.resultArtifactUri, settledAt },
+        });
+      }
+      await tx.episode.createMany({
+        data: [
+          {
+            id: uuid(),
+            turnId: input.turnId,
+            sequence: (latestEpisode?.sequence ?? 0) + 1,
+            kind: "tool_call",
+            modelVisible: true,
+            contentArtifact: input.callTranscriptArtifactUri,
+            toolCallId: input.toolCallId,
+            sourceVersionsJson: JSON.stringify({ providerAttemptId: input.providerAttemptId }),
+          },
+          {
+            id: uuid(),
+            turnId: input.turnId,
+            sequence: (latestEpisode?.sequence ?? 0) + 2,
+            kind: "tool_result",
+            modelVisible: true,
+            contentArtifact: input.resultTranscriptArtifactUri,
+            toolCallId: input.toolCallId,
+            sourceVersionsJson: JSON.stringify({ result: input.resultTranscriptHash ?? input.resultTranscriptArtifactUri }),
+          },
+        ],
+      });
+      await tx.turn.update({ where: { id: input.turnId }, data: { state: "TOOL_SETTLEMENT" } });
+    },
+  }),
+  mutate: mutateAgentState,
+});
+
+const turnCoordinator = new TurnCoordinator<Prisma.TransactionClient>({
+  readTask: async (taskId) => {
+    const task = await db.task.findUnique({ where: { id: taskId }, select: { id: true, threadId: true, status: true } });
+    return task as TurnTaskSnapshot | null;
+  },
+  readTurn: async (turnId) => {
+    const turn = await db.turn.findUnique({
+      where: { id: turnId },
+      select: {
+        id: true,
+        threadId: true,
+        taskId: true,
+        sequence: true,
+        state: true,
+        initiatingActor: true,
+        startedAt: true,
+        completedAt: true,
+      },
+    });
+    return turn as TurnRow | null;
+  },
+  appendEvent: async (event, mutation): Promise<void> => {
+    await emit({
+      eventType: event.eventType,
+      aggregateType: event.aggregateType,
+      aggregateId: event.aggregateId,
+      correlationId: event.correlationId,
+      payload: event.payload,
+      artifactRefs: event.artifactRefs === undefined ? undefined : [...event.artifactRefs],
+    }, mutation);
+  },
+  transaction: (tx) => ({
+    findTask: async (taskId) => {
+      const task = await tx.task.findUnique({ where: { id: taskId }, select: { id: true, threadId: true, status: true } });
+      return task as TurnTaskSnapshot | null;
+    },
+    findActiveTurn: async (taskId, activeStates) => tx.turn.findFirst({
+      where: { taskId, state: { in: [...activeStates] } },
+      orderBy: { sequence: "desc" },
+      select: { id: true },
+    }),
+    findLatestSequence: async (threadId) => (await tx.turn.findFirst({
+      where: { threadId },
+      orderBy: { sequence: "desc" },
+      select: { sequence: true },
+    }))?.sequence ?? null,
+    resumeTask: async (taskId, expectedStatus) => {
+      const resumed = await tx.task.updateMany({ where: { id: taskId, status: expectedStatus }, data: { status: "ACTIVE" } });
+      if (resumed.count !== 1) throw new TurnAdmissionError("state_changed");
+    },
+    createTurn: async (input) => {
+      await tx.turn.create({
+        data: {
+          id: input.turnId,
+          threadId: input.threadId,
+          taskId: input.taskId,
+          sequence: input.sequence,
+          state: "PENDING",
+          initiatingActor: input.initiatingActor,
+          initiatingInputArtifact: input.inputArtifactUri,
+        },
+      });
+    },
+    createUserEpisode: async (input) => {
+      await tx.episode.create({
+        data: {
+          id: uuid(),
+          turnId: input.turnId,
+          sequence: 1,
+          kind: "user_message",
+          modelVisible: true,
+          contentArtifact: input.inputArtifactUri,
+          sourceVersionsJson: JSON.stringify({ input: input.inputArtifactHash }),
+        },
+      });
+    },
+    interruptTurn: async (turnId, reason) => {
+      const update = await tx.turn.updateMany({
+        where: { id: turnId, state: { in: [...V1_ACTIVE_TURN_STATES] } },
+        data: {
+          state: "INTERRUPTED",
+          completedAt: new Date(),
+          terminalErrorJson: JSON.stringify({ reason }),
+        },
+      });
+      if (update.count !== 1) throw new Error(`turn ${turnId} changed before atomic interruption`);
+    },
+  }),
+  mutate: mutateAgentState,
+  projectTask: async (taskId, eventType): Promise<void> => { await synchronizeV1TaskProjection(taskId, eventType); },
+  activeTurnStates: V1_ACTIVE_TURN_STATES,
+});
 
 /** Serialize a stored event into an ARP v2 envelope for SSE consumers. */
 function storedEventToEnvelopeV2(ev: StoredEvent): Record<string, unknown> {
@@ -3956,71 +4109,18 @@ const routes: Route[] = [
       select: { sequence: true },
     });
     const proposedSequence = (observedPrevious?.sequence ?? 0) + 1;
+    let turn: TurnRow;
     try {
-      await emit({
-        eventType: "turn.started",
-        aggregateType: "turn", aggregateId: id,
-        correlationId: body.task_id,
-        payload: {
-          thread_id: body.thread_id,
-          task_id: body.task_id,
-          sequence: proposedSequence,
-          input_artifact: inputArtifact.uri,
-          input_hash: inputArtifact.hash,
-        },
-        artifactRefs: [inputArtifact.uri],
-      }, async (tx) => {
-        const task = await tx.task.findUnique({ where: { id: body.task_id } });
-        if (!task) throw new TurnAdmissionError("task_not_found");
-        if (task.threadId !== body.thread_id) {
-          throw new TurnAdmissionError("thread_mismatch", task.threadId);
-        }
-        if (!["ACTIVE", "NEEDS_USER_DECISION", "BLOCKED"].includes(task.status)) {
-          throw new TurnAdmissionError("state_conflict", task.status);
-        }
-        const activeTurn = await tx.turn.findFirst({
-          where: { taskId: body.task_id, state: { in: [...V1_ACTIVE_TURN_STATES] } },
-          orderBy: { sequence: "desc" },
-        });
-        if (activeTurn) throw new TurnAdmissionError("turn_active", activeTurn.id);
-        const previous = await tx.turn.findFirst({
-          where: { threadId: body.thread_id },
-          orderBy: { sequence: "desc" },
-          select: { sequence: true },
-        });
-        if ((previous?.sequence ?? 0) + 1 !== proposedSequence) {
-          throw new TurnAdmissionError("sequence_changed");
-        }
-        if (task.status !== "ACTIVE") {
-          const resumed = await tx.task.updateMany({
-            where: { id: task.id, status: task.status },
-            data: { status: "ACTIVE" },
-          });
-          if (resumed.count !== 1) throw new TurnAdmissionError("state_changed");
-        }
-        await tx.turn.create({
-          data: {
-            id,
-            threadId: body.thread_id,
-            taskId: body.task_id,
-            sequence: proposedSequence,
-            state: "PENDING",
-            initiatingActor: SERVER_PRINCIPAL,
-            initiatingInputArtifact: inputArtifact.uri,
-          },
-        });
-        await tx.episode.create({
-          data: {
-            id: uuid(),
-            turnId: id,
-            sequence: 1,
-            kind: "user_message",
-            modelVisible: true,
-            contentArtifact: inputArtifact.uri,
-            sourceVersionsJson: JSON.stringify({ input: inputArtifact.hash }),
-          },
-        });
+      const admitted = await turnCoordinator.admitUnderMutationLock({
+        turnId: id,
+        threadId: body.thread_id,
+        taskId: body.task_id,
+        sequence: proposedSequence,
+        inputArtifactUri: inputArtifact.uri,
+        inputArtifactHash: inputArtifact.hash,
+        initiatingActor: SERVER_PRINCIPAL,
       });
+      turn = admitted.turn;
     } catch (error: unknown) {
       if (!(error instanceof TurnAdmissionError)) throw error;
       if (error.reason === "task_not_found") {
@@ -4066,8 +4166,6 @@ const routes: Route[] = [
         "conflict",
       );
     }
-    const turn = await db.turn.findUniqueOrThrow({ where: { id } });
-    await synchronizeV1TaskProjection(body.task_id, "task.running");
     // Kick off the agent loop asynchronously.
     agentLoop(id).catch((err) => {
       console.error("agent loop failed", err);
@@ -4080,38 +4178,40 @@ const routes: Route[] = [
       completed_at: turn.completedAt?.toISOString() ?? null,
     });
   }),
+  route("GET", "/v1/turns/:id", async (_req, res, params) => {
+    const turn = await db.turn.findUnique({ where: { id: String(params.id) } });
+    if (!turn) return sendError(res, 404, "TURN_NOT_FOUND", "turn not found", "not_found");
+    sendJson(res, 200, {
+      id: turn.id, thread_id: turn.threadId, task_id: turn.taskId,
+      sequence: turn.sequence, state: turn.state,
+      initiating_actor: turn.initiatingActor,
+      started_at: turn.startedAt?.toISOString() ?? null,
+      completed_at: turn.completedAt?.toISOString() ?? null,
+      terminal_error: turn.terminalErrorJson === null
+        ? null
+        : safeParse<unknown>(turn.terminalErrorJson, null),
+    });
+  }),
   // SPEC §32.2 — interrupt a running turn. The agent loop checks turn
   // state between phases and stops at the next safe point.
   route("POST", "/v1/turns/:id/interrupt", async (req, res, params) => {
     const body = await jsonBody(req) as { reason?: string | null };
-    const turn = await db.turn.findUnique({ where: { id: String(params.id) } });
-    if (!turn) return sendError(res, 404, "TURN_NOT_FOUND", "turn not found", "not_found");
-    if (!V1_ACTIVE_TURN_STATES.some((state) => state === turn.state)) {
+    let updated: TurnRow;
+    try {
+      updated = await turnCoordinator.interruptUnderMutationLock(String(params.id), body.reason ?? "user_interrupted");
+    } catch (error: unknown) {
+      if (!(error instanceof TurnAdmissionError)) throw error;
+      if (error.reason === "task_not_found") {
+        return sendError(res, 404, "TURN_NOT_FOUND", "turn not found", "not_found");
+      }
       return sendError(
         res,
         409,
         "TURN_INTERRUPT_STATE_CONFLICT",
-        `turn cannot be interrupted from ${turn.state}`,
+        `turn cannot be interrupted from ${error.detail ?? "unknown"}`,
         "conflict",
       );
     }
-    await emit({
-      eventType: "turn.interrupted",
-      aggregateType: "turn", aggregateId: turn.id,
-      correlationId: turn.taskId ?? undefined,
-      payload: { reason: body.reason ?? "user_interrupted" },
-    }, async (tx) => {
-      const update = await tx.turn.updateMany({
-        where: { id: turn.id, state: { in: [...V1_ACTIVE_TURN_STATES] } },
-        data: {
-          state: "INTERRUPTED",
-          completedAt: new Date(),
-          terminalErrorJson: JSON.stringify({ reason: body.reason ?? "user_interrupted" }),
-        },
-      });
-      if (update.count !== 1) throw new Error(`turn ${turn.id} changed before atomic interruption`);
-    });
-    const updated = await db.turn.findUniqueOrThrow({ where: { id: turn.id } });
     sendJson(res, 200, {
       id: updated.id, thread_id: updated.threadId, task_id: updated.taskId,
       sequence: updated.sequence, state: updated.state,
@@ -4154,31 +4254,14 @@ const routes: Route[] = [
       return true;
     };
 
-    let lastEventId: string | null = cursor ?? null;
-    let lastSequence = 0;
-    let replaying = true;
-    const buffered = new Map<string, StoredEvent>();
-    const sent = new Set<string>();
-    const writeEvent = (ev: StoredEvent) => {
-      if (sent.has(ev.eventId)) return;
-      res.write(`id: ${ev.eventId}\nevent: ${ev.eventType}\ndata: ${ev.payloadJson}\n\n`);
-      sent.add(ev.eventId);
-      lastEventId = ev.eventId;
-      lastSequence = ev.aggregateSequence;
-    };
-    // Subscribe before reading the replay high-water mark. Events committed
-    // during the database scan stay buffered until the paged replay catches
-    // up, then are deduplicated by immutable event ID.
-    const unsubscribe = bus.subscribe(filter, (ev) => {
-      if (replaying) buffered.set(ev.eventId, ev);
-      else writeEvent(ev);
-    });
-    const highWater = await bus.latestEventId();
-
-    // Cursor validation + cursor_expired event (SPEC §30.6).
-    if (cursor) {
-      const oldest = await bus.oldestEventId();
-      if (oldest && cursor < oldest) {
+    const subscription = await eventSubscriptionService.open({
+      streamName,
+      cursor,
+      filter,
+      onEvent: (event) => {
+        res.write(`id: ${event.eventId}\nevent: ${event.eventType}\ndata: ${event.payloadJson}\n\n`);
+      },
+      onCursorExpired: ({ requestedCursor, oldestRetainedEventId }) => {
         const snapshotUrl = taskId
           ? `/v1/tasks/${taskId}`
           : sessionId
@@ -4186,29 +4269,16 @@ const routes: Route[] = [
             : "/v1/sessions";
         const expiredPayload = JSON.stringify({
           type: "cursor_expired",
-          cursor,
-          oldest_retained_event_id: oldest,
+          cursor: requestedCursor,
+          oldest_retained_event_id: oldestRetainedEventId,
           snapshot_url: snapshotUrl,
           message:
             "the requested cursor is older than the oldest retained event; " +
             "use the snapshot endpoint to reconcile state before resuming",
         });
-        // Advance the transport cursor to the oldest retained boundary. A
-        // client that reconciles the snapshot and reconnects before another
-        // event arrives must not ask for the same expired cursor forever.
-        res.write(`id: ${oldest}\nevent: cursor_expired\ndata: ${expiredPayload}\n\n`);
-        lastEventId = oldest;
-      } else if (highWater) {
-        // Replay missed events in chronological order.
-        await bus.replay(cursor, highWater, filter, writeEvent);
-      }
-    }
-
-    for (const event of [...buffered.values()].sort((left, right) => left.eventId.localeCompare(right.eventId))) {
-      writeEvent(event);
-    }
-    buffered.clear();
-    replaying = false;
+        res.write(`id: ${oldestRetainedEventId}\nevent: cursor_expired\ndata: ${expiredPayload}\n\n`);
+      },
+    });
 
     // Heartbeat every 15s.
     const heartbeat = setInterval(() => {
@@ -4217,10 +4287,9 @@ const routes: Route[] = [
 
     req.on("close", () => {
       clearInterval(heartbeat);
-      unsubscribe();
-      if (lastEventId) {
-        void bus.persistCursor(streamName, lastEventId, lastSequence);
-      }
+      void subscription.close().catch((error: unknown) => {
+        console.error("[terminus-control] failed to persist event stream cursor", error);
+      });
     });
   }),
 
@@ -5655,8 +5724,16 @@ const routes: Route[] = [
     const sessions = await db.session.findMany({ where: { status: { not: "deleted" } } });
     const tasks = await db.task.findMany({ where: { status: { not: "ABORTED" } }, include: { contractVersions: { orderBy: { version: "desc" }, take: 1 } } });
     const events = body.include_events === false ? [] : await db.semanticEvent.findMany({ orderBy: { occurredAt: "asc" }, take: 10000 });
-    const manifests = await db.contextManifest.findMany({ take: 1000, include: { fragments: true } });
+    const manifests = await db.contextManifest.findMany({
+      take: 1000,
+      include: {
+        fragments: true,
+        providerAttempt: { include: { turn: { select: { taskId: true } } } },
+      },
+    });
     const verifications = await db.verificationPlan.findMany({ take: 500, include: { nodes: true, results: true } });
+    const completionRecords = await db.completionRecord.findMany({ take: 500, orderBy: { generatedAt: "asc" } });
+    const candidateBranches = await db.candidateBranch.findMany({ take: 500, orderBy: { createdAt: "asc" } });
 
     const exportPayload = {
       manifest: {
@@ -5670,6 +5747,8 @@ const routes: Route[] = [
           events: events.length,
           manifests: manifests.length,
           verifications: verifications.length,
+          completion_records: completionRecords.length,
+          candidate_branches: candidateBranches.length,
         },
       },
       sessions: sessions.map((s) => ({
@@ -5688,14 +5767,42 @@ const routes: Route[] = [
         payload: JSON.parse(e.payloadJson),
       })),
       context_manifests: manifests.map((m) => ({
-        id: m.id, provider_key: m.providerKey, model_key: m.modelKey,
+        id: m.id, task_id: m.providerAttempt?.turn.taskId ?? null,
+        provider_attempt_id: m.providerAttemptId,
+        provider_key: m.providerKey, model_key: m.modelKey,
         compiler_version: m.compilerVersion, created_at: m.createdAt.toISOString(),
+        epoch_id: m.epochId, rendered_request_hash: m.renderedRequestHash,
+        estimated_tokens: safeParse<unknown>(m.estimatedTokensJson, null),
+        cache_plan: safeParse<unknown>(m.cachePlanJson, null),
         fragments: m.fragments.map((f) => ({ kind: f.kind, selected: f.selected, authority: f.authority })),
       })),
       verification_plans: verifications.map((p) => ({
         id: p.id, task_id: p.taskId, completion_expression: p.completionExpression,
+        contract_version: p.contractVersion, source_revision: p.sourceRevision,
         nodes: p.nodes.map((n) => ({ id: n.id, kind: n.kind, required: n.required })),
-        results: p.results.map((r) => ({ node_id: r.nodeId, status: r.status })),
+        results: p.results.map((r) => ({
+          node_id: r.nodeId, status: r.status, source_revision: r.sourceRevision,
+          environment_digest: r.environmentDigest, evidence_artifact: r.evidenceArtifact,
+        })),
+      })),
+      completion_records: completionRecords.map((record) => ({
+        id: record.id, task_id: record.taskId, contract_version: record.contractVersion,
+        final_revision: record.finalRevision, status: record.status,
+        criteria: safeParse<unknown[]>(record.criteriaJson, []),
+        verification_plan_id: record.verificationPlanId,
+        unresolved_risks: safeParse<unknown[]>(record.unresolvedRisksJson, []),
+        accepted_risks: safeParse<unknown[]>(record.acceptedRisksJson, []),
+        external_effects: safeParse<unknown[]>(record.externalEffectsJson, []),
+        cost_micros: record.costMicros.toString(), duration_seconds: record.durationSeconds,
+        final_checkpoint: safeParse<unknown>(record.finalCheckpointJson, null),
+        generated_at: record.generatedAt.toISOString(),
+      })),
+      candidate_branches: candidateBranches.map((branch) => ({
+        id: branch.id, task_id: branch.taskId, attempt_id: branch.attemptId,
+        base_revision: branch.baseRevision, head_revision: branch.headRevision,
+        scope_digest: branch.scopeDigest, status: branch.status,
+        effect_ids: safeParse<unknown[]>(branch.effectIdsJson, []),
+        proof: safeParse<unknown>(branch.proofJson ?? "null", null),
       })),
     };
 
@@ -5845,7 +5952,7 @@ const routes: Route[] = [
       completedAt: null,
     };
     if (v1Context !== null) {
-      const projection = await inspectV1TaskProjection(task.id, v1Context);
+      const projection = await taskProjectionService.inspectV1(task.id, v1Context);
       if (projection === "thread_not_found") {
         return sendError(
           res,
@@ -5868,7 +5975,7 @@ const routes: Route[] = [
       mutation: v1Context === null
         ? undefined
         : async (tx) => {
-          const projection = await createV1TaskProjection(tx, task, v1Context);
+          const projection = await taskProjectionService.createV1(tx, task, v1Context);
           if (projection !== "created") {
             throw new Error(`v1 task projection changed during v2 creation (${projection})`);
           }
@@ -5924,7 +6031,7 @@ const routes: Route[] = [
     }
     const attachedAt = nowTimestamp();
     const context = { sessionId: parsed.data.sessionId, threadId: parsed.data.threadId, attachedAt };
-    const projection = await inspectV1TaskProjection(task.id, context);
+    const projection = await taskProjectionService.inspectV1(task.id, context);
     if (projection === "thread_not_found") {
       return sendError(res, 409, "TASK_CONTEXT_MISMATCH", "task context must name an existing thread in the supplied session", "conflict");
     }
@@ -5945,7 +6052,7 @@ const routes: Route[] = [
       correlationId: id,
       idempotencyKey: req.headers["idempotency-key"] as string | undefined ?? null,
       mutation: async (tx) => {
-        const settled = await createV1TaskProjection(tx, task, context);
+        const settled = await taskProjectionService.createV1(tx, task, context);
         if (settled !== "created" && settled !== "existing") {
           throw new Error(`v1 task projection changed during conversation attachment (${settled})`);
         }
@@ -5998,7 +6105,7 @@ const routes: Route[] = [
       snapshot: updated,
       correlationId: id,
       mutation: async (tx) => {
-        await projectV2StatusIntoV1(tx, id, targetStatus);
+        await taskProjectionService.projectStatus(tx, id, targetStatus);
       },
     });
     arpV2.tasks.set(id, updated);
@@ -6051,7 +6158,7 @@ const routes: Route[] = [
       snapshot: updated,
       correlationId: id,
       mutation: async (tx) => {
-        await projectV2ContractIntoV1(tx, id, updated.contract);
+        await taskProjectionService.projectContract(tx, id, updated.contract);
       },
     });
     arpV2.tasks.set(id, updated);
@@ -8070,40 +8177,7 @@ function unconfiguredProviderSnapshot(observedAt: Rfc3339Timestamp): ProviderCap
   };
 }
 
-class ProviderExecutionUnavailableError extends Error {
-  constructor(providerId: string) {
-    super(
-      `no kernel-brokered provider transport is configured for '${providerId}'; provider execution did not occur`,
-    );
-    this.name = "ProviderExecutionUnavailableError";
-  }
-}
-
 /** Execute the configured local provider exclusively through kernel Job RPC. */
-function executeProviderRequest(input: {
-  readonly rendered: RenderedProviderRequest;
-  readonly command: LocalProviderCommand | null;
-  readonly gateway: { readonly model: GatewayModel; readonly secretUri: string } | null;
-  readonly context: RequestContext;
-  readonly workspaceId: string;
-}): Promise<ProviderResponse> {
-  if (input.gateway !== null && input.rendered.providerId === input.gateway.model.providerId) {
-    return executeGatewayProviderRequest(input.rendered, input.gateway, input.context);
-  }
-  if (input.command === null || input.rendered.providerId !== "local") {
-    return Promise.reject(new ProviderExecutionUnavailableError(input.rendered.providerId));
-  }
-  return executeLocalProviderCommand({
-    clients: requireKernelUds(),
-    context: input.context,
-    workspaceId: input.workspaceId,
-    command: input.command,
-    rendered: input.rendered,
-    signal: input.rendered.request.signal,
-    devMode: DEV_MODE,
-  });
-}
-
 async function executeGatewayProviderRequest(
   rendered: RenderedProviderRequest,
   gateway: { readonly model: GatewayModel; readonly secretUri: string },
@@ -8129,6 +8203,93 @@ async function executeGatewayProviderRequest(
     observedAt: now(),
   };
 }
+
+const providerSessionService = new ProviderSessionService<Prisma.TransactionClient>({
+  readTurnState: async (turnId) => (await db.turn.findUnique({ where: { id: turnId }, select: { state: true } }))?.state ?? null,
+  appendEvent: async (event, mutation): Promise<void> => {
+    await emit({
+      eventType: event.eventType,
+      aggregateType: event.aggregateType,
+      aggregateId: event.aggregateId,
+      correlationId: event.correlationId,
+      payload: event.payload,
+      artifactRefs: event.artifactRefs === undefined ? undefined : [...event.artifactRefs],
+    }, mutation);
+  },
+  transaction: (tx) => ({
+    startAttempt: async (input: ProviderAttemptStartInput) => {
+      await tx.turn.update({ where: { id: input.turnId }, data: { state: "PROVIDER_RUNNING" } });
+      await tx.providerAttempt.create({
+        data: {
+          id: input.attemptId,
+          turnId: input.turnId,
+          attemptNumber: input.attemptNumber,
+          providerId: input.providerId,
+          modelKey: input.modelKey,
+          capabilitySnapshotHash: input.capabilitySnapshotHash,
+          contextManifestId: input.contextManifestId,
+          requestArtifact: input.requestArtifact,
+          status: "running",
+        },
+      });
+      await tx.contextManifest.update({
+        where: { id: input.contextManifestId },
+        data: { providerAttemptId: input.attemptId },
+      });
+    },
+    completeAttempt: async (input: ProviderAttemptResponseInput) => {
+      await tx.turn.update({ where: { id: input.turnId }, data: { state: "RESPONSE_VALIDATING" } });
+      if (input.messageArtifact !== null && input.messageHash !== null) {
+        const latestEpisode = await tx.episode.findFirst({
+          where: { turnId: input.turnId },
+          orderBy: { sequence: "desc" },
+          select: { sequence: true },
+        });
+        await tx.episode.create({
+          data: {
+            id: uuid(),
+            turnId: input.turnId,
+            sequence: (latestEpisode?.sequence ?? 0) + 1,
+            kind: "model_message",
+            modelVisible: true,
+            contentArtifact: input.messageArtifact,
+            sourceVersionsJson: JSON.stringify({ providerAttemptId: input.attemptId, response: input.messageHash }),
+          },
+        });
+      }
+      await tx.providerAttempt.update({
+        where: { id: input.attemptId },
+        data: {
+          status: "completed",
+          responseArtifact: input.responseArtifact,
+          completedAt: new Date(),
+          usageJson: JSON.stringify(jsonSafe(input.usage)),
+          costMicros: 0,
+          nativeContinuationJson: input.continuationId === null
+            ? null
+            : JSON.stringify({ continuation_id: input.continuationId }),
+        },
+      });
+    },
+  }),
+  mutate: mutateAgentState,
+  executeLocal: async (input: ProviderExecutionInput) => {
+    if (input.command === null) throw new ProviderExecutionUnavailableError(input.rendered.providerId);
+    return executeLocalProviderCommand({
+      clients: requireKernelUds(),
+      context: input.context,
+      workspaceId: input.workspaceId,
+      command: input.command,
+      rendered: input.rendered,
+      signal: input.rendered.request.signal,
+      devMode: DEV_MODE,
+    });
+  },
+  executeGateway: async (input: ProviderExecutionInput) => {
+    if (input.gateway === null) throw new ProviderExecutionUnavailableError(input.rendered.providerId);
+    return executeGatewayProviderRequest(input.rendered, input.gateway, input.context);
+  },
+});
 
 function makeContextBudget(
   provider: ProviderCapabilitySnapshot,
@@ -8581,24 +8742,39 @@ async function transitionAgentTask(input: AgentTaskTransition): Promise<boolean>
   });
 }
 
+const verificationCoordinator = new VerificationCoordinator<Prisma.TransactionClient>({
+  readTask: async (taskId) => db.task.findUnique({ where: { id: taskId }, select: { status: true } }),
+  appendEvent: async (event, mutation): Promise<void> => {
+    await emit({
+      eventType: event.eventType,
+      aggregateType: event.aggregateType,
+      aggregateId: event.aggregateId,
+      correlationId: event.correlationId,
+      payload: event.payload,
+      artifactRefs: event.artifactRefs === undefined ? undefined : [...event.artifactRefs],
+    }, mutation);
+  },
+  updateTask: async (tx, input: VerificationTransitionInput, expectedStatuses) => {
+    const update = await tx.task.updateMany({
+      where: { id: input.taskId, status: { in: [...expectedStatuses] } },
+      data: {
+        status: input.status,
+        phase: input.phase,
+        completedAt: input.completedAt,
+        terminalReasonJson: input.terminalReasonJson,
+        ...(input.verificationPlanId === undefined ? {} : { verificationPlanId: input.verificationPlanId }),
+      },
+    });
+    if (update.count !== 1) throw new Error(`task ${input.taskId} changed during verification transition`);
+  },
+  mutate: mutateAgentState,
+  projectTask: async (taskId, eventType): Promise<void> => { await synchronizeV1TaskProjection(taskId, eventType); },
+});
+
 class AmbiguousToolSettlementError extends Error {
   constructor(readonly toolCallId: string, message: string) {
     super(message);
     this.name = "AmbiguousToolSettlementError";
-  }
-}
-
-class ToolPolicyDeniedError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ToolPolicyDeniedError";
-  }
-}
-
-class ToolCycleBudgetExhaustedError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ToolCycleBudgetExhaustedError";
   }
 }
 
@@ -8695,6 +8871,7 @@ async function settleStandaloneProviderTool(
       call,
       toolCallId,
       callTranscriptArtifactUri: callTranscriptArtifact.uri,
+      sideEffectId: null,
       result,
     });
     return;
@@ -8737,6 +8914,7 @@ async function settleStandaloneProviderTool(
       call,
       toolCallId,
       callTranscriptArtifactUri: callTranscriptArtifact.uri,
+      sideEffectId: null,
       result,
     });
     return;
@@ -8744,61 +8922,30 @@ async function settleStandaloneProviderTool(
 
   const policyDecisionId = uuid();
   const sideEffectId = generateUuid7();
-  await mutateAgentState(() => emit({
-    eventType: "tool.authorized",
-    aggregateType: "tool_call",
-    aggregateId: toolCallId,
-    correlationId: input.taskId,
-    payload: {
-      policy_decision_id: policyDecisionId,
-      side_effect_id: sideEffectId,
-      effect_type: effect.effectType,
-      constraints: ["task-contract-scope", "kernel-policy", "no-ambient-authority"],
-    },
-    artifactRefs: [argumentsArtifact.uri],
-  }, async (tx) => {
-    await tx.policyDecision.create({
-      data: {
-        id: policyDecisionId,
-        toolCallId,
-        effectType: effect.effectType,
-        normalizedInputArtifact: argumentsArtifact.uri,
-        decision: "allow_with_constraints",
-        ruleIdsJson: JSON.stringify(["task-contract.scope", "kernel.secure-local-default"]),
-        constraintsJson: JSON.stringify({ workspace_id: input.workspaceId, resource_uri: effect.resourceUri }),
-        policyVersion: "secure-local-default:v1",
-        explanation: "Task contract scope admitted; the kernel remains authoritative at dispatch.",
-      },
-    });
-    await tx.sideEffect.create({
-      data: {
-        id: sideEffectId,
-        toolCallId,
-        effectType: effect.effectType,
-        resourceUri: effect.resourceUri,
-        idempotencyKey: operationHash,
-        state: "AUTHORIZED",
-        reversibility: effect.reversibility,
-        requestArtifact: argumentsArtifact.uri,
-      },
-    });
-    await tx.toolCall.update({
-      where: { id: toolCallId },
-      data: { state: "AUTHORIZED", policyDecisionId },
-    });
-  }));
-
-  await mutateAgentState(() => emit({
-    eventType: "tool.started",
-    aggregateType: "tool_call",
-    aggregateId: toolCallId,
-    correlationId: input.taskId,
-    payload: { side_effect_id: sideEffectId, effect_type: effect.effectType },
-  }, async (tx) => {
-    const startedAt = new Date();
-    await tx.toolCall.update({ where: { id: toolCallId }, data: { state: "STARTED", startedAt } });
-    await tx.sideEffect.update({ where: { id: sideEffectId }, data: { state: "STARTED", startedAt } });
-  }));
+  await effectSettlementService.authorize({
+    taskId: input.taskId,
+    toolCallId,
+    sideEffectId,
+    policyDecisionId,
+    effectType: effect.effectType,
+    argumentsArtifactUri: argumentsArtifact.uri,
+    resourceUri: effect.resourceUri,
+    reversibility: effect.reversibility,
+    idempotencyKey: operationHash,
+    workspaceId: input.workspaceId,
+  });
+  await effectSettlementService.start({
+    taskId: input.taskId,
+    toolCallId,
+    sideEffectId,
+    policyDecisionId,
+    effectType: effect.effectType,
+    argumentsArtifactUri: argumentsArtifact.uri,
+    resourceUri: effect.resourceUri,
+    reversibility: effect.reversibility,
+    idempotencyKey: operationHash,
+    workspaceId: input.workspaceId,
+  });
 
   let result: ToolResult<unknown>;
   try {
@@ -8817,30 +8964,12 @@ async function settleStandaloneProviderTool(
   } catch (error: unknown) {
     if (call.toolId !== "read") {
       const message = error instanceof Error ? error.message : String(error);
-      await mutateAgentState(() => emit({
-        eventType: "tool.settlement_unknown",
-        aggregateType: "tool_call",
-        aggregateId: toolCallId,
-        correlationId: input.taskId,
-        payload: { side_effect_id: sideEffectId, error: message, reconciliation_required: true },
-      }, async (tx) => {
-        await tx.toolCall.update({
-          where: { id: toolCallId },
-          data: {
-            state: "UNKNOWN",
-            settledAt: new Date(),
-            resultStatus: "unknown",
-            errorJson: JSON.stringify({ message, reconciliation_required: true }),
-          },
-        });
-        await tx.sideEffect.update({
-          where: { id: sideEffectId },
-          data: {
-            state: "MANUAL_REVIEW",
-            reconciliationJson: JSON.stringify({ message, reconciliation_required: true }),
-          },
-        });
-      }));
+      await effectSettlementService.markUnknown({
+        taskId: input.taskId,
+        toolCallId,
+        sideEffectId,
+        error: message,
+      });
       throw new AmbiguousToolSettlementError(toolCallId, `Tool ${call.toolId} lost settlement certainty: ${message}`);
     }
     const message = error instanceof Error ? error.message : String(error);
@@ -8859,6 +8988,7 @@ async function settleStandaloneProviderTool(
     call,
     toolCallId,
     callTranscriptArtifactUri: callTranscriptArtifact.uri,
+    sideEffectId,
     result,
   });
 }
@@ -8912,6 +9042,7 @@ async function persistSettledToolResult(input: {
   readonly call: ParsedStandaloneToolCall;
   readonly toolCallId: string;
   readonly callTranscriptArtifactUri: string;
+  readonly sideEffectId: string | null;
   readonly result: ToolResult<unknown>;
 }): Promise<void> {
   const fullResultText = canonicalJson(input.result);
@@ -8958,117 +9089,24 @@ async function persistSettledToolResult(input: {
     : input.result.status === "success" || input.result.status === "partial"
       ? "SETTLED"
       : "FAILED";
-  await mutateAgentState(() => emit({
-    eventType: input.result.status === "success" || input.result.status === "partial"
-      ? "tool.settled"
-      : "tool.failed",
-    aggregateType: "tool_call",
-    aggregateId: input.toolCallId,
-    correlationId: input.input.taskId,
-    payload: {
-      provider_call_id: input.call.providerCallId,
-      status: input.result.status,
-      summary: input.result.summary,
-      truncation: input.result.truncation,
-    },
-    artifactRefs: [fullResultArtifact.uri, resultTranscriptArtifact.uri],
-  }, async (tx) => {
-    const latestEpisode = await tx.episode.findFirst({
-      where: { turnId: input.input.turnId },
-      orderBy: { sequence: "desc" },
-      select: { sequence: true },
-    });
-    const callSequence = (latestEpisode?.sequence ?? 0) + 1;
-    const settledAt = new Date();
-    await tx.toolCall.update({
-      where: { id: input.toolCallId },
-      data: {
-        state: toolState,
-        resultArtifact: fullResultArtifact.uri,
-        resultStatus: input.result.status,
-        settledAt,
-        errorJson: toolState === "SETTLED" ? null : JSON.stringify({ summary: input.result.summary }),
-      },
-    });
-    await tx.sideEffect.updateMany({
-      where: { toolCallId: input.toolCallId },
-      data: {
-        state: "SETTLED",
-        evidenceArtifact: fullResultArtifact.uri,
-        settledAt,
-      },
-    });
-    await tx.episode.createMany({
-      data: [
-        {
-          id: uuid(),
-          turnId: input.input.turnId,
-          sequence: callSequence,
-          kind: "tool_call",
-          modelVisible: true,
-          contentArtifact: input.callTranscriptArtifactUri,
-          toolCallId: input.toolCallId,
-          sourceVersionsJson: JSON.stringify({ providerAttemptId: input.input.providerAttemptId }),
-        },
-        {
-          id: uuid(),
-          turnId: input.input.turnId,
-          sequence: callSequence + 1,
-          kind: "tool_result",
-          modelVisible: true,
-          contentArtifact: resultTranscriptArtifact.uri,
-          toolCallId: input.toolCallId,
-          sourceVersionsJson: JSON.stringify({ result: resultTranscriptArtifact.hash }),
-        },
-      ],
-    });
-    await tx.turn.update({ where: { id: input.input.turnId }, data: { state: "TOOL_SETTLEMENT" } });
-  }));
-}
-
-async function loadModelVisibleEpisodes(
-  turnId: string,
-  artifactClient: ArtifactClient,
-): Promise<{
-  readonly episodes: readonly Episode[];
-  readonly content: ReadonlyMap<ContentHash, string>;
-}> {
-  const rows = await db.episode.findMany({
-    where: { turnId, modelVisible: true },
-    orderBy: { sequence: "asc" },
-    take: 16,
+  await effectSettlementService.settle({
+    taskId: input.input.taskId,
+    turnId: input.input.turnId,
+    providerAttemptId: input.input.providerAttemptId,
+    toolCallId: input.toolCallId,
+    sideEffectId: input.sideEffectId,
+    providerCallId: input.call.providerCallId,
+    status: input.result.status,
+    resultStatus: input.result.status,
+    toolState,
+    summary: input.result.summary,
+    callTranscriptArtifactUri: input.callTranscriptArtifactUri,
+    resultArtifactUri: fullResultArtifact.uri,
+    resultTranscriptArtifactUri: resultTranscriptArtifact.uri,
+    resultTranscriptHash: resultTranscriptArtifact.hash,
+    errorJson: toolState === "SETTLED" ? null : JSON.stringify({ summary: input.result.summary }),
+    truncation: input.result.truncation,
   });
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  const content = new Map<ContentHash, string>();
-  let totalBytes = 0;
-  const episodes: Episode[] = [];
-  for (const episode of rows) {
-    const contentRef = episode.contentArtifact?.startsWith("artifact://sha256/")
-      ? (`sha256:${episode.contentArtifact.slice("artifact://sha256/".length)}` as ContentHash)
-      : null;
-    if (contentRef !== null && !content.has(contentRef)) {
-      const bytes = await artifactClient.get(contentRef);
-      if (bytes.byteLength > 128 * 1_024) {
-        throw new Error(`episode ${episode.id} exceeds the 131072-byte continuation limit`);
-      }
-      totalBytes += bytes.byteLength;
-      if (totalBytes > 512 * 1_024) {
-        throw new Error("model-visible episodes exceed the 524288-byte continuation limit");
-      }
-      content.set(contentRef, decoder.decode(bytes));
-    }
-    episodes.push({
-      id: episode.id as Episode["id"],
-      turnId: episode.turnId as Episode["turnId"],
-      sequence: episode.sequence,
-      kind: episode.kind as Episode["kind"],
-      contentRef,
-      providerAttemptId: null,
-      toolCallId: episode.toolCallId as Episode["toolCallId"],
-      occurredAt: episode.createdAt.toISOString() as Rfc3339Timestamp,
-    });
-  }
-  return { episodes, content };
 }
 
 // ────────────────────────── Agent loop ─────────────────────────────────────
@@ -9282,6 +9320,28 @@ async function agentLoop(turnId: string): Promise<void> {
       mutateAgentState,
       assertControlWriterLease,
     );
+    const toolEpisodeService = new ToolEpisodeService({
+      store: {
+        listModelVisibleEpisodes: async (episodeTurnId) => db.episode.findMany({
+          where: { turnId: episodeTurnId, modelVisible: true },
+          orderBy: { sequence: "asc" },
+          take: 16,
+        }),
+        readArtifact: (hash) => artifactClient.get(hash as ContentHash),
+      },
+      settleCall: async (toolInput) => settleStandaloneProviderTool({
+        callChunk: toolInput.call,
+        providerAttemptId: toolInput.providerAttemptId,
+        turnId: toolInput.turnId,
+        taskId: toolInput.taskId,
+        sessionId: toolInput.sessionId,
+        workspaceId: toolInput.workspaceId,
+        contractVersion: toolInput.contractVersion,
+        contractHash: toolInput.contractHash,
+        artifactClient: toolInput.artifactClient,
+      }),
+    });
+    const toolEpisodeSession = toolEpisodeService.startTurn();
     const contextEpoch = await ensureContextEpoch({
       db,
       threadId: turn.threadId,
@@ -9303,7 +9363,7 @@ async function agentLoop(turnId: string): Promise<void> {
       },
     };
     const compileProviderContext = async () => {
-      const recent = await loadModelVisibleEpisodes(turnId, artifactClient);
+      const recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
       const compiled = await compileContext({
         task: taskSnapshot,
         thread: threadSnapshot,
@@ -9379,7 +9439,6 @@ async function agentLoop(turnId: string): Promise<void> {
 
     let finalText: string | null = null;
     let finalResponseArtifactUri: string | null = null;
-    const seenProviderCallIds = new Set<string>();
     for (let attemptNumber = 1; attemptNumber <= MAX_TOOL_CYCLES + 1; attemptNumber += 1) {
       if (attemptNumber > 1) {
         await mutateAgentState(() => emit({
@@ -9399,43 +9458,16 @@ async function agentLoop(turnId: string): Promise<void> {
 
       const { compiled, requestArtifact } = await compileProviderContext();
       const attemptId = uuid();
-      const providerStarted = await mutateAgentState(async () => {
-        const current = await db.turn.findUnique({ where: { id: turnId }, select: { state: true } });
-        if (current?.state === "INTERRUPTED") return false;
-        await emit({
-          eventType: "turn.provider_running",
-          aggregateType: "turn",
-          aggregateId: turnId,
-          correlationId: task.id,
-          payload: {
-            provider_attempt_id: attemptId,
-            attempt_number: attemptNumber,
-            provider: selectedProvider.providerId,
-            model: selectedModel.modelKey,
-            context_manifest_id: compiled.manifest.id,
-          },
-          artifactRefs: [requestArtifact.uri],
-        }, async (tx) => {
-          await tx.turn.update({ where: { id: turnId }, data: { state: "PROVIDER_RUNNING" } });
-          await tx.providerAttempt.create({
-            data: {
-              id: attemptId,
-              turnId,
-              attemptNumber,
-              providerId: selectedProvider.providerId,
-              modelKey: selectedModel.modelKey,
-              capabilitySnapshotHash: compiled.manifest.providerCapabilityHash,
-              contextManifestId: compiled.manifest.id,
-              requestArtifact: requestArtifact.uri,
-              status: "running",
-            },
-          });
-          await tx.contextManifest.update({
-            where: { id: compiled.manifest.id },
-            data: { providerAttemptId: attemptId },
-          });
-        });
-        return true;
+      const providerStarted = await providerSessionService.beginAttempt({
+        attemptId,
+        turnId,
+        taskId: task.id,
+        attemptNumber,
+        providerId: selectedProvider.providerId,
+        modelKey: selectedModel.modelKey,
+        capabilitySnapshotHash: compiled.manifest.providerCapabilityHash,
+        contextManifestId: compiled.manifest.id,
+        requestArtifact: requestArtifact.uri,
       });
       if (!providerStarted) return;
 
@@ -9469,7 +9501,7 @@ async function agentLoop(turnId: string): Promise<void> {
         }),
         idempotencyKey: `provider:${attemptId}`,
       };
-      const providerResponse = await executeProviderRequest({
+      const providerResponse = await providerSessionService.execute({
         rendered: compiled.rendered,
         command: localProviderCommand,
         gateway: gatewayModel === null
@@ -9504,52 +9536,17 @@ async function agentLoop(turnId: string): Promise<void> {
         usage: jsonSafe(usage),
         projectedFinishReason: projected.finishReason,
       });
-      await mutateAgentState(() => emit({
-        eventType: "turn.response_validating",
-        aggregateType: "turn",
-        aggregateId: turnId,
-        correlationId: task.id,
-        payload: {
-          provider_attempt_id: attemptId,
-          status: "completed",
-          usage: jsonSafe(usage),
-          finish_reason: projected.finishReason,
-        },
-        artifactRefs: [responseArtifactMeta.uri, ...(messageArtifactMeta === null ? [] : [messageArtifactMeta.uri])],
-      }, async (tx) => {
-        await tx.turn.update({ where: { id: turnId }, data: { state: "RESPONSE_VALIDATING" } });
-        if (messageArtifactMeta !== null) {
-          const latestEpisode = await tx.episode.findFirst({
-            where: { turnId },
-            orderBy: { sequence: "desc" },
-            select: { sequence: true },
-          });
-          await tx.episode.create({
-            data: {
-              id: uuid(),
-              turnId,
-              sequence: (latestEpisode?.sequence ?? 0) + 1,
-              kind: "model_message",
-              modelVisible: true,
-              contentArtifact: messageArtifactMeta.uri,
-              sourceVersionsJson: JSON.stringify({ providerAttemptId: attemptId, response: messageArtifactMeta.hash }),
-            },
-          });
-        }
-        await tx.providerAttempt.update({
-          where: { id: attemptId },
-          data: {
-            status: "completed",
-            responseArtifact: responseArtifactMeta.uri,
-            completedAt: new Date(),
-            usageJson: JSON.stringify(jsonSafe(usage)),
-            costMicros: 0,
-            nativeContinuationJson: projected.continuationId === null
-              ? null
-              : JSON.stringify({ continuation_id: projected.continuationId }),
-          },
-        });
-      }));
+      await providerSessionService.settleResponse({
+        attemptId,
+        turnId,
+        taskId: task.id,
+        responseArtifact: responseArtifactMeta.uri,
+        messageArtifact: messageArtifactMeta?.uri ?? null,
+        messageHash: messageArtifactMeta?.hash ?? null,
+        usage: jsonSafe(usage),
+        finishReason: projected.finishReason,
+        continuationId: projected.continuationId,
+      });
 
       await mutateAgentState(() => emit({
         eventType: "turn.tool_settlement",
@@ -9572,17 +9569,11 @@ async function agentLoop(turnId: string): Promise<void> {
       if (projected.toolCalls.length !== 1) {
         throw new ToolPolicyDeniedError("Standalone providers may emit exactly one tool call per response");
       }
-      if (attemptNumber > MAX_TOOL_CYCLES) {
-        throw new ToolCycleBudgetExhaustedError(`Provider exceeded the ${MAX_TOOL_CYCLES}-call turn budget`);
-      }
       const [toolCall] = projected.toolCalls;
       if (toolCall === undefined) throw new Error("provider tool call projection was empty");
-      if (seenProviderCallIds.has(toolCall.toolCallId)) {
-        throw new ToolPolicyDeniedError(`Provider repeated tool call id '${toolCall.toolCallId}'`);
-      }
-      seenProviderCallIds.add(toolCall.toolCallId);
-      await settleStandaloneProviderTool({
-        callChunk: toolCall,
+      await toolEpisodeSession.settle({
+        call: toolCall,
+        attemptNumber,
         providerAttemptId: attemptId,
         turnId,
         taskId: task.id,
@@ -9634,23 +9625,7 @@ async function agentLoop(turnId: string): Promise<void> {
     if (turn.taskId) {
       const task = await db.task.findUnique({ where: { id: turn.taskId } });
       if (task && task.status === "ACTIVE") {
-        const enteredVerification = await mutateAgentState(async () => {
-          const current = await db.task.findUnique({ where: { id: task.id }, select: { status: true } });
-          if (current?.status !== "ACTIVE") return false;
-          await emit({
-            eventType: "task.verifying",
-            aggregateType: "task", aggregateId: task.id,
-            payload: { phase: "VERIFY" },
-          }, async (tx) => {
-            const update = await tx.task.updateMany({
-              where: { id: task.id, status: "ACTIVE" },
-              data: { status: "VERIFYING", phase: "VERIFY" },
-            });
-            if (update.count !== 1) throw new Error(`task ${task.id} changed before verification`);
-          });
-          await synchronizeV1TaskProjection(task.id, "task.verifying");
-          return true;
-        });
+        const enteredVerification = await verificationCoordinator.begin(task.id);
         if (!enteredVerification) return;
         // Real verification DAG + completion gate (M8). Verification commands,
         // source identity, environment identity, and evidence all cross the
@@ -9790,18 +9765,9 @@ async function agentLoop(turnId: string): Promise<void> {
         });
 
         if (!allPassed) {
-          await transitionAgentTask({
-            taskId: task.id,
-            expectedStatuses: ["VERIFYING"],
-            status: "FAILED_VERIFICATION",
-            phase: "VERIFY",
-            completedAt: new Date(),
-            terminalReasonJson: JSON.stringify({
-              reason: "required_predicates_failed",
-              blocked: evaluation.blocked,
-            }),
-            eventType: "task.failed",
-            payload: { phase: "VERIFY", status: "FAILED_VERIFICATION" },
+          await verificationCoordinator.fail(task.id, {
+            reason: "required_predicates_failed",
+            blocked: evaluation.blocked,
           });
           return;
         }
@@ -9834,6 +9800,49 @@ async function agentLoop(turnId: string): Promise<void> {
             costMicros: 0n as Micros,
             durationSeconds: 0,
             finalCheckpoint: artifactClient.toArtifactRef(finalCheckpoint),
+          });
+
+          // The verification runtime keeps a process-local copy for its
+          // lifecycle API. Persist the same immutable record before admission
+          // so restart/export consumers never have to trust that copy.
+          const completionData = {
+            id: `completion:${task.id}`,
+            taskId: task.id,
+            contractVersion: completionRecord.contractVersion,
+            finalRevision: completionRecord.finalRevision,
+            status: completionRecord.status,
+            criteriaJson: canonicalJson(completionRecord.criteria),
+            verificationPlanId: completionRecord.verificationPlanId,
+            unresolvedRisksJson: canonicalJson(completionRecord.unresolvedRisks),
+            acceptedRisksJson: canonicalJson(completionRecord.acceptedRisks),
+            externalEffectsJson: canonicalJson(completionRecord.externalEffects),
+            costMicros: completionRecord.costMicros,
+            durationSeconds: completionRecord.durationSeconds,
+            finalCheckpointJson: canonicalJson(completionRecord.finalCheckpoint),
+            generatedAt: new Date(completionRecord.generatedAt),
+          };
+          await mutateAgentState(async () => {
+            const existing = await db.completionRecord.findUnique({ where: { taskId: task.id } });
+            if (existing === null) {
+              await db.completionRecord.create({ data: completionData });
+              return;
+            }
+            const immutableFieldsMatch = existing.id === completionData.id
+              && existing.contractVersion === completionData.contractVersion
+              && existing.finalRevision === completionData.finalRevision
+              && existing.status === completionData.status
+              && existing.criteriaJson === completionData.criteriaJson
+              && existing.verificationPlanId === completionData.verificationPlanId
+              && existing.unresolvedRisksJson === completionData.unresolvedRisksJson
+              && existing.acceptedRisksJson === completionData.acceptedRisksJson
+              && existing.externalEffectsJson === completionData.externalEffectsJson
+              && existing.costMicros === completionData.costMicros
+              && existing.durationSeconds === completionData.durationSeconds
+              && existing.finalCheckpointJson === completionData.finalCheckpointJson
+              && existing.generatedAt.getTime() === completionData.generatedAt.getTime();
+            if (!immutableFieldsMatch) {
+              throw new Error("completion record already exists with different immutable content");
+            }
           });
 
           if (evidenceGraph === null) {
@@ -9905,33 +9914,14 @@ async function agentLoop(turnId: string): Promise<void> {
             requiredClaimsSatisfied: [...requiredClaimIds],
           });
         } catch (gateErr) {
-          await transitionAgentTask({
-            taskId: task.id,
-            expectedStatuses: ["VERIFYING"],
-            status: "FAILED_VERIFICATION",
-            phase: "VERIFY",
-            completedAt: new Date(),
-            terminalReasonJson: JSON.stringify({
-              reason: "completion_gate_denied",
-              error: String(gateErr),
-            }),
-            eventType: "task.failed",
-            payload: { phase: "VERIFY", status: "FAILED_VERIFICATION" },
+          await verificationCoordinator.fail(task.id, {
+            reason: "completion_gate_denied",
+            error: String(gateErr),
           });
           return;
         }
 
-        await transitionAgentTask({
-          taskId: task.id,
-          expectedStatuses: ["VERIFYING"],
-          status: "COMPLETED",
-          phase: "COMPLETE",
-          completedAt: new Date(),
-          terminalReasonJson: null,
-          verificationPlanId: plan.id,
-          eventType: "task.completed",
-          payload: { phase: "COMPLETE" },
-        });
+        await verificationCoordinator.complete(task.id, plan.id);
       }
     }
   } catch (err) {

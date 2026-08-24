@@ -483,4 +483,12 @@ TERMINUS_E2E_CONTROL_URL="http://127.0.0.1:$CONTROL_PORT" \
   TERMINUS_E2E_CONTROL_TOKEN="$TERMINUS_CONTROL_TOKEN" \
   bun test "$ROOT/tests/e2e/arp_v2_lifecycle.test.ts"
 
+echo "[e2e] running complete end-to-end turn integration spine (PR 7)"
+TERMINUS_E2E_CONTROL_URL="http://127.0.0.1:$CONTROL_PORT" \
+  TERMINUS_E2E_CONTROL_TOKEN="$TERMINUS_CONTROL_TOKEN" \
+  TERMINUS_E2E_WORKSPACE_ROOT="$TERMINUS_E2E_WORKSPACE_ROOT" \
+  TERMINUS_E2E_WORKSPACE_ID="$TERMINUS_E2E_PRESEEDED_WORKSPACE_ID" \
+  TERMINUS_TEST_DB="$TMP_DIR/control.db" \
+  bun test "$ROOT/tests/e2e/turn_integration_spine.test.ts"
+
 echo "[e2e] PASS"

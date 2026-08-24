@@ -121,9 +121,12 @@ describe("provider model discovery", () => {
     });
 
     expect(result.models.length).toBe(1);
-    expect(result.models[0].id).toBe("grok-code");
-    expect(result.models[0].toolCalling).toBe(true);
-    expect(result.models[0].contextTokens).toBe(256_000);
+    const [model] = result.models;
+    expect(model).toBeDefined();
+    if (model === undefined) throw new Error("expected the decoded catalog model");
+    expect(model.id).toBe("grok-code");
+    expect(model.toolCalling).toBe(true);
+    expect(model.contextTokens).toBe(256_000);
     expect(result.rejected).toEqual([
       { modelId: "ghost", reason: "model is absent from the decoded opencode catalog" },
     ]);

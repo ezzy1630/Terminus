@@ -62,6 +62,7 @@ function makeRuntime(runner: PredicateCommandRunner, withArtifacts = true) {
   const lifecycle = new VerificationLifecycle({ store, engine, idSource: () => fakeUuid(7), clock: fakeTs });
   return {
     lifecycle,
+    store,
     setPlanId: (id: Uuid7) => {
       planId = id;
     },
@@ -368,6 +369,49 @@ describe("M8 verification exit gate", () => {
       durationSeconds: 1,
       finalCheckpoint: checkpoint,
     })).rejects.toThrow(/evidence|false completion/i);
+  });
+
+  test("evidence replacement after evaluation cannot complete", async () => {
+    const runner: PredicateCommandRunner = {
+      async run() {
+        return { exitCode: 0, stdout: "ok", stderr: "" };
+      },
+    };
+    const { lifecycle, setPlanId, store } = makeRuntime(runner);
+    const criteria: AcceptanceCriterion[] = [
+      { id: "ac1", statement: "ok", verificationHint: null, required: true },
+    ];
+    const plan = await lifecycle.createPlan({
+      taskContractId: fakeUuid(2),
+      taskContractVersion: 1,
+      sourceRevision: "rev-a",
+      criteria,
+      nodes: [criterionNode({ id: "parse", criterionId: "ac1", predicateType: "file_parses", paths: ["."], required: true })],
+      completionExpression: "parse",
+    });
+    setPlanId(plan.id);
+    await lifecycle.evaluate(plan.id, "rev-a", "env:1", null);
+    const result = (await store.listResults(plan.id))[0]!;
+    await store.saveResult({
+      ...result,
+      artifacts: [contentArtifactRef(new TextEncoder().encode("forged evidence"), "text/plain")],
+    });
+
+    await expect(lifecycle.complete({
+      taskId: fakeUuid(3),
+      planId: plan.id,
+      criteria,
+      findings: [],
+      sourceRevision: "rev-a",
+      environmentImageDigest: "env:1",
+      expiresAt: null,
+      unresolvedRisks: [],
+      acceptedRisks: [],
+      externalEffects: [],
+      costMicros: 0n as Micros,
+      durationSeconds: 1,
+      finalCheckpoint: checkpoint,
+    })).rejects.toThrow(/evidence changed/i);
   });
 
   test("a manual required criterion cannot complete without an independent predicate", async () => {

@@ -188,6 +188,7 @@ export function okResult<T>(
     readonly sourceVersions?: Readonly<Record<string, string>> | undefined;
     readonly artifacts?: readonly ArtifactDescriptor[] | undefined;
     readonly sideEffects?: readonly SideEffectDescriptor[] | undefined;
+    readonly diagnostics?: readonly Diagnostic[] | undefined;
     readonly timing?: Partial<TimingInfo> | undefined;
     readonly confidentiality?: ConfidentialityLabel | undefined;
   },
@@ -199,7 +200,7 @@ export function okResult<T>(
     artifacts: opts.artifacts ?? [],
     sourceVersions: opts.sourceVersions ?? {},
     truncation: { occurred: false, reason: null, continuation: null },
-    diagnostics: [],
+    diagnostics: opts.diagnostics ?? [],
     sideEffects: opts.sideEffects ?? [],
     trust: "derived",
     confidentiality: opts.confidentiality ?? "workspace",

@@ -5,11 +5,13 @@ import { ValidationError } from "@terminus/domain";
 import type { VerificationResult } from "@terminus/domain";
 import type { VerificationNode } from "@terminus/domain";
 import { parseNodeSpec, type PredicateType } from "./node-spec.js";
+import type { VerifierBinding } from "./run-binding.js";
 
 export interface NodeExecutorInput {
   readonly node: VerificationNode;
   readonly workspaceRevision: string;
   readonly environmentImageDigest: string | null;
+  readonly verifierBinding?: VerifierBinding | undefined;
   readonly signal: AbortSignal | null;
 }
 

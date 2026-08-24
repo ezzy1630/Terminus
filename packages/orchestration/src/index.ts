@@ -1359,6 +1359,9 @@ export function schedulerForCohort(cohort: TaskCohort): Scheduler {
 // ────────────────────────── Phase 8 Exports (§27) ──────────────────────────
 
 export * from "./ev_scheduler.js";
+export * from "./ev_calibration.js";
+export * from "./worktree_delegation.js";
+export * from "./delegation_budget.js";
 export * from "./clean_reviewer.js";
 export * from "./stagnation_supervisor.js";
 export * from "./candidate_workspace.js";
@@ -1374,6 +1377,7 @@ export * from "./causal_replay.js";
 
 export * from "./ui_observation_fusion.js";
 export * from "./semantic_target_verifier.js";
+export * from "./browser-control.js";
 export * from "./browser_desktop_pools.js";
 export * from "./human_takeover_manager.js";
 export * from "./data_flow_policy.js";

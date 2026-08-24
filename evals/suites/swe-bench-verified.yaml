@@ -5,10 +5,9 @@ suite:
     SWE-bench Verified cohort (SPEC §41.3). The canonical human-verified
     subset of SWE-bench. Used for harness-controlled comparison and as a
     primary signal in the promotion gate. Strictly a 500-task Python benchmark.
-  source: https://github.com/openai/swe-bench
+  source: https://github.com/SWE-bench/SWE-bench
   license: MIT
   task_count: 500
-  pinned_image_digest: sha256:ba582e04e402ef490c2394747a8efb4a622a59a7a917208726bdf3aeef84b0fb
   default_timeout_seconds: 1800
   default_budget:
     model_micros: 5000000
@@ -22,6 +21,18 @@ suite:
   cohorts:
     - python-repos
   notes: |
-    Tasks are NOT vendored in this fixture. The eval lab fetches them on
-    demand from the pinned dataset revision. SWE-bench Verified evaluates exclusively
-    Python repositories. The fixture here declares the suite metadata and the grader contract.
+    Tasks are NOT vendored in this fixture. The live adapter resolves the
+    pinned Hugging Face revision and test split. SWE-bench Verified evaluates
+    exclusively Python repositories. Container images are per-instance, so a
+    live harness must return the resolved image digest for each task.
+  adapter:
+    kind: swebench
+    dataset: SWE-bench/SWE-bench_Verified
+    split: test
+    revision: 78f471bf655a3137b2e8a75af1501690ec009ec3
+    language: python
+    task_count: 500
+    image_digest_policy: per_instance_required
+    harness:
+      repository: https://github.com/SWE-bench/SWE-bench.git
+      commit: 7a21e05772954cc81471ae19d56f436cecf43c54

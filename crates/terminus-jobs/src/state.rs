@@ -42,6 +42,7 @@ impl JobState {
                 | (Self::Stopping, Self::Exited)
                 | (Self::Running, Self::Orphaned)
                 | (Self::Starting, Self::Orphaned)
+                | (Self::Stopping, Self::Orphaned)
                 | (Self::Orphaned, Self::Lost)
                 | (Self::Orphaned, Self::Exited)
         );

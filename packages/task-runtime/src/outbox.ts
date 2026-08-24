@@ -6,7 +6,11 @@
  * plus exactly-once / idempotent command consumption via inbox deduplication.
  */
 import type { OutboxMessage, InboxMessage, Rfc3339Timestamp } from "@terminus/domain";
-import { nowTimestamp } from "@terminus/domain";
+import {
+  ConflictError,
+  IdempotencyConflictError,
+  nowTimestamp,
+} from "@terminus/domain";
 import type { DurableTaskRepository } from "./types.js";
 
 export function sha256Hex(ascii: string): string {
@@ -175,14 +179,23 @@ export class TransactionalInbox {
     const existing = await this.repo.getInboxMessage(idempotencyKey);
 
     if (existing) {
-      if (existing.status === "PROCESSED") {
+      if (existing.payloadHash !== payloadHash) {
+        throw new IdempotencyConflictError(idempotencyKey);
+      }
+      if (existing.status === "PROCESSED" || existing.status === "DUPLICATE") {
         return { duplicate: true };
       }
       if (existing.status === "PENDING") {
-        throw new Error(`Concurrent execution in progress for idempotency key: ${idempotencyKey}`);
+        throw new ConflictError(
+          "IDEMPOTENCY_KEY_CONFLICT",
+          `Concurrent execution in progress for idempotency key: ${idempotencyKey}`,
+        );
       }
       if (existing.status === "FAILED") {
-        throw new Error(`Previous execution failed for idempotency key: ${idempotencyKey}`);
+        throw new ConflictError(
+          "IDEMPOTENCY_KEY_CONFLICT",
+          `Previous execution failed for idempotency key: ${idempotencyKey}`,
+        );
       }
     }
 
@@ -197,7 +210,25 @@ export class TransactionalInbox {
       processedAt: null,
       status: "PENDING",
     };
-    await this.repo.saveInboxMessage(entry);
+    const claimInboxMessage = this.repo.claimInboxMessage;
+    if (claimInboxMessage) {
+      const claimed = await claimInboxMessage.call(this.repo, entry);
+      if (!claimed) {
+        const raced = await this.repo.getInboxMessage(idempotencyKey);
+        if (raced?.payloadHash !== payloadHash) {
+          throw new IdempotencyConflictError(idempotencyKey);
+        }
+        if (raced?.status === "PROCESSED" || raced?.status === "DUPLICATE") {
+          return { duplicate: true };
+        }
+        throw new ConflictError(
+          "IDEMPOTENCY_KEY_CONFLICT",
+          `Concurrent execution in progress for idempotency key: ${idempotencyKey}`,
+        );
+      }
+    } else {
+      await this.repo.saveInboxMessage(entry);
+    }
 
     try {
       const result = await handler();

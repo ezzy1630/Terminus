@@ -14,4 +14,6 @@ pub enum KernelAssemblyError {
     Sandbox(#[from] terminus_sandbox::SandboxError),
     #[error("patch error: {0}")]
     Patch(#[from] terminus_patch::PatchError),
+    #[error("jobs error: {0}")]
+    Jobs(String),
 }

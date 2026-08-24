@@ -121,6 +121,8 @@ export interface DurableTaskRepository {
   markOutboxDelivered(id: string, publishedAt: Rfc3339Timestamp): Promise<void>;
 
   saveInboxMessage(message: InboxMessage): Promise<void>;
+  /** Optional atomic claim used by database-backed inbox implementations. */
+  claimInboxMessage?(message: InboxMessage): Promise<boolean>;
   getInboxMessage(idempotencyKey: string): Promise<InboxMessage | null>;
   updateInboxMessage(message: InboxMessage): Promise<void>;
 

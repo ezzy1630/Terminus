@@ -196,6 +196,37 @@ describe("VerificationEngine evidence binding", () => {
     expect(evaluation.results[0]?.status).toBe("error");
     expect(evaluation.allRequiredPassed).toBe(false);
   });
+
+  test("the engine rejects evaluation against a workspace revision different from the plan", async () => {
+    const plan = mkPlan([mkNode("parse", "command", { required: true })], "parse");
+    const engine = new VerificationEngine({
+      executorFor: () => recordingExecutor([], 0, "pass"),
+      idSource: () => fakeUuid(91),
+      clock: fakeTs,
+    });
+    await expect(engine.evaluate(plan, "rev-attacker")).rejects.toThrow(/exact source revision/i);
+  });
+
+  test("a verifier version mismatch cannot produce a passing result", async () => {
+    const plan = mkPlan([mkNode("parse", "command", { required: true })], "parse");
+    const engine = new VerificationEngine({
+      executorFor: () => ({
+        async execute(input: NodeExecutorInput): Promise<VerificationResult> {
+          return {
+            ...passResult(input.node.id as unknown as Uuid7, input.node.id),
+            verifierVersion: "attacker-version",
+          };
+        },
+      }),
+      idSource: () => fakeUuid(92),
+      clock: fakeTs,
+    });
+    const evaluation = await engine.evaluate(plan, "rev-1", null, {
+      environmentImageDigest: "env:1",
+    });
+    expect(evaluation.results[0]?.status).toBe("error");
+    expect(evaluation.allRequiredPassed).toBe(false);
+  });
 });
 
 // ────────────────────────── Changed-code invalidation (§40.5) ────────────────

@@ -460,6 +460,12 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
     this.inbox.set(message.idempotencyKey, clone(message));
   }
 
+  async claimInboxMessage(message: InboxMessage): Promise<boolean> {
+    if (this.inbox.has(message.idempotencyKey)) return false;
+    this.inbox.set(message.idempotencyKey, clone(message));
+    return true;
+  }
+
   async getInboxMessage(idempotencyKey: string): Promise<InboxMessage | null> {
     const m = this.inbox.get(idempotencyKey);
     return m ? clone(m) : null;

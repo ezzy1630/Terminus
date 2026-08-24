@@ -16,4 +16,17 @@ pub enum JobError {
     Process(#[from] terminus_process::ProcessError),
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error("sqlite error: {0}")]
+    Database(String),
+    #[error("job lease mismatch: {0}")]
+    LeaseMismatch(String),
+    #[error("invalid output stream: {0}")]
+    InvalidOutputStream(String),
+    #[error("output cursor conflict for job {job_id} stream {stream}: expected {expected}, got {actual}")]
+    OutputCursorConflict {
+        job_id: String,
+        stream: String,
+        expected: u64,
+        actual: u64,
+    },
 }

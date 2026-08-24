@@ -102,7 +102,9 @@ export class StageRouter {
       scoredCandidates.push({ profile, score });
     }
 
-    scoredCandidates.sort((a, b) => b.score - a.score);
+    scoredCandidates.sort((a, b) =>
+      b.score - a.score || a.profile.id.localeCompare(b.profile.id),
+    );
 
     const chosen = scoredCandidates.length > 0 && scoredCandidates[0]!.score > -900.0
       ? scoredCandidates[0]!.profile

@@ -2196,6 +2196,19 @@ fn patch_edit(value: protocol::PatchEdit) -> Result<terminus_kernel_protocol::Pa
                 replacement_utf8: value.replacement_utf8,
             },
         )),
+        Edit::ReplaceHashline(value) => Ok(terminus_kernel_protocol::PatchEdit::ReplaceHashline(
+            terminus_kernel_protocol::ReplaceHashline {
+                path: value
+                    .path
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("replace hashline path is required"))?,
+                expected_sha256: value.expected_sha256,
+                line_hashes: value.line_hashes,
+                start_line: value.start_line,
+                end_line: value.end_line,
+                replacement_utf8: value.replacement_utf8,
+            },
+        )),
         Edit::ReplaceExactText(value) => Ok(terminus_kernel_protocol::PatchEdit::ReplaceExactText(
             terminus_kernel_protocol::ReplaceExactText {
                 path: value

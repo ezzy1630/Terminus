@@ -27,13 +27,14 @@ import type {
   Diagnostic,
 } from "./index.js";
 import { okResult, errorResult } from "./index.js";
-import { computeSha256 } from "./read.js";
+import { computeSha256, computeLineHash } from "./read.js";
 
 // ────────────────────────── Patch Schemas ────────────────────────────────────
 
 export const patchOpTypeSchema = z.enum([
   "replace_symbol",
   "range",
+  "replace_hashline",
   "exact_text",
   "insert",
   "delete",
@@ -51,6 +52,7 @@ export const patchOperationSchema = z.object({
   observed_hash: z.string().optional(),
   symbol: z.string().nullable().optional(),
   range: z.object({ startLine: z.number().int().positive(), endLine: z.number().int().positive() }).nullable().optional(),
+  line_hashes: z.array(z.string()).nullable().optional(),
   old_text: z.string().nullable().optional(),
   new_text: z.string().nullable().optional(),
   destination: z.string().nullable().optional(),
@@ -73,6 +75,7 @@ export type PatchValidationProfile = z.infer<typeof patchValidationProfileSchema
 export const patchDialectSchema = z.enum([
   "canonical",
   "search_replace",
+  "hashline",
   "unified_diff",
   "ast",
 ]);
@@ -103,9 +106,11 @@ function validateDialect(dialect: PatchDialect, operations: readonly PatchOperat
     ? new Set<PatchOpType>(patchOpTypeSchema.options)
     : dialect === "search_replace"
       ? new Set<PatchOpType>(["exact_text", "range"])
-      : dialect === "unified_diff"
-        ? new Set<PatchOpType>(["unified_diff"])
-        : new Set<PatchOpType>(["replace_symbol"]);
+      : dialect === "hashline"
+        ? new Set<PatchOpType>(["replace_hashline", "create_file", "delete_file"])
+        : dialect === "unified_diff"
+          ? new Set<PatchOpType>(["unified_diff"])
+          : new Set<PatchOpType>(["replace_symbol"]);
   const unsupported = operations.find((operation) => !allowed.has(operation.op));
   return unsupported === undefined
     ? null
@@ -287,6 +292,44 @@ export function applyPatchOp(
         newContent,
         newHash: computeSha256(newContent),
         diffSnippet: `Replacing lines ${op.range.startLine}-${op.range.endLine}`,
+      };
+    }
+
+    case "replace_hashline": {
+      if (fileContent === null) {
+        throw new ValidationError(`Target file ${op.path} does not exist`);
+      }
+      if (!op.range) {
+        throw new ValidationError(`replace_hashline operation requires range parameter`);
+      }
+      const lines = fileContent.split("\n");
+      const start = op.range.startLine;
+      const end = op.range.endLine;
+      if (start < 1 || end > lines.length || start > end) {
+        throw new Error(`ANCHOR_STALE: Range [${start}, ${end}] out of bounds for ${op.path} (${lines.length} lines)`);
+      }
+      const expectedLineCount = end - start + 1;
+      if (op.line_hashes === null || op.line_hashes === undefined || op.line_hashes.length !== expectedLineCount) {
+        throw new Error(`ANCHOR_STALE: replace_hashline requires exactly ${expectedLineCount} line hashes for ${op.path}`);
+      }
+      for (let i = 0; i < expectedLineCount; i++) {
+        const lineIdx = start - 1 + i;
+        const lineContent = lines[lineIdx] ?? "";
+        const computedHash = computeLineHash(lineContent);
+        const expectedHash = op.line_hashes[i]!;
+        if (expectedHash.length === 0 || expectedHash.toLowerCase() !== computedHash.toLowerCase()) {
+          throw new Error(`ANCHOR_STALE: Line hash mismatch in ${op.path} at line ${lineIdx + 1}: expected ${expectedHash}, got ${computedHash}`);
+        }
+      }
+      const before = lines.slice(0, start - 1);
+      const after = lines.slice(end);
+      const replacementLines = (op.new_text ?? "").split("\n");
+      const newLines = [...before, ...replacementLines, ...after];
+      const newContent = newLines.join("\n");
+      return {
+        newContent,
+        newHash: computeSha256(newContent),
+        diffSnippet: `Hashline replacing lines ${start}-${end}`,
       };
     }
 
@@ -681,6 +724,15 @@ export class ProductionPatchExecutor implements ToolExecutor<PatchResultData> {
       sourceVersionsMap[`workspace://${f.path}`] = f.new_hash;
     }
 
+    const postWriteDiagnostics: Diagnostic[] = [];
+    if (this.provider.validateSyntax) {
+      for (const [path, item] of overlay.entries()) {
+        if (!item.exists) continue;
+        const diags = await this.provider.validateSyntax(path, item.content);
+        postWriteDiagnostics.push(...diags);
+      }
+    }
+
     return okResult(data, {
       toolCallId: ctx.toolCallId,
       traceId: ctx.traceId,
@@ -689,6 +741,7 @@ export class ProductionPatchExecutor implements ToolExecutor<PatchResultData> {
         : `Successfully applied ${changedFiles.length} edits across ${targetPaths.length} files atomically`,
       sourceVersions: sourceVersionsMap,
       sideEffects,
+      diagnostics: postWriteDiagnostics.length > 0 ? postWriteDiagnostics : undefined,
     });
   }
 }
