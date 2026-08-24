@@ -113,6 +113,11 @@ const CausalReplayView = lazy(async () => {
   return { default: cockpitModule.CausalReplayView };
 });
 
+const ClaimEvidenceGraphView = lazy(async () => {
+  const cockpitModule = await import("./components/Cockpit/ClaimEvidenceGraphView");
+  return { default: cockpitModule.ClaimEvidenceGraphView };
+});
+
 const AttentionCenterModal = lazy(async () => {
   const cockpitModule = await import("./components/Cockpit/AttentionCenterModal");
   return { default: cockpitModule.AttentionCenterModal };
@@ -144,7 +149,7 @@ function SelectedTaskReviewPane({
 const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
 const INSPECTOR_VISIBILITY_KEY = "terminus-desktop.inspector-visible.";
 type AppOverlay = "palette" | "settings" | "onboarding" | "attention" | null;
-type TaskWorkspaceTab = "overview" | "activity" | "changes" | "replay" | "usage";
+type TaskWorkspaceTab = "overview" | "activity" | "changes" | "replay" | "usage" | "evidence";
 
 function parseTaskWorkspaceTab(value: string): TaskWorkspaceTab | null {
   switch (value) {
@@ -153,6 +158,7 @@ function parseTaskWorkspaceTab(value: string): TaskWorkspaceTab | null {
     case "changes":
     case "replay":
     case "usage":
+    case "evidence":
       return value;
     default:
       return null;
@@ -484,6 +490,7 @@ export function App(): JSX.Element {
         openArtifactDiff: taskCommandsEnabled ? () => openTaskWorkspace("changes") : undefined,
         openFleetBudget: taskCommandsEnabled ? () => openTaskWorkspace("usage") : undefined,
         openCausalReplay: taskCommandsEnabled ? () => openTaskWorkspace("replay") : undefined,
+        openClaimEvidence: taskCommandsEnabled ? () => openTaskWorkspace("evidence") : undefined,
         viewShortcuts: () => openSettings("shortcuts"),
       }),
       ...selectedSessionTasks.map((task) => ({
@@ -599,6 +606,7 @@ export function App(): JSX.Element {
                   { value: "changes", label: "Changes", content: <ArtifactDiffInspectorView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
                   { value: "replay", label: "Replay", content: <CausalReplayView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
                   { value: "usage", label: "Usage", content: <FleetBudgetView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
+                  { value: "evidence", label: "Evidence", content: <ClaimEvidenceGraphView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
                 ]}
               />
             ) : showNavigationSurface ? (

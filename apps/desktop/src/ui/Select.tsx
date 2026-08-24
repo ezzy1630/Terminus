@@ -39,7 +39,7 @@ export function Select({ value, onValueChange, options, label, disabled, classNa
         <SelectPrimitive.Content
           position="popper"
           sideOffset={5}
-          className="ui-popover z-popover min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-lg border border-default p-1 shadow-md"
+          className="ui-popover z-select min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-lg border border-default p-1 shadow-md"
         >
           <SelectPrimitive.Viewport>
             {options.map((option) => (

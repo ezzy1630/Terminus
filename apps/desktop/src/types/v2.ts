@@ -133,6 +133,26 @@ export interface ClaimSnapshot {
   updatedAt: string;
 }
 
+export interface EvidenceArtifactRef {
+  hash: string;
+  uri: string;
+  mediaType: string;
+  bytes: string;
+}
+
+export interface EvidenceSnapshot {
+  id: string;
+  claimId: string;
+  kind: string;
+  summary: string;
+  sourceRevision: string | null;
+  environmentHash: string | null;
+  verifierResult: string;
+  artifactRef: EvidenceArtifactRef | null;
+  metadata: Record<string, unknown>;
+  observedAt: string;
+}
+
 // ────────────────────────── Phase 9 operator cockpit ──────────────────────
 
 export interface OrganizationSnapshot {

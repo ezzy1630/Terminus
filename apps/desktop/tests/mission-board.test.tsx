@@ -104,7 +104,7 @@ describe("mission board domain mapping", () => {
   });
 
   test("maps only lawful direct drops to canonical transitions", () => {
-    expect(boardTransitionForDrop("DRAFT", "running")).toBe("RUNNING");
+    expect(boardTransitionForDrop("DRAFT", "running")).toBeNull();
     expect(boardTransitionForDrop("READY", "running")).toBe("RUNNING");
     expect(boardTransitionForDrop("RUNNING", "waiting_for_review")).toBe("VERIFYING");
     expect(boardTransitionForDrop("VERIFYING", "running")).toBe("RUNNING");

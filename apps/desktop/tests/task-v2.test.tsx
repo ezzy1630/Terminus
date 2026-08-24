@@ -114,7 +114,7 @@ function eventEnvelope(overrides: Partial<ArpV2EventEnvelope> = {}): ArpV2EventE
     correlationId: "task-requested",
     causationId: null,
     idempotencyKey: null,
-    payload: { snapshot: task("task-requested", "Requested task") },
+    payload: task("task-requested", "Requested task"),
     artifactRefs: [],
     traceId: null,
     ...overrides,
@@ -324,12 +324,12 @@ describe("ARP v2 event admission", () => {
       eventType: "effect.proposed",
       aggregateType: "effect",
       aggregateId: "effect-1",
-      payload: { snapshot: effect("task-requested") },
+      payload: effect("task-requested"),
     });
     expect(eventBelongsToTask(relatedEffect, "task-requested")).toBe(true);
     expect(eventBelongsToTask({
       ...relatedEffect,
-      payload: { snapshot: effect("task-other") },
+      payload: effect("task-other"),
     }, "task-requested")).toBe(false);
     expect(eventBelongsToTask({
       ...relatedEffect,

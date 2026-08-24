@@ -43,6 +43,7 @@ export interface DefaultCommandActions {
   readonly openArtifactDiff?: () => void;
   readonly openFleetBudget?: () => void;
   readonly openCausalReplay?: () => void;
+  readonly openClaimEvidence?: () => void;
 }
 
 /** Convert supported host actions into the provider-neutral command catalog. */
@@ -68,6 +69,7 @@ export function buildDefaultCommands(actions: DefaultCommandActions): Command[] 
   push("cockpit.artifact-diff", "Task changes", "Cockpit", undefined, actions.openArtifactDiff, ["artifacts", "diffs", "patches"]);
   push("cockpit.fleet-budget", "Task usage", "Cockpit", undefined, actions.openFleetBudget, ["tokens", "compute", "costs"]);
   push("cockpit.causal-replay", "Task replay", "Cockpit", undefined, actions.openCausalReplay, ["causal", "counterfactual", "diagnostics"]);
+  push("cockpit.claim-evidence", "Task evidence", "Cockpit", undefined, actions.openClaimEvidence, ["claims", "receipts", "verification"]);
   push("project.open", "Open project", "Navigation", shortcutDisplay(FIXED_SHORTCUTS.openProject), actions.openProject, ["workspace", "folder", "onboarding"]);
   push("nav.mission-board", "Open mission board", "Navigation", undefined, actions.openMissionBoard, ["kanban", "tasks", "work", "status"]);
   push("task.new", "New task", "Task", shortcutDisplay(FIXED_SHORTCUTS.newTask), actions.newTask, ["create task"]);

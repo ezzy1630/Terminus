@@ -6,10 +6,8 @@
  * model field, so choosing a model in the composer means updating that single
  * durable record — the same one Settings edits by hand.
  *
- * Two things travel with the model and must not be left stale: `free_model`
- * and `tools_enabled` describe the model, not the operator's preference, and a
- * mismatch there feeds wrong cost accounting and wrong tool admission. They are
- * taken from the discovered model rather than carried over.
+ * The model's free-tier status travels with the choice. Tool use remains an
+ * operator permission: a model may reduce that permission, never grant it.
  *
  * Writes are optimistic-concurrency guarded by `expected_revision`. On a
  * conflict the configuration is re-read once and retried, because the common
@@ -46,7 +44,7 @@ export function useModelRouting(): ModelRouting {
       deployment: current.deployment,
       protocol: current.protocol,
       model: model.slug,
-      tools_enabled: model.toolCalling ?? current.tools_enabled,
+      tools_enabled: current.tools_enabled && model.toolCalling === true,
       free_model: model.free ?? false,
       workspace_access: current.workspace_access,
       expected_revision: revision,

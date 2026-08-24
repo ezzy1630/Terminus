@@ -27,7 +27,7 @@ function recordFrom(value: unknown): Record<string, unknown> | null {
 export function eventBelongsToTask(envelope: ArpV2EventEnvelope, taskId: string): boolean {
   if (envelope.aggregateType === "task") return envelope.aggregateId === taskId;
   if (envelope.aggregateType !== "effect" && envelope.aggregateType !== "claim") return false;
-  const snapshot = recordFrom(recordFrom(envelope.payload)?.snapshot);
+  const snapshot = recordFrom(envelope.payload);
   return snapshot?.id === envelope.aggregateId && snapshot.taskId === taskId;
 }
 

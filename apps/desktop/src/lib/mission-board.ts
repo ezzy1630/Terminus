@@ -50,7 +50,7 @@ export function boardTransitionForDrop(
   status: TaskV2Status,
   destination: MissionBoardColumnId,
 ): TaskV2Status | null {
-  if ((status === "DRAFT" || status === "READY") && destination === "running") return "RUNNING";
+  if (status === "READY" && destination === "running") return "RUNNING";
   if (status === "RUNNING" && destination === "waiting_for_review") return "VERIFYING";
   if ((status === "VERIFYING" || status === "PAUSED" || status === "BLOCKED") && destination === "running") return "RUNNING";
   return null;

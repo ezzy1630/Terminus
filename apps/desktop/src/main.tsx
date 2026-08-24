@@ -12,7 +12,8 @@ import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { TooltipLayer, TooltipProvider } from "./ui/Tooltip";
 import { setupDevMock } from "./lib/dev-mock";
 
-if (import.meta.env.DEV && (window.location.search.includes("mock") || !window.localStorage.getItem("terminus-desktop.onboarding.completed.v1"))) {
+const mockRequested = new URLSearchParams(window.location.search).get("mock") === "true";
+if (import.meta.env.DEV && mockRequested) {
   setupDevMock();
 }
 

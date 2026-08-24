@@ -872,6 +872,7 @@ html[data-reduce-transparency="true"] .command-palette-shell {
 @utility animate-slide-down { animation: slide-down var(--duration-normal) var(--easing-default); }
 @utility z-popover { z-index: var(--z-popover); }
 @utility z-tooltip { z-index: var(--z-tooltip); }
+@utility z-select { z-index: var(--z-select); }
 
 /* ────────────────────────── Code blocks ──────────────────────────────── */
 

@@ -27,6 +27,7 @@ import type {
   CausalReplayTraceSnapshot,
   DepartmentSnapshot,
   EffectSnapshot,
+  EvidenceSnapshot,
   InterventionApplicationResult,
   MaterialQuestionResolution,
   MaterialQuestionSnapshot,
@@ -359,6 +360,37 @@ function decodeClaim(value: unknown): ClaimSnapshot {
     waivedRationale: nullableString(claim.waivedRationale, "v2 claim.waivedRationale"),
     createdAt: requiredString(claim.createdAt, "v2 claim.createdAt"),
     updatedAt: requiredString(claim.updatedAt, "v2 claim.updatedAt"),
+  };
+}
+
+function decodeEvidence(value: unknown): EvidenceSnapshot {
+  const evidence = asObject(value, "v2 evidence");
+  const rawArtifact = evidence.artifactRef;
+  let artifactRef: EvidenceSnapshot["artifactRef"] = null;
+  if (rawArtifact !== null) {
+    const artifact = asObject(rawArtifact, "v2 evidence artifactRef");
+    const bytes = requiredString(artifact.bytes, "v2 evidence artifactRef.bytes");
+    if (!/^\d+$/.test(bytes)) {
+      throw new TerminusApiError(502, "v2 evidence artifactRef.bytes was not a decimal string", null);
+    }
+    artifactRef = {
+      hash: requiredString(artifact.hash, "v2 evidence artifactRef.hash"),
+      uri: requiredString(artifact.uri, "v2 evidence artifactRef.uri"),
+      mediaType: requiredString(artifact.mediaType, "v2 evidence artifactRef.mediaType"),
+      bytes,
+    };
+  }
+  return {
+    id: requiredString(evidence.id, "v2 evidence.id"),
+    claimId: requiredString(evidence.claimId, "v2 evidence.claimId"),
+    kind: requiredString(evidence.kind, "v2 evidence.kind"),
+    summary: requiredString(evidence.summary, "v2 evidence.summary"),
+    sourceRevision: nullableString(evidence.sourceRevision, "v2 evidence.sourceRevision"),
+    environmentHash: nullableString(evidence.environmentHash, "v2 evidence.environmentHash"),
+    verifierResult: requiredString(evidence.verifierResult, "v2 evidence.verifierResult"),
+    artifactRef,
+    metadata: requiredRecord(evidence.metadata, "v2 evidence.metadata"),
+    observedAt: requiredTimestamp(evidence.observedAt, "v2 evidence.observedAt"),
   };
 }
 
@@ -794,6 +826,19 @@ export class TerminusArpV2Client {
     return requiredArrayField(raw, "effects", "v2 effect list")
       .map(decodeEffect)
       .map((effect) => assertTaskScope(effect, taskId, "v2 effect list"));
+  }
+
+  async listClaims(taskId: string, signal?: AbortSignal | null): Promise<ClaimSnapshot[]> {
+    const raw = await this.request<unknown>("GET", `/v2/claims?taskId=${encodeURIComponent(taskId)}`, { signal });
+    return requiredArrayField(raw, "claims", "v2 claim list")
+      .map(decodeClaim)
+      .map((claim) => assertTaskScope(claim, taskId, "v2 claim list"));
+  }
+
+  async listEvidence(taskId: string, signal?: AbortSignal | null): Promise<EvidenceSnapshot[]> {
+    const raw = await this.request<unknown>("GET", `/v2/evidence?taskId=${encodeURIComponent(taskId)}`, { signal });
+    return requiredArrayField(raw, "evidence", "v2 evidence list")
+      .map(decodeEvidence);
   }
 
   proposeEffect(input: {
