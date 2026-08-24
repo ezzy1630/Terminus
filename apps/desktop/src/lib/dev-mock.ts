@@ -234,18 +234,9 @@ export function setupDevMock(): void {
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
   })));
-  const evidence: EvidenceSnapshot[] = claims.map((claim) => ({
-    id: claim.evidenceIds[0] ?? `evidence-${claim.id}`,
-    claimId: claim.id,
-    kind: claim.requiredEvidenceKind,
-    summary: "Mock verifier receipt: focused contract test passed.",
-    sourceRevision: "fixture",
-    environmentHash: "fixture-environment",
-    verifierResult: "unverified",
-    artifactRef: null,
-    metadata: { mock: true },
-    observedAt: new Date().toISOString(),
-  }));
+  // There is no immutable artifact or verifier in mock mode. Return no
+  // receipts so the cockpit cannot present fixture data as admitted proof.
+  const evidence: EvidenceSnapshot[] = [];
 
   const SESSION_BY_TASK: Record<string, string> = {
     "task-101": "session-1",

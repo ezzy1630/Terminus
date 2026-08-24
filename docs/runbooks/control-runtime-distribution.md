@@ -24,6 +24,7 @@ export TERMINUS_KERNEL_GRPC_SOCKET=/run/terminus/kernel.sock
 secret-manager exec \
   --env TERMINUS_KERNEL_CONTROL_BOOTSTRAP=1 \
   --env TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN=terminus/kernel/control-bootstrap \
+  --env TERMINUS_KERNEL_REQUIRE_UDS=1 \
   -- ./terminus-kernel ...
 
 # The deployment secret manager injects both bearer values into the control

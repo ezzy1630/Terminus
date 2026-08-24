@@ -104,8 +104,9 @@ function main(): void {
         // stale configuration text.
         current = parseSettingsJsonc(readFileSync(settingsPath, "utf8"), settingsPath);
       } catch (error: unknown) {
+        const reason = error instanceof Error ? error.message : String(error);
         throw new Error(
-          `[acp-config] refusing to overwrite ${settingsPath}: expected valid JSONC`,
+          `[acp-config] refusing to overwrite ${settingsPath}: ${reason}`,
           { cause: error },
         );
       }
