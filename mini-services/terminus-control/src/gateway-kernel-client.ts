@@ -30,36 +30,44 @@ export class KernelGatewayClient implements CredentialBoundGatewayClient {
     assertNotAborted(input.signal, "gateway request was aborted");
     const url = admittedGatewayUrl(input.url);
     const effectId = randomUUID();
-    const grant = await this.connectors.MintGrant({
-      context: nextContext(this.context, `gateway-grant:${effectId}`),
-      capabilityUri: input.credentialBindingId,
-      binding: {
-        connectorId: "opencode-gateway",
-        destinationHost: GATEWAY_HOST,
-        destinationPort: GATEWAY_PORT,
-        scheme: "https",
-        method: input.method,
-        pathClass: url.pathname,
-        effectId,
-      },
-      ttlSeconds: 60,
-    });
+    const grant = await withAbortSignal(
+      this.connectors.MintGrant({
+        context: nextContext(this.context, `gateway-grant:${effectId}`),
+        capabilityUri: input.credentialBindingId,
+        binding: {
+          connectorId: "opencode-gateway",
+          destinationHost: GATEWAY_HOST,
+          destinationPort: GATEWAY_PORT,
+          scheme: "https",
+          method: input.method,
+          pathClass: url.pathname,
+          effectId,
+        },
+        ttlSeconds: 60,
+      }),
+      input.signal,
+      "gateway request was aborted",
+    );
     if (grant.encodedGrant.length === 0) throw new Error("kernel returned an empty connector grant");
     assertNotAborted(input.signal, "gateway request was aborted before dispatch");
-    const response = await this.connectors.Execute({
-      context: nextContext(this.context, `gateway-execute:${effectId}`),
-      encodedGrant: grant.encodedGrant,
-      operation: {
-        method: input.method,
-        scheme: "https",
-        host: GATEWAY_HOST,
-        port: GATEWAY_PORT,
-        path: url.pathname,
-        query: url.search.slice(1),
-        headers: Object.entries(input.headers).map(([name, value]) => ({ name, value })),
-        body: input.body === undefined ? new Uint8Array() : new TextEncoder().encode(input.body),
-      },
-    });
+    const response = await withAbortSignal(
+      this.connectors.Execute({
+        context: nextContext(this.context, `gateway-execute:${effectId}`),
+        encodedGrant: grant.encodedGrant,
+        operation: {
+          method: input.method,
+          scheme: "https",
+          host: GATEWAY_HOST,
+          port: GATEWAY_PORT,
+          path: url.pathname,
+          query: url.search.slice(1),
+          headers: Object.entries(input.headers).map(([name, value]) => ({ name, value })),
+          body: input.body === undefined ? new Uint8Array() : new TextEncoder().encode(input.body),
+        },
+      }),
+      input.signal,
+      "gateway request was aborted",
+    );
     const status = response.receipt?.statusCode;
     if (status === undefined) {
       throw new Error(`OpenCode gateway dispatch did not settle: ${response.receipt?.outcome ?? "missing receipt"}`);
@@ -67,12 +75,61 @@ export class KernelGatewayClient implements CredentialBoundGatewayClient {
     if (status < 200 || status > 299) {
       throw new Error(`OpenCode gateway returned HTTP ${status}${providerErrorSuffix(response.body)}`);
     }
-    yield response.body;
+    for (const chunk of splitSseChunks(response.body)) {
+      assertNotAborted(input.signal, "gateway request was aborted during streaming");
+      yield chunk;
+    }
   }
 }
 
 function assertNotAborted(signal: AbortSignal | null, message: string): void {
   if (signal?.aborted === true) throw new Error(message);
+}
+
+function withAbortSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | null | undefined,
+  message: string,
+): Promise<T> {
+  if (signal?.aborted === true) {
+    return Promise.reject(new Error(message));
+  }
+  if (!signal) {
+    return promise;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error(message));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (res) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(res);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+function* splitSseChunks(body: Uint8Array): Generator<Uint8Array> {
+  if (body.byteLength === 0) return;
+  const text = new TextDecoder().decode(body);
+  if (!text.includes("data:") && !text.includes("event:")) {
+    yield body;
+    return;
+  }
+  const parts = text.split(/(?<=\r?\n\r?\n)/);
+  const encoder = new TextEncoder();
+  for (const part of parts) {
+    if (part.length > 0) {
+      yield encoder.encode(part);
+    }
+  }
 }
 
 function admittedGatewayUrl(raw: string): URL {

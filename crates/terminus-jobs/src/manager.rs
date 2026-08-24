@@ -382,9 +382,15 @@ mod tests {
         let record = JobRecord::new(id.clone(), "sess", "task", "echo done");
         mgr.create(record).await.unwrap();
         mgr.start(&id, echo_spawn()).await.unwrap();
-        // Wait for the short echo to exit.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let state = mgr.reconcile(&id).await.unwrap();
+        // Poll for the short echo process to exit and reconcile to Lost.
+        let mut state = JobState::Running;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            state = mgr.reconcile(&id).await.unwrap();
+            if state == JobState::Lost {
+                break;
+            }
+        }
         assert_eq!(state, JobState::Lost);
     }
 
