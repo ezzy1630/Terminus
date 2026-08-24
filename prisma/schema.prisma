@@ -44,7 +44,6 @@ model Workspace {
   deletedAt       DateTime? @map("deleted_at")
 
   sessions  Session[]
-  artifacts ArtifactLink[]
 
   @@index([lastOpenedAt])
   @@map("workspaces")
@@ -352,12 +351,15 @@ model ArtifactLink {
   id           String   @id
   artifactHash String   @map("artifact_hash")
   ownerType    String   @map("owner_type") // turn | task | provider_attempt | tool_call | verification_result | memory | capability | ...
+  // Polymorphic owner reference: (ownerType, ownerId) points at the owning
+  // row. Deliberately NOT a foreign key — the canonical migration
+  // (migrations/sqlite/0001_initial.sql) defines no FK here, and forcing one
+  // to workspaces would make prisma db push reject every non-workspace owner.
   ownerId      String   @map("owner_id")
   purpose      String
   createdAt    DateTime @default(now()) @map("created_at")
 
-  artifact  Artifact   @relation(fields: [artifactHash], references: [hash])
-  workspace Workspace? @relation(fields: [ownerId], references: [id], onDelete: NoAction)
+  artifact Artifact @relation(fields: [artifactHash], references: [hash])
 
   @@unique([artifactHash, ownerType, ownerId, purpose])
   @@index([ownerType, ownerId])
@@ -391,6 +393,7 @@ model ToolCall {
   sideEffects     SideEffect[]
 
   @@index([turnId, proposedAt])
+  @@index([providerAttemptId])
   @@map("tool_calls")
 }
 
@@ -433,6 +436,7 @@ model Approval {
   toolCall    ToolCall?          @relation("ToolApproval", fields: [toolCallId], references: [id])
   scopeLedger ScopeLedgerEntry[] @relation("ScopeApproval")
 
+  @@index([taskId])
   @@map("approvals")
 }
 
@@ -453,6 +457,7 @@ model SideEffect {
   toolCall ToolCall @relation(fields: [toolCallId], references: [id])
 
   @@unique([effectType, idempotencyKey])
+  @@index([toolCallId])
   @@map("side_effects")
 }
 
@@ -480,6 +485,7 @@ model Job {
   task    Task?   @relation(fields: [taskId], references: [id])
 
   @@index([sessionId])
+  @@index([taskId])
   @@map("jobs")
 }
 
@@ -789,6 +795,8 @@ model CapabilityActivation {
   task       Task?      @relation(fields: [taskId], references: [id])
   capability Capability @relation(fields: [capabilityId, capabilityVersion], references: [id, version])
 
+  @@index([sessionId])
+  @@index([taskId])
   @@map("capability_activations")
 }
 

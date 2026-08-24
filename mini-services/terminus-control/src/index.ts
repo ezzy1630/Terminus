@@ -354,7 +354,23 @@ const CONTROL_CORS_ORIGIN = process.env.TERMINUS_CONTROL_CORS_ORIGIN
 // `/home/z/my-project/...` template path so the control plane starts
 // out-of-the-box on any host).
 const DEFAULT_DB_PATH = `file:${process.env.HOME ?? process.cwd()}/.local/share/terminus/terminus.db`;
-const DATABASE_URL = process.env.DATABASE_URL ?? DEFAULT_DB_PATH;
+// The documented DATABASE_URL sample uses `file:~/...`. The bun:sqlite
+// migration runners expand `~` themselves, but Prisma treats it literally,
+// which would fork the database into a literal "./~/..." directory. Expand a
+// leading `~` (bare or after the URL scheme) so every consumer resolves the
+// same file.
+function expandTildeDbUrl(url: string): string {
+  if (url === "~" || url.startsWith("~/")) {
+    return `${process.env.HOME ?? process.cwd()}${url.slice(1)}`;
+  }
+  const schemeMatch = /^[a-z][a-z0-9+.-]*:(?:\/\/)?/.exec(url);
+  const rest = schemeMatch === null ? url : url.slice(schemeMatch[0].length);
+  if (rest !== "~" && !rest.startsWith("~/")) return url;
+  if (schemeMatch !== null && schemeMatch[0].includes("//")) return url;
+  const prefix = schemeMatch === null ? "" : schemeMatch[0];
+  return `${prefix}${process.env.HOME ?? process.cwd()}${rest.slice(1)}`;
+}
+const DATABASE_URL = expandTildeDbUrl(process.env.DATABASE_URL ?? DEFAULT_DB_PATH);
 const SERVER_PRINCIPAL = "terminus-control-bearer";
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_REQUEST_BYTES = 1_048_576;
