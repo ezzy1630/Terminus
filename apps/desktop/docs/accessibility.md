@@ -1,295 +1,74 @@
-# Terminus Desktop — Accessibility Report
+# Terminus Desktop — Accessibility
 
-This document records the accessibility design and current compliance
-state of the Terminus desktop app, per SPEC §26.
+This is the implementation checklist for the desktop renderer. It describes
+the current source-level guarantees; it is not a VoiceOver certification.
+Run the manual scenarios in `voiceover-test-plan.md` on a fresh packaged
+application before calling the accessibility gate complete.
 
-## 1. Requirements (SPEC §26)
+## Keyboard access
 
-The desktop spec mandates:
+- The sidebar uses native buttons for navigation and task rows. Long task
+  sections use roving focus with `ArrowUp`/`ArrowDown`, `Home`, and `End`.
+- The composer is a multiline textarea. `⌘Enter`/`Ctrl+Enter` sends or steers;
+  `Enter` inserts a newline.
+- The command palette supports arrows, `Home`, `End`, `Enter`, and `Esc`.
+- Diff review supports `J`, `K`, `[`, `]`, and `U` when focus is not in an
+  editable or interactive control. See `keyboard-shortcuts.md` for the full
+  fixed registry.
 
-- Full keyboard navigation
-- Visible focus states
-- Logical tab order
-- Screen-reader labels
-- Semantic controls
-- Correct dialog focus trapping
-- Focus restoration
-- Reduced motion support
-- Reduced transparency support
-- Sufficient contrast
-- No meaning conveyed by color alone
-- Large enough interaction targets
-- Tooltips for ambiguous icons
-- Accessible terminal controls
-- Accessible diff navigation
-- Accessible status announcements
-- Streaming updates that do not overwhelm assistive technology
+## Semantics and names
 
-## 2. Keyboard navigation
+Interactive surfaces use native buttons, links, inputs, and textareas where
+possible. Icon-only controls expose an `aria-label`; shared tooltips replace
+browser `title` bubbles on migrated controls.
+Task rows expose their title, status, selected state, and pin state. The
+command palette uses `role="dialog"`, `role="listbox"`, and
+`aria-selected` for its results. Settings and the structured modal surfaces
+use labelled modal dialogs. Empty, loading, stale, and error states retain
+explicit status or alert semantics instead of disappearing into a blank pane.
 
-### Global shortcuts (documented in `docs/keyboard-shortcuts.md`)
+Status is not conveyed by color alone: task status includes text and a
+semantic glyph, diff lines include `+`/`-` prefixes, and approval risk is
+written as a label as well as styled.
 
-| Shortcut       | Action |
-| -------------- | ------ |
-| `⌘K`           | Command palette |
-| `⌘,`           | Settings |
-| `⌘\``          | Terminal drawer |
-| `⌘N`           | New task |
-| `⌘Enter`       | Send / steer |
-| `⇧⌘Enter`      | Queue |
-| `Esc`          | Interrupt / close overlay |
-| `⌘1`–`⌘9`      | Switch to the corresponding visible task |
-| `⌘]`           | Toggle inspector |
-| `⌘\`           | Toggle sidebar |
+## Focus management
 
-### Per-surface shortcuts
+`useDialogFocus` is shared by the command palette, Settings, onboarding,
+Attention Center, and structured interventions. On open it moves focus into
+the dialog; `Tab` and `Shift+Tab` wrap; `Esc` invokes the supplied close action;
+and unmount restores the launching element. Diff and sidebar virtualizers mount
+the pending focused row before applying focus so keyboard navigation does not
+depend on a row already being visible.
 
-- **Command palette** — `↑↓` navigate, `Enter` invoke, `Home/End`
-  jump, `Esc` close. Tab is intentionally allowed to escape (no focus
-  trap) per SPEC §18 ("No keyboard traps") so the user has a recovery
-  path if the palette gets into a bad state.
-- **Diff viewer** — `j/k` next/prev change, `[/]` next/prev file,
-  `u` toggle view mode. Active only when the diff viewer has focus.
-- **Terminal drawer** — `⌘F` focus search, `Enter` cycle matches,
-  `Esc` close search, `⌘K` clear. The drawer never claims `⌘\``
-  (owned by the Layout so it works whether the drawer is open or
-  closed).
-- **Settings / Onboarding** — `Esc` closes; Tab cycles through the
-  visible controls in DOM order; Shift+Tab reverses.
+## Visual and motion preferences
 
-### Tab order
+- `:focus-visible` provides the keyboard focus ring.
+- Light and dark token sets are explicit; the theme store supports system,
+  light, and dark modes plus spacious and compact density.
+- Progress marks and loading skeletons are static. Bounded state transitions
+  honor `prefers-reduced-motion`, which also disables smooth scroll.
+- The Electron shell and renderer use solid surfaces. Reduce Transparency does
+  not reveal a hidden vibrancy dependency.
+- Unit checks hold normal tertiary and placeholder text at WCAG AA contrast on
+  canvas, sidebar, card, hover, and selected surfaces in both themes. The
+  packaged surface still requires contrast and target-size measurement.
 
-The DOM order is:
+## Dynamic content
 
-1. Title bar controls (theme, density, command palette, terminal
-   toggle).
-2. Sidebar (search input → new task → pinned tasks → sessions →
-   tasks → user profile / settings).
-3. Main surface (conversation / new-task / composer).
-4. Inspector (sections in source order).
+Conversation and activity updates are structural rather than token-by-token
+announcements. Approval, connection, loading, stale, and error states expose
+the current state and recovery action. Event histories and collection pages
+are bounded with explicit continuation or rejected-payload messaging; a
+bounded presentation is never presented as complete content.
 
-This order is logical: top-to-bottom, left-to-right, mirroring the
-visual layout. No `tabIndex` overrides are used to reorder.
+## Open manual gates
 
-## 3. Focus states
+- VoiceOver traversal and announcements on macOS.
+- Keyboard-only completion of onboarding, task selection, composer, changes,
+  Settings, approvals, and cockpit dialogs.
+- Contrast, focus visibility, and target-size measurements at wide and narrow
+  window sizes.
+- Reduced-motion and reduced-transparency checks on the packaged application.
 
-Every focusable element uses `:focus-visible` (not `:focus`) so the
-focus ring shows for keyboard users but not for mouse clicks:
-
-```css
-:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
-}
-```
-
-The `--focus-ring` token is `0 0 0 2px #58a6ff40` (dark) / `0 0 0 2px
-#0969da30` (light) — a 2-pixel translucent ring in the primary color.
-This is visible against every surface in the app.
-
-## 4. Screen-reader labels
-
-Every icon-only button has both `aria-label` and `title` so the label
-is announced by VoiceOver and surfaced as a native tooltip on hover.
-Examples:
-
-- Terminal toggle: `aria-label="Show terminal"` (or "Hide terminal"
-  when open).
-- Theme cycle: `aria-label="Theme: system"` (or "light" / "dark").
-- Density toggle: `aria-label="Density: spacious"`.
-- Command palette trigger: `aria-label="Open command palette"`.
-- Sidebar pin: `aria-label="Pin"` / `aria-label="Unpin"`.
-- Approval buttons: `aria-label="Allow once — Run database migration"`
-  (combines the action label with the action being approved).
-
-The status indicators use `aria-label` on the inner glyph (e.g.
-`aria-label="working"`, `aria-label="done"`) so a screen reader
-announces the status when the row is focused.
-
-## 5. Semantic controls
-
-- The sidebar uses `role="button"` with `tabIndex={0}` for task rows
-  (they're clickable divs, not native buttons, because they hold
-  nested content). Enter and Space both activate them.
-- The command palette uses `role="dialog"` + `aria-label="Command
-  palette"` on the backdrop, `role="listbox"` + `aria-label="Commands"`
-  on the results, and `role="option"` + `aria-selected` on each row.
-- The terminal drawer uses `role="region"` + `aria-label="Terminal
-  drawer"` and `role="tablist"` + `role="tab"` for tabs.
-- The settings overlay uses `role="dialog"` + `aria-modal="true"`.
-- The inspector sections use `aria-expanded` on the toggle button.
-- The composer textarea uses `aria-label="Message composer"`.
-- Empty states use `role="status"` + `aria-live="polite"`.
-- Error states use `role="alert"` + `aria-live="assertive"`.
-- Approval cards use `role="group"` + `aria-label` summarizing the
-  action.
-
-## 6. Dialog focus trapping and restoration
-
-- **Command palette** — intentionally does NOT trap focus. Tab escapes
-  to the underlying document (per SPEC §18 "No keyboard traps"). This
-  is a deliberate recovery path: if the palette's keyboard handler
-  ever gets into a bad state, the user can Tab away and dismiss with
-  Esc.
-- **Settings** — `role="dialog"` + `aria-modal="true"`. Focus is
-  moved to the search input on open and restored to the trigger
-  button on close. Tab cycles within the dialog.
-- **Onboarding** — same pattern as Settings. Each step's primary
-  button is auto-focused.
-
-## 7. Reduced motion
-
-Global CSS in `globals.css`:
-
-```css
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-}
-```
-
-This affects every transition and animation in the app, including:
-
-- The streaming cursor (the pulse block on streaming agent messages).
-- The sidebar width transition during resize.
-- The command palette fade-in.
-- The terminal drawer slide-up.
-
-## 8. Reduced transparency
-
-The Electron main process enables `vibrancy: "under-window"` and
-`visualEffectState: "active"` for native macOS vibrancy. The
-`Settings` app exposes a "Reduce transparency" toggle (under
-Appearance) that, when set, swaps the vibrancy for a solid
-`--bg-sidebar` background.
-
-In dev (plain Vite, no Electron), the sidebar uses `--bg-sidebar`
-directly — no vibrancy simulation. The visual difference between
-"with vibrancy" and "without" is subtle by design (SPEC §4.2: "Do not
-place blurred translucent materials behind every surface").
-
-The Electron main process reads the macOS `AppleReduceTransparency`
-preference before creating the window and disables vibrancy when it is set.
-
-## 9. Contrast
-
-All text/background combinations meet WCAG AA (4.5:1 for body text,
-3:1 for large text and UI components):
-
-| Combination | Dark | Light |
-| ----------- | ---- | ----- |
-| `--text-primary` on `--bg-canvas` | `#ececed` on `#171717` (15.2:1) | `#1a1a1c` on `#f6f6f7` (16.1:1) |
-| `--text-secondary` on `--bg-canvas` | `#b5b5b7` on `#171717` (8.8:1) | `#5a5a5e` on `#f6f6f7` (6.4:1) |
-| `--text-tertiary` on `--bg-canvas` | `#828287` on `#171717` (4.7:1) | `#707075` on `#f6f6f7` (4.6:1) |
-| `--text-placeholder` on form surfaces | `#949499` on `#2c2c2c` (4.6:1) | `#68686d` on `#f6f6f7` (5.1:1) |
-| `--text-inverse` on `--color-primary` | `#1a1a1c` on `#80aefb` (7.8:1) | `#ffffff` on `#316fca` (4.9:1) |
-
-All interface text tokens now meet WCAG AA against their intended surfaces,
-including muted metadata and form placeholders.
-
-## 10. Color is never the sole signal
-
-Per SPEC §26: "No meaning conveyed by color alone."
-
-- **Status indicators** (`StatusIndicator.tsx`) — every status has a
-  distinct glyph in addition to its color:
-  - working → spinner (animated border)
-  - queued / interrupted → muted dot
-  - waiting → clock icon
-  - needs_approval → filled dot (warning color)
-  - needs_review → filled dot (info color)
-  - failed → filled dot (error color)
-  - done → check icon (success color)
-  - unknown → hollow ring
-- **Diff sigils** — additions get a `+` prefix and a green tint;
-  deletions get a `-` prefix and a red tint. The `+`/`-` is readable
-  without color.
-- **Approval risk** — the risk class is rendered as text ("Low risk" /
-  "Normal risk" / "High risk" / "Critical risk") with a matching icon
-  and restrained full-surface tint.
-- **Health dot** — the title-bar health indicator is green when ready
-  and red when offline, but the `aria-label` is "Control plane ready"
-  or "Control plane offline" so screen readers announce the state.
-
-## 11. Interaction target sizes
-
-Per SPEC §26: "Large enough interaction targets."
-
-- Sidebar rows: `var(--row-height)` = 36px (spacious) / 28px (compact)
-  — above the 24px minimum.
-- Buttons in the title bar: 28px square (h-7 w-7 in Tailwind).
-- Composer send button: 28px tall, 12px+ horizontal padding.
-- Command palette rows: 32px tall (8px vertical padding + 16px text).
-- Approval buttons: 28px tall, 10px+ horizontal padding.
-
-All meet or exceed the macOS Human Interface Guidelines minimum of
-20px hit area.
-
-## 12. Tooltips for ambiguous icons
-
-Every icon-only button has a `title` attribute that surfaces a native
-macOS tooltip on hover:
-
-- Terminal toggle: "Show terminal" / "Hide terminal".
-- Theme cycle: "Theme: system" / "Theme: light" / "Theme: dark".
-- Density toggle: "Density: spacious" / "Density: compact".
-- Command palette trigger: "Command palette (⌘K)".
-- Sidebar pin: "Pin" / "Unpin".
-- Approval close (X): "Close".
-- Terminal tab close: "Close ${tab.label}".
-
-## 13. VoiceOver considerations
-
-The desktop app has been designed for VoiceOver but not yet manually
-audited end-to-end with VoiceOver (SPEC §28 lists "Manual VoiceOver
-test" as a required scenario). The following design choices are
-VoiceOver-friendly:
-
-- The title bar is a single landmark; the product name is read first.
-- Sidebar sessions/tasks use `aria-pressed` to indicate selection.
-- The conversation is exposed as a `role="feed"` with a task-specific
-  accessible label.
-- A single off-screen `aria-live="polite"` region announces completed
-  agent responses and status changes without reading every token delta.
-- The terminal body uses `tabIndex={0}` so VoiceOver can focus it and
-  read output; the search input uses `aria-label="Search terminal
-  output"`.
-
-Known VoiceOver gaps (future work):
-
-- The terminal output is read as a single pre-formatted block; a
-  per-line `role="text"` would improve navigation.
-- The diff viewer's per-line actions are hover-revealed; VoiceOver
-  users need a keyboard equivalent (currently the `j/k` navigation
-  works, but per-line "add comment" requires a focused state).
-
-## 14. Streaming updates and assistive technology
-
-Per SPEC §26: "Streaming updates that do not overwhelm assistive
-technology."
-
-- The streaming cursor (the pulse block on a streaming agent message)
-  is `aria-hidden` so screen readers don't announce it on every
-  frame.
-- Token deltas from the SSE stream are appended in place and remain outside
-  the live region. The live region emits only concise completion/status text.
-- The status indicator's `aria-label` updates when a task transitions
-  (e.g. working → done), and the Inspector status group is polite-live.
-
-## 15. Known gaps
-
-The following accessibility items are not yet implemented and are
-slated for a future hardening pass:
-
-1. **VoiceOver manual test** (SPEC §28). The app has been designed for
-   VoiceOver but not yet audited end-to-end.
-2. **Diff viewer per-line keyboard actions** — hover-revealed actions
-   need keyboard equivalents (currently only `j/k` navigation works).
-3. **Focus restoration on Conversation scroll** — when the user
-   navigates away from the composer and back, the composer should
-   re-focus.
+Record results in the test plan. Do not mark an unrun manual scenario as
+passing because the source contains the corresponding ARIA attribute.

@@ -1,266 +1,152 @@
 # Terminus Desktop — UI Architecture
 
-This document describes the application routes, layout states, component
-hierarchy, state management, API client architecture, SSE event
-handling, progressive disclosure strategy, and responsive breakpoints
-for the Terminus desktop app at `apps/desktop/`.
+The desktop is a single-window Electron shell and a provider-neutral React
+client. It presents control-plane state; it is not an execution authority and
+does not embed an external coding-agent harness.
 
-## 1. Application routes and layout states
+## Shell and destinations
 
-The desktop app is a single-window Electron shell. There is no router
-library (no React Router, no Next.js). The main surface is routed by a
-plain conditional in `App.tsx` based on `selectedTaskId`:
+`App.tsx` owns the typed `SidebarDestination` selection and overlay state. It
+keeps task selection independent from navigation:
 
+```text
+new_task                         → NewTaskScreen
+chat + selected task             → Conversation + Composer
+chat + Changes                   → ResizableReviewLayout
+board                            → canonical task board/list
+agents                           → directory + operator detail tabs
+task_details                     → Overview | Evidence | Usage
+activity                         → Activity | Changes | Replay
 ```
-selectedTaskId === null + new_task → <NewTaskScreen />
-selectedTaskId === null + secondary destination → <DestinationSurface />
-selectedTaskId !== null → <Conversation /> + <Composer />
-selectedTaskId !== null + changesOpen → <ResizableReviewLayout />
-```
 
-Overlays that can appear above the main surface at any time:
+The sidebar exposes product destinations, not subsystem pages. Organization,
+department, operator, room, and capability data are joined inside one Agents
+workspace. Task-scoped cockpit projections live inside two tabbed destinations.
+Their resources preserve loading, empty, stale, and error states.
 
-| Overlay         | Trigger                | SPEC § |
-| --------------- | ---------------------- | ------ |
-| CommandPalette  | ⌘K                     | 18     |
-| Settings        | ⌘,                     | 20     |
-| Onboarding      | First launch (localStorage flag) | 19 |
-| TerminalDrawer  | ⌘` (Layout-owned)      | 15     |
+The Board projects canonical ARP v2 tasks. An interactive record carries a
+server-resolved conversation context backed by the same-ID v1 Task row. The
+task-title button uses native button semantics, so click, Return, and Space
+open that exact conversation. Preview and admitted transitions live in the
+task's accessible actions menu.
+Non-interactive operational records may remain unassigned and open in Task
+details. No client title-matches or fabricates conversation history.
 
-Layout states (driven by `useViewport`):
+The shell has a 40px native title bar, a 224px default resizable sidebar,
+primary surface, and resizable docked inspector, hidden by default and
+remembered per task. Overlays are Command Palette,
+Settings, onboarding, Attention Center, and structured interventions. The
+command catalog is a pure startup dependency; the palette renderer is
+lazy-loaded after the first open request. There is no renderer terminal
+drawer, PTY surface, or OpenCode bridge.
 
-| Width        | narrowSidebar | inspectorOverlay | sidebarRail |
-| ------------ | -------------- | ---------------- | ----------- |
-| ≥ 1100px     | false          | false            | false       |
-| 900–1099px   | true           | false            | false       |
-| 700–899px    | true           | true             | false       |
-| < 700px      | true           | true             | true        |
+The Electron window enforces the 900px minimum width the layout supports. The
+desktop app has no phone breakpoint or floating inspector. Sidebar and
+inspector widths persist locally and remain within validated bounds.
 
-## 2. Component hierarchy
+## Component boundaries
 
-```
+```text
 App
-├── Layout                                  (SPEC §6 — three-region shell)
+├── Layout
 │   ├── TitleBar
-│   │   ├── center slot (active task objective, when useful)
-│   │   └── right slot (theme, inspector, terminal, health dot)
-│   ├── Sidebar                             (SPEC §7)
-│   │   ├── Workspace navigation (New task, Scheduled, Plugins, Pull requests, Chat)
-│   │   ├── SidebarItem (Pinned tasks)
-│   │   └── SidebarItem (Projects → Tasks, nested)
-│   ├── main
-│   │   ├── NewTaskScreen OR
-│   │   │   Conversation + Composer
-│   │   │     ├── Message (user / agent)
-│   │   │     ├── ActivityBlock (collapsed/expanded)
-│   │   │     ├── ApprovalCard (inline, SPEC §17)
-│   │   │     └── Composer (send/steer/queue/stop)
-│   │   └── ReviewPane (on demand, alongside conversation)
-│   │       └── DiffViewer (patch evidence from task events)
-│   └── Inspector                           (SPEC §11 — contextual sections)
-│   └── LayoutTerminalDrawer
-│       └── TerminalDrawer                  (SPEC §15 — tabs, search, copy, clear)
-├── CommandPalette (overlay)                (SPEC §18)
-├── Settings (overlay)                      (SPEC §20)
-└── Onboarding (overlay, first launch)      (SPEC §19)
+│   ├── Sidebar
+│   ├── primary destination
+│   │   ├── Conversation → Message, ActivityBlock, ApprovalCard, Composer
+│   │   ├── ReviewPane → DiffViewer
+│   │   └── lazy grouped product view
+│   └── Inspector
+├── lazy CommandPalette
+├── Settings
+├── Onboarding
+├── AttentionCenterModal
+└── StructuredInterventionModal
 ```
 
-`ReviewPane` mounts when the user invokes **Show changes** (⌘D). It hides the
-inspector unless the user has pinned it, so a 13-inch window retains useful
-space for both the conversation and review panes. The current control-plane
-event protocol has no standalone diff-artifact event; the pane only renders
-files when a patch tool event carries explicit unified diff evidence. It never
-fabricates a diff from file names or summaries.
+`Conversation` decodes the bounded SSE event projection into messages and
+activity blocks. `ReviewPane` only renders explicit patch evidence; it does
+not infer a diff from a filename or summary. `ComputerUsePlaceholder` and
+`ComputerUsePiP` describe availability boundaries until the kernel supplies a
+trusted lease and preview stream; they do not capture this Mac's display.
+Interactive controls use shared Radix tabs, menus, and tooltips for keyboard
+behavior and accessible names. A delegated tooltip layer serves truncated non-interactive text,
+without a DOM mutation observer or continuously repainting animation.
 
-## 3. State management (Zustand stores)
+## State ownership
 
-Three stores hold all app state. Each is created with the `zustand`
-factory and persisted to `localStorage` where appropriate.
+`useTerminusStore` (`hooks/use-terminus.ts`) is the source of truth for
+sessions, tasks, selected IDs, pins, per-task drafts, event histories,
+approvals, collection freshness, and the selected task's SSE stream. It keeps
+denormalized task lookup for selection and bounded event history for
+presentation. Session, task, and approval pages carry cursor, total, loading,
+and truncation metadata so a page boundary is visible and load-more is
+explicit.
 
-### `useThemeStore` (`hooks/use-theme.ts`)
+`theme.css` owns the CSS-first token definitions. `useThemeStore` owns only the
+system/light/dark and spacious/compact attributes; compact is the default.
+Pins and drafts persist under their renderer-local
+versioned storage keys; failed persistence leaves the in-memory value intact.
 
-- State: `theme: "system" | "light" | "dark"`, `density: "spacious" |
-  "compact"`, `resolved: "light" | "dark"`.
-- Side effects: applies CSS variables from `styles/tokens.ts` to
-  `document.documentElement.style` on every setter call, and at module
-  load so first paint is correct.
-- Persistence key: `terminus-desktop.theme.v1`.
-- Listens to `prefers-color-scheme` changes when `theme === "system"`.
-- Actions: `setTheme`, `setDensity`, `toggleDensity`, `cycleTheme`,
-  `refresh`.
+`useLogicalMutation` owns a bounded, versioned renderer-side journal for
+multi-request user actions such as onboarding and task creation. Each semantic
+operation has one stable key and durable step receipts. A retry resumes only
+missing steps; an ambiguous failure retains the journal lock; a definitive
+failure before any receipt may be abandoned; and a reconciled partial result
+may be completed explicitly. Journal writes are read back before a step is
+treated as durable, and malformed or oversized state fails closed. This
+protects the client from duplicate requests but does not replace server-side
+idempotency or durable control-plane recovery.
 
-### `useTerminusStore` (`hooks/use-terminus.ts`)
+Grouped product pages use `useCockpitResource` for one abortable request per
+scope. Agents also admits a bounded, versioned seven-day local topology
+snapshot so a valid last-known directory can remain visible offline. A refresh
+failure keeps the last decoded snapshot marked stale; malformed cache and an
+empty decoded collection remain distinct from a failed request. `useTaskV2` provides the same
+identity-scoped loading, stale, error, and reconnect behavior for canonical
+ARP v2 tasks.
 
-- State: `sessions`, `tasksBySession`, `taskById`, `selectedSessionId`,
-  `selectedTaskId`, `pinnedTaskIds`, `draftsByTask`,
-  `queuedInstructionsByTask`, `eventsByTask`
-  (capped at 2000 per task), `_stream` (the live SSE stream).
-- Actions: `refreshAll`, `refreshSessions`, `refreshTasks`,
-  `selectSession`, `selectTask`, `togglePin`, `setDraft`, `clearDraft`,
-  `queueInstruction`, `_flushQueuedInstruction`, `_attachStream`,
-  `_appendEvent`, `_updateTaskFromEvent`.
-- Persistence keys: `terminus-desktop.pinned-tasks.v1`.
-- The `_attachStream(taskId)` action opens a `TerminusEventStream` (see
-  §5) and resumes from the last-seen event id (SPEC §30.6 — durable
-  cursor).
-- Selection hooks: `useSelectedSessionTasks`, `usePinnedTasks`,
-  `useSelectedTask`, `useSelectedTaskEvents` (each is a thin Zustand
-  selector that subscribes to the relevant slice).
+## API and effect boundary
 
-### `useSettingsStore` (`components/Settings.tsx`)
+`lib/api.ts` decodes the v1 control-plane contract and `lib/api-v2.ts` decodes
+the canonical ARP v2 contract. Provider request bodies remain outside the
+renderer. Every response is decoded from `unknown`; malformed bodies and
+scope mismatches are errors. Network errors are distinct from HTTP errors, and
+the UI never turns an unavailable service into local success.
 
-- State: a flat `Record<string, string | number | boolean>` of setting
-  values keyed by `id` (e.g. `"appearance.theme"`,
-  `"terminal.shell"`, `"editor.tab-size"`).
-- Actions: `get(id, fallback)`, `set(id, value)`, `reset(id)`,
-  `resetCategory(cat)`, `resetAll()`.
-- Persistence key: `terminus-desktop.settings.v1`.
-- The `Settings` component reads setting descriptors (id, label,
-  control kind, default value, validation, restart-required) and
-  renders the appropriate control. Appearance settings call into
-  `useThemeStore.setTheme/setDensity` for immediate preview.
+All process, filesystem, socket, secret, and computer-use effects belong to
+the Rust kernel and control-plane contracts. The Electron main process owns
+only native window presentation, notifications, theme preference, the system
+directory picker, validated bounds/title updates, fixed menu commands, and a
+validated dropped-directory path through a trusted preload bridge.
 
-## 4. API client architecture
+## Live event flow
 
-`lib/api.ts` exports a single `TerminusApiClient` class and a `TerminusApiError`
-error envelope. A singleton `api` instance is also exported.
-
-```
-TerminusApiClient(baseUrl, token)
-  ├── health()                        GET  /v1/system/health
-  ├── listSessions()                  GET  /v1/sessions
-  ├── createSession(input)            POST /v1/sessions
-  ├── listTasks(sessionId)            GET  /v1/sessions/:id/tasks
-  ├── createTask(input)               POST /v1/tasks
-  ├── startTask(taskId)               POST /v1/tasks/:id/start
-  ├── getTask(taskId)                 GET  /v1/tasks/:id
-  ├── cancelTask(taskId, reason)      POST /v1/tasks/:id/cancel
-  ├── startTurn(input)                POST /v1/turns
-  ├── interruptTurn(turnId, reason)   POST /v1/turns/:id/interrupt
-  ├── resolveApproval(id, decision)   POST /v1/approvals/:id/resolve
-  └── buildHeaders(extra)             (public; used by the SSE stream)
+```text
+GET /v1/events (fetch + ReadableStream)
+  → typed SSE decoder
+  → generation-checked, bounded store event
+  → task status / approval reconciliation
+  → Conversation, Inspector, Review, and cockpit projections
 ```
 
-Every non-2xx response raises a `TerminusApiError(status, message,
-envelope)`. The envelope mirrors SPEC §30.4:
+The store batches event flushes, deduplicates durable event IDs, caps retained
+events per task, preserves a continuation boundary when events are dropped,
+and reconnects with the last cursor using bounded backoff. Oversized payloads
+are explicitly rejected in the presentation projection; they are not silently
+rendered as complete content.
 
-```ts
-{
-  code: string;
-  message: string;
-  retryable: boolean;
-  category: string;            // "auth" | "not_found" | "validation" | "internal" | ...
-  details?: Record<string, unknown>;
-  suggested_action?: string | null;
-  trace_id?: string | null;
-}
-```
+## Progressive disclosure
 
-Network errors (connection refused, DNS failure, CORS) surface as
-`TerminusApiError(status=0, "network error: …", null)`. This makes them
-distinguishable from 5xx responses without a separate error class.
+The sidebar, inspector, conversation, review pane, approvals, and cockpit
+pages render only data that exists. Empty, loading, stale, unavailable, and
+error states remain explicit. The composer stays available for the selected
+task while it can accept work; terminal-state tasks explain that a new task is
+required. Changes, inspector, and modal surfaces are opened on demand.
 
-The client resolves `baseUrl` and `token` in this order:
+## Focus architecture
 
-1. `window.terminusDesktop.apiBase` / `.token` (Electron preload bridge).
-2. `import.meta.env.VITE_TERMINUS_API_BASE` / `VITE_TERMINUS_TOKEN` (Vite env).
-3. Hard-coded defaults: `http://127.0.0.1:3050` and
-   `terminus-control-dev-token`.
-
-## 5. SSE event handling
-
-The control plane's `/v1/events` endpoint requires bearer auth, which
-the browser's native `EventSource` cannot send. We therefore use
-`fetch` + a `ReadableStream` reader + the SSE decoder from
-`@terminus/public-api` (`createSseDecoder`), and surface an
-`EventSource`-like object via `subscribeEvents(opts)`:
-
-```ts
-const stream = subscribeEvents({ task_id: "task-1", cursor: lastEventId });
-stream.addEventListener("message", (ev) => { … });
-stream.addEventListener("open",  () => { … });
-stream.addEventListener("error", () => { … });
-stream.close();
-```
-
-Event flow:
-
-```
-/v1/events (HTTP/1.1 chunked, text/event-stream)
-  ↓ fetch + ReadableStream reader
-createSseDecoder().feed(chunk)  → TerminusSseEvent[] { id, event, data }
-  ↓ FetchEventStream.emit("message", ev)
-useTerminusStore._appendEvent(taskId, ev)
-  ↓
-useTerminusStore._updateTaskFromEvent(ev)   (updates task status/phase)
-  ↓
-Conversation (useSelectedTaskEvents → decodes events into messages + blocks)
-Inspector   (useSelectedTaskEvents → renders Activity + Approvals sections)
-```
-
-Heartbeat comments (`:heartbeat`) are filtered out by the decoder and
-never reach the store.
-
-Reconnection (SPEC §30.6): `_attachStream(taskId)` resumes from the
-last-seen event id and retries unexpected drops with bounded exponential
-backoff. Stream generations and task ids prevent stale retries from attaching
-after the user switches tasks.
-
-## 6. Progressive disclosure strategy
-
-Per SPEC §11: "The inspector must not be a fixed list of empty
-sections. Sections appear only after relevant information exists."
-
-The same principle is applied throughout:
-
-| Surface           | Empty state                                  | Progressive reveal |
-| ----------------- | -------------------------------------------- | ------------------ |
-| Sidebar           | "No projects yet." (search-aware)            | Navigation remains available; Pinned appears only when ≥ 1 task is pinned |
-| Inspector         | "No task selected" placeholder               | Environment (always), Changes (patch evidence), Subagents (agent events), Verification (verification events), Approvals (pending approval events) |
-| Conversation      | (placeholder before first event)             | Messages + ActivityBlocks emerge as the agent emits events |
-| TerminalDrawer    | `EmptyState` ("No terminal session")         | Tabs appear as the user opens terminals |
-| DiffViewer        | `EmptyState` ("No changes yet")              | File list collapses/expands per file; hunk actions appear on hover |
-| CommandPalette    | `<>` when closed                             | Renders only when `open=true`; closes to nothing |
-| ApprovalCard      | (no card until approval arrives)             | Card collapses to one-line summary after resolve |
-
-The composer is the exception: it is always visible while a task is
-selected (SPEC §10: "The composer remains fully available while work
-is running"). Its contextual controls (Branch/worktree, Computer use,
-Queue behavior) are hidden inside a compact "More" dropdown to keep
-the always-visible row stable.
-
-## 7. Responsive breakpoints
-
-Defined in `hooks/use-viewport.ts`:
-
-| Breakpoint | Trigger        | Effect |
-| ---------- | -------------- | ------ |
-| 1100px     | narrowSidebar | Sidebar switches from `--sidebar-width` (260px spacious / 230px compact) to `--sidebar-width-compact` (220px / 190px) |
-| 900px      | inspectorOverlay | Inspector stops reserving reading width and becomes a dismissible floating overlay |
-| 700px      | sidebarRail   | Sidebar collapses to a 56px icon rail; the full `Sidebar` component re-renders in `compact` mode (icons only, no labels) |
-
-The viewport hook debounces resize via `requestAnimationFrame` so
-layout thrash during drag-resize is avoided. The Layout shell applies
-a CSS transition (`width var(--duration-fast) var(--easing-default)`)
-so the sidebar narrows smoothly rather than jumping.
-
-## 8. Module graph (build-time)
-
-The Vite build keeps the initial shell separate from task-heavy and secondary
-surfaces:
-
-```
-index.html
-  └── main.tsx
-       ├── App.tsx
-       │    ├── Layout, Sidebar, Composer, NewTaskScreen, CommandPalette
-       │    ├── Conversation, Inspector (lazy task surfaces)
-       │    ├── Settings, Onboarding, ReviewPane (lazy secondary surfaces)
-       │    ├── useTerminusStore, useThemeStore
-       │    └── lib/api.ts (singleton)
-       ├── styles/globals.css
-       └── styles/tokens.ts (applied at first paint by use-theme.ts)
-```
-
-See `docs/ui-performance.md` for current raw/gzip measurements and the
-remaining production-trace gates.
+`useDialogFocus` is shared by modal surfaces. It moves focus into a dialog,
+wraps Tab/Shift+Tab, handles Escape through the caller, and restores the
+launching control. The command palette follows the same modal focus contract.
+Long sidebar and diff collections combine virtualization with pending-row
+mounting so keyboard focus remains stable.

@@ -1,120 +1,84 @@
 # Terminus Desktop — Keyboard Shortcuts
 
-This is the complete keyboard map for the Terminus desktop app. All
-shortcuts work with either ⌘ (macOS) or Ctrl (Linux/Windows) unless
-noted. Where a shortcut has a UI affordance, the affordance is listed.
+This is the fixed keyboard map exposed by `src/lib/shortcuts.ts`. The app
+accepts the primary modifier as Command on macOS and Control on Linux and
+Windows. These bindings are not user-configurable.
 
-## Global shortcuts
+## Global
 
-| Shortcut       | Action                                | Affordance | SPEC § |
-| -------------- | ------------------------------------- | ---------- | ------ |
-| `⌘K`           | Open / close the command palette      | Shortcut reference in Settings | 18 |
-| `⌘,`           | Open / close Settings                 | —          | 20     |
-| `⌘\``          | Toggle the terminal drawer            | Panel-bottom icon in the title bar | 6, 15 |
-| `⌘N`           | New task (clears the selected task → NewTaskScreen) | "New task" button in the sidebar | 7, 8 |
-| `⌘D`           | Open / close the changes review split | Command palette → Show changes | 13 |
-| `⌘]`           | Toggle the inspector                  | Command palette → Toggle inspector | 11 |
-| `⌘\`           | Toggle the sidebar                    | —          | 7      |
-| `⌘1` … `⌘9`    | Switch to task N (1-indexed)          | —          | 7      |
-| `⌘O`           | Open the project onboarding flow      | New project recovery action | 19 |
-| `⌘/`           | Open Settings and shortcut reference  | Settings | 18, 20 |
-| `⌘Enter`       | Send (or steer if work is running)    | "Send" / "Steer" button in the composer | 10 |
-| `⇧⌘Enter`      | Queue a follow-up                     | "Queue" pill in the composer (visible when applicable) | 10 |
-| `Esc`          | Interrupt the active turn / close the active overlay | — | 10, 18, 20 |
+| Shortcut | Action |
+| --- | --- |
+| `⌘K` | Open or close the command palette |
+| `⌘O` | Open a project |
+| `⌘,` | Open or close Settings |
+| `⌘/` | Open Settings to the shortcut reference |
+| `⌘N` | Start a new task |
+| `⌘D` | Open or close Changes for the selected task |
+| `⌘]` | Toggle the inspector |
+| `⌘\\` | Toggle the sidebar |
+| `⌘1`–`⌘9` | Select task 1–9 in the active session |
 
-> Number shortcuts select tasks in the active project. At narrow widths ⌘]
-> opens the otherwise-hidden inspector overlay deliberately.
+Global actions do not run while a modal overlay owns focus, except for the
+palette, Settings, project, and shortcut-reference bindings used to open or
+close those surfaces.
 
-## Composer-specific shortcuts
+## Composer
 
-These fire only when the composer textarea has focus.
+| Shortcut | Action |
+| --- | --- |
+| `⌘↵` | Send a new message, or steer the active task |
+| `Enter` | Insert a newline |
 
-| Shortcut       | Action                                                |
-| -------------- | ----------------------------------------------------- |
-| `⌘Enter`       | Send (or steer if the active task is running)         |
-| `⇧⌘Enter`      | Queue the input as a follow-up turn                   |
-| `Esc`          | Interrupt the active turn (calls `cancelTask`)        |
-| `Enter`        | Newline (the textarea is multi-line by default)       |
+The composer intentionally has no queue, stop, or interrupt shortcut. Sending
+is disabled for terminal-state tasks; create a new task to continue. The composer
+accepts only the fixed `⌘↵` send/steer binding while its textarea is focused.
 
-## Command palette shortcuts
+## Command palette
 
-Active only while the palette is open.
+While the palette is open:
 
-| Shortcut  | Action                                                |
-| --------- | ----------------------------------------------------- |
-| `↑` `↓`   | Move selection up / down                              |
-| `Enter`   | Invoke the highlighted command                        |
-| `Home`    | Jump to the first result                              |
-| `End`     | Jump to the last result                               |
-| `Esc`     | Close the palette                                     |
-| `Tab`     | (Recovery) escape the palette — does NOT close it     |
+- `↑` / `↓` move through the filtered commands.
+- `Home` / `End` select the first or last command.
+- `Enter` invokes the selected command.
+- `Esc` closes the palette.
 
-## Diff viewer shortcuts
+The palette's dialog has an explicit accessible name and modal semantics. It
+uses the shared focus hook, so `Tab` and `Shift+Tab` stay within the palette.
 
-Active only while the diff viewer has focus.
+## Board
 
-| Shortcut  | Action                                                |
-| --------- | ----------------------------------------------------- |
-| `j`       | Jump to the next change (hunk)                        |
-| `k`       | Jump to the previous change (hunk)                    |
-| `[`       | Jump to the previous file                             |
-| `]`       | Jump to the next file                                 |
-| `u`       | Toggle unified / split view mode                      |
-| `⌘D`      | Open / close the changes review split                  |
+| Key | Action |
+| --- | --- |
+| `Return` | Open the focused task title's conversation |
+| `Space` | Open the focused task title's conversation |
 
-## Terminal drawer shortcuts
+Preview is an explicit item in each task's actions menu. The menu trigger and
+items use their native button/menu keyboard behavior; the card does not
+override Space with a second meaning.
 
-Active only while the terminal drawer is open. The drawer never
-claims `⌘\`` — that shortcut is owned by the Layout so it works
-whether the drawer is open or closed.
+## Diff review
 
-| Shortcut  | Action                                                |
-| --------- | ----------------------------------------------------- |
-| `⌘F`      | Focus the search field (does nothing if focus is already in an input) |
-| `Enter`   | (in the search field) cycle to the next match         |
-| `Esc`     | (in the search field) close the search bar            |
-| `⌘K`      | Clear the active terminal's output                    |
+These bindings are active while the diff viewer owns the review surface and
+focus is not in an input, button, link, or editable control:
 
-## Settings shortcuts
+| Key | Action |
+| --- | --- |
+| `J` | Next change |
+| `K` | Previous change |
+| `[` | Previous file |
+| `]` | Next file |
+| `U` | Toggle unified or split view |
 
-| Shortcut  | Action                                                |
-| --------- | ----------------------------------------------------- |
-| `⌘,`      | Open / close Settings                                 |
-| `Esc`     | Close Settings and restore the prior focus target      |
+The diff viewer also exposes the same Changes command as `⌘D`. Review rows are
+virtualized and keyboard focus is restored to the selected change when a row
+is mounted.
 
-## Onboarding shortcuts
+## Focus and discoverability
 
-| Shortcut  | Action                                                |
-| --------- | ----------------------------------------------------- |
-| `Enter`   | Advance to the next step (when a button is focused)   |
-| `Esc`     | Skip onboarding                                       |
+Settings, onboarding, Attention Center, and structured intervention dialogs
+use the shared dialog-focus hook: focus moves into the dialog, `Tab` and
+`Shift+Tab` wrap, `Esc` invokes the dialog's close action, and focus returns to
+the launching control. The palette participates in the same focus trap.
 
-## Modifier-key conventions
-
-- **macOS-primary.** Every shortcut uses `⌘` on macOS and `Ctrl` on
-  Linux/Windows. The Composer, CommandPalette, Settings, Layout, and
-  TerminalDrawer all check `e.metaKey || e.ctrlKey` so the same code
-  path serves both platforms.
-- **No Alt-only shortcuts.** Alt is reserved for menu access keys in
-  native macOS menus and is not used as the primary modifier for any
-  in-app shortcut.
-- **Shift as a modifier for "queue" semantics.** `⇧⌘Enter` queues
-  instead of sending, mirroring the convention in chat apps where
-  Shift+Enter inserts a newline but Shift+Cmd+Enter sends an alternate
-  action.
-
-## Discoverability
-
-Per SPEC §18: "Clear shortcut hints."
-
-- The composer footer shows `⌘↵ send · ⇧⌘↵ queue · esc interrupt` at
-  all times.
-- The command palette footer shows `↑↓ navigate · ↵ select · esc
-  close` while the palette is open.
-- The terminal drawer footer shows `⌘F search · ⌘K clear · drag the
-  top edge to resize` while the drawer is open.
-- Sidebar rows show their full title via the `title` attribute
-  (native tooltip) — no custom shortcut hint on rows.
-- Icon-only buttons in the title bar (theme cycle, inspector toggle,
-  terminal toggle) all carry both `aria-label` and
-  `title` so hover and screen readers reveal their function.
+The live shortcut reference is rendered from `FIXED_SHORTCUTS`; update the
+registry and this document together when a fixed binding changes.

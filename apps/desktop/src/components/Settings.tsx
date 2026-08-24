@@ -10,11 +10,9 @@
  *   - General
  *   - Appearance
  *   - Editor
- *   - Terminal
  *   - Agents and Models
  *   - Permissions
  *   - Git
- *   - Computer Use
  *   - Notifications
  *   - Keyboard Shortcuts
  *   - Performance
@@ -39,14 +37,12 @@ import {
   Folder,
   GitBranch,
   Keyboard,
-  Monitor,
   Palette,
   Plug,
   Search,
   Settings as SettingsIcon,
   Shield,
   Sliders,
-  Terminal as TerminalIcon,
   Wand2,
   X,
   RotateCcw,
@@ -55,7 +51,18 @@ import { create } from "zustand";
 import { cn } from "../lib/cn";
 import { useThemeStore } from "../hooks/use-theme";
 import { useTerminusStore } from "../hooks/use-terminus";
-import type { Density, Session, Theme } from "../types";
+import { SETTINGS_SHORTCUTS, shortcutSettingValue } from "../lib/shortcuts";
+import { api, createIdempotencyKey } from "../lib/api";
+import type { Density, ProviderConfiguration, ProviderConfigurationResponse, Session, Theme } from "../types";
+import { Button } from "../ui/Button";
+import { IconButton } from "../ui/IconButton";
+import { Input } from "../ui/Input";
+import { Kbd } from "../ui/Kbd";
+import { Select } from "../ui/Select";
+import { Badge } from "../ui/Status";
+import { Switch } from "../ui/Switch";
+import { DialogSurface } from "../ui/Dialog";
+import { GatewayProviderSettings } from "./GatewayProviderSettings";
 
 // ────────────────────────── Setting model ───────────────────────────────────
 
@@ -63,11 +70,9 @@ export type SettingCategoryId =
   | "general"
   | "appearance"
   | "editor"
-  | "terminal"
   | "agents"
   | "permissions"
   | "git"
-  | "computer-use"
   | "notifications"
   | "shortcuts"
   | "performance"
@@ -104,6 +109,8 @@ export interface SettingDescriptor {
    * appearance preview, density, etc.
    */
   apply?: (value: string | number | boolean) => void;
+  /** Render a truthful fixed-value reference instead of an editable preference. */
+  readOnly?: boolean;
 }
 
 export interface SettingCategory {
@@ -118,7 +125,7 @@ export interface SettingCategory {
 
 /**
  * Per SPEC §19 (Onboarding): "Default all settings for a base-model
- * 13-inch M4 MacBook Air: efficient spacious density, system
+ * 13-inch M4 MacBook Air: efficient compact density, system
  * appearance, dynamic inspector, terminal hidden, computer-use
  * preview paused while hidden, conservative notifications, reduced
  * background work, lightweight editor behavior, performance-conscious
@@ -146,13 +153,6 @@ function buildCatalog(): SettingCategory[] {
           description: "Run the first-launch flow again on next start.",
           control: { kind: "toggle" },
           defaultValue: false,
-        },
-        {
-          id: "general.auto-update",
-          label: "Check for updates automatically",
-          description: "Notify when a new build is available.",
-          control: { kind: "toggle" },
-          defaultValue: true,
         },
         {
           id: "general.crash-reports",
@@ -195,7 +195,7 @@ function buildCatalog(): SettingCategory[] {
               { value: "compact", label: "Compact" },
             ],
           },
-          defaultValue: "spacious",
+          defaultValue: "compact",
           apply: (v) => useThemeStore.getState().setDensity(v as Density),
         },
         {
@@ -206,16 +206,6 @@ function buildCatalog(): SettingCategory[] {
           defaultValue: false,
           apply: (v) => {
             document.documentElement.dataset.reduceMotion = Boolean(v) ? "true" : "false";
-          },
-        },
-        {
-          id: "appearance.reduce-transparency",
-          label: "Reduce transparency",
-          description: "Use solid surfaces instead of native vibrancy.",
-          control: { kind: "toggle" },
-          defaultValue: false,
-          apply: (v) => {
-            document.documentElement.dataset.reduceTransparency = Boolean(v) ? "true" : "false";
           },
         },
       ],
@@ -262,42 +252,6 @@ function buildCatalog(): SettingCategory[] {
             ],
           },
           defaultValue: "cursor",
-        },
-      ],
-    },
-    {
-      id: "terminal",
-      label: "Terminal",
-      description: "Shell, scrollback, and tab behavior.",
-      icon: <TerminalIcon size={14} />,
-      settings: [
-        {
-          id: "terminal.shell",
-          label: "Default shell",
-          description: "Detected from your environment if left empty.",
-          control: { kind: "text", placeholder: "/bin/zsh" },
-          defaultValue: "",
-        },
-        {
-          id: "terminal.scrollback",
-          label: "Scrollback lines",
-          description: "Maximum lines kept per terminal tab.",
-          control: { kind: "number", min: 500, max: 50000, step: 500, unit: "lines" },
-          defaultValue: 8000,
-        },
-        {
-          id: "terminal.font-family",
-          label: "Font family",
-          description: "Monospace font for terminal output.",
-          control: { kind: "text", placeholder: "SF Mono" },
-          defaultValue: "SF Mono",
-        },
-        {
-          id: "terminal.persist-when-hidden",
-          label: "Persist sessions when hidden",
-          description: "Keep the PTY alive when the drawer is collapsed.",
-          control: { kind: "toggle" },
-          defaultValue: true,
         },
       ],
     },
@@ -410,35 +364,6 @@ function buildCatalog(): SettingCategory[] {
       ],
     },
     {
-      id: "computer-use",
-      label: "Computer Use",
-      description: "Picture-in-picture behavior and pause rules.",
-      icon: <Monitor size={14} />,
-      settings: [
-        {
-          id: "computer-use.pip-when-hidden",
-          label: "Pause preview when hidden",
-          description: "Stop frame rendering while the PiP is collapsed.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "computer-use.frame-rate",
-          label: "Preview frame rate",
-          description: "Captured frames per second.",
-          control: { kind: "number", min: 1, max: 30, step: 1, unit: "fps" },
-          defaultValue: 8,
-        },
-        {
-          id: "computer-use.notify-on-control",
-          label: "Notify when agent takes control",
-          description: "Surface a native notification before input simulation.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-      ],
-    },
-    {
       id: "notifications",
       label: "Notifications",
       description: "Conservative defaults to keep you focused.",
@@ -486,38 +411,17 @@ function buildCatalog(): SettingCategory[] {
       label: "Keyboard Shortcuts",
       description: "Customize global and contextual shortcuts.",
       icon: <Keyboard size={14} />,
-      settings: [
-        {
-          id: "shortcuts.command-palette",
-          label: "Open command palette",
-          control: { kind: "shortcut" },
-          defaultValue: "Cmd+K",
-        },
-        {
-          id: "shortcuts.new-task",
-          label: "New task",
-          control: { kind: "shortcut" },
-          defaultValue: "Cmd+N",
-        },
-        {
-          id: "shortcuts.toggle-terminal",
-          label: "Toggle terminal",
-          control: { kind: "shortcut" },
-          defaultValue: "Cmd+`",
-        },
-        {
-          id: "shortcuts.toggle-inspector",
-          label: "Toggle inspector",
-          control: { kind: "shortcut" },
-          defaultValue: "Cmd+I",
-        },
-        {
-          id: "shortcuts.send",
-          label: "Send message",
-          control: { kind: "shortcut" },
-          defaultValue: "Cmd+Enter",
-        },
-      ],
+      settings: SETTINGS_SHORTCUTS.map((shortcut) => ({
+        id: `shortcuts.${shortcut.id}`,
+        label: shortcut.label,
+        description: shortcut.scope === "global"
+          ? "Available across the task workspace."
+          : shortcut.scope === "composer"
+            ? "Available while the message composer is focused."
+            : "Available while the diff viewer is focused.",
+        control: { kind: "shortcut" as const },
+        defaultValue: shortcutSettingValue(shortcut),
+      })),
     },
     {
       id: "performance",
@@ -662,7 +566,28 @@ function buildCatalog(): SettingCategory[] {
   ];
 }
 
-const CATALOG = buildCatalog();
+// Only surface settings with real behavior. Runtime policy, provider,
+// notification, Git, and integration controls remain absent until typed
+// control-plane contracts exist; renderer-local values must never masquerade
+// as authoritative configuration.
+const CATALOG = buildCatalog().flatMap((category): SettingCategory[] => {
+  if (category.id === "appearance") return [category];
+  if (category.id === "agents") {
+    return [{
+      ...category,
+      description: "Read-only model profiles reported by current control-plane sessions.",
+      settings: [],
+    }];
+  }
+  if (category.id === "shortcuts") {
+    return [{
+      ...category,
+      description: "Current fixed shortcuts. Custom bindings are not available yet.",
+      settings: category.settings.map((descriptor) => ({ ...descriptor, readOnly: true })),
+    }];
+  }
+  return [];
+});
 const CATEGORIES = CATALOG;
 
 export function deriveRuntimeModelProfiles(sessions: Session[]): Array<{ id: string; projectCount: number }> {
@@ -699,7 +624,12 @@ function readPersisted(): SettingValueMap {
 function writePersisted(values: SettingValueMap): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(values));
+    // Theme and density have one owner: useThemeStore. Keeping a second
+    // persisted copy here made lazily opening Settings restore stale values.
+    const rendererOnly = Object.fromEntries(
+      Object.entries(values).filter(([id]) => id !== "appearance.theme" && id !== "appearance.density"),
+    );
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(rendererOnly));
   } catch {
     // ignore
   }
@@ -735,6 +665,7 @@ function normalizeSettingValue(id: string, value: unknown): SettingValue {
 function normalizedPersistedValues(): SettingValueMap {
   const values: SettingValueMap = {};
   for (const [id, value] of Object.entries(persisted)) {
+    if (id === "appearance.theme" || id === "appearance.density") continue;
     if (findDescriptor(id)) values[id] = normalizeSettingValue(id, value);
   }
   return values;
@@ -795,6 +726,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 for (const category of CATALOG) {
   for (const descriptor of category.settings) {
     if (!descriptor.apply) continue;
+    if (descriptor.id === "appearance.theme" || descriptor.id === "appearance.density") continue;
     const value = useSettingsStore.getState().get(descriptor.id) ?? descriptor.defaultValue;
     descriptor.apply(value);
   }
@@ -819,98 +751,158 @@ export interface SettingsProps {
 }
 
 function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsProps): JSX.Element {
-  const [activeCat, setActiveCat] = useState<SettingCategoryId>(initialCategoryId ?? "general");
+  const [activeCat, setActiveCat] = useState<SettingCategoryId>(initialCategoryId ?? "appearance");
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
   const sessions = useTerminusStore((state) => state.sessions);
   const runtimeProfiles = useMemo(() => deriveRuntimeModelProfiles(sessions), [sessions]);
+  const [providerConfiguration, setProviderConfiguration] = useState<ProviderConfigurationResponse | null>(null);
+  const [providerDraft, setProviderDraft] = useState<ProviderConfiguration | null>(null);
+  const [providerError, setProviderError] = useState<string | null>(null);
+  const [providerSaving, setProviderSaving] = useState(false);
+  const [providerLoading, setProviderLoading] = useState(false);
   const dialogRef = useDialogFocus<HTMLDivElement>(open, onClose);
 
-  // Sync theme store on first open so the appearance select reflects reality.
+  // Focus search after the dialog has mounted. Theme and density rows subscribe
+  // directly to their canonical store; no cross-store synchronization occurs.
   useEffect(() => {
     if (!open) return;
-    const theme = useThemeStore.getState().theme;
-    const density = useThemeStore.getState().density;
-    const store = useSettingsStore.getState();
-    if (store.get("appearance.theme") !== theme) store.set("appearance.theme", theme);
-    if (store.get("appearance.density") !== density) store.set("appearance.density", density);
     window.setTimeout(() => inputRef.current?.focus(), 0);
   }, [open]);
+
+  useEffect(() => {
+    if (!open || activeCat !== "agents") return;
+    const controller = new AbortController();
+    setProviderLoading(true);
+    setProviderError(null);
+    void api.getProviderConfiguration(controller.signal).then((response) => {
+      if (controller.signal.aborted) return;
+      setProviderConfiguration(response);
+      setProviderDraft(response.configuration ?? {
+        program: "",
+        args: [],
+        model: "",
+        timeout_seconds: 300,
+        tools_enabled: false,
+        revision: 0,
+        updated_by: "",
+        created_at: "",
+        updated_at: "",
+      });
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      setProviderError(error instanceof Error ? error.message : "Provider configuration could not be loaded.");
+    }).finally(() => {
+      if (!controller.signal.aborted) setProviderLoading(false);
+    });
+    return () => controller.abort();
+  }, [activeCat, open]);
+
+  const saveProviderConfiguration = useCallback(async (): Promise<void> => {
+    if (providerDraft === null) return;
+    if (providerDraft.program.trim().length === 0 || providerDraft.model.trim().length === 0) {
+      setProviderError("Program and model are required.");
+      return;
+    }
+    if (!Number.isSafeInteger(providerDraft.timeout_seconds) || providerDraft.timeout_seconds < 1 || providerDraft.timeout_seconds > 3_600) {
+      setProviderError("Timeout must be a whole number between 1 and 3600 seconds.");
+      return;
+    }
+    if (providerDraft.args.some((argument) => argument.length === 0)) {
+      setProviderError("Arguments cannot contain a blank argv entry.");
+      return;
+    }
+    setProviderSaving(true);
+    setProviderError(null);
+    try {
+      const response = await api.putProviderConfiguration({
+        program: providerDraft.program,
+        args: providerDraft.args,
+        model: providerDraft.model,
+        timeout_seconds: providerDraft.timeout_seconds,
+        tools_enabled: providerDraft.tools_enabled,
+        expected_revision: providerDraft.revision,
+      }, { idempotencyKey: createIdempotencyKey("provider-config") });
+      setProviderConfiguration(response);
+      setProviderDraft(response.configuration);
+    } catch (error: unknown) {
+      setProviderError(error instanceof Error ? error.message : "Provider configuration could not be saved.");
+    } finally {
+      setProviderSaving(false);
+    }
+  }, [providerDraft]);
 
   const filteredCategories = useMemo(() => {
     if (!query.trim()) return CATEGORIES;
     const q = query.toLowerCase();
     return CATEGORIES.map((cat) => ({
       ...cat,
-      settings: cat.settings.filter(
-        (s) =>
-          s.label.toLowerCase().includes(q) ||
-          (s.description?.toLowerCase().includes(q) ?? false) ||
-          s.id.includes(q),
-      ),
+      settings: [cat.label, cat.description, cat.id, cat.id === "agents" ? "OpenCode Zen Go local provider command model tools" : ""]
+        .some((value) => value.toLowerCase().includes(q))
+        ? cat.settings
+        : cat.settings.filter(
+            (s) =>
+              s.label.toLowerCase().includes(q) ||
+              (s.description?.toLowerCase().includes(q) ?? false) ||
+              s.id.includes(q),
+          ),
     })).filter((cat) => cat.settings.length > 0);
   }, [query]);
 
   if (!open) return <></>;
 
-  const activeCategory = filteredCategories.find((c) => c.id === activeCat) ?? filteredCategories[0] ?? CATEGORIES[0]!;
+  const activeCategory = filteredCategories.find((c) => c.id === activeCat) ?? filteredCategories[0] ?? null;
+  const activeCategoryHasLiveSettings = activeCategory?.settings.some((descriptor) => typeof descriptor.apply === "function") ?? false;
 
   return (
-    <div
+    <DialogSurface
       ref={dialogRef}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Settings"
-      className="settings-dialog fixed inset-0 z-50 flex flex-col bg-canvas"
-      style={{ animation: "fade-in var(--duration-fast) var(--easing-default)" }}
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onClose();
+      }}
+      accessibleTitle="Settings"
+      overlayClassName="bg-canvas"
+      className="settings-dialog fixed inset-0 flex flex-col bg-canvas data-[state=open]:animate-fade-in"
     >
       {/* Header. */}
       <div
-        className="settings-titlebar titlebar-drag flex flex-shrink-0 items-center gap-2 border-b border-subtle px-4"
-        style={{ height: 48, paddingLeft: 80 }}
+        className="settings-titlebar titlebar-drag flex h-10 flex-shrink-0 items-center gap-2 border-b border-subtle px-3 pl-20"
       >
-        <SettingsIcon size={14} className="text-secondary" />
-        <span className="text-primary" style={{ fontSize: "var(--font-size-md)", fontWeight: 600 }}>
+        <span className="ui-page-title text-primary">
           Settings
         </span>
         <div className="titlebar-no-drag ml-auto flex items-center gap-2">
-          <button
-            type="button"
+          <IconButton
             onClick={onClose}
-            aria-label="Close settings"
-            className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
-          >
-            <X size={14} />
-          </button>
+            label="Close settings"
+            icon={<X size={14} aria-hidden />}
+          />
         </div>
       </div>
-      <div className="flex min-h-0 flex-1">
+      <div className="settings-body flex min-h-0 flex-1">
         {/* Sidebar — category list + search. */}
         <aside
-          className="settings-sidebar flex h-full w-64 flex-shrink-0 flex-col border-r border-subtle bg-sidebar"
-          style={{ width: 260 }}
+          className="settings-sidebar flex h-full w-52 flex-shrink-0 flex-col border-r border-subtle bg-sidebar"
         >
           <div className="border-b border-subtle p-2">
-            <div className="settings-search flex items-center gap-2 rounded-lg bg-canvas px-2.5" style={{ height: 34 }}>
+            <div className="settings-search flex h-7 items-center gap-2 rounded-md bg-canvas px-2">
               <Search size={14} className="text-tertiary" />
-              <input
+              <Input
                 ref={inputRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search settings"
                 aria-label="Search settings"
-                className="flex-1 bg-transparent text-primary placeholder:text-tertiary focus:outline-none"
-                style={{ fontSize: "var(--font-size-xs)" }}
+                className="h-7 flex-1 border-0 bg-transparent px-0 text-xs shadow-none"
               />
               {query ? (
-                <button
-                  type="button"
+                <IconButton
                   onClick={() => setQuery("")}
-                  aria-label="Clear search"
-                  className="text-tertiary hover:text-primary"
-                >
-                  <X size={11} />
-                </button>
+                  label="Clear search"
+                  icon={<X size={11} aria-hidden />}
+                  size="sm"
+                />
               ) : null}
             </div>
           </div>
@@ -921,26 +913,26 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
             {filteredCategories.map((cat) => {
               const isSel = cat.id === activeCategory?.id;
               return (
-                <button
+                <Button
                   key={cat.id}
-                  type="button"
                   onClick={() => setActiveCat(cat.id)}
                   aria-current={isSel}
+                  variant="ghost"
+                  size="md"
                   className={cn(
-                    "settings-category flex w-full items-center gap-2.5 px-3 text-left hover:bg-hover",
+                    "settings-category w-full justify-start rounded-none px-3 text-left",
                     isSel ? "bg-selected text-primary" : "text-secondary",
                   )}
-                  style={{ fontSize: "var(--font-size-sm)" }}
                 >
                   <span className="flex-shrink-0 text-tertiary" aria-hidden>
                     {cat.icon}
                   </span>
                   <span className="flex-1 truncate">{cat.label}</span>
-                </button>
+                </Button>
               );
             })}
             {filteredCategories.length === 0 ? (
-              <div className="px-3 py-4 text-center text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>
+              <div className="px-3 py-4 text-center text-tertiary text-xs" >
                 No settings match "{query}".
               </div>
             ) : null}
@@ -949,73 +941,144 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
         {/* Main pane. */}
         <main className="flex min-w-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1 overflow-y-auto">
-            <div className="mx-auto w-full" style={{ maxWidth: 840, padding: "36px 44px" }}>
+            <div className="settings-content mx-auto w-full max-w-[640px] p-4">
               {activeCategory ? (
                 <>
-                  <div className="mb-7 flex items-start justify-between gap-4">
+                  <div className="mb-3 flex items-start justify-between gap-4">
                     <div>
-                      <h1 className="text-primary" style={{ fontSize: "var(--font-size-xl)", fontWeight: 600 }}>
+                      <h1 className="ui-page-title text-primary">
                         {activeCategory.label}
                       </h1>
-                      <p className="mt-1 text-secondary" style={{ fontSize: "var(--font-size-sm)" }}>
+                      <p className="ui-body mt-0.5 text-secondary" >
                         {activeCategory.description}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => useSettingsStore.getState().resetCategory(activeCategory.id)}
-                      className="inline-flex items-center gap-1 rounded-md text-secondary hover:bg-hover hover:text-primary"
-                      style={{ height: 28, padding: "0 8px", fontSize: "var(--font-size-xs)" }}
-                    >
-                      <RotateCcw size={11} />
-                      <span>Reset category</span>
-                    </button>
+                    {activeCategoryHasLiveSettings ? (
+                      <Button
+                        onClick={() => useSettingsStore.getState().resetCategory(activeCategory.id)}
+                        variant="ghost"
+                        size="sm"
+                        leading={<RotateCcw size={11} aria-hidden />}
+                      >
+                        <span>Reset category</span>
+                      </Button>
+                    ) : null}
                   </div>
-                    <div className="settings-panel flex flex-col overflow-hidden rounded-xl border border-subtle bg-elevated">
-                    {activeCategory.settings.map((s) => (
-                      <SettingRow key={s.id} descriptor={s} />
-                    ))}
-                    </div>
+                    {activeCategory.settings.length > 0 ? (
+                      <div className="settings-panel flex flex-col divide-y divide-[var(--border-subtle)]">
+                        {activeCategory.settings.map((s) => (
+                          <SettingRow key={s.id} descriptor={s} />
+                        ))}
+                      </div>
+                    ) : null}
 
                     {activeCategory.id === "agents" ? (
-                      <section className="mb-5 rounded-lg border border-subtle bg-elevated p-4" aria-label="Runtime model profiles">
+                      <>
+                      <GatewayProviderSettings />
+                      <section className="mb-4 border-t border-subtle pt-4" aria-label="Local provider configuration">
                         <div className="flex items-start gap-3">
-                          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md bg-hover text-secondary">
+                          <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center text-secondary"><Plug size={14} /></div>
+                          <div className="min-w-0 flex-1">
+                            <div className="ui-section-title flex items-center gap-2 text-primary">
+                              Local provider
+                              <Badge tone={providerConfiguration?.configured === true ? "success" : "neutral"}>
+                                {providerLoading ? "Loading" : providerConfiguration?.configured === true ? "Configured" : "Unconfigured"}
+                              </Badge>
+                            </div>
+                            <p className="ui-meta mt-0.5">
+                              Local command for model requests. Arguments are passed directly without a shell.
+                            </p>
+                          </div>
+                        </div>
+                        {providerDraft ? (
+                          <div className="mt-3 grid gap-2.5">
+                            <label className="ui-label grid gap-1 text-secondary">
+                              Program
+                              <Input aria-label="Local provider program" value={providerDraft.program} onChange={(event) => setProviderDraft({ ...providerDraft, program: event.target.value })} />
+                            </label>
+                            <label className="ui-label grid gap-1 text-secondary">
+                              Model
+                              <Input aria-label="Local provider model" value={providerDraft.model} onChange={(event) => setProviderDraft({ ...providerDraft, model: event.target.value })} />
+                            </label>
+                            <label className="ui-label grid gap-1 text-secondary">
+                              Arguments (one argv entry per line)
+                              <textarea aria-label="Local provider arguments" className="min-h-20 rounded-md border border-subtle bg-canvas px-2 py-1.5 font-mono text-xs text-primary" value={providerDraft.args.join("\n")} onChange={(event) => setProviderDraft({ ...providerDraft, args: event.target.value.length === 0 ? [] : event.target.value.split("\n") })} />
+                            </label>
+                            <label className="ui-label grid gap-1 text-secondary">
+                              Timeout (seconds)
+                              <Input aria-label="Local provider timeout" type="number" min={1} max={3600} step={1} value={providerDraft.timeout_seconds} onChange={(event) => setProviderDraft({ ...providerDraft, timeout_seconds: Number(event.target.value) })} />
+                            </label>
+                            <div className="flex items-start justify-between gap-4 border-y border-subtle py-2.5">
+                              <div>
+                                <div className="ui-label text-secondary">Allow standalone tools</div>
+                                <p className="ui-meta mt-0.5">Expose read, exact patch, and bounded exec for this task.</p>
+                              </div>
+                              <Switch checked={providerDraft.tools_enabled} onCheckedChange={(checked) => setProviderDraft({ ...providerDraft, tools_enabled: checked })} label="Allow standalone provider tools" />
+                            </div>
+                            {providerError ? <p className="text-error text-xs" role="alert">{providerError}</p> : null}
+                            <div><Button onClick={() => void saveProviderConfiguration()} disabled={providerSaving || providerLoading} variant="secondary" size="sm">{providerSaving ? "Saving…" : "Save provider configuration"}</Button></div>
+                          </div>
+                        ) : (
+                          <div className="mt-4 text-tertiary text-xs">{providerError ?? "No local provider command is configured."}</div>
+                        )}
+                      </section>
+                      <section className="mb-4 border-t border-subtle pt-4" aria-label="Runtime model profiles">
+                        <div className="flex items-start gap-3">
+                          <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center text-secondary">
                             <Plug size={14} />
                           </div>
                           <div className="min-w-0 flex-1">
-                            <div className="text-primary" style={{ fontSize: "var(--font-size-sm)", fontWeight: 600 }}>Available model profiles</div>
-                            <p className="mt-0.5 text-tertiary" style={{ fontSize: "var(--font-size-xs)", lineHeight: 1.45 }}>
-                              Profiles reported by current project sessions. Terminus never invents provider or model names.
+                            <div className="ui-section-title text-primary">Available model profiles</div>
+                            <p className="ui-meta mt-0.5">
+                              Profiles reported by current projects.
                             </p>
                           </div>
-                          <span className="rounded-full border border-subtle px-2 py-0.5 font-mono text-tertiary" style={{ fontSize: 10 }}>
+                          <span className="ui-meta tabular-nums" >
                             {runtimeProfiles.length}
                           </span>
                         </div>
                         {runtimeProfiles.length > 0 ? (
-                          <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+                          <ul className="mt-2 divide-y divide-[var(--border-subtle)] border-y border-subtle">
                             {runtimeProfiles.map((profile) => (
-                              <li key={profile.id} className="flex min-h-11 items-center justify-between rounded-md border border-subtle bg-canvas px-3 py-2">
-                                <span className="min-w-0 truncate font-mono text-primary" style={{ fontSize: "var(--font-size-xs)" }}>{profile.id}</span>
-                                <span className="ml-3 flex-shrink-0 text-tertiary" style={{ fontSize: 10 }}>{profile.projectCount} project{profile.projectCount === 1 ? "" : "s"}</span>
+                              <li key={profile.id} className="flex min-h-8 items-center justify-between px-1 py-1.5">
+                                <span className="min-w-0 truncate font-mono text-primary text-xs" >{profile.id}</span>
+                                <span className="ml-3 flex-shrink-0 text-tertiary text-xs" >{profile.projectCount} project{profile.projectCount === 1 ? "" : "s"}</span>
                               </li>
                             ))}
                           </ul>
                         ) : (
-                          <div className="mt-3 rounded-md border border-dashed border-default px-3 py-3 text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>
+                          <div className="mt-3 px-1 py-2 text-tertiary text-xs" >
                             No provider-backed model profile has been reported by the control plane.
                           </div>
                         )}
                       </section>
+                      </>
                     ) : null}
                 </>
-              ) : null}
+              ) : (
+                <div className="flex min-h-64 flex-col items-center justify-center text-center">
+                  <Search size={18} className="text-tertiary" aria-hidden />
+                  <h1 className="ui-page-title mt-2 text-primary">
+                    No matching settings
+                  </h1>
+                  <p className="ui-body mt-1 max-w-xs text-secondary" >
+                    Nothing matches “{query}”. Try another search or clear it to browse every category.
+                  </p>
+                  <Button
+                    onClick={() => setQuery("")}
+                    className="mt-4"
+                    variant="secondary"
+                    size="md"
+                  >
+                    Clear search
+                  </Button>
+                </div>
+              )}
             </div>
           </div>
         </main>
       </div>
-    </div>
+    </DialogSurface>
   );
 }
 
@@ -1027,10 +1090,18 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
   const value = useSettingsStore((s) => s.values[descriptor.id]);
   const set = useSettingsStore((s) => s.set);
   const reset = useSettingsStore((s) => s.reset);
+  const theme = useThemeStore((state) => state.theme);
+  const density = useThemeStore((state) => state.density);
+  const setTheme = useThemeStore((state) => state.setTheme);
+  const setDensity = useThemeStore((state) => state.setDensity);
   const [error, setError] = useState<string | null>(null);
   const [draftText, setDraftText] = useState<string | null>(null);
 
-  const current: SettingValue = value ?? descriptor.defaultValue;
+  const current: SettingValue = descriptor.id === "appearance.theme"
+    ? theme
+    : descriptor.id === "appearance.density"
+      ? density
+      : value ?? descriptor.defaultValue;
   const available = typeof descriptor.apply === "function";
 
   const commit = useCallback(
@@ -1043,55 +1114,50 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
         }
       }
       setError(null);
-      set(descriptor.id, next);
+      if (descriptor.id === "appearance.theme") setTheme(next as Theme);
+      else if (descriptor.id === "appearance.density") setDensity(next as Density);
+      else set(descriptor.id, next);
     },
-    [descriptor, set],
+    [descriptor, set, setDensity, setTheme],
   );
 
   return (
     <div
-      className={cn("settings-row flex items-start gap-5 px-4 py-4", available ? "hover:bg-hover" : "is-unavailable")}
-      style={{ transition: "background var(--duration-fast) var(--easing-default)" }}
+      className={cn(
+        "settings-row flex min-h-10 items-center gap-4 px-0 py-2",
+        available && "hover:bg-hover",
+        !available && !descriptor.readOnly && "is-unavailable",
+      )}
     >
-      <div className="flex min-w-0 flex-1 flex-col" style={{ gap: 2 }}>
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <div className="flex items-center gap-2">
           <label
             htmlFor={`setting-${descriptor.id}`}
-            className="text-primary"
-            style={{ fontSize: "var(--font-size-sm)", fontWeight: 500 }}
+            className="ui-label text-primary"
           >
             {descriptor.label}
           </label>
           {descriptor.restartRequired ? (
-            <span
-              className="rounded-sm px-1.5 py-0.5 text-warning"
-              style={{
-                fontSize: 10,
-                background: "color-mix(in srgb, var(--color-warning) 12%, transparent)",
-              }}
-              title="Restart required"
-            >
-              Restart
-            </span>
+            <Badge tone="warning">Restart</Badge>
           ) : null}
-          {!available ? (
-            <span className="rounded-sm border border-subtle px-1.5 py-0.5 text-tertiary" style={{ fontSize: 10 }} title="This control is not connected to a runtime contract yet">
+          {!available && !descriptor.readOnly ? (
+            <Badge tone="neutral" aria-label={descriptor.readOnly ? "This shortcut is fixed in the current build" : "This control is not connected yet"}>
               Unavailable
-            </span>
+            </Badge>
           ) : null}
         </div>
         {descriptor.description ? (
-          <p className="text-secondary" style={{ fontSize: "var(--font-size-xs)", lineHeight: "var(--line-height-relaxed)" }}>
+          <p className="ui-meta text-secondary">
             {descriptor.description}
           </p>
         ) : null}
         {error ? (
-          <p className="text-error" role="alert" style={{ fontSize: "var(--font-size-xs)", marginTop: 2 }}>
+          <p className="mt-0.5 text-xs text-error" role="alert">
             {error}
           </p>
         ) : null}
       </div>
-      <div className="flex flex-shrink-0 items-center gap-2">
+      <div className="settings-control flex flex-shrink-0 items-center gap-2">
         <SettingControlView
           descriptor={descriptor}
           value={current}
@@ -1100,18 +1166,17 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
           onDraftText={setDraftText}
           disabled={!available}
         />
-        {available ? <button
-          type="button"
+        {available && current !== descriptor.defaultValue ? <IconButton
           onClick={() => {
             setError(null);
-            reset(descriptor.id);
+            if (descriptor.id === "appearance.theme") setTheme(descriptor.defaultValue as Theme);
+            else if (descriptor.id === "appearance.density") setDensity(descriptor.defaultValue as Density);
+            else reset(descriptor.id);
           }}
-          aria-label={`Reset ${descriptor.label}`}
-          title="Reset to default"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
-        >
-          <RotateCcw size={12} />
-        </button> : null}
+          label={`Reset ${descriptor.label} to default`}
+          icon={<RotateCcw size={12} aria-hidden />}
+          size="md"
+        /> : null}
       </div>
     </div>
   );
@@ -1138,54 +1203,25 @@ function SettingControlView({
   if (c.kind === "toggle") {
     const checked = Boolean(value);
     return (
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        aria-label={descriptor.label}
-        onClick={() => onChange(!checked)}
+      <Switch
+        checked={checked}
+        onCheckedChange={(next) => onChange(next)}
+        label={descriptor.label}
         disabled={disabled}
-        className={cn("relative inline-flex h-6 w-10 items-center rounded-full transition-colors disabled:cursor-not-allowed")}
-        style={{
-          background: disabled ? "var(--bg-hover)" : checked ? "var(--color-primary)" : "var(--bg-hover)",
-          border: "1px solid var(--border-default)",
-        }}
-      >
-        <span
-          className="inline-block h-4 w-4 rounded-full bg-white transition-transform"
-          style={{
-            transform: checked ? "translateX(20px)" : "translateX(2px)",
-            opacity: disabled ? 0.58 : 1,
-            transitionDuration: "var(--duration-fast)",
-          }}
-        />
-      </button>
+      />
     );
   }
 
   if (c.kind === "select") {
     return (
-      <select
-        id={`setting-${descriptor.id}`}
+      <Select
         value={String(value)}
-        onChange={(e) => onChange(e.target.value)}
-        aria-label={descriptor.label}
+        onValueChange={(next) => onChange(next)}
+        label={descriptor.label}
         disabled={disabled}
-        className="rounded-md bg-canvas text-primary focus:outline-none"
-        style={{
-          height: 28,
-          padding: "0 8px",
-          fontSize: "var(--font-size-xs)",
-          border: "1px solid var(--border-default)",
-          minWidth: 140,
-        }}
-      >
-        {c.options.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
+        options={c.options}
+        className="min-w-32"
+      />
     );
   }
 
@@ -1193,7 +1229,7 @@ function SettingControlView({
     const num = typeof value === "number" ? value : Number(value) || 0;
     return (
       <div className="flex items-center gap-1">
-        <input
+        <Input
           id={`setting-${descriptor.id}`}
           type="number"
           value={Number.isFinite(num) ? num : 0}
@@ -1206,18 +1242,10 @@ function SettingControlView({
           }}
           aria-label={descriptor.label}
           disabled={disabled}
-          className="rounded-md bg-canvas text-primary focus:outline-none"
-          style={{
-            height: 28,
-            width: 88,
-            padding: "0 8px",
-            fontSize: "var(--font-size-xs)",
-            border: "1px solid var(--border-default)",
-            fontVariantNumeric: "tabular-nums",
-          }}
+          className="w-[88px] tabular-nums"
         />
         {c.unit ? (
-          <span className="text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>
+          <span className="text-tertiary text-xs" >
             {c.unit}
           </span>
         ) : null}
@@ -1228,7 +1256,7 @@ function SettingControlView({
   if (c.kind === "text") {
     const text = draftText ?? (typeof value === "string" ? value : String(value));
     return (
-      <input
+      <Input
         id={`setting-${descriptor.id}`}
         type="text"
         value={text}
@@ -1247,19 +1275,13 @@ function SettingControlView({
             onDraftText(null);
           } else if (e.key === "Escape" && draftText !== null) {
             e.preventDefault();
+            e.stopPropagation();
             onDraftText(null);
           }
         }}
         aria-label={descriptor.label}
         disabled={disabled}
-        className="rounded-md bg-canvas text-primary placeholder:text-tertiary focus:outline-none"
-        style={{
-          height: 28,
-          minWidth: 220,
-          padding: "0 8px",
-          fontSize: "var(--font-size-xs)",
-          border: `1px solid ${isModified ? "var(--color-primary)" : "var(--border-default)"}`,
-        }}
+        className={cn("settings-text-control min-w-[min(200px,100%)]", isModified && "border-strong")}
       />
     );
   }
@@ -1311,28 +1333,31 @@ function ShortcutControl({
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [recording, onChange]);
+  if (disabled) {
+    return (
+      <output
+        aria-label={`Shortcut for ${label}`}
+        className="flex min-w-32 items-center justify-end gap-1 font-mono text-xs text-primary"
+      >
+        <Kbd>{value}</Kbd>
+      </output>
+    );
+  }
   return (
-    <button
-      type="button"
+    <Button
       disabled={disabled}
       onClick={() => setRecording(true)}
       aria-label={`Edit shortcut for ${label}`}
+      variant="secondary"
+      size="md"
       className={cn(
-        "flex items-center gap-1 rounded-md font-mono text-primary",
+        "min-w-36 justify-start font-mono",
         recording && "ring-1 ring-inset",
       )}
-      style={{
-        height: 28,
-        padding: "0 10px",
-        fontSize: "var(--font-size-xs)",
-        background: "var(--bg-canvas)",
-        border: "1px solid var(--border-default)",
-        minWidth: 140,
-      }}
     >
       <Keyboard size={11} className="text-tertiary" />
       <span>{recording ? "Press keys…" : value}</span>
-    </button>
+    </Button>
   );
 }
 

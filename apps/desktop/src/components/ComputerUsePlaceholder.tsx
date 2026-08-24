@@ -51,14 +51,14 @@ function ComputerUsePlaceholderImpl({
         <Monitor size={compact ? 14 : 20} />
       </div>
       <div
-        className="text-secondary"
-        style={{ fontSize: "var(--font-size-sm)", fontWeight: 500 }}
+        className="text-secondary text-sm"
+        style={{ fontWeight: 500 }}
       >
         No computer-use session
       </div>
       <div
-        className="text-tertiary"
-        style={{ fontSize: "var(--font-size-xs)", maxWidth: 240, lineHeight: 1.4 }}
+        className="text-tertiary text-xs"
+        style={{ maxWidth: 240, lineHeight: 1.4 }}
       >
         When the agent drives the desktop, a live preview will appear here in a floating, resizable picture-in-picture.
       </div>

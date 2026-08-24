@@ -8,10 +8,10 @@
  * keyboard traps.
  *
  * Implementation notes:
- *   - The component is uncontrolled in state but controlled in
- *     `open` — the host renders it always and toggles `open` via
- *     the ⌘K shortcut. Because the body is conditionally rendered,
- *     the closed state is cheap (a single empty fragment).
+ *   - The component owns its transient interaction state while the
+ *     host controls `open`. The host lazy-loads this module only after
+ *     the first ⌘K request, so the closed startup path pays no palette
+ *     rendering cost.
  *   - Fuzzy search is a hand-written subsequence matcher with
  *     scoring (start-of-word bonus, consecutive-match bonus, length
  *     penalty). It runs in O(n × query_len) which is sub-millisecond
@@ -19,9 +19,8 @@
  *   - Recent commands are persisted to localStorage as an array of
  *     command ids (cap 16). Recency multiplies a small score bonus.
  *   - The first result is auto-selected and Enter invokes it. Arrow
- *     keys move the selection. Esc closes. There is no focus trap:
- *     the input is focused on open, but Tab still escapes (we
- *     intentionally keep Tab working as a recovery).
+ *     keys move the selection. Esc closes. Modal focus is trapped while the
+ *     palette is open and restored to the launching control on close.
  *
  * Per design constraints: lucide-react icons, CSS variables, no
  * emojis, restrained motion (the palette fades in over 150ms).
@@ -29,41 +28,14 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Search, X } from "lucide-react";
 import { cn } from "../lib/cn";
+import { isComposingKeyboardEvent, useDialogFocus } from "../hooks/use-dialog-focus";
+import type { Command, CommandGroup } from "../lib/command-catalog";
+import { Button } from "../ui/Button";
+import { DialogSurface } from "../ui/Dialog";
+import { IconButton } from "../ui/IconButton";
 
-// ────────────────────────── Types ───────────────────────────────────────────
-
-export type CommandGroup =
-  | "Navigation"
-  | "Task"
-  | "Changes"
-  | "Terminal"
-  | "Tools"
-  | "Appearance"
-  | "Help";
-
-export interface Command {
-  /** Stable id (used for recent-command persistence). */
-  id: string;
-  /** Visible label, e.g. "Open project". */
-  label: string;
-  /** Logical group — drives grouping in the result list. */
-  group: CommandGroup;
-  /** Optional shortcut hint, e.g. "⌘N". */
-  hint?: string;
-  /** Optional additional keywords used by the fuzzy matcher. */
-  keywords?: string[];
-  /** Optional icon (lucide-react node). */
-  icon?: React.ReactNode;
-  /** Optional secondary description shown under the label. */
-  description?: string;
-  /** Invoked on Enter or click. */
-  action: () => void | Promise<void>;
-  /**
-   * Optional `available` flag. When false the command is hidden from
-   * the palette (e.g. "Commit" when no changes exist).
-   */
-  available?: boolean;
-}
+export { buildDefaultCommands } from "../lib/command-catalog";
+export type { Command, CommandGroup, DefaultCommandActions } from "../lib/command-catalog";
 
 export interface CommandPaletteProps {
   /** Whether the palette is currently open. */
@@ -188,6 +160,7 @@ export function fuzzyMatch(query: string, haystacks: string[]): FuzzyMatch {
 
 const GROUP_ORDER: CommandGroup[] = [
   "Navigation",
+  "Cockpit",
   "Task",
   "Changes",
   "Terminal",
@@ -211,25 +184,17 @@ function CommandPaletteImpl({
 }: CommandPaletteProps): JSX.Element {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const dialogRef = useDialogFocus<HTMLDivElement>(open, onClose);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [recent, setRecent] = useState<string[]>(() => readRecent());
 
-  // Reset query + selection on open. Focus the input.
+  // Reset query + selection on open. The dialog focus hook focuses the input.
   useEffect(() => {
     if (!open) return;
-    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setQuery("");
     setSelectedIndex(0);
     setRecent(readRecent());
-    // Defer focus to next frame so the input is mounted.
-    const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 0);
-    return () => {
-      window.clearTimeout(focusTimer);
-      const previousFocus = previousFocusRef.current;
-      window.requestAnimationFrame(() => previousFocus?.focus());
-    };
   }, [open]);
 
   // Compute ranked results.
@@ -276,6 +241,7 @@ function CommandPaletteImpl({
     }
     return GROUP_ORDER.filter((g) => out.has(g)).map((g) => ({ group: g, items: out.get(g)! }));
   }, [ranked]);
+  const flatRanked = useMemo(() => grouped.flatMap(({ items }) => items), [grouped]);
 
   // Reset selection when results change.
   useEffect(() => {
@@ -307,66 +273,60 @@ function CommandPaletteImpl({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
+      if (!dialogRef.current?.contains(document.activeElement)) return;
+      if (isComposingKeyboardEvent(e)) return;
+      if (e.key === "ArrowDown") {
         e.preventDefault();
-        e.stopPropagation();
-        onClose();
-      } else if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setSelectedIndex((i) => Math.min(ranked.length - 1, i + 1));
+        setSelectedIndex((i) => Math.min(flatRanked.length - 1, i + 1));
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         setSelectedIndex((i) => Math.max(0, i - 1));
       } else if (e.key === "Enter") {
         e.preventDefault();
-        const r = ranked[selectedIndex];
+        const r = flatRanked[selectedIndex];
         invoke(r?.command);
       } else if (e.key === "Home") {
         e.preventDefault();
         setSelectedIndex(0);
       } else if (e.key === "End") {
         e.preventDefault();
-        setSelectedIndex(Math.max(0, ranked.length - 1));
+        setSelectedIndex(Math.max(0, flatRanked.length - 1));
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, ranked, selectedIndex, invoke, onClose]);
+  }, [dialogRef, flatRanked, open, selectedIndex, invoke]);
 
   if (!open) return <></>;
 
   let flatIdx = -1;
 
   return (
-    <div
-      role="dialog"
-      aria-modal="false"
-      aria-label="Command palette"
-      className="fixed inset-0 z-50 flex items-start justify-center"
-      style={{
-        background: "rgba(0, 0, 0, 0.35)",
-        backdropFilter: "blur(2px)",
-        animation: "fade-in var(--duration-fast) var(--easing-default)",
-        paddingTop: "12vh",
+    <DialogSurface
+      ref={dialogRef}
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) onClose();
       }}
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+      onEscapeKeyDown={(event) => {
+        if (isComposingKeyboardEvent(event)) event.preventDefault();
+      }}
+      accessibleTitle="Command palette"
+      tabIndex={-1}
+      overlayClassName="bg-black/35"
+      className={cn(
+        "command-palette-shell fixed left-1/2 top-[14vh] flex max-h-[64vh] w-full -translate-x-1/2 flex-col overflow-hidden rounded-lg border bg-elevated shadow-lg",
+        className,
+      )}
+      style={{
+        width: "min(512px, calc(100vw - 32px))",
+        borderColor: "var(--border-default)",
       }}
     >
-      <div
-        className={cn(
-          "command-palette-shell flex max-h-[70vh] w-full flex-col overflow-hidden rounded-xl border bg-elevated shadow-lg",
-          className,
-        )}
-        style={{
-          width: "min(640px, calc(100vw - 48px))",
-          borderColor: "var(--border-default)",
-        }}
-      >
         {/* Search input. */}
         <div
           className="flex items-center gap-2 border-b border-subtle px-3"
-          style={{ height: 44 }}
+          style={{ height: 36 }}
         >
           <Search size={14} className="text-tertiary" />
           <input
@@ -374,22 +334,24 @@ function CommandPaletteImpl({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={placeholder}
+            role="combobox"
             aria-label="Search commands"
             aria-controls="command-palette-results"
             aria-autocomplete="list"
-            className="flex-1 bg-transparent text-primary placeholder:text-tertiary focus:outline-none"
-            style={{ fontSize: "var(--font-size-md)" }}
+            aria-expanded="true"
+            aria-activedescendant={flatRanked[selectedIndex] ? `command-palette-option-${selectedIndex}` : undefined}
+            className="ui-input ui-body min-w-0 flex-1 border-0 bg-transparent px-0 text-primary placeholder:text-tertiary"
+
             autoComplete="off"
             spellCheck={false}
           />
-          <button
-            type="button"
+          <IconButton
+            label="Close command palette"
+            icon={<X size={12} />}
+            size="sm"
             onClick={onClose}
-            aria-label="Close command palette"
-            className="icon-button flex h-6 w-6 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
-          >
-            <X size={12} />
-          </button>
+            className="icon-button rounded text-tertiary hover:bg-hover hover:text-primary"
+          />
         </div>
         {/* Results. */}
         <div
@@ -401,23 +363,15 @@ function CommandPaletteImpl({
         >
           {grouped.length === 0 ? (
             <div
-              className="px-4 py-6 text-center text-tertiary"
-              style={{ fontSize: "var(--font-size-sm)" }}
+              className="ui-body px-4 py-6 text-center text-tertiary"
+
             >
               No commands match "{query}".
             </div>
           ) : (
             grouped.map(({ group, items }) => (
               <div key={group}>
-                <div
-                  className="px-3 py-1 text-tertiary"
-                  style={{
-                    fontSize: 10,
-                    fontWeight: 600,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.06em",
-                  }}
-                >
+                <div className="ui-meta px-3 pb-0.5 pt-1.5">
                   {group}
                 </div>
                 {items.map((r) => {
@@ -425,158 +379,48 @@ function CommandPaletteImpl({
                   const idx = flatIdx;
                   const isSel = idx === selectedIndex;
                   return (
-                    <button
+                    <Button
                       key={r.command.id}
+                      id={`command-palette-option-${idx}`}
                       type="button"
+                      tabIndex={-1}
                       data-cp-index={idx}
                       role="option"
                       aria-selected={isSel}
+                      data-tooltip={r.command.description}
                       onMouseMove={() => {
                         if (selectedIndex !== idx) setSelectedIndex(idx);
                       }}
                       onClick={() => invoke(r.command)}
                       className={cn(
-                        "flex w-full items-center gap-2 px-3 py-2 text-left",
+                        "ui-body mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-start gap-2 rounded-md px-2.5 text-left",
                         isSel ? "bg-selected text-primary" : "text-secondary hover:bg-hover",
                       )}
-                      style={{ fontSize: "var(--font-size-sm)" }}
+
                     >
                       {r.command.icon ? (
                         <span className="flex-shrink-0 text-tertiary" aria-hidden>
                           {r.command.icon}
                         </span>
-                      ) : (
-                        <span className="flex-shrink-0" style={{ width: 14 }} />
-                      )}
-                      <span className="flex min-w-0 flex-1 flex-col">
-                        <span className="truncate text-primary">{r.command.label}</span>
-                        {r.command.description ? (
-                          <span
-                            className="truncate text-tertiary"
-                            style={{ fontSize: "var(--font-size-xs)" }}
-                          >
-                            {r.command.description}
-                          </span>
-                        ) : null}
-                      </span>
+                      ) : null}
+                      <span className="min-w-0 flex-1 truncate text-primary">{r.command.label}</span>
                       {r.command.hint ? (
                         <kbd
-                          className="flex-shrink-0 font-mono text-tertiary"
-                          style={{ fontSize: "var(--font-size-xs)" }}
+                          className="flex-shrink-0 font-mono text-tertiary text-xs"
+
                         >
                           {r.command.hint}
                         </kbd>
                       ) : null}
-                    </button>
+                    </Button>
                   );
                 })}
               </div>
             ))
           )}
         </div>
-        {/* Footer. */}
-        <div
-          className="flex flex-shrink-0 items-center justify-between border-t border-subtle px-3 text-tertiary"
-          style={{ height: 28, fontSize: "var(--font-size-xs)" }}
-        >
-          <span className="flex items-center gap-2">
-            <kbd className="font-mono">↑↓</kbd>
-            <span>navigate</span>
-            <kbd className="font-mono">↵</kbd>
-            <span>select</span>
-            <kbd className="font-mono">esc</kbd>
-            <span>close</span>
-          </span>
-          <span className="font-mono">{ranked.length} commands</span>
-        </div>
-      </div>
-    </div>
+    </DialogSurface>
   );
 }
 
 export const CommandPalette = memo(CommandPaletteImpl);
-
-// ────────────────────────── Default command factory ─────────────────────────
-
-/**
- * Build a default command catalog for the host app. The host passes
- * callbacks for the actions it cares about; the palette picks
- * sensible icons and labels. Commands whose callbacks are omitted
- * are filtered out by the caller (or surfaced as unavailable).
- */
-export interface DefaultCommandActions {
-  openProject?: () => void;
-  openTask?: () => void;
-  newTask?: () => void;
-  showChanges?: () => void;
-  openTerminal?: () => void;
-  toggleInspector?: () => void;
-  pinInspector?: () => void;
-  switchModel?: () => void;
-  startSubagent?: () => void;
-  commit?: () => void;
-  push?: () => void;
-  compareBranch?: () => void;
-  createPullRequest?: () => void;
-  openInCursor?: () => void;
-  openInTerminal?: () => void;
-  revealInFinder?: () => void;
-  switchTheme?: () => void;
-  switchDensity?: () => void;
-  openSettings?: () => void;
-  viewShortcuts?: () => void;
-}
-
-/**
- * Convert the host's action map into a {@link Command} array. Icons
- * are lazily imported here so the palette module itself stays light.
- */
-export function buildDefaultCommands(actions: DefaultCommandActions): Command[] {
-  // Lazy import keeps the palette boot cheap (<100ms per SPEC §18).
-  // The icons are only loaded when the palette renders.
-  const out: Command[] = [];
-  const push = (
-    id: string,
-    label: string,
-    group: CommandGroup,
-    hint: string | undefined,
-    action: (() => void) | undefined,
-    keywords: string[] = [],
-    icon?: React.ReactNode,
-  ): void => {
-    if (!action) return;
-    out.push({
-      id,
-      label,
-      group,
-      hint,
-      keywords,
-      action,
-      icon,
-      available: true,
-    });
-  };
-  // We import icons at module load to keep the file self-contained.
-  // The cost is negligible (~5KB) and the palette only renders on demand.
-  push("nav.open-project", "Open project", "Navigation", "⌘O", actions.openProject, ["switch session"]);
-  push("nav.open-task", "Open task", "Navigation", "⌘T", actions.openTask, ["switch task"]);
-  push("task.new", "New task", "Task", "⌘N", actions.newTask, ["create task"]);
-  push("changes.show", "Show changes", "Changes", "⌘D", actions.showChanges, ["diff review"]);
-  push("terminal.open", "Open terminal", "Terminal", "⌘`", actions.openTerminal, ["shell console"]);
-  push("nav.toggle-inspector", "Toggle inspector", "Navigation", undefined, actions.toggleInspector, ["hide show panel"]);
-  push("nav.pin-inspector", "Pin inspector", "Navigation", undefined, actions.pinInspector, ["lock panel"]);
-  push("task.switch-model", "Switch model or agent", "Task", undefined, actions.switchModel, ["provider llm"]);
-  push("task.start-subagent", "Start subagent", "Task", undefined, actions.startSubagent, ["delegate spawn"]);
-  push("changes.commit", "Commit", "Changes", undefined, actions.commit, ["git commit"]);
-  push("changes.push", "Push", "Changes", undefined, actions.push, ["git push remote"]);
-  push("changes.compare-branch", "Compare branch", "Changes", undefined, actions.compareBranch, ["git diff branch"]);
-  push("changes.create-pr", "Create pull request", "Changes", undefined, actions.createPullRequest, ["pr github"]);
-  push("tools.open-in-cursor", "Open in Cursor", "Tools", undefined, actions.openInCursor, ["editor"]);
-  push("tools.open-in-terminal", "Open in Terminal", "Tools", undefined, actions.openInTerminal, ["shell external"]);
-  push("tools.reveal-in-finder", "Reveal in Finder", "Tools", undefined, actions.revealInFinder, ["show file"]);
-  push("appearance.switch-theme", "Switch theme", "Appearance", undefined, actions.switchTheme, ["light dark system"]);
-  push("appearance.switch-density", "Switch density", "Appearance", undefined, actions.switchDensity, ["compact spacious"]);
-  push("help.open-settings", "Open settings", "Help", "⌘,", actions.openSettings, ["preferences config"]);
-  push("help.view-shortcuts", "View shortcuts", "Help", "⌘/", actions.viewShortcuts, ["keyboard cheatsheet"]);
-  return out;
-}

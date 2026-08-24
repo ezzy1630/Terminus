@@ -1,23 +1,16 @@
 /**
  * Terminus Desktop — Onboarding.
  *
- * Per SPEC §19: a minimal Codex-style onboarding flow shown on first
- * launch:
- *
- *   Step 1 — Welcome (minimal, calm)
- *   Step 2 — Choose or open project (directory picker or path input)
- *   Step 3 — Confirm detected tools, editors, and models (auto-detect
- *            git, node, bun, cursor, vscode)
- *   Step 4 — Start first task (pre-fills the composer)
+ * A focused project picker with an optional first task on first run.
  *
  * Per SPEC §19: "Do not force users through every setting. Default all
  * settings for a base-model 13-inch M4 MacBook Air. Advanced settings
  * remain available after onboarding."
  *
- * Per SPEC §19: "Can skip at any step."
+ * Per SPEC §19: setup remains skippable.
  *
- * The component is self-contained: it manages its own step state and
- * emits the chosen project path + initial prompt via callbacks. The
+ * The component is self-contained and emits the chosen project path plus
+ * optional initial prompt via callbacks. The
  * host owns the directory picker (via window.terminusDesktop or a
  * future Electron IPC bridge) — we accept a `pickDirectory` callback.
  *
@@ -25,18 +18,12 @@
  * variables, accessible keyboard nav, restrained motion. No emojis,
  * no purple gradients, no glowing effects.
  */
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useDialogFocus } from "../hooks/use-dialog-focus";
+import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
 import {
-  ArrowRight,
-  Check,
-  ChevronRight,
-  CircleAlert,
   Folder,
   FolderOpen,
-  Lightbulb,
-  Terminal as TerminalIcon,
-  Wand2,
   X,
 } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -44,6 +31,10 @@ import { api, TerminusApiError } from "../lib/api";
 import { useTerminusStore } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
 import type { Session } from "../types";
+import { Button } from "../ui/Button";
+import { IconButton } from "../ui/IconButton";
+import { Input, Textarea } from "../ui/Input";
+import { DialogSurface } from "../ui/Dialog";
 
 // ────────────────────────── Types ───────────────────────────────────────────
 
@@ -54,14 +45,18 @@ export interface OnboardingProps {
   pickDirectory?: () => Promise<string | null>;
   /** Optional className. */
   className?: string;
-  /** Initial step (defaults to 1). */
+  /** Retained for caller compatibility with the former stepped flow. */
   initialStep?: number;
+  /** Preselected path, for example from a directory dropped on the window. */
+  initialProjectPath?: string;
+  /** First-run wizard or the focused existing-user project opener. */
+  mode?: "first-run" | "open-project";
 }
 
 export interface OnboardingResult {
-  /** Project path chosen in step 2 (may be null if skipped). */
+  /** Project path chosen in the picker (may be null if skipped). */
   projectPath: string | null;
-  /** Initial prompt entered in step 4 (may be empty). */
+  /** Optional initial prompt (may be empty). */
   initialPrompt: string;
   /** Created Terminus session (if any). */
   session: Session | null;
@@ -69,93 +64,161 @@ export interface OnboardingResult {
   skipped: boolean;
 }
 
-interface DetectedTool {
-  id: string;
-  label: string;
-  /** Detected path or "not found". */
-  path: string | null;
-  /** Whether the tool was found. */
-  available: boolean;
-  icon: React.ReactNode;
-}
-
-// ────────────────────────── Auto-detection ──────────────────────────────────
-
-/**
- * Probe for the presence of common development tools by checking
- * well-known install paths on macOS. We deliberately do NOT spawn a
- * shell — this stays synchronous and cheap, and the user can edit
- * paths later in Settings → Integrations.
- *
- * Detection is best-effort: returning `available: false` does not
- * block onboarding.
- */
-function detectTools(): DetectedTool[] {
-  const candidates: Array<{ id: string; label: string; paths: string[]; icon: React.ReactNode }> = [
-    {
-      id: "git",
-      label: "Git",
-      paths: ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"],
-      icon: <FolderOpen size={14} />,
-    },
-    {
-      id: "node",
-      label: "Node.js",
-      paths: ["/usr/local/bin/node", "/opt/homebrew/bin/node", "/usr/bin/node"],
-      icon: <TerminalIcon size={14} />,
-    },
-    {
-      id: "bun",
-      label: "Bun",
-      paths: ["/opt/homebrew/bin/bun", "/usr/local/bin/bun", "~/.bun/bin/bun"],
-      icon: <TerminalIcon size={14} />,
-    },
-    {
-      id: "cursor",
-      label: "Cursor",
-      paths: ["/Applications/Cursor.app", "/Applications/Cursor.app/Contents/MacOS/Cursor"],
-      icon: <Wand2 size={14} />,
-    },
-    {
-      id: "vscode",
-      label: "VS Code",
-      paths: ["/Applications/Visual Studio Code.app", "/usr/local/bin/code", "/opt/homebrew/bin/code"],
-      icon: <Wand2 size={14} />,
-    },
-  ];
-  return candidates.map((c) => {
-    // We can't actually stat() from the renderer without an Electron
-    // bridge. Surface them as "detected" based on navigator + a
-    // heuristic: assume the macOS-default install paths are present.
-    // The user can confirm or edit in Settings → Integrations.
-    const likelyAvailable = c.id === "git" || c.id === "node";
-    return {
-      id: c.id,
-      label: c.label,
-      path: c.paths[0] ?? null,
-      available: likelyAvailable,
-      icon: c.icon,
-    };
-  });
-}
-
 // ────────────────────────── Component ───────────────────────────────────────
 
-const TOTAL_STEPS = 4;
+const ONBOARDING_DRAFT_PREFIX = "terminus-desktop.onboarding-draft.v1.";
+const MAX_ONBOARDING_PATH_BYTES = 4 * 1024;
+const MAX_ONBOARDING_PROMPT_BYTES = 16 * 1024;
+const MAX_ONBOARDING_DRAFT_BYTES = 24 * 1024;
+const ONBOARDING_DRAFT_WRITE_DELAY_MS = 150;
+const onboardingDraftEncoder = new TextEncoder();
+
+interface OnboardingDraft {
+  step: number;
+  projectPath: string;
+  initialPrompt: string;
+}
+
+function onboardingDraftKey(mode: NonNullable<OnboardingProps["mode"]>): string {
+  return `${ONBOARDING_DRAFT_PREFIX}${mode}`;
+}
+
+function onboardingDraftValidationError(draft: OnboardingDraft): string | null {
+  if (onboardingDraftEncoder.encode(draft.projectPath).byteLength > MAX_ONBOARDING_PATH_BYTES) {
+    return "The project path exceeds the 4 KiB setup-draft limit.";
+  }
+  if (onboardingDraftEncoder.encode(draft.initialPrompt).byteLength > MAX_ONBOARDING_PROMPT_BYTES) {
+    return "The first-task prompt exceeds the 16 KiB draft limit.";
+  }
+  if (onboardingDraftEncoder.encode(JSON.stringify(draft)).byteLength > MAX_ONBOARDING_DRAFT_BYTES) {
+    return "The setup draft exceeds the 24 KiB storage limit.";
+  }
+  return null;
+}
+
+function readOnboardingDraft(mode: NonNullable<OnboardingProps["mode"]>): {
+  draft: OnboardingDraft | null;
+  error: string | null;
+} {
+  try {
+    const storage = window.localStorage;
+    if (!storage) throw new Error("Local storage is unavailable.");
+    const raw = storage.getItem(onboardingDraftKey(mode));
+    if (raw === null) return { draft: null, error: null };
+    if (onboardingDraftEncoder.encode(raw).byteLength > MAX_ONBOARDING_DRAFT_BYTES) {
+      return { draft: null, error: "Stored setup data exceeds the supported limit and was preserved for recovery." };
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { draft: null, error: "Stored setup data is invalid and was preserved for recovery." };
+    }
+    const record = parsed as Record<string, unknown>;
+    if (
+      typeof record.step !== "number" ||
+      !Number.isInteger(record.step) ||
+      typeof record.projectPath !== "string" ||
+      typeof record.initialPrompt !== "string"
+    ) return { draft: null, error: "Stored setup data is invalid and was preserved for recovery." };
+    const draft = {
+      step: Math.max(1, Math.min(4, record.step)),
+      projectPath: record.projectPath,
+      initialPrompt: record.initialPrompt,
+    };
+    const validationError = onboardingDraftValidationError(draft);
+    return validationError
+      ? { draft: null, error: `${validationError} The original entry was preserved for recovery.` }
+      : { draft, error: null };
+  } catch (error) {
+    return {
+      draft: null,
+      error: error instanceof Error
+        ? `Stored setup data could not be read: ${error.message}`
+        : "Stored setup data could not be read.",
+    };
+  }
+}
+
+function writeOnboardingDraft(
+  mode: NonNullable<OnboardingProps["mode"]>,
+  draft: OnboardingDraft | null,
+): string | null {
+  if (draft) {
+    const validationError = onboardingDraftValidationError(draft);
+    if (validationError) return `${validationError} The current setup remains available only in this window.`;
+  }
+  try {
+    const storage = window.localStorage;
+    if (!storage) throw new Error("Local storage is unavailable.");
+    if (draft) storage.setItem(onboardingDraftKey(mode), JSON.stringify(draft));
+    else storage.removeItem(onboardingDraftKey(mode));
+    return null;
+  } catch (error) {
+    return error instanceof Error
+      ? `Setup remains available only in this window: ${error.message}`
+      : "Setup remains available only in this window because local storage failed.";
+  }
+}
 
 function OnboardingImpl({
   onComplete,
   pickDirectory,
   className,
-  initialStep = 1,
+  initialProjectPath,
+  mode = "first-run",
 }: OnboardingProps): JSX.Element {
-  const [step, setStep] = useState<number>(initialStep);
-  const [projectPath, setProjectPath] = useState<string>("");
+  const projectOnly = mode === "open-project";
+  const [savedDraftLoad] = useState(() => readOnboardingDraft(mode));
+  const savedDraft = savedDraftLoad.draft;
+  const step = 2;
+  const [projectPath, setProjectPath] = useState<string>(initialProjectPath ?? savedDraft?.projectPath ?? "");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [initialPrompt, setInitialPrompt] = useState("");
+  const [initialPrompt, setInitialPrompt] = useState(savedDraft?.initialPrompt ?? "");
+  const [draftStorageError, setDraftStorageError] = useState<string | null>(savedDraftLoad.error);
+  const draftStorageBlockedRef = useRef(savedDraftLoad.error !== null);
+  const draftCompletedRef = useRef(false);
+  const draftWriteTimerRef = useRef<number | null>(null);
+  const latestDraftRef = useRef<OnboardingDraft>({ step, projectPath, initialPrompt });
+  latestDraftRef.current = { step, projectPath, initialPrompt };
   const selectSession = useTerminusStore((s) => s.selectSession);
   const selectTask = useTerminusStore((s) => s.selectTask);
+  const setDraft = useTerminusStore((s) => s.setDraft);
+  const healthReady = useTerminusStore((s) => s.healthReady);
+  const onboardingMutation = useLogicalMutation("onboarding");
+  const inFlightRecoveryRef = useRef<{ operationKey: string; session: Session | null } | null>(null);
+  const [partialRecovery, setPartialRecovery] = useState<{ operationKey: string; session: Session } | null>(null);
+
+  useEffect(() => {
+    if (draftStorageBlockedRef.current) return;
+    if (draftWriteTimerRef.current !== null) window.clearTimeout(draftWriteTimerRef.current);
+    const nextDraft = { step, projectPath, initialPrompt };
+    draftWriteTimerRef.current = window.setTimeout(() => {
+      draftWriteTimerRef.current = null;
+      setDraftStorageError(writeOnboardingDraft(mode, nextDraft));
+    }, ONBOARDING_DRAFT_WRITE_DELAY_MS);
+    return () => {
+      if (draftWriteTimerRef.current !== null) {
+        window.clearTimeout(draftWriteTimerRef.current);
+        draftWriteTimerRef.current = null;
+      }
+    };
+  }, [initialPrompt, mode, projectPath, step]);
+
+  useEffect(() => () => {
+    if (draftWriteTimerRef.current !== null) window.clearTimeout(draftWriteTimerRef.current);
+    if (!draftCompletedRef.current && !draftStorageBlockedRef.current) {
+      writeOnboardingDraft(mode, latestDraftRef.current);
+    }
+  }, [mode]);
+
+  const clearCompletedDraft = useCallback((): void => {
+    draftCompletedRef.current = true;
+    if (draftWriteTimerRef.current !== null) {
+      window.clearTimeout(draftWriteTimerRef.current);
+      draftWriteTimerRef.current = null;
+    }
+    writeOnboardingDraft(mode, null);
+  }, [mode]);
 
   // Sync the system theme on mount so first paint matches.
   useEffect(() => {
@@ -163,53 +226,144 @@ function OnboardingImpl({
   }, []);
 
   const skip = useCallback((): void => {
+    if (creating) return;
     onComplete({ projectPath: null, initialPrompt: "", session: null, skipped: true });
-  }, [onComplete]);
+  }, [creating, onComplete]);
   const dialogRef = useDialogFocus<HTMLDivElement>(true, skip);
 
-  const next = useCallback((): void => {
-    setStep((s) => Math.min(TOTAL_STEPS, s + 1));
+  const changeProjectPath = useCallback((path: string): void => {
+    if (onboardingDraftEncoder.encode(path).byteLength > MAX_ONBOARDING_PATH_BYTES) {
+      setDraftStorageError("The project path is limited to 4 KiB and was not changed.");
+      return;
+    }
+    setProjectPath(path);
+    setError(null);
   }, []);
 
-  const back = useCallback((): void => {
-    setStep((s) => Math.max(1, s - 1));
+  const changeInitialPrompt = useCallback((prompt: string): void => {
+    if (onboardingDraftEncoder.encode(prompt).byteLength > MAX_ONBOARDING_PROMPT_BYTES) {
+      setDraftStorageError("The first-task prompt is limited to 16 KiB and was not changed.");
+      return;
+    }
+    setInitialPrompt(prompt);
   }, []);
+
+  const createWorkspaceSession = useCallback(async (objective: string): Promise<{
+    session: Session;
+    operationKey: string;
+  }> => {
+    if (!healthReady) {
+      throw new Error("Terminus is still starting up. Try opening the project again in a moment.");
+    }
+    if (!isAbsoluteLocalPath(projectPath)) {
+      throw new Error("Choose an absolute local directory before opening the workspace.");
+    }
+    const admission = onboardingMutation.acquire(JSON.stringify({ projectPath, objective }));
+    const operationKey = admission.key;
+    inFlightRecoveryRef.current = { operationKey, session: null };
+    if (admission.completedSteps.session_created && !admission.completedSteps.workspace_opened) {
+      throw new Error("Setup stopped partway through. Recover the saved project before trying again.");
+    }
+    let workspaceId = admission.completedSteps.workspace_opened ?? null;
+    if (!workspaceId) {
+      const workspace = await api.openWorkspace({
+        root_uri: projectPathToUri(projectPath),
+        kind: "local_directory",
+        trust: "untrusted",
+      }, { idempotencyKey: `${operationKey}:workspace` });
+      workspaceId = workspace.id;
+      onboardingMutation.checkpoint(operationKey, "workspace_opened", workspace.id);
+    }
+    const sessionId = admission.completedSteps.session_created;
+    const session = sessionId
+      ? await api.getSession(sessionId)
+      : await api.createSession({
+        workspace_id: workspaceId,
+        title: deriveProjectTitle(projectPath) || "Untitled project",
+      }, { idempotencyKey: `${operationKey}:session` });
+    if (!sessionId) onboardingMutation.checkpoint(operationKey, "session_created", session.id);
+    inFlightRecoveryRef.current = { operationKey, session };
+    await useTerminusStore.getState().refreshSessions();
+    selectSession(session.id);
+    return { session, operationKey };
+  }, [healthReady, onboardingMutation, projectPath, selectSession]);
 
   const finish = useCallback(async (): Promise<void> => {
     setCreating(true);
     setError(null);
+    const objective = initialPrompt.trim();
     try {
-      const workspace = await api.openWorkspace({
-        root_uri: projectPathToUri(projectPath),
-        kind: "local_directory",
-        trust: "trusted",
-      });
-      const session = await api.createSession({
-        workspace_id: workspace.id,
-        title: deriveProjectTitle(projectPath) || "My first project",
-      });
-      // Refresh sidebar + select the new session.
-      await useTerminusStore.getState().refreshSessions();
-      selectSession(session.id);
-      const objective = initialPrompt.trim();
+      const { session, operationKey } = await createWorkspaceSession(objective);
       if (objective && session.active_thread_id) {
-        const task = await api.createTask({
-          session_id: session.id,
-          thread_id: session.active_thread_id,
-          objective,
-          risk_class: "normal",
-        });
-        const started = await api.startTask(task.id);
+        const resumed = onboardingMutation.acquire(JSON.stringify({ projectPath, objective }));
+        if (
+          (resumed.completedSteps.task_started || resumed.completedSteps.turn_started)
+          && !resumed.completedSteps.task_created
+        ) {
+          throw new Error("The first task was only partly created. Recover it before trying again.");
+        }
+        if (resumed.completedSteps.turn_started && !resumed.completedSteps.task_started) {
+          throw new Error("The first task stopped before it could start. Recover it before trying again.");
+        }
+        const taskId = resumed.completedSteps.task_created;
+        const task = taskId
+          ? await api.getTask(taskId)
+          : await api.createTask({
+            session_id: session.id,
+            thread_id: session.active_thread_id,
+            objective,
+            risk_class: "normal",
+          }, { idempotencyKey: `${operationKey}:task` });
+        if (!taskId) onboardingMutation.checkpoint(operationKey, "task_created", task.id);
+        const startReceipt = resumed.completedSteps.task_started;
+        let eventCursor: string;
+        if (startReceipt) {
+          const parsed = JSON.parse(startReceipt) as unknown;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+            || typeof (parsed as Record<string, unknown>).eventCursor !== "string"
+            || (parsed as { eventCursor: string }).eventCursor.length === 0) {
+            throw new Error("The saved task state is invalid. Recover the task before trying again.");
+          }
+          eventCursor = (parsed as { eventCursor: string }).eventCursor;
+        } else {
+          const started = await api.startTask(task.id, { idempotencyKey: `${operationKey}:start-task` });
+          eventCursor = started.event_cursor;
+          onboardingMutation.checkpoint(
+            operationKey,
+            "task_started",
+            JSON.stringify({ eventCursor: started.event_cursor }),
+          );
+        }
         await useTerminusStore.getState().refreshTasks(session.id);
-        selectTask(task.id, started.event_cursor);
-        await api.startTurn({
-          thread_id: task.thread_id,
-          task_id: task.id,
-          user_input: objective,
-        });
+        if (!resumed.completedSteps.turn_started) {
+          await api.startTurn({
+            thread_id: task.thread_id,
+            task_id: task.id,
+            user_input: objective,
+          }, { idempotencyKey: `${operationKey}:turn` });
+          onboardingMutation.checkpoint(operationKey, "turn_started", "done");
+        }
+        selectTask(task.id, eventCursor);
       }
+      onboardingMutation.settle(operationKey);
+      inFlightRecoveryRef.current = null;
+      clearCompletedDraft();
       onComplete({ projectPath: projectPath || null, initialPrompt, session, skipped: false });
     } catch (err) {
+      const recovery = inFlightRecoveryRef.current;
+      if (recovery && isDefinitiveMutationFailure(err)) {
+        try {
+          if (recovery.session) {
+            setPartialRecovery({ operationKey: recovery.operationKey, session: recovery.session });
+          } else {
+            onboardingMutation.completePartial(recovery.operationKey);
+            inFlightRecoveryRef.current = null;
+          }
+        } catch (recoveryError) {
+          setError(recoveryError instanceof Error ? recoveryError.message : "Couldn't recover the saved setup.");
+          return;
+        }
+      }
       const msg =
         err instanceof TerminusApiError
           ? err.envelope?.message ?? err.message
@@ -220,79 +374,185 @@ function OnboardingImpl({
     } finally {
       setCreating(false);
     }
-  }, [projectPath, initialPrompt, onComplete, selectSession, selectTask]);
+  }, [clearCompletedDraft, createWorkspaceSession, initialPrompt, onComplete, onboardingMutation, projectPath, selectTask]);
+
+  const continueWithPartialProject = useCallback((): void => {
+    if (!partialRecovery) return;
+    try {
+      onboardingMutation.completePartial(partialRecovery.operationKey);
+      if (initialPrompt.trim()) setDraft("__new__", initialPrompt);
+      selectSession(partialRecovery.session.id);
+      clearCompletedDraft();
+      inFlightRecoveryRef.current = null;
+      onComplete({ projectPath: projectPath || null, initialPrompt, session: partialRecovery.session, skipped: false });
+    } catch (recoveryError) {
+      setError(recoveryError instanceof Error ? recoveryError.message : "Couldn't recover the saved setup.");
+    }
+  }, [clearCompletedDraft, initialPrompt, onComplete, onboardingMutation, partialRecovery, projectPath, selectSession, setDraft]);
+
+  const openSelectedProject = useCallback(async (): Promise<void> => {
+    setCreating(true);
+    setError(null);
+    try {
+      const { session, operationKey } = await createWorkspaceSession("");
+      onboardingMutation.settle(operationKey);
+      inFlightRecoveryRef.current = null;
+      clearCompletedDraft();
+      onComplete({ projectPath, initialPrompt: "", session, skipped: false });
+    } catch (openError: unknown) {
+      const recovery = inFlightRecoveryRef.current;
+      if (recovery && isDefinitiveMutationFailure(openError)) {
+        try {
+          if (recovery.session) {
+            setPartialRecovery({ operationKey: recovery.operationKey, session: recovery.session });
+          } else {
+            onboardingMutation.completePartial(recovery.operationKey);
+            inFlightRecoveryRef.current = null;
+          }
+        } catch (recoveryError) {
+          setError(recoveryError instanceof Error ? recoveryError.message : "Couldn't recover the saved setup.");
+          return;
+        }
+      }
+      setError(openError instanceof Error ? openError.message : "Could not open the project.");
+    } finally {
+      setCreating(false);
+    }
+  }, [clearCompletedDraft, createWorkspaceSession, onComplete, onboardingMutation, projectPath]);
 
   const onPick = useCallback(async (): Promise<void> => {
     if (!pickDirectory) return;
     try {
       const path = await pickDirectory();
-      if (path) setProjectPath(path);
-    } catch {
-      // ignore — the host surfaces its own error
+      if (path) {
+        changeProjectPath(path);
+      }
+    } catch (pickError: unknown) {
+      setError(pickError instanceof Error ? pickError.message : "The directory picker could not be opened.");
     }
-  }, [pickDirectory]);
+  }, [changeProjectPath, pickDirectory]);
+
+  const canOpen = isAbsoluteLocalPath(projectPath) && !creating;
 
   return (
-    <div
+    <DialogSurface
       ref={dialogRef}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Welcome to Terminus"
-      className={cn("fixed inset-0 z-50 flex flex-col bg-canvas", className)}
-      style={{ animation: "fade-in var(--duration-normal) var(--easing-default)" }}
+      open
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) skip();
+      }}
+      accessibleTitle={projectOnly ? "Open project" : "Welcome to Terminus"}
+      overlayClassName={projectOnly ? "bg-black/40" : "bg-canvas"}
+      className={cn(
+        projectOnly
+          ? "dialog-panel fixed left-1/2 top-1/2 flex w-[min(480px,calc(100%-32px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-default bg-elevated shadow-lg"
+          : "fixed inset-0 flex flex-col bg-canvas data-[state=open]:animate-fade-in",
+        className,
+      )}
     >
-      {/* Top bar with skip. */}
-      <div
-        className="titlebar-drag flex flex-shrink-0 items-center justify-between border-b border-subtle px-4"
-        style={{ height: 44, paddingLeft: 80 }}
-      >
-        <div className="titlebar-no-drag flex items-center gap-2 text-secondary">
-          <span className="font-medium tracking-tight text-primary" style={{ fontSize: "var(--font-size-md)" }}>
-            Terminus
-          </span>
+      {!projectOnly ? (
+        <div className="titlebar-drag flex h-11 flex-shrink-0 items-center justify-end px-4" style={{ paddingLeft: 80 }}>
+          <IconButton
+            onClick={skip}
+            disabled={creating}
+            className="titlebar-no-drag"
+            label={creating ? "Workspace creation in progress" : "Skip onboarding"}
+            icon={<X size={12} />}
+          />
         </div>
-        <button
-          type="button"
+      ) : (
+        <IconButton
           onClick={skip}
-          className="titlebar-no-drag flex h-7 items-center gap-1 rounded-md px-2 text-secondary hover:bg-hover hover:text-primary"
-          style={{ fontSize: "var(--font-size-xs)" }}
-          aria-label="Skip onboarding"
-        >
-          <span>Skip</span>
-          <X size={12} />
-        </button>
-      </div>
-      {/* Body. */}
-      <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-8 py-12">
-        <div className="w-full" style={{ maxWidth: 680, marginTop: "-4vh" }}>
-          <div className="flex justify-center"><StepIndicator step={step} /></div>
-          <div style={{ marginTop: 40 }}>
-            {step === 1 ? <WelcomeStep onNext={next} /> : null}
-            {step === 2 ? (
-              <ProjectStep
-                path={projectPath}
-                onPathChange={setProjectPath}
-                onPick={onPick}
-                canPick={Boolean(pickDirectory)}
-                onNext={next}
-                onBack={back}
-              />
+          disabled={creating}
+          className="absolute right-3 top-3"
+          label={creating ? "Workspace creation in progress" : "Cancel opening project"}
+          icon={<X size={12} />}
+        />
+      )}
+      <div className={cn("scrollable flex min-h-0 flex-1 items-center justify-center px-4", projectOnly ? "py-4" : "py-8")}>
+        <div className={cn("w-full p-4", projectOnly ? "max-w-none" : "max-w-[480px]")}>
+          <header className="mb-4">
+            <h1 className="ui-page-title text-primary">
+              {projectOnly ? "Open a project" : "Open your first project"}
+            </h1>
+            <p className="ui-body mt-1 text-secondary">
+              {projectOnly
+                ? "Choose a local project to open in its own workspace."
+                : "Choose a project and optionally describe the first task."}
+            </p>
+          </header>
+
+          <section aria-labelledby="setup-project-heading">
+            <h2 id="setup-project-heading" className="mb-2 text-xs font-medium text-primary">Project</h2>
+            <div className="flex gap-2">
+              <div className="relative min-w-0 flex-1">
+                <Folder className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-tertiary" size={14} />
+                <Input
+                  value={projectPath}
+                  onChange={(event) => changeProjectPath(event.target.value)}
+                  readOnly={Boolean(pickDirectory)}
+                  placeholder="/path/to/project"
+                  aria-label="Project path"
+                  aria-invalid={projectPath.length > 0 && !isAbsoluteLocalPath(projectPath)}
+                  className="pl-8 font-mono"
+                  autoFocus
+                />
+              </div>
+              {pickDirectory ? (
+                <Button variant="secondary" onClick={() => void onPick()}>
+                  <FolderOpen size={14} /> Browse
+                </Button>
+              ) : null}
+            </div>
+            <p className="mt-1.5 text-xs text-tertiary">Terminus verifies the directory before opening it.</p>
+          </section>
+
+          {!projectOnly ? (
+              <section className="mt-4" aria-labelledby="setup-task-heading">
+                <h2 id="setup-task-heading" className="mb-2 text-xs font-medium text-primary">First task <span className="font-normal text-tertiary">(optional)</span></h2>
+                <Textarea
+                  value={initialPrompt}
+                  onChange={(event) => changeInitialPrompt(event.target.value)}
+                  placeholder="Describe the result you want"
+                  aria-label="First task prompt"
+                  rows={3}
+                />
+              </section>
+          ) : null}
+
+          {error ? <p className="mt-3 border-l-2 border-error px-2 text-xs text-danger" role="alert">{error}</p> : null}
+            {partialRecovery ? (
+              <div className="mt-3 border-l-2 border-warning/55 px-2.5 py-1" role="status">
+                <p className="text-xs text-secondary">
+                  The project opened, but the first task did not. Continue and the request will remain in your draft.
+                </p>
+                <Button className="mt-2" variant="primary" onClick={continueWithPartialProject}>
+                  Continue with created project
+                </Button>
+              </div>
             ) : null}
-            {step === 3 ? <ToolsStep onNext={next} onBack={back} /> : null}
-            {step === 4 ? (
-              <FirstTaskStep
-                prompt={initialPrompt}
-                onPromptChange={setInitialPrompt}
-                onFinish={() => void finish()}
-                onBack={back}
-                creating={creating}
-                error={error}
-              />
+            {draftStorageError ? (
+              <p className="mt-3 text-xs text-tertiary" role="status">
+                {draftStorageError}
+              </p>
             ) : null}
-          </div>
+
+          <footer className="mt-4 flex items-center justify-between border-t border-subtle pt-3">
+            <Button variant="ghost" onClick={skip} disabled={creating}>
+              {projectOnly ? "Cancel" : "Not now"}
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => void (projectOnly ? openSelectedProject() : finish())}
+              disabled={!canOpen}
+              aria-busy={creating || undefined}
+            >
+              {creating ? "Opening…" : "Open project"}
+            </Button>
+          </footer>
         </div>
       </div>
-    </div>
+    </DialogSurface>
   );
 }
 
@@ -311,399 +571,12 @@ function deriveProjectTitle(path: string): string {
  * control plane accepts. Keeping this at the renderer boundary avoids
  * smuggling path semantics into session creation. */
 function projectPathToUri(path: string): string {
-  if (path.startsWith("file://")) return path;
-  return new URL(path, "file:///").href;
+  // Encode path segments directly. `new URL(path, "file:///")` would treat
+  // valid filename characters such as `#` and `?` as URL syntax.
+  return `file://${path.split("/").map((segment) => encodeURIComponent(segment)).join("/")}`;
 }
 
-// ────────────────────────── Step indicator ──────────────────────────────────
-
-function StepIndicator({ step }: { step: number }): JSX.Element {
-  return (
-    <div className="flex items-center gap-2" aria-label={`Step ${step} of ${TOTAL_STEPS}`}>
-      {Array.from({ length: TOTAL_STEPS }, (_, i) => {
-        const n = i + 1;
-        const isDone = n < step;
-        const isCurrent = n === step;
-        return (
-          <div
-            key={n}
-            className="flex items-center gap-2"
-            style={{ fontSize: "var(--font-size-xs)" }}
-          >
-            <span
-              className={cn(
-                "flex h-5 w-5 items-center justify-center rounded-full",
-                isCurrent && "text-primary",
-                isDone && "text-primary",
-                !isCurrent && !isDone && "text-tertiary",
-              )}
-              style={{
-                background: isCurrent
-                  ? "var(--color-primary)"
-                  : isDone
-                    ? "color-mix(in srgb, var(--color-success) 18%, transparent)"
-                    : "var(--bg-hover)",
-                color: isCurrent ? "var(--text-inverse)" : undefined,
-                border: isDone ? "1px solid var(--color-success)" : "1px solid var(--border-default)",
-              }}
-              aria-current={isCurrent ? "step" : undefined}
-            >
-              {isDone ? <Check size={10} /> : <span>{n}</span>}
-            </span>
-            {n < TOTAL_STEPS ? (
-              <div style={{ width: 24, height: 1, background: "var(--border-subtle)" }} />
-            ) : null}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ────────────────────────── Step 1: Welcome ─────────────────────────────────
-
-function WelcomeStep({ onNext }: { onNext: () => void }): JSX.Element {
-  return (
-    <div className="flex flex-col items-center text-center" style={{ gap: 18 }}>
-      <div className="flex flex-col items-center gap-4">
-        <div
-          aria-hidden
-          className="flex items-center justify-center text-primary"
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius: "var(--radius-lg)",
-            background: "var(--bg-elevated)",
-            border: "1px solid var(--border-subtle)",
-            fontSize: "var(--font-size-xl)",
-            fontWeight: 700,
-          }}
-        >
-          <TerminalIcon size={18} strokeWidth={1.7} />
-        </div>
-        <div>
-          <h1 className="text-primary" style={{ fontSize: "32px", fontWeight: 550, letterSpacing: "-0.025em" }}>
-            Welcome to Terminus
-          </h1>
-          <p className="text-secondary" style={{ fontSize: "var(--font-size-md)", marginTop: 6 }}>
-            Your work, agents, and evidence in one focused workspace.
-          </p>
-        </div>
-      </div>
-      <p
-        className="text-secondary"
-        style={{ maxWidth: 540, fontSize: "var(--font-size-sm)", lineHeight: "var(--line-height-relaxed)" }}
-      >
-        Set up one local project, confirm the tools you already use, and start your first task.
-        Everything can be changed later in Settings.
-      </p>
-      <div className="flex items-center justify-center" style={{ marginTop: 10 }}>
-        <button
-          type="button"
-          onClick={onNext}
-          className="inline-flex items-center gap-1.5 rounded-md text-primary"
-          style={{
-            height: 32,
-            padding: "0 14px",
-            fontSize: "var(--font-size-sm)",
-            fontWeight: 500,
-            background: "var(--color-primary)",
-            color: "var(--text-inverse)",
-            transition: "background var(--duration-fast) var(--easing-default)",
-          }}
-          autoFocus
-        >
-          <span>Continue</span>
-          <ArrowRight size={13} />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ────────────────────────── Step 2: Project ─────────────────────────────────
-
-function ProjectStep({
-  path,
-  onPathChange,
-  onPick,
-  canPick,
-  onNext,
-  onBack,
-}: {
-  path: string;
-  onPathChange: (p: string) => void;
-  onPick: () => void;
-  canPick: boolean;
-  onNext: () => void;
-  onBack: () => void;
-}): JSX.Element {
-  const canContinue = path.trim().length > 0;
-  return (
-    <div className="flex flex-col" style={{ gap: 16 }}>
-      <div>
-        <h1 className="text-primary" style={{ fontSize: "var(--font-size-xl)", fontWeight: 600 }}>
-          Open a project
-        </h1>
-        <p className="text-secondary" style={{ fontSize: "var(--font-size-sm)", marginTop: 4 }}>
-          Choose a local directory. Terminus will treat it as the workspace root.
-        </p>
-      </div>
-      <div className="flex flex-col" style={{ gap: 8 }}>
-        <div className="flex items-center gap-2">
-          <div className="flex flex-1 items-center gap-2 rounded-md bg-elevated px-3" style={{ height: 36, border: "1px solid var(--border-default)" }}>
-            <Folder size={13} className="text-tertiary" />
-            <input
-              value={path}
-              onChange={(e) => onPathChange(e.target.value)}
-              placeholder="/path/to/your/project"
-              aria-label="Project path"
-              className="flex-1 bg-transparent font-mono text-primary placeholder:text-tertiary focus:outline-none"
-              style={{ fontSize: "var(--font-size-sm)" }}
-              autoFocus
-            />
-          </div>
-          {canPick ? (
-            <button
-              type="button"
-              onClick={onPick}
-              className="inline-flex items-center gap-1 rounded-md text-secondary hover:bg-hover hover:text-primary"
-              style={{ height: 36, padding: "0 12px", fontSize: "var(--font-size-sm)", border: "1px solid var(--border-default)" }}
-            >
-              <FolderOpen size={13} />
-              <span>Browse</span>
-            </button>
-          ) : null}
-        </div>
-        <p className="text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>
-          Tip: paste a path or click Browse to use the macOS directory picker.
-        </p>
-      </div>
-      <StepNav
-        onNext={onNext}
-        onBack={onBack}
-        nextLabel="Continue"
-        nextDisabled={!canContinue}
-      />
-    </div>
-  );
-}
-
-// ────────────────────────── Step 3: Tools ───────────────────────────────────
-
-function ToolsStep({ onNext, onBack }: { onNext: () => void; onBack: () => void }): JSX.Element {
-  const tools = useMemo(() => detectTools(), []);
-  return (
-    <div className="flex flex-col" style={{ gap: 16 }}>
-      <div>
-        <h1 className="text-primary" style={{ fontSize: "var(--font-size-xl)", fontWeight: 600 }}>
-          Confirm detected tools
-        </h1>
-        <p className="text-secondary" style={{ fontSize: "var(--font-size-sm)", marginTop: 4 }}>
-          Terminus looked for common editors and runtimes. Adjust paths later in Settings → Integrations.
-        </p>
-      </div>
-      <ul className="flex flex-col" style={{ gap: 6 }}>
-        {tools.map((t) => (
-          <li
-            key={t.id}
-            className="flex items-center gap-3 rounded-md bg-elevated px-3 py-2"
-            style={{ border: "1px solid var(--border-subtle)" }}
-          >
-            <span
-              aria-hidden
-              className="flex flex-shrink-0 items-center justify-center text-tertiary"
-              style={{ width: 22, height: 22, borderRadius: "var(--radius-sm)", background: "var(--bg-canvas)" }}
-            >
-              {t.icon}
-            </span>
-            <div className="flex min-w-0 flex-1 flex-col">
-              <span className="text-primary" style={{ fontSize: "var(--font-size-sm)", fontWeight: 500 }}>
-                {t.label}
-              </span>
-              {t.path ? (
-                <span className="truncate font-mono text-tertiary" style={{ fontSize: "var(--font-size-xs)" }} title={t.path}>
-                  {t.path}
-                </span>
-              ) : null}
-            </div>
-            {t.available ? (
-              <span
-                className="inline-flex items-center gap-1 text-success"
-                style={{ fontSize: "var(--font-size-xs)" }}
-              >
-                <Check size={11} />
-                <span>Detected</span>
-              </span>
-            ) : (
-              <span
-                className="inline-flex items-center gap-1 text-warning"
-                style={{ fontSize: "var(--font-size-xs)" }}
-              >
-                <CircleAlert size={11} />
-                <span>Not found</span>
-              </span>
-            )}
-          </li>
-        ))}
-      </ul>
-      <StepNav onNext={onNext} onBack={onBack} nextLabel="Continue" />
-    </div>
-  );
-}
-
-// ────────────────────────── Step 4: First task ──────────────────────────────
-
-const STARTER_PROMPTS = [
-  "Explore the codebase and summarize how the main modules fit together.",
-  "Build a small feature with tests and documentation.",
-  "Review recent changes and suggest improvements.",
-  "Fix a failing test or runtime warning.",
-];
-
-function FirstTaskStep({
-  prompt,
-  onPromptChange,
-  onFinish,
-  onBack,
-  creating,
-  error,
-}: {
-  prompt: string;
-  onPromptChange: (p: string) => void;
-  onFinish: () => void;
-  onBack: () => void;
-  creating: boolean;
-  error: string | null;
-}): JSX.Element {
-  return (
-    <div className="flex flex-col" style={{ gap: 16 }}>
-      <div>
-        <h1 className="text-primary" style={{ fontSize: "var(--font-size-xl)", fontWeight: 600 }}>
-          Start your first task
-        </h1>
-        <p className="text-secondary" style={{ fontSize: "var(--font-size-sm)", marginTop: 4 }}>
-          Pick a starting prompt or write your own. You can refine it after the workspace opens.
-        </p>
-      </div>
-      <div className="flex flex-col" style={{ gap: 8 }}>
-        <div className="flex items-center gap-2 text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>
-          <Lightbulb size={11} />
-          <span>Suggestions</span>
-        </div>
-        <div className="grid grid-cols-1 gap-1.5" style={{ gridTemplateColumns: "1fr 1fr" }}>
-          {STARTER_PROMPTS.map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={() => onPromptChange(p)}
-              className={cn(
-                "rounded-md px-3 py-2 text-left text-secondary hover:bg-hover hover:text-primary",
-                prompt === p && "bg-selected text-primary",
-              )}
-              style={{
-                fontSize: "var(--font-size-xs)",
-                border: "1px solid var(--border-subtle)",
-                background: prompt === p ? "var(--bg-selected)" : "var(--bg-elevated)",
-              }}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-      </div>
-      <textarea
-        value={prompt}
-        onChange={(e) => onPromptChange(e.target.value)}
-        placeholder="Describe what you want to build…"
-        aria-label="First task prompt"
-        className="selectable w-full resize-none rounded-md bg-elevated px-3 py-2 text-primary placeholder:text-tertiary focus:outline-none"
-        style={{
-          fontSize: "var(--font-size-sm)",
-          minHeight: 90,
-          border: "1px solid var(--border-default)",
-          lineHeight: "var(--line-height-relaxed)",
-        }}
-        rows={3}
-      />
-      {error ? (
-        <p className="text-error" role="alert" style={{ fontSize: "var(--font-size-xs)" }}>
-          {error}
-        </p>
-      ) : null}
-      <div className="flex items-center justify-between">
-        <button
-          type="button"
-          onClick={onBack}
-          className="text-secondary hover:text-primary"
-          style={{ fontSize: "var(--font-size-sm)" }}
-        >
-          Back
-        </button>
-        <button
-          type="button"
-          onClick={onFinish}
-          disabled={creating}
-          className="inline-flex items-center gap-1.5 rounded-md text-primary disabled:opacity-50"
-          style={{
-            height: 32,
-            padding: "0 14px",
-            fontSize: "var(--font-size-sm)",
-            fontWeight: 500,
-            background: "var(--color-primary)",
-            color: "var(--text-inverse)",
-            transition: "background var(--duration-fast) var(--easing-default)",
-          }}
-        >
-          <span>{creating ? "Creating…" : "Open workspace"}</span>
-          {!creating ? <ArrowRight size={13} /> : null}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ────────────────────────── Step nav ────────────────────────────────────────
-
-function StepNav({
-  onNext,
-  onBack,
-  nextLabel,
-  nextDisabled,
-}: {
-  onNext: () => void;
-  onBack: () => void;
-  nextLabel: string;
-  nextDisabled?: boolean;
-}): JSX.Element {
-  return (
-    <div className="flex items-center justify-between" style={{ marginTop: 8 }}>
-      <button
-        type="button"
-        onClick={onBack}
-        className="text-secondary hover:text-primary"
-        style={{ fontSize: "var(--font-size-sm)" }}
-      >
-        Back
-      </button>
-      <button
-        type="button"
-        onClick={onNext}
-        disabled={nextDisabled}
-        className="inline-flex items-center gap-1.5 rounded-md text-primary disabled:opacity-50"
-        style={{
-          height: 32,
-          padding: "0 14px",
-          fontSize: "var(--font-size-sm)",
-          fontWeight: 500,
-          background: "var(--color-primary)",
-          color: "var(--text-inverse)",
-          transition: "background var(--duration-fast) var(--easing-default)",
-        }}
-      >
-        <span>{nextLabel}</span>
-        <ChevronRight size={13} />
-      </button>
-    </div>
-  );
+function isAbsoluteLocalPath(path: string): boolean {
+  const value = path.trim();
+  return value.startsWith("/") && !value.includes("\0") && !value.startsWith("//");
 }

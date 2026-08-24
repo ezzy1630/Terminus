@@ -2,17 +2,16 @@
  * Terminus Desktop — Layout tests (SPEC §29 — required test scenarios).
  *
  * Coverage:
- *   1. Layout renders sidebar, main, inspector, and terminal drawer.
- *   2. Sidebar collapses (rail mode at < 700px; narrow token at < 1100px).
- *   3. Inspector is a floating card and becomes a wider overlay at < 900px.
- *   4. ⌘` toggles the terminal drawer.
+ *   1. Layout renders sidebar, main, and inspector.
+ *   2. Sidebar and inspector stay docked at every supported desktop width.
+ *   3. Both dock separators support keyboard resizing.
+ *   4. Review mode responds to its measured container width.
  *
- * The breakpoints live in `hooks/use-viewport.ts` (1100 / 900 / 700).
- * We resize `window.innerWidth` and dispatch a `resize` event to flip
- * between layouts.
+ * The native window enforces a 900px minimum width, so the renderer keeps a
+ * stable desktop column model instead of switching to a phone/rail layout.
  */
-import { describe, expect, test, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, cleanup, act } from "@testing-library/react";
+import { describe, expect, test, beforeEach, afterEach } from "vitest";
+import { act, render, screen, fireEvent, cleanup } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { Layout } from "../src/components/Layout";
@@ -51,9 +50,16 @@ function renderLayout(): {
   return { unmount };
 }
 
+function titlebarSidebarWidth(): string {
+  const shell = document.querySelector(".titlebar-shell")?.parentElement;
+  if (!(shell instanceof HTMLElement)) throw new Error("layout shell not found");
+  return shell.style.getPropertyValue("--titlebar-sidebar-width");
+}
+
 // ────────────────────────── Setup / teardown ────────────────────────────────
 
 beforeEach(() => {
+  window.localStorage.clear();
   // Default to a comfortable wide viewport for each test.
   setViewport(1400, 900);
 });
@@ -79,27 +85,13 @@ describe("Layout — three-region render", () => {
     expect(screen.queryByRole("button", { name: "Forward" })).not.toBeInTheDocument();
   });
 
-  test("renders a terminal toggle button in the title bar", () => {
-    renderLayout();
-    const toggle = screen.getByRole("button", { name: /Show terminal/i });
-    expect(toggle).toBeInTheDocument();
+  test("keeps the titlebar center in the native drag region", () => {
+    render(<Layout sidebar={<div />} main={<div />} inspector={<div />} center={<span>Task title</span>} />);
+    const center = screen.getByTestId("titlebar-center");
+    expect(center).not.toHaveClass("titlebar-no-drag");
+    expect(center).toHaveTextContent("Task title");
   });
 
-  test("terminal drawer is hidden by default", () => {
-    renderLayout();
-    // No terminal region is rendered until the drawer is opened.
-    expect(screen.queryByRole("region", { name: "Terminal drawer" })).toBeNull();
-  });
-
-  test("clicking the terminal toggle opens the drawer", () => {
-    renderLayout();
-    const toggle = screen.getByRole("button", { name: /Show terminal/i });
-    fireEvent.click(toggle);
-    // After opening, the toggle's accessible name flips to "Hide terminal"
-    // and the drawer region appears.
-    expect(screen.getByRole("button", { name: /Hide terminal/i })).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "Terminal drawer" })).toBeInTheDocument();
-  });
 });
 
 // ────────────────────────── 2. Sidebar collapses at narrow widths ───────────
@@ -116,99 +108,61 @@ describe("Layout — sidebar responsive collapse", () => {
     );
     expect(screen.queryByTestId("hidden-sidebar")).toBeNull();
     expect(screen.getByTestId("visible-main")).toBeInTheDocument();
+    expect(titlebarSidebarWidth()).toBe("0px");
   });
 
-  test("at width ≥ 1100px, the sidebar uses the full sidebar-width token", () => {
-    setViewport(1400, 900);
+  test("sidebar is a resizable dock at every supported width", () => {
+    setViewport(900, 900);
     renderLayout();
     const aside = document.querySelector("aside");
     expect(aside).not.toBeNull();
-    expect(aside!.getAttribute("style") ?? "").toContain("var(--sidebar-width)");
+    expect(aside!.getAttribute("style") ?? "").toContain("width: 256px");
+    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveAttribute("aria-valuenow", "256");
+    expect(titlebarSidebarWidth()).toBe("256px");
   });
 
-  test("at width < 1100px, the sidebar uses the compact-width token", () => {
-    setViewport(1000, 900);
+  test("sidebar does not become a rail at a narrow desktop width", () => {
+    setViewport(900, 900);
     renderLayout();
     const aside = document.querySelector("aside");
     expect(aside).not.toBeNull();
-    const style = aside!.getAttribute("style") ?? "";
-    expect(style).toContain("var(--sidebar-width-compact)");
-    expect(style).not.toContain("var(--sidebar-width)");
-  });
-
-  test("at width < 700px, the sidebar collapses to a 56px rail", () => {
-    setViewport(600, 900);
-    renderLayout();
-    const aside = document.querySelector("aside");
-    expect(aside).not.toBeNull();
-    const style = aside!.getAttribute("style") ?? "";
-    // The rail is a numeric 56px width (not a CSS variable).
-    expect(style).toMatch(/width:\s*56px/);
+    expect(aside!.getAttribute("style") ?? "").toContain("width: 256px");
+    expect(titlebarSidebarWidth()).toBe("256px");
+    fireEvent.keyDown(screen.getByRole("separator", { name: "Resize sidebar" }), { key: "ArrowRight" });
+    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveAttribute("aria-valuenow", "264");
   });
 });
 
-// ────────────────────────── 3. Inspector becomes overlay ────────────────────
+// ────────────────────────── 3. Inspector dock ───────────────────────────────
 
-describe("Layout — floating inspector", () => {
-  test("at width ≥ 900px, the inspector floats while reserving conversation width", () => {
+describe("Layout — docked inspector", () => {
+  test("inspector is docked at the right edge", () => {
     setViewport(1200, 900);
     renderLayout();
-    expect(screen.getByTestId("inspector-float")).toHaveAttribute("data-layout", "floating");
-    expect(screen.getByTestId("main-content").parentElement?.parentElement).toHaveStyle({
-      paddingRight: "calc(var(--inspector-width) + 32px)",
-    });
+    expect(screen.getByTestId("inspector-dock")).toHaveAttribute("data-layout", "docked");
+    expect(screen.getByTestId("inspector-dock")).toHaveStyle({ width: "320px" });
+    expect(screen.getByRole("separator", { name: "Resize inspector" })).toHaveAttribute("aria-valuenow", "320");
   });
 
-  test("at width < 900px, the inspector becomes an absolutely-positioned overlay", () => {
-    setViewport(800, 900);
+  test("inspector supports keyboard resizing without an overlay", () => {
+    setViewport(1200, 900);
     renderLayout();
-    expect(screen.getByTestId("inspector-float")).toHaveAttribute("data-layout", "overlay");
-    expect(screen.getByTestId("main-content").parentElement?.parentElement).not.toHaveStyle({
-      paddingRight: "calc(var(--inspector-width) + 32px)",
-    });
-  });
-});
-
-// ────────────────────────── 4. ⌘` toggles terminal ──────────────────────────
-
-describe("Layout — ⌘` keyboard shortcut", () => {
-  test("pressing ⌘` opens the terminal drawer", () => {
-    renderLayout();
-    expect(screen.queryByRole("region", { name: "Terminal drawer" })).toBeNull();
-    fireEvent.keyDown(window, { key: "`", metaKey: true });
-    expect(screen.queryByRole("region", { name: "Terminal drawer" })).toBeInTheDocument();
+    const separator = screen.getByRole("separator", { name: "Resize inspector" });
+    fireEvent.keyDown(separator, { key: "ArrowLeft" });
+    expect(separator).toHaveAttribute("aria-valuenow", "328");
+    expect(screen.getByTestId("inspector-dock")).toHaveAttribute("data-layout", "docked");
   });
 
-  test("pressing ⌘` again closes the drawer", () => {
+  test("reserves the main working surface when both stored docks are maximal", () => {
+    window.localStorage.setItem("terminus-desktop.sidebar-width.v2", "320");
+    window.localStorage.setItem("terminus-desktop.inspector-width.v1", "520");
+    setViewport(900, 900);
     renderLayout();
-    fireEvent.keyDown(window, { key: "`", metaKey: true });
-    expect(screen.queryByRole("region", { name: "Terminal drawer" })).toBeInTheDocument();
-    fireEvent.keyDown(window, { key: "`", metaKey: true });
-    expect(screen.queryByRole("region", { name: "Terminal drawer" })).toBeNull();
-  });
 
-  test("ctrl+` also toggles the drawer (cross-platform)", () => {
-    renderLayout();
-    fireEvent.keyDown(window, { key: "`", ctrlKey: true });
-    expect(screen.queryByRole("region", { name: "Terminal drawer" })).toBeInTheDocument();
-  });
-
-  test("a plain ` (without modifier) does NOT open the drawer", () => {
-    renderLayout();
-    fireEvent.keyDown(window, { key: "`" });
-    expect(screen.queryByRole("region", { name: "Terminal drawer" })).toBeNull();
-  });
-});
-
-describe("Layout — terminal expansion", () => {
-  test("expands into the working area and collapses without losing the drawer", () => {
-    renderLayout();
-    fireEvent.click(screen.getByRole("button", { name: "Show terminal" }));
-    fireEvent.click(screen.getByRole("button", { name: "Expand" }));
-    expect(screen.getByRole("button", { name: "Collapse" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Terminal drawer" })).toHaveStyle({ height: "860px" });
-    fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
-    expect(screen.getByRole("button", { name: "Expand" })).toBeInTheDocument();
+    const sidebarWidth = Number(screen.getByRole("separator", { name: "Resize sidebar" }).getAttribute("aria-valuenow"));
+    const inspectorWidth = Number(screen.getByRole("separator", { name: "Resize inspector" }).getAttribute("aria-valuenow"));
+    expect(sidebarWidth + inspectorWidth).toBeLessThanOrEqual(572);
+    expect(screen.getByTestId("main-content")).toBeInTheDocument();
   });
 });
 
@@ -238,5 +192,30 @@ describe("ResizableReviewLayout", () => {
     const separator = screen.getByRole("separator", { name: "Resize conversation and review panes" });
     fireEvent.keyDown(separator, { key: "ArrowRight", shiftKey: true });
     expect(separator).toHaveAttribute("aria-valuenow", "68");
+  });
+
+  test("preserves review state and focus across the compact threshold", () => {
+    setViewport(1099, 900);
+    render(
+      <ResizableReviewLayout
+        conversation={<textarea aria-label="Conversation draft" defaultValue="conversation" />}
+        review={<textarea aria-label="Inline review draft" />}
+      />,
+    );
+    expect(screen.getByTestId("review-tabs")).toBeInTheDocument();
+    const reviewDraft = screen.getByRole("textbox", { name: "Inline review draft" });
+    fireEvent.change(reviewDraft, { target: { value: "Keep this unsent note" } });
+    reviewDraft.focus();
+
+    act(() => setViewport(1101, 900));
+    expect(screen.getByTestId("review-split")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Inline review draft" })).toHaveValue("Keep this unsent note");
+    expect(document.activeElement).toBe(reviewDraft);
+
+    act(() => setViewport(1099, 900));
+    expect(screen.getByTestId("review-tabs")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Inline review draft" })).toBe(reviewDraft);
+    expect(reviewDraft).toHaveValue("Keep this unsent note");
+    expect(document.activeElement).toBe(reviewDraft);
   });
 });

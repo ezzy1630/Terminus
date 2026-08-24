@@ -9,6 +9,9 @@ export default defineConfig({
     environmentOptions: {
       jsdom: { url: "http://localhost/" },
     },
+    // Full-suite jsdom contention can starve interaction-heavy accessibility
+    // tests even though their focused runs finish in under two seconds.
+    testTimeout: 15_000,
     globals: true,
     setupFiles: ["./tests/setup.ts"],
   },

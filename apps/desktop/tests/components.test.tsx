@@ -16,8 +16,8 @@
  *      on Esc.
  *   6. Composer send-button mode switches (send / steer / stop) based on
  *      the selected task's status.
- *   7. SidebarItem truncates long titles and exposes the full text via
- *      the `title` attribute (native tooltip).
+ *   7. SidebarItem truncates long titles and exposes the full text through
+ *      the shared accessible tooltip layer.
  */
 import { describe, expect, test, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, cleanup, act, waitFor } from "@testing-library/react";
@@ -25,7 +25,7 @@ import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 
 import { StatusIndicator } from "../src/components/StatusIndicator";
-import { EmptyState } from "../src/components/EmptyState";
+import { EmptyState } from "../src/ui/EmptyState";
 import { ErrorState, errorPreset } from "../src/components/ErrorState";
 import { ApprovalCard } from "../src/components/ApprovalCard";
 import { CommandPalette, type Command } from "../src/components/CommandPalette";
@@ -35,11 +35,18 @@ import { Sidebar } from "../src/components/Sidebar";
 import { SidebarItem } from "../src/components/SidebarItem";
 import { Message } from "../src/components/Message";
 import { ActivityBlock } from "../src/components/ActivityBlock";
+import { ConnectionBanner } from "../src/components/ConnectionBanner";
 import { sidebarVisibleTaskCount } from "../src/components/Sidebar";
 import { deriveRuntimeModelProfiles, useSettingsStore } from "../src/components/Settings";
 
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import { useThemeStore } from "../src/hooks/use-theme";
+import {
+  restoreAppDialogFocusOrigin,
+  setAppDialogFocusOrigin,
+  useDialogFocus,
+} from "../src/hooks/use-dialog-focus";
+import type { Approval, ApprovalSummary, Task, TaskDomainStatus, TaskListResponse } from "../src/types";
 
 // ────────────────────────── 1. StatusIndicator ──────────────────────────────
 
@@ -144,12 +151,14 @@ describe("ActivityBlock", () => {
             summary: "Desktop component suite",
             detail: "18 passed, 0 failed",
             at: "2026-07-13T00:00:00.000Z",
+            phase: "settled",
+            outcome: "succeeded",
           }],
         }}
       />,
     );
 
-    const toggle = screen.getByRole("button", { name: "Ran verification, 18 tests passed" });
+    const toggle = screen.getByRole("button", { name: "Ran verification, status done, 18 tests passed" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("18 tests passed")).toBeInTheDocument();
     expect(screen.queryByText("18 passed, 0 failed")).not.toBeInTheDocument();
@@ -236,6 +245,18 @@ vi.mock("../src/lib/api", async (importOriginal) => {
   return {
     ...actual,
     api: {
+      health: vi.fn(async () => ({
+        status: "ok",
+        ready: true,
+        version: "test",
+        kernel: { ready: true, status: "ready" },
+      })),
+      listSessions: vi.fn(async () => ({
+        sessions: [],
+        total: 0,
+        next_cursor: null,
+        truncation: { occurred: false as const, continuation: null },
+      })),
       resolveApproval: vi.fn(),
       startTask: vi.fn(async () => ({ task_id: "task-1", status: "ACTIVE", event_cursor: "cursor-1" })),
       startTurn: vi.fn(async () => ({ id: "turn-1" })),
@@ -250,6 +271,8 @@ vi.mock("../src/lib/api", async (importOriginal) => {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         completed_at: null,
+        terminal_reason: null,
+        contract: null,
       })),
       getTask: vi.fn(async () => ({
         id: "task-new",
@@ -264,8 +287,33 @@ vi.mock("../src/lib/api", async (importOriginal) => {
         completed_at: null,
         contract: null,
       })),
-      cancelTask: vi.fn(async () => ({ task_id: "task-1", status: "CANCELLED" })),
-      listTasks: vi.fn(async () => ({ tasks: [] })),
+      getSession: vi.fn(async (sessionId: string) => ({
+        id: sessionId,
+        workspace_id: "workspace-1",
+        title: "Hydrated project",
+        status: "active" as const,
+        active_thread_id: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })),
+      cancelTask: vi.fn(async () => ({
+        id: "task-1", session_id: "session-1", thread_id: "thread-1",
+        status: "ABORTED" as const, phase: "INTAKE", active_contract_version: 1,
+        risk_class: "normal" as const, created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(), completed_at: new Date().toISOString(), contract: null,
+      })),
+      listTasks: vi.fn(async () => ({
+        tasks: [],
+        total: 0,
+        next_cursor: null,
+        truncation: { occurred: false as const, continuation: null },
+      })),
+      listApprovals: vi.fn(async () => ({
+        approvals: [],
+        total: 0,
+        next_cursor: null,
+        truncation: { occurred: false as const, continuation: null },
+      })),
     },
   };
 });
@@ -275,15 +323,42 @@ vi.mock("../src/lib/api", async (importOriginal) => {
 // below resolves to the mocked module.
 import { api, TerminusApiError } from "../src/lib/api";
 
+const BASIC_APPROVAL_DECISIONS = ["allow_once", "allow_for_action", "allow_for_task", "deny_once"] as const;
+
+function resolvedApproval(id: string, status: "allowed" | "denied"): Approval {
+  const now = new Date().toISOString();
+  return {
+    id,
+    task_id: "task-x",
+    operation_hash: `hash-${id}`,
+    binding: null,
+    display: null,
+    status,
+    decision: status === "allowed" ? "allow_once" : "deny_once",
+    supported_decisions: [...BASIC_APPROVAL_DECISIONS],
+    risk: "normal",
+    scope: ["workspace://project"],
+    use_limit: 1,
+    use_count: status === "allowed" ? 1 : 0,
+    expires_at: null,
+    requested_at: now,
+    resolved_at: now,
+    rationale: null,
+  };
+}
+
 describe("ApprovalCard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.resolveApproval).mockReset();
   });
 
-  test("renders three buttons (Allow once, Allow for this task, Deny) by default", () => {
+  test("prioritizes the recommended decision and reveals advanced choices on demand", async () => {
+    const user = userEvent.setup();
     render(
       <ApprovalCard
         id="approval-1"
+        operationHash="hash-approval-1"
         action="Run database migration"
         operation="npm run migrate:production"
         reason="This may modify the production database."
@@ -291,131 +366,179 @@ describe("ApprovalCard", () => {
         scope={["workspace://db"]}
         affectedEnvironment="production"
         canPersist
+        authorizationReady
+        supportedDecisions={[...BASIC_APPROVAL_DECISIONS]}
       />,
     );
-    expect(screen.getByRole("button", { name: /Allow once/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Allow for this task/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Deny/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow once — Run database migration" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Deny once — Run database migration" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Allow exact action — Run database migration" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "More" }));
+    expect(screen.getByRole("button", { name: "Allow exact action — Run database migration" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Allow for this task — Run database migration" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /Deny and add task rule/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Stop task/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(screen.getByRole("note")).toHaveTextContent("Allow once, Allow exact action, Allow for this task, Deny once");
   });
 
-  test("hides 'Allow for this task' when canPersist=false", () => {
+  test("disables decisions when a bound approval expires without a refresh", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-23T12:00:00.000Z"));
+    const onExpired = vi.fn();
+    try {
+      render(
+        <ApprovalCard
+          id="approval-expiring"
+          operationHash="hash-approval-expiring"
+          action="Run a bounded effect"
+          risk="normal"
+          canPersist={false}
+          authorizationReady
+          supportedDecisions={["allow_once", "deny_once"]}
+          expiresAt="2026-08-23T12:00:01.000Z"
+          onExpired={onExpired}
+        />,
+      );
+      const allow = screen.getByRole("button", { name: "Allow once — Run a bounded effect" });
+      expect(allow).toBeEnabled();
+
+      act(() => vi.advanceTimersByTime(1_001));
+
+      expect(allow).toBeDisabled();
+      expect(screen.getByRole("alert")).toHaveTextContent("This approval expired");
+      expect(onExpired).toHaveBeenCalledTimes(1);
+      fireEvent.click(allow);
+      expect(api.resolveApproval).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("keeps task-scoped approval available in more choices but disabled when persistence is forbidden", async () => {
+    const user = userEvent.setup();
     render(
       <ApprovalCard
         id="approval-2"
+        operationHash="hash-approval-2"
         action="Read a file"
+        operation="read workspace://README.md"
         risk="low"
+        scope={["workspace://README.md"]}
         canPersist={false}
+        authorizationReady
+        supportedDecisions={[...BASIC_APPROVAL_DECISIONS]}
       />,
     );
-    expect(screen.getByRole("button", { name: /Allow once/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Allow for this task/ })).toBeNull();
-    expect(screen.getByRole("button", { name: /Deny/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow once — Read a file" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "More" }));
+    expect(screen.getByRole("button", { name: /Allow for this task \(unavailable\)/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Deny once — Read a file" })).toBeEnabled();
   });
 
   test("clicking 'Allow once' calls api.resolveApproval(id, 'allow_once')", async () => {
     const user = userEvent.setup();
     const onResolved = vi.fn();
-    vi.mocked(api.resolveApproval).mockResolvedValueOnce({
-      id: "approval-3",
-      task_id: "task-x",
-      operation_hash: "h",
-      status: "allowed",
-      risk: "normal",
-      requested_at: new Date().toISOString(),
-      resolved_at: new Date().toISOString(),
-      rationale: null,
-    });
+    vi.mocked(api.resolveApproval).mockResolvedValueOnce(resolvedApproval("approval-3", "allowed"));
 
     render(
       <ApprovalCard
         id="approval-3"
+        operationHash="hash-approval-3"
         action="Run a script"
+        operation="bun run check"
         risk="normal"
+        scope={["workspace://project"]}
         canPersist
+        authorizationReady
+        supportedDecisions={[...BASIC_APPROVAL_DECISIONS]}
         onResolved={onResolved}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: /Allow once/ }));
 
-    expect(api.resolveApproval).toHaveBeenCalledWith("approval-3", "allow_once");
+    expect(api.resolveApproval).toHaveBeenCalledWith(
+      "approval-3",
+      "hash-approval-3",
+      "allow_once",
+      { idempotencyKey: expect.stringMatching(/^approval\.approval-3:/) },
+    );
     expect(onResolved).toHaveBeenCalledWith("allow_once");
   });
 
   test("clicking 'Allow for this task' calls api.resolveApproval(id, 'allow_for_task')", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.resolveApproval).mockResolvedValueOnce({
-      id: "approval-4",
-      task_id: "task-x",
-      operation_hash: "h",
-      status: "allowed",
-      risk: "normal",
-      requested_at: new Date().toISOString(),
-      resolved_at: new Date().toISOString(),
-      rationale: null,
-    });
+    vi.mocked(api.resolveApproval).mockResolvedValueOnce(resolvedApproval("approval-4", "allowed"));
 
     render(
       <ApprovalCard
         id="approval-4"
+        operationHash="hash-approval-4"
         action="Run a script"
+        operation="bun run check"
         risk="normal"
+        scope={["workspace://project"]}
         canPersist
+        authorizationReady
+        supportedDecisions={[...BASIC_APPROVAL_DECISIONS]}
       />,
     );
 
+    await user.click(screen.getByRole("button", { name: "More" }));
     await user.click(screen.getByRole("button", { name: /Allow for this task/ }));
 
-    expect(api.resolveApproval).toHaveBeenCalledWith("approval-4", "allow_for_task");
+    expect(api.resolveApproval).toHaveBeenCalledWith(
+      "approval-4",
+      "hash-approval-4",
+      "allow_for_task",
+      { idempotencyKey: expect.stringMatching(/^approval\.approval-4:/) },
+    );
   });
 
   test("clicking 'Deny' calls api.resolveApproval(id, 'deny_once')", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.resolveApproval).mockResolvedValueOnce({
-      id: "approval-5",
-      task_id: "task-x",
-      operation_hash: "h",
-      status: "denied",
-      risk: "normal",
-      requested_at: new Date().toISOString(),
-      resolved_at: new Date().toISOString(),
-      rationale: null,
-    });
+    vi.mocked(api.resolveApproval).mockResolvedValueOnce(resolvedApproval("approval-5", "denied"));
 
     render(
       <ApprovalCard
         id="approval-5"
+        operationHash="hash-approval-5"
         action="Run a script"
         risk="normal"
         canPersist
+        supportedDecisions={[...BASIC_APPROVAL_DECISIONS]}
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /^Deny/ }));
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(screen.getByText("Persistence").nextElementSibling).toHaveTextContent("Task-scoped decisions may be available");
 
-    expect(api.resolveApproval).toHaveBeenCalledWith("approval-5", "deny_once");
+    await user.click(screen.getByRole("button", { name: "Deny once — Run a script" }));
+
+    expect(api.resolveApproval).toHaveBeenCalledWith(
+      "approval-5",
+      "hash-approval-5",
+      "deny_once",
+      { idempotencyKey: expect.stringMatching(/^approval\.approval-5:/) },
+    );
   });
 
   test("after a successful resolve, the card collapses to a one-line summary", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.resolveApproval).mockResolvedValueOnce({
-      id: "approval-6",
-      task_id: "task-x",
-      operation_hash: "h",
-      status: "allowed",
-      risk: "normal",
-      requested_at: new Date().toISOString(),
-      resolved_at: new Date().toISOString(),
-      rationale: null,
-    });
+    vi.mocked(api.resolveApproval).mockResolvedValueOnce(resolvedApproval("approval-6", "allowed"));
 
     render(
       <ApprovalCard
         id="approval-6"
+        operationHash="hash-approval-6"
         action="Run migration"
         operation="npm run migrate"
         risk="normal"
+        scope={["workspace://db"]}
         canPersist
+        authorizationReady
+        supportedDecisions={[...BASIC_APPROVAL_DECISIONS]}
       />,
     );
 
@@ -440,9 +563,14 @@ describe("ApprovalCard", () => {
     render(
       <ApprovalCard
         id="approval-7"
+        operationHash="hash-approval-7"
         action="Run migration"
+        operation="npm run migrate"
         risk="normal"
+        scope={["workspace://db"]}
         canPersist
+        authorizationReady
+        supportedDecisions={[...BASIC_APPROVAL_DECISIONS]}
       />,
     );
 
@@ -451,6 +579,57 @@ describe("ApprovalCard", () => {
     // The card stays open and surfaces the error.
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Allow once/ })).toBeInTheDocument();
+  });
+
+  test("disables allow actions when exact authorization context is incomplete", () => {
+    render(
+      <ApprovalCard
+        id="approval-incomplete"
+        operationHash="hash-approval-incomplete"
+        action="Approval details unavailable"
+        risk="unknown"
+        canPersist
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /^Allow/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Deny once — Approval details unavailable" })).toBeEnabled();
+    expect(screen.getByText(/Allow actions are disabled/)).toBeInTheDocument();
+  });
+});
+
+describe("Approval reconciliation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useTerminusStore.setState({
+      healthReady: true,
+      healthStatus: "ready",
+      healthDetail: null,
+      lastError: null,
+      selectedTaskId: "task-cold-approval",
+      approvalsByTask: {},
+      approvalFreshnessByTask: {},
+      sessionsFreshness: { status: "ready", error: null },
+      taskListFreshnessBySession: {},
+      taskFreshnessById: { "task-cold-approval": { status: "ready", error: null } },
+    });
+  });
+
+  test("surfaces a cold approval-list failure even when no approval row is retained", async () => {
+    vi.mocked(api.listApprovals).mockRejectedValueOnce(new Error("approval coordinator unavailable"));
+
+    await act(async () => {
+      await useTerminusStore.getState().refreshApprovals("task-cold-approval");
+    });
+
+    expect(useTerminusStore.getState().approvalFreshnessByTask["task-cold-approval"]).toEqual({
+      status: "error",
+      error: "approval coordinator unavailable",
+    });
+    render(<ConnectionBanner />);
+    const banner = screen.getByRole("alert", { name: "Navigation data is stale" });
+    expect(banner).toHaveTextContent("Approvals data is temporarily unavailable");
+    expect(banner).toHaveTextContent("approval coordinator unavailable");
   });
 });
 
@@ -582,6 +761,34 @@ describe("CommandPalette", () => {
     expect(first).not.toHaveBeenCalled();
   });
 
+  test("leaves navigation, submission, and Escape with an active IME composition", async () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const onClose = vi.fn();
+    const commands: Command[] = [
+      { id: "ime-first", label: "Alpha", group: "Navigation", action: first },
+      { id: "ime-second", label: "Beta", group: "Navigation", action: second },
+    ];
+    render(<CommandPalette open={true} onClose={onClose} commands={commands} />);
+    const input = screen.getByLabelText("Search commands");
+    input.focus();
+
+    fireEvent.keyDown(input, { key: "ArrowDown", keyCode: 229 });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    fireEvent.keyDown(input, { key: "Escape", keyCode: 229 });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(first).not.toHaveBeenCalled();
+    expect(second).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 13 });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   test("Esc closes the palette via the onClose callback", () => {
     const onClose = vi.fn();
     render(<CommandPalette open={true} onClose={onClose} commands={makeCommands()} />);
@@ -589,14 +796,11 @@ describe("CommandPalette", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  test("backdrop click closes the palette", () => {
+  test("backdrop click closes the palette", async () => {
     const onClose = vi.fn();
+    const user = userEvent.setup();
     render(<CommandPalette open={true} onClose={onClose} commands={makeCommands()} />);
-    // The dialog itself is the backdrop (fixed inset-0 with the dark
-    // background). Clicking directly on it (target === currentTarget)
-    // should trigger onClose.
-    const dialog = screen.getByRole("dialog", { name: "Command palette" });
-    fireEvent.mouseDown(dialog);
+    await user.click(screen.getByTestId("dialog-overlay"));
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -605,6 +809,44 @@ describe("CommandPalette", () => {
     render(<CommandPalette open={true} onClose={vi.fn()} commands={makeCommands()} />);
     await user.type(screen.getByLabelText("Search commands"), "zzzzz");
     expect(screen.getByText(/No commands match/)).toBeInTheDocument();
+  });
+});
+
+function TestFocusDialog({ label }: { label: string }): JSX.Element {
+  const dialogRef = useDialogFocus<HTMLDivElement>(true, () => undefined);
+  return (
+    <div ref={dialogRef} role="dialog" aria-label={label} tabIndex={-1}>
+      <button type="button">{label} control</button>
+    </div>
+  );
+}
+
+describe("lazy dialog focus lifecycle", () => {
+  test("retains the launcher across a loading fallback and resolved dialog", async () => {
+    const view = render(<button type="button">Open dialog</button>);
+    const launcher = screen.getByRole("button", { name: "Open dialog" });
+    launcher.focus();
+    setAppDialogFocusOrigin(launcher);
+
+    view.rerender(
+      <>
+        <button type="button">Open dialog</button>
+        <TestFocusDialog key="loading" label="Loading dialog" />
+      </>,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Loading dialog control" })).toHaveFocus());
+
+    view.rerender(
+      <>
+        <button type="button">Open dialog</button>
+        <TestFocusDialog key="resolved" label="Resolved dialog" />
+      </>,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Resolved dialog control" })).toHaveFocus());
+
+    view.rerender(<button type="button">Open dialog</button>);
+    restoreAppDialogFocusOrigin();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open dialog" })).toHaveFocus());
   });
 });
 
@@ -620,9 +862,14 @@ describe("Composer — send-button mode switches based on task status", () => {
       taskById: {},
       selectedSessionId: null,
       selectedTaskId: null,
+      healthReady: true,
+      healthStatus: "ready",
       pinnedTaskIds: new Set(),
+      pinPersistenceError: null,
       draftsByTask: {},
-      queuedInstructionsByTask: {},
+      sessionDraftsByTask: {},
+      draftPersistenceByTask: {},
+      draftStorageError: null,
       eventsByTask: {},
     });
     useThemeStore.getState().setDensity("spacious");
@@ -630,7 +877,7 @@ describe("Composer — send-button mode switches based on task status", () => {
     cleanup();
   });
 
-  function makeTask(status: string): void {
+  function makeTask(status: TaskDomainStatus): void {
     useTerminusStore.setState({
       selectedTaskId: "task-1",
       taskById: {
@@ -645,6 +892,7 @@ describe("Composer — send-button mode switches based on task status", () => {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           completed_at: null,
+          terminal_reason: null,
           contract: null,
         },
       },
@@ -657,20 +905,20 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.getByRole("button", { name: /Steer/ })).toBeInTheDocument();
   });
 
-  test("task.status=PENDING → button label is 'Send' so the first turn can start", () => {
-    makeTask("PENDING");
+  test("task.status=DRAFT → button label is 'Send' so the first turn can start", () => {
+    makeTask("DRAFT");
     render(<Composer />);
     expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
   });
 
-  test("task.status=QUEUED → button label is 'Stop'", () => {
-    makeTask("QUEUED");
+  test("task.status=NEEDS_USER_DECISION → button label is 'Steer'", () => {
+    makeTask("NEEDS_USER_DECISION");
     render(<Composer />);
-    expect(screen.getByRole("button", { name: /Stop/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Steer/ })).toBeInTheDocument();
   });
 
   test("submitting a pending task starts it before creating the first turn", async () => {
-    makeTask("PENDING");
+    makeTask("DRAFT");
     const user = userEvent.setup();
     render(<Composer />);
 
@@ -678,7 +926,9 @@ describe("Composer — send-button mode switches based on task status", () => {
     await user.click(screen.getByRole("button", { name: /^Send/ }));
 
     await waitFor(() => expect(api.startTurn).toHaveBeenCalledTimes(1));
-    expect(api.startTask).toHaveBeenCalledWith("task-1");
+    expect(api.startTask).toHaveBeenCalledWith("task-1", {
+      idempotencyKey: expect.stringMatching(/^composer-turn\.task-1:/),
+    });
     expect(vi.mocked(api.startTask).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(api.startTurn).mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
@@ -686,21 +936,9 @@ describe("Composer — send-button mode switches based on task status", () => {
       thread_id: "thread-1",
       task_id: "task-1",
       user_input: "Begin the task",
+    }, {
+      idempotencyKey: expect.stringMatching(/^composer-turn\.task-1:/),
     });
-  });
-
-  test("queues a follow-up without starting a concurrent turn", async () => {
-    makeTask("ACTIVE");
-    const user = userEvent.setup();
-    render(<Composer />);
-
-    const composer = screen.getByRole("textbox", { name: "Message composer" });
-    await user.type(composer, "Run the visual checks after implementation");
-    fireEvent.keyDown(composer, { key: "Enter", metaKey: true, shiftKey: true });
-
-    await waitFor(() => expect(useTerminusStore.getState().queuedInstructionsByTask["task-1"]).toHaveLength(1));
-    expect(api.startTurn).not.toHaveBeenCalled();
-    expect(screen.getByText("1 queued")).toBeInTheDocument();
   });
 
   test("preserves composer text and focus while streaming task state updates", async () => {
@@ -724,27 +962,216 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(composer).toHaveFocus();
   });
 
-  test("drains the next queued follow-up only after task completion", async () => {
+  test("applies an external draft replacement and cancels the pending local write", async () => {
     makeTask("ACTIVE");
-    useTerminusStore.getState().queueInstruction("task-1", "Now verify the finished work");
+    const user = userEvent.setup();
+    render(<Composer />);
 
-    useTerminusStore.getState()._updateTaskFromEvent({
-      id: "event-complete",
-      event: "task.completed",
-      data: JSON.stringify({ phase: "COMPLETE" }),
-    }, "task-1");
+    const composer = screen.getByRole("textbox", { name: "Message composer" });
+    await user.type(composer, "Local draft that has not persisted yet");
+    act(() => {
+      useTerminusStore.getState().setDraft("task-1", "Review this hunk and propose a safer revision");
+    });
 
-    await waitFor(() => expect(api.startTurn).toHaveBeenCalledWith({
-      thread_id: "thread-1",
-      task_id: "task-1",
-      user_input: "Now verify the finished work",
-    }));
-    expect(api.startTask).toHaveBeenCalledWith("task-1");
-    expect(useTerminusStore.getState().queuedInstructionsByTask["task-1"]).toHaveLength(0);
+    await waitFor(() => expect(composer).toHaveValue("Review this hunk and propose a safer revision"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(useTerminusStore.getState().draftsByTask["task-1"]).toBe(
+      "Review this hunk and propose a safer revision",
+    );
   });
 
-  test("task.status=WAITING → button label is 'Steer'", () => {
-    makeTask("WAITING");
+  test("does not cancel this task's pending write for another task's replacement", () => {
+    makeTask("ACTIVE");
+    render(<Composer />);
+    const composer = screen.getByRole("textbox", { name: "Message composer" });
+    fireEvent.change(composer, { target: { value: "current task edit" } });
+
+    act(() => {
+      useTerminusStore.getState().setDraft("task-other", "other task replacement");
+    });
+    fireEvent.blur(composer);
+
+    expect(useTerminusStore.getState().draftsByTask["task-1"]).toBe("current task edit");
+    expect(useTerminusStore.getState().draftsByTask["task-other"]).toBe("other task replacement");
+  });
+
+  test("coalesces a burst into one idle draft write", () => {
+    makeTask("ACTIVE");
+    const requestDescriptor = Object.getOwnPropertyDescriptor(window, "requestIdleCallback");
+    const cancelDescriptor = Object.getOwnPropertyDescriptor(window, "cancelIdleCallback");
+    const callbacks = new Map<number, () => void>();
+    let nextHandle = 1;
+    Object.defineProperty(window, "requestIdleCallback", {
+      configurable: true,
+      value: vi.fn((callback: () => void) => {
+        const handle = nextHandle++;
+        callbacks.set(handle, callback);
+        return handle;
+      }),
+    });
+    Object.defineProperty(window, "cancelIdleCallback", {
+      configurable: true,
+      value: vi.fn((handle: number) => callbacks.delete(handle)),
+    });
+
+    try {
+      render(<Composer />);
+      const composer = screen.getByRole("textbox", { name: "Message composer" });
+      fireEvent.change(composer, { target: { value: "a" } });
+      fireEvent.change(composer, { target: { value: "ab" } });
+      fireEvent.change(composer, { target: { value: "abc" } });
+
+      expect(callbacks.size).toBe(1);
+      expect(useTerminusStore.getState().draftsByTask["task-1"]).toBeUndefined();
+      const callback = [...callbacks.values()][0];
+      if (!callback) throw new Error("Expected one scheduled draft write");
+      act(callback);
+      expect(useTerminusStore.getState().draftsByTask["task-1"]).toBe("abc");
+    } finally {
+      cleanup();
+      if (requestDescriptor) Object.defineProperty(window, "requestIdleCallback", requestDescriptor);
+      else Reflect.deleteProperty(window, "requestIdleCallback");
+      if (cancelDescriptor) Object.defineProperty(window, "cancelIdleCallback", cancelDescriptor);
+      else Reflect.deleteProperty(window, "cancelIdleCallback");
+    }
+  });
+
+  test("flushes the latest draft when the composer unmounts before idle time", () => {
+    makeTask("ACTIVE");
+    const requestDescriptor = Object.getOwnPropertyDescriptor(window, "requestIdleCallback");
+    const cancelDescriptor = Object.getOwnPropertyDescriptor(window, "cancelIdleCallback");
+    const callbacks = new Map<number, () => void>();
+    Object.defineProperty(window, "requestIdleCallback", {
+      configurable: true,
+      value: vi.fn((callback: () => void) => {
+        callbacks.set(1, callback);
+        return 1;
+      }),
+    });
+    Object.defineProperty(window, "cancelIdleCallback", {
+      configurable: true,
+      value: vi.fn((handle: number) => callbacks.delete(handle)),
+    });
+
+    try {
+      const view = render(<Composer />);
+      fireEvent.change(screen.getByRole("textbox", { name: "Message composer" }), {
+        target: { value: "survives navigation" },
+      });
+      expect(callbacks.size).toBe(1);
+      view.unmount();
+      expect(callbacks.size).toBe(0);
+      expect(useTerminusStore.getState().draftsByTask["task-1"]).toBe("survives navigation");
+    } finally {
+      cleanup();
+      if (requestDescriptor) Object.defineProperty(window, "requestIdleCallback", requestDescriptor);
+      else Reflect.deleteProperty(window, "requestIdleCallback");
+      if (cancelDescriptor) Object.defineProperty(window, "cancelIdleCallback", cancelDescriptor);
+      else Reflect.deleteProperty(window, "cancelIdleCallback");
+    }
+  });
+
+  test("flushes the pending draft before the window unloads", () => {
+    makeTask("ACTIVE");
+    render(<Composer />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Message composer" }), {
+      target: { value: "survives window close" },
+    });
+
+    fireEvent(window, new Event("beforeunload"));
+
+    expect(useTerminusStore.getState().draftsByTask["task-1"]).toBe("survives window close");
+  });
+
+  test("surfaces quota failures as session-only drafts with recovery actions", () => {
+    makeTask("ACTIVE");
+    const storage = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+    try {
+      render(<Composer />);
+      const composer = screen.getByRole("textbox", { name: "Message composer" });
+      fireEvent.change(composer, { target: { value: "keep this in memory" } });
+      fireEvent.blur(composer);
+
+      expect(useTerminusStore.getState().draftsByTask["task-1"]).toBe("keep this in memory");
+      expect(useTerminusStore.getState().draftPersistenceByTask["task-1"]).toEqual({
+        status: "session_only",
+        error: "Local draft storage is full.",
+      });
+      expect(screen.getByRole("status")).toHaveTextContent("Draft not saved locally. Local draft storage is full.");
+      expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Copy draft" })).toBeInTheDocument();
+    } finally {
+      storage.mockRestore();
+    }
+  });
+
+  test("retains collection-cap fallbacks per task while switching composers", () => {
+    const fullDraftCollection = Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [`saved-${index}`, `Saved draft ${index}`]),
+    );
+    useTerminusStore.setState({ draftsByTask: fullDraftCollection, sessionDraftsByTask: {} });
+    makeTask("ACTIVE");
+    const firstTask = useTerminusStore.getState().taskById["task-1"]!;
+    useTerminusStore.setState((state) => ({
+      taskById: {
+        ...state.taskById,
+        "task-2": { ...firstTask, id: "task-2", thread_id: "thread-2" },
+      },
+    }));
+    render(<Composer />);
+    const composer = screen.getByRole("textbox", { name: "Message composer" });
+    fireEvent.change(composer, { target: { value: "First session-only draft" } });
+    fireEvent.blur(composer);
+    expect(useTerminusStore.getState().sessionDraftsByTask["task-1"]).toBe("First session-only draft");
+
+    act(() => useTerminusStore.setState({ selectedTaskId: "task-2" }));
+    expect(composer).toHaveValue("");
+    fireEvent.change(composer, { target: { value: "Second session-only draft" } });
+    fireEvent.blur(composer);
+    expect(useTerminusStore.getState().sessionDraftsByTask["task-2"]).toBe("Second session-only draft");
+
+    act(() => useTerminusStore.setState({ selectedTaskId: "task-1" }));
+    expect(composer).toHaveValue("First session-only draft");
+    expect(screen.getByRole("status")).toHaveTextContent("retained per task until this window closes");
+  });
+
+  test("rejects a multibyte draft above the byte limit without silent truncation", () => {
+    makeTask("ACTIVE");
+    render(<Composer />);
+    const composer = screen.getByRole("textbox", { name: "Message composer" });
+    const oversized = "é".repeat(9_000);
+
+    fireEvent.change(composer, { target: { value: oversized } });
+
+    expect(composer).toHaveValue("");
+    expect(screen.getByRole("alert")).toHaveTextContent("Draft limit reached");
+    expect(useTerminusStore.getState().draftsByTask["task-1"]).toBeUndefined();
+  });
+
+  test("surfaces unreadable cold draft storage and resets it only on request", async () => {
+    makeTask("ACTIVE");
+    window.localStorage.setItem("terminus-desktop.drafts.v1", "{not-json");
+    useTerminusStore.setState({
+      draftsByTask: {},
+      sessionDraftsByTask: {},
+      draftPersistenceByTask: {},
+      draftStorageError: null,
+    });
+
+    useTerminusStore.getState().retryDraftHydration();
+    render(<Composer />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Saved draft recovery is unavailable");
+    expect(window.localStorage.getItem("terminus-desktop.drafts.v1")).toBe("{not-json");
+    await userEvent.click(screen.getByRole("button", { name: "Reset local draft storage" }));
+    expect(window.localStorage.getItem("terminus-desktop.drafts.v1")).toBe("{}");
+    expect(screen.queryByText(/Saved draft recovery is unavailable/)).not.toBeInTheDocument();
+  });
+
+  test("task.status=BLOCKED → button label is 'Steer'", () => {
+    makeTask("BLOCKED");
     render(<Composer />);
     expect(screen.getByRole("button", { name: /Steer/ })).toBeInTheDocument();
   });
@@ -777,14 +1204,14 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
   });
 
-  test("task.status=INTERRUPTED → button label is 'Send'", () => {
-    makeTask("INTERRUPTED");
+  test("task.status=ABORTED → button label is 'Send'", () => {
+    makeTask("ABORTED");
     render(<Composer />);
     expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
   });
 
-  test("task.status=NEEDS_APPROVAL → button label is 'Steer'", () => {
-    makeTask("NEEDS_APPROVAL");
+  test("task.status=NEEDS_USER_DECISION → button label is 'Steer'", () => {
+    makeTask("NEEDS_USER_DECISION");
     render(<Composer />);
     expect(screen.getByRole("button", { name: /Steer/ })).toBeInTheDocument();
   });
@@ -795,37 +1222,40 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
   });
 
-  test("does not invent a model or access level when no session profile exists", () => {
+  test("keeps the start composer focused on the project and prompt", () => {
     useTerminusStore.setState({ selectedTaskId: null });
+    render(<Composer onCreateTask={vi.fn(async () => undefined)} onChangeProject={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Change project" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Environment: Local")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Model profile: Default model")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Permission profile: Workspace policy")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Claude|GPT|Gemini/)).not.toBeInTheDocument();
+  });
+
+  test("does not expose a fake provider selector when runtime model inventory is empty", () => {
+    render(<Composer onCreateTask={vi.fn(async () => undefined)} />);
+    expect(screen.queryByRole("button", { name: /provider/i })).not.toBeInTheDocument();
+  });
+
+  test("keeps task permission metadata read-only without a dead environment menu", () => {
     render(<Composer />);
-    expect(screen.getByRole("button", { name: "Connect provider" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Permission profile: Workspace policy" })).toBeInTheDocument();
+
+    expect(screen.getByLabelText("Permission profile: Workspace policy")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Environment details" })).not.toBeInTheDocument();
   });
 
-  test("opens connection management from an empty runtime model inventory", async () => {
-    const openSettings = vi.fn();
-    window.addEventListener("terminus:open-settings", openSettings, { once: true });
-    render(<Composer onCreateTask={vi.fn(async () => undefined)} />);
-
-    const provider = screen.getByRole("button", { name: "Connect provider" });
-    await userEvent.setup().click(provider);
-    await userEvent.setup().click(screen.getByRole("menuitemradio", { name: /Connect provider/ }));
-
-    expect(openSettings).toHaveBeenCalledTimes(1);
-  });
-
-  test("opens permission management and exposes contextual options", async () => {
-    const openSettings = vi.fn();
-    window.addEventListener("terminus:open-settings", openSettings, { once: true });
-    render(<Composer onCreateTask={vi.fn(async () => undefined)} />);
+  test("announces a submit failure without discarding the composer draft", async () => {
+    makeTask("ACTIVE");
+    vi.mocked(api.startTurn).mockRejectedValueOnce(new Error("provider unavailable"));
     const user = userEvent.setup();
+    render(<Composer />);
 
-    await user.click(screen.getByRole("button", { name: "Permission profile: Workspace policy" }));
-    expect(openSettings).toHaveBeenCalledTimes(1);
+    const composer = screen.getByRole("textbox", { name: "Message composer" });
+    await user.type(composer, "Keep this exact retry");
+    await user.click(screen.getByRole("button", { name: "Steer" }));
 
-    await user.click(screen.getByRole("button", { name: "More options" }));
-    expect(screen.getByText("Branch / worktree")).toBeInTheDocument();
-    expect(screen.getByRole("menuitemradio", { name: /Queue follow-up/ })).toBeDisabled();
+    expect(await screen.findByRole("alert")).toHaveTextContent("provider unavailable");
+    expect(composer).toHaveValue("Keep this exact retry");
   });
 
   test("opts the native composer out of browser writing-assistant injection", () => {
@@ -851,6 +1281,7 @@ describe("Composer — send-button mode switches based on task status", () => {
 describe("NewTaskScreen — first turn lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
     useTerminusStore.setState({
       sessions: [{
         id: "session-1",
@@ -865,6 +1296,8 @@ describe("NewTaskScreen — first turn lifecycle", () => {
       taskById: {},
       selectedSessionId: "session-1",
       selectedTaskId: null,
+      healthReady: true,
+      healthStatus: "ready",
       draftsByTask: {},
       eventsByTask: {},
     });
@@ -878,42 +1311,87 @@ describe("NewTaskScreen — first turn lifecycle", () => {
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     await waitFor(() => expect(api.startTurn).toHaveBeenCalledTimes(1));
-    expect(api.startTask).toHaveBeenCalledWith("task-new");
+    expect(api.startTask).toHaveBeenCalledWith("task-new", {
+      idempotencyKey: expect.stringMatching(/^new-task\.session-1:/),
+    });
     expect(api.startTurn).toHaveBeenCalledWith({
       thread_id: "thread-1",
       task_id: "task-new",
       user_input: "Build the live task surface",
-    });
+    }, { idempotencyKey: expect.stringMatching(/^new-task\.session-1:/) });
     expect(vi.mocked(api.startTask).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(api.startTurn).mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
     expect(useTerminusStore.getState().selectedTaskId).toBe("task-new");
   });
 
-  test("keeps starter actions compact while preserving their explanatory tooltips", () => {
+  test("resumes from the created-task checkpoint after an ambiguous start failure", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.startTask).mockRejectedValueOnce(new TerminusApiError(0, "connection lost", null));
+    const first = render(<NewTaskScreen />);
+    await user.type(screen.getByRole("textbox", { name: "Message composer" }), "Resume this task");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+    expect((await screen.findAllByText("connection lost")).length).toBeGreaterThan(0);
+    const firstStartKey = vi.mocked(api.startTask).mock.calls[0]?.[1].idempotencyKey;
+    first.unmount();
+
+    render(<NewTaskScreen />);
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+    await waitFor(() => expect(api.startTurn).toHaveBeenCalledTimes(1));
+
+    expect(api.createTask).toHaveBeenCalledTimes(1);
+    expect(api.getTask).toHaveBeenCalledWith("task-new");
+    expect(api.startTask).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.startTask).mock.calls[1]?.[1].idempotencyKey).toBe(firstStartKey);
+  });
+
+  test("keeps the start surface focused on project context and one composer", () => {
     render(<NewTaskScreen />);
 
-    const starter = screen.getByRole("button", { name: "Explore and understand code" });
-    expect(starter).toHaveAttribute("title", "Map the system before making a change");
-    expect(screen.queryByText("Map the system before making a change")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What do you want to work on?" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Change project" })).toHaveTextContent("Terminus");
+    expect(screen.getAllByRole("textbox", { name: "Message composer" })).toHaveLength(1);
+    expect(screen.queryByText("Map the codebase")).not.toBeInTheDocument();
+  });
+
+  test("keeps local-service recovery beside the disabled start composer", async () => {
+    const originalRefreshAll = useTerminusStore.getState().refreshAll;
+    const refreshAll = vi.fn(async () => undefined);
+    useTerminusStore.setState({ healthReady: false, healthStatus: "offline", refreshAll });
+
+    render(<NewTaskScreen />);
+    expect(screen.getByText(/Terminus is offline|Local service offline/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(refreshAll).toHaveBeenCalledTimes(1);
+
+    act(() => useTerminusStore.setState({
+      refreshAll: originalRefreshAll,
+      healthReady: true,
+      healthStatus: "ready",
+    }));
   });
 });
 
 describe("Sidebar — navigation destinations", () => {
-  test("surfaces the Codex-style destination hierarchy", async () => {
+  test("keeps primary destinations available without showing empty attention chrome", async () => {
     const onNavigate = vi.fn();
     render(<Sidebar onNavigate={onNavigate} />);
 
-    for (const label of ["New task", "Scheduled", "Plugins", "Pull requests", "Chat"]) {
+    expect(screen.getByRole("button", { name: /^New (session|task)/ })).toBeInTheDocument();
+    for (const label of [/^(Kanban|Sessions)/, "Agents"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
-    expect(screen.queryByRole("button", { name: "Sites" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Needs attention" })).not.toBeInTheDocument();
+    for (const unsupported of ["Scheduled", "Plugins", "Pull requests", "Sites"]) {
+      expect(screen.queryByRole("button", { name: unsupported })).not.toBeInTheDocument();
+    }
 
-    await userEvent.setup().click(screen.getByRole("button", { name: "Plugins" }));
-    expect(onNavigate).toHaveBeenCalledWith("plugins");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+    expect(onNavigate).toHaveBeenCalledWith("agents");
   });
 
-  test("routes Settings and Help to distinct settings categories", async () => {
+  test("routes Settings without adding a second Help destination", async () => {
     const details: unknown[] = [];
     const listener = (event: Event): void => {
       details.push(event instanceof CustomEvent ? event.detail : null);
@@ -923,10 +1401,809 @@ describe("Sidebar — navigation destinations", () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Settings" }));
-    await user.click(screen.getByRole("button", { name: "Help" }));
 
-    expect(details).toEqual([{ category: "general" }, { category: "shortcuts" }]);
+    expect(details).toEqual([{ category: "appearance" }]);
+    expect(screen.queryByRole("button", { name: "Help" })).not.toBeInTheDocument();
     window.removeEventListener("terminus:open-settings", listener);
+  });
+
+  test("keeps search, settings, and help reachable in compact rail mode", () => {
+    render(<Sidebar compact />);
+    expect(screen.getByRole("button", { name: "Search tasks and commands" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Help" })).toBeInTheDocument();
+  });
+
+  test("opens global search from the primary row and keeps recent-task filtering separate", async () => {
+    const openPalette = vi.fn();
+    window.addEventListener("terminus:open-command-palette", openPalette);
+    render(<Sidebar />);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Search tasks and commands" }));
+    expect(openPalette).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("textbox", { name: "Search tasks" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Filter recent tasks" }));
+    expect(screen.getByRole("textbox", { name: "Search tasks" })).toBeInTheDocument();
+    window.removeEventListener("terminus:open-command-palette", openPalette);
+  });
+
+  test("announces cold and paginated task counts truthfully in the compact rail", () => {
+    const now = new Date().toISOString();
+    const cold = {
+      id: "session-rail-cold",
+      workspace_id: "workspace-rail-cold",
+      title: "Cold rail project",
+      status: "active" as const,
+      active_thread_id: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const paginated = { ...cold, id: "session-rail-page", title: "Paged rail project" };
+    const loadedTask: Task = {
+      id: "task-rail-loaded",
+      session_id: paginated.id,
+      thread_id: "thread-rail-loaded",
+      status: "ACTIVE",
+      phase: "EXECUTING",
+      active_contract_version: 1,
+      risk_class: "normal",
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      terminal_reason: null,
+      contract: null,
+    };
+    useTerminusStore.setState({
+      sessions: [cold, paginated],
+      tasksBySession: { [paginated.id]: [loadedTask] },
+      taskById: { [loadedTask.id]: loadedTask },
+      taskListFreshnessBySession: {
+        [paginated.id]: { status: "ready", error: null },
+      },
+      taskPagesBySession: {
+        [paginated.id]: { nextCursor: "next", total: 3, loadingMore: false, error: null },
+      },
+    });
+
+    render(<Sidebar compact />);
+
+    expect(screen.getByRole("button", { name: "Cold rail project, task count not loaded" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Paged rail project, 1 of 3 tasks loaded" })).toBeInTheDocument();
+  });
+
+  test("shows task matches without flooding results with every task in the project", async () => {
+    const now = new Date().toISOString();
+    const task = (id: string, objective: string): Task => ({
+      id,
+      session_id: "session-search",
+      thread_id: `thread-${id}`,
+      status: "ACTIVE",
+      phase: "EXECUTING",
+      active_contract_version: 1,
+      risk_class: "normal",
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      terminal_reason: null,
+      contract: {
+        version: 1,
+        objective,
+        non_goals: [],
+        allowed_scope: { read_paths: [], write_paths: [], external_systems: [] },
+      },
+    });
+    const matching = task("task-needle", "Needle migration");
+    const unrelated = task("task-unrelated", "Unrelated cleanup");
+    const selected = task("task-selected", "Selected context");
+    useTerminusStore.setState({
+      sessions: [{
+        id: "session-search",
+        workspace_id: "workspace-search",
+        title: "Search project",
+        status: "active",
+        active_thread_id: selected.thread_id,
+        created_at: now,
+        updated_at: now,
+      }],
+      tasksBySession: { "session-search": [matching, unrelated, selected] },
+      taskById: { [matching.id]: matching, [unrelated.id]: unrelated, [selected.id]: selected },
+      selectedSessionId: "session-search",
+      selectedTaskId: selected.id,
+      pinnedTaskIds: new Set(),
+    });
+    const user = userEvent.setup();
+    render(<Sidebar compact={false} />);
+
+    await user.click(screen.getByRole("button", { name: "Filter recent tasks" }));
+    await user.type(screen.getByRole("textbox", { name: "Search tasks" }), "needle");
+
+    expect(screen.getByText("Needle migration")).toBeInTheDocument();
+    expect(screen.getByText("Selected context")).toBeInTheDocument();
+    expect(screen.queryByText("Unrelated cleanup")).not.toBeInTheDocument();
+  });
+
+  test("loads the next project page only when requested", async () => {
+    const now = new Date().toISOString();
+    const firstSession = {
+      id: "session-page-1",
+      workspace_id: "workspace-page",
+      title: "First project",
+      status: "active" as const,
+      active_thread_id: "thread-page-1",
+      created_at: now,
+      updated_at: now,
+    };
+    const secondSession = { ...firstSession, id: "session-page-2", title: "Second project" };
+    useTerminusStore.setState({
+      sessions: [firstSession],
+      tasksBySession: {},
+      taskById: {},
+      selectedSessionId: firstSession.id,
+      selectedTaskId: null,
+      sessionsPage: { nextCursor: "cursor-projects", total: 2, loadingMore: false, error: null },
+    });
+    vi.mocked(api.listSessions).mockResolvedValueOnce({
+      sessions: [secondSession],
+      total: 2,
+      next_cursor: null,
+      truncation: { occurred: false, continuation: null },
+    });
+    render(<Sidebar compact={false} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Load more projects" }));
+
+    await waitFor(() => expect(screen.getByText("Second project")).toBeInTheDocument());
+    expect(api.listSessions).toHaveBeenCalledWith({ cursor: "cursor-projects" });
+    expect(useTerminusStore.getState().sessionsPage.nextCursor).toBeNull();
+  });
+
+  test("shows a cold project-list failure instead of an authoritative empty state", async () => {
+    const originalRefreshSessions = useTerminusStore.getState().refreshSessions;
+    const refreshSessions = vi.fn(async () => undefined);
+    useTerminusStore.setState({
+      sessions: [],
+      sessionsFreshness: { status: "error", error: "project catalog unavailable" },
+      loadingSessions: false,
+      healthReady: true,
+      healthStatus: "ready",
+      refreshSessions,
+    });
+    render(<Sidebar compact={false} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Projects could not be loaded.");
+    expect(screen.queryByText("project catalog unavailable")).not.toBeInTheDocument();
+    expect(screen.queryByText("No projects yet.")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Retry projects" }));
+    expect(refreshSessions).toHaveBeenCalledTimes(1);
+    act(() => useTerminusStore.setState({ refreshSessions: originalRefreshSessions }));
+  });
+
+  test("keeps offline recovery reachable without duplicating project errors", async () => {
+    const originalRefreshAll = useTerminusStore.getState().refreshAll;
+    const refreshAll = vi.fn(async () => undefined);
+    useTerminusStore.setState({
+      sessions: [],
+      sessionsFreshness: { status: "error", error: "network error: Failed to fetch" },
+      loadingSessions: false,
+      healthReady: false,
+      healthStatus: "offline",
+      refreshAll,
+    });
+
+    render(<Sidebar compact={false} />);
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Failed to fetch/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry projects" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Retry connection" }));
+    expect(refreshAll).toHaveBeenCalledTimes(1);
+    act(() => useTerminusStore.setState({
+      refreshAll: originalRefreshAll,
+      healthReady: true,
+      healthStatus: "ready",
+    }));
+  });
+
+  test("keeps task continuation reachable while searching loaded rows", async () => {
+    const now = new Date().toISOString();
+    const session = {
+      id: "session-search-continuation",
+      workspace_id: "workspace-search-continuation",
+      title: "Continuation project",
+      status: "active" as const,
+      active_thread_id: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const unrelated: Task = {
+      id: "task-loaded-unrelated",
+      session_id: session.id,
+      thread_id: "thread-loaded-unrelated",
+      status: "ACTIVE",
+      phase: "EXECUTING",
+      active_contract_version: 1,
+      risk_class: "normal",
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      terminal_reason: null,
+      contract: null,
+    };
+    useTerminusStore.setState({
+      sessions: [session],
+      sessionsFreshness: { status: "ready", error: null },
+      tasksBySession: { [session.id]: [unrelated] },
+      taskById: { [unrelated.id]: unrelated },
+      selectedSessionId: session.id,
+      selectedTaskId: null,
+      taskPagesBySession: {
+        [session.id]: { nextCursor: "next-search-page", total: 2, loadingMore: false, error: null },
+      },
+    });
+    render(<Sidebar compact={false} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Filter recent tasks" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Search tasks" }), "needle");
+
+    expect(screen.getByText("No match in loaded tasks. Search the next page below.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `Load more tasks in ${session.title}` })).toBeInTheDocument();
+    expect(screen.queryByText("No matches in loaded projects.")).not.toBeInTheDocument();
+  });
+
+  test("keeps an unrequested project's task catalog reachable during search", async () => {
+    const now = new Date().toISOString();
+    const selectedSession = {
+      id: "session-loaded-search",
+      workspace_id: "workspace-loaded-search",
+      title: "Loaded project",
+      status: "active" as const,
+      active_thread_id: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const coldSession = {
+      ...selectedSession,
+      id: "session-cold-search",
+      workspace_id: "workspace-cold-search",
+      title: "Cold project",
+    };
+    const originalRefreshTasks = useTerminusStore.getState().refreshTasks;
+    const refreshTasks = vi.fn(async () => undefined);
+    useTerminusStore.setState({
+      sessions: [selectedSession, coldSession],
+      sessionsFreshness: { status: "ready", error: null },
+      tasksBySession: { [selectedSession.id]: [] },
+      taskListFreshnessBySession: {
+        [selectedSession.id]: { status: "ready", error: null },
+      },
+      taskPagesBySession: {
+        [selectedSession.id]: { nextCursor: null, total: 0, loadingMore: false, error: null },
+      },
+      selectedSessionId: selectedSession.id,
+      selectedTaskId: null,
+      refreshTasks,
+    });
+    try {
+      render(<Sidebar compact={false} />);
+      await userEvent.click(screen.getByRole("button", { name: "Filter recent tasks" }));
+      await userEvent.type(screen.getByRole("textbox", { name: "Search tasks" }), "needle");
+
+      expect(screen.getByText("Cold project")).toBeInTheDocument();
+      expect(screen.getByText("Load this project's tasks to complete the search.")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Load tasks in Cold project to complete search" }));
+      expect(refreshTasks).toHaveBeenCalledWith(coldSession.id);
+      expect(screen.queryByText("No matches in loaded projects.")).not.toBeInTheDocument();
+    } finally {
+      act(() => useTerminusStore.setState({ refreshTasks: originalRefreshTasks }));
+    }
+  });
+
+  test("appends and de-duplicates an explicit next task page", async () => {
+    const now = new Date().toISOString();
+    const task = (id: string, objective: string): Task => ({
+      id,
+      session_id: "session-task-pages",
+      thread_id: `thread-${id}`,
+      status: "ACTIVE",
+      phase: "EXECUTING",
+      active_contract_version: 1,
+      risk_class: "normal",
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      terminal_reason: null,
+      contract: {
+        version: 1,
+        objective,
+        non_goals: [],
+        allowed_scope: { read_paths: [], write_paths: [], external_systems: [] },
+      },
+    });
+    const first = task("task-page-1", "First task");
+    const second = task("task-page-2", "Second task");
+    useTerminusStore.setState({
+      tasksBySession: { "session-task-pages": [first] },
+      taskById: { [first.id]: first },
+      taskPagesBySession: {
+        "session-task-pages": { nextCursor: "cursor-tasks", total: 2, loadingMore: false, error: null },
+      },
+    });
+    vi.mocked(api.listTasks).mockResolvedValueOnce({
+      tasks: [first, second],
+      total: 2,
+      next_cursor: null,
+      truncation: { occurred: false, continuation: null },
+    });
+
+    await useTerminusStore.getState().loadMoreTasks("session-task-pages");
+
+    expect(api.listTasks).toHaveBeenCalledWith("session-task-pages", { cursor: "cursor-tasks" });
+    expect(useTerminusStore.getState().tasksBySession["session-task-pages"]?.map((candidate) => candidate.id)).toEqual([
+      first.id,
+      second.id,
+    ]);
+  });
+
+  test("a first-page refresh invalidates an in-flight task continuation and removes absent rows", async () => {
+    const now = new Date().toISOString();
+    const task = (id: string): Task => ({
+      id,
+      session_id: "session-race",
+      thread_id: `thread-${id}`,
+      status: "ACTIVE",
+      phase: "EXECUTING",
+      active_contract_version: 1,
+      risk_class: "normal",
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      terminal_reason: null,
+      contract: null,
+    });
+    const retained = task("task-retained");
+    const removed = task("task-removed");
+    const staleContinuation = task("task-stale-continuation");
+    useTerminusStore.setState({
+      tasksBySession: { "session-race": [retained, removed] },
+      taskById: { [retained.id]: retained, [removed.id]: removed },
+      pinnedTaskIds: new Set([removed.id]),
+      draftsByTask: { [removed.id]: "durable draft" },
+      eventsByTask: { [removed.id]: [{ id: "old-event", event: "turn.completed", data: "{}" }] },
+      eventHistoryByTask: {
+        [removed.id]: {
+          reason: "bounded_window",
+          omittedCount: 1,
+          droppedThroughCursor: "old-event",
+          continuationCursor: null,
+          snapshotUrl: `/v1/tasks/${removed.id}`,
+          reconciliation: "ready",
+          error: null,
+        },
+      },
+      approvalsByTask: {
+        [removed.id]: [{ id: "old-approval", action: "Old", risk: "normal", canPersist: false, supportedDecisions: ["deny_once"], authorizationReady: false }],
+      },
+      approvalFreshnessByTask: { [removed.id]: { status: "ready", error: null } },
+      approvalPagesByTask: { [removed.id]: { nextCursor: null, total: 1, loadingMore: false, error: null } },
+      taskFreshnessById: { [removed.id]: { status: "ready", error: null } },
+      selectedTaskId: null,
+      loadingTasksFor: null,
+      taskListFreshnessBySession: { "session-race": { status: "ready", error: null } },
+      taskPagesBySession: {
+        "session-race": { nextCursor: "old-cursor", total: 3, loadingMore: false, error: null },
+      },
+    });
+    let resolveContinuation!: (response: TaskListResponse) => void;
+    const continuation = new Promise<TaskListResponse>((resolve) => {
+      resolveContinuation = resolve;
+    });
+    vi.mocked(api.listTasks)
+      .mockImplementationOnce(async () => continuation)
+      .mockResolvedValueOnce({
+        tasks: [retained],
+        total: 1,
+        next_cursor: null,
+        truncation: { occurred: false, continuation: null },
+      });
+
+    const loadMore = useTerminusStore.getState().loadMoreTasks("session-race");
+    const refresh = useTerminusStore.getState().refreshTasks("session-race");
+    await refresh;
+    resolveContinuation({
+      tasks: [staleContinuation],
+      total: 3,
+      next_cursor: null,
+      truncation: { occurred: false, continuation: null },
+    });
+    await loadMore;
+
+    const state = useTerminusStore.getState();
+    expect(state.tasksBySession["session-race"]?.map((candidate) => candidate.id)).toEqual([retained.id]);
+    expect(state.taskById[removed.id]).toBeUndefined();
+    expect(state.taskById[staleContinuation.id]).toBeUndefined();
+    expect(state.eventsByTask[removed.id]).toBeUndefined();
+    expect(state.eventHistoryByTask[removed.id]).toBeUndefined();
+    expect(state.approvalsByTask[removed.id]).toBeUndefined();
+    expect(state.approvalFreshnessByTask[removed.id]).toBeUndefined();
+    expect(state.approvalPagesByTask[removed.id]).toBeUndefined();
+    expect(state.taskFreshnessById[removed.id]).toBeUndefined();
+    expect(state.draftsByTask[removed.id]).toBe("durable draft");
+    expect(state.pinnedTaskIds.has(removed.id)).toBe(true);
+    expect(state.loadingTasksFor).toBeNull();
+    expect(state.taskListFreshnessBySession["session-race"]).toEqual({ status: "ready", error: null });
+
+    vi.mocked(api.listTasks).mockResolvedValueOnce({
+      tasks: [removed],
+      total: 1,
+      next_cursor: null,
+      truncation: { occurred: false, continuation: null },
+    });
+    await useTerminusStore.getState().refreshTasks("session-race");
+    expect(useTerminusStore.getState().taskById[removed.id]).toEqual(removed);
+    expect(useTerminusStore.getState().eventsByTask[removed.id]).toBeUndefined();
+  });
+
+  test("a partial first-page refresh preserves selected and pinned continuation tasks", async () => {
+    const now = new Date().toISOString();
+    const task = (id: string): Task => ({
+      id,
+      session_id: "session-selected-page",
+      thread_id: `thread-${id}`,
+      status: "ACTIVE",
+      phase: "EXECUTING",
+      active_contract_version: 1,
+      risk_class: "normal",
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      terminal_reason: null,
+      contract: null,
+    });
+    const firstPageTask = task("task-first-page");
+    const selectedContinuationTask = task("task-selected-continuation");
+    const pinnedContinuationTask = task("task-pinned-continuation");
+    const staleContinuationTask = task("task-stale-continuation");
+    useTerminusStore.setState({
+      tasksBySession: {
+        "session-selected-page": [firstPageTask, selectedContinuationTask, pinnedContinuationTask, staleContinuationTask],
+      },
+      taskById: {
+        [firstPageTask.id]: firstPageTask,
+        [selectedContinuationTask.id]: selectedContinuationTask,
+        [pinnedContinuationTask.id]: pinnedContinuationTask,
+        [staleContinuationTask.id]: staleContinuationTask,
+      },
+      pinnedTaskIds: new Set([pinnedContinuationTask.id]),
+      selectedSessionId: "session-selected-page",
+      selectedTaskId: selectedContinuationTask.id,
+      taskPagesBySession: {
+        "session-selected-page": { nextCursor: null, total: 3, loadingMore: false, error: null },
+      },
+    });
+    vi.mocked(api.listTasks).mockResolvedValueOnce({
+      tasks: [firstPageTask],
+      total: 4,
+      next_cursor: "next-task-page",
+      truncation: { occurred: true, continuation: "next-task-page" },
+    });
+
+    await useTerminusStore.getState().refreshTasks("session-selected-page");
+
+    const state = useTerminusStore.getState();
+    expect(state.selectedTaskId).toBe(selectedContinuationTask.id);
+    expect(state.taskById[selectedContinuationTask.id]).toEqual(selectedContinuationTask);
+    expect(state.taskById[pinnedContinuationTask.id]).toEqual(pinnedContinuationTask);
+    expect(state.taskById[staleContinuationTask.id]).toBeUndefined();
+    expect(state.tasksBySession["session-selected-page"]?.map((candidate) => candidate.id)).toEqual([
+      firstPageTask.id,
+      pinnedContinuationTask.id,
+      selectedContinuationTask.id,
+    ]);
+  });
+
+  test("selecting a pinned task also selects its owning project", () => {
+    const original = useTerminusStore.getState();
+    const now = new Date().toISOString();
+    const pinned: Task = {
+      id: "task-cross-project-pin",
+      session_id: "session-pin-owner",
+      thread_id: "thread-cross-project-pin",
+      status: "ACTIVE",
+      phase: "EXECUTING",
+      active_contract_version: 1,
+      risk_class: "normal",
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      terminal_reason: null,
+      contract: null,
+    };
+    const refreshTask = vi.fn(async () => undefined);
+    const refreshApprovals = vi.fn(async () => undefined);
+    const attachStream = vi.fn();
+    useTerminusStore.setState({
+      selectedSessionId: "session-other",
+      selectedTaskId: null,
+      taskById: { [pinned.id]: pinned },
+      tasksBySession: { [pinned.session_id]: [pinned] },
+      refreshTask,
+      refreshApprovals,
+      _attachStream: attachStream,
+    });
+
+    useTerminusStore.getState().selectTask(pinned.id);
+
+    expect(useTerminusStore.getState().selectedSessionId).toBe(pinned.session_id);
+    expect(useTerminusStore.getState().selectedTaskId).toBe(pinned.id);
+    expect(refreshTask).toHaveBeenCalledWith(pinned.id);
+    expect(refreshApprovals).toHaveBeenCalledWith(pinned.id);
+    expect(attachStream).toHaveBeenCalledWith(pinned.id, null);
+    useTerminusStore.setState({
+      refreshTask: original.refreshTask,
+      refreshApprovals: original.refreshApprovals,
+      _attachStream: original._attachStream,
+    });
+  });
+
+  test("hydrates cold pins with bounded concurrency and inserts their task rows", async () => {
+    const now = new Date().toISOString();
+    const sessionId = "session-pin-hydration";
+    const ids = Array.from({ length: 6 }, (_, index) => `cold-pin-${index + 1}`);
+    let active = 0;
+    let maxActive = 0;
+    vi.mocked(api.getTask).mockImplementation(async (id) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      if (id === "cold-pin-3") throw new Error("temporary pin lookup failure");
+      return {
+        id,
+        session_id: sessionId,
+        thread_id: `thread-${id}`,
+        status: "ACTIVE",
+        phase: "EXECUTING",
+        active_contract_version: 1,
+        risk_class: "normal",
+        created_at: now,
+        updated_at: now,
+        completed_at: null,
+        terminal_reason: null,
+        contract: null,
+      };
+    });
+    useTerminusStore.setState({
+      sessions: [{
+        id: sessionId,
+        workspace_id: "workspace-pins",
+        title: "Pinned project",
+        status: "active",
+        active_thread_id: null,
+        created_at: now,
+        updated_at: now,
+      }],
+      tasksBySession: { [sessionId]: [] },
+      taskById: {},
+      pinnedTaskIds: new Set(ids),
+      taskFreshnessById: {},
+    });
+
+    await useTerminusStore.getState().refreshPinnedTasks();
+
+    expect(maxActive).toBeLessThanOrEqual(4);
+    expect(api.getTask).toHaveBeenCalledTimes(6);
+    expect(useTerminusStore.getState().tasksBySession[sessionId]).toHaveLength(5);
+    expect(useTerminusStore.getState().taskFreshnessById["cold-pin-3"]).toMatchObject({ status: "error" });
+    expect(useTerminusStore.getState().pinnedTaskIds.has("cold-pin-3")).toBe(true);
+  });
+
+  test("removes a confirmed missing pin but retains a retryable failed pin", async () => {
+    const originalGetTask = vi.mocked(api.getTask).getMockImplementation();
+    useTerminusStore.setState({
+      pinnedTaskIds: new Set(["pin-gone", "pin-retry"]),
+      taskById: {},
+      tasksBySession: {},
+      taskFreshnessById: {},
+      pinPersistenceError: null,
+    });
+    vi.mocked(api.getTask).mockRejectedValueOnce(new TerminusApiError(404, "task not found", null));
+    await useTerminusStore.getState().refreshTask("pin-gone");
+    expect(useTerminusStore.getState().pinnedTaskIds.has("pin-gone")).toBe(false);
+
+    vi.mocked(api.getTask).mockRejectedValueOnce(new TerminusApiError(503, "control plane unavailable", null));
+    await useTerminusStore.getState().refreshTask("pin-retry");
+    expect(useTerminusStore.getState().pinnedTaskIds.has("pin-retry")).toBe(true);
+    render(<Sidebar compact={false} />);
+    expect(screen.getByText("Pinned task pin-retry — unavailable")).toBeInTheDocument();
+    expect(screen.getByText(/This task is unavailable/)).toBeInTheDocument();
+    expect(screen.queryByText(/control plane unavailable/)).not.toBeInTheDocument();
+    if (originalGetTask) vi.mocked(api.getTask).mockImplementation(originalGetTask);
+  });
+
+  test("upserts a task detail that was absent from its loaded session page", async () => {
+    const now = new Date().toISOString();
+    const task: Task = {
+      id: "task-detail-upsert",
+      session_id: "session-detail-upsert",
+      thread_id: "thread-detail-upsert",
+      status: "ACTIVE",
+      phase: "EXECUTING",
+      active_contract_version: 1,
+      risk_class: "normal",
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      terminal_reason: null,
+      contract: null,
+    };
+    useTerminusStore.setState({
+      sessions: [{
+        id: task.session_id,
+        workspace_id: "workspace-detail-upsert",
+        title: "Detail project",
+        status: "active",
+        active_thread_id: task.thread_id,
+        created_at: now,
+        updated_at: now,
+      }],
+      tasksBySession: { [task.session_id]: [] },
+      taskById: {},
+    });
+    vi.mocked(api.getTask).mockResolvedValueOnce(task);
+
+    await useTerminusStore.getState().refreshTask(task.id);
+
+    expect(useTerminusStore.getState().tasksBySession[task.session_id]).toEqual([task]);
+    expect(useTerminusStore.getState().taskById[task.id]).toEqual(task);
+  });
+
+  test("approval refresh removes a row resolved outside the renderer", async () => {
+    const requestedAt = new Date().toISOString();
+    const summary = (id: string): ApprovalSummary => ({
+      id,
+      task_id: "task-approval-pages",
+      operation_hash: `hash-${id}`,
+      binding: null,
+      display: null,
+      status: "pending",
+      decision: null,
+      supported_decisions: ["deny_once"],
+      risk: "normal",
+      scope: [],
+      use_limit: 1,
+      use_count: 0,
+      expires_at: null,
+      requested_at: requestedAt,
+      resolved_at: null,
+      rationale: null,
+    });
+    useTerminusStore.setState({
+      approvalsByTask: {
+        "task-approval-pages": [
+          { id: "approval-retained", action: "Retained", risk: "normal", canPersist: false, supportedDecisions: ["deny_once"], authorizationReady: false },
+          { id: "approval-resolved", action: "Resolved elsewhere", risk: "normal", canPersist: false, supportedDecisions: ["deny_once"], authorizationReady: false },
+        ],
+      },
+      approvalFreshnessByTask: { "task-approval-pages": { status: "ready", error: null } },
+      approvalPagesByTask: {
+        "task-approval-pages": { nextCursor: "approval-cursor", total: 2, loadingMore: false, error: null },
+      },
+    });
+    vi.mocked(api.listApprovals).mockResolvedValueOnce({
+      approvals: [summary("approval-retained")],
+      total: 1,
+      next_cursor: null,
+      truncation: { occurred: false, continuation: null },
+    });
+
+    await useTerminusStore.getState().refreshApprovals("task-approval-pages");
+
+    expect(useTerminusStore.getState().approvalsByTask["task-approval-pages"]?.map((approval) => approval.id)).toEqual([
+      "approval-retained",
+    ]);
+  });
+
+  test("rejects a cross-task identity from a task-scoped event stream", () => {
+    const now = new Date().toISOString();
+    const task = (id: string): Task => ({
+      id,
+      session_id: "session-stream-scope",
+      thread_id: `thread-${id}`,
+      status: "ACTIVE",
+      phase: "EXECUTING",
+      active_contract_version: 1,
+      risk_class: "normal",
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      terminal_reason: null,
+      contract: null,
+    });
+    const selected = task("task-stream-selected");
+    const other = task("task-stream-other");
+    useTerminusStore.setState({
+      tasksBySession: { "session-stream-scope": [selected, other] },
+      taskById: { [selected.id]: selected, [other.id]: other },
+      selectedTaskId: selected.id,
+    });
+
+    useTerminusStore.getState()._updateTaskFromEvent({
+      id: "poisoned-event",
+      event: "task.completed",
+      data: JSON.stringify({ task_id: other.id, status: "COMPLETED" }),
+    }, selected.id);
+
+    expect(useTerminusStore.getState().taskById[selected.id]?.status).toBe("ACTIVE");
+    expect(useTerminusStore.getState().taskById[other.id]?.status).toBe("ACTIVE");
+  });
+
+  test("reaches virtualized tasks with End, Home, and arrow-key roving focus", async () => {
+    const widthSpy = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(280);
+    const heightSpy = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(432);
+    const now = new Date().toISOString();
+    const tasks = Array.from({ length: 60 }, (_, index): Task => ({
+      id: `virtual-task-${String(index + 1).padStart(2, "0")}`,
+      session_id: "session-virtual",
+      thread_id: `thread-virtual-${index + 1}`,
+      status: "ACTIVE",
+      phase: "EXECUTING",
+      active_contract_version: 1,
+      risk_class: "normal",
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+      terminal_reason: null,
+      contract: {
+        version: 1,
+        objective: `Virtual task ${index + 1}`,
+        non_goals: [],
+        allowed_scope: { read_paths: [], write_paths: [], external_systems: [] },
+      },
+    }));
+    useTerminusStore.setState({
+      sessions: [{
+        id: "session-virtual",
+        workspace_id: "workspace-virtual",
+        title: "Virtual project",
+        status: "active",
+        active_thread_id: tasks[0]?.thread_id ?? null,
+        created_at: now,
+        updated_at: now,
+      }],
+      tasksBySession: { "session-virtual": tasks },
+      taskById: Object.fromEntries(tasks.map((task) => [task.id, task])),
+      selectedSessionId: "session-virtual",
+      selectedTaskId: tasks[0]?.id ?? null,
+      taskPagesBySession: {
+        "session-virtual": { nextCursor: null, total: tasks.length, loadingMore: false, error: null },
+      },
+      taskListFreshnessBySession: {
+        "session-virtual": { status: "ready", error: null },
+      },
+    });
+    try {
+      const user = userEvent.setup();
+      render(<Sidebar compact={false} />);
+      await user.click(screen.getByRole("button", { name: "Filter recent tasks" }));
+      await user.type(screen.getByRole("textbox", { name: "Search tasks" }), "virtual");
+
+      const first = screen.getByRole("button", { name: /Virtual task 1, status working/ });
+      expect(first.closest("[role='listitem']")).toHaveAttribute("aria-posinset", "1");
+      expect(first.closest("[role='listitem']")).toHaveAttribute("aria-setsize", "60");
+      act(() => first.focus());
+      fireEvent.keyDown(first, { key: "End" });
+      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 60, status working/ })).toHaveFocus());
+
+      fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Home" });
+      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 1, status working/ })).toHaveFocus());
+      fireEvent.keyDown(document.activeElement as HTMLElement, { key: "ArrowDown" });
+      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 2, status working/ })).toHaveFocus());
+    } finally {
+      heightSpy.mockRestore();
+      widthSpy.mockRestore();
+    }
   });
 });
 
@@ -936,7 +2213,7 @@ describe("SidebarItem — truncation + tooltip", () => {
   const LONG_TITLE =
     "This is a very long task title that should be truncated because it goes well beyond the available sidebar width";
 
-  test("renders the truncate CSS class on the title span", () => {
+  test("keeps the title to one line, with the full text still reachable", () => {
     render(
       <SidebarItem
         title={LONG_TITLE}
@@ -944,19 +2221,27 @@ describe("SidebarItem — truncation + tooltip", () => {
       />,
     );
     const titleSpan = screen.getByText(LONG_TITLE);
+    // This previously clamped to two lines, on the reasoning that one line cut
+    // titles at ~21 characters and made sibling tasks indistinguishable. The
+    // sidebar has since widened (256px default, ~173px of title column) and the
+    // row gained a status//time line beneath the title, so two clamped lines
+    // plus meta made every row a three-line paragraph and the rail a wall of
+    // text. One line plus meta stays scannable, and the cases where a title is
+    // genuinely ambiguous are covered by the tooltip and the accessible name
+    // asserted below.
     expect(titleSpan).toHaveClass("truncate");
+    expect(titleSpan).not.toHaveClass("line-clamp-2");
   });
 
-  test("exposes the full title via the title attribute on the row", () => {
+  test("exposes the full title through the accessible row name", () => {
     render(
       <SidebarItem
         title={LONG_TITLE}
         selected={false}
       />,
     );
-    // The role="button" row carries the title attribute.
     const row = screen.getByRole("button");
-    expect(row).toHaveAttribute("title", LONG_TITLE);
+    expect(row).toHaveAccessibleName(expect.stringContaining(LONG_TITLE));
   });
 
   test("renders in compact mode (rail icon-only) and still exposes the title", () => {
@@ -968,7 +2253,6 @@ describe("SidebarItem — truncation + tooltip", () => {
       />,
     );
     const button = screen.getByRole("button");
-    expect(button).toHaveAttribute("title", LONG_TITLE);
     expect(button).toHaveAttribute("aria-label", LONG_TITLE);
     expect(button).toHaveAttribute("aria-pressed", "true");
   });
@@ -982,11 +2266,12 @@ describe("SidebarItem — truncation + tooltip", () => {
         onTogglePin={onTogglePin}
       />,
     );
-    // When not pinned and not hovered, the pin button is invisible
-    // (CSS class `invisible`). The aria-label includes the task title
-    // for screen readers ("Pin task <title>").
+    // The action is visually hidden until pointer hover or keyboard focus.
+    // Opacity preserves its focusability; focus-within reveals it before a
+    // keyboard user acts.
     const pinButton = screen.getByLabelText("Pin task Short title");
-    expect(pinButton).toHaveClass("invisible");
+    expect(pinButton).toHaveClass("opacity-0");
+    expect(pinButton).toHaveClass("group-focus-within:opacity-100");
 
     // When pinned, the pin button is visible regardless of hover.
     rerender(
@@ -998,7 +2283,7 @@ describe("SidebarItem — truncation + tooltip", () => {
       />,
     );
     const unpinButton = screen.getByLabelText("Unpin task Short title");
-    expect(unpinButton).not.toHaveClass("invisible");
+    expect(unpinButton).not.toHaveClass("opacity-0");
   });
 });
 
@@ -1030,12 +2315,12 @@ describe("Message — code interactions", () => {
 });
 
 describe("Sidebar — progressive task disclosure", () => {
-  test("shows five tasks initially and all tasks after expansion", () => {
-    expect(sidebarVisibleTaskCount(12, -1, false)).toBe(5);
+  test("shows three tasks initially and all tasks after expansion", () => {
+    expect(sidebarVisibleTaskCount(12, -1, false)).toBe(3);
     expect(sidebarVisibleTaskCount(12, -1, true)).toBe(12);
   });
 
-  test("keeps the selected task visible beyond the initial five", () => {
+  test("keeps the selected task visible beyond the initial three", () => {
     expect(sidebarVisibleTaskCount(12, 8, false)).toBe(9);
   });
 
@@ -1072,29 +2357,23 @@ describe("Settings — runtime model profiles", () => {
     expect(deriveRuntimeModelProfiles([])).toEqual([]);
   });
 
-  test("applies reduced motion and transparency to the live document", () => {
+  test("applies reduced motion to the live document", () => {
     const settings = useSettingsStore.getState();
     settings.set("appearance.reduce-motion", true);
-    settings.set("appearance.reduce-transparency", true);
     expect(document.documentElement.dataset.reduceMotion).toBe("true");
-    expect(document.documentElement.dataset.reduceTransparency).toBe("true");
 
     settings.set("appearance.reduce-motion", false);
-    settings.set("appearance.reduce-transparency", false);
     expect(document.documentElement.dataset.reduceMotion).toBe("false");
-    expect(document.documentElement.dataset.reduceTransparency).toBe("false");
   });
 
   test("normalizes malformed persisted-style select and numeric values", () => {
     const settings = useSettingsStore.getState();
     settings.set("appearance.theme", "Light");
     settings.set("appearance.density", "dense");
-    settings.set("performance.max-events-per-task", 50000);
 
     expect(settings.get("appearance.theme")).toBe("system");
-    expect(settings.get("appearance.density")).toBe("spacious");
-    expect(settings.get("performance.max-events-per-task")).toBe(10000);
+    expect(settings.get("appearance.density")).toBe("compact");
     expect(useThemeStore.getState().theme).toBe("system");
-    expect(useThemeStore.getState().density).toBe("spacious");
+    expect(useThemeStore.getState().density).toBe("compact");
   });
 });

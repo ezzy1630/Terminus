@@ -17,16 +17,24 @@
  * Per SPEC §22: "Respect Reduce Motion."
  */
 import { memo, useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, FilePen, Search, SquareTerminal } from "lucide-react";
 import { cn } from "../lib/cn";
 import { StatusIndicator } from "./StatusIndicator";
-import { format } from "date-fns";
+import { clockTimestamp } from "../lib/time";
 import type { ActivityBlock as ActivityBlockData, ActivityBlockStatus } from "../types";
+import { Button } from "../ui/Button";
 
 interface ActivityBlockProps {
   block: ActivityBlockData;
   /** Default expanded state. */
   defaultExpanded?: boolean;
+}
+
+const MAX_RENDERED_ACTIVITY_DETAIL_CHARS = 16_000;
+
+function renderedDetail(detail: string): string {
+  if (detail.length <= MAX_RENDERED_ACTIVITY_DETAIL_CHARS) return detail;
+  return `[Activity detail rejected: ${detail.length} characters exceeds the ${MAX_RENDERED_ACTIVITY_DETAIL_CHARS}-character presentation limit. Inspect the immutable artifact or continuation reference.]`;
 }
 
 function statusKind(s: ActivityBlockStatus): import("../types").TaskStatusKind {
@@ -36,6 +44,31 @@ function statusKind(s: ActivityBlockStatus): import("../types").TaskStatusKind {
     case "failed": return "failed";
     case "waiting": return "waiting";
     case "interrupted": return "interrupted";
+    case "unknown": return "unknown";
+  }
+}
+
+/**
+ * Icon for the block's dominant tool. Keyed off the authoritative `tool` id on
+ * the first entry, never off display copy, so a re-worded title cannot silently
+ * change what the row claims to be.
+ */
+function ToolIcon({ tool }: { tool: string | undefined }): JSX.Element | null {
+  switch (tool) {
+    case "read":
+    case "search":
+    case "grep":
+      return <Search size={11} className="flex-shrink-0 text-tertiary" aria-hidden />;
+    case "patch":
+    case "edit":
+    case "write":
+      return <FilePen size={11} className="flex-shrink-0 text-tertiary" aria-hidden />;
+    case "exec":
+    case "bash":
+    case "shell":
+      return <SquareTerminal size={11} className="flex-shrink-0 text-tertiary" aria-hidden />;
+    default:
+      return null;
   }
 }
 
@@ -46,19 +79,17 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
   return (
     <div
       className={cn(
-        "activity-block selectable my-1 overflow-hidden rounded-md border border-transparent",
-        expanded && "is-expanded border-subtle bg-elevated",
+        "activity-block selectable my-0.5 overflow-hidden border-b border-subtle",
+        expanded && "is-expanded",
       )}
-      style={{ background: expanded ? "var(--bg-elevated)" : "transparent" }}
     >
       {/* Collapsed header — communicates what + result. */}
-      <button
+      <Button
         type="button"
         onClick={() => setExpanded((e) => !e)}
         aria-expanded={expanded}
-        aria-label={`${block.title}${block.metric ? `, ${block.metric}` : ""}`}
-        className="activity-header flex w-full items-center gap-2 px-2.5 text-left hover:bg-hover"
-        style={{ minHeight: 38 }}
+        aria-label={`${block.title}, status ${block.status}${block.metric ? `, ${block.metric}` : ""}`}
+        className="activity-header flex min-h-7 w-full items-center justify-start gap-2 px-1.5 text-left hover:bg-hover"
       >
         <ChevronRight
           size={12}
@@ -67,40 +98,40 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
         <span className="activity-status flex w-4 flex-shrink-0 items-center justify-center">
           <StatusIndicator status={kind} size={11} />
         </span>
-        <span
-          className="min-w-0 flex-1 truncate text-secondary"
-          style={{ fontSize: "var(--font-size-sm)", fontWeight: 500 }}
-        >
-          {block.title}
-        </span>
-        {block.metric ? (
-          <span
-            className="flex-shrink-0 font-mono text-secondary"
-            style={{ fontSize: "var(--font-size-xs)" }}
-          >
-            {block.metric}
+        {/* Title and metric read as one phrase. The metric used to be pinned to
+            the far edge of the column, hundreds of pixels from the thing it
+            measured. */}
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <ToolIcon tool={block.entries[0]?.tool} />
+          <span className="ui-label min-w-0 truncate text-secondary">
+            {block.title}
           </span>
-        ) : null}
-      </button>
+          {block.metric ? (
+            <span className="flex-shrink-0 font-mono text-tertiary text-xs">
+              {block.metric}
+            </span>
+          ) : null}
+        </span>
+      </Button>
 
       {/* Expanded details. */}
       {expanded && block.entries.length > 0 ? (
-        <div className="activity-detail border-t border-subtle px-3 py-2.5">
+        <div className="activity-detail border-t border-subtle px-2 pb-2 pt-1.5">
           <ul className="flex flex-col gap-1.5">
             {block.entries.map((entry, i) => (
               <li
                 key={`entry-${i}`}
-                className="flex flex-col gap-0.5 font-mono text-secondary"
-                style={{ fontSize: "var(--font-size-xs)" }}
+                className="ui-code flex flex-col gap-0.5 text-secondary"
+
               >
                 <div className="flex items-center gap-2">
                   <span
                     className="text-tertiary"
-                    title={entry.at}
+                    data-tooltip={entry.at}
                   >
-                    {format(new Date(entry.at), "HH:mm:ss")}
+                    {clockTimestamp(entry.at)}
                   </span>
-                  <span className="rounded-sm bg-hover px-1.5 py-0.5 text-tertiary">
+                  <span className="text-tertiary">
                     {entry.tool}
                   </span>
                   <span className="min-w-0 flex-1 truncate text-primary">
@@ -109,16 +140,9 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
                 </div>
                 {entry.detail ? (
                   <pre
-                    className="selectable mt-1 overflow-x-auto rounded-sm border border-subtle px-2 py-1.5 text-secondary"
-                    style={{
-                      background: "var(--bg-terminal)",
-                      fontSize: "var(--font-size-xs)",
-                      lineHeight: 1.5,
-                      maxHeight: 220,
-                      overflowY: "auto",
-                    }}
+                    className="selectable mt-1 max-h-[220px] overflow-auto border-l border-subtle bg-terminal px-2 py-1.5 text-secondary text-xs leading-[1.5]"
                   >
-                    {entry.detail}
+                    {renderedDetail(entry.detail)}
                   </pre>
                 ) : null}
               </li>

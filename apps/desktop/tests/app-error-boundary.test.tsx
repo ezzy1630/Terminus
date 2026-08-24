@@ -15,9 +15,10 @@ describe("AppErrorBoundary", () => {
       </AppErrorBoundary>,
     );
 
-    expect(screen.getByRole("heading", { name: "Terminus encountered an application error" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "The interface stopped unexpectedly" })).toBeInTheDocument();
     expect(screen.getByText("render fixture failed")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Reload interface" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reload" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy error" })).toBeInTheDocument();
     consoleError.mockRestore();
   });
 });

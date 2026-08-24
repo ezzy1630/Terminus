@@ -6,14 +6,12 @@
  * Per SPEC §5: native macOS traffic lights, draggable title bar.
  */
 
+@import "./theme.css";
 @import "tailwindcss";
-/* xterm.js core CSS (SPEC §15 — real PTY integration). Imported here
-   so the rules are available app-wide and apply to whichever drawer
-   tab is mounted. */
-@import "@xterm/xterm/css/xterm.css";
 
 /* ────────────────────────── CSS Reset ─────────────────────────────────── */
 
+@layer base {
 * {
   box-sizing: border-box;
   margin: 0;
@@ -27,9 +25,9 @@ html, body, #root {
 }
 
 body {
-  font-family: var(--font-family, -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif);
-  font-size: var(--font-size-base, 13px);
-  line-height: var(--line-height-normal, 1.5);
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
   color: var(--text-primary);
   background: var(--bg-canvas);
   -webkit-font-smoothing: antialiased;
@@ -43,6 +41,28 @@ textarea {
   font: inherit;
 }
 
+button {
+  cursor: default;
+}
+
+.ui-button:not(:disabled):active {
+  transform: translateY(.5px) scale(.99);
+}
+
+.ui-button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ui-input {
+  transition: border-color var(--duration-fast) var(--easing-default), box-shadow var(--duration-fast) var(--easing-default);
+}
+
+.ui-input:focus-visible {
+  border-color: var(--focus-border);
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 input::placeholder,
 textarea::placeholder,
 .placeholder\:text-tertiary::placeholder {
@@ -51,7 +71,7 @@ textarea::placeholder,
 }
 
 /* Allow text selection in conversation and code */
-.selectable, .selectable * {
+.selectable, .selectable *, code, pre {
   user-select: text;
 }
 
@@ -59,8 +79,8 @@ textarea::placeholder,
 /* Minimal macOS-style scrollbars */
 
 ::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -68,29 +88,61 @@ textarea::placeholder,
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-default);
-  border-radius: 4px;
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+*:hover::-webkit-scrollbar-thumb,
+*:focus-within::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--text-tertiary) 54%, transparent);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--border-strong);
+  background-color: color-mix(in srgb, var(--text-secondary) 72%, transparent);
+}
+
+.scrollable {
+  scrollbar-gutter: stable;
+}
+
+/* The feed reserves a stable scrollbar gutter. Reserving it on one edge only
+   pushed the centred reading column 4px left of the docked composer, so the
+   messages and the input that produces them sat on different axes. */
+.conversation-scroll {
+  scrollbar-gutter: stable both-edges;
 }
 
 ::selection {
   color: var(--text-primary);
-  background: color-mix(in srgb, var(--color-primary) 30%, transparent);
+  background: color-mix(in srgb, var(--action-primary) 30%, transparent);
 }
 
 /* ────────────────────────── Focus ─────────────────────────────────────── */
 
-:focus-visible {
+:where(
+  a[href],
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  [tabindex]:not([tabindex="-1"]),
+  [role="button"],
+  [role="menuitem"],
+  [role="option"],
+  [role="separator"],
+  [role="tab"]
+):focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
+}
 }
 
 /* ────────────────────────── Draggable title bar ───────────────────────── */
 
+@layer components {
 .titlebar-drag {
   -webkit-app-region: drag;
 }
@@ -99,13 +151,42 @@ textarea::placeholder,
   -webkit-app-region: no-drag;
 }
 
+/* No `isolation: isolate` and no negative z-index here. Both create a stacking
+   context around the drag region, which is a known way to break
+   `-webkit-app-region: no-drag` hit testing in Electron: the child control
+   stays visible but the drag layer keeps swallowing its mouse events. The
+   sidebar tint is painted as a normal z-index:0 layer instead, with the
+   interactive regions stacked above it. */
 .titlebar-shell {
-  background: linear-gradient(
-    to right,
-    var(--bg-sidebar) 0 var(--sidebar-width),
-    var(--bg-canvas) var(--sidebar-width) 100%
-  );
+  position: relative;
+  background: var(--bg-canvas);
   box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--border-subtle) 45%, transparent);
+}
+
+.titlebar-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 0;
+  width: var(--titlebar-sidebar-width, 0px);
+  border-right: 1px solid var(--sidebar-separator);
+  background: var(--bg-sidebar);
+  pointer-events: none;
+}
+
+/* Interactive title-bar controls sit above the drag layer. */
+.titlebar-actions {
+  position: relative;
+  z-index: 1;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-center {
+  position: absolute;
+  z-index: 1;
+  inset-inline: calc(var(--titlebar-sidebar-width, 0px) + 16px) 156px;
+  height: 100%;
+  pointer-events: none;
 }
 
 /* ────────────────────────── Animations ───────────────────────────────── */
@@ -113,6 +194,29 @@ textarea::placeholder,
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+@keyframes fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes dialog-in {
+  from { opacity: 0; transform: translate(-50%, calc(-50% + 8px)) scale(.99); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+@keyframes dialog-out {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to { opacity: 0; transform: translate(-50%, calc(-50% + 4px)) scale(.99); }
+}
+
+.dialog-panel[data-state="open"] {
+  animation: dialog-in var(--duration-normal) var(--easing-emphasized);
+}
+
+.dialog-panel[data-state="closed"] {
+  animation: dialog-out var(--duration-fast) var(--easing-default);
 }
 
 @keyframes slide-up {
@@ -125,137 +229,89 @@ textarea::placeholder,
   to { opacity: 1; transform: translateY(0); }
 }
 
-.animate-fade-in {
-  animation: fade-in var(--duration-normal, 250ms) var(--easing-default, cubic-bezier(0.25,0.1,0.25,1));
+@keyframes surface-in {
+  from { opacity: 0; transform: translateY(-3px) scale(.995); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-.animate-slide-up {
-  animation: slide-up var(--duration-normal, 250ms) var(--easing-default, cubic-bezier(0.25,0.1,0.25,1));
+@keyframes surface-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(-2px) scale(.995); }
 }
 
-.animate-slide-down {
-  animation: slide-down var(--duration-normal, 250ms) var(--easing-default, cubic-bezier(0.25,0.1,0.25,1));
+.ui-popover {
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin, var(--radix-select-content-transform-origin, center));
+  background: var(--bg-popover);
 }
 
-.start-mark {
-  color: var(--text-secondary);
+.ui-popover[data-state="open"],
+.ui-popover[data-state="delayed-open"] {
+  animation: surface-in var(--duration-fast) var(--easing-emphasized);
 }
 
-.start-mark-glyph {
-  background: var(--bg-card);
-  border: 1px solid var(--border-default);
-  box-shadow: inset 0 1px 0 color-mix(in srgb, white 5%, transparent), var(--shadow-sm);
+.ui-popover[data-state="closed"] {
+  animation: surface-out 90ms var(--easing-default);
 }
 
-.new-task-screen {
-  padding: clamp(28px, 4vh, 56px) clamp(28px, 5vw, 72px) 20px;
-}
-
-.start-surface-shell { container-type: inline-size; }
-
-.new-task-hero {
-  min-height: 0;
-  padding: clamp(34px, 7vh, 84px) 0 clamp(30px, 5vh, 58px);
-}
-
-.starter-grid {
-  width: min(100%, 840px);
-  margin-top: clamp(30px, 4.5vh, 44px);
-  gap: 12px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.new-task-heading {
-  font-size: 28px;
-}
-
-/* ────────────────────────── Starter Cards ────────────────────────────── */
-/* Codex-style action cards on the new task screen. More elevated feel. */
-
-.starter-card {
-  position: relative;
-  overflow: hidden;
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
-  box-shadow: var(--shadow-card);
+.ui-menu-item,
+.ui-select-trigger,
+.ui-select-item,
+.ui-tab {
   transition:
-    transform var(--duration-fast) var(--easing-default),
-    border-color var(--duration-fast) var(--easing-default),
+    color var(--duration-fast) var(--easing-default),
     background var(--duration-fast) var(--easing-default),
-    box-shadow var(--duration-fast) var(--easing-default);
-  min-height: 116px;
-  padding: 18px;
+    border-color var(--duration-fast) var(--easing-default),
+    transform 90ms var(--easing-default);
 }
 
-.starter-card-title {
-  font-size: 14px;
+.ui-menu-item:active,
+.ui-select-item:active,
+.ui-tab:active {
+  transform: scale(.99);
 }
 
-.starter-card::after {
-  position: absolute;
-  inset: 0;
-  content: "";
-  pointer-events: none;
-  border-radius: inherit;
-  box-shadow: inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
-  opacity: 0;
-  transition: opacity var(--duration-fast) var(--easing-default);
+.surface-enter {
+  animation: slide-up var(--duration-normal) var(--easing-emphasized);
 }
 
-.starter-card:hover {
-  transform: translateY(-2px);
-  border-color: var(--border-default);
-  box-shadow: var(--shadow-card-hover);
+@keyframes panel-in {
+  from { opacity: 0; transform: translateX(6px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 
-.starter-card:hover::after,
-.starter-card:focus-visible::after { opacity: 1; }
-
-.starter-card:active { transform: translateY(0) scale(0.992); }
-.starter-icon-explore { color: var(--color-info); }
-.starter-icon-build { color: var(--text-accent); }
-.starter-icon-review { color: var(--color-success); }
-.starter-icon-fix { color: var(--color-warning); }
+.panel-enter {
+  animation: panel-in var(--duration-normal) var(--easing-emphasized);
+}
 
 /* ────────────────────────── Composer ─────────────────────────────────── */
 
-.composer-dock {
-  max-width: 880px;
+.content-column {
+  width: 100%;
+  max-width: var(--content-width);
   margin-inline: auto;
 }
 
-.project-chooser {
-  height: 46px;
-  width: calc(100% - 28px);
-  margin-inline: 14px;
-  background: color-mix(in srgb, var(--bg-card) 92%, var(--bg-canvas));
-  border: 1px solid var(--border-subtle);
-  border-bottom: 0;
-  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
-  transition: background var(--duration-fast) var(--easing-default),
-              color var(--duration-fast) var(--easing-default);
+.start-column {
+  width: 100%;
+  max-width: var(--content-width);
+  margin-inline: auto;
 }
 
-.project-chooser:hover {
-  background: var(--bg-card);
-  color: var(--text-primary);
+/* The feed is top-anchored inside a flex-1 box with the composer docked
+   below it, so every conversation shorter than the viewport collected its
+   slack as one dead band through the middle of the primary surface. Pushing
+   the column to the bottom puts the newest turn against the composer. Once
+   content exceeds the viewport this resolves identically to block layout,
+   so the virtualizer's scroll math is untouched. */
+.feed-column {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  justify-content: flex-end;
 }
 
-.start-composer { margin-top: -1px; position: relative; }
-.start-composer > div { max-width: none !important; }
-.start-composer .composer-surface {
-  border-color: var(--border-default);
-  border-radius: 0 0 var(--radius-xl) var(--radius-xl);
-}
-
-.start-composer .composer-surface {
-  box-shadow: 0 6px 12px rgba(0,0,0,.30), inset 0 1px 0 rgba(255,255,255,.035);
-}
-
-.start-composer textarea {
-  min-height: 76px;
-  padding: 16px 18px 8px;
-  letter-spacing: -0.01em;
+.feed-column > * {
+  flex-shrink: 0;
 }
 
 /* The outer surface owns focus treatment. The textarea itself should stay
@@ -265,15 +321,38 @@ textarea::placeholder,
   box-shadow: none;
 }
 
-.start-composer .composer-controls {
-  padding: 4px 14px 12px;
-}
-
+/* The composer is the base of the reading column, so it carries the only
+   real elevation on the primary surface. */
 .composer-surface {
+  box-shadow:
+    var(--elevation-md),
+    inset 0 1px 0 color-mix(in srgb, var(--border-strong) 45%, transparent);
   transition:
     border-color var(--duration-fast) var(--easing-default),
     box-shadow var(--duration-normal) var(--easing-default),
     transform var(--duration-fast) var(--easing-default);
+}
+
+.composer-surface:focus-within {
+  border-color: var(--focus-border);
+  box-shadow: var(--focus-ring), var(--elevation-md);
+}
+
+/* Feed content scrolls under the composer instead of colliding with it. */
+.composer-dock {
+  position: relative;
+  background: var(--bg-canvas);
+}
+
+.composer-dock::before {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  left: 0;
+  height: 24px;
+  pointer-events: none;
+  background: linear-gradient(to top, var(--bg-canvas), transparent);
 }
 
 .composer-control,
@@ -291,16 +370,38 @@ textarea::placeholder,
     transform 100ms var(--easing-default);
 }
 
-.icon-button:not(:disabled):active { transform: scale(0.94); }
+.icon-button:not(:disabled):active { transform: scale(0.97); }
 
 .composer-control:hover {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-default) 72%, transparent);
 }
 
 .composer-control:active,
-.send-control:active { transform: scale(0.96); }
+.send-control:active { transform: scale(0.98); }
 
 /* ────────────────────────── Sidebar ──────────────────────────────────── */
+
+/* The one action the sidebar exists to trigger. It previously shared the nav
+   rows' weight and sat only 4 sRGB steps off the rail, so nothing in the
+   column read as primary. */
+.sidebar-primary-action {
+  background: var(--bg-elevated);
+  box-shadow:
+    var(--elevation-sm),
+    inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
+  transition:
+    background var(--duration-fast) var(--easing-default),
+    border-color var(--duration-fast) var(--easing-default),
+    box-shadow var(--duration-fast) var(--easing-default),
+    transform 100ms var(--easing-default);
+}
+
+.sidebar-primary-action:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.sidebar-primary-action:active { transform: scale(0.99); }
 
 .sidebar-nav-row {
   transition:
@@ -313,16 +414,17 @@ textarea::placeholder,
 
 /* Navigation items — Codex-style consistent row treatment */
 .sidebar-nav-item {
-  display: flex;
-  align-items: center;
-  gap: 11px;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  gap: 8px;
   width: 100%;
-  height: var(--nav-row-height, 32px);
-  padding: 0 10px;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-size-sm);
+  height: var(--nav-row-height, 30px);
+  padding: 0 8px;
+  border-radius: var(--radius-md, 6px);
+  font-size: var(--font-size-xs, 12px);
   color: var(--text-secondary);
-  text-align: left;
+  text-align: left !important;
   border: none;
   background: transparent;
   cursor: pointer;
@@ -346,6 +448,7 @@ textarea::placeholder,
 .sidebar-nav-item.is-active {
   background: var(--bg-selected);
   color: var(--text-primary);
+  font-weight: 500;
 }
 
 .sidebar-nav-item:focus-visible,
@@ -356,17 +459,141 @@ textarea::placeholder,
   z-index: 1;
 }
 
+/* Docked chrome below the scrolling task tree. The hairline plus a short
+   fade tells the eye the list continues under it, instead of letting rows
+   clip dead against a border. */
+.sidebar-dock {
+  position: relative;
+  flex-shrink: 0;
+  border-top: 1px solid var(--sidebar-separator);
+  background: var(--bg-sidebar);
+}
+
+.sidebar-dock::before {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  left: 0;
+  height: 20px;
+  pointer-events: none;
+  background: linear-gradient(to top, var(--bg-sidebar), transparent);
+}
+
 /* Section headers in sidebar */
 .sidebar-section-header {
   padding: 0 8px;
   margin-top: 4px;
   margin-bottom: 2px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 500;
   color: var(--text-tertiary);
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
   user-select: none;
+}
+
+/* One semantic type hierarchy for application chrome. Components may still
+   use monospace for code, paths, hashes, and shortcuts, never for prose. */
+.ui-page-title {
+  font-size: var(--font-size-title);
+  line-height: var(--line-height-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Screen headings. Distinct from .ui-page-title, which labels chrome. */
+.ui-display-title {
+  font-size: var(--font-size-display);
+  line-height: var(--line-height-display);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+}
+
+.ui-hero-title {
+  font-size: var(--font-size-display-large);
+  line-height: var(--line-height-display-large);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+}
+
+.ui-section-title {
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-sm);
+  font-weight: 600;
+}
+
+.ui-body {
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+  font-weight: 400;
+}
+
+/* Conversation prose only. Chrome stays on .ui-body at 13px; agent and user
+   turns are the one place in the app that is read rather than scanned. */
+.ui-prose {
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+  font-weight: 400;
+}
+
+.ui-label {
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-sm);
+  font-weight: 500;
+}
+
+.ui-meta {
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-xs);
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+/* Section labels sat at the same size, weight, and colour as the metadata
+   beside them, so nothing separated "a group starts here" from "this row has
+   a count". Tracking and weight do that without adding a rule or a size. */
+.ui-section-label {
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.ui-code {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-xs);
+}
+
+/* Every working surface that owns a toolbar draws the same header. They had
+   drifted to three heights (40 / 44 / 48px), two paddings, and two border
+   tokens, so moving between Kanban, Agents, and Review shifted the content
+   start line each time. */
+.ui-view-header {
+  display: flex;
+  height: 44px;
+  flex: none;
+  align-items: center;
+  gap: var(--space-3);
+  padding-inline: var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-canvas);
+}
+
+.ui-panel-header {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  padding: 8px 12px;
+}
+
+.ui-panel-body {
+  padding: 12px;
+}
+
+.ui-list-row {
+  min-height: var(--row-height);
 }
 
 /* Task rows — refined for Codex parity */
@@ -384,15 +611,15 @@ textarea::placeholder,
   transition: background var(--duration-fast) var(--easing-default), transform var(--duration-fast) var(--easing-default);
   transform: scaleY(.45);
 }
-.sidebar-task-row[aria-pressed="true"]::before { background: var(--text-secondary); transform: scaleY(1); }
+.sidebar-task-row[data-selected="true"]::before { background: var(--accent); transform: scaleY(1); }
+.sidebar-task-row[data-selected="true"] { background: var(--accent-wash); }
 .sidebar-task-row:active { transform: scale(.992); }
 .sidebar-show-more { transition: color var(--duration-fast) var(--easing-default), background var(--duration-fast) var(--easing-default); }
 
 /* ────────────────────────── Inspector ────────────────────────────────── */
 
 .inspector-card {
-  backdrop-filter: blur(18px);
-  background: color-mix(in srgb, var(--bg-inspector) 94%, transparent);
+  background: var(--bg-inspector);
 }
 
 .inspector-section { transition: background var(--duration-fast) var(--easing-default); }
@@ -405,15 +632,18 @@ textarea::placeholder,
   background: color-mix(in srgb, var(--color-warning) 4%, var(--bg-elevated));
 }
 
-.command-palette-shell {
-  background: color-mix(in srgb, var(--bg-elevated) 96%, var(--text-accent));
-  backdrop-filter: blur(20px);
+.error-state.conversation-terminal-state {
+  border: 0;
+  background: transparent;
+  padding: 8px 0 !important;
 }
 
-/* Settings is a full workspace, not a dense preference table. */
-.settings-titlebar {
-  background: linear-gradient(to right, var(--bg-sidebar) 0 260px, var(--bg-canvas) 260px 100%);
+.command-palette-shell {
+  background: color-mix(in srgb, var(--bg-elevated) 96%, var(--text-accent));
 }
+
+/* Settings follows a quiet native split-view: one sidebar, one flat list. */
+.settings-titlebar { background: var(--bg-canvas); }
 
 .settings-search {
   border: 1px solid color-mix(in srgb, var(--border-default) 72%, transparent);
@@ -421,7 +651,7 @@ textarea::placeholder,
 }
 
 .settings-category {
-  min-height: 36px;
+  min-height: 28px;
   margin: 1px 7px;
   width: calc(100% - 14px);
   border-radius: var(--radius-sm);
@@ -430,23 +660,34 @@ textarea::placeholder,
 
 .settings-category:active { transform: scale(.985); }
 
-.settings-panel {
-  box-shadow: var(--shadow-sm), inset 0 1px 0 color-mix(in srgb, white 2.5%, transparent);
-}
-
 .settings-row {
-  min-height: 72px;
+  min-height: 40px;
   transition: background var(--duration-fast) var(--easing-default);
-}
-
-.settings-row + .settings-row {
-  border-top: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
 }
 
 .settings-row.is-unavailable { opacity: .58; }
 
 /* ────────────────────────── Activity Blocks ──────────────────────────── */
 
+/* Consecutive blocks share one continuous rail, so a run of activity reads as
+   a single timeline rather than three unrelated stripes. */
+/* Consecutive blocks are siblings with a gap between them, so a per-block
+   pseudo-element drew three disconnected stripes rather than the single rail
+   the grouping implies. Bleeding the rail through the gap joins them, and the
+   first/last block round it off so a lone block still reads as one mark. */
+.activity-block { position: relative; padding-left: 12px; }
+.activity-block::before {
+  content: "";
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  left: 3px;
+  width: 1.5px;
+  border-radius: 999px;
+  background: var(--border-default);
+}
+.activity-block:first-of-type::before { top: 6px; }
+.activity-block:last-of-type::before { bottom: 6px; }
 .activity-block { transition: background var(--duration-fast) var(--easing-default), border-color var(--duration-fast) var(--easing-default), box-shadow var(--duration-fast) var(--easing-default); }
 .activity-block:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-default) 65%, transparent); }
 .activity-header svg { transition: transform var(--duration-fast) var(--easing-default), color var(--duration-fast) var(--easing-default); }
@@ -454,24 +695,36 @@ textarea::placeholder,
 
 /* ────────────────────────── Code Surfaces ────────────────────────────── */
 
-.code-surface { background: var(--bg-terminal); }
+.code-surface { background: var(--bg-terminal); color: var(--text-code); }
+.code-surface .text-primary,
+pre.text-primary { color: var(--text-code); }
 .code-toolbar { background: color-mix(in srgb, var(--bg-elevated) 74%, var(--bg-terminal)); }
 .code-copy { opacity: .72; transition: opacity var(--duration-fast) var(--easing-default), background var(--duration-fast) var(--easing-default); }
 .code-surface:hover .code-copy,
 .code-copy:focus-visible { opacity: 1; }
 
-@media (max-height: 760px) {
-  .new-task-screen { padding-top: 20px; }
-  .new-task-hero { padding-block: 24px 28px; }
-  .starter-grid { margin-top: 28px; }
-  .starter-card { min-height: 108px; padding: 16px; }
-  .start-composer textarea { min-height: 68px; }
-}
+/* ────────────────────────── Progress marks ───────────────────────────── */
 
-/* ────────────────────────── Spinner ──────────────────────────────────── */
-
+/* These four keyframes back marks that were already styled to animate but
+   never did: the spinner rendered as a frozen broken ring, and .skeleton
+   carried overflow:hidden for a sweep that had no source. */
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+@keyframes shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .45; transform: scale(.82); }
+}
+
+@keyframes caret-blink {
+  0%, 45% { opacity: 1; }
+  55%, 100% { opacity: 0; }
 }
 
 .spinner {
@@ -480,17 +733,45 @@ textarea::placeholder,
   border: 1.5px solid var(--border-default);
   border-top-color: var(--color-agent-working);
   border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+  animation: spin 720ms linear infinite;
 }
 
-/* Small spinner for sidebar status indicators */
+/* Compact progress mark for sidebar status indicators. */
 .spinner-sm {
   width: 10px;
   height: 10px;
   border: 1.5px solid color-mix(in srgb, var(--border-default) 50%, transparent);
   border-top-color: var(--color-agent-working);
   border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+  animation: spin 720ms linear infinite;
+}
+
+.streaming-caret {
+  width: 2px;
+  height: 1em;
+  background: var(--text-primary);
+  border-radius: 1px;
+  animation: caret-blink 1s steps(1, end) infinite;
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--text-tertiary) 16%, var(--bg-elevated));
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--text-tertiary) 14%, transparent),
+    transparent
+  );
+  animation: shimmer 1.4s var(--easing-default) infinite;
 }
 
 /* ────────────────────────── Status Dots ──────────────────────────────── */
@@ -503,7 +784,10 @@ textarea::placeholder,
   flex-shrink: 0;
 }
 
-.status-dot-working { background: var(--color-agent-working); }
+.status-dot-working {
+  background: var(--color-agent-working);
+  animation: pulse-dot 1.6s var(--easing-default) infinite;
+}
 .status-dot-queued { background: var(--color-agent-queued); }
 .status-dot-waiting { background: var(--color-agent-waiting); }
 .status-dot-approval { background: var(--color-approval-risk); }
@@ -511,14 +795,8 @@ textarea::placeholder,
 .status-dot-done { background: var(--color-success); }
 .status-dot-idle { background: var(--border-default); }
 
-/* Pulsing animation for active status */
-@keyframes status-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
 .status-dot-active {
-  animation: status-pulse 2s ease-in-out infinite;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent);
 }
 
 /* ────────────────────────── Reduced motion ───────────────────────────── */
@@ -547,76 +825,57 @@ html[data-reduce-transparency="true"] .command-palette-shell {
   background: var(--bg-inspector) !important;
 }
 
-/* ────────────────────────── Utility classes ──────────────────────────── */
-
-.font-mono {
-  font-family: var(--font-family-mono, "SF Mono", ui-monospace, monospace);
+/* Mission Board responds to the space left after the docked sidebar and task
+   quick view, not the full Electron window width. */
+.mission-board-scroll {
+  container-type: inline-size;
 }
 
-.text-xs { font-size: var(--font-size-xs, 11px); }
-.text-sm { font-size: var(--font-size-sm, 12px); }
-.text-base { font-size: var(--font-size-base, 13px); }
-.text-md { font-size: var(--font-size-md, 14px); }
-.text-lg { font-size: var(--font-size-lg, 16px); }
-.text-xl { font-size: var(--font-size-xl, 18px); }
-.text-2xl { font-size: var(--font-size-2xl, 24px); }
-
-.text-primary { color: var(--text-primary); }
-.text-secondary { color: var(--text-secondary); }
-.text-tertiary { color: var(--text-tertiary); }
-.text-accent { color: var(--text-accent); }
-.text-success { color: var(--color-success); }
-.text-error { color: var(--color-error); }
-.text-warning { color: var(--color-warning); }
-.text-info { color: var(--color-info); }
-.text-addition { color: var(--color-addition); }
-.text-deletion { color: var(--color-deletion); }
-
-.bg-canvas { background: var(--bg-canvas); }
-.bg-elevated { background: var(--bg-elevated); }
-.bg-card { background: var(--bg-card); }
-.bg-sidebar { background: var(--bg-sidebar); }
-.bg-inspector { background: var(--bg-inspector); }
-.bg-hover:hover { background: var(--bg-hover); }
-.bg-selected { background: var(--bg-selected); }
-
-.border-subtle { border-color: var(--border-subtle); }
-.border-default { border-color: var(--border-default); }
-.border-strong { border-color: var(--border-strong); }
-
-.shadow-sm { box-shadow: var(--shadow-sm); }
-.shadow-md { box-shadow: var(--shadow-md); }
-.shadow-lg { box-shadow: var(--shadow-lg); }
-
-@media (max-width: 700px) {
-  .starter-card { min-height: 108px; padding: 14px; }
-  .project-chooser { padding-inline: 16px; }
-  .new-task-heading { font-size: 24px; }
+.mission-board-list-row {
+  grid-template-columns: minmax(220px, 1fr) 140px 140px 112px;
 }
 
-@container (max-width: 680px) {
-  .starter-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+@container (max-width: 720px) {
+  .mission-board-list-row {
+    grid-template-columns: minmax(180px, 1fr) 132px;
+  }
+
+  .mission-board-list-secondary {
+    display: none;
   }
 }
 
-@container (max-width: 480px) {
-  .starter-grid { grid-template-columns: 1fr; }
+@container (max-width: 420px) {
+  .mission-board-list-row {
+    grid-template-columns: minmax(100px, 1fr) 112px;
+  }
+}
 }
 
-.rounded-sm { border-radius: var(--radius-sm); }
-.rounded-md { border-radius: var(--radius-md); }
-.rounded-lg { border-radius: var(--radius-lg); }
-
-.truncate {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* Semantic utilities that intentionally differ from Tailwind's color names. */
+@utility text-primary { color: var(--text-primary); }
+@utility text-secondary { color: var(--text-secondary); }
+@utility text-tertiary { color: var(--text-tertiary); }
+@utility text-accent { color: var(--text-accent); }
+@utility bg-subtle { background-color: var(--bg-subtle); }
+@utility bg-default { background-color: var(--bg-elevated); }
+@utility bg-neutral-status { background-color: var(--border-strong); }
+@utility bg-strong { background-color: var(--border-strong); }
+@utility bg-primary { background-color: var(--action-primary); }
+@utility border-subtle { border-color: var(--border-subtle); }
+@utility border-default { border-color: var(--border-default); }
+@utility border-strong { border-color: var(--border-strong); }
+@utility border-primary { border-color: var(--action-primary); }
+@utility animate-fade-in { animation: fade-in var(--duration-normal) var(--easing-default); }
+@utility animate-fade-out { animation: fade-out var(--duration-fast) var(--easing-default); }
+@utility animate-slide-up { animation: slide-up var(--duration-normal) var(--easing-default); }
+@utility animate-slide-down { animation: slide-down var(--duration-normal) var(--easing-default); }
+@utility z-popover { z-index: var(--z-popover); }
+@utility z-tooltip { z-index: var(--z-tooltip); }
 
 /* ────────────────────────── Code blocks ──────────────────────────────── */
 
+@layer base {
 code, pre {
   font-family: var(--font-family-mono, "SF Mono", ui-monospace, monospace);
   font-size: var(--font-size-sm, 12px);
@@ -624,13 +883,20 @@ code, pre {
 
 pre {
   background: var(--bg-terminal);
-  color: var(--text-primary);
+  color: var(--text-code);
   padding: var(--space-3, 12px) var(--space-4, 16px);
   border-radius: var(--radius-md, 10px);
   overflow-x: auto;
 }
+}
 
 /* ────────────────────────── Diff ─────────────────────────────────────── */
+
+@layer components {
+.diff-file-nav {
+  width: var(--diff-nav-width);
+  min-width: var(--diff-nav-min-width);
+}
 
 .diff-line {
   font-family: var(--font-family-mono, "SF Mono", monospace);
@@ -658,4 +924,5 @@ pre {
   background: var(--bg-hover);
   color: var(--text-tertiary);
   border-bottom: 1px solid var(--border-subtle);
+}
 }
