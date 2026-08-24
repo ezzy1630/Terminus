@@ -129,9 +129,21 @@ pub async fn request(
             "{scheme} scheme authorized but not relayed by this broker (TLS not supported here); no request was sent"
         ));
     } else if let Some(target_ip) = resolved_ips.first() {
+        // Bounded relay: an authorized-but-hostile destination used to be
+        // able to hang this handler forever (no connect/read deadline) and
+        // grow the response buffer without limit, exhausting connections and
+        // memory one request at a time.
+        const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        const RELAY_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        const MAX_RELAY_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
         let target_addr = std::net::SocketAddr::new(*target_ip, port);
-        match tokio::net::TcpStream::connect(target_addr).await {
-            Ok(mut stream) => {
+        let connect = tokio::time::timeout(
+            RELAY_CONNECT_TIMEOUT,
+            tokio::net::TcpStream::connect(target_addr),
+        )
+        .await;
+        match connect {
+            Ok(Ok(mut stream)) => {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 let path = if url.path().is_empty() {
                     "/"
@@ -150,34 +162,58 @@ pub async fn request(
                     req.body.len(),
                     req.body
                 );
-                match stream.write_all(http_req.as_bytes()).await {
-                    Ok(()) => {
+                let write =
+                    tokio::time::timeout(RELAY_IO_TIMEOUT, stream.write_all(http_req.as_bytes()))
+                        .await;
+                match write {
+                    Ok(Ok(())) => {
                         bytes_relayed += http_req.len() as u64;
                         let mut resp_buf = Vec::new();
-                        match stream.read_to_end(&mut resp_buf).await {
-                            Ok(_) => {
-                                bytes_relayed += resp_buf.len() as u64;
-                                if !resp_buf.is_empty() {
-                                    body_out = String::from_utf8_lossy(&resp_buf).to_string();
-                                    status = body_out
-                                        .split_whitespace()
-                                        .nth(1)
-                                        .and_then(|s| s.parse::<u16>().ok())
-                                        .unwrap_or(0);
+                        loop {
+                            let mut chunk = [0u8; 16 * 1024];
+                            let read =
+                                tokio::time::timeout(RELAY_IO_TIMEOUT, stream.read(&mut chunk))
+                                    .await;
+                            match read {
+                                Ok(Ok(0)) | Err(_) => break,
+                                Ok(Ok(n)) => {
+                                    bytes_relayed += n as u64;
+                                    resp_buf.extend_from_slice(&chunk[..n]);
+                                    if resp_buf.len() > MAX_RELAY_RESPONSE_BYTES {
+                                        relay_note = Some(format!(
+                                            "relay response exceeded {MAX_RELAY_RESPONSE_BYTES} bytes and was truncated"
+                                        ));
+                                        break;
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    relay_note = Some(format!("relay read failed: {e}"));
+                                    break;
                                 }
                             }
-                            Err(e) => {
-                                relay_note = Some(format!("relay read failed: {e}"));
-                            }
+                        }
+                        if !resp_buf.is_empty() {
+                            body_out = String::from_utf8_lossy(&resp_buf).to_string();
+                            status = body_out
+                                .split_whitespace()
+                                .nth(1)
+                                .and_then(|s| s.parse::<u16>().ok())
+                                .unwrap_or(0);
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         relay_note = Some(format!("relay write failed: {e}"));
+                    }
+                    Err(_) => {
+                        relay_note = Some("relay write timed out".to_string());
                     }
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 relay_note = Some(format!("relay connect failed: {e}"));
+            }
+            Err(_) => {
+                relay_note = Some("relay connect timed out".to_string());
             }
         }
     } else {

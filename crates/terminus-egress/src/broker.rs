@@ -9,7 +9,7 @@ use crate::{EgressError, EgressProxy};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
 
 const MAX_HANDSHAKE_BYTES: usize = 4 * 1024;
