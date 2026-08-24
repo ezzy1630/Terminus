@@ -12,7 +12,7 @@ use crate::error::ConnectorError;
 use crate::operation::path_matches_class;
 use crate::operation::CanonicalOperation;
 use crate::receipt::{ConnectorReceipt, ConnectorResponse, Outcome};
-use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::header::{HeaderName, HeaderValue, ACCEPT, USER_AGENT};
 use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -42,6 +42,7 @@ struct ConnectorDescriptor {
 const DEFAULT_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
+const CONNECTOR_USER_AGENT: &str = concat!("terminus-connector/", env!("CARGO_PKG_VERSION"));
 
 /// The L7 connector broker.
 pub struct ConnectorBroker {
@@ -436,10 +437,13 @@ async fn dispatch_https(
     for (name, value) in &op.headers {
         request = request.header(name, value);
     }
-    let request = request.body(op.body.clone()).build().map_err(|error| {
+    let mut request = request.body(op.body.clone()).build().map_err(|error| {
         ConnectorError::Protocol(format!("HTTPS request setup failed: {error}"))
     })?;
-    reserve_request_exact(egress, serialized_request_bytes(&request, op.body.len())?)?;
+    ensure_request_defaults(&mut request);
+    let request_bytes = serialized_request_bytes(&request, op.body.len())
+        .map_err(|error| ConnectorError::RequestNotDispatched(error.to_string()))?;
+    reserve_request_exact(egress, request_bytes)?;
     let mut response = client
         .execute(request)
         .await
@@ -467,6 +471,16 @@ async fn dispatch_https(
         body.extend_from_slice(&chunk);
     }
     Ok((status, body, content_type))
+}
+
+fn ensure_request_defaults(request: &mut reqwest::Request) {
+    let headers = request.headers_mut();
+    headers
+        .entry(ACCEPT)
+        .or_insert(HeaderValue::from_static("*/*"));
+    headers
+        .entry(USER_AGENT)
+        .or_insert(HeaderValue::from_static(CONNECTOR_USER_AGENT));
 }
 
 fn serialized_request_bytes(
@@ -622,4 +636,35 @@ async fn dispatch_http(
 
 fn find_double_crlf(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_size_includes_explicit_default_headers() {
+        let client = reqwest::Client::builder().https_only(true).build().unwrap();
+        let mut request = client
+            .post("https://example.com:443/health")
+            .body(b"body".to_vec())
+            .build()
+            .unwrap();
+        let without_defaults = serialized_request_bytes(&request, 4).unwrap();
+
+        ensure_request_defaults(&mut request);
+
+        assert_eq!(
+            request.headers().get(ACCEPT),
+            Some(&HeaderValue::from_static("*/*"))
+        );
+        assert_eq!(
+            request.headers().get(USER_AGENT),
+            Some(&HeaderValue::from_static(CONNECTOR_USER_AGENT))
+        );
+        let with_defaults = serialized_request_bytes(&request, 4).unwrap();
+        let expected_added =
+            "accept: */*\r\n".len() + format!("user-agent: {CONNECTOR_USER_AGENT}\r\n").len();
+        assert_eq!(with_defaults - without_defaults, expected_added);
+    }
 }

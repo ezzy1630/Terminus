@@ -15,7 +15,7 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 | Client apps | 4 | directories in apps/ |
 | External harness adapters | 7 | directories in adapters/ |
 | Mini-services | 2 | directories in mini-services/ |
-| Declared Rust tests | 398 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
+| Declared Rust tests | 399 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
 | TypeScript test files | 94 | `*.test.{ts,tsx}` in packages/ + apps/ |
 | Declared TypeScript test blocks | 815 | `test(/it(` occurrences in those files |
 | Declared Python tests | 243 | `def test_*` in python/** |
