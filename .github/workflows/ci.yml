@@ -28,7 +28,7 @@ jobs:
     name: Architecture boundary checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: ./.github/actions/setup-terminus
       - name: Run boundary checks (§42.5)
         run: just boundary-check
@@ -38,7 +38,7 @@ jobs:
     name: Lint, typecheck, codegen drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: ./.github/actions/setup-terminus
       - name: Format check (Rust + TS)
         run: |
@@ -100,7 +100,7 @@ jobs:
             run-ts-tests: true
     continue-on-error: ${{ matrix.continue-on-error }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: ./.github/actions/setup-terminus
       - name: Build Rust workspace (${{ matrix.target }})
         shell: bash
@@ -122,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Build workspace inside rust:bookworm container
         run: |
           docker run --rm \
@@ -135,7 +135,7 @@ jobs:
     name: Unit tests (Python eval)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: ./.github/actions/setup-terminus
       - run: cd python && uv run pytest -q
 
@@ -144,7 +144,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: platform
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: ./.github/actions/setup-terminus
       - run: cargo test --workspace --test '*' --locked
       - run: bun run test:integration
@@ -154,7 +154,7 @@ jobs:
     name: Security scans
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: ./.github/actions/setup-terminus
       - name: cargo deny (license + advisories + bans)
         run: cargo deny check
@@ -173,7 +173,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: integration
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: ./.github/actions/setup-terminus
       - name: Run the supervised public API lifecycle and recovery path
         run: just e2e
@@ -184,7 +184,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [integration, security, e2e]
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: ./.github/actions/setup-terminus
       - name: Produce M12 evidence bundle
         env:
@@ -217,7 +217,7 @@ jobs:
     needs: integration
     if: ${{ contains(github.event.pull_request.labels.*.name, 'agent-behavior') }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: ./.github/actions/setup-terminus
       - run: just eval-smoke
 
@@ -226,7 +226,7 @@ jobs:
     name: Standalone runtime ownership
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: ./.github/actions/setup-terminus
       - run: just standalone-check
 
@@ -235,7 +235,7 @@ jobs:
     name: Protobuf breaking-change check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-terminus
