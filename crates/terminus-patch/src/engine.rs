@@ -1,5 +1,6 @@
 use crate::error::PatchError;
 use crate::journal::{JournalEntry, JournalRecord};
+use crate::unified_diff::{parse_unified_diff, target_path, HunkLine};
 use crate::validate::{
     brace_balance_check, line_count_sanity, utf8_check, ValidationProfile, ValidationResult,
     ValidationStatus,
@@ -340,12 +341,20 @@ impl PatchEngine {
             // Register the path with no snapshot file: if this transaction
             // creates it, rollback must remove it again instead of leaving a
             // created file behind while reporting "rolled_back".
-            tx.snapshots
-                .insert(relative_path.to_string(), PathBuf::new());
+            tx.snapshots.entry(relative_path.to_string()).or_default();
             return Ok(String::new());
         }
         let original_bytes = std::fs::read(&resolved.host.host_path)?;
-        let original_hash = sha256_hex(&original_bytes);
+        let current_hash = sha256_hex(&original_bytes);
+        if tx.snapshots.contains_key(relative_path) {
+            // First snapshot wins. A second edit of the same path within one
+            // transaction snapshots the already-edited content; overwriting
+            // the entry would leave rollback/reconcile restoring that
+            // intermediate state instead of the pre-transaction state. The
+            // current hash is still returned so this edit's source-hash
+            // verification anchors against the content actually on disk.
+            return Ok(current_hash);
+        }
         let snapshot_name = format!(
             "{}-{}",
             relative_path.replace('/', "_"),
@@ -358,9 +367,9 @@ impl PatchEngine {
         tx.journal.push(JournalEntry::FileSnapshotted {
             relative_path: relative_path.to_string(),
             snapshot_path: snapshot_path.to_string_lossy().to_string(),
-            original_hash: original_hash.clone(),
+            original_hash: current_hash.clone(),
         });
-        Ok(original_hash)
+        Ok(current_hash)
     }
 
     fn apply_create_file(
@@ -380,13 +389,17 @@ impl PatchEngine {
         std::fs::write(&resolved.host.host_path, &edit.content)?;
         // Created files have no prior snapshot; register an empty one so a
         // validation-failure rollback removes the file instead of leaving it.
-        tx.snapshots
-            .insert(edit.path.relative_path.clone(), PathBuf::new());
-        tx.journal.push(JournalEntry::FileSnapshotted {
-            relative_path: edit.path.relative_path.clone(),
-            snapshot_path: String::new(),
-            original_hash: String::new(),
-        });
+        // First registration wins (a later edit of the same path within this
+        // transaction must not replace the "did not exist" marker).
+        if !tx.snapshots.contains_key(edit.path.relative_path.as_str()) {
+            tx.snapshots
+                .insert(edit.path.relative_path.clone(), PathBuf::new());
+            tx.journal.push(JournalEntry::FileSnapshotted {
+                relative_path: edit.path.relative_path.clone(),
+                snapshot_path: String::new(),
+                original_hash: String::new(),
+            });
+        }
         let new_hash = sha256_hex(&edit.content);
         tx.journal.push(JournalEntry::EditApplied {
             relative_path: edit.path.relative_path.clone(),
@@ -417,24 +430,12 @@ impl PatchEngine {
         let text = String::from_utf8(original_bytes).map_err(|_| {
             PatchError::InvalidEdit(format!("{} is not valid UTF-8", edit.path.relative_path))
         })?;
-        let lines: Vec<&str> = text.lines().collect();
-        let start = edit.range.start_line as usize;
-        let end = edit.range.end_line as usize;
-        if start == 0 || end == 0 || start > end || end > lines.len() {
-            return Err(PatchError::InvalidEdit(format!(
-                "invalid line range {}..{} (file has {} lines)",
-                start,
-                end,
-                lines.len()
-            )));
-        }
-        let mut new_lines: Vec<String> =
-            lines[..start - 1].iter().map(ToString::to_string).collect();
-        new_lines.push(String::from_utf8_lossy(&edit.replacement_utf8).to_string());
-        for line in &lines[end..] {
-            new_lines.push(line.to_string());
-        }
-        let new_text = new_lines.join("\n") + "\n";
+        let new_text = replace_line_range(
+            &text,
+            edit.range.start_line as usize,
+            edit.range.end_line as usize,
+            Some(&String::from_utf8_lossy(&edit.replacement_utf8)),
+        )?;
         let new_bytes = new_text.as_bytes();
         std::fs::write(&resolved.host.host_path, new_bytes)?;
         let new_hash = sha256_hex(new_bytes);
@@ -464,9 +465,14 @@ impl PatchEngine {
         let safe = SafePath::new(&edit.path.relative_path)?;
         let resolved = self.resolver.resolve_strict(&safe)?;
         let original_bytes = std::fs::read(&resolved.host.host_path)?;
-        let expected = String::from_utf8_lossy(&edit.expected_utf8);
-        let original = String::from_utf8_lossy(&original_bytes);
-        let occurrences = original.matches(expected.as_ref()).count();
+        // Fail closed on non-UTF-8 sources: a lossy decode would persist
+        // U+FFFD replacement characters over the original bytes.
+        let expected = std::str::from_utf8(&edit.expected_utf8)
+            .map_err(|_| PatchError::InvalidEdit("expected_utf8 is not valid UTF-8".to_string()))?;
+        let original = String::from_utf8(original_bytes).map_err(|_| {
+            PatchError::InvalidEdit(format!("{} is not valid UTF-8", edit.path.relative_path))
+        })?;
+        let occurrences = original.matches(expected).count();
         if occurrences == 0 {
             return Err(PatchError::AnchorNotFound(expected.to_string()));
         }
@@ -475,8 +481,10 @@ impl PatchEngine {
                 "anchor found {occurrences} times"
             )));
         }
-        let replacement = String::from_utf8_lossy(&edit.replacement_utf8);
-        let new_text = original.replacen(expected.as_ref(), replacement.as_ref(), 1);
+        let replacement = std::str::from_utf8(&edit.replacement_utf8).map_err(|_| {
+            PatchError::InvalidEdit("replacement_utf8 is not valid UTF-8".to_string())
+        })?;
+        let new_text = original.replacen(expected, replacement, 1);
         let new_bytes = new_text.as_bytes();
         std::fs::write(&resolved.host.host_path, new_bytes)?;
         let new_hash = sha256_hex(new_bytes);
@@ -512,7 +520,9 @@ impl PatchEngine {
         let safe = SafePath::new(&edit.path.relative_path)?;
         let resolved = self.resolver.resolve_strict(&safe)?;
         let original_bytes = std::fs::read(&resolved.host.host_path)?;
-        let original = String::from_utf8_lossy(&original_bytes);
+        let original = String::from_utf8(original_bytes).map_err(|_| {
+            PatchError::InvalidEdit(format!("{} is not valid UTF-8", edit.path.relative_path))
+        })?;
         let anchor = format!("{} ", edit.symbol);
         let start = original
             .find(&anchor)
@@ -578,7 +588,9 @@ impl PatchEngine {
         let safe = SafePath::new(&edit.path.relative_path)?;
         let resolved = self.resolver.resolve_strict(&safe)?;
         let original_bytes = std::fs::read(&resolved.host.host_path)?;
-        let original = String::from_utf8_lossy(&original_bytes).to_string();
+        let original = String::from_utf8(original_bytes).map_err(|_| {
+            PatchError::InvalidEdit(format!("{} is not valid UTF-8", edit.path.relative_path))
+        })?;
         let anchor_idx = original
             .find(&edit.anchor)
             .ok_or_else(|| PatchError::AnchorNotFound(edit.anchor.clone()))?;
@@ -624,24 +636,15 @@ impl PatchEngine {
         let safe = SafePath::new(&edit.path.relative_path)?;
         let resolved = self.resolver.resolve_strict(&safe)?;
         let original_bytes = std::fs::read(&resolved.host.host_path)?;
-        let text = String::from_utf8_lossy(&original_bytes).to_string();
-        let lines: Vec<&str> = text.lines().collect();
-        let start = edit.range.start_line as usize;
-        let end = edit.range.end_line as usize;
-        if start == 0 || end == 0 || start > end || end > lines.len() {
-            return Err(PatchError::InvalidEdit(format!(
-                "invalid line range {}..{} (file has {} lines)",
-                start,
-                end,
-                lines.len()
-            )));
-        }
-        let mut new_lines: Vec<String> =
-            lines[..start - 1].iter().map(ToString::to_string).collect();
-        for line in &lines[end..] {
-            new_lines.push(line.to_string());
-        }
-        let new_text = new_lines.join("\n") + "\n";
+        let text = String::from_utf8(original_bytes).map_err(|_| {
+            PatchError::InvalidEdit(format!("{} is not valid UTF-8", edit.path.relative_path))
+        })?;
+        let new_text = replace_line_range(
+            &text,
+            edit.range.start_line as usize,
+            edit.range.end_line as usize,
+            None,
+        )?;
         let new_bytes = new_text.as_bytes();
         std::fs::write(&resolved.host.host_path, new_bytes)?;
         let new_hash = sha256_hex(new_bytes);
@@ -738,21 +741,15 @@ impl PatchEngine {
         edit: &UnifiedDiff,
         changed_files: &mut Vec<ChangedFile>,
     ) -> Result<(), PatchError> {
-        let diff_str = String::from_utf8_lossy(&edit.diff_utf8);
-        let diff_lines: Vec<&str> = diff_str.lines().collect();
-
-        // Extract target path from +++ b/<path> or --- a/<path>
-        let mut target_path = String::new();
-        for l in &diff_lines {
-            if l.starts_with("+++ b/") {
-                target_path = l.trim_start_matches("+++ b/").to_string();
-                break;
-            } else if l.starts_with("--- a/") && target_path.is_empty() {
-                target_path = l.trim_start_matches("--- a/").to_string();
-            }
-        }
+        // Use the strict structured parser instead of a hand-rolled scan:
+        // malformed headers and hunk bodies are rejected here rather than
+        // silently defaulted to line 1.
+        let parsed = parse_unified_diff(&edit.diff_utf8)?;
+        let target_path = target_path(&parsed);
         if target_path.is_empty() {
-            target_path = "diff_patch.txt".to_string();
+            return Err(PatchError::InvalidEdit(
+                "unified diff has no ---/+++ target path".to_string(),
+            ));
         }
 
         let original_hash = self.snapshot_if_existing(tx, &target_path)?;
@@ -781,66 +778,82 @@ impl PatchEngine {
         }
         let safe = SafePath::new(&target_path)?;
         let resolved = self.resolver.resolve_strict(&safe)?;
-        let original_bytes = std::fs::read(&resolved.host.host_path).unwrap_or_default();
-        let original_text = String::from_utf8_lossy(&original_bytes).to_string();
+        let original_bytes = std::fs::read(&resolved.host.host_path)?;
+        let original_text = String::from_utf8(original_bytes)
+            .map_err(|_| PatchError::InvalidEdit(format!("{target_path} is not valid UTF-8")))?;
 
         let mut lines: Vec<String> = original_text.lines().map(ToString::to_string).collect();
+        // Net line delta from earlier hunks; hunk headers address the
+        // pre-diff file, so later hunks must be shifted by this amount.
+        let mut line_offset: i64 = 0;
 
-        let mut idx = 0;
-        let mut line_offset: i32 = 0;
-
-        while idx < diff_lines.len() {
-            let line = diff_lines[idx];
-            if line.starts_with("@@") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    let old_part = parts[1].trim_start_matches('-');
-                    let old_start: usize = old_part
-                        .split(',')
-                        .next()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(1);
-
-                    #[allow(
-                        clippy::cast_possible_truncation,
-                        clippy::cast_possible_wrap,
-                        clippy::cast_sign_loss
-                    )]
-                    let mut target_line =
-                        ((old_start as i64) - 1 + i64::from(line_offset)).max(0) as usize;
-                    idx += 1;
-
-                    while idx < diff_lines.len() && !diff_lines[idx].starts_with("@@") {
-                        let hunk_line = diff_lines[idx];
-                        if hunk_line.starts_with('-') {
-                            if target_line < lines.len() {
-                                lines.remove(target_line);
-                                line_offset -= 1;
+        for hunk in &parsed.hunks {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let mut pos = {
+                let start = i64::try_from(hunk.old_start).unwrap_or(i64::MAX);
+                (start - 1 + line_offset).max(0) as usize
+            };
+            for hunk_line in &hunk.lines {
+                match hunk_line {
+                    HunkLine::Context { text } | HunkLine::Delete { text } => {
+                        // Verify the file actually contains what the diff
+                        // expects before touching it. Blind application of a
+                        // drifted hunk silently corrupts unrelated lines.
+                        match lines.get(pos) {
+                            Some(actual) if actual == text => {}
+                            other => {
+                                return Err(PatchError::InvalidEdit(format!(
+                                    "unified diff context mismatch at line {}: diff expects {text:?}, file has {:?}",
+                                    pos + 1,
+                                    other
+                                )));
                             }
-                        } else if let Some(stripped) = hunk_line.strip_prefix('+') {
-                            let added_content = stripped.to_string();
-                            if target_line <= lines.len() {
-                                lines.insert(target_line, added_content);
-                            } else {
-                                lines.push(added_content);
-                            }
-                            target_line += 1;
-                            line_offset += 1;
-                        } else if hunk_line.starts_with(' ') {
-                            target_line += 1;
                         }
-                        idx += 1;
+                        if matches!(hunk_line, HunkLine::Delete { .. }) {
+                            lines.remove(pos);
+                            line_offset -= 1;
+                        } else {
+                            pos += 1;
+                        }
                     }
-                    continue;
+                    HunkLine::Add { text } => {
+                        if pos > lines.len() {
+                            return Err(PatchError::InvalidEdit(format!(
+                                "unified diff insertion past end of file at line {}",
+                                pos + 1
+                            )));
+                        }
+                        lines.insert(pos, text.clone());
+                        pos += 1;
+                        line_offset += 1;
+                    }
+                    HunkLine::Other { raw } => {
+                        // `\ No newline at end of file` markers carry no
+                        // content; anything else is fail-closed.
+                        if !raw.starts_with('\\') {
+                            return Err(PatchError::InvalidEdit(format!(
+                                "unrecognized unified diff line: {raw:?}"
+                            )));
+                        }
+                    }
                 }
             }
-            idx += 1;
         }
 
+        let newline = if original_text.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let trailing_newline = original_text.ends_with('\n');
         let new_text = if lines.is_empty() {
             String::new()
         } else {
-            lines.join("\n") + "\n"
+            let mut joined = lines.join(newline);
+            if trailing_newline {
+                joined.push_str(newline);
+            }
+            joined
         };
         let new_bytes = new_text.as_bytes();
         if let Some(parent) = resolved.host.host_path.parent() {
@@ -1000,6 +1013,45 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+/// Replace (or delete, when `replacement` is `None`) the 1-based inclusive
+/// line range `start..=end` while preserving the file's newline style and
+/// trailing-newline state. `str::lines()` strips `\r` and the previous
+/// rebuild joined with `\n` unconditionally, which rewrote every line ending
+/// in a CRLF file and forced a trailing newline onto files that lacked one.
+fn replace_line_range(
+    text: &str,
+    start: usize,
+    end: usize,
+    replacement: Option<&str>,
+) -> Result<String, PatchError> {
+    let lines: Vec<&str> = text.lines().collect();
+    if start == 0 || end == 0 || start > end || end > lines.len() {
+        return Err(PatchError::InvalidEdit(format!(
+            "invalid line range {start}..{end} (file has {} lines)",
+            lines.len()
+        )));
+    }
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let trailing_newline = text.ends_with('\n');
+    let mut new_lines: Vec<String> = lines[..start - 1].iter().map(ToString::to_string).collect();
+    if let Some(replacement) = replacement {
+        // Match the host file's line endings inside inserted content.
+        let unified = replacement.replace("\r\n", "\n");
+        new_lines.push(unified.replace('\n', newline));
+    }
+    for line in &lines[end..] {
+        new_lines.push((*line).to_string());
+    }
+    if new_lines.is_empty() {
+        return Ok(String::new());
+    }
+    let mut new_text = new_lines.join(newline);
+    if trailing_newline {
+        new_text.push_str(newline);
+    }
+    Ok(new_text)
 }
 
 fn compute_dirty_digest(changed: &[ChangedFile]) -> String {
