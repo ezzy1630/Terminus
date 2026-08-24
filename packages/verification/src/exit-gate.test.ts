@@ -69,6 +69,40 @@ function makeRuntime(runner: PredicateCommandRunner, withArtifacts = true) {
 }
 
 describe("M8 verification exit gate", () => {
+  test("completion cannot succeed without a required acceptance criterion", () => {
+    const decision = evaluateCompletionGate({
+      taskId: fakeUuid(1),
+      contractVersion: 1,
+      plan: {
+        id: fakeUuid(2),
+        taskContractId: fakeUuid(3),
+        taskContractVersion: 1,
+        sourceRevision: "rev-a",
+        nodes: [],
+        edges: [],
+        completionExpression: "",
+        createdAt: fakeTs(),
+      },
+      criteria: [],
+      results: [],
+      findings: [],
+      sourceRevision: "rev-a",
+      environmentImageDigest: "env:1",
+      now: fakeTs(),
+      expiresAt: null,
+      invalidatedNodeIds: new Set(),
+      completionExpressionSatisfied: true,
+      unresolvedRisks: [],
+      acceptedRisks: [],
+      externalEffects: [],
+      costMicros: 0n as Micros,
+      durationSeconds: 1,
+      finalCheckpoint: checkpoint,
+    });
+    expect(decision.allow).toBe(false);
+    if (!decision.allow) expect(decision.detail).toMatch(/required acceptance criterion/i);
+  });
+
   test("required acceptance criteria must bind to predicates", () => {
     const criteria: AcceptanceCriterion[] = [
       { id: "ac1", statement: "tests pass", verificationHint: null, required: true },

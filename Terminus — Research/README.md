@@ -95,8 +95,18 @@ External standards are boundaries, not the internal source of truth.
 | [`evals.md`](evals.md) | Controlled benchmark, security, chaos, UX, and release-evaluation program |
 | [`roadmap.md`](roadmap.md) | Concrete staged evolution of the current Terminus repository |
 | [`terminus-audit.md`](terminus-audit.md) | Evidence-based audit of the current branch and implementation |
+| [`implementation-reconciliation.md`](implementation-reconciliation.md) | August 23 mapping from all twelve research leaps to current implementation evidence and remaining gates |
 | [`sources.md`](sources.md) | Curated primary-source map and research methodology |
 | [`manifest.json`](manifest.json) | File hashes and research metadata |
+
+## Current implementation reconciliation
+
+The documents above preserve the August 21 research cut. The companion
+[`implementation-reconciliation.md`](implementation-reconciliation.md) records
+the August 23 standalone-runtime and desktop implementation, the checks run on
+the packaged artifact, and the north-star gates that remain unproven. Read it
+with `maturity.yaml` and the repository release gates before making a current
+product or readiness claim.
 
 ## Important scope note
 

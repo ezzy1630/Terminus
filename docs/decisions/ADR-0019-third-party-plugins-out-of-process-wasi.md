@@ -56,7 +56,7 @@ Critical. This is what prevents third-party code from acquiring ambient effects 
 
 ## Migration
 
-Plugins are introduced in M9 (SPEC §48.12). OpenCode's in-process plugin model is replaced by the Terminus extension runtime (ADR-0002, `docs/security/effect-bypass-register.yaml`).
+Plugins are introduced in M9 (SPEC §48.12) only through the Terminus extension runtime. No inherited in-process plugin exception remains (ADR-0039).
 
 ## Rollback
 

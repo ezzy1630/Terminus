@@ -2,7 +2,7 @@
 
 **parent:** [Wayfinder Map — Phase 6 ACI, Editing and Verification](wayfinder-phase-6-map.md)
 **label:** wayfinder:task
-**status:** complete
+**status:** local-slice-complete; roadmap-exit-unverified
 **assignee:** codex
 
 ## Question
@@ -35,5 +35,5 @@ checkout, including any Phase 0–5 gap that blocks its acceptance surface?
 
 Implemented the Phase 6 vertical slice and repaired the directly blocking
 earlier-phase gaps. Verification is recorded in the map, final response, and
-repository diff. The only remaining release gates are external and fail closed:
-model-backed factorial evaluation evidence and CI Linux enforcement evidence.
+repository diff. Roadmap and release evidence remain fail-closed as recorded in
+`terminus-research-execution-ledger.md`; this ticket does not mark them passed.

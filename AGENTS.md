@@ -26,7 +26,7 @@ When these sources disagree, stop and surface the conflict. Do not silently choo
 - Do not enable a default affecting context, tools, routing, compression, memory, or orchestration without a targeted evaluation or a documented security/reliability justification.
 - Do not widen task scope without updating the task contract and scope ledger. Obtain user approval when the effective scope expands.
 - Never expose raw credentials in prompts, logs, artifacts, fixtures, or tests. Use short-lived brokered capabilities.
-- Before modifying inherited OpenCode files, identify them through `upstream/divergence-budget.yaml`; update that file and `docs/security/effect-bypass-register.yaml` with the change.
+- First-party runtime/build code must stay independent of OpenCode. Run `just standalone-check`; external harness integrations belong behind provider-neutral adapter protocols.
 - Production Rust must not use `unwrap`, `expect`, or `panic`, unbounded channels, or detached `tokio::spawn`. Narrowly scoped `unsafe` is allowed only under SPEC §44.2: adopted ADR, safety comment, applicable Miri/fuzz coverage, and security-owner review.
 - TypeScript `any` is prohibited outside generated and compatibility code. Decode `unknown` at boundaries.
 
@@ -41,7 +41,7 @@ For behavioral code changes:
 5. Implement one reviewable contract or vertical slice.
 6. Run targeted checks during development.
 7. Before handoff, run `just check`, the applicable suites below, and `just codegen-check`.
-8. Report the diff, evidence, risks, and upstream impact.
+8. Report the diff, evidence, risks, and standalone dependency impact.
 
 Do not generate a whole subsystem in one change. Prefer one independently testable contract or vertical slice per PR.
 

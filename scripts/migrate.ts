@@ -29,6 +29,24 @@ function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+function migrationSql(sql: string): string {
+  // Connection PRAGMAs are applied by the runner before any transaction.
+  // Keeping them out of migration transactions avoids SQLite's
+  // `Safety level may not be changed inside a transaction` restriction.
+  // Pass the remaining program to SQLite intact. Splitting SQL on `;` is not
+  // a parser: semicolons are legal in comments, strings, and trigger bodies.
+  return sql.replace(/^\s*PRAGMA\s+[^;]+;\s*$/gim, "").trim();
+}
+
+function faultAfterStatement(version: number): number | null {
+  const configured = process.env.TERMINUS_MIGRATION_TEST_FAIL_AFTER;
+  if (!configured) return null;
+  const match = /^(\d+):(\d+)$/.exec(configured);
+  if (!match || Number(match[1]) !== version) return null;
+  const count = Number(match[2]);
+  return Number.isInteger(count) && count > 0 ? count : null;
+}
+
 function main(): void {
   mkdirSync(dirname(DB_PATH), { recursive: true });
   const db = new Database(DB_PATH);
@@ -46,35 +64,39 @@ function main(): void {
     ) STRICT;
   `);
 
-  const applied = new Map<number, { checksum: string; name: string }>();
-  const rows = db
-    .query("SELECT version, name, checksum_sha256 FROM schema_migrations")
-    .all() as Array<{ version: number; name: string; checksum_sha256: string }>;
-  for (const r of rows) {
-    applied.set(r.version, { checksum: r.checksum_sha256, name: r.name });
+  const files = readdirSync(MIGRATIONS_DIR)
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+  const migrationFiles = new Map<number, { file: string; name: string }>();
+  for (const file of files) {
+    const match = /^(\d+)_(.+)\.sql$/.exec(file);
+    if (!match) throw new Error(`invalid migration filename: ${file}`);
+    const version = Number.parseInt(match[1] ?? "", 10);
+    if (migrationFiles.has(version)) throw new Error(`duplicate migration version ${version}`);
+    migrationFiles.set(version, { file, name: match[2]! });
+  }
+  const appliedRows = db
+    .query("SELECT version FROM schema_migrations")
+    .all() as Array<{ version: number }>;
+  for (const row of appliedRows) {
+    if (!migrationFiles.has(row.version)) {
+      throw new Error(`schema_migrations contains orphaned applied version ${row.version}`);
+    }
   }
 
-  const files = readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
-
   let appliedCount = 0;
-  for (const file of files) {
-    const m = file.match(/^(\d+)_(.+)\.sql$/);
-    if (!m) {
-      console.warn(`skipping non-migration file: ${file}`);
-      continue;
-    }
-    const version = parseInt(m[1]!, 10);
-    const name = m[2]!;
+  for (const [version, migration] of migrationFiles) {
+    const { file, name } = migration;
     const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
     const checksum = sha256(sql);
 
-    const existing = applied.get(version);
+    const existing = db
+      .query("SELECT name, checksum_sha256 FROM schema_migrations WHERE version = ?")
+      .get(version) as { checksum_sha256: string; name: string } | null;
     if (existing) {
-      if (existing.checksum !== checksum) {
+      if (existing.checksum_sha256 !== checksum || existing.name !== name) {
         console.error(
-          `checksum mismatch for migration ${version} (${name}): expected ${existing.checksum}, got ${checksum}`,
+          `checksum or name mismatch for migration ${version} (${name})`,
         );
         process.exit(1);
       }
@@ -83,25 +105,41 @@ function main(): void {
 
     console.log(`applying migration ${version}: ${name}`);
     try {
-      // Run the migration SQL outside an explicit transaction: SQLite
-      // migrations contain PRAGMAs (e.g. `synchronous = NORMAL`) that cannot
-      // be changed inside a transaction. Each DDL statement is atomically
-      // applied by SQLite; the schema_migrations row is inserted only after
-      // the SQL succeeds, so a failed migration is retried on the next run.
-      db.exec(sql);
+      const program = migrationSql(sql);
+      const injectedFailure = faultAfterStatement(version);
+      db.exec("BEGIN IMMEDIATE");
+      const committed = db
+        .query("SELECT name, checksum_sha256 FROM schema_migrations WHERE version = ?")
+        .get(version) as { checksum_sha256: string; name: string } | null;
+      if (committed) {
+        if (committed.checksum_sha256 !== checksum || committed.name !== name) {
+          throw new Error(`checksum or name mismatch for migration ${version} (${name})`);
+        }
+        db.exec("COMMIT");
+        continue;
+      }
+      db.exec(program);
+      if (injectedFailure !== null) {
+        // The hook deliberately fails after SQLite has executed the migration
+        // program but before the ledger row and COMMIT. This proves DDL and
+        // ledger publication share one rollback boundary without maintaining
+        // a second, incomplete SQL parser in the runner.
+        throw new Error(`injected migration failure before commit (requested statement ${injectedFailure})`);
+      }
       db.query(
         "INSERT INTO schema_migrations (version, name, checksum_sha256, applied_at) VALUES (?, ?, ?, ?)",
       ).run(version, name, checksum, new Date().toISOString());
+      db.exec("COMMIT");
     } catch (e) {
+      try { db.exec("ROLLBACK"); } catch { /* transaction may not have started */ }
       console.error(`migration ${version} failed: ${e}`);
       process.exit(1);
     }
     appliedCount++;
   }
 
-  console.log(
-    `migrations complete: ${appliedCount} applied, ${applied.size + appliedCount} total`,
-  );
+  const totalMigrations = (db.query("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count;
+  console.log(`migrations complete: ${appliedCount} applied, ${totalMigrations} total`);
 
   const integrity = db.query("PRAGMA quick_check").all() as Array<{ quick_check: string }>;
   if (integrity[0]?.quick_check !== "ok") {

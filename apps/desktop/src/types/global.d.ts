@@ -6,8 +6,8 @@
  * React 19 types removed the implicit global JSX namespace.
  *
  * Also pulls in Vite's `import.meta.env` typing via `vite/client` and
- * declares the Electron preload bridges (`terminusDesktop`, `terminusTerminal`)
- * on `window`.
+ * declares the constrained Electron preload bridge (`terminusDesktop`) on
+ * `window`.
  */
 /// <reference types="vite/client" />
 
@@ -15,36 +15,18 @@ import type { JSX as ReactJSX } from "react/jsx-runtime";
 
 // ────────────────────────── Electron preload bridges ─────────────────────────
 
-/** Result of terminusTerminal.spawn — `error` is set when the PTY backend is unavailable. */
-export interface TerminusTerminalSpawnResult {
-  id: string;
-  label: string;
-  cwd?: string;
-  error?: string;
-}
-
-/** Screen source from desktopCapturer.getSources (SPEC §16). */
-export interface TerminusScreenSource {
-  id: string;
-  name: string;
-  display_id?: string;
-}
-
-export interface TerminusTerminalBridge {
-  spawn: (
-    cwd?: string,
-    command?: string,
-    cols?: number,
-    rows?: number,
-  ) => Promise<TerminusTerminalSpawnResult>;
-  write: (termId: string, data: string) => Promise<void>;
-  resize: (termId: string, cols: number, rows: number) => Promise<void>;
-  kill: (termId: string) => Promise<void>;
-  onData: (termId: string, cb: (data: string) => void) => () => void;
-  onExit: (termId: string, cb: (exitCode: number) => void) => () => void;
-}
-
 declare global {
+  type TerminusWindowBounds = { x: number; y: number; width: number; height: number };
+  type TerminusDesktopCommandId =
+    | "command-palette"
+    | "open-project"
+    | "settings"
+    | "shortcut-reference"
+    | "new-task"
+    | "show-changes"
+    | "toggle-inspector"
+    | "toggle-sidebar";
+
   namespace JSX {
     type Element = ReactJSX.Element;
     type ElementClass = ReactJSX.ElementClass;
@@ -60,8 +42,6 @@ declare global {
   interface Window {
     terminusDesktop?: {
       apiBase: string;
-      gateway: string;
-      token: string;
       platform: string;
       isMac: boolean;
       notify: (title: string, body: string) => Promise<unknown>;
@@ -70,10 +50,15 @@ declare global {
       windowClose: () => Promise<unknown>;
       getTheme: () => Promise<"system" | "light" | "dark">;
       setTheme: (theme: "system" | "light" | "dark") => Promise<"system" | "light" | "dark">;
-      getScreenSources: () => Promise<TerminusScreenSource[]>;
       pickDirectory: () => Promise<string | null>;
+      validateDirectoryDrop: (path: string) => Promise<string | null>;
+      onDirectoryDrop: (callback: (path: string) => void) => () => void;
+      onCommand: (callback: (commandId: TerminusDesktopCommandId) => void) => () => void;
+      setWindowTitle: (title: string) => Promise<string>;
+      getWindowBounds: () => Promise<TerminusWindowBounds | null>;
+      setWindowBounds: (bounds: TerminusWindowBounds) => Promise<TerminusWindowBounds>;
+      onWindowBoundsChange: (callback: (bounds: TerminusWindowBounds) => void) => () => void;
     };
-    terminusTerminal?: TerminusTerminalBridge;
   }
 }
 

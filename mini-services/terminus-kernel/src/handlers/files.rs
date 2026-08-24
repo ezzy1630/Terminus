@@ -4,9 +4,8 @@
 //! `ArtifactRef` after ingesting them into the CAS. `list` walks a
 //! directory under the workspace root and returns entries with their
 //! sha256 hashes; the kernel does not yet expose a public `list` method,
-//! so we implement it directly using `std::fs::read_dir` over paths
-//! resolved by the kernel's `PathResolver` (so absolute paths, `..`
-//! traversal, symlink escapes, and protected prefixes are rejected).
+//! so we implement it directly using `std::fs::read_dir` over a path
+//! resolved by the kernel's workspace-bound file service.
 
 use axum::extract::State;
 use axum::Extension;
@@ -101,16 +100,13 @@ pub async fn list(
     let mut req: ListFilesRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
     req.envelope.inject_capability_token(&cap_token);
-    // §31.3 step 5: canonicalize paths and reject traversal/symlink escape
-    // before listing. We reuse the kernel's PathResolver so the same
-    // safety guarantees apply to `list` as to `read`.
-    let resolver = state.kernel.files.resolver();
-    let safe = terminus_fs::SafePath::new(&req.path.relative_path).map_err(|e| {
-        ApiError::validation(format!("path rejected by SafePath: {e}"), &trace_id.0)
-    })?;
-    let resolved = resolver.resolve_strict(&safe).map_err(|e| {
-        ApiError::validation(format!("path rejected by PathResolver: {e}"), &trace_id.0)
-    })?;
+    // §31.3 steps 3-5: validate the workspace-bound capability, select the
+    // registered root, then reject traversal/symlink escape.
+    let resolved = state
+        .kernel
+        .files
+        .resolve_for_read(&req.envelope.request_context, &req.path)
+        .map_err(|error| ApiError::from_kernel(error, &trace_id.0))?;
     let base = &resolved.host.host_path;
     let mut entries = Vec::new();
     let read_dir = match std::fs::read_dir(base) {

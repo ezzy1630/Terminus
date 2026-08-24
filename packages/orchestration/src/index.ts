@@ -1363,3 +1363,20 @@ export * from "./clean_reviewer.js";
 export * from "./stagnation_supervisor.js";
 export * from "./candidate_workspace.js";
 
+// ────────────────────────── Phase 9 Exports (SPEC §1, §4, §16, §29, §33) ───
+
+export * from "./organization_directory.js";
+export * from "./attention_coordinator.js";
+export * from "./intervention_manager.js";
+export * from "./causal_replay.js";
+
+// ────────────────────────── Phase 10 Exports (SPEC §25, §18.3, §17, §30) ───
+
+export * from "./ui_observation_fusion.js";
+export * from "./semantic_target_verifier.js";
+export * from "./browser_desktop_pools.js";
+export * from "./human_takeover_manager.js";
+export * from "./data_flow_policy.js";
+export * from "./ambiguous_submit_reconciler.js";
+export * from "./external_connector_library.js";
+export * from "./incident_research_profiles.js";

@@ -215,7 +215,7 @@ export class VerificationLifecycle {
     };
 
     const decision = evaluateCompletionGate(gateInput);
-    if (!decision.allow) {
+    if (decision.allow === false) {
       throw new ValidationError("false completion prevented", {
         reason: decision.reason,
         detail: decision.detail,

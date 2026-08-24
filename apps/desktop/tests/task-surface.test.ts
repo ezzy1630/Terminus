@@ -7,6 +7,11 @@ import {
   extractUnifiedDiffs,
 } from "../src/lib/task-surface";
 import { decodeFeed } from "../src/components/Conversation";
+import {
+  MAX_PRESENTATION_EVENT_CHARS,
+  PRESENTATION_REJECTION_KEY,
+  boundPresentationEvent,
+} from "../src/hooks/use-terminus";
 import type { TerminusSseEvent } from "../src/types";
 
 function event(id: string, type: string, payload: Record<string, unknown>): TerminusSseEvent {
@@ -33,7 +38,7 @@ describe("task surface event projections", () => {
       event("3", "approval.resolved", { approvalId: "approval-a", decision: "deny_once" }),
     ];
     expect(derivePendingApprovals(events)).toEqual([
-      expect.objectContaining({ id: "approval-b", action: "Push branch", risk: "normal", canPersist: true }),
+      expect.objectContaining({ id: "approval-b", action: "Push branch", risk: "normal", canPersist: false, authorizationReady: false }),
     ]);
   });
 
@@ -95,7 +100,7 @@ describe("task surface event projections", () => {
     ];
 
     expect(derivePendingApprovals(events)).toEqual([
-      expect.objectContaining({ id: "approval-a", action: "Apply migration", risk: "critical", canPersist: true }),
+      expect.objectContaining({ id: "approval-a", action: "Apply migration", risk: "critical", canPersist: false, authorizationReady: false }),
     ]);
     expect(deriveSubagentActivity(events)).toEqual([
       { id: "agent-a", role: "Review the patch", state: "done", worktreeId: "review-worktree" },
@@ -132,5 +137,67 @@ describe("task surface event projections", () => {
     expect(feed.blocks).toEqual([
       expect.objectContaining({ title: "Explored codebase", status: "done", metric: "1 file" }),
     ]);
+  });
+
+  test("rejects oversized SSE payloads before parsing or retaining presentation data", () => {
+    const original: TerminusSseEvent = {
+      id: "oversized-1",
+      event: "tool.settled",
+      data: "sensitive".repeat(MAX_PRESENTATION_EVENT_CHARS),
+    };
+    const bounded = boundPresentationEvent(original);
+    expect(bounded.id).toBe(original.id);
+    expect(bounded.event).toBe(original.event);
+    expect(bounded.data.length).toBeLessThan(MAX_PRESENTATION_EVENT_CHARS);
+    expect(JSON.parse(bounded.data)).toEqual({
+      [PRESENTATION_REJECTION_KEY]: expect.objectContaining({
+        reason: "event_payload_too_large",
+        source_event: "tool.settled",
+        character_count: original.data.length,
+      }),
+    });
+
+    const feed = decodeFeed([original], "2026-07-12T00:00:00.000Z");
+    expect(feed.blocks).toEqual([
+      expect.objectContaining({
+        title: "Event omitted from presentation",
+        metric: "Payload rejected",
+        status: "failed",
+      }),
+    ]);
+    expect(feed.blocks[0]?.entries[0]?.detail).not.toContain("sensitive");
+  });
+
+  test("does not stringify structured tool results into the activity surface", () => {
+    const feed = decodeFeed([
+      event("1", "turn.started", { user_input: "Inspect it" }),
+      event("2", "tool.settled", {
+        tool: "read",
+        status: "success",
+        result: { private_payload: "must-not-render", artifact_ref: "artifact-sha256:abc" },
+      }),
+      event("3", "turn.completed", { summary: "Done" }),
+    ], "2026-07-12T00:00:00.000Z");
+
+    const detail = feed.blocks[0]?.entries[0]?.detail;
+    expect(detail).toContain("artifact-sha256:abc");
+    expect(detail).not.toContain("must-not-render");
+  });
+
+  test("explicitly rejects streaming content beyond the presentation budget", () => {
+    const deltas = Array.from({ length: 270 }, (_, index) =>
+      event(`delta-${index}`, "turn.provider_running", {
+        delta: index === 269 ? "FINAL_PRIVATE_TAIL" : "x".repeat(1_000),
+      }));
+    const feed = decodeFeed([
+      event("start", "turn.started", { user_input: "Stream" }),
+      ...deltas,
+      event("complete", "turn.completed", { summary: "Done" }),
+    ], "2026-07-12T00:00:00.000Z");
+    const response = feed.messages.find((message) => message.role === "agent")?.content ?? "";
+
+    expect(response).toContain("Streaming response rejected");
+    expect(response).not.toContain("FINAL_PRIVATE_TAIL");
+    expect(response.length).toBeLessThan(270_000);
   });
 });

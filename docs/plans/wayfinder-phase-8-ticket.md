@@ -2,7 +2,7 @@
 
 **parent:** [Wayfinder Map — Phase 8 Deep Model Profiles, Routing & Expected-Value Orchestration](wayfinder-phase-8-map.md)
 **label:** wayfinder:task
-**status:** complete
+**status:** local-slice-complete; roadmap-exit-unverified
 **assignee:** codex
 
 ## Question
@@ -26,4 +26,8 @@ checkout, including any Phase 0–7 gap that blocks its acceptance surface?
 
 ## Resolution
 
-Implemented Phase 8 end-to-end across `@terminus/domain`, `@terminus/model-router`, `@terminus/orchestration`, `@terminus/public-api`, `@terminus/public-client`, and `terminus-control`. All unit tests, codegen checks, integration suites, and smoke evaluations pass cleanly. ADR-0037 recorded.
+Implemented the Phase 8 local slice across `@terminus/domain`,
+`@terminus/model-router`, `@terminus/orchestration`, `@terminus/public-api`,
+`@terminus/public-client`, and `terminus-control`. ADR-0037 records the decision.
+Live provider and roadmap-exit evidence remain unverified as recorded in
+`terminus-research-execution-ledger.md`.

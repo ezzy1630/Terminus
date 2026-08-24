@@ -9,6 +9,24 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
+let appDialogFocusOrigin: HTMLElement | null = null;
+
+/** Preserve one launcher across a Suspense fallback and its resolved dialog. */
+export function setAppDialogFocusOrigin(origin: HTMLElement | null): void {
+  appDialogFocusOrigin = origin;
+}
+
+export function restoreAppDialogFocusOrigin(): void {
+  const origin = appDialogFocusOrigin;
+  appDialogFocusOrigin = null;
+  window.requestAnimationFrame(() => origin?.focus());
+}
+
+/** IME composition keys must remain owned by the text input method. */
+export function isComposingKeyboardEvent(event: KeyboardEvent): boolean {
+  return event.isComposing || event.keyCode === 229;
+}
+
 /** Keeps keyboard focus inside a modal and restores the launching control. */
 export function useDialogFocus<T extends HTMLElement>(
   active: boolean,
@@ -22,7 +40,8 @@ export function useDialogFocus<T extends HTMLElement>(
 
   useEffect(() => {
     if (!active) return;
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousFocus = appDialogFocusOrigin
+      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     const initialFocusFrame = window.requestAnimationFrame(() => {
       const dialog = dialogRef.current;
       if (!dialog || dialog.contains(document.activeElement)) return;
@@ -30,6 +49,7 @@ export function useDialogFocus<T extends HTMLElement>(
     });
 
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (isComposingKeyboardEvent(event)) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -54,16 +74,16 @@ export function useDialogFocus<T extends HTMLElement>(
       if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
         event.preventDefault();
         last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
         event.preventDefault();
         first.focus();
       }
     };
 
-    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keydown", onKeyDown);
     return () => {
       window.cancelAnimationFrame(initialFocusFrame);
-      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keydown", onKeyDown);
       window.requestAnimationFrame(() => previousFocus?.focus());
     };
   }, [active]);

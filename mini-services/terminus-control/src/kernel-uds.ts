@@ -13,6 +13,7 @@ import { Observable } from "rxjs";
 import {
   ArtifactIngestServiceClientImpl,
   CodeIntelligenceServiceClientImpl,
+  ConnectorServiceClientImpl,
   ExtensionRuntimeServiceClientImpl,
   FileServiceClientImpl,
   JobServiceClientImpl,
@@ -40,10 +41,13 @@ class UdsRpc implements GeneratedRpc {
   private readonly client: Client;
   private readonly metadata: Metadata;
 
-  constructor(socketPath: string, capabilityToken: string) {
+  constructor(socketPath: string, capabilityToken: string, controlBootstrapToken: string) {
     this.client = new Client(`unix://${socketPath}`, credentials.createInsecure());
     this.metadata = new Metadata();
     if (capabilityToken) this.metadata.set("x-capability-token", capabilityToken);
+    if (controlBootstrapToken) {
+      this.metadata.set("x-terminus-control-bootstrap", controlBootstrapToken);
+    }
   }
 
   request(service: string, method: string, data: Uint8Array): Promise<Uint8Array> {
@@ -106,6 +110,7 @@ export interface KernelUdsClients {
   policies: PolicyServiceClientImpl;
   secrets: SecretServiceClientImpl;
   network: NetworkServiceClientImpl;
+  connectors: ConnectorServiceClientImpl;
   codeIntel: CodeIntelligenceServiceClientImpl;
   extensions: ExtensionRuntimeServiceClientImpl;
   artifacts: ArtifactIngestServiceClientImpl;
@@ -114,8 +119,9 @@ export interface KernelUdsClients {
 export function createKernelUdsClients(
   socketPath: string,
   capabilityToken: string,
+  controlBootstrapToken = "",
 ): KernelUdsClients {
-  const rpc = new UdsRpc(socketPath, capabilityToken);
+  const rpc = new UdsRpc(socketPath, capabilityToken, controlBootstrapToken);
   return {
     info: new KernelInfoServiceClientImpl(rpc),
     workspaces: new WorkspaceServiceClientImpl(rpc),
@@ -127,6 +133,7 @@ export function createKernelUdsClients(
     policies: new PolicyServiceClientImpl(rpc),
     secrets: new SecretServiceClientImpl(rpc),
     network: new NetworkServiceClientImpl(rpc),
+    connectors: new ConnectorServiceClientImpl(rpc),
     codeIntel: new CodeIntelligenceServiceClientImpl(rpc),
     extensions: new ExtensionRuntimeServiceClientImpl(rpc),
     artifacts: new ArtifactIngestServiceClientImpl(rpc),

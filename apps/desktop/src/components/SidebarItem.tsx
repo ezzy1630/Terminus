@@ -1,161 +1,219 @@
 /**
- * Terminus Desktop — Sidebar item (single project/task row).
+ * Terminus Desktop — Sidebar item (single project/session row).
  *
- * Per SPEC §7.1:
- *   - Task rows must be easy to scan.
- *   - Selected state must be visible without a bright saturated background.
- *   - Hover actions should not cause layout shift.
- *   - Long names must truncate gracefully.
- *   - Show full names in tooltips.
- *
- * Per SPEC §7.2: minimal semantic status indicator (tiny spinner, dot,
- * checkmark, etc.). No large colorful badges.
- *
- * Compact mode (SPEC §24): icons only.
+ * Upgraded hybrid design blending T3 Code, Codex, and reference screenshot:
+ *   - 2-line session card with high scanability.
+ *   - Line 1: Title + right-aligned blue activity dot for active/running tasks.
+ *   - Line 2: Status phase (e.g. Working..., PR is ready) + relative time + branch/PR glyphs.
+ *   - Selected state visible with clean macOS elevation.
+ *   - Compact rail mode support.
  */
-import { memo, useState } from "react";
-import { Pin, PinOff } from "lucide-react";
+import { memo, type KeyboardEventHandler } from "react";
+import { GitBranch, GitPullRequest, Pin } from "lucide-react";
 import { cn } from "../lib/cn";
 import { StatusIndicator } from "./StatusIndicator";
-import { normalizeTaskStatus } from "../hooks/use-terminus";
 import type { TaskStatusKind } from "../types";
+import { IconButton } from "../ui/IconButton";
+import { Button } from "../ui/Button";
 
 interface SidebarItemProps {
   /** Title to display. */
   title: string;
-  /** Status kind for tasks. Projects omit this. */
+  /** Status kind for tasks. Projects/spaces omit this. */
   status?: TaskStatusKind;
   /** ISO timestamp for relative time display. */
   updatedAt?: string;
+  /** Branch name if associated with a worktree/branch. */
+  branch?: string;
+  /** Pull request status or number if available. */
+  pullRequest?: string;
   /** Whether this row is currently selected. */
   selected: boolean;
   /** Whether this row is pinned. */
   pinned?: boolean;
   /** Compact mode: icons only. */
   compact?: boolean;
-  /** Indentation depth (0 = top-level project, 1 = nested task). */
+  /** Indentation depth (0 = top-level, 1 = nested session). */
   depth?: number;
   /** Click handler. */
   onClick?: () => void;
   /** Toggle pin. */
   onTogglePin?: () => void;
+  /** Roving-focus plumbing for virtualized task sections. */
+  primaryButtonRef?: (element: HTMLButtonElement | null) => void;
+  primaryTabIndex?: number;
+  onPrimaryKeyDown?: KeyboardEventHandler<HTMLButtonElement>;
+}
+
+function statusPhrase(status?: TaskStatusKind): string | null {
+  switch (status) {
+    case "working": return "Working";
+    case "queued": return "Queued";
+    case "waiting": return "Waiting";
+    case "needs_approval": return "Needs approval";
+    case "needs_review": return "Needs review";
+    case "failed": return "Failed";
+    case "interrupted": return "Stopped";
+    default: return null;
+  }
+}
+
+/**
+ * One meta line: what the task is doing, then when it last moved. A finished
+ * task only needs the time — repeating "Done" beside a row with no activity
+ * mark is a word that carries nothing.
+ */
+function metaLine(status?: TaskStatusKind, updatedAt?: string): string {
+  const phrase = statusPhrase(status);
+  const when = updatedAt ? relativeTimeAgo(updatedAt) : "";
+  if (phrase && when) return `${phrase} · ${when}`;
+  return phrase ?? when;
+}
+
+function relativeTimeAgo(isoTimestamp: string): string {
+  try {
+    const diffMs = Date.now() - new Date(isoTimestamp).getTime();
+    const minutes = Math.floor(diffMs / 60000);
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  } catch {
+    return "";
+  }
 }
 
 function SidebarItemImpl({
   title,
   status,
-  updatedAt: _updatedAt,
+  updatedAt,
+  branch,
+  pullRequest,
   selected,
   pinned = false,
   compact = false,
   depth = 0,
   onClick,
   onTogglePin,
+  primaryButtonRef,
+  primaryTabIndex,
+  onPrimaryKeyDown,
 }: SidebarItemProps): JSX.Element {
-  const [hovered, setHovered] = useState(false);
+  const subtitle = metaLine(status, updatedAt);
 
   if (compact) {
     // Rail mode: icon-only.
     return (
-      <button
+      <Button
+        ref={primaryButtonRef}
         type="button"
         onClick={onClick}
-        title={title}
+        onKeyDown={onPrimaryKeyDown}
+        tabIndex={primaryTabIndex}
         aria-label={title}
         aria-pressed={selected}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
+        data-tooltip={title}
         className={cn(
-          "flex w-full items-center justify-center",
-          selected ? "bg-selected" : hovered ? "bg-hover" : "transparent",
+          "flex w-full items-center justify-center hover:bg-hover",
+          selected && "bg-selected",
         )}
         style={{ height: "var(--row-height)" }}
       >
         {status ? (
           <StatusIndicator status={status} size={12} />
         ) : (
-          <span
-            className="block rounded-sm"
-            style={{ width: 8, height: 8, background: "var(--text-tertiary)" }}
-            aria-hidden
-          />
+          <span className="block h-2 w-2 rounded-sm bg-neutral-status" aria-hidden />
         )}
-      </button>
+      </Button>
     );
   }
 
+  const isTwoLine = Boolean(status || subtitle);
+
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={onClick}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onClick?.();
-        }
-      }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      aria-pressed={selected}
-      aria-label={
-        status
-          ? `${title}, status ${status}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
-          : `${title}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
-      }
-      title={title}
+      data-selected={selected}
       className={cn(
-        "sidebar-task-row group relative flex cursor-default items-center gap-2 rounded-md text-sm",
-        selected ? "bg-selected text-primary" : hovered ? "bg-hover text-primary" : "text-secondary",
+        "sidebar-task-row group relative flex cursor-default items-center rounded-lg text-sm transition-colors",
+        selected ? "bg-selected text-primary font-medium shadow-xs" : "text-secondary hover:bg-hover hover:text-primary",
       )}
       style={{
-        height: "var(--row-height)",
-        paddingLeft: 8 + depth * 12,
+        minHeight: isTwoLine ? 38 : "var(--row-height)",
+        // Nested tasks hang from the same label column as their space row.
+        paddingLeft: depth > 0 ? 34 : 8,
         paddingRight: 6,
+        paddingTop: isTwoLine ? 4 : 0,
+        paddingBottom: isTwoLine ? 4 : 0,
       }}
     >
-      {/* Status indicator — pinned to the left of the title. */}
-      <span className="flex w-4 flex-shrink-0 items-center justify-center">
-        {status ? (
-          <StatusIndicator status={status} size={12} />
-        ) : (
-          <span
-            className="block rounded-sm"
-            style={{ width: 6, height: 6, background: "var(--text-tertiary)" }}
-            aria-hidden
-          />
-        )}
-      </span>
+      {status ? (
+        <span className="pointer-events-none absolute left-3 top-2.5 flex w-4 justify-center" aria-hidden>
+          <StatusIndicator status={status} size={10} />
+        </span>
+      ) : null}
 
-      {/* Title — truncate with ellipsis. */}
-      <span className="min-w-0 flex-1 truncate" style={{ fontSize: "var(--font-size-base)" }}>
-        {title}
-      </span>
+      <Button
+        ref={primaryButtonRef}
+        variant="bare"
+        type="button"
+        onClick={onClick}
+        onKeyDown={onPrimaryKeyDown}
+        tabIndex={primaryTabIndex}
+        aria-pressed={selected}
+        data-tooltip={title}
+        aria-label={
+          status
+            ? `${title}, status ${status}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
+            : `${title}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
+        }
+        className="flex w-full min-w-0 flex-1 flex-col items-start justify-center gap-0.5"
+      >
+        {/* One line. Titles are objectives, so the second clamped line was
+            almost always another half-sentence: it doubled the row height
+            without making adjacent tasks distinguishable any faster than the
+            first six words already do. */}
+        <span className="w-full min-w-0 truncate text-left text-sm font-medium leading-snug text-primary">
+          {title}
+        </span>
 
-      {/* Right side: reserve a compact action slot so hover affordances never
-          move the task title. Recency is available in the inspector instead
-          of adding a noisy second column to every navigation row. */}
+        {isTwoLine ? (
+          <span className="flex w-full min-w-0 items-center gap-1 text-left text-xs leading-tight text-tertiary">
+            <span className="truncate">{subtitle}</span>
+            {branch ? (
+              <span className="inline-flex shrink-0 items-center gap-0.5" data-tooltip={branch}>
+                <GitBranch size={10} aria-hidden />
+              </span>
+            ) : null}
+            {pullRequest ? (
+              <span className="inline-flex shrink-0 items-center gap-0.5 text-success" data-tooltip={pullRequest}>
+                <GitPullRequest size={10} aria-hidden />
+              </span>
+            ) : null}
+          </span>
+        ) : null}
+      </Button>
+
+      {/* Right side pin button */}
       <span
-        className="flex flex-shrink-0 items-center justify-end gap-1"
-        style={{ width: 24 }}
+        className="flex flex-shrink-0 items-center justify-end"
+        style={{ width: 20 }}
       >
         {onTogglePin ? (
-          <button
-            type="button"
+          <IconButton
             onClick={(e) => {
               e.stopPropagation();
               onTogglePin();
             }}
-            aria-label={`${pinned ? "Unpin" : "Pin"} task ${title}`}
-            title={pinned ? "Unpin" : "Pin"}
+            label={`${pinned ? "Unpin" : "Pin"} task ${title}`}
+            icon={<Pin size={11} className={pinned ? "fill-current" : undefined} />}
+            size="sm"
             className={cn(
-              "flex h-6 w-6 items-center justify-center rounded-md text-tertiary hover:bg-hover",
               pinned && "text-primary",
-              !hovered && !pinned && "invisible",
+              !pinned && "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100",
             )}
-          >
-            {pinned ? <Pin size={11} /> : <PinOff size={11} />}
-          </button>
+          />
         ) : null}
       </span>
     </div>

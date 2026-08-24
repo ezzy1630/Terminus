@@ -4,13 +4,14 @@
 # enforcement report; it never upgrades host capabilities into claims.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 manifest="${TERMINUS_LINUX_EVIDENCE:?TERMINUS_LINUX_EVIDENCE is required}"
 signature="${TERMINUS_LINUX_EVIDENCE_SIGNATURE:?TERMINUS_LINUX_EVIDENCE_SIGNATURE is required}"
 certificate="${TERMINUS_LINUX_EVIDENCE_CERTIFICATE:?TERMINUS_LINUX_EVIDENCE_CERTIFICATE is required}"
 report="${TERMINUS_ENFORCEMENT_REPORT:?TERMINUS_ENFORCEMENT_REPORT is required}"
 test_log="${TERMINUS_LINUX_TEST_LOG:-${manifest}.test.log}"
 test_command="${TERMINUS_LINUX_TEST_COMMAND:?TERMINUS_LINUX_TEST_COMMAND is required}"
+release_version="${TERMINUS_RELEASE_VERSION:?TERMINUS_RELEASE_VERSION is required}"
+commit="${TERMINUS_RELEASE_COMMIT:?TERMINUS_RELEASE_COMMIT is required}"
 
 fail() {
   echo "[linux-evidence] $*" >&2
@@ -22,6 +23,11 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 command -v bwrap >/dev/null 2>&1 || fail "bubblewrap is required"
 command -v cosign >/dev/null 2>&1 || fail "cosign is required"
 [[ -r /sys/fs/cgroup/cgroup.controllers ]] || fail "cgroup v2 controller inventory is unavailable"
+[[ "$release_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+  || fail "TERMINUS_RELEASE_VERSION must be stable SemVer: $release_version"
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "TERMINUS_RELEASE_COMMIT must be a full 40-character Git SHA"
+[[ -z "${GITHUB_SHA:-}" || "$commit" == "$GITHUB_SHA" ]] \
+  || fail "TERMINUS_RELEASE_COMMIT does not match GITHUB_SHA"
 mkdir -p "$(dirname "$manifest")"
 {
   echo "# command: $test_command"
@@ -29,8 +35,10 @@ mkdir -p "$(dirname "$manifest")"
 } >"$test_log" 2>&1
 
 [[ -r "$report" ]] || fail "effective enforcement report is missing after test: $report"
-jq -e '
+jq -e --arg commit "$commit" --arg version "$release_version" '
   .status == "enforced" and
+  .candidate_commit == $commit and
+  .release_version == $version and
   .sandbox.cgroup_mode == "v2" and
   .sandbox.network_mode == "deny" and
   (.sandbox.seccomp_filter_sha256 | type == "string" and length > 0) and
@@ -47,9 +55,8 @@ jq -e '
   .checks.secret_isolation == "blocked" and
   .checks.no_new_privs == "blocked" and
   .exit_status == 0
-' "$report" >/dev/null || fail "effective report does not prove the secure Linux profile"
+' "$report" >/dev/null || fail "effective report does not prove the secure Linux profile and release identity"
 
-commit="${TERMINUS_RELEASE_COMMIT:-${GITHUB_SHA:-$(git -C "$ROOT" rev-parse HEAD)}}"
 run_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-local/terminus}/actions/runs/${GITHUB_RUN_ID:-local}"
 identity="${GITHUB_WORKFLOW:-local}:${GITHUB_RUN_ATTEMPT:-1}"
 bwrap_version="$(bwrap --version)"
@@ -61,6 +68,7 @@ filter_digest="$(jq -r '.sandbox.seccomp_filter_sha256' "$report")"
 
 jq -n \
   --arg commit "$commit" \
+  --arg release_version "$release_version" \
   --arg kernel "$kernel" \
   --arg bwrap "$bwrap_version" \
   --arg controllers "$controllers" \
@@ -73,6 +81,8 @@ jq -n \
   '{
     schema_version: 1,
     terminus_commit: $commit,
+    candidate_commit: $commit,
+    release_version: $release_version,
     runner: {os: "linux", kernel: $kernel},
     sandbox: {
       bubblewrap_version: $bwrap,

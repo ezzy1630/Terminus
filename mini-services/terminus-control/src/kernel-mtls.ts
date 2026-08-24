@@ -13,6 +13,7 @@ import { Observable } from "rxjs";
 import {
   ArtifactIngestServiceClientImpl,
   CodeIntelligenceServiceClientImpl,
+  ConnectorServiceClientImpl,
   ExtensionRuntimeServiceClientImpl,
   FileServiceClientImpl,
   JobServiceClientImpl,
@@ -126,6 +127,7 @@ export function createKernelMtlsClients(config: KernelMtlsConfig): KernelMtlsCli
     policies: new PolicyServiceClientImpl(rpc),
     secrets: new SecretServiceClientImpl(rpc),
     network: new NetworkServiceClientImpl(rpc),
+    connectors: new ConnectorServiceClientImpl(rpc),
     codeIntel: new CodeIntelligenceServiceClientImpl(rpc),
     extensions: new ExtensionRuntimeServiceClientImpl(rpc),
     artifacts: new ArtifactIngestServiceClientImpl(rpc),

@@ -1,6 +1,6 @@
 # Threat model
 
-This document covers Terminus's threat actors (SPEC §36.2) and the threat/control matrix (Appendix I.1). For the trust-zone model and non-bypassability invariant, see `docs/architecture/trust-boundaries.md`. For the bypass register, see `docs/security/effect-bypass-register.yaml`.
+This document covers Terminus's threat actors (SPEC §36.2) and the threat/control matrix (Appendix I.1). For the trust-zone model and non-bypassability invariant, see `docs/architecture/trust-boundaries.md`. `docs/security/effect-bypass-register.yaml` records the retired inherited-source exception.
 
 ## Scope (SPEC §36.1)
 
@@ -174,7 +174,7 @@ Every requested effect is classified into: `READ_LOCAL`, `WRITE_LOCAL`, `EXECUTE
 ## Related
 
 - `docs/architecture/trust-boundaries.md` — trust zones Z0–Z5, non-bypassability invariant.
-- `docs/security/effect-bypass-register.yaml` — bootstrap bypass inventory.
+- `docs/security/effect-bypass-register.yaml` — retired inherited-source exception tombstone.
 - `docs/security/non-bypassability-tests.md` — the test plan.
 - `SECURITY.md` — security policy and reporting.
 - `docs/runbooks/security-incident.md` — incident response.

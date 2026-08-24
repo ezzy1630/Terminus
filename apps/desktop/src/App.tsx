@@ -18,25 +18,44 @@
  *
  * Per SPEC §25.1: "The initial shell must appear before heavy feature
  * bundles load." Settings, onboarding, review, conversation, and the
- * task inspector are split behind React.lazy boundaries.
+ * task inspector and operator cockpit are split behind React.lazy boundaries.
  */
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { CalendarClock, GitPullRequestArrow, MessageCircle, Monitor, Moon, PanelRight, Puzzle, Sun } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { FolderClosed, MessageCircle, PanelLeft, PanelRight } from "lucide-react";
 import { Layout } from "./components/Layout";
 import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
 import { Sidebar } from "./components/Sidebar";
 import { Composer } from "./components/Composer";
 import { NewTaskScreen } from "./components/NewTaskScreen";
-import { EmptyState } from "./components/EmptyState";
-import { CommandPalette, buildDefaultCommands } from "./components/CommandPalette";
-import { useTerminusStore, useSelectedSessionTasks, useSelectedTask, useSelectedTaskEvents } from "./hooks/use-terminus";
+import { MissionBoardView } from "./components/MissionBoardView";
+import { EmptyState } from "./ui/EmptyState";
+import { TaskStatusPill } from "./components/StatusIndicator";
+import {
+  useTerminusStore,
+  useSelectedSessionTasks,
+  useSelectedTask,
+  useSelectedTaskEventHistory,
+  useSelectedTaskEvents,
+  normalizeTaskStatus,
+} from "./hooks/use-terminus";
 import { useThemeStore } from "./hooks/use-theme";
-import { useViewport } from "./hooks/use-viewport";
-import { deriveComputerUseActivity } from "./lib/task-surface";
-import { api } from "./lib/api";
 import type { Theme } from "./types";
 import type { SidebarDestination } from "./components/Sidebar";
 import type { SettingCategoryId } from "./components/Settings";
+import type { TaskV2Snapshot } from "./types/v2";
+import { FIXED_SHORTCUTS, matchesShortcut, shortcutDisplay } from "./lib/shortcuts";
+import { restoreAppDialogFocusOrigin, setAppDialogFocusOrigin } from "./hooks/use-dialog-focus";
+import { buildDefaultCommands } from "./lib/command-catalog";
+import { Button } from "./ui/Button";
+import { DialogSurface } from "./ui/Dialog";
+import { IconButton } from "./ui/IconButton";
+import { Skeleton, Spinner } from "./ui/Status";
+import { Tabs } from "./ui/Tabs";
+
+const CommandPalette = lazy(async () => {
+  const paletteModule = await import("./components/CommandPalette");
+  return { default: paletteModule.CommandPalette };
+});
 
 const Settings = lazy(async () => {
   const settingsModule = await import("./components/Settings");
@@ -63,60 +82,131 @@ const Inspector = lazy(async () => {
   return { default: inspectorModule.Inspector };
 });
 
-const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
 
-type SecondaryDestination = Exclude<SidebarDestination, "new_task" | "chat"> | "chat";
+const AgentsView = lazy(async () => {
+  const agentsModule = await import("./components/AgentsView");
+  return { default: agentsModule.AgentsView };
+});
 
-const DESTINATION_SURFACES: Record<SecondaryDestination, {
-  icon: JSX.Element;
-  title: string;
-  description: string;
-  actionLabel: string;
-}> = {
-  scheduled: {
-    icon: <CalendarClock size={18} strokeWidth={1.6} />,
-    title: "Nothing scheduled yet",
-    description: "Scheduled tasks will appear here when the control plane exposes them. Start with a focused task whenever you are ready.",
-    actionLabel: "Start a task",
-  },
-  plugins: {
-    icon: <Puzzle size={18} strokeWidth={1.6} />,
-    title: "Plugins are quiet for now",
-    description: "Installed capabilities will be listed here with their trust boundary and current status.",
-    actionLabel: "Open settings",
-  },
-  pull_requests: {
-    icon: <GitPullRequestArrow size={18} strokeWidth={1.6} />,
-    title: "No pull requests yet",
-    description: "Pull requests created from verified task changes will be collected here.",
-    actionLabel: "Start a review",
-  },
-  chat: {
-    icon: <MessageCircle size={18} strokeWidth={1.6} />,
-    title: "Start a conversation",
-    description: "Choose a project and describe what you want to explore, build, review, or fix.",
-    actionLabel: "New task",
-  },
-};
+const MissionLedgerView = lazy(async () => {
+  const cockpitModule = await import("./components/Cockpit/MissionLedgerView");
+  return { default: cockpitModule.MissionLedgerView };
+});
 
-function DestinationSurface({
-  destination,
-  onStartTask,
-  onOpenSettings,
+const EffectQueueView = lazy(async () => {
+  const cockpitModule = await import("./components/Cockpit/EffectQueueView");
+  return { default: cockpitModule.EffectQueueView };
+});
+
+const ArtifactDiffInspectorView = lazy(async () => {
+  const cockpitModule = await import("./components/Cockpit/ArtifactDiffInspectorView");
+  return { default: cockpitModule.ArtifactDiffInspectorView };
+});
+
+const FleetBudgetView = lazy(async () => {
+  const cockpitModule = await import("./components/Cockpit/FleetBudgetView");
+  return { default: cockpitModule.FleetBudgetView };
+});
+
+const CausalReplayView = lazy(async () => {
+  const cockpitModule = await import("./components/Cockpit/CausalReplayView");
+  return { default: cockpitModule.CausalReplayView };
+});
+
+const ClaimEvidenceGraphView = lazy(async () => {
+  const cockpitModule = await import("./components/Cockpit/ClaimEvidenceGraphView");
+  return { default: cockpitModule.ClaimEvidenceGraphView };
+});
+
+const AttentionCenterModal = lazy(async () => {
+  const cockpitModule = await import("./components/Cockpit/AttentionCenterModal");
+  return { default: cockpitModule.AttentionCenterModal };
+});
+
+function SelectedTaskReviewPane({
+  taskId,
+  onClose,
+  onDraftRevision,
 }: {
-  destination: SecondaryDestination;
-  onStartTask: () => void;
-  onOpenSettings: () => void;
+  taskId: string;
+  onClose: () => void;
+  onDraftRevision: (instruction: string) => void;
 }): JSX.Element {
-  const surface = DESTINATION_SURFACES[destination];
-  const action = destination === "plugins" ? onOpenSettings : onStartTask;
+  const events = useSelectedTaskEvents();
+  const history = useSelectedTaskEventHistory();
+  return (
+    <ReviewPane
+      key={taskId}
+      events={history ? [] : events}
+      eventHistoryIncomplete={history !== null}
+      taskId={taskId}
+      onClose={onClose}
+      onDraftRevision={onDraftRevision}
+    />
+  );
+}
+
+const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
+const INSPECTOR_VISIBILITY_KEY = "terminus-desktop.inspector-visible.";
+type AppOverlay = "palette" | "settings" | "onboarding" | "attention" | null;
+type TaskWorkspaceTab = "overview" | "activity" | "changes" | "replay" | "usage" | "evidence";
+
+function parseTaskWorkspaceTab(value: string): TaskWorkspaceTab | null {
+  switch (value) {
+    case "overview":
+    case "activity":
+    case "changes":
+    case "replay":
+    case "usage":
+    case "evidence":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function readInspectorVisibility(taskId: string): boolean {
+  try { return window.localStorage.getItem(`${INSPECTOR_VISIBILITY_KEY}${taskId}`) === "true"; }
+  catch { return false; }
+}
+
+function ModalLoadingFallback({ label, onClose }: { label: string; onClose: () => void }): JSX.Element {
+  return (
+    <DialogSurface
+        open
+        onOpenChange={(open) => { if (!open) onClose(); }}
+        accessibleTitle={`Loading ${label}`}
+        aria-describedby="modal-loading-description"
+        className="dialog-panel fixed left-1/2 top-1/2 z-[calc(var(--z-dialog)+1)] flex w-[min(384px,calc(100%-32px))] -translate-x-1/2 -translate-y-1/2 flex-col rounded-[10px] border border-default bg-elevated p-5 text-primary shadow-lg"
+      >
+        <h2 className="text-md font-semibold">Loading {label}</h2>
+        <p id="modal-loading-description" className="mt-1 text-sm text-secondary">
+          The task workspace remains unchanged while this interface loads.
+        </p>
+        <div className="mt-5 flex items-center gap-2 text-sm text-secondary" role="status">
+          <Spinner /> Loading…
+        </div>
+        <div className="mt-5 flex justify-end">
+          <Button variant="secondary" size="sm" onClick={onClose}>Close</Button>
+        </div>
+    </DialogSurface>
+  );
+}
+
+/**
+ * The only non-task navigation surface left. Scheduled / Plugins /
+ * Pull-requests placeholders were removed: the control plane exposes no
+ * backing data for them, and unbacked UI is dead UI (SPEC §11 — no empty
+ * sections).
+ */
+function ChatDestinationSurface({ onStartTask }: { onStartTask: () => void }): JSX.Element {
   return (
     <div className="flex h-full items-center justify-center bg-canvas">
       <EmptyState
-        icon={surface.icon}
-        title={surface.title}
-        description={surface.description}
-        action={{ label: surface.actionLabel, onClick: action, shortcutHint: destination === "plugins" ? "⌘," : "⌘N" }}
+        icon={<MessageCircle size={18} strokeWidth={1.6} />}
+        title="Start a conversation"
+        description="Choose a project and describe what you want to explore, build, review, or fix."
+        action={{ label: "New task", onClick: onStartTask, shortcutHint: shortcutDisplay(FIXED_SHORTCUTS.newTask) }}
       />
     </div>
   );
@@ -142,73 +232,157 @@ function markOnboardingComplete(): void {
 
 export function App(): JSX.Element {
   const refreshAll = useTerminusStore((s) => s.refreshAll);
+  const selectedSessionId = useTerminusStore((s) => s.selectedSessionId);
+  const sessions = useTerminusStore((s) => s.sessions);
   const selectedTaskId = useTerminusStore((s) => s.selectedTaskId);
+  const selectedTaskPage = useTerminusStore((s) => s.selectedSessionId ? s.taskPagesBySession[s.selectedSessionId] : undefined);
+  const loadMoreTasks = useTerminusStore((s) => s.loadMoreTasks);
   const selectTask = useTerminusStore((s) => s.selectTask);
-  const healthReady = useTerminusStore((s) => s.healthReady);
-  const lastError = useTerminusStore((s) => s.lastError);
   const setDraft = useTerminusStore((s) => s.setDraft);
   const selectedTask = useSelectedTask();
-  const selectedTaskEvents = useSelectedTaskEvents();
   const selectedSessionTasks = useSelectedSessionTasks();
-  const viewport = useViewport();
+  const selectedSession = useMemo(
+    () => sessions.find((session) => session.id === selectedSessionId) ?? null,
+    [selectedSessionId, sessions],
+  );
 
-  const theme = useThemeStore((s) => s.theme);
-  const setTheme = useThemeStore((s) => s.setTheme);
   const cycleTheme = useThemeStore((s) => s.cycleTheme);
   const toggleDensity = useThemeStore((s) => s.toggleDensity);
 
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsCategory, setSettingsCategory] = useState<SettingCategoryId>("general");
-  const [onboardingOpen, setOnboardingOpen] = useState<boolean>(() => shouldShowOnboarding());
+  const [overlay, setOverlay] = useState<AppOverlay>(() => shouldShowOnboarding() ? "onboarding" : null);
+  const previousOverlayRef = useRef<AppOverlay>(null);
+  const [onboardingInitialStep, setOnboardingInitialStep] = useState<1 | 2>(() => shouldShowOnboarding() ? 1 : 2);
+  const [onboardingProjectPath, setOnboardingProjectPath] = useState<string | undefined>();
+  const [settingsCategory, setSettingsCategory] = useState<SettingCategoryId>("appearance");
   const [activeDestination, setActiveDestination] = useState<SidebarDestination>("new_task");
+  const [selectedCanonicalTaskId, setSelectedCanonicalTaskId] = useState<string | null>(null);
+  const [taskWorkspaceTab, setTaskWorkspaceTab] = useState<TaskWorkspaceTab>("overview");
 
-  const [computerUseExpandedTaskId, setComputerUseExpandedTaskId] = useState<string | null>(null);
-  const [computerUseHiddenTaskId, setComputerUseHiddenTaskId] = useState<string | null>(null);
-  const [computerUseStoppedTaskId, setComputerUseStoppedTaskId] = useState<string | null>(null);
   const [changesOpen, setChangesOpen] = useState(false);
-  const [inspectorVisible, setInspectorVisible] = useState(true);
-  const [inspectorPinned, setInspectorPinned] = useState(false);
-  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [inspectorVisibilityByTask, setInspectorVisibilityByTask] = useState<Record<string, boolean>>({});
   const [sidebarVisible, setSidebarVisible] = useState(true);
-  const computerUseActivity = useMemo(
-    () => deriveComputerUseActivity(selectedTaskEvents),
-    [selectedTaskEvents],
-  );
+  const inspectorVisible = selectedTaskId === null
+    ? false
+    : inspectorVisibilityByTask[selectedTaskId] ?? readInspectorVisibility(selectedTaskId);
 
-  const stopComputerUse = useCallback(async (): Promise<void> => {
-    if (!selectedTaskId) return;
-    try {
-      await api.cancelTask(selectedTaskId, "computer_use_stopped_by_user");
-      setComputerUseExpandedTaskId(null);
-      setComputerUseHiddenTaskId(null);
-      setComputerUseStoppedTaskId(selectedTaskId);
-    } catch (error) {
-      useTerminusStore.setState({
-        lastError: error instanceof Error ? error.message : "Failed to stop computer use",
-      });
+  useLayoutEffect(() => {
+    const previous = previousOverlayRef.current;
+    if (previous === null && overlay !== null) {
+      setAppDialogFocusOrigin(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    } else if (previous !== null && overlay === null) {
+      restoreAppDialogFocusOrigin();
     }
-  }, [selectedTaskId]);
+    previousOverlayRef.current = overlay;
+  }, [overlay]);
+
+  useEffect(() => () => {
+    if (previousOverlayRef.current !== null) restoreAppDialogFocusOrigin();
+  }, []);
 
   const toggleInspector = useCallback((): void => {
-    if (viewport.inspectorOverlay && !inspectorPinned) {
-      setInspectorPinned(true);
-      setInspectorVisible(true);
-      return;
-    }
-    setInspectorVisible((visible) => !visible);
-  }, [inspectorPinned, viewport.inspectorOverlay]);
+    if (!selectedTaskId) return;
+    const next = !(inspectorVisibilityByTask[selectedTaskId] ?? readInspectorVisibility(selectedTaskId));
+    setInspectorVisibilityByTask((current) => ({ ...current, [selectedTaskId]: next }));
+    try { window.localStorage.setItem(`${INSPECTOR_VISIBILITY_KEY}${selectedTaskId}`, String(next)); } catch { /* optional preference */ }
+  }, [inspectorVisibilityByTask, selectedTaskId]);
 
   const goToNewTask = useCallback((): void => {
     setActiveDestination("new_task");
+    setSelectedCanonicalTaskId(null);
     selectTask(null);
     setChangesOpen(false);
   }, [selectTask]);
 
-  const openSettings = useCallback((category: SettingCategoryId = "general"): void => {
-    setSettingsCategory(category);
-    setSettingsOpen(true);
+  const openDestination = useCallback((destination: SidebarDestination): void => {
+    setActiveDestination(destination);
+    setSelectedCanonicalTaskId(null);
+    if (destination !== "chat") setChangesOpen(false);
   }, []);
+
+  const openTaskWorkspace = useCallback((tab: TaskWorkspaceTab): void => {
+    setTaskWorkspaceTab(tab);
+    setActiveDestination("task_details");
+    setChangesOpen(false);
+  }, []);
+
+  const inspectCanonicalTask = useCallback((taskId: string): void => {
+    setSelectedCanonicalTaskId(taskId);
+    setTaskWorkspaceTab("overview");
+    setActiveDestination("task_details");
+    setChangesOpen(false);
+  }, []);
+
+  const openBoardTask = useCallback((task: TaskV2Snapshot): void => {
+    if (task.conversationContext === null) {
+      inspectCanonicalTask(task.id);
+      return;
+    }
+    setSelectedCanonicalTaskId(null);
+    setActiveDestination("chat");
+    setChangesOpen(false);
+    selectTask(task.id);
+  }, [inspectCanonicalTask, selectTask]);
+
+  const openSettings = useCallback((category: SettingCategoryId = "appearance"): void => {
+    setSettingsCategory(category);
+    setOverlay("settings");
+  }, []);
+
+  const openProject = useCallback((projectPath?: string): void => {
+    // React passes a MouseEvent to unwrapped click handlers. Keep the native
+    // drop path, but never let an event object become persisted path state.
+    setOnboardingProjectPath(typeof projectPath === "string" ? projectPath : undefined);
+    setOnboardingInitialStep(2);
+    setOverlay("onboarding");
+  }, []);
+
+  useEffect(() => {
+    const desktop = window.terminusDesktop;
+    if (!desktop) return;
+    return desktop.onCommand((commandId) => {
+      switch (commandId) {
+        case "command-palette":
+          setOverlay((current) => current === "palette" ? null : "palette");
+          break;
+        case "open-project":
+          openProject();
+          break;
+        case "settings":
+          openSettings("appearance");
+          break;
+        case "shortcut-reference":
+          openSettings("shortcuts");
+          break;
+        case "new-task":
+          setOverlay(null);
+          goToNewTask();
+          break;
+        case "show-changes":
+          if (selectedTaskId) setChangesOpen((open) => !open);
+          break;
+        case "toggle-inspector":
+          toggleInspector();
+          break;
+        case "toggle-sidebar":
+          setSidebarVisible((visible) => !visible);
+          break;
+      }
+    });
+  }, [goToNewTask, openProject, openSettings, selectedTaskId, toggleInspector]);
+
+  useEffect(() => {
+    const desktop = window.terminusDesktop;
+    if (!desktop) return;
+    return desktop.onDirectoryDrop((projectPath) => openProject(projectPath));
+  }, [openProject]);
+
+  useEffect(() => {
+    const objective = activeDestination === "chat"
+      ? selectedTask?.contract?.objective?.trim()
+      : undefined;
+    const title = objective ? `${objective} — Terminus` : "Terminus";
+    void window.terminusDesktop?.setWindowTitle(title);
+  }, [activeDestination, selectedTask?.contract?.objective]);
 
   // Initial data load.
   useEffect(() => {
@@ -216,7 +390,8 @@ export function App(): JSX.Element {
     // Reconcile when the user returns to the app instead of polling while
     // idle. Active task updates remain event-driven through SSE.
     const refreshOnFocus = (): void => {
-      void useTerminusStore.getState().refreshSessions();
+      const state = useTerminusStore.getState();
+      void Promise.all([state.refreshSessions(), state.refreshPinnedTasks()]);
     };
     window.addEventListener("focus", refreshOnFocus);
     return () => window.removeEventListener("focus", refreshOnFocus);
@@ -225,32 +400,41 @@ export function App(): JSX.Element {
   // ⌘K opens the command palette (SPEC §18). ⌘, opens Settings (SPEC §20).
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      if (matchesShortcut(e, FIXED_SHORTCUTS.commandPalette)) {
         e.preventDefault();
-        setPaletteOpen((o) => !o);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
+        setOverlay((current) => current === "palette" ? null : current === null ? "palette" : current);
+        return;
+      }
+      if (matchesShortcut(e, FIXED_SHORTCUTS.settings)) {
+        e.preventDefault();
+        if (overlay === "settings") setOverlay(null);
+        else if (overlay === null) openSettings("appearance");
+        return;
+      }
+      if (matchesShortcut(e, FIXED_SHORTCUTS.openProject)) {
+        e.preventDefault();
+        if (overlay === null || overlay === "onboarding") openProject();
+        return;
+      }
+      if (matchesShortcut(e, FIXED_SHORTCUTS.shortcutReference)) {
+        e.preventDefault();
+        if (overlay === null || overlay === "settings") openSettings("shortcuts");
+        return;
+      }
+      if (overlay !== null) return;
+      if (matchesShortcut(e, FIXED_SHORTCUTS.newTask)) {
         e.preventDefault();
         goToNewTask();
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d" && selectedTaskId) {
+      } else if (matchesShortcut(e, FIXED_SHORTCUTS.showChanges) && selectedTaskId) {
         e.preventDefault();
         setChangesOpen((open) => !open);
-      } else if ((e.metaKey || e.ctrlKey) && e.key === "]") {
+      } else if (matchesShortcut(e, FIXED_SHORTCUTS.toggleInspector)) {
         e.preventDefault();
         toggleInspector();
-      } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
-        e.preventDefault();
-        if (settingsOpen) setSettingsOpen(false);
-        else openSettings("general");
-      } else if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+      } else if (matchesShortcut(e, FIXED_SHORTCUTS.toggleSidebar)) {
         e.preventDefault();
         setSidebarVisible((visible) => !visible);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "o") {
-        e.preventDefault();
-        setOnboardingOpen(true);
-      } else if ((e.metaKey || e.ctrlKey) && e.key === "/") {
-        e.preventDefault();
-        openSettings("shortcuts");
-      } else if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+      } else if (matchesShortcut(e, FIXED_SHORTCUTS.taskSlot)) {
         const task = selectedSessionTasks[Number(e.key) - 1];
         if (task) {
           e.preventDefault();
@@ -262,205 +446,268 @@ export function App(): JSX.Element {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [goToNewTask, openSettings, selectedSessionTasks, selectedTaskId, selectTask, settingsOpen, toggleInspector]);
+  }, [goToNewTask, openProject, openSettings, overlay, selectedSessionTasks, selectedTaskId, selectTask, toggleInspector]);
 
   useEffect(() => {
     const onOpenSettings = (event: Event): void => {
       const detail = event instanceof CustomEvent
         ? event.detail as { category?: SettingCategoryId } | undefined
         : undefined;
-      openSettings(detail?.category ?? "general");
+      openSettings(detail?.category ?? "appearance");
     };
-    const openOnboarding = (): void => setOnboardingOpen(true);
+    const openOnboarding = (): void => openProject();
+    const openCommandPalette = (): void => setOverlay("palette");
     window.addEventListener("terminus:open-settings", onOpenSettings);
     window.addEventListener("terminus:open-onboarding", openOnboarding);
+    window.addEventListener("terminus:open-command-palette", openCommandPalette);
     return () => {
       window.removeEventListener("terminus:open-settings", onOpenSettings);
       window.removeEventListener("terminus:open-onboarding", openOnboarding);
+      window.removeEventListener("terminus:open-command-palette", openCommandPalette);
     };
-  }, [openSettings]);
+  }, [openProject, openSettings]);
 
   // Build the command catalog. Memoized so the palette doesn't re-rank
   // on every App re-render.
+  const taskCommandsEnabled = selectedTaskId !== null || selectedCanonicalTaskId !== null;
   const commands = useMemo(
-    () =>
-      buildDefaultCommands({
+    () => [
+      ...buildDefaultCommands({
+        openProject,
         newTask: goToNewTask,
         showChanges: selectedTaskId ? () => setChangesOpen(true) : undefined,
-        openTerminal: () => setTerminalOpen(true),
-        toggleInspector,
-        pinInspector: () => {
-          setInspectorPinned((pinned) => !pinned);
-          setInspectorVisible(true);
-        },
+        toggleInspector: selectedTaskId ? toggleInspector : undefined,
+        toggleSidebar: () => setSidebarVisible((visible) => !visible),
+        sidebarVisible,
         switchTheme: () => cycleTheme(),
         switchDensity: () => toggleDensity(),
         openSettings,
-        openProject: undefined,
-        openTask: undefined,
-        switchModel: undefined,
-        startSubagent: undefined,
-        commit: undefined,
-        push: undefined,
-        compareBranch: undefined,
-        createPullRequest: undefined,
-        openInCursor: undefined,
-        openInTerminal: undefined,
-        revealInFinder: undefined,
-        viewShortcuts: undefined,
+        openMissionBoard: () => openDestination("board"),
+        openAttentionCenter: () => setOverlay("attention"),
+        openAgents: () => openDestination("agents"),
+        openMissionLedger: taskCommandsEnabled ? () => openTaskWorkspace("overview") : undefined,
+        openEffectQueue: taskCommandsEnabled ? () => openTaskWorkspace("activity") : undefined,
+        openArtifactDiff: taskCommandsEnabled ? () => openTaskWorkspace("changes") : undefined,
+        openFleetBudget: taskCommandsEnabled ? () => openTaskWorkspace("usage") : undefined,
+        openCausalReplay: taskCommandsEnabled ? () => openTaskWorkspace("replay") : undefined,
+        openClaimEvidence: taskCommandsEnabled ? () => openTaskWorkspace("evidence") : undefined,
+        viewShortcuts: () => openSettings("shortcuts"),
       }),
-    [cycleTheme, goToNewTask, openSettings, selectedTaskId, toggleDensity, toggleInspector],
+      ...selectedSessionTasks.map((task) => ({
+        id: `task.open.${task.id}`,
+        label: task.contract?.objective ?? task.id,
+        group: "Task" as const,
+        description: `Open loaded task ${task.id}`,
+        keywords: [task.id, "open", "switch", "loaded task"],
+        action: () => {
+          selectTask(task.id);
+          openDestination("chat");
+        },
+      })),
+      ...(selectedSessionId && selectedTaskPage?.nextCursor ? [{
+        id: `task.load-more.${selectedSessionId}`,
+        label: "Load more tasks",
+        group: "Task" as const,
+        description: "Fetch the next task page before searching again",
+        keywords: ["search more tasks", "next page", "loaded tasks"],
+        action: () => loadMoreTasks(selectedSessionId),
+      }] : []),
+    ],
+    [cycleTheme, goToNewTask, loadMoreTasks, openDestination, openProject, openSettings, openTaskWorkspace, selectTask, selectedSessionId, selectedSessionTasks, selectedTask, selectedTaskId, selectedTaskPage?.nextCursor, sidebarVisible, taskCommandsEnabled, toggleDensity, toggleInspector],
   );
 
   const showNewTask = selectedTaskId === null && activeDestination === "new_task";
-  const showNavigationSurface = selectedTaskId === null && !showNewTask;
+  const showNavigationSurface = selectedTaskId === null && activeDestination === "chat";
+  const durableTaskId = selectedTask?.id ?? null;
 
   const onCompleteOnboarding = useCallback((): void => {
     markOnboardingComplete();
-    setOnboardingOpen(false);
+    setOverlay(null);
   }, []);
 
   const draftReviewRevision = useCallback((instruction: string): void => {
     if (!selectedTaskId) return;
-    setDraft(selectedTaskId, instruction);
-    setChangesOpen(false);
-    window.requestAnimationFrame(() => {
-      window.dispatchEvent(new Event("terminus:focus-composer"));
-    });
+    const existing = useTerminusStore.getState().draftsByTask[selectedTaskId]?.trim() ?? "";
+    setDraft(selectedTaskId, existing ? `${existing}\n\n${instruction}` : instruction);
   }, [selectedTaskId, setDraft]);
 
   const conversation = (
-    <Suspense fallback={<div className="flex h-full items-center justify-center text-tertiary" style={{ fontSize: "var(--font-size-sm)" }}>Loading task…</div>}>
-      <Conversation />
+    <Suspense
+      fallback={
+        <div className="content-column grid h-full content-center gap-2 px-6" role="status" aria-label="Loading conversation">
+          <Skeleton className="h-4 w-28" />
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-4/5" />
+        </div>
+      }
+    >
+      <Conversation onNewTask={goToNewTask} />
     </Suspense>
   );
 
   return (
     <>
       <Layout
+        sidebarVisible={sidebarVisible}
+        inspectorVisible={activeDestination === "chat" && inspectorVisible && durableTaskId !== null && !changesOpen}
+        backgroundInert={overlay !== null}
+        center={activeDestination === "task_details" ? (
+          <span className="ui-label text-secondary">Task</span>
+        ) : activeDestination === "chat" && selectedTask ? (
+          <span className="flex min-w-0 max-w-2xl items-center gap-2.5 text-primary">
+            <FolderClosed size={14} className="shrink-0 text-tertiary" aria-hidden />
+            <span className="ui-page-title truncate">{selectedTask.contract?.objective ?? selectedTask.id}</span>
+            <TaskStatusPill status={normalizeTaskStatus(selectedTask.status)} />
+          </span>
+        ) : undefined}
         sidebar={
           <Sidebar
-            activeDestination={selectedTaskId ? "chat" : activeDestination}
-            onNavigate={setActiveDestination}
+            activeDestination={activeDestination}
+            onNavigate={(destination) => {
+              openDestination(destination);
+              if (destination === "new_task") selectTask(null);
+            }}
+            onOpenAttentionCenter={() => setOverlay("attention")}
+            onOpenProject={openProject}
+            taskActionsEnabled={selectedTask !== null}
           />
         }
-        sidebarVisible={sidebarVisible}
-        // The inspector is contextual. A new-task screen has no task-bound
-        // context yet, so keeping it out of the canvas restores the calm,
-        // focused Codex-style start composition.
-        inspectorVisible={Boolean(selectedTask) && inspectorVisible && (!changesOpen || inspectorPinned) && (!viewport.inspectorOverlay || inspectorPinned)}
-        terminalOpen={terminalOpen}
-        onTerminalOpenChange={setTerminalOpen}
-        center={
-          selectedTask ? (
-            <div className="min-w-0 max-w-[460px] truncate text-secondary" style={{ fontSize: "var(--font-size-xs)" }}>
-              {selectedTask.contract?.objective ?? "Task"}
-            </div>
-          ) : undefined
-        }
         inspector={
-          <Suspense fallback={null}>
-            <Inspector
-              computerUseSession={{
-                active: computerUseActivity.active && computerUseStoppedTaskId !== selectedTaskId,
-                expanded: computerUseExpandedTaskId === selectedTaskId,
-                hidden: computerUseHiddenTaskId === selectedTaskId,
-              }}
-            onComputerUseHide={() => setComputerUseHiddenTaskId(selectedTaskId)}
-            onComputerUseShow={() => setComputerUseHiddenTaskId(null)}
-            onComputerUseStop={() => void stopComputerUse()}
-            onComputerUseToggleExpanded={(expanded) => setComputerUseExpandedTaskId(expanded ? selectedTaskId : null)}
-              onShowChanges={() => setChangesOpen(true)}
-            />
-          </Suspense>
+          activeDestination === "chat" && durableTaskId ? (
+            <Suspense fallback={null}>
+              <Inspector
+                onShowChanges={() => setChangesOpen(true)}
+              />
+            </Suspense>
+          ) : null
         }
         main={
-          showNewTask ? (
-            <NewTaskScreen />
-          ) : showNavigationSurface ? (
-            <DestinationSurface
-              destination={activeDestination === "new_task" ? "chat" : activeDestination}
-              onStartTask={goToNewTask}
-              onOpenSettings={openSettings}
-            />
-          ) : changesOpen ? (
-            <ResizableReviewLayout
-              conversation={<div className="flex h-full min-w-0 flex-col">
-                <div className="min-h-0 flex-1">{conversation}</div>
-                <div className="border-t border-subtle" style={{ background: "var(--bg-canvas)", padding: "10px 20px 14px" }}>
+          <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-tertiary">Loading</div>}>
+            {showNewTask ? (
+              <NewTaskScreen onOpenProject={openProject} />
+            ) : activeDestination === "board" ? (
+              <MissionBoardView
+                onOpenTask={openBoardTask}
+                onInspectTask={inspectCanonicalTask}
+              />
+            ) : activeDestination === "agents" ? (
+              <AgentsView />
+            ) : activeDestination === "task_details" ? (
+              <Tabs
+                value={taskWorkspaceTab}
+                onValueChange={(value) => {
+                  const tab = parseTaskWorkspaceTab(value);
+                  if (tab) setTaskWorkspaceTab(tab);
+                }}
+                label="Task workspace views"
+                items={[
+                  { value: "overview", label: "Overview", content: <MissionLedgerView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
+                  { value: "activity", label: "Activity", content: <EffectQueueView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
+                  { value: "changes", label: "Changes", content: <ArtifactDiffInspectorView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
+                  { value: "replay", label: "Replay", content: <CausalReplayView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
+                  { value: "usage", label: "Usage", content: <FleetBudgetView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
+                  { value: "evidence", label: "Evidence", content: <ClaimEvidenceGraphView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
+                ]}
+              />
+            ) : showNavigationSurface ? (
+              <ChatDestinationSurface onStartTask={goToNewTask} />
+            ) : changesOpen && durableTaskId ? (
+              <ResizableReviewLayout
+                conversation={<div className="flex h-full min-w-0 flex-col">
+                  <div className="min-h-0 flex-1">{conversation}</div>
+                  <div className="composer-dock px-5 pb-3 pt-2">
+                    <Composer />
+                  </div>
+                </div>}
+                review={<Suspense fallback={<div className="flex h-full items-center justify-center bg-diff text-tertiary text-sm" >Loading review</div>}>
+                  <SelectedTaskReviewPane
+                    taskId={durableTaskId}
+                    onClose={() => setChangesOpen(false)}
+                    onDraftRevision={draftReviewRevision}
+                  />
+                </Suspense>}
+              />
+            ) : (
+              <div className="flex h-full flex-col">
+                <div className="min-h-0 flex-1">
+                  {conversation}
+                </div>
+                <div className="composer-dock px-6 pb-3 pt-2">
                   <Composer />
                 </div>
-              </div>}
-              review={<Suspense fallback={<div className="flex h-full items-center justify-center bg-diff text-tertiary" style={{ fontSize: "var(--font-size-sm)" }}>Loading review…</div>}>
-                <ReviewPane events={selectedTaskEvents} onClose={() => setChangesOpen(false)} onDraftRevision={draftReviewRevision} />
-              </Suspense>}
+              </div>
+            )}
+          </Suspense>
+        }
+        left={
+          <>
+            <IconButton
+              onClick={() => setSidebarVisible((visible) => !visible)}
+              label={sidebarVisible ? "Hide sidebar" : "Show sidebar"}
+              icon={<PanelLeft size={14} />}
+              aria-pressed={sidebarVisible}
+              data-tooltip={sidebarVisible ? "Hide sidebar" : "Show sidebar"}
+              className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary"
             />
-          ) : (
-            <div className="flex h-full flex-col">
-              <div className="min-h-0 flex-1">
-                {conversation}
-              </div>
-              <div
-                className="border-t border-subtle"
-                style={{ background: "var(--bg-canvas)", padding: "12px 32px 16px" }}
-              >
-                <Composer />
-              </div>
-            </div>
-          )
+            {/* The space name is the sidebar's header. Without it the left
+                column's first content sat 32px below the right column's,
+                which is what made the two columns read as misaligned. */}
+            {selectedSession ? (
+              <span className="ui-label min-w-0 max-w-40 truncate text-secondary">
+                {selectedSession.title}
+              </span>
+            ) : null}
+          </>
         }
         right={
           <>
-            {/* Theme cycle: system → light → dark → system. */}
-            <button
-              type="button"
-              onClick={() => setTheme(theme === "system" ? "light" : theme === "light" ? "dark" : "system")}
-              aria-label={`Theme: ${theme}`}
-              title={`Theme: ${theme}`}
-              className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
-            >
-              {theme === "system" ? <Monitor size={14} /> : theme === "light" ? <Sun size={14} /> : <Moon size={14} />}
-            </button>
-            <button
-              type="button"
-              onClick={toggleInspector}
-              disabled={!selectedTask}
-              aria-label={inspectorVisible ? "Hide task context" : "Show task context"}
-              title={selectedTask ? (inspectorVisible ? "Hide task context" : "Show task context") : "Task context appears when a task is selected"}
-              className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-35"
-            >
-              <PanelRight size={14} />
-            </button>
-            {/* Health indicator — a single restrained dot. */}
-            <span
-              aria-label={healthReady ? "Control plane ready" : "Control plane offline"}
-              title={healthReady ? "Control plane ready" : lastError ?? "Control plane offline"}
-              className="ml-2 inline-block h-1.5 w-1.5 rounded-full"
-              style={{ background: healthReady ? "var(--color-success)" : "var(--color-error)" }}
-            />
+            {activeDestination === "chat" ? (
+              <IconButton
+                onClick={toggleInspector}
+                disabled={!selectedTask}
+                label={inspectorVisible ? "Hide task context" : "Show task context"}
+                icon={<PanelRight size={14} />}
+                aria-pressed={inspectorVisible}
+                data-tooltip={selectedTask ? (inspectorVisible ? "Hide task context" : "Show task context") : "Task context appears when a task is selected"}
+                className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-35"
+              />
+            ) : null}
           </>
         }
       />
-      <CommandPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
-        commands={commands}
-      />
-      {settingsOpen ? (
-        <Suspense fallback={null}>
+      {overlay === "palette" ? (
+        <Suspense fallback={<ModalLoadingFallback label="command palette" onClose={() => setOverlay(null)} />}>
+          <CommandPalette open onClose={() => setOverlay(null)} commands={commands} />
+        </Suspense>
+      ) : null}
+      {overlay === "settings" ? (
+        <Suspense fallback={<ModalLoadingFallback label="settings" onClose={() => setOverlay(null)} />}>
           <Settings
             key={settingsCategory}
-            open={settingsOpen}
-            onClose={() => setSettingsOpen(false)}
+            open
+            onClose={() => setOverlay(null)}
             initialCategoryId={settingsCategory}
           />
         </Suspense>
       ) : null}
-      {onboardingOpen ? (
-        <Suspense fallback={null}>
+      {overlay === "onboarding" ? (
+        <Suspense fallback={<ModalLoadingFallback label="project setup" onClose={() => setOverlay(null)} />}>
           <Onboarding
+            key={`${onboardingInitialStep}:${onboardingProjectPath ?? "picker"}`}
             onComplete={onCompleteOnboarding}
             pickDirectory={window.terminusDesktop?.pickDirectory}
+            initialStep={onboardingInitialStep}
+            initialProjectPath={onboardingProjectPath}
+            mode={onboardingInitialStep === 1 ? "first-run" : "open-project"}
+          />
+        </Suspense>
+      ) : null}
+      {overlay === "attention" ? (
+        <Suspense fallback={<ModalLoadingFallback label="attention center" onClose={() => setOverlay(null)} />}>
+          <AttentionCenterModal
+            isOpen
+            onClose={() => setOverlay(null)}
+            selectedTaskId={durableTaskId}
           />
         </Suspense>
       ) : null}

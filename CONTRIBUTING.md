@@ -20,7 +20,7 @@ Required tools (pinned in `mise.toml`):
 
 - Rust 1.97.0 (stable)
 - Node 22.x LTS
-- pnpm (workspace), Bun 1.3.x (upstream bridge only)
+- pnpm (workspace), Bun 1.3.x (development and test runner)
 - Python 3.12.13 with `uv`
 - `buf`, `just`, `cargo-deny`, `sqlx-cli`
 
@@ -40,7 +40,6 @@ See `SPEC.md` §42.1 for the normative monorepo layout. Quick map:
 - `policies/`, `prompts/`, `skills/`, `capability-packs/`, `evals/`, `adapters/` — declarative configuration.
 - `docs/` — architecture, decisions (ADRs), runbooks, security, quality, plans.
 - `migrations/sqlite/` — schema migrations.
-- `upstream/` — OpenCode fork pin and divergence budget.
 
 ## Code style
 
@@ -88,7 +87,7 @@ See `.github/pull_request_template.md`. Every PR description includes:
 
 ## Rollback or feature flag
 
-## Upstream divergence impact
+## Standalone dependency impact
 ```
 
 ## Ownership matrix (SPEC §49.3)
@@ -105,7 +104,7 @@ See `.github/pull_request_template.md`. Every PR description includes:
 | Memory | memory owner | privacy + evaluation |
 | MCP/plugins/adapters | ecosystem owner | security owner |
 | Storage/migrations | persistence owner | recovery owner |
-| Upstream OpenCode | upstream owner | affected package owner |
+| Standalone dependency boundary | architecture owner | affected package owner |
 | Release | release owner | security + protocol + eval owners |
 
 See `.github/CODEOWNERS` for the current repository owner.
@@ -118,7 +117,7 @@ A change requires review from:
 - the security owner for policy, sandbox, secret, network, plugin, MCP, auth, or multi-tenant changes;
 - the protocol owner for public/proto/schema changes;
 - the evaluation owner for default policy/model/context changes;
-- the upstream owner for inherited OpenCode changes.
+- the architecture owner for standalone dependency-boundary changes.
 
 **High-risk changes require two approvals and passing targeted security/eval suites.**
 
@@ -160,9 +159,9 @@ just new-eval suite=... task=...
 
 Scaffolds include README, AGENTS, tests, ownership, lint config, observability placeholders, and CI registration (SPEC §45.7).
 
-## Upstream divergence
+## Standalone dependency boundary
 
-Any change to inherited OpenCode files MUST update `upstream/divergence-budget.yaml` and `docs/security/effect-bypass-register.yaml`. Generic fixes are proposed upstream. See `docs/runbooks/upstream-merge-conflict.md`.
+First-party runtime/build code must not import or depend on OpenCode. External harness integrations use the adapter protocol. Run `just standalone-check` for every dependency, workspace, client, or protocol change.
 
 ## Questions
 

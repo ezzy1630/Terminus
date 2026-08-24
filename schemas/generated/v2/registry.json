@@ -4,7 +4,7 @@
   "sourceOfTruth": "packages/domain/src/aggregates.ts (zod)",
   "generator": "tools/codegen/v2-schemas.ts",
   "notes": [
-    "bigint constraint values are emitted as {} (JSON Schema has no bigint type); canonical values are Micros integers serialized as strings on the wire."
+    "bigint constraint values are emitted as {} (JSON Schema has no bigint type); canonical Micros, token counts, and byte counts are serialized as decimal strings on the wire."
   ],
   "schemas": [
     {
@@ -18,15 +18,15 @@
       "name": "task-contract-v2",
       "title": "TaskContractV2",
       "path": "schemas/generated/v2/task-contract-v2.json",
-      "sha256": "sha256:d2547b5408822139bb488cdc193278869bf103b0a0d12279abb1ea72876e7357",
-      "bytes": 4366
+      "sha256": "sha256:30a3fb59cdfcaf3cf313625c97aa8adbb4ac225a06196dd3d56ef4fcbdcd046e",
+      "bytes": 5255
     },
     {
       "name": "task-v2",
       "title": "TaskV2",
       "path": "schemas/generated/v2/task-v2.json",
-      "sha256": "sha256:44178c042e32fa2bfe6afe1a8a7af9f3fdea96b251d521c711bfaff123086cce",
-      "bytes": 6459
+      "sha256": "sha256:4883088a79784ae30af452cc61ff9cd375702be940538ce9b05a8b8f6080cef2",
+      "bytes": 8081
     },
     {
       "name": "workflow-node",
@@ -88,15 +88,15 @@
       "name": "evidence",
       "title": "Evidence",
       "path": "schemas/generated/v2/evidence.json",
-      "sha256": "sha256:cbd79d792ac1ea18da714cca6d2e8d526f60416b8eaafbd63edf00cf373907d5",
-      "bytes": 1756
+      "sha256": "sha256:8d914322aa5a3cac177e4e718dab2c7313aa7e074386732e9da2722e689c7a07",
+      "bytes": 1944
     },
     {
       "name": "resource-handle",
       "title": "ResourceHandle",
       "path": "schemas/generated/v2/resource-handle.json",
-      "sha256": "sha256:4f37aec50d52e4a38ce597eafeba4660064b13b57a90c839fecce7049d27a41f",
-      "bytes": 1511
+      "sha256": "sha256:db70b9b3b0aba4e687b97479b9e223350ec2df0f3d35a321fb92abebd5f1eab8",
+      "bytes": 1695
     },
     {
       "name": "authorization-instance",
@@ -123,8 +123,8 @@
       "name": "effect-record",
       "title": "EffectRecord",
       "path": "schemas/generated/v2/effect-record.json",
-      "sha256": "sha256:467d1a175bc30a141e4a91a53e26810c0d031f0069827a3103c4fd30239349da",
-      "bytes": 4552
+      "sha256": "sha256:7d4588fa86d298a73b9c5df34345bfb248d44b08a03d7332115d01780a7791cd",
+      "bytes": 4760
     },
     {
       "name": "question",
@@ -186,15 +186,15 @@
       "name": "model-profile",
       "title": "ModelProfile",
       "path": "schemas/generated/v2/model-profile.json",
-      "sha256": "sha256:e7835ec38c8904e4380b008daa2fa510f2ca4188bcf39c789dd72a209d822f0c",
-      "bytes": 5980
+      "sha256": "sha256:8f873846957f9ad50f1be68450433187c687b76a7b0548fb8320267da613a502",
+      "bytes": 3684
     },
     {
       "name": "route-decision-v2",
       "title": "RouteDecisionV2",
       "path": "schemas/generated/v2/route-decision-v2.json",
-      "sha256": "sha256:efa0ed192220fb7c1b27ed76e4970c778bf66ee8d157644eea0b374bcdc7b5a8",
-      "bytes": 1419
+      "sha256": "sha256:c3ec7d12eaf1157e468a0bae7033109d32b51ded46dd193aa91ed8632d5a1981",
+      "bytes": 1498
     },
     {
       "name": "model-cohort-posterior",
@@ -214,15 +214,281 @@
       "name": "stagnation-report",
       "title": "StagnationReport",
       "path": "schemas/generated/v2/stagnation-report.json",
-      "sha256": "sha256:6dfade5df0b0ca22c67b65d61a7b0c7e0683713d16bdcb454f1492317db1052d",
-      "bytes": 1286
+      "sha256": "sha256:5819fd9a4edfe051b539756d8feded590ef5f3ed4c9e07c0bcbacba03dd849f9",
+      "bytes": 1365
     },
     {
       "name": "provider-continuation",
       "title": "ProviderContinuation",
       "path": "schemas/generated/v2/provider-continuation.json",
-      "sha256": "sha256:12ff279b6255c873927c3e05d06727f9cdd2b5d44e3d7cec950ab14ca7957f29",
-      "bytes": 1250
+      "sha256": "sha256:7cf5fcff3b13990faf61b40ca06ed7a9d12dc607417573330e27880492bf42d4",
+      "bytes": 1329
+    },
+    {
+      "name": "organization",
+      "title": "Organization",
+      "path": "schemas/generated/v2/organization.json",
+      "sha256": "sha256:0544c1199bad3c532b6e4a59fea4d9793fddeba0a5882ad4cd8be3fe4d2283bb",
+      "bytes": 630
+    },
+    {
+      "name": "department",
+      "title": "Department",
+      "path": "schemas/generated/v2/department.json",
+      "sha256": "sha256:e3ab7b5e394934e10d2de40e143c59b918747aecddf8a893359b4bfcc442d882",
+      "bytes": 893
+    },
+    {
+      "name": "operator-agent",
+      "title": "OperatorAgent",
+      "path": "schemas/generated/v2/operator-agent.json",
+      "sha256": "sha256:789349e6a4aba3ecb4caf0e5ba41148b64809d2fcee90d74463669b6bdbda39c",
+      "bytes": 761
+    },
+    {
+      "name": "agent-room",
+      "title": "AgentRoom",
+      "path": "schemas/generated/v2/agent-room.json",
+      "sha256": "sha256:66d7397c757c59517619623d97bba3b419084140b1484dfd823e31e12108f714",
+      "bytes": 1230
+    },
+    {
+      "name": "capability-directory-entry",
+      "title": "CapabilityDirectoryEntry",
+      "path": "schemas/generated/v2/capability-directory-entry.json",
+      "sha256": "sha256:6d6e483b7b6c2bfc39bc765b739042ac0d8e044238865ff8e7125a2b175302b0",
+      "bytes": 983
+    },
+    {
+      "name": "material-question",
+      "title": "MaterialQuestion",
+      "path": "schemas/generated/v2/material-question.json",
+      "sha256": "sha256:834070d7db767295147befad5dfcbfb683b285c41fa6e1eb1fc96927c24801ee",
+      "bytes": 1963
+    },
+    {
+      "name": "attention-assessment",
+      "title": "AttentionAssessment",
+      "path": "schemas/generated/v2/attention-assessment.json",
+      "sha256": "sha256:bd7e11bef155842feed7c898157553f497c138099a7db97ee0e4a7cba180e9cd",
+      "bytes": 3270
+    },
+    {
+      "name": "structured-intervention",
+      "title": "StructuredIntervention",
+      "path": "schemas/generated/v2/structured-intervention.json",
+      "sha256": "sha256:cf8c7979a6edbe1900cd937d650fdeaf333c52db4c9c2f155e78f6a08997d2dc",
+      "bytes": 1775
+    },
+    {
+      "name": "causal-step",
+      "title": "CausalStep",
+      "path": "schemas/generated/v2/causal-step.json",
+      "sha256": "sha256:d39d18da2a3dfdbef8e3de59fea84ebdb8e47505dbd24fe2fdcfe8af48a600b3",
+      "bytes": 1409
+    },
+    {
+      "name": "causal-replay-trace",
+      "title": "CausalReplayTrace",
+      "path": "schemas/generated/v2/causal-replay-trace.json",
+      "sha256": "sha256:36664de1605bb75eb5eb82712f38af4aa859a4de6e2a1dd2997dea32308a3416",
+      "bytes": 4030
+    },
+    {
+      "name": "counterfactual-experiment",
+      "title": "CounterfactualExperiment",
+      "path": "schemas/generated/v2/counterfactual-experiment.json",
+      "sha256": "sha256:daa306437a306cd1c9775013d4ce8485832453aa246c13591a734e1a644f707a",
+      "bytes": 1650
+    },
+    {
+      "name": "mobile-supervision-session",
+      "title": "MobileSupervisionSession",
+      "path": "schemas/generated/v2/mobile-supervision-session.json",
+      "sha256": "sha256:a094bf033a6de1765ba4b488c0d59df2d03eeb44429997b76d470d3d6ef2f8f3",
+      "bytes": 1154
+    },
+    {
+      "name": "acp-context-injection",
+      "title": "AcpContextInjection",
+      "path": "schemas/generated/v2/acp-context-injection.json",
+      "sha256": "sha256:9d7ff8f3136a9110aded2eae3ab1675df48666b40bbc4f1b7bab6c2226c441c5",
+      "bytes": 2317
+    },
+    {
+      "name": "ui-viewport",
+      "title": "UiViewport",
+      "path": "schemas/generated/v2/ui-viewport.json",
+      "sha256": "sha256:dace516a63f03eff736ec5cebc3b69aa4c7f98e33aa579977b3f86b1dbd12eee",
+      "bytes": 665
+    },
+    {
+      "name": "ui-bounding-box",
+      "title": "UiBoundingBox",
+      "path": "schemas/generated/v2/ui-bounding-box.json",
+      "sha256": "sha256:8aed735f5bdc1202240872b106674dd775cabc5705d75f0ad16d577abc8f0204",
+      "bytes": 477
+    },
+    {
+      "name": "ui-dom-node",
+      "title": "UiDomNode",
+      "path": "schemas/generated/v2/ui-dom-node.json",
+      "sha256": "sha256:d2dc0aceabf6375787743589624b897b6bbfbc2afa09602169542533f08bbf43",
+      "bytes": 1557
+    },
+    {
+      "name": "ui-accessibility-node",
+      "title": "UiAccessibilityNode",
+      "path": "schemas/generated/v2/ui-accessibility-node.json",
+      "sha256": "sha256:90cc7edecd15b29835c3a153d45ad286b5e862f0c31f4782874b36e4152d337d",
+      "bytes": 1662
+    },
+    {
+      "name": "ui-element-target",
+      "title": "UiElementTarget",
+      "path": "schemas/generated/v2/ui-element-target.json",
+      "sha256": "sha256:12c375fb71a72e7b8561e9e70bce83c162e6304bcb9556e291db025845d371b1",
+      "bytes": 1577
+    },
+    {
+      "name": "ui-observation-input",
+      "title": "UiObservationInput",
+      "path": "schemas/generated/v2/ui-observation-input.json",
+      "sha256": "sha256:f23c10cceb8068e58dc77a27dff96f34d720110593e4944daad1158d3fe881a2",
+      "bytes": 6514
+    },
+    {
+      "name": "ui-observation",
+      "title": "UiObservation",
+      "path": "schemas/generated/v2/ui-observation.json",
+      "sha256": "sha256:f6bb642f2efb6c86676a603ee3bcc55787b0e405e1f3e086ef17fcb642201a8f",
+      "bytes": 6467
+    },
+    {
+      "name": "computer-use-action",
+      "title": "ComputerUseAction",
+      "path": "schemas/generated/v2/computer-use-action.json",
+      "sha256": "sha256:42ae1372d79b86a7e3f47f18ddc8efc3aa5d46342860638c8bdf2df74abdedd6",
+      "bytes": 4866
+    },
+    {
+      "name": "semantic-target-verification",
+      "title": "SemanticTargetVerification",
+      "path": "schemas/generated/v2/semantic-target-verification.json",
+      "sha256": "sha256:fbc83bdb68e7cca210e582f8a32fed406a7f9c0992d8fc466f15dad5cc231b4b",
+      "bytes": 3832
+    },
+    {
+      "name": "ui-evidence-record",
+      "title": "UiEvidenceRecord",
+      "path": "schemas/generated/v2/ui-evidence-record.json",
+      "sha256": "sha256:29bfa406f54b0aeec61f6e9ff6a9e2dce8b33a2b7bb54f849a7e8e86cdc7340e",
+      "bytes": 1362
+    },
+    {
+      "name": "browser-desktop-pool",
+      "title": "BrowserDesktopPool",
+      "path": "schemas/generated/v2/browser-desktop-pool.json",
+      "sha256": "sha256:f113b8e9ce8079dc012bb7bb809022ebf911f76063fd9a8142a657ab0659b4f9",
+      "bytes": 1585
+    },
+    {
+      "name": "pool-lease",
+      "title": "PoolLease",
+      "path": "schemas/generated/v2/pool-lease.json",
+      "sha256": "sha256:792165c53c475a2a6e4f0a4ebbf5fee5dc2b773d213973dbbaf348ac57a01100",
+      "bytes": 1102
+    },
+    {
+      "name": "human-takeover-session",
+      "title": "HumanTakeoverSession",
+      "path": "schemas/generated/v2/human-takeover-session.json",
+      "sha256": "sha256:fbf5c782e6fbe70f2ba7abdde25b6e43fe0249382b3aac8a4b8f13ca6c16060a",
+      "bytes": 1748
+    },
+    {
+      "name": "data-flow-policy",
+      "title": "DataFlowPolicy",
+      "path": "schemas/generated/v2/data-flow-policy.json",
+      "sha256": "sha256:6aa1e2b323d4547f12e5933744943926ce37c15119598d45bbe55675f16622b2",
+      "bytes": 1034
+    },
+    {
+      "name": "data-transfer-audit",
+      "title": "DataTransferAudit",
+      "path": "schemas/generated/v2/data-transfer-audit.json",
+      "sha256": "sha256:85c2fc14436c60797ef4e267b1512ee33bd525fc6f23fac280aa7388e957857c",
+      "bytes": 2348
+    },
+    {
+      "name": "data-flow-check-result",
+      "title": "DataFlowCheckResult",
+      "path": "schemas/generated/v2/data-flow-check-result.json",
+      "sha256": "sha256:f9560004be1d68c53d9a1d56dd3f062f107d5d62a9a613a9e739c0cfd0ec2ac7",
+      "bytes": 3066
+    },
+    {
+      "name": "external-connector-spec",
+      "title": "ExternalConnectorSpec",
+      "path": "schemas/generated/v2/external-connector-spec.json",
+      "sha256": "sha256:45ff4d99ac0788d8437ddc17232434167286b7ff2ca71a8ba1a812b1364f59be",
+      "bytes": 1447
+    },
+    {
+      "name": "connector-call-intent",
+      "title": "ConnectorCallIntent",
+      "path": "schemas/generated/v2/connector-call-intent.json",
+      "sha256": "sha256:280da0963ecc607f6d4ef6190a0d5055dbfec65be9d76e6a4b676695bac987c5",
+      "bytes": 1440
+    },
+    {
+      "name": "connector-execution-observation",
+      "title": "ConnectorExecutionObservation",
+      "path": "schemas/generated/v2/connector-execution-observation.json",
+      "sha256": "sha256:f999ae3388ab4b75a4f22c5f0ba8d0382a67cf6a6f6209a3e109bf0da3d33c7b",
+      "bytes": 1326
+    },
+    {
+      "name": "connector-call-result",
+      "title": "ConnectorCallResult",
+      "path": "schemas/generated/v2/connector-call-result.json",
+      "sha256": "sha256:1e3229810fa9c45bff22290b006d2c3689582e3d593c080bf1e77a73f745f3ce",
+      "bytes": 1790
+    },
+    {
+      "name": "ambiguous-submit-reconciliation",
+      "title": "AmbiguousSubmitReconciliation",
+      "path": "schemas/generated/v2/ambiguous-submit-reconciliation.json",
+      "sha256": "sha256:e2e5d18c2fc3fb4f8e961e02f206e3532bd55e7b86c681b8d0b7d9932b01b503",
+      "bytes": 1469
+    },
+    {
+      "name": "incident-profile-spec",
+      "title": "IncidentProfileSpec",
+      "path": "schemas/generated/v2/incident-profile-spec.json",
+      "sha256": "sha256:03448614db28c12a73765063825c5dc89ac12540f5547a10396eb84063c17499",
+      "bytes": 1128
+    },
+    {
+      "name": "incident-execution-record",
+      "title": "IncidentExecutionRecord",
+      "path": "schemas/generated/v2/incident-execution-record.json",
+      "sha256": "sha256:4bf871368701ecb4164bbea862f52bbac7b08c163034a871ca4a0de302afec3f",
+      "bytes": 1512
+    },
+    {
+      "name": "research-profile-spec",
+      "title": "ResearchProfileSpec",
+      "path": "schemas/generated/v2/research-profile-spec.json",
+      "sha256": "sha256:49bb35656cc34d37f10be7a2ba4a96df2e8291b31dec3143712e27aeb4ff0c7c",
+      "bytes": 1103
+    },
+    {
+      "name": "research-provenance-record",
+      "title": "ResearchProvenanceRecord",
+      "path": "schemas/generated/v2/research-provenance-record.json",
+      "sha256": "sha256:9ab01ec0cbc3c2f2eed7d498476978650edf18fb720898ae1e771f6cfc204546",
+      "bytes": 2628
     }
   ]
 }

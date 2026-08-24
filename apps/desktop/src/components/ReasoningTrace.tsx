@@ -1,0 +1,110 @@
+/**
+ * Terminus Desktop — reasoning trace.
+ *
+ * The control plane already reports what a turn is doing between
+ * `turn.started` and `turn.completed` (`turn.context_compiling`,
+ * `turn.provider_running`, `turn.response_validating`, `turn.finalizing`).
+ * The feed used to drop every one of them, so the wait before the first token
+ * was indistinguishable from a hang.
+ *
+ * While the turn runs this is one quiet live line: a spinner, the current
+ * phase, and elapsed time. Once it settles it collapses to "Thought for 4.2s",
+ * which expands into the phases and how long each took. It never invents
+ * reasoning text — it reports only phases the control plane actually emitted.
+ */
+import { memo, useEffect, useState } from "react";
+import { ChevronRight } from "lucide-react";
+import { cn } from "../lib/cn";
+import { Button } from "../ui/Button";
+import type { ReasoningBlock, ReasoningPhaseKind } from "../types";
+
+const PHASE_LABEL: Record<ReasoningPhaseKind, string> = {
+  context_compiling: "Compiling context",
+  provider_running: "Thinking",
+  response_validating: "Validating response",
+  finalizing: "Finalizing",
+};
+
+/** Ticks once a second, but only while a turn is actually running. */
+function useElapsed(startedAt: string, endedAt: string | null): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (endedAt !== null) return;
+    const handle = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(handle);
+  }, [endedAt]);
+  const start = Date.parse(startedAt);
+  if (Number.isNaN(start)) return 0;
+  const end = endedAt === null ? now : Date.parse(endedAt);
+  return Math.max(0, (Number.isNaN(end) ? now : end) - start);
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
+}
+
+function ReasoningTraceImpl({ block }: { block: ReasoningBlock }): JSX.Element | null {
+  const [expanded, setExpanded] = useState(false);
+  const running = block.endedAt === null;
+  const elapsed = useElapsed(block.startedAt, block.endedAt);
+
+  // A turn that settled without reporting a single phase has nothing to say.
+  if (!running && block.phases.length === 0) return null;
+
+  const current = block.phases[block.phases.length - 1];
+  const label = running
+    ? PHASE_LABEL[current?.kind ?? "provider_running"]
+    : `Thought for ${formatDuration(elapsed)}`;
+
+  if (running) {
+    return (
+      <div className="my-1.5 flex items-center gap-2 px-1" role="status" aria-live="polite">
+        <span className="spinner-sm" aria-hidden />
+        <span className="ui-meta text-secondary">{label}</span>
+        <span className="ui-code text-tertiary tabular-nums">{formatDuration(elapsed)}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="my-1.5">
+      <Button
+        variant="bare"
+        onClick={() => setExpanded((open) => !open)}
+        aria-expanded={expanded}
+        className="flex items-center gap-1.5 rounded-md px-1 py-0.5 text-tertiary hover:text-secondary"
+      >
+        <ChevronRight
+          size={11}
+          className={cn("transition-transform", expanded && "rotate-90")}
+          aria-hidden
+        />
+        <span className="ui-meta">{label}</span>
+      </Button>
+      {expanded ? (
+        <ul className="mt-1 ml-2 flex flex-col gap-0.5 border-l border-subtle pl-3">
+          {block.phases.map((phase, index) => {
+            const next = block.phases[index + 1];
+            const from = Date.parse(phase.at);
+            const to = next ? Date.parse(next.at) : Date.parse(block.endedAt ?? phase.at);
+            const span = Number.isNaN(from) || Number.isNaN(to) ? null : Math.max(0, to - from);
+            return (
+              <li key={`${phase.kind}-${index}`} className="flex items-center gap-2">
+                <span className="ui-meta text-secondary">{PHASE_LABEL[phase.kind]}</span>
+                {span === null ? null : (
+                  <span className="ui-code text-tertiary tabular-nums">{formatDuration(span)}</span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+export const ReasoningTrace = memo(ReasoningTraceImpl);

@@ -1,85 +1,821 @@
-import { memo, useMemo, useState } from "react";
-import { FileDiff, PanelRightClose, Send } from "lucide-react";
-import { DiffViewer, parseUnifiedDiff } from "./DiffViewer";
-import { EmptyState } from "./EmptyState";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, FileDiff, PanelRightClose, Send } from "lucide-react";
+import { DiffViewer, parseUnifiedDiff, type DiffCommentAnchor, type DiffFile } from "./DiffViewer";
+import { EmptyState } from "../ui/EmptyState";
+import { ErrorState } from "./ErrorState";
 import { extractUnifiedDiffs } from "../lib/task-surface";
+import { api, TerminusApiError } from "../lib/api";
+import type { ArtifactSummary, TaskArtifactsPage, TerminusSseEvent } from "../types";
 import type { DiffComment } from "./DiffViewer";
-import type { TerminusSseEvent } from "../types";
+import { Select } from "../ui/Select";
+import { Skeleton } from "../ui/Status";
+import { Button } from "../ui/Button";
+
+/** Hard byte cap for inline artifact previews (bounded output). */
+const ARTIFACT_PREVIEW_BYTES = 256 * 1024;
+
+function isDiffArtifact(artifact: ArtifactSummary): boolean {
+  return (
+    artifact.media_type === "text/x-diff"
+    || artifact.media_type === "text/vnd.diff"
+    || /patch|diff/i.test(artifact.purpose)
+  );
+}
+
+interface OpenArtifact {
+  artifact: ArtifactSummary;
+  loading: boolean;
+  text: string | null;
+  truncated: boolean;
+  /** Populated when the artifact parses as a unified diff. */
+  files: DiffFile[];
+  parseError: string | null;
+}
+
+interface ArtifactInventoryState {
+  taskId: string | null;
+  page: TaskArtifactsPage | null;
+  error: string | null;
+  refreshing: boolean;
+}
+
+interface ReviewNote extends DiffComment {
+  sourceId: string;
+  sourceLabel: string;
+}
+
+interface EventDiffSource {
+  id: string;
+  label: string;
+  files: DiffFile[];
+}
+
+/**
+ * Event-derived review notes are bound to the authoritative stream event id.
+ * The patch body is deliberately not fingerprinted: short presentation hashes
+ * can collide and reopen feedback against unrelated evidence.
+ */
+export function eventDiffSourceId(
+  event: TerminusSseEvent,
+  eventIndex: number,
+  diffIndex: number,
+): string {
+  const sourceEventId = event.id
+    ? `${event.event}:${event.id}`
+    : `missing-event-id:${eventIndex}:${event.event}:${event.data.length}`;
+  return `event-diff:${sourceEventId}:${diffIndex}`;
+}
+
+const REVIEW_NOTES_PREFIX = "terminus-desktop.review-notes.v2.";
+const MAX_PERSISTED_REVIEW_NOTES = 200;
+const MAX_PERSISTED_REVIEW_NOTE_BYTES = 128 * 1024;
+const MAX_SESSION_REVIEW_NOTES = 250;
+const MAX_SESSION_REVIEW_NOTE_BYTES = 256 * 1024;
+const REVIEW_NOTES_WRITE_DELAY_MS = 150;
+const reviewNoteEncoder = new TextEncoder();
+let reviewNoteFallbackSequence = 0;
+
+function reviewNotesStorageKey(taskId: string): string {
+  return `${REVIEW_NOTES_PREFIX}${taskId}`;
+}
+
+function createReviewNoteId(sourceId: string, filePath: string, lineNo: number): string {
+  const randomId = globalThis.crypto?.randomUUID?.();
+  if (randomId) return `review-note:${randomId}`;
+  reviewNoteFallbackSequence += 1;
+  return `${sourceId}:${filePath}:${lineNo}:${Date.now()}:${reviewNoteFallbackSequence}`;
+}
+
+interface ReviewNotesLoad {
+  notes: ReviewNote[];
+  status: "ready" | "session_only" | "recovery_needed";
+  error: string | null;
+}
+
+interface ReviewNotesState extends ReviewNotesLoad {
+  taskId: string | null;
+}
+
+function reviewNotesCollectionError(
+  notes: ReviewNote[],
+  maxCount: number,
+  maxBytes: number,
+): string | null {
+  if (notes.length > maxCount) return `Review notes are limited to ${maxCount} per task.`;
+  if (reviewNoteEncoder.encode(JSON.stringify(notes)).byteLength > maxBytes) {
+    return `Review notes exceed the ${Math.floor(maxBytes / 1024)} KiB per-task storage limit.`;
+  }
+  return null;
+}
+
+function readReviewNotes(taskId: string | null | undefined): ReviewNotesLoad {
+  if (!taskId) return { notes: [], status: "ready", error: null };
+  try {
+    const storage = window.localStorage;
+    if (!storage) throw new Error("Local storage is unavailable.");
+    const raw = storage.getItem(reviewNotesStorageKey(taskId));
+    if (raw === null) return { notes: [], status: "ready", error: null };
+    if (reviewNoteEncoder.encode(raw).byteLength > MAX_PERSISTED_REVIEW_NOTE_BYTES) {
+      return {
+        notes: [],
+        status: "recovery_needed",
+        error: "Stored review notes exceed the supported limit. The original storage entry was preserved.",
+      };
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) throw new Error("Stored review notes are not a collection.");
+    const notes = parsed.flatMap((value): ReviewNote[] => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      const record = value as Record<string, unknown>;
+      if (
+        typeof record.id !== "string" ||
+        typeof record.sourceId !== "string" ||
+        typeof record.sourceLabel !== "string" ||
+        typeof record.filePath !== "string" ||
+        typeof record.lineNo !== "number" ||
+        !Number.isInteger(record.lineNo) ||
+        (record.anchor !== "old" && record.anchor !== "new") ||
+        typeof record.body !== "string" ||
+        typeof record.at !== "string"
+      ) return [];
+      return [{
+        id: record.id,
+        sourceId: record.sourceId,
+        sourceLabel: record.sourceLabel,
+        filePath: record.filePath,
+        lineNo: record.lineNo,
+        anchor: record.anchor,
+        body: record.body,
+        at: record.at,
+      }];
+    });
+    if (notes.length !== parsed.length || reviewNotesCollectionError(
+      notes,
+      MAX_PERSISTED_REVIEW_NOTES,
+      MAX_PERSISTED_REVIEW_NOTE_BYTES,
+    )) {
+      return {
+        notes: [],
+        status: "recovery_needed",
+        error: "Stored review notes are invalid. The original storage entry was preserved.",
+      };
+    }
+    return { notes, status: "ready", error: null };
+  } catch (error) {
+    return {
+      notes: [],
+      status: "recovery_needed",
+      error: error instanceof Error
+        ? `Stored review notes could not be read: ${error.message}`
+        : "Stored review notes could not be read.",
+    };
+  }
+}
+
+function writeReviewNotes(taskId: string, notes: ReviewNote[]): string | null {
+  const validationError = reviewNotesCollectionError(
+    notes,
+    MAX_PERSISTED_REVIEW_NOTES,
+    MAX_PERSISTED_REVIEW_NOTE_BYTES,
+  );
+  if (validationError) return `${validationError} Newer notes remain available only in this window.`;
+  try {
+    const storage = window.localStorage;
+    if (!storage) throw new Error("Local storage is unavailable.");
+    storage.setItem(reviewNotesStorageKey(taskId), JSON.stringify(notes));
+    return null;
+  } catch (error) {
+    return error instanceof Error
+      ? `Review notes remain available only in this window: ${error.message}`
+      : "Review notes remain available only in this window because local storage failed.";
+  }
+}
 
 interface ReviewPaneProps {
   events: TerminusSseEvent[];
+  /** True when the retained event tail is incomplete and cannot prove a patch. */
+  eventHistoryIncomplete?: boolean;
+  /** Selected task id — enables the real artifact inventory from the CAS. */
+  taskId?: string | null;
   onClose: () => void;
   onDraftRevision: (instruction: string) => void;
 }
 
-function ReviewPaneImpl({ events, onClose, onDraftRevision }: ReviewPaneProps): JSX.Element {
-  const [comments, setComments] = useState<DiffComment[]>([]);
-  const files = useMemo(
-    () => extractUnifiedDiffs(events).flatMap((diff) => parseUnifiedDiff(diff)),
-    [events],
-  );
+/**
+ * Changes review surface grounded in two real evidence sources:
+ *
+ *   1. Unified diffs attached to patch tool events by the runtime.
+ *   2. The task's artifact inventory (GET /v1/tasks/:id/artifacts), served
+ *      from the kernel's content-addressed store. Diff-typed artifacts are
+ *      fetched and parsed through the same viewer; other artifacts open as
+ *      byte-capped previews.
+ *
+ * Previews never truncate silently: when the byte cap hits, the pane states
+ * it and references the full artifact hash.
+ */
+function ReviewPaneImpl({
+  events,
+  eventHistoryIncomplete = false,
+  taskId,
+  onClose,
+  onDraftRevision,
+}: ReviewPaneProps): JSX.Element {
+  const initialNotesTaskId = taskId ?? null;
+  const [reviewNotesState, setReviewNotesState] = useState<ReviewNotesState>(() => ({
+    taskId: initialNotesTaskId,
+    ...readReviewNotes(initialNotesTaskId),
+  }));
+  const reviewNotesWriteTimerRef = useRef<number | null>(null);
+  const latestReviewNotesStateRef = useRef(reviewNotesState);
+  latestReviewNotesStateRef.current = reviewNotesState;
+  const comments = reviewNotesState.taskId === (taskId ?? null) ? reviewNotesState.notes : [];
+  const [artifactInventory, setArtifactInventory] = useState<ArtifactInventoryState>({
+    taskId: null,
+    page: null,
+    error: null,
+    refreshing: false,
+  });
+  const [selectedHash, setSelectedHash] = useState<string | null>(null);
+  const [openArtifact, setOpenArtifact] = useState<OpenArtifact | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [selectedEventSourceId, setSelectedEventSourceId] = useState<string | null>(null);
+  const [browsingArtifacts, setBrowsingArtifacts] = useState(false);
+  const [inventoryRequestVersion, setInventoryRequestVersion] = useState(0);
+  const [previewRequestVersion, setPreviewRequestVersion] = useState(0);
+  const [revisionQueued, setRevisionQueued] = useState(false);
+  const loadMoreInFlightRef = useRef(false);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
+      if (document.querySelector('[role="dialog"]')) return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  // Real patch evidence embedded in patch tool events.
+  const eventSources = useMemo<EventDiffSource[]>(() => {
+    const sources: EventDiffSource[] = [];
+    events.forEach((event, index) => {
+      const extracted = extractUnifiedDiffs([event]);
+      extracted.forEach((diff, diffIndex) => {
+        sources.push({
+          id: eventDiffSourceId(event, index, diffIndex),
+          label: event.id
+            ? `event ${event.id} · patch ${diffIndex + 1}`
+            : `unidentified event ${index + 1} · patch ${diffIndex + 1}`,
+          files: parseUnifiedDiff(diff),
+        });
+      });
+    });
+    return sources.filter((source) => source.files.length > 0);
+  }, [events]);
+  const visibleEventSources = eventHistoryIncomplete ? [] : eventSources;
+  const activeEventSource = visibleEventSources.find((source) => source.id === selectedEventSourceId)
+    ?? visibleEventSources[visibleEventSources.length - 1]
+    ?? null;
+  const eventFileCount = visibleEventSources.reduce((total, source) => total + source.files.length, 0);
+
+  useEffect(() => {
+    setSelectedHash(null);
+    setOpenArtifact(null);
+    setPreviewError(null);
+    setSelectedEventSourceId(null);
+    setBrowsingArtifacts(false);
+    setLoadingMore(false);
+    loadMoreInFlightRef.current = false;
+  }, [taskId]);
+
+  useEffect(() => {
+    const nextTaskId = taskId ?? null;
+    if (reviewNotesState.taskId === nextTaskId) return;
+    if (reviewNotesWriteTimerRef.current !== null) {
+      window.clearTimeout(reviewNotesWriteTimerRef.current);
+      reviewNotesWriteTimerRef.current = null;
+    }
+    const previous = latestReviewNotesStateRef.current;
+    if (previous.taskId && previous.status !== "recovery_needed") writeReviewNotes(previous.taskId, previous.notes);
+    setReviewNotesState({ taskId: nextTaskId, ...readReviewNotes(nextTaskId) });
+  }, [reviewNotesState.taskId, taskId]);
+
+  useEffect(() => {
+    if (!reviewNotesState.taskId || reviewNotesState.status === "recovery_needed") return;
+    if (reviewNotesWriteTimerRef.current !== null) window.clearTimeout(reviewNotesWriteTimerRef.current);
+    reviewNotesWriteTimerRef.current = window.setTimeout(() => {
+      reviewNotesWriteTimerRef.current = null;
+      const writeError = writeReviewNotes(reviewNotesState.taskId!, reviewNotesState.notes);
+      setReviewNotesState((current) => current.taskId === reviewNotesState.taskId
+        && current.notes === reviewNotesState.notes
+        ? { ...current, status: writeError ? "session_only" : "ready", error: writeError }
+        : current);
+    }, REVIEW_NOTES_WRITE_DELAY_MS);
+    return () => {
+      if (reviewNotesWriteTimerRef.current !== null) {
+        window.clearTimeout(reviewNotesWriteTimerRef.current);
+        reviewNotesWriteTimerRef.current = null;
+      }
+    };
+  }, [reviewNotesState.notes, reviewNotesState.status, reviewNotesState.taskId]);
+
+  useEffect(() => () => {
+    if (reviewNotesWriteTimerRef.current !== null) window.clearTimeout(reviewNotesWriteTimerRef.current);
+    const latest = latestReviewNotesStateRef.current;
+    if (latest.taskId && latest.status !== "recovery_needed") writeReviewNotes(latest.taskId, latest.notes);
+  }, []);
+
+  // Artifact inventory from the control plane (kernel CAS).
+  useEffect(() => {
+    if (!taskId) return;
+    let cancelled = false;
+    setArtifactInventory((current) => current.taskId === taskId
+      ? { ...current, error: null, refreshing: true }
+      : { taskId, page: null, error: null, refreshing: true });
+    api.listTaskArtifacts(taskId)
+      .then((page) => {
+        if (!cancelled) {
+          setArtifactInventory({ taskId, page, error: null, refreshing: false });
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setArtifactInventory({
+            taskId,
+            page: null,
+            error: err instanceof Error ? err.message : "Failed to load artifacts",
+            refreshing: false,
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [inventoryRequestVersion, taskId]);
+
+  const inventoryIsCurrent = artifactInventory.taskId === taskId;
+  const artifactPage = inventoryIsCurrent ? artifactInventory.page : null;
+  const artifactsError = inventoryIsCurrent ? artifactInventory.error : null;
+  const artifactsLoading = Boolean(taskId) && (!inventoryIsCurrent || artifactInventory.refreshing);
+  const retryInventory = useCallback((): void => {
+    setInventoryRequestVersion((version) => version + 1);
+  }, []);
+
+  // Fetch + decode the selected artifact whenever a new one is opened.
+  useEffect(() => {
+    if (!taskId || !selectedHash) return;
+    const artifact = artifactPage?.artifacts.find((a) => a.hash === selectedHash);
+    if (!artifact) return;
+    let cancelled = false;
+    api.getArtifactText(artifact.hash, taskId, ARTIFACT_PREVIEW_BYTES)
+      .then((result) => {
+        if (cancelled) return;
+        let files: DiffFile[] = [];
+        let parseError: string | null = null;
+        if (isDiffArtifact(artifact)) {
+          if (!result.truncated) {
+            files = parseUnifiedDiff(result.text);
+            if (files.length === 0) {
+              parseError = result.text.trim().length === 0
+                ? "The diff artifact is empty."
+                : "The artifact does not contain a recognizable unified diff.";
+            }
+          }
+        }
+        setPreviewError(null);
+        setOpenArtifact({
+          artifact,
+          loading: false,
+          text: result.text,
+          truncated: result.truncated,
+          files,
+          parseError,
+        });
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setPreviewError(err instanceof Error ? err.message : "Artifact preview is temporarily unavailable.");
+        setOpenArtifact((current) => current?.artifact.hash === selectedHash
+          ? { ...current, loading: false }
+          : current);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [artifactPage, previewRequestVersion, selectedHash, taskId]);
+
+  const retryPreview = useCallback((): void => {
+    if (!selectedHash) return;
+    setPreviewError(null);
+    setOpenArtifact((current) => current ? { ...current, loading: true } : current);
+    setPreviewRequestVersion((version) => version + 1);
+  }, [selectedHash]);
+
+  const closeOpenArtifact = useCallback((): void => {
+    setSelectedHash(null);
+    setOpenArtifact(null);
+    setPreviewError(null);
+  }, []);
+
+  const openArtifactPreview = useCallback((artifact: ArtifactSummary): void => {
+    setBrowsingArtifacts(true);
+    setOpenArtifact({ artifact, loading: true, text: null, truncated: false, files: [], parseError: null });
+    setPreviewError(null);
+    setSelectedHash(artifact.hash);
+  }, []);
+
+  const loadMore = useCallback(async (): Promise<void> => {
+    if (!taskId || !artifactPage?.next_cursor || loadMoreInFlightRef.current) return;
+    loadMoreInFlightRef.current = true;
+    setLoadingMore(true);
+    try {
+      const next = await api.listTaskArtifacts(taskId, artifactPage.next_cursor);
+      setArtifactInventory((current) => current.taskId === taskId && current.page
+        ? (() => {
+            const artifactsByHash = new Map(current.page.artifacts.map((artifact) => [artifact.hash, artifact]));
+            for (const artifact of next.artifacts) artifactsByHash.set(artifact.hash, artifact);
+            return {
+              taskId,
+              error: null,
+              page: {
+                task_id: next.task_id,
+                total: next.total,
+                artifacts: [...artifactsByHash.values()],
+                next_cursor: next.next_cursor,
+              },
+              refreshing: false,
+            };
+          })()
+        : { taskId, page: next, error: null, refreshing: false });
+    } catch (err: unknown) {
+      setArtifactInventory((current) => current.taskId === taskId
+        ? { ...current, error: err instanceof Error ? err.message : "Failed to load more artifacts" }
+        : current);
+    } finally {
+      loadMoreInFlightRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [artifactPage, taskId]);
+
+  const selectedIsDiff = openArtifact ? isDiffArtifact(openArtifact.artifact) : false;
+  const hasEvidence = activeEventSource !== null || (artifactPage?.artifacts.length ?? 0) > 0;
+
+  // A selected immutable artifact is one evidence source. Never append
+  // event-derived files under its hash: that would misattribute unrelated
+  // presentation history to the artifact.
+  const viewerFiles: DiffFile[] = openArtifact && selectedIsDiff
+    ? openArtifact.files
+    : browsingArtifacts
+      ? []
+      : activeEventSource?.files ?? [];
+  const activeSource = openArtifact && selectedIsDiff
+    ? {
+        id: `artifact:${openArtifact.artifact.hash}`,
+        label: `immutable artifact ${openArtifact.artifact.hash}`,
+      }
+    : !browsingArtifacts && activeEventSource
+      ? {
+        id: activeEventSource?.id ?? "event-diff:no-event-evidence",
+        label: activeEventSource?.label ?? "event diff snapshot unavailable",
+      }
+      : {
+          id: "review:no-active-evidence",
+          label: "no active review evidence",
+        };
+  const visibleComments = comments.filter((comment) => comment.sourceId === activeSource.id);
 
   return (
     <section className="flex h-full min-w-0 flex-1 flex-col bg-diff" aria-label="Changes review">
-      <header className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-default px-3">
-        <FileDiff size={15} className="text-secondary" />
-        <span className="text-primary" style={{ fontSize: "var(--font-size-sm)", fontWeight: 600 }}>
-          Changes
+      <header className="ui-view-header">
+        {openArtifact ? (
+          <Button
+            type="button"
+            onClick={closeOpenArtifact}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
+            aria-label="Back to changes overview"
+            data-tooltip="Back to changes overview"
+          >
+            <ArrowLeft size={14} />
+          </Button>
+        ) : (
+          <FileDiff size={15} className="text-secondary" />
+        )}
+        <span className="truncate text-primary text-sm" style={{ fontWeight: 600 }}>
+          {openArtifact ? openArtifact.artifact.hash.replace(/^sha256:/, "").slice(0, 16) + "…" : "Changes"}
         </span>
-        <span className="font-mono text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>
-          {files.length === 0 ? "waiting for patch evidence" : `${files.length} ${files.length === 1 ? "file" : "files"}`}
-        </span>
-        <button
+        {openArtifact ? (
+          <span className="ml-auto flex-shrink-0 font-mono text-tertiary text-xs" >
+            {openArtifact.artifact.purpose}
+          </span>
+        ) : (
+          <span className="font-mono text-tertiary text-xs" >
+            {artifactsLoading
+              ? "loading immutable artifacts"
+              : hasEvidence
+              ? `${eventFileCount} event ${eventFileCount === 1 ? "file" : "files"} · ${artifactPage?.total ?? 0} artifacts`
+              : "waiting for patch evidence"}
+          </span>
+        )}
+        <Button
           type="button"
           onClick={onClose}
-          className="ml-auto flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
+          className={openArtifact ? "" : "ml-auto"}
           aria-label="Close changes"
-          title="Close changes"
+          data-tooltip="Close changes"
+          style={{ marginLeft: openArtifact ? 8 : undefined, flexShrink: 0 }}
         >
           <PanelRightClose size={15} />
-        </button>
+        </Button>
       </header>
-      <div className="min-h-0 flex-1">
-        {files.length === 0 ? (
+      {eventHistoryIncomplete ? (
+        <p className="border-b border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning" role="status">
+          Event-derived patch evidence is hidden because the live history has a retention gap. Immutable task artifacts remain available below.
+        </p>
+      ) : null}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {openArtifact?.truncated ? (
+          <p
+            role="note"
+            className="border-b border-warning/40 bg-warning/5 px-3 py-2 font-mono text-warning text-xs"
+
+            data-tooltip={`Full artifact: ${openArtifact.artifact.hash}`}
+          >
+            Partial preview: stopped at {ARTIFACT_PREVIEW_BYTES.toLocaleString()} bytes. Structured diff review is disabled; the full immutable artifact is {openArtifact.artifact.hash}.
+          </p>
+        ) : null}
+        {previewError ? (
+          <ErrorState
+            severity="warning"
+            title="Artifact preview unavailable"
+            description={previewError}
+            action={{ label: "Retry preview", onClick: retryPreview }}
+            compact
+            className="m-3 rounded-md border border-subtle bg-elevated"
+          />
+        ) : !openArtifact && artifactsError && !artifactPage && (browsingArtifacts || !activeEventSource) ? (
+          <ErrorState
+            severity="warning"
+            title="Artifact inventory unavailable"
+            description={artifactsError}
+            action={{ label: "Retry inventory", onClick: retryInventory }}
+            compact
+            className="m-3 rounded-md border border-subtle bg-elevated"
+          />
+        ) : !openArtifact && artifactsLoading && (browsingArtifacts || !activeEventSource) ? (
+          <div className="grid gap-2 px-4 py-6" role="status" aria-label="Loading task artifacts">
+            <Skeleton className="h-4 w-40" />
+            <Skeleton className="h-3 w-2/3" />
+            <Skeleton className="h-24 w-full" />
+          </div>
+        ) : !openArtifact && !hasEvidence ? (
           <EmptyState
             icon={<FileDiff size={17} />}
             title="No reviewable changes yet"
             description="Patch evidence will appear here as the agent updates the workspace."
             compact
           />
+        ) : openArtifact && !selectedIsDiff && !openArtifact.loading ? (
+          <div className="flex h-full flex-col text-xs" >
+            <pre className="selectable overflow-x-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-primary" style={{ margin: 0 }}>
+              <code>{openArtifact.text ?? ""}</code>
+            </pre>
+          </div>
+        ) : openArtifact && selectedIsDiff && openArtifact.truncated ? (
+          <pre className="selectable overflow-x-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-primary text-xs" style={{ margin: 0 }}>
+            <code>{openArtifact.text ?? ""}</code>
+          </pre>
+        ) : openArtifact && selectedIsDiff && openArtifact.parseError ? (
+          <div className="px-4 py-6 text-tertiary text-sm" role="alert" >
+            {openArtifact.parseError}
+          </div>
+        ) : openArtifact && openArtifact.loading ? (
+          <div className="grid gap-2 px-4 py-6" role="status" aria-label="Loading artifact preview">
+            <Skeleton className="h-3 w-32" />
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="h-3 w-5/6" />
+          </div>
+        ) : viewerFiles.length > 0 ? (
+          <div className="flex h-full min-h-0 flex-col">
+            {!openArtifact && activeEventSource ? (
+              <div className="flex flex-shrink-0 items-center gap-2 bg-elevated px-3 py-2 text-xs" >
+                <label htmlFor="review-event-source" className="sr-only">Event evidence</label>
+                <Select
+                  id="review-event-source"
+                  label="Event diff snapshot"
+                  value={activeEventSource.id}
+                  onValueChange={setSelectedEventSourceId}
+                  className="min-w-0 flex-1 font-mono text-xs"
+                  options={visibleEventSources.map((source) => ({ value: source.id, label: source.label }))}
+                />
+                {taskId ? (
+                  <Button
+                    type="button"
+                    onClick={() => setBrowsingArtifacts(true)}
+                    aria-label="Browse artifacts"
+                    className="flex-shrink-0 rounded-sm px-2 py-1 text-primary hover:bg-hover"
+                  >
+                    Artifacts
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="min-h-0 flex-1">
+              <DiffViewer
+                key={openArtifact?.artifact.hash ?? activeEventSource?.id ?? "event-diffs"}
+                files={viewerFiles}
+                initialSelectedPath={viewerFiles[0]?.displayPath ?? viewerFiles[0]?.newPath}
+                comments={visibleComments}
+                onAddComment={(filePath, lineNo, anchor: DiffCommentAnchor, body) => {
+                  setReviewNotesState((current) => {
+                    if (current.taskId !== (taskId ?? null)) return current;
+                    const nextNotes = [
+                      ...current.notes,
+                      {
+                        id: createReviewNoteId(activeSource.id, filePath, lineNo),
+                        sourceId: activeSource.id,
+                        sourceLabel: activeSource.label,
+                        filePath,
+                        lineNo,
+                        anchor,
+                        body,
+                        at: new Date().toISOString(),
+                      },
+                    ];
+                    const sessionError = reviewNotesCollectionError(
+                      nextNotes,
+                      MAX_SESSION_REVIEW_NOTES,
+                      MAX_SESSION_REVIEW_NOTE_BYTES,
+                    );
+                    if (sessionError) {
+                      return { ...current, status: "recovery_needed", error: `${sessionError} The note was not added.` };
+                    }
+                    const persistenceError = reviewNotesCollectionError(
+                      nextNotes,
+                      MAX_PERSISTED_REVIEW_NOTES,
+                      MAX_PERSISTED_REVIEW_NOTE_BYTES,
+                    );
+                    const recoveryBlocked = current.status === "recovery_needed";
+                    return {
+                      ...current,
+                      notes: nextNotes,
+                      status: recoveryBlocked ? "recovery_needed" : persistenceError ? "session_only" : "ready",
+                      error: recoveryBlocked
+                        ? `${current.error ?? "Stored notes require recovery."} New notes remain available only in this window.`
+                        : persistenceError
+                        ? `${persistenceError} Newer notes remain available only in this window.`
+                        : null,
+                    };
+                  });
+                }}
+                onAskAgentRevise={(filePath, lineStart, lineEnd) => {
+                  onDraftRevision(`Please revise ${filePath} around lines ${lineStart}-${lineEnd}, based on ${activeSource.label}. Keep the current task scope and explain the change before applying it.`);
+                }}
+              />
+            </div>
+          </div>
         ) : (
-          <DiffViewer
-            files={files}
-            comments={comments}
-            onAddComment={(filePath, lineNo, body) => {
-              setComments((current) => [
-                ...current,
-                { id: `${filePath}:${lineNo}:${Date.now()}`, filePath, lineNo, body, at: new Date().toISOString() },
-              ]);
-            }}
-            onAskAgentRevise={(filePath, lineStart, lineEnd) => {
-              onDraftRevision(`Please revise ${filePath} around lines ${lineStart}-${lineEnd}. Keep the current task scope and explain the change before applying it.`);
-            }}
-          />
+          <div className="flex h-full min-h-0 flex-col">
+            {!openArtifact && activeEventSource ? (
+              <div className="flex flex-shrink-0 items-center justify-between border-b border-default bg-elevated px-3 py-2 text-xs" >
+                <span className="text-tertiary">Immutable task artifacts</span>
+                <Button
+                  type="button"
+                  onClick={() => setBrowsingArtifacts(false)}
+                  className="rounded-sm px-2 py-1 text-primary hover:bg-hover"
+                >
+                  Review event diff
+                </Button>
+              </div>
+            ) : null}
+            <ArtifactListSection
+              artifacts={artifactPage?.artifacts ?? []}
+              onOpen={openArtifactPreview}
+            />
+          </div>
         )}
       </div>
-      {comments.length > 0 ? (
-        <footer className="flex flex-shrink-0 items-center gap-2 border-t border-default px-3 py-2 text-secondary" style={{ fontSize: "var(--font-size-xs)" }}>
+      {artifactsError && (artifactPage !== null || activeEventSource !== null) ? (
+        <ErrorState
+          severity="warning"
+          title="Artifact inventory unavailable"
+          description={artifactsError}
+          action={{ label: "Retry inventory", onClick: retryInventory }}
+          compact
+          className="mx-3 mb-2 rounded-md border border-subtle bg-elevated"
+        />
+      ) : null}
+      {artifactPage && artifactPage.artifacts.length < artifactPage.total ? (
+        <div className="flex flex-shrink-0 items-center justify-between border-t border-default px-3 py-2 text-xs" >
+          <span className="font-mono text-tertiary">
+            {artifactPage.artifacts.length} of {artifactPage.total} artifacts
+          </span>
+          <Button
+            type="button"
+            onClick={() => void loadMore()}
+            disabled={!artifactPage.next_cursor || loadingMore}
+            className="rounded-sm px-2 py-1 text-primary hover:bg-hover disabled:opacity-50"
+          >
+            {loadingMore ? "Loading" : "Load more"}
+          </Button>
+        </div>
+      ) : null}
+      {reviewNotesState.taskId === (taskId ?? null) && reviewNotesState.error ? (
+        <div className="flex flex-shrink-0 items-center gap-2 border-t border-default px-3 py-2 text-danger text-xs" role="status" >
+          <span>{reviewNotesState.error}</span>
+          <Button
+            type="button"
+            className="ml-auto rounded-sm px-2 py-1 text-primary hover:bg-hover"
+            onClick={() => {
+              if (!taskId) return;
+              const loaded = readReviewNotes(taskId);
+              if (loaded.status === "ready") {
+                const mergedById = new Map(loaded.notes.map((note) => [note.id, note]));
+                for (const note of reviewNotesState.notes) mergedById.set(note.id, note);
+                const merged = [...mergedById.values()];
+                const error = writeReviewNotes(taskId, merged);
+                setReviewNotesState({
+                  taskId,
+                  notes: error ? reviewNotesState.notes : merged,
+                  status: error ? "session_only" : "ready",
+                  error,
+                });
+              } else {
+                setReviewNotesState((current) => ({ ...current, error: loaded.error }));
+              }
+            }}
+          >
+            Retry storage
+          </Button>
+        </div>
+      ) : null}
+      {visibleComments.length > 0 ? (
+        <footer className="flex flex-shrink-0 items-center gap-2 border-t border-default px-3 py-2 text-secondary text-xs" >
           <Send size={13} />
-          <span>{comments.length} {comments.length === 1 ? "review note" : "review notes"} ready.</span>
-          <button
+          <span>{visibleComments.length} {visibleComments.length === 1 ? "review note" : "review notes"} for {activeSource.label}.</span>
+          <Button
             type="button"
             onClick={() => {
-              const note = comments.map((comment) => `- ${comment.filePath}:${comment.lineNo} — ${comment.body}`).join("\n");
+              const note = visibleComments.map((comment) => `- [${comment.sourceLabel}] ${comment.filePath}:${comment.anchor}:${comment.lineNo} — ${comment.body}`).join("\n");
               onDraftRevision(`Please address this code review feedback:\n${note}`);
+              setRevisionQueued(true);
+              window.setTimeout(() => setRevisionQueued(false), 1600);
             }}
             className="ml-auto rounded-sm px-2 py-1 text-primary hover:bg-hover"
           >
-            Add to composer
-          </button>
+            {revisionQueued ? "Added" : "Add to composer"}
+          </Button>
+          <span className="sr-only" aria-live="polite">{revisionQueued ? "Review notes added to composer" : ""}</span>
         </footer>
       ) : null}
     </section>
+  );
+}
+
+function ArtifactListSection({
+  artifacts,
+  onOpen,
+}: {
+  artifacts: ArtifactSummary[];
+  onOpen: (artifact: ArtifactSummary) => void;
+}): JSX.Element {
+  if (artifacts.length === 0) {
+    return (
+      <EmptyState
+        icon={<FileDiff size={17} />}
+        title="No immutable artifacts"
+        description="This task has not published any immutable review artifacts."
+        compact
+      />
+    );
+  }
+  return (
+    <ul className="flex flex-col" aria-label="Task artifacts">
+      {artifacts.map((artifact) => (
+        <li key={artifact.hash} className="border-b border-subtle last:border-b-0">
+          <Button
+            type="button"
+            onClick={() => onOpen(artifact)}
+            className="flex w-full items-center gap-2 px-4 py-2 text-left hover:bg-hover text-xs"
+
+          >
+            <span className="truncate font-mono text-secondary" data-tooltip={artifact.hash}>
+              {artifact.hash}
+            </span>
+            <span className="ml-auto flex-shrink-0 font-mono text-tertiary">{artifact.purpose}</span>
+            {isDiffArtifact(artifact) ? (
+              <span className="flex-shrink-0 font-mono" style={{ color: "var(--color-info)" }}>diff</span>
+            ) : null}
+            {artifact.size_bytes !== null ? (
+              <span className="w-20 flex-shrink-0 text-right font-mono text-tertiary">
+                {artifact.size_bytes.toLocaleString()} B
+              </span>
+            ) : null}
+          </Button>
+        </li>
+      ))}
+    </ul>
   );
 }
 

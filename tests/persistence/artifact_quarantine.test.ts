@@ -22,7 +22,7 @@ describe("Artifact Corruption, Quarantine, and Retention Behavior", () => {
       async getMetadata(hash) {
         const b = store.get(hash);
         if (!b) return null;
-        return { bytes: b.length, mediaType: "text/plain", createdAt: new Date().toISOString(), compression: "none", custom: {} };
+        return { hash, bytes: b.length, mediaType: "text/plain", createdAt: new Date().toISOString(), compression: "none", custom: {} };
       },
       async link() {},
       async gcDryRun() { return { deleted: [], retained: Array.from(store.keys()) }; },
@@ -63,7 +63,7 @@ describe("Artifact Corruption, Quarantine, and Retention Behavior", () => {
       async getMetadata(hash) {
         const b = store.get(hash);
         if (!b) return null;
-        return { bytes: b.length, mediaType: "text/plain", createdAt: new Date().toISOString(), compression: "none", custom: {} };
+        return { hash, bytes: b.length, mediaType: "text/plain", createdAt: new Date().toISOString(), compression: "none", custom: {} };
       },
       async link() {},
       async quarantine(hash, bytes, reason) {

@@ -4,7 +4,7 @@
 //! kernel from:
 //!
 //! - ordinary TypeScript code;
-//! - an OpenCode-derived plugin hook;
+//! - a first-party plugin hook;
 //! - a local project plugin;
 //! - an npm plugin;
 //! - an MCP server;
@@ -20,7 +20,7 @@
 //! generated scripts (`curl | bash`), symlink/path traversal, direct socket
 //! connections (egress policy), and environment-variable secret access
 //! (NormalizedSpawn env_clear). The TypeScript-side bypass attempts
-//! (OpenCode plugin, project plugin, npm plugin, MCP server, external
+//! (first-party plugin, project plugin, npm plugin, MCP server, external
 //! harness adapter) are exercised in `tests/security/bypass/` (TypeScript
 //! test runner) — this file is the Rust kernel-side mirror.
 
@@ -39,9 +39,10 @@ use terminus_policy::{Decision, NetworkDestination, NormalizedCommand, PolicyEng
 fn ctx_with_token(token: &str) -> RequestContext {
     let mut ctx = RequestContext::new("test-request");
     ctx.capability_token = token.to_string();
-    ctx.task_id = "test-task".to_string();
-    ctx.actor_id = "test-actor".to_string();
-    ctx.session_id = "test-session".to_string();
+    ctx.task_id = "test".to_string();
+    ctx.actor_id = "test".to_string();
+    ctx.session_id = "test".to_string();
+    ctx.workspace_id = "*".to_string();
     ctx
 }
 
@@ -59,7 +60,7 @@ fn mint_admin_token(kernel: &KernelHandle) -> String {
         principal: "test".to_string(),
         session_id: "test".to_string(),
         task_id: "test".to_string(),
-        workspace_id: "test".to_string(),
+        workspace_id: "*".to_string(),
         kernel_instance_id: String::new(),
     };
     let ops = vec![
@@ -87,7 +88,34 @@ fn mint_admin_token(kernel: &KernelHandle) -> String {
 fn make_kernel() -> (tempfile::TempDir, KernelHandle) {
     let dir = tempdir().expect("tempdir");
     let kernel = KernelHandle::new(PathBuf::from(dir.path())).expect("kernel");
+    let token = mint_admin_token(&kernel);
+    kernel
+        .workspaces
+        .register_with_id(
+            &ctx_with_token(&token),
+            &empty_intent(),
+            format!("file://{}", dir.path().display()),
+            dir.path().display().to_string(),
+            "untrusted",
+            Some("ws-1"),
+        )
+        .expect("register default test workspace");
     (dir, kernel)
+}
+
+fn register_test_workspace(kernel: &KernelHandle, root: &std::path::Path) -> String {
+    let token = mint_admin_token(kernel);
+    let context = ctx_with_token(&token);
+    kernel
+        .workspaces
+        .register(
+            &context,
+            &empty_intent(),
+            format!("file://{}", root.display()),
+            root.display().to_string(),
+            "untrusted",
+        )
+        .expect("register test workspace")
 }
 
 // ---------- §27.4 attempt 1: ordinary code tries to read /etc/passwd ----------
@@ -145,6 +173,7 @@ fn nb_symlink_escape_is_rejected_by_path_resolver() {
     // A symlink inside the workspace that points outside (e.g. to /etc)
     // MUST be rejected by the PathResolver before any bytes are read.
     let (dir, kernel) = make_kernel();
+    let workspace_id = register_test_workspace(&kernel, dir.path());
     let token = mint_admin_token(&kernel);
     let ctx = ctx_with_token(&token);
     let outside = tempdir().expect("tempdir");
@@ -154,7 +183,7 @@ fn nb_symlink_escape_is_rejected_by_path_resolver() {
         use std::os::unix::fs::symlink;
         symlink(outside.path(), dir.path().join("escape")).expect("symlink");
     }
-    let path = WorkspacePath::new("ws-1", "escape/secret");
+    let path = WorkspacePath::new(workspace_id, "escape/secret");
     let err = kernel
         .files
         .read(&ctx, &empty_intent(), &path)
@@ -518,12 +547,9 @@ async fn nb_revoked_token_is_rejected() {
 
 // ---------- §13.4 secure profile fails closed on a degraded backend ----------
 
-// Phase 0 (roadmap.md): secure-mode rejection of degraded profiles must be
-// pinned by a test. On macOS/Windows the assembled kernel's default backend
-// is `local-restrictive`, which honestly reports Degraded; the secure
-// profile MUST be rejected with SANDBOX_DEGRADED, while the explicitly
-// named `degraded-local` profile may proceed.
-#[cfg(not(target_os = "linux"))]
+// Platforms without a production backend must reject the secure profile.
+// Linux and macOS have concrete Bubblewrap/Seatbelt backends below.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[tokio::test]
 async fn nb_secure_profile_rejects_degraded_backend() {
     let (_dir, kernel) = make_kernel();
@@ -556,11 +582,11 @@ async fn nb_secure_profile_rejects_degraded_backend() {
     ));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn nb_secure_profile_proceeds_only_when_enforced() {
-    // On Linux the kernel prefers the Bubblewrap backend. When it reports
-    // Enforced the secure profile proceeds; otherwise it must fail closed.
+    // The kernel prefers the platform backend. When it reports Enforced the
+    // secure profile proceeds; otherwise it must fail closed.
     let (_dir, kernel) = make_kernel();
     let token = mint_admin_token(&kernel);
     let ctx = ctx_with_token(&token);
@@ -570,7 +596,7 @@ async fn nb_secure_profile_proceeds_only_when_enforced() {
     }
     let command = CommandSpec {
         program: "pnpm".to_string(),
-        args: vec!["test".to_string()],
+        args: vec!["--version".to_string()],
         cwd: WorkspacePath::new("ws-1", "."),
         public_env,
         timeout_ms: 1_000,
@@ -582,10 +608,15 @@ async fn nb_secure_profile_proceeds_only_when_enforced() {
         .start_in_profile(&ctx, &empty_intent(), command, "secure-local-default")
         .await;
     if matches!(status, terminus_sandbox::EnforcementStatus::Enforced) {
-        assert!(
-            result.is_ok(),
-            "enforced backend MUST accept the secure profile"
-        );
+        let mut events = result.expect("enforced backend MUST accept the secure profile");
+        let mut observed_success = false;
+        while let Some(event) = events.recv().await {
+            if let terminus_kernel_protocol::ProcessEvent::Exited(exit) = event {
+                observed_success = exit.exit_code == 0;
+                break;
+            }
+        }
+        assert!(observed_success, "secure process must exit successfully");
     } else {
         let err = result.expect_err("non-enforced backend MUST fail closed");
         assert!(matches!(
@@ -645,6 +676,7 @@ fn nb_patch_apply_is_idempotent() {
     let (dir, kernel) = make_kernel();
     let token = mint_admin_token(&kernel);
     let mut ctx = ctx_with_token(&token);
+    ctx.workspace_id = "ws-1".to_string();
     ctx.idempotency_key = "patch-idemp-101".to_string();
 
     std::fs::write(dir.path().join("file.txt"), b"initial content\n").expect("write file");

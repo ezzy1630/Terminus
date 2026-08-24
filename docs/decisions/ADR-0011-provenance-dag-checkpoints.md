@@ -52,7 +52,7 @@ Medium. Provenance DAG enables forensic investigation of prompt-injection incide
 
 ## Migration
 
-OpenCode's context epochs are bridged (ADR-0002). Terminus checkpoints are introduced in M6 (SPEC §48.9) and become the source of truth.
+Terminus-owned context epochs and checkpoints are introduced in M6 (SPEC §48.9) and become the source of truth (ADR-0039).
 
 ## Rollback
 

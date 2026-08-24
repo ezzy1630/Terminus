@@ -2,7 +2,7 @@
 
 **tracker:** local-markdown
 **label:** wayfinder:map
-**status:** complete
+**status:** local-slice-complete; roadmap-exit-unverified
 
 ## Destination
 
@@ -47,7 +47,7 @@ Canonical terms:
 
 ## Completion evidence
 
-The local Phase 6 vertical slice is implemented and verified. The acceptance
+The local Phase 6 vertical slice is implemented and has prior local test evidence. The acceptance
 surface is now backed by bounded immutable artifacts and continuation cursors,
 source-bound retrieval, provider-appropriate edit dialects, hash-anchored
 transactional patches, real code-intelligence results, persisted verification
@@ -67,13 +67,14 @@ Observed proof from this execution:
   passed.
 - `mise exec -- just build`: passed after repairing the Python build recipe to
   use `uv build`.
-- `mise exec -- just upstream-check`: passed with the pinned OpenCode source
-  and zero open bypass entries.
+- Historical fork checks reported pass, but their repository declarations did
+  not prove live behavior parity. ADR-0039 retires them in favor of
+  `just standalone-check` and public-path verification.
 
-The stable release gate remains correctly blocked by external evidence, not by
-an implementation failure: the local release evaluation is explicitly
-`fixture_pass`, and Linux enforcement evidence must be produced on CI Linux
-runners. No fixture or degraded platform result was promoted to release proof.
+The roadmap and stable-release gates remain blocked by evidence outside this
+source slice, including fixed-model cohort comparisons, current signed Linux
+enforcement, and release-scale recovery. No fixture or degraded platform result
+is promoted to release proof. See `terminus-research-execution-ledger.md`.
 
 ## Out of scope
 

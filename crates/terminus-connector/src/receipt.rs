@@ -32,10 +32,23 @@ pub struct ConnectorReceipt {
     pub destination: String,
     /// SHA-256 over method|host|port|path|query|body.
     pub request_sha256: String,
+    /// Number of request body bytes admitted to the connector transport.
+    pub request_bytes: usize,
     pub status_code: Option<u16>,
     /// SHA-256 over the response body bytes as received (post-redaction).
     pub response_sha256: Option<String>,
+    /// Number of response body bytes returned after redaction.
+    pub response_bytes: usize,
     /// Number of credential-material redactions applied to the response.
     pub response_redactions: usize,
     pub outcome: Outcome,
+}
+
+/// Bounded response returned to the trusted caller. `body` has already been
+/// scanned for the injected credential and contains the redacted bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorResponse {
+    pub receipt: ConnectorReceipt,
+    pub body: Vec<u8>,
+    pub content_type: Option<String>,
 }

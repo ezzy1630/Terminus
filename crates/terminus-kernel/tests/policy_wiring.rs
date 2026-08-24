@@ -23,9 +23,10 @@ use terminus_kernel_protocol::{
 fn ctx_with_token(token: &str) -> RequestContext {
     let mut ctx = RequestContext::new("test-request");
     ctx.capability_token = token.to_string();
-    ctx.task_id = "test-task".to_string();
-    ctx.actor_id = "test-actor".to_string();
-    ctx.session_id = "test-session".to_string();
+    ctx.task_id = "test".to_string();
+    ctx.actor_id = "test".to_string();
+    ctx.session_id = "test".to_string();
+    ctx.workspace_id = "*".to_string();
     ctx
 }
 
@@ -43,7 +44,7 @@ fn mint_admin_token(issuer: &TokenIssuer) -> String {
         principal: "test".to_string(),
         session_id: "test".to_string(),
         task_id: "test".to_string(),
-        workspace_id: "test".to_string(),
+        workspace_id: "*".to_string(),
         kernel_instance_id: String::new(),
     };
     let ops = vec![
@@ -72,7 +73,7 @@ fn mint_token_with_classes(issuer: &TokenIssuer, classes: &[OperationClass]) -> 
         principal: "test".to_string(),
         session_id: "test".to_string(),
         task_id: "test".to_string(),
-        workspace_id: "test".to_string(),
+        workspace_id: "*".to_string(),
         kernel_instance_id: String::new(),
     };
     issuer
@@ -90,7 +91,34 @@ fn mint_token_with_classes(issuer: &TokenIssuer, classes: &[OperationClass]) -> 
 fn make_kernel() -> (tempfile::TempDir, KernelHandle) {
     let dir = tempdir().expect("tempdir");
     let kernel = KernelHandle::new(PathBuf::from(dir.path())).expect("kernel");
+    let token = mint_admin_token(&kernel.token_issuer);
+    kernel
+        .workspaces
+        .register_with_id(
+            &ctx_with_token(&token),
+            &empty_intent(),
+            format!("file://{}", dir.path().display()),
+            dir.path().display().to_string(),
+            "untrusted",
+            Some("ws-1"),
+        )
+        .expect("register default test workspace");
     (dir, kernel)
+}
+
+fn register_test_workspace(kernel: &KernelHandle, root: &std::path::Path) -> String {
+    let token = mint_admin_token(&kernel.token_issuer);
+    let context = ctx_with_token(&token);
+    kernel
+        .workspaces
+        .register(
+            &context,
+            &empty_intent(),
+            format!("file://{}", root.display()),
+            root.display().to_string(),
+            "untrusted",
+        )
+        .expect("register test workspace")
 }
 
 // ---------- Fix #1: ProcessService::start wires terminus-policy ----------
@@ -303,11 +331,12 @@ fn file_read_rejects_dotenv_protected_path() {
 #[test]
 fn file_read_succeeds_for_legitimate_workspace_file() {
     let (dir, kernel) = make_kernel();
+    let workspace_id = register_test_workspace(&kernel, dir.path());
     let token = mint_admin_token(&kernel.token_issuer);
     let ctx = ctx_with_token(&token);
     // Create a real file in the workspace root.
     std::fs::write(dir.path().join("hello.txt"), b"hi there").expect("write");
-    let path = WorkspacePath::new("ws-1", "hello.txt");
+    let path = WorkspacePath::new(workspace_id, "hello.txt");
     let (bytes, artifact) = kernel
         .files
         .read(&ctx, &empty_intent(), &path)
@@ -319,6 +348,7 @@ fn file_read_succeeds_for_legitimate_workspace_file() {
 #[test]
 fn file_read_rejects_symlink_escape() {
     let (dir, kernel) = make_kernel();
+    let workspace_id = register_test_workspace(&kernel, dir.path());
     let token = mint_admin_token(&kernel.token_issuer);
     let ctx = ctx_with_token(&token);
     // Create a symlink inside the workspace that points outside.
@@ -329,7 +359,7 @@ fn file_read_rejects_symlink_escape() {
         use std::os::unix::fs::symlink;
         symlink(outside.path(), dir.path().join("escape")).expect("symlink");
     }
-    let path = WorkspacePath::new("ws-1", "escape/secret");
+    let path = WorkspacePath::new(workspace_id, "escape/secret");
     let err = kernel
         .files
         .read(&ctx, &empty_intent(), &path)

@@ -20,18 +20,39 @@ import type {
   ContinuationDecision,
   ProviderToolSchema,
 } from "@terminus/provider-core";
-import { BaseProviderRenderer } from "@terminus/provider-core";
+import {
+  BaseProviderRenderer,
+  providerToolCallTranscriptSchema,
+  providerToolResultTranscriptSchema,
+} from "@terminus/provider-core";
 import type { TokenCount } from "@terminus/domain";
 
 // ────────────────────────── Local wire shapes ────────────────────────────────
 
 /** OpenAI-compatible local request body. */
+export type LocalChatMessage =
+  | {
+      readonly role: "system" | "user" | "assistant" | "tool";
+      readonly content: string;
+    }
+  | {
+      readonly role: "assistant";
+      readonly content: string;
+      readonly tool_calls: readonly {
+        readonly id: string;
+        readonly type: "function";
+        readonly function: { readonly name: string; readonly arguments: string };
+      }[];
+    }
+  | {
+      readonly role: "tool";
+      readonly content: string;
+      readonly tool_call_id: string;
+    };
+
 export interface LocalRequestBody {
   readonly model: string;
-  readonly messages: readonly {
-    readonly role: "system" | "user" | "assistant" | "tool";
-    readonly content: string;
-  }[];
+  readonly messages: readonly LocalChatMessage[];
   readonly tools?: readonly {
     readonly type: "function";
     readonly function: { readonly name: string; readonly description: string; readonly parameters: Readonly<Record<string, unknown>> };
@@ -231,11 +252,47 @@ export class LocalRenderer extends BaseProviderRenderer {
 
 function renderMessages(
   input: CanonicalRenderInput,
-): readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly content: string }[] {
-  return input.fragments.map((f) => ({
-    role: fragmentRole(f.kind),
-    content: fragmentText(f),
-  }));
+): readonly LocalChatMessage[] {
+  return input.fragments.map((fragment): LocalChatMessage => {
+    const content = fragmentText(fragment);
+    if (fragment.id.endsWith(":tool_call")) {
+      const transcript = parseToolTranscript(content, providerToolCallTranscriptSchema, "tool call");
+      return {
+        role: "assistant",
+        content: "",
+        tool_calls: [{
+          id: transcript.provider_call_id,
+          type: "function",
+          function: { name: transcript.tool_name, arguments: JSON.stringify(transcript.arguments) },
+        }],
+      };
+    }
+    if (fragment.kind === "tool_result") {
+      const transcript = parseToolTranscript(content, providerToolResultTranscriptSchema, "tool result");
+      return {
+        role: "tool",
+        content: JSON.stringify(transcript.result),
+        tool_call_id: transcript.provider_call_id,
+      };
+    }
+    return { role: fragmentRole(fragment.kind), content };
+  });
+}
+
+function parseToolTranscript<T>(
+  content: string,
+  schema: { readonly safeParse: (value: unknown) => { readonly success: true; readonly data: T } | { readonly success: false } },
+  label: string,
+): T {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(content) as unknown;
+  } catch {
+    throw new Error(`${label} episode is not valid JSON`);
+  }
+  const parsed = schema.safeParse(decoded);
+  if (!parsed.success) throw new Error(`${label} episode does not match the canonical transcript`);
+  return parsed.data;
 }
 
 /**
@@ -310,3 +367,5 @@ export function renderRequest(input: CanonicalRenderInput): Promise<RenderedProv
   const renderer = new LocalRenderer();
   return renderer.render(input);
 }
+
+export * from "./model_profiles.js";

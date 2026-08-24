@@ -140,6 +140,25 @@ export interface ProviderToolCallChunk {
   readonly arguments: Readonly<Record<string, unknown>>;
 }
 
+/** Canonical durable transcript for a provider-emitted tool invocation. */
+export const providerToolCallTranscriptSchema = z.object({
+  protocol: z.literal("terminus.tool-call.v1"),
+  provider_call_id: z.string().min(1),
+  tool_name: z.string().min(1),
+  arguments: z.record(z.string(), z.unknown()),
+}).strict();
+
+/** Canonical durable transcript for the matching settled tool result. */
+export const providerToolResultTranscriptSchema = z.object({
+  protocol: z.literal("terminus.tool-result.v1"),
+  provider_call_id: z.string().min(1),
+  tool_name: z.string().min(1),
+  result: z.record(z.string(), z.unknown()),
+}).strict();
+
+export type ProviderToolCallTranscript = z.infer<typeof providerToolCallTranscriptSchema>;
+export type ProviderToolResultTranscript = z.infer<typeof providerToolResultTranscriptSchema>;
+
 export interface ProviderResponseChunk {
   readonly kind: "text" | "tool_call" | "error" | "done";
   readonly text?: string | undefined;
@@ -755,3 +774,5 @@ export type {
   TokenCount,
   Uuid7,
 };
+
+export * from "./model_profile.js";

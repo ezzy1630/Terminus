@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! exit gate: "credential use is exact-operation bound").
 
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use terminus_connector::{AuthStyle, CanonicalOperation, ConnectorBroker, Outcome};
 use terminus_egress::{DestinationPolicy, EgressPolicy, EgressProxy, RateLimit};
@@ -15,13 +16,13 @@ const KEY: &[u8] = &[42u8; 32];
 const CREDENTIAL: &[u8] = b"canary-ghp_ABCDEF_1234567890";
 const SECRET_URI: &str = "secret://github/repo-read";
 
-fn egress_for_port(port: u16) -> EgressProxy {
+fn egress_for_port_with_limit(port: u16, max_total_bytes: u64) -> EgressProxy {
     let policy = EgressPolicy {
         default_deny: true,
         destinations: vec![DestinationPolicy {
             allowed_host_suffixes: vec!["localhost".to_string()],
             allowed_ports: vec![port],
-            allowed_schemes: vec!["http".to_string()],
+            allowed_schemes: vec!["http".to_string(), "https".to_string()],
         }],
         deny_private_ips: false,
     };
@@ -29,17 +30,21 @@ fn egress_for_port(port: u16) -> EgressProxy {
         policy,
         RateLimit {
             bytes_per_second: 10_000_000,
-            max_total_bytes: 10_000_000,
+            max_total_bytes,
         },
     )
 }
 
 fn binding(port: u16) -> GrantBinding {
+    binding_for_scheme(port, "http")
+}
+
+fn binding_for_scheme(port: u16, scheme: &str) -> GrantBinding {
     GrantBinding {
         connector_id: "fixture-api".into(),
         destination_host: "localhost".into(),
         destination_port: port,
-        scheme: "http".into(),
+        scheme: scheme.into(),
         method: "POST".into(),
         path_class: "/repos/{owner}/{repo}/pulls".into(),
         task_id: "task-1".into(),
@@ -55,11 +60,16 @@ fn operation(path: &str, port: u16) -> CanonicalOperation {
         port,
         path: path.into(),
         query: String::new(),
+        headers: Vec::new(),
         body: br#"{"title":"fix"}"#.to_vec(),
     }
 }
 
 async fn fixture_stack() -> (ConnectorBroker, u16, TcpListener) {
+    fixture_stack_with_budget(10_000_000).await
+}
+
+async fn fixture_stack_with_budget(max_total_bytes: u64) -> (ConnectorBroker, u16, TcpListener) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
@@ -69,11 +79,93 @@ async fn fixture_stack() -> (ConnectorBroker, u16, TcpListener) {
     secret_broker.register_provider("github", provider);
 
     let grants = Arc::new(GrantStore::new());
-    let broker =
-        ConnectorBroker::builder(secret_broker, grants, Arc::new(egress_for_port(port)), KEY)
-            .connector("fixture-api", AuthStyle::Bearer)
-            .build();
+    let broker = ConnectorBroker::builder(
+        secret_broker,
+        grants,
+        Arc::new(egress_for_port_with_limit(port, max_total_bytes)),
+        KEY,
+    )
+    .connector("fixture-api", AuthStyle::Bearer)
+    .build();
     (broker, port, listener)
+}
+
+#[tokio::test]
+#[ignore = "contacts the public OpenCode endpoint with an invalid generated credential"]
+async fn live_opencode_tls_canary_reaches_a_validated_http_response() {
+    let secret_broker = Arc::new(SecretBroker::new());
+    let provider = Arc::new(InMemoryProvider::new());
+    let nonce = format!("{}:{:?}", std::process::id(), std::time::SystemTime::now());
+    let credential = hex::encode(Sha256::digest(nonce.as_bytes())).into_bytes();
+    let secret_uri = "secret://opencode-test/zen";
+    provider.register(secret_uri, credential.clone());
+    secret_broker.register_provider("opencode-test", provider);
+    let grants = Arc::new(GrantStore::new());
+    let egress = EgressProxy::new(
+        EgressPolicy {
+            default_deny: true,
+            destinations: vec![DestinationPolicy {
+                allowed_host_suffixes: vec!["opencode.ai".to_string()],
+                allowed_ports: vec![443],
+                allowed_schemes: vec!["https".to_string()],
+            }],
+            deny_private_ips: true,
+        },
+        RateLimit::default(),
+    );
+    let broker = ConnectorBroker::builder(secret_broker, grants, Arc::new(egress), KEY)
+        .connector("opencode-gateway", AuthStyle::Bearer)
+        .timeout(std::time::Duration::from_secs(20))
+        .build();
+    let binding = GrantBinding {
+        connector_id: "opencode-gateway".into(),
+        destination_host: "opencode.ai".into(),
+        destination_port: 443,
+        scheme: "https".into(),
+        method: "POST".into(),
+        path_class: "/zen/v1/chat/completions".into(),
+        task_id: "tls-canary".into(),
+        effect_id: "tls-canary".into(),
+    };
+    let grant = GrantIssuer::new(KEY.to_vec())
+        .mint(
+            WorkloadIdentity {
+                workload_id: "tls-canary".into(),
+                principal: "tls-canary".into(),
+                task_id: "tls-canary".into(),
+            },
+            secret_uri,
+            &credential,
+            binding,
+            60,
+            1,
+        )
+        .unwrap();
+    let response = broker
+        .execute(
+            &CanonicalOperation {
+                method: "POST".into(),
+                scheme: "https".into(),
+                host: "opencode.ai".into(),
+                port: 443,
+                path: "/zen/v1/chat/completions".into(),
+                query: String::new(),
+                headers: vec![
+                    ("accept".into(), "application/json".into()),
+                    ("content-type".into(), "application/json".into()),
+                ],
+                body: b"{}".to_vec(),
+            },
+            &grant,
+        )
+        .await
+        .unwrap();
+    assert!(response.receipt.status_code.is_some());
+    assert_eq!(response.receipt.destination, "https://opencode.ai:443");
+    assert!(!response
+        .body
+        .windows(credential.len())
+        .any(|window| window == credential));
 }
 
 /// Serve exactly one HTTP request; return the raw request bytes.
@@ -139,13 +231,16 @@ async fn happy_path_injects_credential_and_returns_receipt() {
         listener,
         b"HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok".to_vec(),
     ));
-    let receipt = broker.execute(&op, &grant).await.unwrap();
+    let response = broker.execute(&op, &grant).await.unwrap();
+    let receipt = response.receipt;
     let request_bytes = server.await.unwrap();
 
     assert_eq!(receipt.outcome, Outcome::Accepted);
     assert_eq!(receipt.status_code, Some(201));
     assert_eq!(receipt.task_id, "task-1");
     assert_eq!(receipt.effect_id, "eff-1");
+    assert_eq!(receipt.request_bytes, op.body.len());
+    assert_eq!(receipt.response_bytes, response.body.len());
 
     let sent = String::from_utf8_lossy(&request_bytes);
     // Credential injected into the exact bound request...
@@ -207,10 +302,10 @@ async fn method_change_rejected() {
 }
 
 #[tokio::test]
-async fn https_fails_closed_and_grant_remains_unconsumed() {
+async fn https_uses_tls_and_records_plaintext_peer_failure_as_uncertain() {
     let (broker, port, _listener) = fixture_stack().await;
-    // A grant minted for an https destination cannot be honored by this
-    // build: refuse BEFORE resolving any credential or consuming state.
+    // The fixture is deliberately plaintext. An HTTPS operation must attempt
+    // a validated TLS handshake and record the consumed dispatch as uncertain.
     let issuer = GrantIssuer::new(KEY.to_vec());
     let mut https_binding = binding(port);
     https_binding.scheme = "https".into();
@@ -230,11 +325,36 @@ async fn https_fails_closed_and_grant_remains_unconsumed() {
         .unwrap();
     let mut op = operation("/repos/acme/widget/pulls", port);
     op.scheme = "https".into();
-    let err = broker.execute(&op, &grant).await.unwrap_err();
-    assert!(matches!(
-        err,
-        terminus_connector::ConnectorError::TlsUnavailable
-    ));
+    let response = broker.execute(&op, &grant).await.unwrap();
+    assert_eq!(response.receipt.outcome, Outcome::DispatchUncertain);
+    assert_eq!(response.receipt.status_code, None);
+}
+
+#[tokio::test]
+async fn https_request_budget_failure_is_not_dispatched() {
+    let (broker, port, _listener) = fixture_stack_with_budget(1).await;
+    let issuer = GrantIssuer::new(KEY.to_vec());
+    let grant = issuer
+        .mint(
+            WorkloadIdentity {
+                workload_id: "wl-1".into(),
+                principal: "agent-a".into(),
+                task_id: "task-1".into(),
+            },
+            SECRET_URI,
+            CREDENTIAL,
+            binding_for_scheme(port, "https"),
+            300,
+            1,
+        )
+        .unwrap();
+    let mut op = operation("/repos/acme/widget/pulls", port);
+    op.scheme = "https".into();
+
+    let response = broker.execute(&op, &grant).await.unwrap();
+
+    assert_eq!(response.receipt.outcome, Outcome::NotDispatched);
+    assert_eq!(response.receipt.status_code, None);
 }
 
 #[tokio::test]
@@ -307,6 +427,19 @@ async fn egress_deny_blocks_before_consumption() {
 }
 
 #[tokio::test]
+async fn request_budget_failure_is_not_dispatched() {
+    let (broker, port, _listener) = fixture_stack_with_budget(1).await;
+    let grant = mint_grant(port);
+    let response = broker
+        .execute(&operation("/repos/acme/widget/pulls", port), &grant)
+        .await
+        .unwrap();
+
+    assert_eq!(response.receipt.outcome, Outcome::NotDispatched);
+    assert_eq!(response.receipt.status_code, None);
+}
+
+#[tokio::test]
 async fn credential_digest_mismatch_detected() {
     let (broker, port, _listener) = fixture_stack().await;
     // Mint against material that does not match what the provider holds —
@@ -353,7 +486,8 @@ async fn echoed_credential_redacted_from_response() {
     response.extend_from_slice(echo_body.as_bytes());
 
     let server = tokio::spawn(serve_once(listener, response));
-    let receipt = broker.execute(&op, &grant).await.unwrap();
+    let response = broker.execute(&op, &grant).await.unwrap();
+    let receipt = response.receipt;
     let _ = server.await.unwrap();
 
     assert_eq!(receipt.outcome, Outcome::Accepted);

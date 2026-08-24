@@ -17,9 +17,21 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: ./.github/actions/setup-terminus
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - uses: ./.github/actions/setup-terminus
+      - name: Resolve release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(jq -r '.version // empty' package.json)"
+          [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "package.json version must be stable SemVer: $version" >&2
+            exit 1
+          }
+          printf 'TERMINUS_RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+          printf 'TERMINUS_RELEASE_COMMIT=%s\n' "$GITHUB_SHA" >> "$GITHUB_ENV"
       - name: Install host enforcement dependencies
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
       - name: Delegate cgroup-v2 subtree to the kernel probe
@@ -60,7 +72,7 @@ jobs:
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/terminus-linux-evidence.json.pem
           TERMINUS_LINUX_TEST_LOG: ${{ runner.temp }}/terminus-linux-enforcement.log
-          TERMINUS_LINUX_TEST_COMMAND: sudo --preserve-env=TERMINUS_CGROUP_ROOT,TERMINUS_ENFORCEMENT_REPORT,TERMINUS_KERNEL_BINARY bash scripts/run-linux-enforcement-probe.sh
+          TERMINUS_LINUX_TEST_COMMAND: sudo --preserve-env=TERMINUS_CGROUP_ROOT,TERMINUS_ENFORCEMENT_REPORT,TERMINUS_KERNEL_BINARY,TERMINUS_RELEASE_COMMIT,TERMINUS_RELEASE_VERSION,GITHUB_SHA bash scripts/run-linux-enforcement-probe.sh
         run: just linux-enforcement-evidence
       - name: Verify signed evidence
         env:
@@ -69,6 +81,19 @@ jobs:
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/terminus-linux-evidence.json.pem
         run: bash scripts/verify-release-evidence.sh
+      - name: Verify evidence release identity
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EVIDENCE: ${{ runner.temp }}/terminus-linux-evidence.json
+        run: |
+          set -euo pipefail
+          expected_version="${TERMINUS_RELEASE_VERSION:?TERMINUS_RELEASE_VERSION is required}"
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg version "$expected_version" '
+            (.candidate_commit | type == "string" and length > 0) and
+            (.terminus_commit | type == "string" and . == $commit) and
+            (.candidate_commit == $commit) and
+            (.release_version | type == "string" and . == $version)
+          ' "$EVIDENCE" >/dev/null
       - name: Upload evidence bundle
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

@@ -13,17 +13,17 @@
  * drops a hard-required fragment is rejected.
  */
 
-import type {
-  Uuid7,
-  ContentHash,
-  Rfc3339Timestamp,
-  ArtifactRef,
+import {
+  contentHashSchema,
+  type AcceptanceCriterion,
+  type ArtifactRef,
+  type Checkpoint,
+  type ContentHash,
+  type Rfc3339Timestamp,
+  type TaskContract,
+  type Uuid7,
 } from "@terminus/domain";
-import type {
-  AcceptanceCriterion,
-  Checkpoint,
-  TaskContract,
-} from "@terminus/domain";
+import { z } from "zod";
 
 export type { Checkpoint };
 
@@ -90,6 +90,57 @@ export interface CheckpointContent {
     readonly operationHash: string;
   }[] | undefined;
 }
+
+const checkpointTextSchema = z.string().max(10_000);
+const checkpointTextListSchema = z.array(checkpointTextSchema).max(1_000);
+
+/** Runtime decoder for immutable checkpoint artifacts before trusted use. */
+export const checkpointContentSchema = z.object({
+  objective: checkpointTextSchema.min(1),
+  completedSteps: z.array(z.object({
+    description: checkpointTextSchema,
+    evidenceArtifactHashes: z.array(contentHashSchema).max(256),
+  }).strict()).max(1_000),
+  pendingSteps: checkpointTextListSchema,
+  requirements: z.array(z.object({
+    id: z.string().min(1).max(256),
+    statement: checkpointTextSchema,
+    status: z.enum(["satisfied", "unsatisfied", "unverified"]),
+    evidence: z.array(contentHashSchema).max(256),
+  }).strict()).max(1_000),
+  assumptions: checkpointTextListSchema,
+  unknowns: checkpointTextListSchema,
+  decisions: z.array(z.object({
+    decision: checkpointTextSchema,
+    rationale: checkpointTextSchema,
+    alternatives: checkpointTextListSchema,
+  }).strict()).max(1_000),
+  failures: z.array(z.object({
+    description: checkpointTextSchema,
+    artifactHash: contentHashSchema.nullable(),
+    resolved: z.boolean(),
+  }).strict()).max(1_000),
+  openQuestions: checkpointTextListSchema,
+  sourceVersions: z.record(
+    z.string().min(1).max(2_048),
+    z.string().min(1).max(4_096),
+  ),
+  scope: z.object({
+    readPaths: z.array(z.string().max(4_096)).max(10_000),
+    writePaths: z.array(z.string().max(4_096)).max(10_000),
+    externalSystems: z.array(z.string().max(4_096)).max(10_000),
+  }).strict(),
+  effectState: z.array(z.object({
+    effectId: z.string().min(1).max(256),
+    state: z.string().min(1).max(64),
+    idempotencyKey: z.string().min(1).max(512),
+  }).strict()).max(10_000).optional(),
+  approvalState: z.array(z.object({
+    approvalId: z.string().min(1).max(256),
+    state: z.string().min(1).max(64),
+    operationHash: contentHashSchema,
+  }).strict()).max(10_000).optional(),
+}).strict() satisfies z.ZodType<CheckpointContent>;
 
 // ──────────────────────── Checkpoint generator ───────────────────────────────
 
@@ -220,16 +271,19 @@ export function validateCheckpoint(
     }
   }
 
-  // 4. Stale source versions. If a checkpoint references a source that
-  //    has changed since the checkpoint was created, flag it.
+  // 4. Source versions must still be observable and unchanged. A missing
+  //    current source cannot authenticate the checkpoint's claim and therefore
+  //    fails closed just like a known mismatch.
   for (const [sourceUri, checkpointVersion] of Object.entries(
     checkpoint.sourceVersions,
   )) {
     const currentVersion = currentSourceVersions[sourceUri];
-    if (
-      currentVersion !== undefined &&
-      currentVersion !== checkpointVersion
-    ) {
+    if (currentVersion === undefined) {
+      violations.push({
+        kind: "version_mismatch",
+        description: `Source "${sourceUri}" is unavailable for checkpoint validation`,
+      });
+    } else if (currentVersion !== checkpointVersion) {
       violations.push({
         kind: "version_mismatch",
         description: `Source \"${sourceUri}\" changed (checkpoint: ${checkpointVersion}, current: ${currentVersion})`,

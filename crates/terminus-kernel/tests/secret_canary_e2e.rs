@@ -45,8 +45,9 @@ fn ctx_with_token(token: &str) -> RequestContext {
     let mut ctx = RequestContext::new("canary-request");
     ctx.capability_token = token.to_string();
     ctx.task_id = "canary-task".to_string();
-    ctx.actor_id = "canary-actor".to_string();
+    ctx.actor_id = "canary-principal".to_string();
     ctx.session_id = "canary-session".to_string();
+    ctx.workspace_id = "canary-ws".to_string();
     ctx
 }
 
@@ -157,6 +158,7 @@ fn operation_for(fx: &Fixture) -> CanonicalOperation {
         port: fx.listener_port,
         path: "/repos/acme/widget/pulls".into(),
         query: String::new(),
+        headers: Vec::new(),
         body: br#"{"title":"canary"}"#.to_vec(),
     }
 }

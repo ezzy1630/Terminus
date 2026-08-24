@@ -95,42 +95,6 @@ wheels = [
 ]
 
 [[package]]
-name = "forge-evals"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "polars" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-]
-
-[package.optional-dependencies]
-analysis = [
-    { name = "duckdb" },
-    { name = "pyarrow" },
-]
-test = [
-    { name = "hypothesis" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "duckdb", marker = "extra == 'analysis'", specifier = ">=1.0" },
-    { name = "hypothesis", marker = "extra == 'test'", specifier = ">=6.0" },
-    { name = "mypy", marker = "extra == 'test'", specifier = ">=1.10" },
-    { name = "polars", specifier = ">=1.0" },
-    { name = "pyarrow", marker = "extra == 'analysis'", specifier = ">=15.0" },
-    { name = "pydantic", specifier = ">=2.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "ruff", marker = "extra == 'test'", specifier = ">=0.5" },
-]
-provides-extras = ["analysis", "test"]
-
-[[package]]
 name = "hypothesis"
 version = "6.156.6"
 source = { registry = "https://pypi.org/simple" }
@@ -588,6 +552,53 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
+]
+
+[[package]]
+name = "terminus-evals"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "polars" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+
+[package.optional-dependencies]
+analysis = [
+    { name = "duckdb" },
+    { name = "pyarrow" },
+]
+test = [
+    { name = "hypothesis" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "ruff" },
+    { name = "types-pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "duckdb", marker = "extra == 'analysis'", specifier = ">=1.0" },
+    { name = "hypothesis", marker = "extra == 'test'", specifier = ">=6.0" },
+    { name = "mypy", marker = "extra == 'test'", specifier = ">=1.10" },
+    { name = "polars", specifier = ">=1.0" },
+    { name = "pyarrow", marker = "extra == 'analysis'", specifier = ">=15.0" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "ruff", marker = "extra == 'test'", specifier = ">=0.5" },
+    { name = "types-pyyaml", marker = "extra == 'test'" },
+]
+provides-extras = ["analysis", "test"]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260815"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/72/b56089aeee6c496d969bac42376bedb6e3eeab4682e1018fa3137122f94b/types_pyyaml-6.0.12.20260815.tar.gz", hash = "sha256:28764110c9cf35846e733da32d8d734df7473c5dde9ef67c3b7332ec0e819858", size = 18545, upload-time = "2026-08-15T02:41:51.532Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/52/eefeba09be4ef2a1eb989eb92934561e8e502a6ee3c32654996e4be7e399/types_pyyaml-6.0.12.20260815-py3-none-any.whl", hash = "sha256:6f332212b7e191f3afd5016a713c510b6340593b7ebec573c7d5d20aa5386d3b", size = 21148, upload-time = "2026-08-15T02:41:50.555Z" },
 ]
 
 [[package]]

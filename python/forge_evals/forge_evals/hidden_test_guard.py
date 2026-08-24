@@ -80,7 +80,9 @@ class ContaminationChecker:
                 for line in content.splitlines():
                     line_clean = line.strip()
                     if len(line_clean) > 20 and line_clean in prompt_text:
-                        violations.append(f"Hidden test code line leaked into prompt: {line_clean[:40]}...")
+                        violations.append(
+                            f"Hidden test code line leaked into prompt: {line_clean[:40]}..."
+                        )
                         break
         return violations
 
@@ -97,5 +99,7 @@ class ContaminationChecker:
                 if CANARY_STRING in text_content:
                     violations.append(f"Canary string detected in event {event.get('event_type')}")
                 if "hidden/test_" in text_content:
-                    violations.append(f"Hidden test path referenced in event {event.get('event_type')}")
+                    violations.append(
+                        f"Hidden test path referenced in event {event.get('event_type')}"
+                    )
         return violations

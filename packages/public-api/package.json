@@ -6,5 +6,9 @@
   "types": "./src/index.ts",
   "exports": { ".": "./src/index.ts" },
   "scripts": { "build": "tsc -p tsconfig.json", "lint": "eslint src" },
-  "dependencies": { "zod": "^4.0.2", "@terminus/domain": "workspace:*" }
+  "dependencies": {
+    "@terminus/domain": "workspace:*",
+    "@terminus/runtime-protocol": "workspace:*",
+    "zod": "^4.0.2"
+  }
 }

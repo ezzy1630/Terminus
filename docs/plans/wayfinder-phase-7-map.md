@@ -2,11 +2,11 @@
 
 **tracker:** local-markdown
 **label:** wayfinder:map
-**status:** complete
+**status:** local-slice-complete; roadmap-exit-unverified
 
 ## Destination
 
-Phase 7 is complete when Terminus provides a production-grade Workflow and Skill
+The Phase 7 local slice is complete when Terminus provides a typed Workflow and Skill
 Compiler that combines dynamic orchestration with deterministic safety:
 compiling natural-language skills, prose procedures, and structured workflows
 into statically verified, typed Workflow IR with exact source-span provenance,
@@ -49,7 +49,7 @@ Canonical terms:
 
 ## Completion evidence
 
-The Phase 7 workflow and skill compiler subsystem is implemented and verified end-to-end:
+The Phase 7 workflow and skill compiler local slice is implemented:
 - Typed Workflow IR with source-span provenance and ambiguity classification.
 - Natural-language skill compiler parsing SKILL.md and structured procedures into Workflow IR.
 - Owner-test classifier cleanly separating deterministic derivation from model/human judgment.
@@ -57,7 +57,11 @@ The Phase 7 workflow and skill compiler subsystem is implemented and verified en
   mandatory-step witness paths, capability attenuation, and verifier independence.
 - Deterministic runtime controller owning traversal, guarded edges, loop counters, and verify-repair-commit.
 - Reusable organizational workflows for software patches, database migrations, security reviews, and releases.
-- ADR-0036 recorded and all boundary/codegen/unit/integration/eval checks passing.
+- ADR-0036 records the contract. Current integrated checks are rerun at handoff.
+
+This is not the roadmap exit gate. Representative outcome comparisons and
+candidate-bound evidence remain unverified; see
+`terminus-research-execution-ledger.md`.
 
 ## Out of scope
 

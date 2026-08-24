@@ -3,10 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "terminus-tui": "src/index.ts"
+  },
   "scripts": {
-    "dev": "bun --hot src/index.ts",
+    "dev": "bun src/index.ts tui",
     "start": "bun src/index.ts",
-    "lint": "eslint src"
+    "lint": "eslint src tests",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test tests"
   },
   "dependencies": {
     "@terminus/public-client": "workspace:*",

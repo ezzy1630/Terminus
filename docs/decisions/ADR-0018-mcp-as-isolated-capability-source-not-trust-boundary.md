@@ -55,7 +55,7 @@ Critical. MCP tool poisoning is a known attack class (SPEC §3.6, Appendix I.1).
 
 ## Migration
 
-MCP support is introduced in M9 (SPEC §48.12). OpenCode's MCP integration is wrapped behind the Terminus capability registry (ADR-0002).
+MCP support is introduced in M9 (SPEC §48.12) through the Terminus capability registry and isolated extension host.
 
 ## Rollback
 

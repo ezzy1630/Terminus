@@ -4,17 +4,27 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 
+async function runMigrations(
+  dbPath: string,
+  extraEnv: Readonly<Record<string, string>> = {},
+): Promise<number> {
+  const proc = Bun.spawn(["bun", "run", "scripts/migrate.ts"], {
+    env: { ...process.env, ...extraEnv, DATABASE_URL: `file:${dbPath}` },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  return proc.exited;
+}
+
 describe("Database Migration Integrity & Corruption Detection", () => {
-  test("Database migrations apply monotonically and populate schema_migrations ledger", () => {
+  test("Database migrations apply monotonically and populate schema_migrations ledger", async () => {
     const testDir = join(tmpdir(), `terminus-mig-test-${Date.now()}`);
     mkdirSync(testDir, { recursive: true });
     const dbPath = join(testDir, "test.db");
 
     try {
-      const proc = Bun.spawnSync(["bun", "run", "scripts/migrate.ts"], {
-        env: { ...process.env, DATABASE_URL: `file:${dbPath}` },
-      });
-      expect(proc.exitCode).toBe(0);
+      expect(await runMigrations(dbPath)).toBe(0);
+      expect(await runMigrations(dbPath)).toBe(0);
 
       const db = new Database(dbPath);
       const rows = db
@@ -25,9 +35,73 @@ describe("Database Migration Integrity & Corruption Detection", () => {
       expect(rows[0]?.version).toBe(1);
       expect(rows[0]?.checksum_sha256).toMatch(/^[0-9a-f]{64}$/);
 
+      const checkpointColumns = db
+        .query("PRAGMA table_info(checkpoints)")
+        .all() as Array<{ name: string; notnull: number; dflt_value: string | null }>;
+      expect(checkpointColumns).toContainEqual(expect.objectContaining({
+        name: "admission_state",
+        notnull: 1,
+        dflt_value: "'PREPARED'",
+      }));
+      const contractColumns = db
+        .query("PRAGMA table_info(task_contract_versions)")
+        .all() as Array<{ name: string }>;
+      expect(contractColumns.map((column) => column.name)).toContain("v2_projection_json");
+
+      const now = Date.now();
+      db.query(
+        "INSERT INTO workspaces (id, kind, root_uri, canonical_root, trust, policy_profile_id, created_at, last_opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("workspace-admission", "local_directory", "file:///workspace", "/workspace", "trusted", "default", now, now);
+      db.query(
+        "INSERT INTO sessions (id, workspace_id, owner_principal, title, status, default_model_profile, default_permission_profile, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("session-admission", "workspace-admission", "tester", "test", "active", "default", "default", "{}", now, now);
+      db.query(
+        "INSERT INTO threads (id, session_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      ).run("thread-admission", "session-admission", "active", now, now);
+      db.query(
+        "INSERT INTO checkpoints (id, session_id, thread_id, checkpoint_artifact, schema_version, last_committed_sequences_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run("checkpoint-default", "session-admission", "thread-admission", `artifact://sha256/${"a".repeat(64)}`, 1, "{}", now);
+      const defaultAdmission = db
+        .query("SELECT admission_state AS state FROM checkpoints WHERE id = ?")
+        .get("checkpoint-default") as { state: string };
+      expect(defaultAdmission.state).toBe("PREPARED");
+      expect(() => db.query(
+        "INSERT INTO checkpoints (id, session_id, thread_id, checkpoint_artifact, schema_version, last_committed_sequences_json, admission_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("checkpoint-invalid", "session-admission", "thread-admission", `artifact://sha256/${"b".repeat(64)}`, 1, "{}", "VISIBLE", now)).toThrow();
+
       const integrity = db.query("PRAGMA quick_check").all() as Array<{ quick_check: string }>;
       expect(integrity[0]?.quick_check).toBe("ok");
       db.close();
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  test("A mid-migration failure rolls back schema and can be retried", async () => {
+    const testDir = join(tmpdir(), `terminus-mig-retry-${Date.now()}`);
+    mkdirSync(testDir, { recursive: true });
+    const dbPath = join(testDir, "test.db");
+
+    try {
+      expect(await runMigrations(dbPath, { TERMINUS_MIGRATION_TEST_FAIL_AFTER: "5:1" })).not.toBe(0);
+      const partial = new Database(dbPath);
+      const columnsAfterFailure = partial
+        .query("PRAGMA table_info(checkpoints)")
+        .all() as Array<{ name: string }>;
+      expect(columnsAfterFailure.map((column) => column.name)).not.toContain("admission_state");
+      const migrationFive = partial
+        .query("SELECT version FROM schema_migrations WHERE version = 5")
+        .get();
+      expect(migrationFive).toBeNull();
+      partial.close();
+
+      expect(await runMigrations(dbPath)).toBe(0);
+      const upgraded = new Database(dbPath);
+      const upgradedColumns = upgraded
+        .query("PRAGMA table_info(checkpoints)")
+        .all() as Array<{ name: string }>;
+      expect(upgradedColumns.map((column) => column.name)).toContain("admission_state");
+      upgraded.close();
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }

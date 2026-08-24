@@ -1,0 +1,51 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/capability-directory-entry.json",
+  "title": "CapabilityDirectoryEntry",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capabilityId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "category": {
+      "type": "string",
+      "minLength": 1
+    },
+    "providerOperatorId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resourceDomain": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authorityRequirement": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "AVAILABLE",
+        "RESTRICTED",
+        "OFFLINE"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "capabilityId",
+    "category",
+    "providerOperatorId",
+    "resourceDomain",
+    "authorityRequirement",
+    "status"
+  ]
+}

@@ -107,7 +107,7 @@ function StatusIndicatorImpl({ status, size = SIZE_DEFAULT, label, className }: 
     >
       <StatusGlyph status={status} size={size} />
       {label ? (
-        <span className="text-xs text-secondary" style={{ fontSize: "var(--font-size-xs)" }}>
+        <span className="text-xs text-secondary text-xs" >
           {label}
         </span>
       ) : null}
@@ -116,6 +116,25 @@ function StatusIndicatorImpl({ status, size = SIZE_DEFAULT, label, className }: 
 }
 
 export const StatusIndicator = memo(StatusIndicatorImpl);
+
+/**
+ * Single always-visible status for the active task. The title bar is the one
+ * authority for "what is this task doing"; surfaces below it no longer each
+ * announce their own version of the same state.
+ */
+export const TaskStatusPill = memo(function TaskStatusPill(
+  { status }: { status: TaskStatusKind },
+): JSX.Element {
+  return (
+    <span
+      className="ui-meta inline-flex shrink-0 items-center gap-1.5 rounded-md border border-subtle bg-subtle px-2 py-0.5 text-secondary"
+      aria-label={`Task status: ${statusLabel(status)}`}
+    >
+      <StatusGlyph status={status} size={9} />
+      {statusLabel(status)}
+    </span>
+  );
+});
 
 /** Map a domain status string to a UI-facing kind, then to a label. */
 export function statusLabel(status: TaskStatusKind): string {

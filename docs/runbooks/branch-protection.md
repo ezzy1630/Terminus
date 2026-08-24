@@ -40,6 +40,7 @@ this repository uses a ruleset rather than legacy branch-protection settings.
    - block branch deletion.
 3. Make these checks required:
    - `Architecture boundary checks`
+   - `Standalone runtime ownership`
    - `Lint, typecheck, codegen drift`
    - `Platform (linux-x86_64)`
    - `Unit tests (Python eval)`
@@ -47,7 +48,7 @@ this repository uses a ruleset rather than legacy branch-protection settings.
    - `Security scans`
    - `End-to-end public path`
 4. Do not require the informational platform entries, the container build,
-   `M12 release-gate evidence`, `Upstream OpenCode parity`,
+   `M12 release-gate evidence`,
    `Protobuf breaking-change check`, the conditional eval smoke job, or the
    nightly Linux enforcement probes.
 5. Leave an emergency administrator bypass available and record any use of it.

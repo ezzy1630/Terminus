@@ -592,6 +592,13 @@ export class FakeKernel {
   readonly metadata: Map<string, Readonly<Record<string, unknown>>> = new Map();
   readonly links: { hash: string; ownerType: string; ownerId: string; purpose: string }[] = [];
   readonly sandboxCalls: { profile: string; command: CommandSpec }[] = [];
+  private readonly scriptedSandboxResults: Array<{ readonly exitCode: number } | Error> = [];
+
+  /** Queue one explicit sandbox settlement. Unscripted privileged calls fail. */
+  scriptSandboxResult(result: { readonly exitCode: number } | Error): this {
+    this.scriptedSandboxResults.push(result);
+    return this;
+  }
 
   async ingest(bytes: Uint8Array, metadata: Record<string, unknown> = {}): Promise<ContentHash> {
     // Simple FNV-1a hash; not real sha256. Used only for tests.
@@ -636,10 +643,15 @@ export class FakeKernel {
     return { deleted, retained };
   }
 
-  /** Records a sandbox call but does not actually execute anything. */
+  /** Records a sandbox call and returns only an explicitly scripted settlement. */
   async sandboxExec(profile: string, command: CommandSpec): Promise<{ exitCode: number }> {
     this.sandboxCalls.push({ profile, command });
-    return { exitCode: 0 };
+    const result = this.scriptedSandboxResults.shift();
+    if (result === undefined) {
+      throw new Error("FakeKernel sandboxExec has no explicit scripted settlement");
+    }
+    if (result instanceof Error) throw result;
+    return result;
   }
 }
 
@@ -655,6 +667,7 @@ export const anyValue = z.unknown();
 
 export * from "./arp_v2_fixture_server.js";
 export * from "./arp_v2_conformance.js";
+export * from "./kernel_mock.js";
 
 export type {
   Task,
@@ -671,4 +684,3 @@ export type {
   SelectionFeatures,
   ResourceUri,
 };
-

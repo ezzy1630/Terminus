@@ -83,7 +83,7 @@ class MiniSweAgentAdapter:
     final_revision: str = ""
     cost: CostBreakdown | None = None
     outcome: Outcome = Outcome.COMPLETED
-    notes: str = "mini-SWE-agent bash loop (simulated)"
+    notes: str = "fixture-only mini-SWE-agent bash loop; not a live external run"
     #: Per-turn sleep (seconds) — set to a small value to simulate wall-clock.
     sleep_per_turn: float = 0.0
     #: Optional model capability snapshot for trajectory metadata.

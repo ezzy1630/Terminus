@@ -2,7 +2,7 @@
 
 ## When to use
 
-Use this runbook when the kernel reports that the requested sandbox backend cannot be enforced (e.g., Bubblewrap not installed on Linux, macOS/Windows backend in degraded mode, container runtime unavailable). Per SPEC §26.3 #11, Terminus MUST fail closed or require explicit user selection of a named degraded profile.
+Use this runbook when the kernel reports that the requested sandbox backend cannot be enforced (e.g., Bubblewrap not installed on Linux, macOS backend unavailable, Windows backend degraded, container runtime unavailable). Per SPEC §26.3 #11, Terminus MUST fail closed or require explicit user selection of a named degraded profile.
 
 ## Symptoms
 
@@ -67,7 +67,7 @@ Use this runbook when the kernel reports that the requested sandbox backend cann
    `cpu`, `memory`, and `pids` controllers for children. Set
    `TERMINUS_CGROUP_ROOT` to that subtree. Do not point it at the global
    `/sys/fs/cgroup` root; the backend rejects that unsafe configuration.
-5. **For macOS degraded:** the macOS backend honestly reports degraded capability. Accept degraded mode or move to Linux.
+5. **For macOS unavailable:** fail closed. Install or restore `sandbox-exec`, or select another enforcing backend such as Linux Bubblewrap or a container. Do not accept an unnamed degraded macOS profile.
 6. **For Windows degraded:** the Windows backend honestly reports degraded capability. Accept degraded mode or move to Linux.
 7. **For container backend missing:** install Podman or Docker, or use a different backend (ADR-0027).
 

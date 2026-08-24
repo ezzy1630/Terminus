@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://terminus.dev/schemas/release/evidence-manifest.json",
+  "title": "ReleaseEvidenceManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "candidate_commit",
+    "release_version",
+    "generated_at",
+    "artifacts"
+  ],
+  "properties": {
+    "schema": { "const": "terminus.release-evidence-manifest.v1" },
+    "candidate_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+    },
+    "release_version": { "type": "string", "minLength": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "artifacts": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "uniqueItems": true,
+      "allOf": [
+        { "contains": { "properties": { "key": { "const": "fuzz-smoke" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "fault-injection" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "property-tests" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "upgrade-rollback" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "soak-leak" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "preview-canary" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "ops-metrics" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "eval-release" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "sbom-verify" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "schema-freeze" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "platform-matrix" } } }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "key": { "const": "system-card" } } }, "minContains": 1, "maxContains": 1 }
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "path", "sha256"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

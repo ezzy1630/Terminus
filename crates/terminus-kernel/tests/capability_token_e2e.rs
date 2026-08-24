@@ -41,8 +41,9 @@ fn ctx_with_token(token: &str) -> RequestContext {
     let mut ctx = RequestContext::new("cap-e2e-request");
     ctx.capability_token = token.to_string();
     ctx.task_id = "cap-e2e-task".to_string();
-    ctx.actor_id = "cap-e2e-actor".to_string();
+    ctx.actor_id = "cap-e2e-principal".to_string();
     ctx.session_id = "cap-e2e-session".to_string();
+    ctx.workspace_id = "cap-e2e-ws".to_string();
     ctx
 }
 
@@ -96,6 +97,79 @@ fn is_capability_or_permission_error(err: &terminus_kernel_protocol::KernelError
     )
 }
 
+#[test]
+fn artifact_reads_require_task_ownership_or_explicit_maintenance_authority() {
+    let (_directory, kernel) = make_kernel();
+    let owner_token = mint_and_encode(
+        &kernel,
+        default_binder(),
+        vec![OperationClass::ArtifactIngest],
+        Scope::default(),
+        None,
+        "artifact-owner",
+    );
+    let owner_context = ctx_with_token(&owner_token);
+    let artifact = kernel
+        .artifact_ingest
+        .ingest(&owner_context, &empty_intent(), b"task-a-checkpoint")
+        .expect("owner ingests artifact");
+    assert_eq!(
+        kernel
+            .artifact_ingest
+            .get(&owner_context, &artifact.sha256)
+            .expect("owner reads artifact"),
+        b"task-a-checkpoint",
+    );
+
+    let other_binder = TokenBinder {
+        task_id: "other-task".to_string(),
+        ..default_binder()
+    };
+    let other_token = mint_and_encode(
+        &kernel,
+        other_binder,
+        vec![OperationClass::ArtifactIngest],
+        Scope::default(),
+        None,
+        "artifact-other",
+    );
+    let mut other_context = ctx_with_token(&other_token);
+    other_context.task_id = "other-task".to_string();
+    for error in [
+        kernel
+            .artifact_ingest
+            .get(&other_context, &artifact.sha256)
+            .expect_err("another task cannot read bytes"),
+        kernel
+            .artifact_ingest
+            .metadata(&other_context, &artifact.sha256)
+            .expect_err("another task cannot read metadata"),
+    ] {
+        assert_eq!(error.code(), ErrorCode::PermissionDenied);
+    }
+
+    let maintenance_token = mint_and_encode(
+        &kernel,
+        TokenBinder {
+            task_id: "control-maintenance".to_string(),
+            ..default_binder()
+        },
+        vec![OperationClass::Admin],
+        Scope::default(),
+        None,
+        "artifact-maintenance",
+    );
+    let mut maintenance_context = ctx_with_token(&maintenance_token);
+    maintenance_context.task_id = "control-maintenance".to_string();
+    assert_eq!(
+        kernel
+            .artifact_ingest
+            .get(&maintenance_context, &artifact.sha256)
+            .expect("maintenance reads artifact"),
+        b"task-a-checkpoint",
+    );
+}
+
 // ---------- Test 1: Read-only token cannot Exec ----------
 
 #[tokio::test]
@@ -126,11 +200,61 @@ async fn cap_e2e_read_only_token_rejected_for_exec() {
     assert_eq!(err.category(), ErrorCategory::Permission);
 }
 
+#[test]
+fn capability_binders_reject_cross_context_replay() {
+    let (_directory, kernel) = make_kernel();
+    let token = mint_and_encode(
+        &kernel,
+        default_binder(),
+        vec![OperationClass::Read],
+        Scope::default(),
+        None,
+        "cap-e2e-context-binding",
+    );
+    for field in ["principal", "session", "task", "workspace"] {
+        let mut context = ctx_with_token(&token);
+        match field {
+            "principal" => context.actor_id = "other-principal".to_string(),
+            "session" => context.session_id = "other-session".to_string(),
+            "task" => context.task_id = "other-task".to_string(),
+            "workspace" => context.workspace_id = "other-workspace".to_string(),
+            _ => unreachable!(),
+        }
+        let error = terminus_kernel::validate_capability_for_op(
+            &kernel.token_issuer,
+            &context,
+            OperationClass::Read,
+            &Scope::default(),
+        )
+        .expect_err("cross-context replay must fail");
+        assert_eq!(error.code(), ErrorCode::PermissionDenied, "{field}");
+    }
+}
+
 // ---------- Test 2: Exec token accepted for Exec ----------
 
 #[tokio::test]
 async fn cap_e2e_exec_token_accepted_for_exec() {
-    let (_dir, kernel) = make_kernel();
+    let (dir, kernel) = make_kernel();
+    let admin_token = mint_and_encode(
+        &kernel,
+        default_binder(),
+        vec![OperationClass::Admin],
+        Scope::default(),
+        None,
+        "cap-e2e-n2-register",
+    );
+    kernel
+        .workspaces
+        .register_with_id(
+            &ctx_with_token(&admin_token),
+            &empty_intent(),
+            format!("file://{}", dir.path().display()),
+            dir.path().display().to_string(),
+            "untrusted",
+            Some("cap-e2e-ws"),
+        )
+        .expect("register Exec test workspace");
     let token = mint_and_encode(
         &kernel,
         default_binder(),
@@ -145,7 +269,7 @@ async fn cap_e2e_exec_token_accepted_for_exec() {
     let command = CommandSpec {
         program: "ls".to_string(),
         args: vec!["-la".to_string()],
-        cwd: WorkspacePath::new("ws-1", "."),
+        cwd: WorkspacePath::new("cap-e2e-ws", "."),
         timeout_ms: 1_000,
         ..Default::default()
     };
@@ -195,7 +319,26 @@ fn cap_e2e_workspace_scope_rejects_out_of_scope_path() {
 
 #[test]
 fn cap_e2e_workspace_scope_wildcard_accepts_any_path() {
-    let (_dir, kernel) = make_kernel();
+    let (dir, kernel) = make_kernel();
+    let admin_token = mint_and_encode(
+        &kernel,
+        default_binder(),
+        vec![OperationClass::Admin],
+        Scope::default(),
+        None,
+        "cap-e2e-register",
+    );
+    let admin_context = ctx_with_token(&admin_token);
+    let workspace_id = kernel
+        .workspaces
+        .register(
+            &admin_context,
+            &empty_intent(),
+            format!("file://{}", dir.path().display()),
+            dir.path().display().to_string(),
+            "untrusted",
+        )
+        .expect("register capability-test workspace");
     let max_scope = Scope {
         workspace_paths: vec!["**".to_string()],
         network_destinations: Vec::new(),
@@ -203,16 +346,20 @@ fn cap_e2e_workspace_scope_wildcard_accepts_any_path() {
     };
     let token = mint_and_encode(
         &kernel,
-        default_binder(),
+        TokenBinder {
+            workspace_id: workspace_id.clone(),
+            ..default_binder()
+        },
         vec![OperationClass::Read],
         max_scope,
         None,
         "cap-e2e-n4",
     );
-    let ctx = ctx_with_token(&token);
+    let mut ctx = ctx_with_token(&token);
+    ctx.workspace_id = workspace_id.clone();
     // The token's `**` scope accepts any path. The subsequent PathNotFound
     // error (file does not exist) is fine — the token check MUST pass.
-    let path = WorkspacePath::new("ws-1", "any/deep/path/file.txt");
+    let path = WorkspacePath::new(workspace_id, "any/deep/path/file.txt");
     let result = kernel.files.read(&ctx, &empty_intent(), &path);
     match result {
         Ok(_) => { /* unexpected but acceptable */ }

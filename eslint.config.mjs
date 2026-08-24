@@ -44,6 +44,34 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-useless-escape": "off",
   },
 }, {
+  files: ["apps/desktop/src/**/*.{ts,tsx}"],
+  ignores: ["apps/desktop/src/ui/Button.tsx"],
+  rules: {
+    "no-restricted-syntax": [
+      "error",
+      {
+        selector: "JSXAttribute[name.name='style'] Property[key.name='fontSize']",
+        message: "Use the desktop type-scale utilities instead of inline fontSize styles.",
+      },
+      {
+        selector: "Literal[value=/text-\\[[0-9.]+px\\]/]",
+        message: "Use a named desktop type-scale utility instead of an arbitrary pixel size.",
+      },
+      {
+        selector: "JSXOpeningElement[name.name='button']",
+        message: "Use the shared Button or IconButton component.",
+      },
+      {
+        selector: "JSXOpeningElement[name.name=/^[a-z]/] > JSXAttribute[name.name='title']",
+        message: "Use data-tooltip or the shared Tooltip component instead of a native browser tooltip.",
+      },
+      {
+        selector: "JSXOpeningElement[name.name=/^(Button|IconButton)$/] > JSXAttribute[name.name='title']",
+        message: "Use data-tooltip or the shared Tooltip component instead of a native browser tooltip.",
+      },
+    ],
+  },
+}, {
   ignores: [
     "node_modules/**",
     ".next/**",

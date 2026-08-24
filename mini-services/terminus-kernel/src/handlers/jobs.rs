@@ -84,7 +84,9 @@ pub async fn start(
         .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
     // Drain the bounded event stream so the child is not left backpressured;
     // reconnecting consumers read through the durable job record instead.
-    tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+    state
+        .spawn_background(async move { while receiver.recv().await.is_some() {} })
+        .await;
     let state_now = state
         .kernel
         .jobs

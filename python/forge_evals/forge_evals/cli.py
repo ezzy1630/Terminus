@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,7 @@ from .analysis.load_runs import (
     load_runs_from_parquet,
 )
 from .analysis.regression_detector import detect_regressions
+from .conformance_levels import ConformanceEvidence, ConformanceLevel, assess_conformance
 from .dashboards.cohort_dashboard import write_cohort_dashboard
 from .dashboards.security_report import compute_security_report, write_security_report
 from .eval_tiers import EvalTier, get_tier_config, list_all_tiers
@@ -89,6 +92,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_security_cmd(sub)
     _add_tier_cmd(sub)
     _add_exit_gate_cmd(sub)
+    _add_conformance_cmd(sub)
     return p
 
 
@@ -111,19 +115,113 @@ def _cmd_tier(args: argparse.Namespace) -> int:
 
 
 def _add_exit_gate_cmd(sub: argparse._SubParsersAction[Any]) -> None:
-    p = sub.add_parser("exit-gate", help="Run exit gate validation suite.")
-    p.add_argument("--runs-dir", default=None, help="Optional directory of run records to check.")
+    p = sub.add_parser(
+        "exit-gate",
+        help="Validate local run evidence without claiming the signed release gate.",
+    )
+    p.add_argument("--runs-dir", default=None, help="Directory of immutable run records to check.")
 
 
 def _cmd_exit_gate(args: argparse.Namespace) -> int:
-    print("Running evaluation laboratory exit gate checks...")
-    print("  1. Baseline runners: verified.")
-    print("  2. Grader mutation fault-catching: verified.")
-    print("  3. Token/cost bill reconciliation: verified.")
-    print("  4. Multi-seed variance measurement: verified.")
-    print("  5. Promotion & rollback rules: verified.")
-    print("EXIT GATE VERDICT: PASS")
+    if args.runs_dir is None:
+        print("LOCAL EVIDENCE CHECK: BLOCKED", file=sys.stderr)
+        print("--runs-dir is required; no release claim was evaluated", file=sys.stderr)
+        return 2
+
+    catalog = _load_runs_dir(args.runs_dir)
+    if catalog.n == 0:
+        print("LOCAL EVIDENCE CHECK: BLOCKED", file=sys.stderr)
+        print(f"no run records found in {args.runs_dir}", file=sys.stderr)
+        return 2
+
+    issues = _local_exit_gate_issues(catalog.records)
+    if issues:
+        print("LOCAL EVIDENCE CHECK: FAIL", file=sys.stderr)
+        for issue in issues:
+            print(f"- {issue}", file=sys.stderr)
+        print("RELEASE EXIT GATE: UNVERIFIED", file=sys.stderr)
+        return 1
+
+    print(f"LOCAL EVIDENCE CHECK: PASS ({catalog.n} records)")
+    print(
+        "RELEASE EXIT GATE: UNVERIFIED; signed CI, security, durability, UX, "
+        "and external reproduction evidence are separate requirements"
+    )
     return 0
+
+
+def _local_exit_gate_issues(records: Sequence[RunRecord]) -> list[str]:
+    """Return structural defects that make local evaluation evidence unusable."""
+
+    issues: list[str] = []
+    seeds_by_cell: dict[tuple[str, str, str, str], set[int]] = {}
+    exact_revision = re.compile(r"(?:(?:git:)?(?:[0-9a-f]{40}|[0-9a-f]{64})|sha256:[0-9a-f]{64})")
+    content_digest = re.compile(r"sha256:[0-9a-f]{64}")
+    for record in records:
+        revision = record.harness_commit.strip().lower()
+        if exact_revision.fullmatch(revision) is None:
+            issues.append(f"{record.run_id}: harness revision is not exact")
+        if content_digest.fullmatch(record.environment_digest) is None:
+            issues.append(f"{record.run_id}: environment digest is not content-addressed")
+        if record.end is None:
+            issues.append(f"{record.run_id}: run has no terminal timestamp")
+        if not record.grader_results:
+            issues.append(f"{record.run_id}: no independent grader result")
+        elif any(result.grader_id == "end_state.noop" for result in record.grader_results):
+            issues.append(f"{record.run_id}: fixture noop grader is not admissible evidence")
+        if "fixture" in record.notes.lower() or "fake" in record.notes.lower():
+            issues.append(f"{record.run_id}: fixture harness output is not admissible evidence")
+        if record.cost is None:
+            issues.append(f"{record.run_id}: no cost/token accounting")
+        cell = (record.suite, record.task, record.harness, record.harness_commit)
+        seeds_by_cell.setdefault(cell, set()).add(record.random_seed)
+
+    for cell, seeds in sorted(seeds_by_cell.items()):
+        if len(seeds) < 5:
+            suite, task, harness, _revision = cell
+            issues.append(
+                f"{suite}/{task}/{harness}: {len(seeds)} independent seeds; at least 5 required"
+            )
+    return issues
+
+
+def _add_conformance_cmd(sub: argparse._SubParsersAction[Any]) -> None:
+    p = sub.add_parser(
+        "conformance",
+        help="Structurally inspect candidate L0-L6 receipts without claiming signature proof.",
+    )
+    p.add_argument("--evidence", required=True, help="JSON array of conformance receipts.")
+    p.add_argument("--commit", required=True, help="Exact Git object hash.")
+    p.add_argument("--platform", required=True, help="Exact platform/environment identifier.")
+    p.add_argument("--as-of", required=True, help="Timezone-aware ISO-8601 assessment time.")
+    p.add_argument("--output", default="-", help="Output path or '-' for stdout.")
+    p.add_argument(
+        "--require-level",
+        choices=[level.name for level in ConformanceLevel],
+        default=None,
+        help="Fail closed unless an externally verified assessment proves this level.",
+    )
+
+
+def _cmd_conformance(args: argparse.Namespace) -> int:
+    raw = json.loads(Path(args.evidence).read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError("conformance evidence must be a JSON array")
+    receipts = [ConformanceEvidence.from_dict(item) for item in raw if isinstance(item, dict)]
+    if len(receipts) != len(raw):
+        raise ValueError("every conformance evidence item must be an object")
+    assessment = assess_conformance(
+        receipts,
+        commit=args.commit,
+        platform=args.platform,
+        now=datetime.fromisoformat(args.as_of),
+    )
+    _write_json(assessment.to_system_card_fragment(), args.output)
+    if args.require_level is None:
+        return 0
+    # This offline command performs structural inspection only. Release gates
+    # require the separate trusted verifier and therefore always fail closed.
+    return 1
 
 
 # ──────────────────────────── run ─────────────────────────────────────────
@@ -148,6 +246,11 @@ def _add_run_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     p.add_argument("--seed", type=int, default=42, help="Starting seed.")
     p.add_argument("--provider", default="fake", help="Provider id.")
     p.add_argument("--model", default="fake-1", help="Model id.")
+    p.add_argument(
+        "--fixture-mode",
+        action="store_true",
+        help="Explicitly run the deterministic fake harness; output is never release evidence.",
+    )
     p.add_argument("--output-dir", default="evals/results", help="Directory to write run records.")
     p.add_argument(
         "--format",
@@ -159,8 +262,14 @@ def _add_run_cmd(sub: argparse._SubParsersAction[Any]) -> None:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     """Execute the ``run`` command."""
-    # Build a deterministic fake harness for the demo. In production this
-    # would dispatch to a real harness adapter.
+    if not args.fixture_mode:
+        print(
+            "run is blocked: no live harness adapter is configured; pass --fixture-mode "
+            "only for deterministic test data",
+            file=sys.stderr,
+        )
+        return 2
+
     harness_runner = HarnessRunner(harness=FakeScriptHarness(result=_fake_result(args)))
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -216,7 +325,7 @@ def _fake_result(args: argparse.Namespace) -> HarnessResult:
                 evidence=["noop grader (demo)"],
             )
         ],
-        notes="fake scripted harness (demo)",
+        notes="fixture-only scripted harness; not live or release evidence",
     )
 
 
@@ -474,6 +583,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         "security": _cmd_security,
         "tier": _cmd_tier,
         "exit-gate": _cmd_exit_gate,
+        "conformance": _cmd_conformance,
     }
     handler = handlers.get(args.command)
     if handler is None:

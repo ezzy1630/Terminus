@@ -25,8 +25,8 @@ export type StageRole =
 export interface StageRouteInputs {
   readonly stage: StageRole;
   readonly confidentiality: "public" | "workspace" | "secret_adjacent" | "secret";
-  readonly allowedProviders?: readonly string[];
-  readonly implementerProviderId?: string | null;
+  readonly allowedAdapterRefs?: readonly string[];
+  readonly implementerModelFamilyRef?: string | null;
   readonly budgetMaxMicros?: bigint | null;
   readonly maxLatencyMs?: number | null;
   readonly requireOffline?: boolean;
@@ -53,31 +53,32 @@ export class StageRouter {
 
     // Filter by confidentiality
     candidates = candidates.filter((p) =>
-      p.confidentialityPolicy.includes(input.confidentiality),
+      p.allowedConfidentiality.includes(input.confidentiality),
     );
 
     // Filter by offline requirement
     if (input.requireOffline || input.stage === "local_safe" || input.confidentiality === "secret") {
-      candidates = candidates.filter((p) => p.providerId === "local");
+      candidates = candidates.filter((p) => p.capabilities.offlineExecution);
     }
 
-    // Filter by allowed providers
-    if (input.allowedProviders && input.allowedProviders.length > 0) {
-      candidates = candidates.filter((p) =>
-        input.allowedProviders!.includes(p.providerId),
-      );
+    // Filter by caller-authorized opaque adapter references.
+    if (input.allowedAdapterRefs && input.allowedAdapterRefs.length > 0) {
+      const allowedAdapterRefs = new Set(input.allowedAdapterRefs);
+      candidates = candidates.filter((profile) => allowedAdapterRefs.has(profile.adapterRef));
     }
 
     // Filter by stage-specific requirements
     if (input.stage === "vision") {
-      candidates = candidates.filter((p) => p.contextLayout.supportsImages);
+      candidates = candidates.filter((p) => p.capabilities.imageInput);
     }
     if (input.stage === "implementer") {
       candidates = candidates.filter((p) => p.capabilities.codingQuality === "high");
     }
     if (input.stage === "specialist") {
       candidates = candidates.filter(
-        (p) => p.reasoningEffortPolicy === "high" || p.capabilities.securityReasoning === "high",
+        (p) =>
+          p.capabilities.reasoningStrength === "high" ||
+          p.capabilities.securityReasoning === "high",
       );
     }
 
@@ -87,9 +88,9 @@ export class StageRouter {
 
     for (const profile of candidates) {
       // Check circuit breaker and rate limit
-      const cbOpen = this.controls.circuitBreaker?.isOpen(profile.providerId) ?? false;
-      const rateAvailable = this.controls.rateLimiter?.canAcquire(profile.providerId, 1) ?? true;
-      const concAvailable = this.controls.concurrencyLimiter?.available(profile.providerId) ?? true;
+      const cbOpen = this.controls.circuitBreaker?.isOpen(profile.adapterRef) ?? false;
+      const rateAvailable = this.controls.rateLimiter?.canAcquire(profile.adapterRef, 1) ?? true;
+      const concAvailable = this.controls.concurrencyLimiter?.available(profile.adapterRef) ?? true;
 
       if (cbOpen || !rateAvailable || !concAvailable) {
         candidateScoresRecord[profile.id] = -999.0;
@@ -161,20 +162,23 @@ export class StageRouter {
         break;
       case "reviewer":
         // Family diversity preference (+0.25 bonus for different family)
-        if (input.implementerProviderId && input.implementerProviderId !== profile.providerId) {
+        if (
+          input.implementerModelFamilyRef &&
+          input.implementerModelFamilyRef !== profile.modelFamilyRef
+        ) {
           score += 0.25;
         }
         score += 0.05 * (profile.capabilities.securityReasoning === "high" ? 1 : 0.5);
         break;
       case "specialist":
         // High reasoning
-        score += profile.reasoningEffortPolicy === "high" ? 0.3 : 0.1;
+        score += profile.capabilities.reasoningStrength === "high" ? 0.3 : 0.1;
         break;
       case "vision":
-        score += profile.contextLayout.supportsImages ? 0.3 : -1.0;
+        score += profile.capabilities.imageInput ? 0.3 : -1.0;
         break;
       case "local_safe":
-        score += profile.providerId === "local" ? 0.3 : -1.0;
+        score += profile.capabilities.offlineExecution ? 0.3 : -1.0;
         break;
     }
 

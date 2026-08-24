@@ -31,6 +31,8 @@ provider.
 - Hard-required fragments (authority ≥ 80) bypass scoring.
 - Complete episode integrity is preserved (a tool_call episode always includes
   both call and settled result).
+- Complete tool episode artifacts are rehydrated from CAS, SHA-256 verified,
+  and rendered byte-exactly. Missing or mismatched bytes fail before send.
 - The compiler MUST NOT silently pretend evidence coverage exists.
 - Every candidate, query, omission, transform, confidentiality decision, and
   memory decision is recorded in the manifest decision record.

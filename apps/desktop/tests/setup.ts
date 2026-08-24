@@ -18,6 +18,13 @@ if (!window.localStorage) {
   });
 }
 
+// Node can expose an experimental process-wide Storage constructor. Renderer
+// code uses the window realm, so tests must spy on that same prototype.
+Object.defineProperty(globalThis, "Storage", {
+  configurable: true,
+  value: window.Storage,
+});
+
 // Polyfill ResizeObserver for jsdom
 class ResizeObserverStub {
   observe() {}
@@ -46,4 +53,12 @@ if (!window.matchMedia) {
 // Polyfill scrollIntoView for jsdom
 if (typeof HTMLElement !== "undefined" && !HTMLElement.prototype.scrollIntoView) {
   HTMLElement.prototype.scrollIntoView = function() {};
+}
+
+// Radix Select uses pointer capture in browsers. jsdom does not implement the
+// capture API, so expose the inert test equivalent.
+if (typeof HTMLElement !== "undefined" && !HTMLElement.prototype.hasPointerCapture) {
+  HTMLElement.prototype.hasPointerCapture = () => false;
+  HTMLElement.prototype.setPointerCapture = () => {};
+  HTMLElement.prototype.releasePointerCapture = () => {};
 }

@@ -35,6 +35,11 @@ next-env.d.ts
 packages/*/dist/
 packages/*/*.tsbuildinfo
 
+# Desktop build/package outputs. The source tree and packaging scripts are the
+# reproducible inputs; Vite/Electron output is candidate-local evidence.
+apps/desktop/dist/
+apps/desktop/dist-electron/
+
 # Generated code (kept under src control per SPEC §45.2, but local regen output)
 schemas/generated/*
 !schemas/generated/terminus.kernel.v1.binpb
@@ -98,3 +103,6 @@ apps/desktop/release/
 # Keep the directory; ignore generated payloads.
 artifacts/release-gate/*
 !artifacts/release-gate/.gitkeep
+
+# Local development runtime state (SQLite db, kernel data, UDS socket, tokens)
+.terminus-dev/

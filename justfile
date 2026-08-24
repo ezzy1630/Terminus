@@ -34,8 +34,6 @@ bootstrap:
     (cd python && uv sync --frozen --extra dev)
     echo "[bootstrap] verifying buf..."
     buf --version
-    echo "[bootstrap] verifying OpenCode source pin..."
-    bash scripts/fetch-opencode.sh
     echo "[bootstrap] OK"
 
 # Build Rust, TypeScript, and generated contracts.
@@ -58,8 +56,37 @@ check: boundary-check
     # SPEC §44.3: typecheck the canonical Terminus packages under strict
     # settings (tsconfig.packages.json), then the Next.js dashboard.
     bun run typecheck:packages
+    bun run typecheck:scripts
     bun run typecheck
     cd python && uv run --extra dev ruff check . && uv run --extra dev mypy forge_evals
+
+# Fast Rust-only fmt + clippy check.
+check-rs:
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets
+
+# Fast TS-only boundary + lint + typecheck.
+check-ts: boundary-check
+    bun run lint
+    bun run typecheck:packages
+    bun run typecheck:scripts
+    bun run typecheck
+
+# Run tests for a specific TypeScript package.
+test-pkg name:
+    bun test packages/{{name}}/src
+
+# Run tests for a specific Rust crate.
+test-crate name:
+    cargo test -p {{name}}
+
+# Watch mode test runner for a specific TypeScript package.
+tdd-ts name:
+    bun test --watch packages/{{name}}/src
+
+# Fast parallel Rust test execution via cargo-nextest.
+nextest:
+    cargo nextest run --workspace
 
 # Lint + test the kernel HTTP mini-service, which intentionally sits outside
 # the root Cargo workspace (SPEC §42.5 boundary). The root `cargo clippy
@@ -76,11 +103,20 @@ kernel-mini-check:
 boundary-check:
     bun run tools/boundary-check.ts
 
+# Prove Terminus has no first-party OpenCode runtime/build dependency and owns
+# the ARP -> public API -> public client chain directly (ADR-0039).
+standalone-check:
+    bun run tools/standalone-check.ts
+
 # Full local validation.
-check-all: check kernel-mini-check codegen-check truth-check unit integration security
+check-all: check standalone-check kernel-mini-check codegen-check truth-check unit integration security
 
 # Regenerate all derived contracts.
 codegen: codegen-proto codegen-public-api codegen-events codegen-tools codegen-config codegen-v2-schemas codegen-sqlx codegen-docs
+
+# Incrementally regenerate derived contracts based on changed files.
+codegen-changed:
+    bun run tools/codegen/changed.ts
 
 # Verify no generated drift.
 codegen-check:
@@ -164,7 +200,7 @@ eval-smoke:
     set -eu
     cd python
     for task in build-failure/build-001 test-generation/testgen-001; do
-      uv run terminus-eval run --suite terminus-internal --task "$task" --task-dir "forge_evals/evals/tasks/$task" --harness terminus-minimal --seeds 1 --output-dir evals/results/smoke
+      uv run terminus-eval run --fixture-mode --suite terminus-internal --task "$task" --task-dir "forge_evals/evals/tasks/$task" --harness terminus-minimal --seeds 1 --output-dir evals/results/smoke
     done
 
 # Full configured evaluation suite.
@@ -175,19 +211,8 @@ eval-full:
     for task_dir in forge_evals/evals/tasks/*/*; do
       test -d "$task_dir" || continue
       task="${task_dir#forge_evals/evals/tasks/}"
-      uv run terminus-eval run --suite terminus-internal --task "$task" --task-dir "$task_dir" --harness terminus-minimal --seeds 3 --output-dir evals/results/full
+      uv run terminus-eval run --fixture-mode --suite terminus-internal --task "$task" --task-dir "$task_dir" --harness terminus-minimal --seeds 3 --output-dir evals/results/full
     done
-
-# OpenCode parity and divergence checks.
-upstream-check:
-    #!/usr/bin/env bash
-    set -eu
-    # The divergence verifier needs pyyaml; run under the pinned python env
-    # so the dependency comes from the locked uv environment, not the host.
-    uv run --project python python scripts/verify-upstream-divergence.py
-    bun test packages/open-code-bridge
-    bash scripts/verify-opencode-parity.sh
-
 
 # Property + fuzz-smoke corpus regressions (SPEC §46.3 / §46.4).
 fuzz-smoke:
@@ -232,8 +257,17 @@ sbom-verify:
 schema-freeze-evidence:
     bun run scripts/write-schema-freeze-evidence.ts
 
-# Four-owner machine-readable release decision (SPEC §50.10).
-release-decision: platform-matrix
+# Build the immutable evidence set before owners sign it. This recipe changes
+# the manifest digest, so never run it after collecting approvals.
+release-evidence-candidate: release-source-check fuzz-smoke fault-injection release-drills soak canary eval-release sbom-verify schema-freeze-evidence system-card
+    bun run scripts/produce-release-evidence-manifest.ts
+
+# Four-owner machine-readable release decision (SPEC §50.10). Evidence and
+# signed approval artifacts must already exist.
+release-source-check:
+    bun run scripts/verify-release-source.ts
+
+release-decision: release-source-check
     bun run scripts/produce-release-decision.ts
 
 # Evidence-derived platform/backend support matrix (roadmap Phase 0). A
@@ -252,20 +286,21 @@ truth-check:
     bun run scripts/check-declaration-consistency.ts
 
 # First system card: maturity, platform support, limitations, missing infra.
-system-card:
+system-card: platform-matrix
     bun run scripts/produce-system-card.ts
 
 # Signed baseline evaluation evidence bound to HEAD (roadmap Phase 0).
 eval-baseline:
     bash scripts/run-eval-baseline.sh
 
-# Aggregate M12 exit-gate evidence report.
-m12-exit-gate: fuzz-smoke fault-injection release-drills soak canary eval-release sbom-verify schema-freeze-evidence release-decision system-card
+# Validate the frozen evidence set and signed decision without regenerating
+# anything covered by the owner approvals.
+m12-exit-gate: release-source-check
     bun run scripts/m12-exit-gate.ts
 
 # Release gate (SPEC §46.18, §50). Every dependency is mandatory; missing
 # infrastructure or evidence is a release failure, not a warning.
-release-check: check-all e2e eval-smoke upstream-check m12-exit-gate
+release-check: check-all e2e eval-smoke standalone-check m12-exit-gate
     #!/usr/bin/env bash
     set -eu
     if [[ -n "${TERMINUS_LINUX_EVIDENCE:-}" ]]; then
@@ -280,16 +315,20 @@ release-check: check-all e2e eval-smoke upstream-check m12-exit-gate
     fi
     echo "[release-check] PASS — required local checks and release evidence are present"
 
-# Run control plane and kernel locally (supervised).
+# Run the kernel, control plane, and terminal client locally (supervised).
 run:
     #!/usr/bin/env bash
     set -eu
-    echo "[run] starting kernel (:3040), control (:3050), tui (:3000) — Ctrl-C to stop"
+    export TERMINUS_DEV="${TERMINUS_DEV:-1}"
+    export TERMINUS_CONTROL_TOKEN="${TERMINUS_CONTROL_TOKEN:-terminus-control-dev-token}"
+    export TERMINUS_TOKEN="${TERMINUS_TOKEN:-$TERMINUS_CONTROL_TOKEN}"
+    export TERMINUS_GATEWAY="${TERMINUS_GATEWAY:-http://127.0.0.1:3050}"
+    echo "[run] starting kernel (:3040), control (:3050), and terminal UI — Ctrl-C to stop"
     trap 'kill 0' EXIT INT TERM
     (just run-kernel) &
     (just run-control) &
-    (just run-tui) &
-    wait
+    sleep 2
+    just run-tui
 
 # Run the Rust kernel mini-service on :3040.
 run-kernel:
@@ -297,11 +336,11 @@ run-kernel:
 
 # Run the TS control plane mini-service on :3050.
 run-control:
-    cd mini-services/terminus-control && bun run dev
+    cd mini-services/terminus-control && TERMINUS_DEV="${TERMINUS_DEV:-1}" bun run dev
 
-# Run the Next.js dashboard on :3000.
+# Run the full-screen terminal client. TERMINUS_TOKEN is required.
 run-tui:
-    bun run dev
+    TERMINUS_GATEWAY="${TERMINUS_GATEWAY:-http://127.0.0.1:3050}" bun apps/tui/src/index.ts tui
 
 # Scaffolding helpers (SPEC §45.7).
 new-ts-package name:
@@ -327,3 +366,11 @@ new-eval suite task:
 
 new-adr title:
     bun run tools/scaffold/new-adr.ts "{{title}}"
+
+# Run the IDE Agent Client Protocol (ACP) JSON-RPC bridge on stdio.
+run-acp:
+    bun apps/ide-acp/src/index.ts
+
+# Generate editor/t3code ACP launcher configurations.
+acp-config:
+    bun run tools/scaffold/acp-config.ts

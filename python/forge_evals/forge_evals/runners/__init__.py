@@ -9,9 +9,9 @@ from __future__ import annotations
 from .baseline_adapters import (
     ClaudeCodeAdapter,
     CodexAdapter,
+    ExternalHarnessUnavailable,
     OhMyPiAdapter,
     PiAdapter,
-    PinnedOpenCodeAdapter,
     TerminusFullAdapter,
     TerminusMinimalAdapter,
     get_baseline_harness,
@@ -59,6 +59,7 @@ __all__ = [
     "CrossHarnessRunner",
     "CrossTaskSpec",
     "EnvironmentDigest",
+    "ExternalHarnessUnavailable",
     "FakeProvider",
     "FakeProviderBuilder",
     "FakeProviderChunk",
@@ -74,7 +75,6 @@ __all__ = [
     "ModelCapabilitySnapshot",
     "OhMyPiAdapter",
     "PiAdapter",
-    "PinnedOpenCodeAdapter",
     "RunRequest",
     "ScriptStep",
     "TerminusFullAdapter",
@@ -87,4 +87,3 @@ __all__ = [
     "make_default_cost",
     "run_paired_comparison",
 ]
-

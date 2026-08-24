@@ -121,7 +121,7 @@ function validate(registry: Registry): void {
     if (!existsSync(yamlPath)) continue; // declaration-only adapters may lack runner but have yaml
     let doc: { adapter?: { id?: string; status?: Tier; last_verified?: string | null } };
     try {
-      doc = Bun.YAML.parse(readFileSync(yamlPath, "utf8"));
+      doc = Bun.YAML.parse(readFileSync(yamlPath, "utf8")) as { adapter?: { id?: string; status?: Tier; last_verified?: string | null } };
     } catch (err) {
       return fail(`${c.id}: adapter.yaml does not parse: ${String(err)}`);
     }
@@ -166,7 +166,7 @@ function emit(registry: Registry): void {
   lines.push("| Component | Kind | Path | Tier | Basis |");
   lines.push("|---|---|---|---|---|");
   for (const c of sorted) {
-    const basis = c.basis.replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
+    const basis = c.basis.replaceAll("\\", "\\\\").replaceAll("|", "\\|").replace(/\s+/g, " ").trim();
     lines.push(`| \`${c.id}\` | ${c.kind} | \`${c.path}\` | \`${c.tier}\` | ${basis} |`);
   }
   lines.push("");

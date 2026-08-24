@@ -67,17 +67,6 @@ storage:
     dry_run: false
     interval_hours: 24
 
-# OpenCode upstream fork tracking (SPEC §4, §48). The pinned commit and
-# content_sha256 live in upstream/opencode.lock.json; this section names
-# the lockfile and the divergence budget so the control plane can
-# surface drift in the dashboard.
-upstream:
-  lock_file: upstream/opencode.lock.json
-  divergence_budget: upstream/divergence-budget.yaml
-  patches_dir: upstream/patches
-  sync_mode: fork_assisted  # fork_assisted | rebase | subtree
-  auto_merge: false  # never auto-merge upstream changes; always require review
-
 # Provider accounts (SPEC §15). Each account is keyed by an opaque id
 # and references an adapter by name. Credentials are never stored in
 # config; they are brokered as short-lived, destination-scoped tokens by

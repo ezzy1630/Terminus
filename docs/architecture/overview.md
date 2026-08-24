@@ -11,7 +11,7 @@ This document is the entry point for Terminus's architecture. It summarizes the 
 └──────────────────────────────┬───────────────────────────────────────────┘
                                │ Public API / ACP adapter (ADR-0008)
 ┌──────────────────────────────▼───────────────────────────────────────────┐
-│ CONTROL AND COGNITION PLANE — TypeScript, OpenCode-derived initially    │
+│ CONTROL AND COGNITION PLANE — Terminus-owned TypeScript                 │
 │ (ADR-0003)                                                              │
 │                                                                          │
 │ Session/task engine     Context Compiler (ADR-0009)    Provider renderers│
@@ -24,7 +24,7 @@ This document is the entry point for Terminus's architecture. It summarizes the 
                 │ (ADR-0007)                 │
 ┌───────────────▼────────────────────┐  ┌───▼──────────────────────────────┐
 │ EXECUTION/SECURITY MICROKERNEL     │  │ CAPABILITY PLANE                │
-│ Rust, non-bypassable (ADR-0014)    │  │                                  │
+│ Rust effect boundary (ADR-0014)    │  │                                  │
 │                                   │  │ Built-in tools · Agent Skills    │
 │ Sandbox broker                    │  │ MCP servers · first-party packs  │
 │ PTY/process/job manager           │  │ third-party plugins · adapters   │
@@ -82,9 +82,9 @@ terminus client(s)
     │ HTTPS/UDS HTTP + SSE
     ▼
 terminus-control (TypeScript, port 3050)
-    │ gRPC over Unix domain socket (or JSON-over-HTTP in mini-service bootstrap)
+    │ gRPC over a private Unix domain socket
     ▼
-terminus-kernel (Rust, port 3040, privileged effect boundary)
+terminus-kernel (Rust, privileged effect boundary)
     ├── sandboxed command/job processes
     ├── LSP/DAP/index workers
     ├── plugin/WASI workers
@@ -99,10 +99,10 @@ terminus-eval (Python, offline or isolated)
 
 ## Decisions governing this architecture
 
-See `docs/decisions/` for the 30 ADRs from Appendix H. Key architectural ADRs:
+See `docs/decisions/` for the current ADR catalog. Key architectural ADRs:
 
 - ADR-0001 — Primary metric: verified successful tasks per dollar-hour.
-- ADR-0002 — Fork-assisted OpenCode strangler strategy.
+- ADR-0039 — Standalone Terminus runtime.
 - ADR-0003 — TS control plane + Rust kernel + Python eval.
 - ADR-0004 — Separate public, kernel, adapter protocols.
 - ADR-0005 — Hybrid SQLite/events/artifact persistence.
@@ -110,6 +110,8 @@ See `docs/decisions/` for the 30 ADRs from Appendix H. Key architectural ADRs:
 - ADR-0009 — Context IR + provider-specific renderers.
 - ADR-0014 — Linux Bubblewrap secure backend.
 - ADR-0025 — Permanent minimal baseline + feature promotion gates.
+- ADR-0040 — Sealed evolution + evidence-derived conformance.
+- ADR-0041 — Governed computer-use coordinators.
 
 ## Next steps
 

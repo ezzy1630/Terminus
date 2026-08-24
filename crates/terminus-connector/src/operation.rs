@@ -15,6 +15,10 @@ pub struct CanonicalOperation {
     pub path: String,
     /// Raw query string without `?` (may be empty).
     pub query: String,
+    /// Bounded, non-secret request headers. Authentication headers are
+    /// rejected because the connector injects credentials itself.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
     /// Bounded request body bytes (may be empty).
     pub body: Vec<u8>,
 }

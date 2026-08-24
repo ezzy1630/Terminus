@@ -9,12 +9,48 @@ use terminus_authz::{OperationClass, Scope, TokenBinder, TokenIssuer};
 use terminus_kernel::KernelHandle;
 use terminus_kernel_protocol::OutputChunk;
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tracing::info;
 
 use crate::idempotency::IdempotencyMap;
 
 /// Default bearer token if `TERMINUS_KERNEL_TOKEN` is unset.
 pub const DEFAULT_BEARER_TOKEN: &str = "terminus-kernel-dev-token";
+
+/// Lifecycle owner for bounded background work started by request handlers.
+/// Dropping the last clone drops the `JoinSet`, which aborts any remaining
+/// tasks; normal server shutdown explicitly aborts and joins them first.
+#[derive(Clone, Default)]
+struct BackgroundTaskSupervisor {
+    tasks: Arc<Mutex<JoinSet<()>>>,
+}
+
+impl BackgroundTaskSupervisor {
+    async fn spawn<F>(&self, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut tasks = self.tasks.lock().await;
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result {
+                tracing::warn!(%error, "kernel background task ended unexpectedly");
+            }
+        }
+        tasks.spawn(task);
+    }
+
+    async fn shutdown(&self) {
+        let mut tasks = self.tasks.lock().await;
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    tracing::warn!(%error, "kernel background task failed during shutdown");
+                }
+            }
+        }
+    }
+}
 
 /// The shared application state.
 #[derive(Clone)]
@@ -36,6 +72,7 @@ pub struct AppState {
     pub process_outputs: Arc<Mutex<HashMap<String, Vec<OutputChunk>>>>,
     /// Final ProcessEvent per process, used to expose exit status.
     pub process_exits: Arc<Mutex<HashMap<String, terminus_kernel_protocol::ProcessExited>>>,
+    background_tasks: BackgroundTaskSupervisor,
     /// RFC3339 timestamp captured at startup.
     pub started_at: String,
     /// Build commit (best-effort, from env or "dev").
@@ -60,6 +97,17 @@ impl std::fmt::Debug for AppState {
 }
 
 impl AppState {
+    pub async fn spawn_background<F>(&self, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.background_tasks.spawn(task).await;
+    }
+
+    pub async fn shutdown_background(&self) {
+        self.background_tasks.shutdown().await;
+    }
+
     /// Build the app state from environment variables.
     pub fn from_env() -> Result<Self, std::io::Error> {
         let data_dir = env::var("TERMINUS_DATA").unwrap_or_else(|_| ".terminus-data".to_string());
@@ -82,10 +130,13 @@ impl AppState {
 
         // Mint a long-lived dev capability token with all operation classes.
         let binder = TokenBinder {
-            principal: "terminus-dev".to_string(),
-            session_id: "dev-session".to_string(),
-            task_id: "dev-task".to_string(),
-            workspace_id: "dev-workspace".to_string(),
+            principal: "*".to_string(),
+            // The development control-plane token is intentionally a
+            // wildcard binder. Production never mints this token and must
+            // supply task/workspace-scoped capabilities.
+            session_id: "*".to_string(),
+            task_id: "*".to_string(),
+            workspace_id: "*".to_string(),
             kernel_instance_id: String::new(),
         };
         let ops = vec![
@@ -190,9 +241,45 @@ impl AppState {
             idempotency: Arc::new(IdempotencyMap::new()),
             process_outputs: Arc::new(Mutex::new(HashMap::new())),
             process_exits: Arc::new(Mutex::new(HashMap::new())),
+            background_tasks: BackgroundTaskSupervisor::default(),
             started_at,
             build_commit,
             data_dir,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BackgroundTaskSupervisor;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_and_joins_owned_background_tasks() {
+        let supervisor = BackgroundTaskSupervisor::default();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        supervisor
+            .spawn(async move {
+                let _drop_flag = DropFlag(task_dropped);
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+            })
+            .await;
+        assert!(started_rx.await.is_ok(), "background task must start");
+
+        supervisor.shutdown().await;
+
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

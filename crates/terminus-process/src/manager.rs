@@ -59,6 +59,15 @@ pub struct ManagedProcess {
     pub cancel_requested: bool,
     pub allocate_pty: bool,
     lease: Option<SpawnLease>,
+    pub supervisor_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for ManagedProcess {
+    fn drop(&mut self) {
+        if let Some(handle) = self.supervisor_handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 /// ProcessManager owns child processes. Construction is cheap; share via
@@ -108,7 +117,7 @@ impl ProcessManager {
     /// sandbox argv INCLUDING the trailing `-- <program> <args...>` (as
     /// produced by `LinuxSandboxBackend::build_bwrap_argv`). The wrapper
     /// binary owns namespace isolation; `ProcessManager` still owns the
-    /// process group, timeout, output streaming, and tree-kill on cancel.
+    /// process group, timeout, output streaming, and owned-group kill on cancel.
     /// SPEC §13.4 / §34.11.
     pub async fn spawn_wrapped(
         &self,
@@ -120,9 +129,12 @@ impl ProcessManager {
         command.args(&wrapper_argv);
         command.env_clear();
         command.envs(&spawn.env);
-        // Working directory is set via the wrapper argv (bwrap --chdir); do
-        // not also set current_dir or the wrapper may fail to chdir inside
-        // the new mount namespace.
+        // The wrapper starts from the already-resolved host cwd. Namespace
+        // backends may also set an in-sandbox cwd (for example bwrap
+        // --chdir); Seatbelt inherits this host cwd directly.
+        if let Some(cwd) = &spawn.working_dir {
+            command.current_dir(cwd);
+        }
         let resolved_executable =
             format!("{} (sandboxed via {})", spawn.program, wrapper.display());
         self.spawn_command(command, resolved_executable, spawn.timeout_ms, None)
@@ -142,6 +154,9 @@ impl ProcessManager {
         command.args(&wrapper_argv);
         command.env_clear();
         command.envs(&spawn.env);
+        if let Some(cwd) = &spawn.working_dir {
+            command.current_dir(cwd);
+        }
         let resolved_executable =
             format!("{} (sandboxed via {})", spawn.program, wrapper.display());
         self.spawn_command(command, resolved_executable, spawn.timeout_ms, Some(lease))
@@ -195,6 +210,7 @@ impl ProcessManager {
             cancel_requested: false,
             allocate_pty: false,
             lease,
+            supervisor_handle: None,
         }));
         self.children
             .lock()
@@ -206,19 +222,14 @@ impl ProcessManager {
         let pid = process_id.clone();
         let tx_clone = tx.clone();
         let children = Arc::clone(&self.children);
+        let managed_supervisor = Arc::clone(&managed);
         // `timeout_ms` is a parameter of `spawn_command`.
 
         // SPEC §44.2 ownership: this supervisor task owns the child's
-        // lifetime. It is not detached — ownership is implicit via the
-        // `mpsc::Receiver` held by the caller (`rx`): when the caller drops
-        // `rx` or the process exits, this task drains stdout/stderr, captures
-        // exit status, ingests output artifacts, and completes. The child is
-        // also registered in `self.children` so `cancel()` can kill the
-        // process group. Cancellation propagates: dropping the receiver
-        // cancels the stream tasks; `kill_process_group` reaps the tree.
-        tokio::spawn(async move {
+        // lifetime and is explicitly tracked by ManagedProcess.
+        let supervisor = tokio::spawn(async move {
             // Pull child out of the managed wrapper so we can take stdout/stderr.
-            let mut child_guard = managed.lock().await;
+            let mut child_guard = managed_supervisor.lock().await;
             let mut child = match child_guard.child.take() {
                 Some(c) => c,
                 None => return,
@@ -259,7 +270,7 @@ impl ProcessManager {
                             kill_process_group(pid);
                             let _ = child.wait().await;
                         }
-                        let mut child_guard = managed.lock().await;
+                        let mut child_guard = managed_supervisor.lock().await;
                         child_guard.pid = None;
                         child_guard.stdin = None;
                         drop(child_guard);
@@ -267,22 +278,24 @@ impl ProcessManager {
                         // both capture tasks reach EOF promptly; reap them
                         // instead of leaving them running detached and racing
                         // release_managed below.
-                        if let Some(t) = stdout_task {
-                            let _ = t.await;
-                        }
-                        if let Some(t) = stderr_task {
-                            let _ = t.await;
-                        }
+                        let stdout_artifact = match stdout_task {
+                            Some(t) => t.await.unwrap_or(None),
+                            None => None,
+                        };
+                        let stderr_artifact = match stderr_task {
+                            Some(t) => t.await.unwrap_or(None),
+                            None => None,
+                        };
                         let _ = tx_clone
                             .send(ProcessEvent::Exited(ProcessExited {
                                 exit_code: -1,
                                 signal: "TIMEOUT".to_string(),
                                 exited_at: now_rfc3339(),
-                                stdout_artifact: None,
-                                stderr_artifact: None,
+                                stdout_artifact,
+                                stderr_artifact,
                             }))
                             .await;
-                        release_managed(&children, &pid, &managed).await;
+                        release_managed(&children, &pid, &managed_supervisor).await;
                         return;
                     }
                 }
@@ -290,7 +303,7 @@ impl ProcessManager {
             let status = match exit_result {
                 Ok(s) => s,
                 Err(e) => {
-                    let mut child_guard = managed.lock().await;
+                    let mut child_guard = managed_supervisor.lock().await;
                     child_guard.pid = None;
                     child_guard.stdin = None;
                     drop(child_guard);
@@ -314,11 +327,11 @@ impl ProcessManager {
                             stderr_artifact: None,
                         }))
                         .await;
-                    release_managed(&children, &pid, &managed).await;
+                    release_managed(&children, &pid, &managed_supervisor).await;
                     return;
                 }
             };
-            let mut child_guard = managed.lock().await;
+            let mut child_guard = managed_supervisor.lock().await;
             child_guard.pid = None;
             child_guard.stdin = None;
             drop(child_guard);
@@ -361,8 +374,9 @@ impl ProcessManager {
                     stderr_artifact,
                 }))
                 .await;
-            release_managed(&children, &pid, &managed).await;
+            release_managed(&children, &pid, &managed_supervisor).await;
         });
+        managed.lock().await.supervisor_handle = Some(supervisor);
 
         Ok((
             SpawnOutcome {
@@ -445,6 +459,39 @@ impl ProcessManager {
             false
         }
     }
+
+    /// Kill every owned process group and wait until each child supervisor
+    /// has reaped its direct child and released its registry entry. Kernel shutdown
+    /// calls this before its transport returns, so provider/tool descendants
+    /// cannot outlive the effect authority that created them.
+    pub async fn shutdown_all(&self) -> Result<(), ProcessError> {
+        const SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
+        let deadline = time::Instant::now() + std::time::Duration::from_millis(SHUTDOWN_TIMEOUT_MS);
+        loop {
+            let managed = {
+                let children = self.children.lock().await;
+                if children.is_empty() {
+                    return Ok(());
+                }
+                children.values().cloned().collect::<Vec<_>>()
+            };
+            for process in managed {
+                let pid = {
+                    let mut guard = process.lock().await;
+                    guard.cancel_requested = true;
+                    guard.stdin = None;
+                    guard.pid
+                };
+                if let Some(pid) = pid {
+                    kill_process_group(pid);
+                }
+            }
+            if time::Instant::now() >= deadline {
+                return Err(ProcessError::Timeout(SHUTDOWN_TIMEOUT_MS));
+            }
+            time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -494,39 +541,101 @@ async fn capture_stream<R: tokio::io::AsyncRead + Unpin>(
 ) -> Option<ArtifactRef> {
     let mut buf = vec![0u8; 8192];
     let mut total: Vec<u8> = Vec::new();
+    let mut spill_path: Option<std::path::PathBuf> = None;
+    let mut spill_file: Option<tokio::fs::File> = None;
     let mut cursor: u64 = 0;
-    let mut spilled = false;
+    let mut delivery_open = true;
+    let mut read_failed = false;
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
                 let chunk = &buf[..n];
-                if !spilled {
-                    if total.len() + chunk.len() > max_inline {
-                        spilled = true;
-                    } else {
-                        total.extend_from_slice(chunk);
+                if spill_file.is_none() && total.len().saturating_add(chunk.len()) <= max_inline {
+                    total.extend_from_slice(chunk);
+                } else {
+                    if spill_file.is_none() {
+                        let path = store.root().join("tmp").join(format!(
+                            "process-output-{}-{}",
+                            std::process::id(),
+                            terminus_kernel_protocol::new_id()
+                        ));
+                        let mut file = tokio::fs::File::create(&path).await.ok()?;
+                        if file.write_all(&total).await.is_err() {
+                            let _ = tokio::fs::remove_file(&path).await;
+                            return None;
+                        }
+                        spill_path = Some(path);
+                        spill_file = Some(file);
+                    }
+                    let write_failed = match spill_file.as_mut() {
+                        Some(file) => file.write_all(chunk).await.is_err(),
+                        None => false,
+                    };
+                    if write_failed {
+                        spill_file.take();
+                        if let Some(path) = spill_path.take() {
+                            let _ = tokio::fs::remove_file(path).await;
+                        }
+                        return None;
                     }
                 }
                 cursor += n as u64;
-                let event = match kind {
-                    StreamKind::Stdout => ProcessEvent::Stdout(OutputChunk {
-                        cursor,
-                        bytes: chunk.to_vec(),
-                        redacted: false,
-                    }),
-                    StreamKind::Stderr => ProcessEvent::Stderr(OutputChunk {
-                        cursor,
-                        bytes: chunk.to_vec(),
-                        redacted: false,
-                    }),
-                };
-                if tx.send(event).await.is_err() {
-                    break;
+                if delivery_open {
+                    let event = match kind {
+                        StreamKind::Stdout => ProcessEvent::Stdout(OutputChunk {
+                            cursor,
+                            bytes: chunk.to_vec(),
+                            redacted: false,
+                        }),
+                        StreamKind::Stderr => ProcessEvent::Stderr(OutputChunk {
+                            cursor,
+                            bytes: chunk.to_vec(),
+                            redacted: false,
+                        }),
+                    };
+                    if tx.send(event).await.is_err() {
+                        // A closed observer is not permission to truncate the
+                        // authoritative artifact. Continue draining the pipe.
+                        delivery_open = false;
+                    }
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                read_failed = true;
+                break;
+            }
         }
+    }
+    if read_failed {
+        tracing::warn!(
+            stream = ?kind,
+            cursor,
+            "process output read failed; withholding incomplete artifact"
+        );
+        drop(spill_file.take());
+        if let Some(path) = spill_path.take() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        return None;
+    }
+    if let Some(path) = spill_path {
+        if let Some(mut file) = spill_file {
+            if file.flush().await.is_err() {
+                let _ = tokio::fs::remove_file(&path).await;
+                return None;
+            }
+        }
+        let artifact = tokio::task::spawn_blocking({
+            let store = store.clone();
+            let path = path.clone();
+            move || store.ingest_file(&path).ok().map(|(_, artifact)| artifact)
+        })
+        .await
+        .ok()
+        .flatten();
+        let _ = tokio::fs::remove_file(path).await;
+        return artifact;
     }
     if total.is_empty() {
         return None;
@@ -674,6 +783,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spill_capture_keeps_the_complete_output_artifact() {
+        let (_dir, store) = store();
+        let expected = "0123456789abcdef".repeat(128);
+        let mgr = ProcessManager::new(Arc::clone(&store)).with_max_inline_bytes(32);
+        let spawn = NormalizedSpawn {
+            program: "sh".into(),
+            args: vec!["-c".into(), format!("printf '%s' '{}'", expected)],
+            env: std::collections::BTreeMap::new(),
+            working_dir: None,
+            timeout_ms: 5_000,
+            shell: true,
+            allocate_pty: false,
+        };
+        let (_outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
+        let mut artifact = None;
+        while let Some(event) = rx.recv().await {
+            if let ProcessEvent::Exited(exit) = event {
+                artifact = exit.stdout_artifact;
+            }
+        }
+        let artifact = artifact.expect("spilled stdout must produce an artifact reference");
+        assert_eq!(store.get(&artifact.sha256).unwrap(), expected.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn closed_event_receiver_does_not_truncate_spilled_output() {
+        let (_dir, store) = store();
+        let expected = "0123456789abcdef".repeat(128);
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let mut reader = std::io::Cursor::new(expected.as_bytes().to_vec());
+
+        let artifact = capture_stream(&mut reader, &tx, &store, 32, StreamKind::Stdout)
+            .await
+            .expect("closed observers must still receive the complete artifact reference");
+        assert_eq!(store.get(&artifact.sha256).unwrap(), expected.as_bytes());
+    }
+
+    struct ReadThenError {
+        emitted: bool,
+    }
+
+    impl tokio::io::AsyncRead for ReadThenError {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.emitted {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "fixture read failure",
+                )));
+            }
+            self.emitted = true;
+            buf.put_slice(b"partial output");
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn read_failure_withholds_incomplete_artifact() {
+        let (_dir, store) = store();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut reader = ReadThenError { emitted: false };
+
+        let artifact = capture_stream(&mut reader, &tx, &store, 32, StreamKind::Stdout).await;
+
+        assert!(artifact.is_none());
+    }
+
+    #[tokio::test]
     async fn cancel_running_process() {
         let (_dir, store) = store();
         let mgr = ProcessManager::new(store);
@@ -691,6 +872,44 @@ mod tests {
         let state = mgr.cancel(&outcome.process_id, "test").await.unwrap();
         assert_eq!(state, "cancelled");
         assert!(!mgr.is_running(&outcome.process_id).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_all_kills_and_reaps_the_owned_process_group() {
+        let (_dir, store) = store();
+        let mgr = ProcessManager::new(store);
+        let spawn = NormalizedSpawn {
+            program: "sh".into(),
+            args: vec!["-c".into(), "sleep 30 & echo $!; wait".into()],
+            env: std::collections::BTreeMap::new(),
+            working_dir: None,
+            timeout_ms: 0,
+            shell: true,
+            allocate_pty: false,
+        };
+        let (_outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
+        let descendant_pid = time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = rx.recv().await {
+                if let ProcessEvent::Stdout(chunk) = event {
+                    let value = String::from_utf8_lossy(&chunk.bytes);
+                    if let Ok(pid) = value.trim().parse::<u32>() {
+                        return Some(pid);
+                    }
+                }
+            }
+            None
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        mgr.shutdown_all().await.unwrap();
+        let still_alive = std::process::Command::new("kill")
+            .args(["-0", &descendant_pid.to_string()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(!still_alive, "descendant process survived manager shutdown");
     }
 
     #[tokio::test]

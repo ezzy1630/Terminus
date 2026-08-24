@@ -4,7 +4,7 @@ This document maps the primary sources (SPEC Appendix B) and research interpreta
 
 ## Current primary product and protocol sources
 
-### OpenCode (bootstrap donor, ADR-0002)
+### OpenCode (historical research input and external comparison, ADR-0039)
 
 - Repository and context architecture:
   - https://github.com/anomalyco/opencode
@@ -18,7 +18,7 @@ This document maps the primary sources (SPEC Appendix B) and research interpreta
   - https://opencode.ai/docs/lsp/
   - https://opencode.ai/docs/skills/
 
-**Interpretation (Appendix J.2):** OpenCode is a bootstrap donor, not a permanent dependency. Inherited effect paths are tracked in `docs/security/effect-bypass-register.yaml` and removed per the divergence budget.
+**Interpretation (Appendix J.2):** OpenCode informed the research and may be an external eval comparison. ADR-0039 forbids it as a first-party runtime/build dependency. The retired effect-bypass tombstone makes no historical parity claim.
 
 ### OpenAI Codex (runtime/security reference)
 
@@ -134,7 +134,7 @@ This document maps the primary sources (SPEC Appendix B) and research interpreta
 | Recent complete tool window + summary can outperform full history in a tested workflow | checkpoint/recent-episode policy; no full-history default |
 | Prompt-cache effectiveness depends on stable prefixes and provider behavior | immutable epochs and provider-specific renderers |
 | SWE-agent ACI ablations show file-view/edit/search feedback matters | ACI treated as first-order, benchmarked subsystem |
-| OpenCode typed context sources and epochs provide useful implemented substrate | reuse/bridge rather than greenfield rewrite |
+| OpenCode typed context sources and epochs provide useful research evidence | implement the useful behavior behind Terminus-owned Context IR and epoch contracts |
 | Codex app-server and Linux sandbox demonstrate typed runtime and OS enforcement patterns | generated protocols, bounded queues, Bubblewrap-class kernel |
 | OpenCode plugins can auto-install packages and receive shell access in the upstream model | secure Terminus profile isolates installation and removes ambient plugin authority |
 | MCP permits powerful tool interoperability while security remains implementation responsibility | descriptor pinning, isolation, per-tool scopes, reauthorization |

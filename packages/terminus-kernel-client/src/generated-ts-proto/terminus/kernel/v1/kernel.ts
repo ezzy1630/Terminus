@@ -42,6 +42,22 @@ export enum DecisionProto {
   UNRECOGNIZED = -1,
 }
 
+export enum CapabilityOperationProto {
+  CAPABILITY_OPERATION_UNSPECIFIED = 0,
+  CAPABILITY_OPERATION_READ = 1,
+  CAPABILITY_OPERATION_PATCH = 2,
+  CAPABILITY_OPERATION_EXEC = 3,
+  CAPABILITY_OPERATION_JOB = 4,
+  CAPABILITY_OPERATION_SANDBOX = 5,
+  CAPABILITY_OPERATION_SECRET = 6,
+  CAPABILITY_OPERATION_NETWORK = 7,
+  CAPABILITY_OPERATION_CODE_INTEL = 8,
+  CAPABILITY_OPERATION_EXTENSION = 9,
+  CAPABILITY_OPERATION_GIT = 10,
+  CAPABILITY_OPERATION_ARTIFACT_INGEST = 11,
+  UNRECOGNIZED = -1,
+}
+
 /**
  * RequestContext is carried by every privileged kernel RPC. The capability
  * token MUST be validated against the kernel's instance identity before any
@@ -527,6 +543,19 @@ export interface KernelHealth {
   checkedAt: Date | undefined;
 }
 
+export interface BootstrapControlRequest {
+  /** Must equal the configured control principal */
+  principal: string;
+}
+
+export interface BootstrapControlCapabilities {
+  /** Admin, bound to task control-broker */
+  brokerCapabilityToken: string;
+  /** Admin, bound to task control-maintenance */
+  maintenanceCapabilityToken: string;
+  expiresAtUnix: number;
+}
+
 export interface RegisterWorkspaceRequest {
   context: RequestContext | undefined;
   rootUri: string;
@@ -537,6 +566,11 @@ export interface RegisterWorkspaceRequest {
   remoteEnvironmentJson: string;
   /** workspace | container | microvm | remote */
   kind: string;
+  /**
+   * Existing control-plane identity to preserve during registry migration.
+   * Empty for a new workspace. Admin authorization is required by the RPC.
+   */
+  requestedWorkspaceId: string;
 }
 
 export interface WorkspaceEntryMessage {
@@ -544,6 +578,17 @@ export interface WorkspaceEntryMessage {
   rootUri: string;
   canonicalRoot: string;
   trust: string;
+}
+
+export interface ResolveWorkspaceRootRequest {
+  context: RequestContext | undefined;
+  rootUri: string;
+  candidateRoot: string;
+}
+
+export interface ResolvedWorkspaceRootMessage {
+  rootUri: string;
+  canonicalRoot: string;
 }
 
 export interface GetWorkspaceRequest {
@@ -592,6 +637,26 @@ export interface EvaluatePolicyRequest {
   command: NormalizedCommandMessage | undefined;
 }
 
+export interface MintTaskCapabilityRequest {
+  /** Admin broker capability */
+  context: RequestContext | undefined;
+  principal: string;
+  sessionId: string;
+  taskId: string;
+  workspaceId: string;
+  operationClasses: CapabilityOperationProto[];
+  workspacePaths: string[];
+  networkDestinations: string[];
+  secretCapabilities: string[];
+  /** 1..300 */
+  ttlSeconds: number;
+}
+
+export interface MintTaskCapabilityResponse {
+  capabilityToken: string;
+  expiresAtUnix: number;
+}
+
 export interface MintSecretRequest {
   context:
     | RequestContext
@@ -608,6 +673,23 @@ export interface SecretCapabilityMessage {
   expiresAtUnix: number;
 }
 
+export interface StoreSecretRequest {
+  context: RequestContext | undefined;
+  capabilityUri: string;
+  /** Maximum 16 KiB; never logged or persisted outside OS keyring */
+  value: Uint8Array;
+}
+
+export interface DeleteSecretRequest {
+  context: RequestContext | undefined;
+  capabilityUri: string;
+}
+
+export interface SecretMutationResponse {
+  capabilityUri: string;
+  stored: boolean;
+}
+
 export interface EgressRequest {
   context:
     | RequestContext
@@ -620,6 +702,72 @@ export interface EgressRequest {
 export interface EgressDecisionMessage {
   allowed: boolean;
   reason: string;
+}
+
+export interface ConnectorGrantBindingMessage {
+  connectorId: string;
+  destinationHost: string;
+  destinationPort: number;
+  scheme: string;
+  method: string;
+  pathClass: string;
+  effectId: string;
+}
+
+export interface MintConnectorGrantRequest {
+  context: RequestContext | undefined;
+  capabilityUri: string;
+  binding: ConnectorGrantBindingMessage | undefined;
+  ttlSeconds: number;
+}
+
+export interface ConnectorGrantMessage {
+  encodedGrant: string;
+  grantId: string;
+  expiresAtUnix: number;
+}
+
+export interface ConnectorHeaderMessage {
+  name: string;
+  value: string;
+}
+
+export interface ConnectorOperationMessage {
+  method: string;
+  scheme: string;
+  host: string;
+  port: number;
+  path: string;
+  query: string;
+  headers: ConnectorHeaderMessage[];
+  body: Uint8Array;
+}
+
+export interface ExecuteConnectorRequest {
+  context: RequestContext | undefined;
+  encodedGrant: string;
+  operation: ConnectorOperationMessage | undefined;
+}
+
+export interface ConnectorReceiptMessage {
+  grantId: string;
+  taskId: string;
+  effectId: string;
+  connectorId: string;
+  method: string;
+  path: string;
+  destination: string;
+  requestSha256: string;
+  statusCode?: number | undefined;
+  responseSha256?: string | undefined;
+  responseRedactions: number;
+  outcome: string;
+}
+
+export interface ConnectorResponseMessage {
+  receipt: ConnectorReceiptMessage | undefined;
+  body: Uint8Array;
+  contentType?: string | undefined;
 }
 
 export interface CodeSearchRequest {
@@ -684,6 +832,53 @@ export interface GetArtifactMetadataRequest {
 
 export interface GetArtifactMetadataResponse {
   artifact: ArtifactRef | undefined;
+}
+
+export interface LinkArtifactRequest {
+  context: RequestContext | undefined;
+  sha256: string;
+  ownerType: string;
+  ownerId: string;
+  purpose: string;
+  /**
+   * Authoritative task aggregate that owns the admission. The kernel binds
+   * this to both RequestContext.task_id and the capability token task binder.
+   */
+  ownerTaskId: string;
+}
+
+export interface LinkArtifactResponse {
+  linked: boolean;
+}
+
+export interface ListCheckpointArtifactLinksRequest {
+  context: RequestContext | undefined;
+  pageSize: number;
+  continuationToken: string;
+}
+
+export interface CheckpointArtifactLinkMessage {
+  linkId: string;
+  sha256: string;
+  checkpointId: string;
+  ownerTaskId: string;
+  createdAt: string;
+}
+
+export interface ListCheckpointArtifactLinksResponse {
+  links: CheckpointArtifactLinkMessage[];
+  continuationToken: string;
+}
+
+export interface UnlinkCheckpointArtifactRequest {
+  context: RequestContext | undefined;
+  sha256: string;
+  checkpointId: string;
+  ownerTaskId: string;
+}
+
+export interface UnlinkCheckpointArtifactResponse {
+  unlinked: boolean;
 }
 
 function createBaseRequestContext(): RequestContext {
@@ -5392,8 +5587,132 @@ export const KernelHealth: MessageFns<KernelHealth> = {
   },
 };
 
+function createBaseBootstrapControlRequest(): BootstrapControlRequest {
+  return { principal: "" };
+}
+
+export const BootstrapControlRequest: MessageFns<BootstrapControlRequest> = {
+  encode(message: BootstrapControlRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.principal !== "") {
+      writer.uint32(10).string(message.principal);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BootstrapControlRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBootstrapControlRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.principal = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<BootstrapControlRequest>, I>>(base?: I): BootstrapControlRequest {
+    return BootstrapControlRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<BootstrapControlRequest>, I>>(object: I): BootstrapControlRequest {
+    const message = createBaseBootstrapControlRequest();
+    message.principal = object.principal ?? "";
+    return message;
+  },
+};
+
+function createBaseBootstrapControlCapabilities(): BootstrapControlCapabilities {
+  return { brokerCapabilityToken: "", maintenanceCapabilityToken: "", expiresAtUnix: 0 };
+}
+
+export const BootstrapControlCapabilities: MessageFns<BootstrapControlCapabilities> = {
+  encode(message: BootstrapControlCapabilities, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.brokerCapabilityToken !== "") {
+      writer.uint32(10).string(message.brokerCapabilityToken);
+    }
+    if (message.maintenanceCapabilityToken !== "") {
+      writer.uint32(18).string(message.maintenanceCapabilityToken);
+    }
+    if (message.expiresAtUnix !== 0) {
+      writer.uint32(24).uint64(message.expiresAtUnix);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): BootstrapControlCapabilities {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseBootstrapControlCapabilities();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.brokerCapabilityToken = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.maintenanceCapabilityToken = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.expiresAtUnix = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<BootstrapControlCapabilities>, I>>(base?: I): BootstrapControlCapabilities {
+    return BootstrapControlCapabilities.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<BootstrapControlCapabilities>, I>>(object: I): BootstrapControlCapabilities {
+    const message = createBaseBootstrapControlCapabilities();
+    message.brokerCapabilityToken = object.brokerCapabilityToken ?? "";
+    message.maintenanceCapabilityToken = object.maintenanceCapabilityToken ?? "";
+    message.expiresAtUnix = object.expiresAtUnix ?? 0;
+    return message;
+  },
+};
+
 function createBaseRegisterWorkspaceRequest(): RegisterWorkspaceRequest {
-  return { context: undefined, rootUri: "", canonicalRoot: "", trust: "", remoteEnvironmentJson: "", kind: "" };
+  return {
+    context: undefined,
+    rootUri: "",
+    canonicalRoot: "",
+    trust: "",
+    remoteEnvironmentJson: "",
+    kind: "",
+    requestedWorkspaceId: "",
+  };
 }
 
 export const RegisterWorkspaceRequest: MessageFns<RegisterWorkspaceRequest> = {
@@ -5415,6 +5734,9 @@ export const RegisterWorkspaceRequest: MessageFns<RegisterWorkspaceRequest> = {
     }
     if (message.kind !== "") {
       writer.uint32(50).string(message.kind);
+    }
+    if (message.requestedWorkspaceId !== "") {
+      writer.uint32(58).string(message.requestedWorkspaceId);
     }
     return writer;
   },
@@ -5474,6 +5796,14 @@ export const RegisterWorkspaceRequest: MessageFns<RegisterWorkspaceRequest> = {
           message.kind = reader.string();
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.requestedWorkspaceId = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -5496,6 +5826,7 @@ export const RegisterWorkspaceRequest: MessageFns<RegisterWorkspaceRequest> = {
     message.trust = object.trust ?? "";
     message.remoteEnvironmentJson = object.remoteEnvironmentJson ?? "";
     message.kind = object.kind ?? "";
+    message.requestedWorkspaceId = object.requestedWorkspaceId ?? "";
     return message;
   },
 };
@@ -5578,6 +5909,136 @@ export const WorkspaceEntryMessage: MessageFns<WorkspaceEntryMessage> = {
     message.rootUri = object.rootUri ?? "";
     message.canonicalRoot = object.canonicalRoot ?? "";
     message.trust = object.trust ?? "";
+    return message;
+  },
+};
+
+function createBaseResolveWorkspaceRootRequest(): ResolveWorkspaceRootRequest {
+  return { context: undefined, rootUri: "", candidateRoot: "" };
+}
+
+export const ResolveWorkspaceRootRequest: MessageFns<ResolveWorkspaceRootRequest> = {
+  encode(message: ResolveWorkspaceRootRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.rootUri !== "") {
+      writer.uint32(18).string(message.rootUri);
+    }
+    if (message.candidateRoot !== "") {
+      writer.uint32(26).string(message.candidateRoot);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolveWorkspaceRootRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolveWorkspaceRootRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.rootUri = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.candidateRoot = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ResolveWorkspaceRootRequest>, I>>(base?: I): ResolveWorkspaceRootRequest {
+    return ResolveWorkspaceRootRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolveWorkspaceRootRequest>, I>>(object: I): ResolveWorkspaceRootRequest {
+    const message = createBaseResolveWorkspaceRootRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.rootUri = object.rootUri ?? "";
+    message.candidateRoot = object.candidateRoot ?? "";
+    return message;
+  },
+};
+
+function createBaseResolvedWorkspaceRootMessage(): ResolvedWorkspaceRootMessage {
+  return { rootUri: "", canonicalRoot: "" };
+}
+
+export const ResolvedWorkspaceRootMessage: MessageFns<ResolvedWorkspaceRootMessage> = {
+  encode(message: ResolvedWorkspaceRootMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.rootUri !== "") {
+      writer.uint32(10).string(message.rootUri);
+    }
+    if (message.canonicalRoot !== "") {
+      writer.uint32(18).string(message.canonicalRoot);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ResolvedWorkspaceRootMessage {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseResolvedWorkspaceRootMessage();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.rootUri = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.canonicalRoot = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ResolvedWorkspaceRootMessage>, I>>(base?: I): ResolvedWorkspaceRootMessage {
+    return ResolvedWorkspaceRootMessage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ResolvedWorkspaceRootMessage>, I>>(object: I): ResolvedWorkspaceRootMessage {
+    const message = createBaseResolvedWorkspaceRootMessage();
+    message.rootUri = object.rootUri ?? "";
+    message.canonicalRoot = object.canonicalRoot ?? "";
     return message;
   },
 };
@@ -6130,6 +6591,243 @@ export const EvaluatePolicyRequest: MessageFns<EvaluatePolicyRequest> = {
   },
 };
 
+function createBaseMintTaskCapabilityRequest(): MintTaskCapabilityRequest {
+  return {
+    context: undefined,
+    principal: "",
+    sessionId: "",
+    taskId: "",
+    workspaceId: "",
+    operationClasses: [],
+    workspacePaths: [],
+    networkDestinations: [],
+    secretCapabilities: [],
+    ttlSeconds: 0,
+  };
+}
+
+export const MintTaskCapabilityRequest: MessageFns<MintTaskCapabilityRequest> = {
+  encode(message: MintTaskCapabilityRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.principal !== "") {
+      writer.uint32(18).string(message.principal);
+    }
+    if (message.sessionId !== "") {
+      writer.uint32(26).string(message.sessionId);
+    }
+    if (message.taskId !== "") {
+      writer.uint32(34).string(message.taskId);
+    }
+    if (message.workspaceId !== "") {
+      writer.uint32(42).string(message.workspaceId);
+    }
+    writer.uint32(50).fork();
+    for (const v of message.operationClasses) {
+      writer.int32(v);
+    }
+    writer.join();
+    for (const v of message.workspacePaths) {
+      writer.uint32(58).string(v!);
+    }
+    for (const v of message.networkDestinations) {
+      writer.uint32(66).string(v!);
+    }
+    for (const v of message.secretCapabilities) {
+      writer.uint32(74).string(v!);
+    }
+    if (message.ttlSeconds !== 0) {
+      writer.uint32(80).uint64(message.ttlSeconds);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MintTaskCapabilityRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMintTaskCapabilityRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.principal = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sessionId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.taskId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag === 48) {
+            message.operationClasses.push(reader.int32() as any);
+
+            continue;
+          }
+
+          if (tag === 50) {
+            const end2 = reader.uint32() + reader.pos;
+            while (reader.pos < end2) {
+              message.operationClasses.push(reader.int32() as any);
+            }
+
+            continue;
+          }
+
+          break;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.workspacePaths.push(reader.string());
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.networkDestinations.push(reader.string());
+          continue;
+        }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.secretCapabilities.push(reader.string());
+          continue;
+        }
+        case 10: {
+          if (tag !== 80) {
+            break;
+          }
+
+          message.ttlSeconds = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<MintTaskCapabilityRequest>, I>>(base?: I): MintTaskCapabilityRequest {
+    return MintTaskCapabilityRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<MintTaskCapabilityRequest>, I>>(object: I): MintTaskCapabilityRequest {
+    const message = createBaseMintTaskCapabilityRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.principal = object.principal ?? "";
+    message.sessionId = object.sessionId ?? "";
+    message.taskId = object.taskId ?? "";
+    message.workspaceId = object.workspaceId ?? "";
+    message.operationClasses = object.operationClasses?.map((e) => e) || [];
+    message.workspacePaths = object.workspacePaths?.map((e) => e) || [];
+    message.networkDestinations = object.networkDestinations?.map((e) => e) || [];
+    message.secretCapabilities = object.secretCapabilities?.map((e) => e) || [];
+    message.ttlSeconds = object.ttlSeconds ?? 0;
+    return message;
+  },
+};
+
+function createBaseMintTaskCapabilityResponse(): MintTaskCapabilityResponse {
+  return { capabilityToken: "", expiresAtUnix: 0 };
+}
+
+export const MintTaskCapabilityResponse: MessageFns<MintTaskCapabilityResponse> = {
+  encode(message: MintTaskCapabilityResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.capabilityToken !== "") {
+      writer.uint32(10).string(message.capabilityToken);
+    }
+    if (message.expiresAtUnix !== 0) {
+      writer.uint32(16).uint64(message.expiresAtUnix);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MintTaskCapabilityResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMintTaskCapabilityResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.capabilityToken = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.expiresAtUnix = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<MintTaskCapabilityResponse>, I>>(base?: I): MintTaskCapabilityResponse {
+    return MintTaskCapabilityResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<MintTaskCapabilityResponse>, I>>(object: I): MintTaskCapabilityResponse {
+    const message = createBaseMintTaskCapabilityResponse();
+    message.capabilityToken = object.capabilityToken ?? "";
+    message.expiresAtUnix = object.expiresAtUnix ?? 0;
+    return message;
+  },
+};
+
 function createBaseMintSecretRequest(): MintSecretRequest {
   return { context: undefined, capabilityUri: "", ttlSeconds: 0 };
 }
@@ -6272,6 +6970,196 @@ export const SecretCapabilityMessage: MessageFns<SecretCapabilityMessage> = {
   },
 };
 
+function createBaseStoreSecretRequest(): StoreSecretRequest {
+  return { context: undefined, capabilityUri: "", value: new Uint8Array(0) };
+}
+
+export const StoreSecretRequest: MessageFns<StoreSecretRequest> = {
+  encode(message: StoreSecretRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.capabilityUri !== "") {
+      writer.uint32(18).string(message.capabilityUri);
+    }
+    if (message.value.length !== 0) {
+      writer.uint32(26).bytes(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): StoreSecretRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseStoreSecretRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.capabilityUri = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.value = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<StoreSecretRequest>, I>>(base?: I): StoreSecretRequest {
+    return StoreSecretRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<StoreSecretRequest>, I>>(object: I): StoreSecretRequest {
+    const message = createBaseStoreSecretRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.capabilityUri = object.capabilityUri ?? "";
+    message.value = object.value ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseDeleteSecretRequest(): DeleteSecretRequest {
+  return { context: undefined, capabilityUri: "" };
+}
+
+export const DeleteSecretRequest: MessageFns<DeleteSecretRequest> = {
+  encode(message: DeleteSecretRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.capabilityUri !== "") {
+      writer.uint32(18).string(message.capabilityUri);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DeleteSecretRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDeleteSecretRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.capabilityUri = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DeleteSecretRequest>, I>>(base?: I): DeleteSecretRequest {
+    return DeleteSecretRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DeleteSecretRequest>, I>>(object: I): DeleteSecretRequest {
+    const message = createBaseDeleteSecretRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.capabilityUri = object.capabilityUri ?? "";
+    return message;
+  },
+};
+
+function createBaseSecretMutationResponse(): SecretMutationResponse {
+  return { capabilityUri: "", stored: false };
+}
+
+export const SecretMutationResponse: MessageFns<SecretMutationResponse> = {
+  encode(message: SecretMutationResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.capabilityUri !== "") {
+      writer.uint32(10).string(message.capabilityUri);
+    }
+    if (message.stored !== false) {
+      writer.uint32(16).bool(message.stored);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): SecretMutationResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseSecretMutationResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.capabilityUri = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.stored = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<SecretMutationResponse>, I>>(base?: I): SecretMutationResponse {
+    return SecretMutationResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<SecretMutationResponse>, I>>(object: I): SecretMutationResponse {
+    const message = createBaseSecretMutationResponse();
+    message.capabilityUri = object.capabilityUri ?? "";
+    message.stored = object.stored ?? false;
+    return message;
+  },
+};
+
 function createBaseEgressRequest(): EgressRequest {
   return { context: undefined, destination: "", method: "" };
 }
@@ -6398,6 +7286,813 @@ export const EgressDecisionMessage: MessageFns<EgressDecisionMessage> = {
     const message = createBaseEgressDecisionMessage();
     message.allowed = object.allowed ?? false;
     message.reason = object.reason ?? "";
+    return message;
+  },
+};
+
+function createBaseConnectorGrantBindingMessage(): ConnectorGrantBindingMessage {
+  return {
+    connectorId: "",
+    destinationHost: "",
+    destinationPort: 0,
+    scheme: "",
+    method: "",
+    pathClass: "",
+    effectId: "",
+  };
+}
+
+export const ConnectorGrantBindingMessage: MessageFns<ConnectorGrantBindingMessage> = {
+  encode(message: ConnectorGrantBindingMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.connectorId !== "") {
+      writer.uint32(10).string(message.connectorId);
+    }
+    if (message.destinationHost !== "") {
+      writer.uint32(18).string(message.destinationHost);
+    }
+    if (message.destinationPort !== 0) {
+      writer.uint32(24).uint32(message.destinationPort);
+    }
+    if (message.scheme !== "") {
+      writer.uint32(34).string(message.scheme);
+    }
+    if (message.method !== "") {
+      writer.uint32(42).string(message.method);
+    }
+    if (message.pathClass !== "") {
+      writer.uint32(50).string(message.pathClass);
+    }
+    if (message.effectId !== "") {
+      writer.uint32(58).string(message.effectId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConnectorGrantBindingMessage {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConnectorGrantBindingMessage();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.connectorId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.destinationHost = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.destinationPort = reader.uint32();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.scheme = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.method = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.pathClass = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.effectId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ConnectorGrantBindingMessage>, I>>(base?: I): ConnectorGrantBindingMessage {
+    return ConnectorGrantBindingMessage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConnectorGrantBindingMessage>, I>>(object: I): ConnectorGrantBindingMessage {
+    const message = createBaseConnectorGrantBindingMessage();
+    message.connectorId = object.connectorId ?? "";
+    message.destinationHost = object.destinationHost ?? "";
+    message.destinationPort = object.destinationPort ?? 0;
+    message.scheme = object.scheme ?? "";
+    message.method = object.method ?? "";
+    message.pathClass = object.pathClass ?? "";
+    message.effectId = object.effectId ?? "";
+    return message;
+  },
+};
+
+function createBaseMintConnectorGrantRequest(): MintConnectorGrantRequest {
+  return { context: undefined, capabilityUri: "", binding: undefined, ttlSeconds: 0 };
+}
+
+export const MintConnectorGrantRequest: MessageFns<MintConnectorGrantRequest> = {
+  encode(message: MintConnectorGrantRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.capabilityUri !== "") {
+      writer.uint32(18).string(message.capabilityUri);
+    }
+    if (message.binding !== undefined) {
+      ConnectorGrantBindingMessage.encode(message.binding, writer.uint32(26).fork()).join();
+    }
+    if (message.ttlSeconds !== 0) {
+      writer.uint32(32).uint64(message.ttlSeconds);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): MintConnectorGrantRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseMintConnectorGrantRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.capabilityUri = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.binding = ConnectorGrantBindingMessage.decode(reader, reader.uint32());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.ttlSeconds = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<MintConnectorGrantRequest>, I>>(base?: I): MintConnectorGrantRequest {
+    return MintConnectorGrantRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<MintConnectorGrantRequest>, I>>(object: I): MintConnectorGrantRequest {
+    const message = createBaseMintConnectorGrantRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.capabilityUri = object.capabilityUri ?? "";
+    message.binding = (object.binding !== undefined && object.binding !== null)
+      ? ConnectorGrantBindingMessage.fromPartial(object.binding)
+      : undefined;
+    message.ttlSeconds = object.ttlSeconds ?? 0;
+    return message;
+  },
+};
+
+function createBaseConnectorGrantMessage(): ConnectorGrantMessage {
+  return { encodedGrant: "", grantId: "", expiresAtUnix: 0 };
+}
+
+export const ConnectorGrantMessage: MessageFns<ConnectorGrantMessage> = {
+  encode(message: ConnectorGrantMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.encodedGrant !== "") {
+      writer.uint32(10).string(message.encodedGrant);
+    }
+    if (message.grantId !== "") {
+      writer.uint32(18).string(message.grantId);
+    }
+    if (message.expiresAtUnix !== 0) {
+      writer.uint32(24).uint64(message.expiresAtUnix);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConnectorGrantMessage {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConnectorGrantMessage();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.encodedGrant = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.grantId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.expiresAtUnix = longToNumber(reader.uint64());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ConnectorGrantMessage>, I>>(base?: I): ConnectorGrantMessage {
+    return ConnectorGrantMessage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConnectorGrantMessage>, I>>(object: I): ConnectorGrantMessage {
+    const message = createBaseConnectorGrantMessage();
+    message.encodedGrant = object.encodedGrant ?? "";
+    message.grantId = object.grantId ?? "";
+    message.expiresAtUnix = object.expiresAtUnix ?? 0;
+    return message;
+  },
+};
+
+function createBaseConnectorHeaderMessage(): ConnectorHeaderMessage {
+  return { name: "", value: "" };
+}
+
+export const ConnectorHeaderMessage: MessageFns<ConnectorHeaderMessage> = {
+  encode(message: ConnectorHeaderMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.name !== "") {
+      writer.uint32(10).string(message.name);
+    }
+    if (message.value !== "") {
+      writer.uint32(18).string(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConnectorHeaderMessage {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConnectorHeaderMessage();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.name = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ConnectorHeaderMessage>, I>>(base?: I): ConnectorHeaderMessage {
+    return ConnectorHeaderMessage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConnectorHeaderMessage>, I>>(object: I): ConnectorHeaderMessage {
+    const message = createBaseConnectorHeaderMessage();
+    message.name = object.name ?? "";
+    message.value = object.value ?? "";
+    return message;
+  },
+};
+
+function createBaseConnectorOperationMessage(): ConnectorOperationMessage {
+  return { method: "", scheme: "", host: "", port: 0, path: "", query: "", headers: [], body: new Uint8Array(0) };
+}
+
+export const ConnectorOperationMessage: MessageFns<ConnectorOperationMessage> = {
+  encode(message: ConnectorOperationMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.method !== "") {
+      writer.uint32(10).string(message.method);
+    }
+    if (message.scheme !== "") {
+      writer.uint32(18).string(message.scheme);
+    }
+    if (message.host !== "") {
+      writer.uint32(26).string(message.host);
+    }
+    if (message.port !== 0) {
+      writer.uint32(32).uint32(message.port);
+    }
+    if (message.path !== "") {
+      writer.uint32(42).string(message.path);
+    }
+    if (message.query !== "") {
+      writer.uint32(50).string(message.query);
+    }
+    for (const v of message.headers) {
+      ConnectorHeaderMessage.encode(v!, writer.uint32(58).fork()).join();
+    }
+    if (message.body.length !== 0) {
+      writer.uint32(66).bytes(message.body);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConnectorOperationMessage {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConnectorOperationMessage();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.method = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.scheme = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.host = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.port = reader.uint32();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.path = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.query = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.headers.push(ConnectorHeaderMessage.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.body = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ConnectorOperationMessage>, I>>(base?: I): ConnectorOperationMessage {
+    return ConnectorOperationMessage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConnectorOperationMessage>, I>>(object: I): ConnectorOperationMessage {
+    const message = createBaseConnectorOperationMessage();
+    message.method = object.method ?? "";
+    message.scheme = object.scheme ?? "";
+    message.host = object.host ?? "";
+    message.port = object.port ?? 0;
+    message.path = object.path ?? "";
+    message.query = object.query ?? "";
+    message.headers = object.headers?.map((e) => ConnectorHeaderMessage.fromPartial(e)) || [];
+    message.body = object.body ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseExecuteConnectorRequest(): ExecuteConnectorRequest {
+  return { context: undefined, encodedGrant: "", operation: undefined };
+}
+
+export const ExecuteConnectorRequest: MessageFns<ExecuteConnectorRequest> = {
+  encode(message: ExecuteConnectorRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.encodedGrant !== "") {
+      writer.uint32(18).string(message.encodedGrant);
+    }
+    if (message.operation !== undefined) {
+      ConnectorOperationMessage.encode(message.operation, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ExecuteConnectorRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseExecuteConnectorRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.encodedGrant = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.operation = ConnectorOperationMessage.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ExecuteConnectorRequest>, I>>(base?: I): ExecuteConnectorRequest {
+    return ExecuteConnectorRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ExecuteConnectorRequest>, I>>(object: I): ExecuteConnectorRequest {
+    const message = createBaseExecuteConnectorRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.encodedGrant = object.encodedGrant ?? "";
+    message.operation = (object.operation !== undefined && object.operation !== null)
+      ? ConnectorOperationMessage.fromPartial(object.operation)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseConnectorReceiptMessage(): ConnectorReceiptMessage {
+  return {
+    grantId: "",
+    taskId: "",
+    effectId: "",
+    connectorId: "",
+    method: "",
+    path: "",
+    destination: "",
+    requestSha256: "",
+    statusCode: undefined,
+    responseSha256: undefined,
+    responseRedactions: 0,
+    outcome: "",
+  };
+}
+
+export const ConnectorReceiptMessage: MessageFns<ConnectorReceiptMessage> = {
+  encode(message: ConnectorReceiptMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.grantId !== "") {
+      writer.uint32(10).string(message.grantId);
+    }
+    if (message.taskId !== "") {
+      writer.uint32(18).string(message.taskId);
+    }
+    if (message.effectId !== "") {
+      writer.uint32(26).string(message.effectId);
+    }
+    if (message.connectorId !== "") {
+      writer.uint32(34).string(message.connectorId);
+    }
+    if (message.method !== "") {
+      writer.uint32(42).string(message.method);
+    }
+    if (message.path !== "") {
+      writer.uint32(50).string(message.path);
+    }
+    if (message.destination !== "") {
+      writer.uint32(58).string(message.destination);
+    }
+    if (message.requestSha256 !== "") {
+      writer.uint32(66).string(message.requestSha256);
+    }
+    if (message.statusCode !== undefined) {
+      writer.uint32(72).uint32(message.statusCode);
+    }
+    if (message.responseSha256 !== undefined) {
+      writer.uint32(82).string(message.responseSha256);
+    }
+    if (message.responseRedactions !== 0) {
+      writer.uint32(88).uint64(message.responseRedactions);
+    }
+    if (message.outcome !== "") {
+      writer.uint32(98).string(message.outcome);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConnectorReceiptMessage {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConnectorReceiptMessage();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.grantId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.taskId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.effectId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.connectorId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.method = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.path = reader.string();
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.destination = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.requestSha256 = reader.string();
+          continue;
+        }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.statusCode = reader.uint32();
+          continue;
+        }
+        case 10: {
+          if (tag !== 82) {
+            break;
+          }
+
+          message.responseSha256 = reader.string();
+          continue;
+        }
+        case 11: {
+          if (tag !== 88) {
+            break;
+          }
+
+          message.responseRedactions = longToNumber(reader.uint64());
+          continue;
+        }
+        case 12: {
+          if (tag !== 98) {
+            break;
+          }
+
+          message.outcome = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ConnectorReceiptMessage>, I>>(base?: I): ConnectorReceiptMessage {
+    return ConnectorReceiptMessage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConnectorReceiptMessage>, I>>(object: I): ConnectorReceiptMessage {
+    const message = createBaseConnectorReceiptMessage();
+    message.grantId = object.grantId ?? "";
+    message.taskId = object.taskId ?? "";
+    message.effectId = object.effectId ?? "";
+    message.connectorId = object.connectorId ?? "";
+    message.method = object.method ?? "";
+    message.path = object.path ?? "";
+    message.destination = object.destination ?? "";
+    message.requestSha256 = object.requestSha256 ?? "";
+    message.statusCode = object.statusCode ?? undefined;
+    message.responseSha256 = object.responseSha256 ?? undefined;
+    message.responseRedactions = object.responseRedactions ?? 0;
+    message.outcome = object.outcome ?? "";
+    return message;
+  },
+};
+
+function createBaseConnectorResponseMessage(): ConnectorResponseMessage {
+  return { receipt: undefined, body: new Uint8Array(0), contentType: undefined };
+}
+
+export const ConnectorResponseMessage: MessageFns<ConnectorResponseMessage> = {
+  encode(message: ConnectorResponseMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.receipt !== undefined) {
+      ConnectorReceiptMessage.encode(message.receipt, writer.uint32(10).fork()).join();
+    }
+    if (message.body.length !== 0) {
+      writer.uint32(18).bytes(message.body);
+    }
+    if (message.contentType !== undefined) {
+      writer.uint32(26).string(message.contentType);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConnectorResponseMessage {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConnectorResponseMessage();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.receipt = ConnectorReceiptMessage.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.body = reader.bytes();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.contentType = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ConnectorResponseMessage>, I>>(base?: I): ConnectorResponseMessage {
+    return ConnectorResponseMessage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConnectorResponseMessage>, I>>(object: I): ConnectorResponseMessage {
+    const message = createBaseConnectorResponseMessage();
+    message.receipt = (object.receipt !== undefined && object.receipt !== null)
+      ? ConnectorReceiptMessage.fromPartial(object.receipt)
+      : undefined;
+    message.body = object.body ?? new Uint8Array(0);
+    message.contentType = object.contentType ?? undefined;
     return message;
   },
 };
@@ -7152,9 +8847,535 @@ export const GetArtifactMetadataResponse: MessageFns<GetArtifactMetadataResponse
   },
 };
 
+function createBaseLinkArtifactRequest(): LinkArtifactRequest {
+  return { context: undefined, sha256: "", ownerType: "", ownerId: "", purpose: "", ownerTaskId: "" };
+}
+
+export const LinkArtifactRequest: MessageFns<LinkArtifactRequest> = {
+  encode(message: LinkArtifactRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.sha256 !== "") {
+      writer.uint32(18).string(message.sha256);
+    }
+    if (message.ownerType !== "") {
+      writer.uint32(26).string(message.ownerType);
+    }
+    if (message.ownerId !== "") {
+      writer.uint32(34).string(message.ownerId);
+    }
+    if (message.purpose !== "") {
+      writer.uint32(42).string(message.purpose);
+    }
+    if (message.ownerTaskId !== "") {
+      writer.uint32(50).string(message.ownerTaskId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LinkArtifactRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLinkArtifactRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sha256 = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.ownerType = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.ownerId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.purpose = reader.string();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.ownerTaskId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<LinkArtifactRequest>, I>>(base?: I): LinkArtifactRequest {
+    return LinkArtifactRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LinkArtifactRequest>, I>>(object: I): LinkArtifactRequest {
+    const message = createBaseLinkArtifactRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.sha256 = object.sha256 ?? "";
+    message.ownerType = object.ownerType ?? "";
+    message.ownerId = object.ownerId ?? "";
+    message.purpose = object.purpose ?? "";
+    message.ownerTaskId = object.ownerTaskId ?? "";
+    return message;
+  },
+};
+
+function createBaseLinkArtifactResponse(): LinkArtifactResponse {
+  return { linked: false };
+}
+
+export const LinkArtifactResponse: MessageFns<LinkArtifactResponse> = {
+  encode(message: LinkArtifactResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.linked !== false) {
+      writer.uint32(8).bool(message.linked);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LinkArtifactResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLinkArtifactResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.linked = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<LinkArtifactResponse>, I>>(base?: I): LinkArtifactResponse {
+    return LinkArtifactResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LinkArtifactResponse>, I>>(object: I): LinkArtifactResponse {
+    const message = createBaseLinkArtifactResponse();
+    message.linked = object.linked ?? false;
+    return message;
+  },
+};
+
+function createBaseListCheckpointArtifactLinksRequest(): ListCheckpointArtifactLinksRequest {
+  return { context: undefined, pageSize: 0, continuationToken: "" };
+}
+
+export const ListCheckpointArtifactLinksRequest: MessageFns<ListCheckpointArtifactLinksRequest> = {
+  encode(message: ListCheckpointArtifactLinksRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.pageSize !== 0) {
+      writer.uint32(16).uint32(message.pageSize);
+    }
+    if (message.continuationToken !== "") {
+      writer.uint32(26).string(message.continuationToken);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ListCheckpointArtifactLinksRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseListCheckpointArtifactLinksRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.pageSize = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.continuationToken = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ListCheckpointArtifactLinksRequest>, I>>(
+    base?: I,
+  ): ListCheckpointArtifactLinksRequest {
+    return ListCheckpointArtifactLinksRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ListCheckpointArtifactLinksRequest>, I>>(
+    object: I,
+  ): ListCheckpointArtifactLinksRequest {
+    const message = createBaseListCheckpointArtifactLinksRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.pageSize = object.pageSize ?? 0;
+    message.continuationToken = object.continuationToken ?? "";
+    return message;
+  },
+};
+
+function createBaseCheckpointArtifactLinkMessage(): CheckpointArtifactLinkMessage {
+  return { linkId: "", sha256: "", checkpointId: "", ownerTaskId: "", createdAt: "" };
+}
+
+export const CheckpointArtifactLinkMessage: MessageFns<CheckpointArtifactLinkMessage> = {
+  encode(message: CheckpointArtifactLinkMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.linkId !== "") {
+      writer.uint32(10).string(message.linkId);
+    }
+    if (message.sha256 !== "") {
+      writer.uint32(18).string(message.sha256);
+    }
+    if (message.checkpointId !== "") {
+      writer.uint32(26).string(message.checkpointId);
+    }
+    if (message.ownerTaskId !== "") {
+      writer.uint32(34).string(message.ownerTaskId);
+    }
+    if (message.createdAt !== "") {
+      writer.uint32(42).string(message.createdAt);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): CheckpointArtifactLinkMessage {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseCheckpointArtifactLinkMessage();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.linkId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sha256 = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.checkpointId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.ownerTaskId = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 42) {
+            break;
+          }
+
+          message.createdAt = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<CheckpointArtifactLinkMessage>, I>>(base?: I): CheckpointArtifactLinkMessage {
+    return CheckpointArtifactLinkMessage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<CheckpointArtifactLinkMessage>, I>>(
+    object: I,
+  ): CheckpointArtifactLinkMessage {
+    const message = createBaseCheckpointArtifactLinkMessage();
+    message.linkId = object.linkId ?? "";
+    message.sha256 = object.sha256 ?? "";
+    message.checkpointId = object.checkpointId ?? "";
+    message.ownerTaskId = object.ownerTaskId ?? "";
+    message.createdAt = object.createdAt ?? "";
+    return message;
+  },
+};
+
+function createBaseListCheckpointArtifactLinksResponse(): ListCheckpointArtifactLinksResponse {
+  return { links: [], continuationToken: "" };
+}
+
+export const ListCheckpointArtifactLinksResponse: MessageFns<ListCheckpointArtifactLinksResponse> = {
+  encode(message: ListCheckpointArtifactLinksResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.links) {
+      CheckpointArtifactLinkMessage.encode(v!, writer.uint32(10).fork()).join();
+    }
+    if (message.continuationToken !== "") {
+      writer.uint32(18).string(message.continuationToken);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ListCheckpointArtifactLinksResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseListCheckpointArtifactLinksResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.links.push(CheckpointArtifactLinkMessage.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.continuationToken = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ListCheckpointArtifactLinksResponse>, I>>(
+    base?: I,
+  ): ListCheckpointArtifactLinksResponse {
+    return ListCheckpointArtifactLinksResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ListCheckpointArtifactLinksResponse>, I>>(
+    object: I,
+  ): ListCheckpointArtifactLinksResponse {
+    const message = createBaseListCheckpointArtifactLinksResponse();
+    message.links = object.links?.map((e) => CheckpointArtifactLinkMessage.fromPartial(e)) || [];
+    message.continuationToken = object.continuationToken ?? "";
+    return message;
+  },
+};
+
+function createBaseUnlinkCheckpointArtifactRequest(): UnlinkCheckpointArtifactRequest {
+  return { context: undefined, sha256: "", checkpointId: "", ownerTaskId: "" };
+}
+
+export const UnlinkCheckpointArtifactRequest: MessageFns<UnlinkCheckpointArtifactRequest> = {
+  encode(message: UnlinkCheckpointArtifactRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.sha256 !== "") {
+      writer.uint32(18).string(message.sha256);
+    }
+    if (message.checkpointId !== "") {
+      writer.uint32(26).string(message.checkpointId);
+    }
+    if (message.ownerTaskId !== "") {
+      writer.uint32(34).string(message.ownerTaskId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): UnlinkCheckpointArtifactRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseUnlinkCheckpointArtifactRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.sha256 = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.checkpointId = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.ownerTaskId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<UnlinkCheckpointArtifactRequest>, I>>(base?: I): UnlinkCheckpointArtifactRequest {
+    return UnlinkCheckpointArtifactRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<UnlinkCheckpointArtifactRequest>, I>>(
+    object: I,
+  ): UnlinkCheckpointArtifactRequest {
+    const message = createBaseUnlinkCheckpointArtifactRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.sha256 = object.sha256 ?? "";
+    message.checkpointId = object.checkpointId ?? "";
+    message.ownerTaskId = object.ownerTaskId ?? "";
+    return message;
+  },
+};
+
+function createBaseUnlinkCheckpointArtifactResponse(): UnlinkCheckpointArtifactResponse {
+  return { unlinked: false };
+}
+
+export const UnlinkCheckpointArtifactResponse: MessageFns<UnlinkCheckpointArtifactResponse> = {
+  encode(message: UnlinkCheckpointArtifactResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.unlinked !== false) {
+      writer.uint32(8).bool(message.unlinked);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): UnlinkCheckpointArtifactResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseUnlinkCheckpointArtifactResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.unlinked = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<UnlinkCheckpointArtifactResponse>, I>>(
+    base?: I,
+  ): UnlinkCheckpointArtifactResponse {
+    return UnlinkCheckpointArtifactResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<UnlinkCheckpointArtifactResponse>, I>>(
+    object: I,
+  ): UnlinkCheckpointArtifactResponse {
+    const message = createBaseUnlinkCheckpointArtifactResponse();
+    message.unlinked = object.unlinked ?? false;
+    return message;
+  },
+};
+
 export interface KernelInfoService {
   GetInfo(request: Empty): Promise<KernelInfo>;
   Health(request: Empty): Promise<KernelHealth>;
+  /** Restricted-UDS-only standalone bootstrap. Never exposed by HTTP/TCP. */
+  BootstrapControl(request: BootstrapControlRequest): Promise<BootstrapControlCapabilities>;
 }
 
 export const KernelInfoServiceServiceName = "terminus.kernel.v1.KernelInfoService";
@@ -7166,6 +9387,7 @@ export class KernelInfoServiceClientImpl implements KernelInfoService {
     this.rpc = rpc;
     this.GetInfo = this.GetInfo.bind(this);
     this.Health = this.Health.bind(this);
+    this.BootstrapControl = this.BootstrapControl.bind(this);
   }
   GetInfo(request: Empty): Promise<KernelInfo> {
     const data = Empty.encode(request).finish();
@@ -7177,6 +9399,12 @@ export class KernelInfoServiceClientImpl implements KernelInfoService {
     const data = Empty.encode(request).finish();
     const promise = this.rpc.request(this.service, "Health", data);
     return promise.then((data) => KernelHealth.decode(new BinaryReader(data)));
+  }
+
+  BootstrapControl(request: BootstrapControlRequest): Promise<BootstrapControlCapabilities> {
+    const data = BootstrapControlRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "BootstrapControl", data);
+    return promise.then((data) => BootstrapControlCapabilities.decode(new BinaryReader(data)));
   }
 }
 
@@ -7317,6 +9545,8 @@ export class JobServiceClientImpl implements JobService {
 }
 
 export interface WorkspaceService {
+  /** Read-only canonicalization used before durable identity/trust admission. */
+  ResolveRoot(request: ResolveWorkspaceRootRequest): Promise<ResolvedWorkspaceRootMessage>;
   Register(request: RegisterWorkspaceRequest): Promise<WorkspaceEntryMessage>;
   Get(request: GetWorkspaceRequest): Promise<WorkspaceEntryMessage>;
 }
@@ -7328,9 +9558,16 @@ export class WorkspaceServiceClientImpl implements WorkspaceService {
   constructor(rpc: Rpc, opts?: { service?: string }) {
     this.service = opts?.service || WorkspaceServiceServiceName;
     this.rpc = rpc;
+    this.ResolveRoot = this.ResolveRoot.bind(this);
     this.Register = this.Register.bind(this);
     this.Get = this.Get.bind(this);
   }
+  ResolveRoot(request: ResolveWorkspaceRootRequest): Promise<ResolvedWorkspaceRootMessage> {
+    const data = ResolveWorkspaceRootRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "ResolveRoot", data);
+    return promise.then((data) => ResolvedWorkspaceRootMessage.decode(new BinaryReader(data)));
+  }
+
   Register(request: RegisterWorkspaceRequest): Promise<WorkspaceEntryMessage> {
     const data = RegisterWorkspaceRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "Register", data);
@@ -7366,6 +9603,7 @@ export class SandboxServiceClientImpl implements SandboxService {
 
 export interface PolicyService {
   Evaluate(request: EvaluatePolicyRequest): Promise<DecisionReportMessage>;
+  MintTaskCapability(request: MintTaskCapabilityRequest): Promise<MintTaskCapabilityResponse>;
 }
 
 export const PolicyServiceServiceName = "terminus.kernel.v1.PolicyService";
@@ -7376,16 +9614,25 @@ export class PolicyServiceClientImpl implements PolicyService {
     this.service = opts?.service || PolicyServiceServiceName;
     this.rpc = rpc;
     this.Evaluate = this.Evaluate.bind(this);
+    this.MintTaskCapability = this.MintTaskCapability.bind(this);
   }
   Evaluate(request: EvaluatePolicyRequest): Promise<DecisionReportMessage> {
     const data = EvaluatePolicyRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "Evaluate", data);
     return promise.then((data) => DecisionReportMessage.decode(new BinaryReader(data)));
   }
+
+  MintTaskCapability(request: MintTaskCapabilityRequest): Promise<MintTaskCapabilityResponse> {
+    const data = MintTaskCapabilityRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "MintTaskCapability", data);
+    return promise.then((data) => MintTaskCapabilityResponse.decode(new BinaryReader(data)));
+  }
 }
 
 export interface SecretService {
   Mint(request: MintSecretRequest): Promise<SecretCapabilityMessage>;
+  Store(request: StoreSecretRequest): Promise<SecretMutationResponse>;
+  Delete(request: DeleteSecretRequest): Promise<SecretMutationResponse>;
 }
 
 export const SecretServiceServiceName = "terminus.kernel.v1.SecretService";
@@ -7396,11 +9643,25 @@ export class SecretServiceClientImpl implements SecretService {
     this.service = opts?.service || SecretServiceServiceName;
     this.rpc = rpc;
     this.Mint = this.Mint.bind(this);
+    this.Store = this.Store.bind(this);
+    this.Delete = this.Delete.bind(this);
   }
   Mint(request: MintSecretRequest): Promise<SecretCapabilityMessage> {
     const data = MintSecretRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "Mint", data);
     return promise.then((data) => SecretCapabilityMessage.decode(new BinaryReader(data)));
+  }
+
+  Store(request: StoreSecretRequest): Promise<SecretMutationResponse> {
+    const data = StoreSecretRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "Store", data);
+    return promise.then((data) => SecretMutationResponse.decode(new BinaryReader(data)));
+  }
+
+  Delete(request: DeleteSecretRequest): Promise<SecretMutationResponse> {
+    const data = DeleteSecretRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "Delete", data);
+    return promise.then((data) => SecretMutationResponse.decode(new BinaryReader(data)));
   }
 }
 
@@ -7421,6 +9682,34 @@ export class NetworkServiceClientImpl implements NetworkService {
     const data = EgressRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "Decide", data);
     return promise.then((data) => EgressDecisionMessage.decode(new BinaryReader(data)));
+  }
+}
+
+export interface ConnectorService {
+  MintGrant(request: MintConnectorGrantRequest): Promise<ConnectorGrantMessage>;
+  Execute(request: ExecuteConnectorRequest): Promise<ConnectorResponseMessage>;
+}
+
+export const ConnectorServiceServiceName = "terminus.kernel.v1.ConnectorService";
+export class ConnectorServiceClientImpl implements ConnectorService {
+  private readonly rpc: Rpc;
+  private readonly service: string;
+  constructor(rpc: Rpc, opts?: { service?: string }) {
+    this.service = opts?.service || ConnectorServiceServiceName;
+    this.rpc = rpc;
+    this.MintGrant = this.MintGrant.bind(this);
+    this.Execute = this.Execute.bind(this);
+  }
+  MintGrant(request: MintConnectorGrantRequest): Promise<ConnectorGrantMessage> {
+    const data = MintConnectorGrantRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "MintGrant", data);
+    return promise.then((data) => ConnectorGrantMessage.decode(new BinaryReader(data)));
+  }
+
+  Execute(request: ExecuteConnectorRequest): Promise<ConnectorResponseMessage> {
+    const data = ExecuteConnectorRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "Execute", data);
+    return promise.then((data) => ConnectorResponseMessage.decode(new BinaryReader(data)));
   }
 }
 
@@ -7468,6 +9757,9 @@ export interface ArtifactIngestService {
   Ingest(request: IngestArtifactRequest): Promise<IngestArtifactResponse>;
   Get(request: GetArtifactRequest): Promise<GetArtifactResponse>;
   GetMetadata(request: GetArtifactMetadataRequest): Promise<GetArtifactMetadataResponse>;
+  Link(request: LinkArtifactRequest): Promise<LinkArtifactResponse>;
+  ListCheckpointLinks(request: ListCheckpointArtifactLinksRequest): Promise<ListCheckpointArtifactLinksResponse>;
+  UnlinkCheckpoint(request: UnlinkCheckpointArtifactRequest): Promise<UnlinkCheckpointArtifactResponse>;
 }
 
 export const ArtifactIngestServiceServiceName = "terminus.kernel.v1.ArtifactIngestService";
@@ -7480,6 +9772,9 @@ export class ArtifactIngestServiceClientImpl implements ArtifactIngestService {
     this.Ingest = this.Ingest.bind(this);
     this.Get = this.Get.bind(this);
     this.GetMetadata = this.GetMetadata.bind(this);
+    this.Link = this.Link.bind(this);
+    this.ListCheckpointLinks = this.ListCheckpointLinks.bind(this);
+    this.UnlinkCheckpoint = this.UnlinkCheckpoint.bind(this);
   }
   Ingest(request: IngestArtifactRequest): Promise<IngestArtifactResponse> {
     const data = IngestArtifactRequest.encode(request).finish();
@@ -7497,6 +9792,24 @@ export class ArtifactIngestServiceClientImpl implements ArtifactIngestService {
     const data = GetArtifactMetadataRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "GetMetadata", data);
     return promise.then((data) => GetArtifactMetadataResponse.decode(new BinaryReader(data)));
+  }
+
+  Link(request: LinkArtifactRequest): Promise<LinkArtifactResponse> {
+    const data = LinkArtifactRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "Link", data);
+    return promise.then((data) => LinkArtifactResponse.decode(new BinaryReader(data)));
+  }
+
+  ListCheckpointLinks(request: ListCheckpointArtifactLinksRequest): Promise<ListCheckpointArtifactLinksResponse> {
+    const data = ListCheckpointArtifactLinksRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "ListCheckpointLinks", data);
+    return promise.then((data) => ListCheckpointArtifactLinksResponse.decode(new BinaryReader(data)));
+  }
+
+  UnlinkCheckpoint(request: UnlinkCheckpointArtifactRequest): Promise<UnlinkCheckpointArtifactResponse> {
+    const data = UnlinkCheckpointArtifactRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "UnlinkCheckpoint", data);
+    return promise.then((data) => UnlinkCheckpointArtifactResponse.decode(new BinaryReader(data)));
   }
 }
 

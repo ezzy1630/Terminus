@@ -68,7 +68,7 @@ _TIER_CONFIGS: dict[EvalTier, TierConfig] = {
         max_tasks_per_cohort=5,
         budget_multiplier=1.0,
         required_cohorts=("tiny-bugfix", "refactor", "security-sensitive"),
-        baseline_harnesses=("forge_minimal", "forge_full", "upstream_opencode"),
+        baseline_harnesses=("forge_minimal", "forge_full"),
     ),
     EvalTier.NIGHTLY: TierConfig(
         tier=EvalTier.NIGHTLY,
@@ -87,7 +87,7 @@ _TIER_CONFIGS: dict[EvalTier, TierConfig] = {
             "test-debug",
             "build-fix",
         ),
-        baseline_harnesses=("forge_minimal", "forge_full", "upstream_opencode", "codex", "pi"),
+        baseline_harnesses=("forge_minimal", "forge_full", "codex", "pi"),
     ),
     EvalTier.RELEASE: TierConfig(
         tier=EvalTier.RELEASE,

@@ -21,6 +21,8 @@
 import { memo, type ReactNode } from "react";
 import { TriangleAlert } from "lucide-react";
 import { cn } from "../lib/cn";
+import { Button } from "../ui/Button";
+import { Kbd } from "../ui/Kbd";
 
 export interface ErrorStateAction {
   label: string;
@@ -79,49 +81,36 @@ function ErrorStateImpl({
       aria-live="assertive"
       className={cn(
         "error-state flex w-full flex-col",
-        compact ? "py-4" : "py-10",
+        compact ? "py-3" : "py-8",
         className,
       )}
-      style={{ gap: compact ? 8 : 12, padding: compact ? "0 16px" : "0 24px" }}
+      style={{ gap: compact ? 8 : 12, padding: compact ? "0 12px" : "0 20px" }}
     >
       <div className="flex items-start gap-3">
         {resolvedIcon ? (
-          <div
-            aria-hidden
-            className="flex flex-shrink-0 items-center justify-center"
-            style={{
-              width: 28,
-              height: 28,
-              borderRadius: "var(--radius-md)",
-              background: "color-mix(in srgb, " + glyphColor + " 12%, transparent)",
-              color: glyphColor,
-            }}
-          >
+          <div aria-hidden className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center" style={{ color: glyphColor }}>
             {resolvedIcon}
           </div>
         ) : null}
         <div className="flex min-w-0 flex-1 flex-col" style={{ gap: 4 }}>
           <h2
-            className="text-primary"
-            style={{ fontSize: "var(--font-size-md)", fontWeight: 600, lineHeight: 1.3 }}
+            className="text-primary text-md"
+            style={{ fontWeight: 600, lineHeight: 1.3 }}
           >
             {title}
           </h2>
           {description ? (
             <p
-              className="text-secondary"
-              style={{
-                fontSize: "var(--font-size-sm)",
-                lineHeight: "var(--line-height-relaxed)",
-              }}
+              className="text-secondary text-sm"
+              style={{ lineHeight: "var(--line-height-relaxed)" }}
             >
               {description}
             </p>
           ) : null}
           {detail ? (
             <p
-              className="selectable font-mono text-tertiary"
-              style={{ fontSize: "var(--font-size-xs)", marginTop: 2 }}
+              className="selectable font-mono text-tertiary text-xs"
+              style={{ marginTop: 2 }}
             >
               {detail}
             </p>
@@ -130,53 +119,29 @@ function ErrorStateImpl({
       </div>
       {(action || secondaryAction) ? (
         <div
-          className="flex flex-wrap items-center"
-          style={{ gap: 12, marginTop: 4, paddingLeft: resolvedIcon ? 40 : 0 }}
+          className="flex flex-wrap items-center gap-2"
+          style={{ marginTop: 2, paddingLeft: resolvedIcon ? 32 : 0 }}
         >
           {action ? (
-            <button
+            <Button
               type="button"
               onClick={action.onClick}
-              className="inline-flex items-center gap-2 rounded-md"
-              style={{
-                height: 30,
-                padding: "0 12px",
-                fontSize: "var(--font-size-sm)",
-                fontWeight: 500,
-                background: action.variant === "secondary" ? "transparent" : "var(--color-primary)",
-                color: action.variant === "secondary" ? "var(--text-secondary)" : "var(--text-inverse)",
-                border: action.variant === "secondary" ? "1px solid var(--border-default)" : "none",
-                transition: "background var(--duration-fast) var(--easing-default)",
-              }}
+              variant={action.variant === "secondary" ? "secondary" : "primary"}
             >
               <span>{action.label}</span>
               {action.shortcutHint ? (
-                <kbd
-                  className="font-mono"
-                  style={{
-                    fontSize: "var(--font-size-xs)",
-                    opacity: action.variant === "secondary" ? 0.7 : 0.85,
-                  }}
-                >
-                  {action.shortcutHint}
-                </kbd>
+                <Kbd>{action.shortcutHint}</Kbd>
               ) : null}
-            </button>
+            </Button>
           ) : null}
           {secondaryAction ? (
-            <button
+            <Button
               type="button"
               onClick={secondaryAction.onClick}
-              className="inline-flex items-center rounded-md text-secondary hover:text-primary"
-              style={{
-                height: 30,
-                padding: "0 8px",
-                fontSize: "var(--font-size-sm)",
-                transition: "color var(--duration-fast) var(--easing-default)",
-              }}
+              variant="ghost"
             >
               {secondaryAction.label}
-            </button>
+            </Button>
           ) : null}
         </div>
       ) : null}

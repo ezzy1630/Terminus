@@ -84,7 +84,7 @@ Generated protocol descriptor fixtures tested across:
 - current control plane to current kernel;
 - current control plane to previous supported kernel;
 - previous supported control client to current public API;
-- OpenCode compatibility facade against inherited clients;
+- current and previous supported Terminus public clients against the public API;
 - adapter SDK fixture agent.
 
 Contract tests verify decoding, semantic behavior, and error codes.
@@ -197,7 +197,7 @@ all platforms build
  → kernel integration
  → e2e/recovery
  → security dedicated runners
- → compatibility and upstream parity
+ → compatibility and standalone dependency check
  → targeted/full evals
  → package and install tests
 ```

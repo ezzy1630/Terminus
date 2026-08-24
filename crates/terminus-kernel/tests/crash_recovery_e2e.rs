@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 use terminus_authz::{OperationClass, Scope, TokenBinder};
 use terminus_kernel::KernelHandle;
-use terminus_kernel_protocol::{ErrorCategory, ErrorCode, RequestContext, WorkspacePath};
+use terminus_kernel_protocol::{
+    EffectIntent, ErrorCategory, ErrorCode, RequestContext, WorkspacePath,
+};
 
 fn ctx_with_token(token: &str) -> RequestContext {
     let mut ctx = RequestContext::new("crash-test-req");
@@ -31,11 +33,39 @@ async fn test_kernel_restart_invalidates_prior_instance_tokens() {
 
     // 1. Boot kernel 1
     let k1 = KernelHandle::new(data_path.clone()).expect("k1 boot");
+    let registration_token = k1
+        .token_issuer
+        .mint(
+            TokenBinder {
+                principal: "actor-crash".to_string(),
+                session_id: "session-crash".to_string(),
+                task_id: "task-crash".to_string(),
+                workspace_id: "*".to_string(),
+                kernel_instance_id: String::new(),
+            },
+            vec![OperationClass::Admin],
+            Scope::default(),
+            None,
+            "crash-register",
+        )
+        .and_then(|token| token.encode())
+        .expect("registration capability");
+    let registration_context = ctx_with_token(&registration_token);
+    let workspace_id = k1
+        .workspaces
+        .register(
+            &registration_context,
+            &EffectIntent::default(),
+            format!("file://{}", dir.path().display()),
+            dir.path().display().to_string(),
+            "untrusted",
+        )
+        .expect("register crash-test workspace");
     let binder = TokenBinder {
-        principal: "user-1".to_string(),
-        session_id: "s-1".to_string(),
-        task_id: "t-1".to_string(),
-        workspace_id: "ws-1".to_string(),
+        principal: "actor-crash".to_string(),
+        session_id: "session-crash".to_string(),
+        task_id: "task-crash".to_string(),
+        workspace_id: workspace_id.clone(),
         kernel_instance_id: String::new(),
     };
     let token1 = k1
@@ -51,8 +81,9 @@ async fn test_kernel_restart_invalidates_prior_instance_tokens() {
         .expect("mint token in k1");
 
     // Verify token1 works on k1
-    let ctx1 = ctx_with_token(&token1);
-    let path = WorkspacePath::new("ws-1", "test.txt");
+    let mut ctx1 = ctx_with_token(&token1);
+    ctx1.workspace_id = workspace_id.clone();
+    let path = WorkspacePath::new(workspace_id, "test.txt");
     std::fs::write(dir.path().join("test.txt"), b"data").expect("write file");
     k1.files
         .read(
@@ -67,7 +98,8 @@ async fn test_kernel_restart_invalidates_prior_instance_tokens() {
     let k2 = KernelHandle::new(data_path).expect("k2 boot");
 
     // 3. Token from k1 MUST be rejected on k2 due to kernel_instance_id mismatch
-    let ctx_reboot = ctx_with_token(&token1);
+    let mut ctx_reboot = ctx_with_token(&token1);
+    ctx_reboot.workspace_id = path.workspace_id.clone();
     let err = k2
         .files
         .read(
@@ -96,9 +128,11 @@ async fn test_kernel_restart_starts_with_clean_process_and_egress_state() {
 
     // Mint token on k2
     let binder = TokenBinder {
-        principal: "user-1".to_string(),
+        principal: "actor-crash".to_string(),
+        session_id: "session-crash".to_string(),
+        task_id: "task-crash".to_string(),
         workspace_id: "ws-1".to_string(),
-        ..Default::default()
+        kernel_instance_id: String::new(),
     };
     let token2 = k2
         .token_issuer
@@ -112,7 +146,8 @@ async fn test_kernel_restart_starts_with_clean_process_and_egress_state() {
         .and_then(|t| t.encode())
         .expect("mint token in k2");
 
-    let ctx2 = ctx_with_token(&token2);
+    let mut ctx2 = ctx_with_token(&token2);
+    ctx2.workspace_id = "ws-1".to_string();
 
     // Egress default-deny remains active on k2
     let private_ip: std::net::IpAddr = "10.0.0.1".parse().expect("parse");

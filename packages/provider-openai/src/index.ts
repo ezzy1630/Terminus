@@ -311,3 +311,5 @@ export function renderRequest(input: CanonicalRenderInput): Promise<RenderedProv
 }
 
 export type { ProviderRenderer, ProviderResponseChunk };
+
+export * from "./model_profiles.js";

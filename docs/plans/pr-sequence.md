@@ -5,10 +5,10 @@ This document lists the first 40 PRs in the suggested order (SPEC §49.1). The s
 ## PR sequence
 
 1. **Repository governance and toolchain pinning.** Add root docs, CODEOWNERS, ADR template, `mise`, `just`, CI skeleton. *(This task — Task 10.)*
-2. **Pin OpenCode upstream and divergence registry.** Record commit, licenses, sync workflow, parity fixture.
+2. **Standalone architecture contract.** Record direct ARP/API/client ownership and dependency checks.
 3. **Eval task schema and fake-provider skeleton.** No production behavior change.
 4. **Minimal shell baseline runner.** Produce first complete trace and grader result.
-5. **OpenCode baseline adapter.** Pin and run the same eval task.
+5. **External comparison adapter.** Pin and run the same eval task where automation is permitted.
 6. **Canonical IDs, URIs, and typed errors.** Unit/property tests.
 7. **SQLite migration framework and schema snapshot.** Integrity/startup tests.
 8. **Workspace/session/thread/task repositories.** State-machine tests.
@@ -17,7 +17,7 @@ This document lists the first 40 PRs in the suggested order (SPEC §49.1). The s
 11. **Public API initialization, health, and generated client.** Reconnect fixture.
 12. **Task contract, scope ledger, and terminal states.** API and persistence.
 13. **SSE event stream with resumable cursors.** Duplicate/reconnect tests.
-14. **Exact provider-attempt recorder around OpenCode.** Capture request block hashes.
+14. **Exact provider-attempt recorder.** Capture request block hashes at Terminus provider boundaries.
 15. **Context-manifest skeleton.** Persist before provider send.
 16. **Kernel Protobuf v1 and code generation.** Buf compatibility check.
 17. **Authenticated UDS kernel server and fake kernel.** Health and capability token.

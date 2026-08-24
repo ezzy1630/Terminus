@@ -5,7 +5,8 @@
  *   1. TerminusApiClient URL builder + header construction (unit, offline).
  *   2. TerminusApiError envelope shape (unit, offline — driven via fetch mock).
  *   3. Live integration tests against the control plane at
- *      http://127.0.0.1:3050 with bearer `terminus-control-dev-token`:
+ *      http://127.0.0.1:3050 with `TERMINUS_TOKEN` or
+ *      `TERMINUS_CONTROL_TOKEN`:
  *        - health()
  *        - listSessions()
  *        - createSession(input)
@@ -31,13 +32,115 @@
  *   cd apps/desktop && bunx vitest run tests/api.test.ts --reporter=verbose
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { TerminusApiClient, TerminusApiError } from "../src/lib/api";
+import {
+  subscribeEvents,
+  TerminusApiClient,
+  TerminusApiError,
+  MAX_REST_RESPONSE_BYTES,
+} from "../src/lib/api";
+import { subscribeEventsV2, TerminusArpV2Client } from "../src/lib/api-v2";
+import { DEFAULT_SSE_MAX_FRAME_BYTES as PUBLIC_SSE_MAX_FRAME_BYTES } from "@terminus/public-api";
 import type { CreateSessionInput, CreateTaskInput } from "../src/types";
 
 // ────────────────────────── Configuration ───────────────────────────────────
 
 const API_BASE = "http://127.0.0.1:3050";
-const TOKEN = "terminus-control-dev-token";
+const nativeFetch = globalThis.fetch;
+const TOKEN = process.env.TERMINUS_TOKEN
+  ?? process.env.TERMINUS_CONTROL_TOKEN
+  ?? (process.env.TERMINUS_DEV === "1" ? "terminus-control-dev-token" : "");
+let mutationSequence = 0;
+
+function mutationOptions(scope: string): { idempotencyKey: string } {
+  mutationSequence += 1;
+  return { idempotencyKey: `desktop-test:${scope}:${mutationSequence}` };
+}
+
+function v1Task(id: string, sessionId: string): Record<string, unknown> {
+  return {
+    id,
+    session_id: sessionId,
+    thread_id: "thread-1",
+    status: "DRAFT",
+    phase: "INTAKE",
+    active_contract_version: 1,
+    risk_class: "low",
+    created_at: "2026-08-23T12:00:00.000Z",
+    updated_at: "2026-08-23T12:00:00.000Z",
+    completed_at: null,
+    terminal_reason: null,
+    contract: null,
+  };
+}
+
+function v1Session(id: string, workspaceId: string): Record<string, unknown> {
+  return {
+    id,
+    workspace_id: workspaceId,
+    title: "Session",
+    status: "active",
+    active_thread_id: "thread-1",
+    created_at: "2026-08-23T12:00:00.000Z",
+    updated_at: "2026-08-23T12:00:00.000Z",
+  };
+}
+
+function v1Workspace(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+  return {
+    id: "workspace-1",
+    kind: "local_directory",
+    root_uri: "file:///tmp/project",
+    canonical_root: "/tmp/project",
+    trust: "trusted",
+    policy_profile_id: "secure-local-default",
+    created_at: "2026-08-23T12:00:00.000Z",
+    last_opened_at: "2026-08-23T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function startTaskResponse(taskId: string): Record<string, unknown> {
+  return {
+    task_id: taskId,
+    status: "ACTIVE",
+    event_cursor: "cursor-1",
+    links: { events: "/v1/events", task: `/v1/tasks/${taskId}` },
+  };
+}
+
+function v1Turn(taskId: string, threadId = "thread-1"): Record<string, unknown> {
+  return {
+    id: "turn-1",
+    thread_id: threadId,
+    task_id: taskId,
+    sequence: 1,
+    state: "ACTIVE",
+    initiating_actor: "operator",
+    started_at: "2026-08-23T12:00:00.000Z",
+    completed_at: null,
+  };
+}
+
+function v1Approval(id: string, taskId: string): Record<string, unknown> {
+  return {
+    id,
+    task_id: taskId,
+    operation_hash: "sha256:operation-1",
+    binding: null,
+    display: null,
+    status: "pending",
+    decision: null,
+    supported_decisions: ["allow_once"],
+    risk: "low",
+    scope: [],
+    use_limit: 1,
+    use_count: 0,
+    expires_at: null,
+    requested_at: "2026-08-23T12:00:00.000Z",
+    resolved_at: null,
+    rationale: null,
+  };
+}
 
 // ────────────────────────── Live-server probe ───────────────────────────────
 
@@ -47,6 +150,7 @@ const TOKEN = "terminus-control-dev-token";
  * supports top-level await in ESM-mode test files by default.
  */
 async function probeLive(): Promise<boolean> {
+  if (TOKEN.length === 0) return false;
   // Race the fetch against a 1.5s timeout. We don't pass `signal` to
   // fetch because the jsdom test environment provides its own
   // AbortController global that doesn't satisfy undici's fetch (Node's
@@ -76,6 +180,23 @@ const describeLive = live ? describe : describe.skip;
 // ────────────────────────── 1. Unit tests (offline) ─────────────────────────
 
 describe("TerminusApiClient — URL + headers (offline)", () => {
+  test("health() accepts the current kernel state summary", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      status: "ok",
+      version: "0.1.0",
+      build_commit: "dev",
+      instance_id: "control-test",
+      uptime_seconds: 1,
+      ready: true,
+      kernel: { state: "ok", degradations: [], checkedAt: "2026-08-23T12:00:00.000Z" },
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const health = await client.health();
+
+    expect(health.kernel).toMatchObject({ status: "ok", ready: true });
+  });
+
   test("url() builds a path with no query when query is empty", () => {
     const c = new TerminusApiClient("http://example.test/", "tok");
     expect(c.url("/v1/sessions")).toBe("http://example.test/v1/sessions");
@@ -109,6 +230,432 @@ describe("TerminusApiClient — URL + headers (offline)", () => {
     const h = c.buildHeaders({ accept: "text/event-stream" });
     expect(h["accept"]).toBe("text/event-stream");
     expect(h["authorization"]).toBe("Bearer tok");
+  });
+
+  test("collection methods fetch one bounded page and preserve its continuation", async () => {
+    const session = {
+      id: "session-001",
+      workspace_id: "workspace-001",
+      title: "Bounded project",
+      status: "active",
+      active_thread_id: "thread-001",
+      created_at: "2026-08-23T12:00:00.000Z",
+      updated_at: "2026-08-23T12:00:00.000Z",
+    };
+    const mocked = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify({
+      sessions: [session],
+      total: 401,
+      next_cursor: String(input).includes("cursor=session-001") ? null : "session-001",
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    globalThis.fetch = mocked as typeof fetch;
+    const client = new TerminusApiClient("http://example.test", "tok");
+
+    const firstPage = await client.listSessions();
+    const nextPage = await client.listSessions({ cursor: firstPage.next_cursor });
+
+    expect(firstPage).toMatchObject({
+      total: 401,
+      next_cursor: "session-001",
+      truncation: { occurred: true, continuation: "session-001" },
+    });
+    expect(mocked).toHaveBeenCalledTimes(2);
+    expect(String(mocked.mock.calls[0]?.[0])).toContain("/v1/sessions?limit=200");
+    expect(String(mocked.mock.calls[1]?.[0])).toContain("cursor=session-001");
+    expect(nextPage.sessions).toHaveLength(1);
+  });
+
+  test("mutations require and transmit the logical idempotency key", async () => {
+    const mocked = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      new Response(JSON.stringify(v1Session("session-1", "workspace-1")), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    globalThis.fetch = mocked as typeof fetch;
+    const client = new TerminusApiClient("http://example.test", "tok");
+
+    await client.createSession(
+      { workspace_id: "workspace-1", title: "Test" },
+      { idempotencyKey: "session:create:logical-1" },
+    );
+
+    const headers = new Headers(mocked.mock.calls[0]?.[1]?.headers);
+    expect(headers.get("idempotency-key")).toBe("session:create:logical-1");
+  });
+
+  test("blank idempotency keys fail before fetch", async () => {
+    const mocked = vi.fn<typeof fetch>();
+    globalThis.fetch = mocked;
+    const client = new TerminusApiClient("http://example.test", "tok");
+
+    await expect(client.createSession(
+      { workspace_id: "workspace-1", title: "Test" },
+      { idempotencyKey: "  " },
+    )).rejects.toThrow(/Idempotency-Key must be a non-empty string/);
+    expect(mocked).not.toHaveBeenCalled();
+  });
+
+  test("gateway settings decode without ever returning credential bytes", async () => {
+    const mocked = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const submitted = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        configured: true,
+        configuration: {
+          deployment: submitted.deployment ?? "zen",
+          protocol: submitted.protocol ?? "chat_completions",
+          model: submitted.model ?? "gpt-5-nano",
+          tools_enabled: submitted.tools_enabled ?? true,
+          free_model: submitted.free_model ?? true,
+          workspace_access: submitted.workspace_access ?? false,
+          privacy_terms_admitted: submitted.privacy_terms_admitted ?? false,
+          privacy_terms_version: submitted.privacy_terms_version ?? null,
+          credential_configured: true,
+          revision: 1,
+          updated_by: "control",
+          created_at: "2026-08-24T00:00:00.000Z",
+          updated_at: "2026-08-24T00:00:00.000Z",
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    globalThis.fetch = mocked as typeof fetch;
+    const client = new TerminusApiClient("http://example.test", "tok");
+
+    const response = await client.putGatewayProviderConfiguration({
+      deployment: "zen",
+      protocol: "chat_completions",
+      model: "gpt-5-nano",
+      tools_enabled: true,
+      free_model: true,
+      workspace_access: false,
+      privacy_terms_admitted: false,
+      privacy_terms_version: null,
+      credential: "private-key-value",
+      expected_revision: 0,
+    }, { idempotencyKey: "gateway:create:1" });
+
+    expect(response.configuration?.credential_configured).toBe(true);
+    expect(JSON.stringify(response)).not.toContain("private-key-value");
+  });
+
+  test("rejects a task list containing a task from another session", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      tasks: [v1Task("task-other", "session-other")],
+      total: 1,
+      next_cursor: null,
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const error = await client.listTasks("session-requested").catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as TerminusApiError).message).toContain("task list response crossed the requested scope");
+  });
+
+  test("rejects task detail whose id differs from the requested task", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(v1Task("task-other", "session-1")), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const error = await client.getTask("task-requested").catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as TerminusApiError).message).toContain("task detail response crossed the requested scope");
+  });
+
+  test("rejects approvals returned for a different task", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      approvals: [v1Approval("approval-1", "task-other")],
+      total: 1,
+      next_cursor: null,
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const error = await client.listApprovals("task-requested").catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as TerminusApiError).message).toContain("approval list response crossed the requested scope");
+  });
+
+  test("rejects a non-pending approval row from the list boundary", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      approvals: [{ ...v1Approval("approval-resolved", "task-requested"), status: "allowed" }],
+      total: 1,
+      next_cursor: null,
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const error = await client.listApprovals("task-requested").catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as TerminusApiError).message).toContain("non-pending row");
+  });
+
+  test("rejects an artifact page returned for a different task", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      task_id: "task-other",
+      artifacts: [],
+      total: 0,
+      next_cursor: null,
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const error = await client.listTaskArtifacts("task-requested").catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as TerminusApiError).message).toContain("task artifact page response crossed the requested scope");
+  });
+
+  test("rejects invalid artifact continuation inputs instead of restarting at page one", async () => {
+    const mocked = vi.fn(async () => new Response(null, { status: 500 }));
+    globalThis.fetch = mocked as unknown as typeof fetch;
+
+    const error = await new TerminusApiClient("http://example.test", "tok")
+      .listTaskArtifacts("task-requested", "opaque-cursor")
+      .catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 400 });
+    expect(mocked).not.toHaveBeenCalled();
+  });
+
+  test("rejects malformed and non-advancing artifact continuations", async () => {
+    const artifact = {
+      hash: "sha256:artifact",
+      purpose: "verification_evidence",
+      media_type: "text/plain",
+      size_bytes: 12,
+    };
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      task_id: "task-requested",
+      artifacts: [artifact],
+      total: 2,
+      next_cursor: "not-an-offset",
+    }), { status: 200 })) as unknown as typeof fetch;
+    const client = new TerminusApiClient("http://example.test", "tok");
+
+    const malformed = await client.listTaskArtifacts("task-requested").catch((reason: unknown) => reason);
+    expect(malformed).toBeInstanceOf(TerminusApiError);
+    expect((malformed as TerminusApiError).message).toContain("not a numeric offset");
+
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      task_id: "task-requested",
+      artifacts: [artifact],
+      total: 3,
+      next_cursor: "1",
+    }), { status: 200 })) as unknown as typeof fetch;
+    const repeated = await client.listTaskArtifacts("task-requested", "1").catch((reason: unknown) => reason);
+    expect(repeated).toBeInstanceOf(TerminusApiError);
+    expect((repeated as TerminusApiError).message).toContain("non-advancing continuation");
+  });
+
+  test("rejects a session creation response for a different workspace", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(v1Session("session-1", "workspace-other")), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const error = await client.createSession(
+      { workspace_id: "workspace-requested", title: "Session" },
+      { idempotencyKey: "session-create-scope" },
+    ).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+  });
+
+  test("rejects task creation, start, cancellation, and turn responses outside their requested identity", async () => {
+    const client = new TerminusApiClient("http://example.test", "tok");
+
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(v1Task("task-1", "session-other")), { status: 200 })) as unknown as typeof fetch;
+    const createError = await client.createTask({
+      session_id: "session-requested",
+      thread_id: "thread-1",
+      objective: "objective",
+    }, { idempotencyKey: "task-create-scope" }).catch((reason: unknown) => reason);
+    expect(createError).toBeInstanceOf(TerminusApiError);
+    expect(createError).toMatchObject({ status: 502 });
+
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(startTaskResponse("task-other")), { status: 200 })) as unknown as typeof fetch;
+    const startError = await client.startTask("task-requested", { idempotencyKey: "task-start-scope" }).catch((reason: unknown) => reason);
+    expect(startError).toBeInstanceOf(TerminusApiError);
+    expect(startError).toMatchObject({ status: 502 });
+
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(v1Task("task-other", "session-1")), { status: 200 })) as unknown as typeof fetch;
+    const cancelError = await client.cancelTask("task-requested", { idempotencyKey: "task-cancel-scope" }).catch((reason: unknown) => reason);
+    expect(cancelError).toBeInstanceOf(TerminusApiError);
+    expect(cancelError).toMatchObject({ status: 502 });
+
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(v1Turn("task-other")), { status: 200 })) as unknown as typeof fetch;
+    const turnError = await client.startTurn({
+      task_id: "task-requested",
+      thread_id: "thread-1",
+      user_input: "hello",
+    }, { idempotencyKey: "turn-scope" }).catch((reason: unknown) => reason);
+    expect(turnError).toBeInstanceOf(TerminusApiError);
+    expect(turnError).toMatchObject({ status: 502 });
+  });
+
+  test("rejects an approval resolution response with a different id or operation hash", async () => {
+    const client = new TerminusApiClient("http://example.test", "tok");
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(v1Approval("approval-other", "task-1")), { status: 200 })) as unknown as typeof fetch;
+    const idError = await client.resolveApproval(
+      "approval-requested",
+      "sha256:operation-1",
+      "allow_once",
+      { idempotencyKey: "approval-id-scope" },
+    ).catch((reason: unknown) => reason);
+    expect(idError).toBeInstanceOf(TerminusApiError);
+    expect(idError).toMatchObject({ status: 502 });
+
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(v1Approval("approval-requested", "task-1")), { status: 200 })) as unknown as typeof fetch;
+    const operationError = await client.resolveApproval(
+      "approval-requested",
+      "sha256:operation-other",
+      "allow_once",
+      { idempotencyKey: "approval-operation-scope" },
+    ).catch((reason: unknown) => reason);
+    expect(operationError).toBeInstanceOf(TerminusApiError);
+    expect(operationError).toMatchObject({ status: 502 });
+  });
+
+  test("rejects a poisoned approval resolution status or decision", async () => {
+    const client = new TerminusApiClient("http://example.test", "tok");
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      ...v1Approval("approval-requested", "task-1"),
+      status: "denied",
+      decision: "allow_once",
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    const statusError = await client.resolveApproval(
+      "approval-requested",
+      "sha256:operation-1",
+      "allow_once",
+      { idempotencyKey: "approval-status-scope" },
+    ).catch((reason: unknown) => reason);
+    expect(statusError).toBeInstanceOf(TerminusApiError);
+    expect(statusError).toMatchObject({ status: 502 });
+
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      ...v1Approval("approval-requested", "task-1"),
+      status: "allowed",
+      decision: "deny_once",
+    }), { status: 200 })) as unknown as typeof fetch;
+    const decisionError = await client.resolveApproval(
+      "approval-requested",
+      "sha256:operation-1",
+      "allow_once",
+      { idempotencyKey: "approval-decision-scope" },
+    ).catch((reason: unknown) => reason);
+    expect(decisionError).toBeInstanceOf(TerminusApiError);
+    expect(decisionError).toMatchObject({ status: 502 });
+  });
+
+  test("rejects a turn interruption response for a different turn", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(v1Turn("task-1")), { status: 200 })) as unknown as typeof fetch;
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const error = await client.interruptTurn(
+      "turn-requested",
+      { idempotencyKey: "turn-interrupt-scope" },
+    ).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as TerminusApiError).message).toContain("turn interruption response crossed the requested scope");
+  });
+});
+
+describe("SSE transport closure (offline)", () => {
+  function eofResponse(): Response {
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  }
+
+  test("v1 emits error when the server closes without an owner close", async () => {
+    globalThis.fetch = vi.fn(async () => eofResponse()) as unknown as typeof fetch;
+    const stream = subscribeEvents({ task_id: "task-1" });
+    const onError = vi.fn();
+    stream.addEventListener("error", onError);
+
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(stream.readyState).toBe(3);
+    stream.close();
+  });
+
+  test("v2 emits error when the server closes without an owner close", async () => {
+    globalThis.fetch = vi.fn(async () => eofResponse()) as unknown as typeof fetch;
+    const stream = subscribeEventsV2({ baseUrl: "http://example.test", token: "tok", taskId: "task-1" });
+    const onError = vi.fn();
+    stream.addEventListener("error", onError);
+
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(stream.readyState).toBe(3);
+    stream.close();
+  });
+
+  test("v1 emits error when an SSE frame exceeds the decoder limit", async () => {
+    const payload = `data: ${"x".repeat(PUBLIC_SSE_MAX_FRAME_BYTES + 1)}\n\n`;
+    globalThis.fetch = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
+    const stream = subscribeEvents({ task_id: "task-1" });
+    const onError = vi.fn();
+    stream.addEventListener("error", onError);
+
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(stream.readyState).toBe(3);
+  });
+
+  test("v2 emits error when an SSE frame is unterminated at EOF", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: unfinished"));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
+    const stream = subscribeEventsV2({ baseUrl: "http://example.test", token: "tok", taskId: "task-1" });
+    const onError = vi.fn();
+    stream.addEventListener("error", onError);
+
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(stream.readyState).toBe(3);
+  });
+});
+
+describe("bounded artifact previews (offline)", () => {
+  test("cancels the response producer when the byte cap is reached", async () => {
+    let cancellationReason: unknown = null;
+    let requestedUrl = "";
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("0123456789"));
+      },
+      cancel(reason) {
+        cancellationReason = reason;
+      },
+    });
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      requestedUrl = String(input);
+      return new Response(body, {
+        status: 200,
+        headers: { "content-length": "10" },
+      });
+    }) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const preview = await client.getArtifactText("sha256:artifact", "task-1", 4);
+
+    expect(preview).toEqual({ text: "0123", truncated: true, totalBytes: 10 });
+    expect(cancellationReason).toBe("artifact preview byte cap reached");
+    expect(requestedUrl).toBe("http://example.test/v1/artifacts/artifact?task_id=task-1");
   });
 });
 
@@ -202,6 +749,65 @@ describe("TerminusApiError — envelope shape (offline)", () => {
       globalThis.fetch = original;
     }
   });
+
+  test("rejects an oversized v1 REST response before JSON admission", async () => {
+    const oversized = new Uint8Array(MAX_REST_RESPONSE_BYTES + 1);
+    globalThis.fetch = vi.fn(async () => new Response(oversized, { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const error = await client.health().catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as TerminusApiError).message).toContain("REST response exceeded");
+  });
+
+  test("rejects an oversized v2 REST response before JSON admission", async () => {
+    const oversized = new Uint8Array(MAX_REST_RESPONSE_BYTES + 1);
+    globalThis.fetch = vi.fn(async () => new Response(oversized, { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusArpV2Client({ baseUrl: "http://example.test", token: "tok" });
+    const error = await client.listTasks().catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as TerminusApiError).message).toContain("REST response exceeded");
+  });
+
+  test("rejects a workspace open response bound to a different root or policy", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(v1Workspace({ root_uri: "file:///tmp/other" })), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const error = await client.openWorkspace({
+      root_uri: "file:///tmp/project",
+      kind: "local_directory",
+      trust: "trusted",
+      policy_profile_id: "secure-local-default",
+    }, { idempotencyKey: "workspace-scope" }).catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as TerminusApiError).message).toContain("workspace open response crossed the requested scope");
+  });
+
+  test("rejects a sandbox report returned for a different profile", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      profile_id: "profile-other",
+      backend_id: "seatbelt-v1",
+      status: "enforced",
+      enforced: [],
+      degraded: [],
+      unsupported: [],
+      notes: [],
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    const client = new TerminusApiClient("http://example.test", "tok");
+    const error = await client.getSandboxReport("profile-requested").catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(TerminusApiError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as TerminusApiError).message).toContain("sandbox report response crossed the requested scope");
+  });
 });
 
 // ────────────────────────── 3. Live integration tests ───────────────────────
@@ -221,7 +827,7 @@ describeLive("TerminusApiClient — live control plane (http://127.0.0.1:3050)",
       kind: "local_directory",
       trust: "trusted",
       policy_profile_id: "secure-local-default",
-    });
+    }, mutationOptions("workspace"));
     return workspace.id;
   }
 
@@ -257,7 +863,7 @@ describeLive("TerminusApiClient — live control plane (http://127.0.0.1:3050)",
       workspace_id: workspaceId,
       title: `Terminus Desktop test session ${new Date().toISOString()}`,
     };
-    const s = await c.createSession(input);
+    const s = await c.createSession(input, mutationOptions("session"));
     expect(s.id).toMatch(/[0-9a-f-]{20,}/);
     expect(s.title).toBe(input.title);
     expect(s.workspace_id).toBe(input.workspace_id);
@@ -273,7 +879,7 @@ describeLive("TerminusApiClient — live control plane (http://127.0.0.1:3050)",
     const session = await c.createSession({
       workspace_id: workspaceId,
       title: `Terminus Desktop listTasks test ${new Date().toISOString()}`,
-    });
+    }, mutationOptions("list-tasks-session"));
     const res = await c.listTasks(session.id);
     expect(Array.isArray(res.tasks)).toBe(true);
     // No tasks yet — we just created the session.
@@ -286,7 +892,7 @@ describeLive("TerminusApiClient — live control plane (http://127.0.0.1:3050)",
     const session = await c.createSession({
       workspace_id: workspaceId,
       title: `Terminus Desktop createTask test ${new Date().toISOString()}`,
-    });
+    }, mutationOptions("create-task-session"));
     const input: CreateTaskInput = {
       session_id: session.id,
       thread_id: session.active_thread_id!,
@@ -294,7 +900,7 @@ describeLive("TerminusApiClient — live control plane (http://127.0.0.1:3050)",
       non_goals: ["Touching production systems"],
       risk_class: "low",
     };
-    const task = await c.createTask(input);
+    const task = await c.createTask(input, mutationOptions("task"));
     expect(task.session_id).toBe(session.id);
     expect(task.thread_id).toBe(session.active_thread_id);
     expect(task.status).toBe("DRAFT");
@@ -319,14 +925,14 @@ describeLive("TerminusApiClient — live control plane (http://127.0.0.1:3050)",
     const session = await c.createSession({
       workspace_id: workspaceId,
       title: `Terminus Desktop startTask test ${new Date().toISOString()}`,
-    });
+    }, mutationOptions("start-task-session"));
     const task = await c.createTask({
       session_id: session.id,
       thread_id: session.active_thread_id!,
       objective: "Start-task test objective.",
       risk_class: "low",
-    });
-    const started = await c.startTask(task.id);
+    }, mutationOptions("start-task-contract"));
+    const started = await c.startTask(task.id, mutationOptions("start-task"));
     expect(started.task_id).toBe(task.id);
     expect(started.status).toBe("ACTIVE");
     expect(typeof started.event_cursor).toBe("string");
@@ -342,19 +948,19 @@ describeLive("TerminusApiClient — live control plane (http://127.0.0.1:3050)",
     const session = await c.createSession({
       workspace_id: workspaceId,
       title: `Terminus Desktop startTurn test ${new Date().toISOString()}`,
-    });
+    }, mutationOptions("start-turn-session"));
     const task = await c.createTask({
       session_id: session.id,
       thread_id: session.active_thread_id!,
       objective: "Start-turn test objective.",
       risk_class: "low",
-    });
-    await c.startTask(task.id);
+    }, mutationOptions("start-turn-task"));
+    await c.startTask(task.id, mutationOptions("start-turn-start"));
     const turn = await c.startTurn({
       thread_id: session.active_thread_id!,
       task_id: task.id,
       user_input: "Hello from the test suite.",
-    });
+    }, mutationOptions("turn"));
     expect(turn.thread_id).toBe(session.active_thread_id);
     expect(turn.task_id).toBe(task.id);
     expect(typeof turn.id).toBe("string");
@@ -392,7 +998,12 @@ describeLive("TerminusApiClient — error handling (live)", () => {
     // when the `decision` field doesn't match an accepted value. We don't
     // need a real approval id — the validation runs before the lookup.
     const err = (await c
-      .resolveApproval("approval-does-not-matter", "not-a-real-decision" as never)
+      .resolveApproval(
+        "approval-does-not-matter",
+        "sha256:operation-does-not-matter",
+        "not-a-real-decision" as never,
+        mutationOptions("invalid-approval"),
+      )
       .catch((e: unknown) => e)) as TerminusApiError;
     expect(err).toBeInstanceOf(TerminusApiError);
     expect(err.status).toBe(400);
@@ -436,8 +1047,10 @@ describe("TerminusApiClient — live-suite status", () => {
 beforeEach(() => {
   // Reset any fetch mocks between tests in the offline describe blocks.
   vi.restoreAllMocks();
+  globalThis.fetch = nativeFetch;
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  globalThis.fetch = nativeFetch;
 });

@@ -6,7 +6,26 @@
  * not turn a build matrix or a declaration into evidence.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
+import {
+  RELEASE_APPROVAL_ROLES,
+  loadReleaseApprovalTrustStore,
+  parseReleaseApprovalEnvelope,
+  requireExternalTrustStorePath,
+  verifyReleaseApproval,
+  type ReleaseApprovalEnvelope,
+  type ReleaseApprovalRole,
+  type VerifiedReleaseApproval,
+} from "./release-approval.ts";
+import {
+  RELEASE_EVIDENCE_MANIFEST_PATH,
+  parseReleaseEvidenceManifest,
+  releaseEvidenceManifestSha256,
+  validateDirectEvidenceIdentity,
+  validateReleaseEvidenceManifest,
+  type ReleaseEvidenceManifest,
+} from "./produce-release-evidence-manifest.ts";
+import { requireCleanReleaseSource } from "./verify-release-source.ts";
 
 type Finding = {
   id?: string;
@@ -31,6 +50,30 @@ type PlatformMatrix = {
   platforms?: Record<string, PlatformEntry>;
 };
 
+export type ReleaseDecisionSignature = {
+  verified: true;
+  key_id: string;
+  identity: string;
+  issued_at: string;
+  expires_at: string;
+  envelope_sha256: string;
+  envelope: ReleaseApprovalEnvelope;
+};
+
+export type ReleaseDecisionRenderInput = {
+  version: string;
+  commit: string;
+  generatedAt: string;
+  databaseSchemaVersion: number;
+  supportedPlatforms: string[];
+  securityProfile: string;
+  evaluationReport: string;
+  evidenceManifestSha256: string;
+  knownLimitations: string[];
+  acceptedRisks: string[];
+  signatures: Record<ReleaseApprovalRole, ReleaseDecisionSignature>;
+};
+
 const ROOT = join(import.meta.dir, "..");
 const OUT_DIR = join(ROOT, "artifacts", "release-gate");
 const OUT_PATH = join(OUT_DIR, "release-decision.yaml");
@@ -49,6 +92,17 @@ function currentCommit(): string {
   if (fromEnv) return fromEnv;
   const result = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: ROOT });
   return result.stdout.toString().trim() || "unknown";
+}
+
+function releaseVersion(): string {
+  const fromEnv = envOrEmpty("TERMINUS_RELEASE_VERSION");
+  if (fromEnv) return fromEnv;
+  const packageJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as JsonRecord;
+  const version = packageJson.version;
+  if (typeof version !== "string" || !version.trim()) {
+    throw new Error("release version is unknown");
+  }
+  return version.trim();
 }
 
 function countMigrations(): number {
@@ -162,22 +216,98 @@ function validateEvaluationReport(): string[] {
   return limitations;
 }
 
-function requireOwnerApprovals(): Record<string, string> {
+function resolveInputPath(value: string): string {
+  return isAbsolute(value) ? value : join(ROOT, value);
+}
+
+function loadEvidenceManifest(
+  candidateCommit: string,
+  releaseVersion: string,
+): { manifest: ReleaseEvidenceManifest; sha256: string } {
+  if (!existsSync(RELEASE_EVIDENCE_MANIFEST_PATH)) {
+    throw new Error(
+      "release-evidence-manifest.json is missing; produce it before collecting owner approvals",
+    );
+  }
+  let manifest: ReleaseEvidenceManifest;
+  try {
+    manifest = parseReleaseEvidenceManifest(
+      JSON.parse(readFileSync(RELEASE_EVIDENCE_MANIFEST_PATH, "utf8")),
+    );
+  } catch (error) {
+    throw new Error(
+      `release evidence manifest is invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const errors = validateReleaseEvidenceManifest(manifest, ROOT, OUT_DIR, {
+    candidateCommit,
+    releaseVersion,
+  });
+  if (errors.length > 0) throw new Error(`release evidence manifest is invalid: ${errors.join("; ")}`);
+  return { manifest, sha256: releaseEvidenceManifestSha256(manifest) };
+}
+
+function approvalEnvName(role: ReleaseApprovalRole): string {
   const names = {
     release_owner: "TERMINUS_RELEASE_OWNER_APPROVAL",
     security_owner: "TERMINUS_SECURITY_OWNER_APPROVAL",
     protocol_owner: "TERMINUS_PROTOCOL_OWNER_APPROVAL",
     evaluation_owner: "TERMINUS_EVALUATION_OWNER_APPROVAL",
   } as const;
-  const signatures = Object.fromEntries(
-    Object.entries(names).map(([owner, envName]) => [owner, envOrEmpty(envName)]),
-  );
-  const missing = Object.entries(signatures).filter(([, value]) => !value).map(([owner]) => owner);
-  if (missing.length > 0) throw new Error(`release decision is unsigned: missing ${missing.join(", ")}`);
-  return signatures;
+  return names[role];
 }
 
-function validateSignedLinuxEvidence(head: string): void {
+function decisionSignature(approval: VerifiedReleaseApproval): ReleaseDecisionSignature {
+  return {
+    verified: true,
+    key_id: approval.envelope.key_id,
+    identity: approval.payload.identity,
+    issued_at: approval.payload.issued_at,
+    expires_at: approval.payload.expires_at,
+    envelope_sha256: approval.envelopeSha256,
+    envelope: approval.envelope,
+  };
+}
+
+function requireOwnerApprovals(
+  candidateCommit: string,
+  releaseVersion: string,
+  evidenceManifestSha256: string,
+): Record<ReleaseApprovalRole, ReleaseDecisionSignature> {
+  const trustStorePath = envOrEmpty("TERMINUS_RELEASE_APPROVAL_TRUST_STORE");
+  if (!trustStorePath) throw new Error("TERMINUS_RELEASE_APPROVAL_TRUST_STORE is required");
+  const resolvedTrustStorePath = resolveInputPath(trustStorePath);
+  requireExternalTrustStorePath(resolvedTrustStorePath, ROOT);
+  const trustStore = loadReleaseApprovalTrustStore(resolvedTrustStorePath);
+  return Object.fromEntries(
+    RELEASE_APPROVAL_ROLES.map((role) => {
+      const envName = approvalEnvName(role);
+      const configuredPath = envOrEmpty(envName);
+      if (!configuredPath) throw new Error(`release decision is unsigned: missing ${role} approval path`);
+      const approvalPath = resolveInputPath(configuredPath);
+      if (!existsSync(approvalPath)) {
+        throw new Error(`${envName} must name an existing signed approval artifact, got ${configuredPath}`);
+      }
+      let envelope: ReleaseApprovalEnvelope;
+      try {
+        envelope = parseReleaseApprovalEnvelope(JSON.parse(readFileSync(approvalPath, "utf8")));
+      } catch (error) {
+        throw new Error(
+          `${role} approval artifact is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const approval = verifyReleaseApproval(envelope, trustStore, {
+        role,
+        candidateCommit,
+        releaseVersion,
+        evidenceManifestSha256,
+      });
+      return [role, decisionSignature(approval)] as const;
+    }),
+  ) as Record<ReleaseApprovalRole, ReleaseDecisionSignature>;
+}
+
+function validateSignedLinuxEvidence(head: string, version: string): void {
   if (process.env.TERMINUS_RELEASE_ENFORCE_SIGNED_ARTIFACTS !== "1") return;
   const evidencePath = envOrEmpty("TERMINUS_LINUX_EVIDENCE");
   const signaturePath = envOrEmpty("TERMINUS_LINUX_EVIDENCE_SIGNATURE");
@@ -186,13 +316,20 @@ function validateSignedLinuxEvidence(head: string): void {
   if (!existsSync(evidencePath) || !existsSync(signaturePath) || !existsSync(certificatePath)) {
     throw new Error("signed Linux evidence is incomplete");
   }
-  const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as { terminus_commit?: string };
-  if (evidence.terminus_commit !== head) throw new Error("Linux evidence commit does not match HEAD");
+  const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as JsonRecord;
+  const identityErrors = validateDirectEvidenceIdentity(
+    evidence,
+    { candidateCommit: head, releaseVersion: version },
+    "Linux evidence",
+  );
+  if (identityErrors.length > 0) throw new Error(identityErrors.join("; "));
 }
 
 export function buildReleaseDecision(): string {
   const head = currentCommit();
   if (head === "unknown") throw new Error("release commit is unknown");
+  const version = releaseVersion();
+  const evidenceManifest = loadEvidenceManifest(head, version);
   const platformSupport = loadPlatformSupport(head);
   const findings = loadFindings();
   const knownLimitations = [
@@ -201,31 +338,49 @@ export function buildReleaseDecision(): string {
     ...platformSupport.limitations,
     ...validateEvaluationReport(),
   ];
-  validateSignedLinuxEvidence(head);
-  const signatures = requireOwnerApprovals();
-  const version = envOrEmpty("TERMINUS_RELEASE_VERSION") || "0.1.0";
+  validateSignedLinuxEvidence(head, version);
+  const signatures = requireOwnerApprovals(head, version, evidenceManifest.sha256);
   const securityProfile = envOrEmpty("TERMINUS_SECURITY_PROFILE") || "secure-local-default";
+  return renderReleaseDecision({
+    version,
+    commit: head,
+    generatedAt: new Date().toISOString(),
+    databaseSchemaVersion: countMigrations(),
+    supportedPlatforms: platformSupport.supported,
+    securityProfile,
+    evaluationReport:
+      process.env.TERMINUS_EVALUATION_REPORT ?? "artifacts/release-gate/eval-release.json",
+    evidenceManifestSha256: evidenceManifest.sha256,
+    knownLimitations: [...new Set(knownLimitations)],
+    acceptedRisks: [...new Set(findings.acceptedRisks)],
+    signatures,
+  });
+}
+
+export function renderReleaseDecision(input: ReleaseDecisionRenderInput): string {
   return `release:
-  version: ${JSON.stringify(version)}
-  commit: ${JSON.stringify(head)}
-  generated_at: ${JSON.stringify(new Date().toISOString())}
+  version: ${JSON.stringify(input.version)}
+  commit: ${JSON.stringify(input.commit)}
+  generated_at: ${JSON.stringify(input.generatedAt)}
   protocol_versions:
     terminus_kernel_v1: "1"
-  database_schema_version: ${countMigrations()}
+  database_schema_version: ${input.databaseSchemaVersion}
   supported_platforms:
-${yamlList(platformSupport.supported, "    ")}
-  security_profile: ${JSON.stringify(securityProfile)}
-  evaluation_report: ${JSON.stringify(process.env.TERMINUS_EVALUATION_REPORT ?? "artifacts/release-gate/eval-release.json")}
-  divergence_report: ${JSON.stringify(process.env.TERMINUS_DIVERGENCE_REPORT ?? "upstream/divergence-budget.yaml")}
+${yamlList(input.supportedPlatforms, "    ")}
+  security_profile: ${JSON.stringify(input.securityProfile)}
+  evaluation_report: ${JSON.stringify(input.evaluationReport)}
+  evidence_manifest:
+    path: "artifacts/release-gate/release-evidence-manifest.json"
+    sha256: ${JSON.stringify(input.evidenceManifestSha256)}
   known_limitations:
-${yamlList([...new Set(knownLimitations)], "    ")}
+${yamlList(input.knownLimitations, "    ")}
   accepted_risks:
-${yamlList([...new Set(findings.acceptedRisks)], "    ")}
+${yamlList(input.acceptedRisks, "    ")}
   signatures:
-    release_owner: ${JSON.stringify(signatures.release_owner)}
-    security_owner: ${JSON.stringify(signatures.security_owner)}
-    protocol_owner: ${JSON.stringify(signatures.protocol_owner)}
-    evaluation_owner: ${JSON.stringify(signatures.evaluation_owner)}
+    release_owner: ${JSON.stringify(input.signatures.release_owner)}
+    security_owner: ${JSON.stringify(input.signatures.security_owner)}
+    protocol_owner: ${JSON.stringify(input.signatures.protocol_owner)}
+    evaluation_owner: ${JSON.stringify(input.signatures.evaluation_owner)}
 `;
 }
 
@@ -235,6 +390,7 @@ function yamlList(items: string[], indent: string): string {
 }
 
 function main(): void {
+  requireCleanReleaseSource(ROOT);
   mkdirSync(OUT_DIR, { recursive: true });
   const document = buildReleaseDecision();
   writeFileSync(OUT_PATH, document, "utf8");

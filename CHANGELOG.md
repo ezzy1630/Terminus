@@ -2,6 +2,16 @@
 
 All notable changes to Terminus are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- Terminus now owns ARP, the public API, and the public client directly. ADR-0039 retires the OpenCode bridge, source pin, overlays, divergence tooling, and fork release gates.
+- `just standalone-check` blocks first-party OpenCode runtime/build dependencies. Historical research and external comparison baselines remain separate from the workspace.
+- Checkpoints are now derived from authoritative server state and admitted only after canonical schema, SHA-256, task-contract, and durable artifact-owner validation. Caller-authored checkpoint state is rejected.
+- Public effect transitions, including denial and cancellation, remain unchanged unless a trusted receipt boundary verifies the requested state.
+- `ArtifactIngestService.Link` adds a capability-checked, reference-aware retention contract to the kernel gRPC API.
+
 ## [0.1.0] — unreleased
 
 ### Summary
@@ -27,9 +37,9 @@ Initial monorepo build of Terminus, a provider-neutral coding-agent operating sy
 - `crates/terminus-git` — protected worktree/commit/merge operations.
 - `crates/terminus-kernel-testkit` — mock sandbox, fake kernel, builders, store.
 
-### Added — TypeScript control plane (26 packages, ~11k lines)
+### Added — TypeScript control plane
 
-- `packages/domain`, `public-api`, `public-client`, `open-code-bridge`, `session-runtime`, `task-runtime`, `context-ir`, `context-compiler`, `retrieval`, `provider-core`, `provider-openai/anthropic/google/local`, `model-router`, `orchestration`, `verification`, `memory`, `capability-registry`, `extension-host`, `adapter-sdk`, `policy-coordinator`, `artifact-client`, `observability`, `config`, `testkit`.
+- `packages/domain`, `public-api`, `public-client`, `session-runtime`, `task-runtime`, `context-ir`, `context-compiler`, `retrieval`, `provider-core`, `provider-openai/anthropic/google/local`, `model-router`, `orchestration`, `verification`, `memory`, `capability-registry`, `extension-host`, `adapter-sdk`, `policy-coordinator`, `artifact-client`, `observability`, `config`, `testkit`.
 
 ### Added — Next.js dashboard (5,283 lines)
 
@@ -58,9 +68,7 @@ Initial monorepo build of Terminus, a provider-neutral coding-agent operating sy
 - `proto/terminus/kernel/v1/kernel.proto` — canonical kernel RPC schema.
 - `migrations/sqlite/0001_initial.sql` — initial schema with STRICT tables.
 - `AGENTS.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `README.md`.
-- 30 ADRs in `docs/decisions/` per Appendix H inventory.
-- 9 architecture docs, 12 runbooks, product/security/quality/research/plans docs.
-- `upstream/opencode.lock.json`, `upstream/divergence-budget.yaml`, `upstream/patches/`.
+- ADRs, architecture documents, runbooks, and product/security/quality/research plans; current counts live in `docs/generated/inventory.md`.
 
 ### Mini-services
 
@@ -70,15 +78,10 @@ Initial monorepo build of Terminus, a provider-neutral coding-agent operating sy
 ### Known limitations
 
 - This is a development build. Many subsystems are scaffolds with unit tests but no full integration path.
-- Bun is still required for the upstream OpenCode bridge (ADR-0026 PROVISIONAL).
 - Durable memory is disabled by default pending the precision/harm gate (ADR-0023).
-- Container/micro-VM backend selection is OPEN (ADR-0027).
-- Remote multi-tenant deployment is OPEN (ADR-0030).
-- 158/175 Python eval tests pass; remaining failures are test-fixture edge cases.
-
-### Upstream divergence
-
-- Pinned OpenCode commit recorded in `upstream/opencode.lock.json`.
-- Divergence budget tracked in `upstream/divergence-budget.yaml`.
+- Native Windows AppContainer enforcement is absent; Windows fails closed to the documented fallback.
+- Shared multi-tenant kernel execution remains deferred (ADR-0030).
+- External harness adapters and release evaluations remain fixture/stub tier until independently pinned live runs exist.
+- Stable release remains blocked on exact-commit signed Linux evidence, owner signatures, release-tier evaluations, and the full required security suite.
 
 [0.1.0]: https://github.com/terminus/terminus/releases/tag/v0.1.0

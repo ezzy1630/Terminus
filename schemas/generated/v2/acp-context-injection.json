@@ -1,0 +1,109 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/acp-context-injection.json",
+  "title": "AcpContextInjection",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "workspaceRootUri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "activeFileUri": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "selectedRange": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "startLine": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "startCol": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "endLine": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "endCol": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "startLine",
+            "startCol",
+            "endLine",
+            "endCol"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "fileUri": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warning",
+              "info",
+              "hint"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "fileUri",
+          "line",
+          "severity",
+          "message"
+        ]
+      }
+    },
+    "openEditorUris": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "workspaceRootUri",
+    "activeFileUri",
+    "selectedRange",
+    "diagnostics",
+    "openEditorUris"
+  ]
+}

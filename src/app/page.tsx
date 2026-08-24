@@ -116,7 +116,7 @@ export default function HomePage() {
             <span className="font-mono">?XTransformPort=3050</span> to reach the
             control plane, or <span className="font-mono">?XTransformPort=3040</span>{" "}
             to reach the kernel directly. Mutating requests accept an{" "}
-            <span className="font-mono">x-idempotency-key</span> header (SPEC §30.5).
+            <span className="font-mono">Idempotency-Key</span> header (SPEC §30.5).
           </p>
           <div className="rounded-lg border border-border overflow-hidden">
             <table className="w-full text-sm">

@@ -10,6 +10,8 @@ other providers.
 - `AnthropicRenderer` — implements `ProviderRenderer`.
 - `AnthropicTransport` — interface for the HTTP transport.
 - `renderRequest(input)` — convenience helper.
+- `ANTHROPIC_MODEL_PROFILES` and `ANTHROPIC_RENDERING_PROFILES`: concrete
+  catalog data owned by this adapter.
 - Wire types: `AnthropicRequestBody`, `AnthropicMessage`,
   `AnthropicContentBlock`, `AnthropicSystemBlock`, `AnthropicToolSchema`.
 

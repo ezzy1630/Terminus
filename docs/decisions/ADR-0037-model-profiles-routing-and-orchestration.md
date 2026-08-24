@@ -9,11 +9,13 @@
 ## Context
 
 Production coding agents frequently suffer from two failure modes:
+
 1. **Generic model prompts and uniform assumptions:** Treating all frontier and open-weight models as identical generic LLMs leads to dialect mismatches (tool schemas, edit diff syntax, reasoning tokens, cache invalidation), unhandled provider rate/quota failures, and unrepairable structured output corruptions.
 2. **Uncontrolled multi-agent sprawl and echo-chamber reviews:** Naive agent frameworks spawn parallel subagents indiscriminately, creating severe coordination overhead, token waste, git merge conflicts, and self-review biases where an agent validates its own flawed changes.
 
 Phase 8 solves both challenges end-to-end:
-- **Deep Model Profiles:** Pinned, versioned profiles specialize instructions, context layouts, tool dialects, edit diff formats, reasoning effort policies, prompt caching breakpoints, structured output repair mechanisms, error mitigations, economics, latency models, and confidentiality policies across Anthropic, OpenAI, Google, and Local open-weight models.
+
+- **Deep Model Profiles:** Pinned, versioned provider-owned profiles specialize instructions, context layouts, tool dialects, edit diff formats, reasoning effort policies, prompt caching breakpoints, structured output repair mechanisms, and error mitigations. Canonical routing profiles retain only provider-neutral economics, latency observations, confidentiality policy, measured capabilities, and opaque adapter/rendering references.
 - **Stage-Aware Deterministic Routing & Bayesian Posteriors:** Workflow nodes route dynamically based on their role (`classifier`, `implementer`, `reviewer`, `specialist`, `vision`, `local_safe`), updating conjugate Beta-Binomial reliability and Log-Normal latency posteriors from real execution telemetry.
 - **Expected-Value Subagent Scheduler:** Multi-agent spawning is strictly constrained by a mathematical expected-value formula:
   $$EV = \text{InfoGain} + \text{SpecializationGain} + \text{ParallelSpeedup} - \text{TokenCost} - \text{CoordinationCost} - \text{ConflictRisk} - \text{ReviewCost}$$
@@ -25,23 +27,24 @@ Phase 8 solves both challenges end-to-end:
 
 ### 1. Deep Model Profiles and Profile Registry (SPEC §26.1–§26.3)
 
-All model invocations MUST resolve an immutable `ModelProfile` containing:
-- `id`, `providerId`, `modelKey`, `version`;
-- `contextLayout`: system prompt placement, max tokens, tested safe tokens, image support;
-- `toolDialect`: `anthropic_tools`, `openai_function_calling`, `gemini_function_declarations`, `standard_json_schema`;
-- `editDialect`: `hash_anchored_diff`, `search_replace_blocks`, `whole_file`;
-- `reasoningEffortPolicy`: `none`, `low`, `medium`, `high`;
-- `continuationStrategy`: `native_token`, `server_history`, `client_replay`;
-- `compactionStrategy`: `structured_claims_with_evidence`, `rolling_summary`, `hierarchical_epoch`;
-- `cachingStrategy`: `explicit_breakpoints`, `automatic_prefix`, `explicit_resource`, `none`;
-- `structuredOutputRepair`: `strict_json_schema`, `prompt_guided_json`, `grammar_constrained`;
-- `knownFailureMitigations`: error sanitizers and prompt adjustments;
-- `economics` & `latencyModel`: micro-cost and distribution parameters;
-- `confidentialityPolicy`: allowed confidentiality classifications (`public`, `workspace`, `secret_adjacent`, `secret`).
+All model invocations MUST resolve an immutable canonical `ModelProfile` containing:
+
+- `id`, opaque `modelKey`, and `version`;
+- opaque `adapterRef`, `renderingProfileRef`, and `modelFamilyRef` values resolved by the composition root and selected provider adapter;
+- `economics` and `latencyModel`: micro-cost and distribution parameters;
+- `allowedConfidentiality`: allowed confidentiality classifications (`public`, `workspace`, `secret_adjacent`, `secret`);
+- measured `capabilities`: coding quality, tool reliability, structured output, image input, advertised and tested-safe context windows, security reasoning, reasoning strength, and offline execution.
+
+The canonical domain MUST NOT enumerate provider IDs, model families, system-prompt placement, tool or edit dialects, reasoning wire controls, continuation strategies, cache layouts, structured-output repair prompts, or provider failure mitigations.
+
+`packages/provider-core` defines the generic binding between a canonical `ModelProfile` and provider rendering configuration. Concrete catalogs and closed rendering values live only in `packages/provider-*`. `packages/model-router` owns no concrete catalog or default registry. The composition root gathers the provider-owned model profiles and injects them into `ProfileRegistry`.
+
+A profile ID is an immutable descriptor identity. Registering the same ID and exact content is idempotent. Registering the same ID with different content fails closed to prevent descriptor replacement after policy or evaluation admission.
 
 ### 2. Conjugate Bayesian Performance Posteriors (SPEC §26.4)
 
 The router maintains `ModelCohortPosterior` distributions updated online via:
+
 - Beta-Binomial conjugate updates for discrete event success (tool reliability, structured output, edit cohort);
 - Log-Normal online updates for execution latency;
 - Running averages for costs and cache hit rates.
@@ -49,12 +52,13 @@ The router maintains `ModelCohortPosterior` distributions updated online via:
 ### 3. Stage-Aware Deterministic Router (SPEC §26.4, §38.3)
 
 The router matches workflow node stage and confidentiality requirements:
+
 - `classifier`: optimizes for TTFT and low latency;
 - `implementer`: optimizes for high coding quality, edit success, and tool reliability;
 - `reviewer`: maximizes security reasoning and enforces model family diversity from the implementer;
 - `specialist`: engages high reasoning effort models;
 - `vision`: selects models with verified multimodal support;
-- `local_safe`: restricts routing exclusively to local open-weight models for offline or strict secret confidentiality.
+- `local_safe`: restricts routing to profiles with measured offline-execution capability for offline or strict secret confidentiality.
 
 ### 4. Expected-Value Scheduling & Candidate Isolation (SPEC §27.1–§27.3)
 
@@ -70,6 +74,7 @@ The router matches workflow node stage and confidentiality requirements:
 ### 6. Stagnation Supervisor & Escalating Intervention Ladder (SPEC §27.5)
 
 The supervisor evaluates 11 diagnostic signals and triggers:
+
 - `none` $\to$ `warn` $\to$ `change_strategy` $\to$ `spawn_scout` $\to$ `request_user_decision` $\to$ `terminate`.
 
 ## Consequences

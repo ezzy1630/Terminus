@@ -48,10 +48,10 @@ The strongest practical design is **not**:
 - a prompt-compression wrapper;
 - or a collection of MCP servers.
 
-The best evidence-backed design is a **fork-assisted strangler architecture**:
+The best evidence-backed design is a **standalone, provider-neutral architecture**:
 
-1. **Bootstrap the product and provider-neutral cognition plane from a pinned OpenCode fork.** Reuse its current headless server, durable sessions, generated SDK/API, provider adapters, context sources and epochs, clients, LSP, MCP support, and bounded tool-output machinery.
-2. **Immediately establish an independent Agent Runtime Protocol and canonical data model.** New clients, the context compiler, the artifact/evidence store, and the execution service depend on this contract—not on OpenCode internals.
+1. **Own the product and cognition plane directly.** Terminus owns durable sessions, ARP, its public API and client, provider adapters, context sources, clients, LSP/MCP integration, and bounded tool-output behavior.
+2. **Make the Agent Runtime Protocol and canonical data model the product boundary.** Clients, the context compiler, the artifact/evidence store, and the execution service depend on Terminus contracts alone.
 3. **Move every process, filesystem mutation, network request, secret use, and external side effect behind a non-bypassable Rust execution-and-security microkernel.** TypeScript, plugins, models, MCP servers, and external agents receive no ambient host authority.
 4. **Make the Context Compiler the principal intelligence layer.** Every inference receives a provider-specific rendering of a canonical, typed Context IR; every request gets an exact manifest recording what was included, omitted, ordered, cached, compressed, and trusted.
 5. **Expose a very small, benchmarked agent–computer interface.** Use progressive disclosure for skills, MCP tools, debuggers, browsers, cloud integrations, and external harnesses.
@@ -59,7 +59,7 @@ The best evidence-backed design is a **fork-assisted strangler architecture**:
 7. **Build the research laboratory before the ambitious features.** Keep a Bash-only minimal mode as the permanent control. No memory system, router, subagent, retrieval layer, compression method, or tool pack becomes default until it improves the relevant Pareto frontier.
 8. **Optimize for verified successful tasks per dollar-hour**, where the denominator includes model spend, compute, latency, and human attention—not merely API tokens.
 
-This strategy gets to a competitive system quickly while preserving the option to replace OpenCode components behind stable interfaces. It also avoids adopting OpenCode’s current weak points—especially ambient-authority plugins and a permission layer that is not, by itself, an operating-system security boundary.
+This strategy keeps each Terminus component replaceable behind stable interfaces without carrying an inherited runtime. It also avoids ambient-authority plugins and permission layers that are not operating-system security boundaries.
 
 ---
 
@@ -83,7 +83,7 @@ Subject to hard constraints:
 - reproducibility and auditability;
 - interruption recovery;
 - acceptable latency;
-- maintainability and upstream-divergence budgets.
+- maintainability and dependency budgets.
 
 The primary product metric should be:
 
@@ -99,7 +99,7 @@ Secondary metrics must expose trade-offs rather than hide them in one score:
 - time to first useful action and wall-clock completion;
 - scope violations, secret leakage, and blocked unsafe actions;
 - restart/resume correctness;
-- codebase complexity and upstream divergence.
+- codebase complexity and external-integration overhead.
 
 A release should be selected from a **Pareto frontier**, not from a single benchmark number.
 
@@ -161,18 +161,17 @@ The latest blueprint’s minimal Bash reference mode and research/evaluation pla
 
 ## 2.2 What should be revised
 
-### 1. Replace the “fork versus greenfield” binary
+### 1. Resolve the “fork versus greenfield” binary
 
-The older `SPEC` and `RESEARCH` documents recommend a new Rust daemon with Pi compatibility. The newer blueprint recommends a hardened OpenCode fork. Neither extreme is optimal.
+The older `SPEC` and `RESEARCH` documents recommend a new Rust daemon with Pi compatibility. A later blueprint recommended a hardened OpenCode fork. ADR-0039 closes that migration question.
 
-Use a **fork-assisted strangler**:
+Use a **standalone Terminus runtime**:
 
-- reuse OpenCode initially;
-- define an independent runtime protocol and schemas immediately;
-- move effects to Rust first;
+- own the runtime protocol, schemas, public API, and public client;
+- keep effects behind the Rust kernel;
 - keep provider adapters and clients replaceable;
-- enforce a divergence budget;
-- gradually replace components only when an evaluation shows value.
+- use competitors as research and evaluation baselines, not build dependencies;
+- promote components only when an evaluation shows value.
 
 ### 2. Do not make pure event sourcing a religion
 
@@ -343,7 +342,7 @@ Design consequence:
 
 | System | Use as | Copy | Improve or isolate | Do not adopt as default |
 |---|---|---|---|---|
-| **OpenCode** | Bootstrap control/cognition plane | server/client split, provider abstraction, durable sessions, typed context sources, context epochs, SDK/API, LSP/MCP, bounded outputs | extract behind independent protocol; harden plugins; external OS enforcement | ambient-authority plugin execution; permissions as sole security boundary |
+| **OpenCode** | Research and evaluation baseline | server/client split, provider abstraction, durable sessions, typed context sources, context epochs, SDK/API, LSP/MCP, bounded outputs | compare through public harness adapters; keep Terminus contracts independent | runtime/build dependency; ambient-authority plugin execution; permissions as sole security boundary |
 | **Codex** | Runtime/security reference and benchmark | typed app-server primitives, bounded queues, generated schemas, Bubblewrap model, command policy, memory pipeline patterns, deferred tools | generalize provider-specific domain concepts | wholesale monorepo fork for a provider-neutral product |
 | **Claude Code** | UX, skills, subagent, sandbox reference | scoped subagents, skills progressive disclosure, hooks, permission modes, worktrees, OS sandbox concepts | fail closed; add provenance/TTL to memory; manifest-drive hooks | treating auto-memory or permission prompts as the security boundary |
 | **Pi** | Minimal loop and compatibility target | comprehensible provider loop, session branching, extension experiments | run inside the enforcement boundary | host-permission inheritance as production trust model |
@@ -367,7 +366,7 @@ The product should also support Codex, Claude Code, Pi, OpenHands-compatible age
 └──────────────────────────────┬───────────────────────────────────────────┘
                                │ Public API / ACP adapter
 ┌──────────────────────────────▼───────────────────────────────────────────┐
-│ CONTROL AND COGNITION PLANE — TypeScript, OpenCode-derived initially    │
+│ CONTROL AND COGNITION PLANE — Terminus-owned TypeScript                 │
 │                                                                          │
 │ Session/task engine     Context Compiler       Provider renderers        │
 │ Model broker            Scope/policy coordinator Agent scheduler         │
@@ -431,25 +430,15 @@ Enforce this structurally:
 
 ---
 
-# 6. Foundation and migration strategy
+# 6. Foundation and ownership strategy
 
-## 6.1 Start from OpenCode, but do not become trapped by OpenCode
+## 6.1 Standalone Terminus ownership
 
-### Bootstrap assets to reuse
+ADR-0039 supersedes the fork-assisted bootstrap. Terminus first-party runtime and build code MUST NOT import OpenCode or declare an OpenCode workspace dependency. Historical research, design references, and external evaluation baselines MAY mention OpenCode when they do not imply a runtime dependency.
 
-- headless server and multiple clients;
-- durable sessions, forks, abort/revert/diff;
-- provider adapters;
-- generated API/SDK;
-- typed context source registry;
-- context epochs and update/removal semantics;
-- bounded tool output with full-result spill;
-- LSP, formatters, MCP integrations;
-- TUI/web/desktop/IDE surfaces.
+### Permanent boundaries
 
-### Immediate extraction seams
-
-Create these before adding differentiated features:
+These contracts are owned by Terminus:
 
 1. **Agent Runtime Protocol (ARP)**  
    Provider-neutral task/session/turn/item/effect/artifact events.
@@ -461,28 +450,26 @@ Create these before adding differentiated features:
    Canonical fragments and manifests independent of any provider message format.
 
 4. **Artifact/evidence API**  
-   Immutable artifacts and verification evidence independent of OpenCode storage.
+   Immutable artifacts and verification evidence independent of any client or provider store.
 
 5. **Provider adapter interface**  
-   OpenCode providers are wrapped rather than called directly from business logic.
+   Provider request bodies remain inside `packages/provider-*` and are never called directly from canonical domain logic.
 
-### Divergence controls
+### Standalone controls
 
-- pin an exact upstream commit;
-- run upstream behavior-parity tests continuously;
-- keep new behavior behind feature flags;
-- prohibit cosmetic refactors of upstream code;
-- track modified upstream files and merge-conflict hours;
-- set a maximum divergence budget per release;
-- upstream generic fixes where possible;
-- publish a divergence report.
+- `just standalone-check` rejects retired bridge/source paths, OpenCode imports, and workspace dependencies;
+- `@terminus/public-api` depends directly on `@terminus/runtime-protocol`;
+- `@terminus/public-client` depends directly on `@terminus/public-api`;
+- first-party clients that declare the public API also declare the public client;
+- CI and the release gate run the standalone check;
+- ignored local data under `vendor/opencode/` is outside the build and does not satisfy or violate this contract.
 
-## 6.2 Exit strategy
+## 6.2 Replacement strategy
 
-The architecture is successful if, after the bootstrap phase, any of these can be replaced independently:
+The architecture is successful if any of these can be replaced independently:
 
-- OpenCode clients;
-- OpenCode session store;
+- Terminus clients;
+- the Terminus session store;
 - provider adapters;
 - context compiler implementation language;
 - scheduler;
@@ -500,7 +487,7 @@ A single JSON-RPC protocol for everything is unnecessarily constraining.
 
 ### Public product API
 
-- retain OpenCode-compatible HTTP/OpenAPI during bootstrap;
+- expose Terminus-owned HTTP/OpenAPI routes;
 - provide streaming via SSE or WebSocket;
 - expose generated TypeScript/Rust/Python clients;
 - provide an ACP v1 adapter for IDEs and other clients.
@@ -1047,6 +1034,15 @@ inspect_failure
 
 The Rust code-intelligence service composes LSP/DAP calls and degrades gracefully when a server is unavailable.
 
+## 11.9 Governed browser and desktop use
+
+ADR-0041 defines computer use as pure coordination over kernel-authorized
+effects. Observations bind screenshot, DOM, accessibility, viewport, and source
+identity. Actions target semantic elements against an exact observation;
+stale, ambiguous, occluded, or moved targets fail closed. Unknown submissions
+are reconciled before retry. Environment leases, data flow, credentials, and
+human takeover remain policy-bound and evidence-bearing.
+
 ---
 
 # 12. Skills, MCP, plugins, and external agents
@@ -1570,7 +1566,7 @@ The model cannot produce `COMPLETED` without the harness accepting the evidence 
 
 At minimum:
 
-- upstream pinned OpenCode;
+- a pinned OpenCode external baseline where automation and licensing permit;
 - current Codex;
 - current Claude Code where automation/licensing permits;
 - Pi;
@@ -1681,9 +1677,23 @@ A feature becomes default only when it:
 - does not cause unacceptable regressions;
 - improves or preserves the cost/latency frontier;
 - passes security and recovery gates;
-- fits the maintainability/divergence budget.
+- fits the maintainability budget.
 
 The minimal mode remains permanently available.
+
+## 18.8 Sealed evolution and conformance
+
+ADR-0040 separates optimizer, evaluator, and promotion authority. Optimizers
+MUST NOT read hidden partitions, graders, promotion thresholds, or production
+secrets. Candidates MUST preregister trace attribution, causal ablations,
+predictions, regression floors, resource/security effects, and forbidden
+components. Promotion signatures bind the candidate and ordered evaluation
+receipts; violated predictions or hard guardrails trigger automatic rollback.
+
+Conformance is assessed per exact commit and platform from current immutable
+evidence. Levels L0 through L6 are contiguous. Source presence, fixture tests,
+or evidence for a lower level MUST NOT satisfy a higher level. L6 additionally
+requires locked competitor comparisons and independent reproduction.
 
 ---
 
@@ -1709,7 +1719,7 @@ Trusted and performance-sensitive components:
 
 Rapidly changing product/cognition components:
 
-- OpenCode-derived control plane;
+- Terminus-owned control plane;
 - provider adapters/renderers;
 - task/session orchestration;
 - Context Compiler initially;
@@ -1753,7 +1763,6 @@ forge/
 │   ├── desktop/
 │   └── ide-acp/
 ├── packages/
-│   ├── kernel/                 # OpenCode-derived bootstrap
 │   ├── runtime-protocol/
 │   ├── domain-events/
 │   ├── context-ir/
@@ -1808,7 +1817,7 @@ forge/
 └── SPEC.md
 ```
 
-Dependency rule: the domain protocol and schemas are leaves; the OpenCode bootstrap layer depends on them, never the reverse.
+Dependency rule: the domain protocol and schemas are leaves. Public APIs and clients depend on those Terminus-owned contracts, never on provider or external-harness implementations.
 
 ---
 
@@ -1825,17 +1834,17 @@ Dependency rule: the domain protocol and schemas are leaves; the OpenCode bootst
 
 **Exit:** repeated runs detect meaningful regressions.
 
-## Stage 1 — Fork-assisted bootstrap
+## Stage 1 — Standalone contract foundation
 
-- pin OpenCode;
-- add upstream parity and merge tests;
 - define ARP and core schemas;
+- expose the Terminus public API and public client;
+- add the deterministic standalone dependency check;
 - add task contracts and terminal states;
 - add immutable artifact store;
 - record exact provider requests and tool-schema hashes;
 - feature-flag all changes.
 
-**Exit:** no material regression versus upstream.
+**Exit:** first-party runtime/build code has no external harness dependency and the public client exercises the ARP path.
 
 ## Stage 2 — Rust effect boundary
 
@@ -1851,7 +1860,7 @@ Dependency rule: the domain protocol and schemas are leaves; the OpenCode bootst
 ## Stage 3 — Context Compiler v1
 
 - formalize Context IR;
-- wrap OpenCode context epochs;
+- implement Terminus-owned context epochs;
 - add scope/task ledger;
 - add recomputed world-state sources;
 - record full manifests and omissions;
@@ -1917,9 +1926,9 @@ Dependency rule: the domain protocol and schemas are leaves; the OpenCode bootst
 
 # 22. First sixteen pull requests
 
-1. Pin OpenCode and add automated upstream parity/rebase tests.
+1. Add a deterministic standalone-dependency gate.
 2. Build the cross-harness eval runner and Bash-only baseline.
-3. Define Agent Runtime Protocol schemas and generated clients.
+3. Define Agent Runtime Protocol schemas and Terminus-owned clients.
 4. Add task contracts, scope ledgers, acceptance predicates, and terminal states.
 5. Add content-addressed artifacts and portable trace export.
 6. Record exact context/provider/tool manifests and cache telemetry.
@@ -1978,7 +1987,7 @@ Architecture should make these swappable.
 
 Forge is:
 
-> **A provider-neutral coding-agent system bootstrapped from OpenCode but isolated behind its own runtime protocol; enforced by a non-bypassable Rust effect microkernel; driven by a typed, provenance-bearing Context Compiler with provider-specific renderers; equipped with a small empirically optimized ACI and progressively disclosed skills/MCP capabilities; capable of durable scoped worktree agents and external harness workers; and governed by an integrated evidence laboratory that requires every feature to prove its effect on correctness, cost, latency, continuity, maintainability, and safety.**
+> **A standalone, provider-neutral coding-agent system with its own runtime protocol and public clients; enforced by a non-bypassable Rust effect microkernel; driven by a typed, provenance-bearing Context Compiler with provider-specific renderers; equipped with a small empirically optimized ACI and progressively disclosed skills/MCP capabilities; capable of durable scoped worktree agents and external harness workers; and governed by an integrated evidence laboratory that requires every feature to prove its effect on correctness, cost, latency, continuity, maintainability, and safety.**
 
 Its durable advantage is not the number of features. It is the ability to answer, for every turn:
 
@@ -2051,7 +2060,7 @@ The following invariants are release blockers:
 9. **No blind retry of uncertain effects.** An operation with an unknown settlement state MUST be reconciled before retry.
 10. **No unpinned experiment as a default.** A feature that affects context, tools, routing, compression, memory, or orchestration MUST carry a version and an evaluation record.
 11. **No unreported degradation.** When the requested sandbox or policy cannot be enforced, Forge MUST fail closed or require explicit user selection of a named degraded profile.
-12. **No uncontrolled upstream divergence.** Changes to inherited OpenCode packages MUST remain within a measured divergence budget and be covered by parity tests.
+12. **No inherited runtime dependency.** First-party runtime and build code MUST pass `just standalone-check`; external harnesses integrate only through provider-neutral adapter protocols.
 
 ## 26.4 Goals
 
@@ -2109,7 +2118,7 @@ The denominator MUST be reported as separate components as well as any composite
 - unsafe attempts, policy denials, and sandbox escapes;
 - stale-context and stale-write incidents;
 - plugin/MCP descriptor changes;
-- upstream divergence;
+- external-integration maintenance cost;
 - feature-specific contribution through ablation or replay.
 
 No single aggregate score may conceal a safety regression.
@@ -2206,7 +2215,7 @@ Each effect also receives:
 The build MUST include tests that deliberately attempt to bypass the kernel from:
 
 - ordinary TypeScript code;
-- an OpenCode-derived plugin hook;
+- a first-party plugin hook;
 - a local project plugin;
 - an npm plugin;
 - an MCP server;
@@ -2220,23 +2229,11 @@ The build MUST include tests that deliberately attempt to bypass the kernel from
 
 A supported configuration passes only when each attempt is denied or routed through an audited kernel capability. These tests are required before any release may call the effect boundary non-bypassable.
 
-## 27.5 Bootstrap trust exception
+## 27.5 Retired bootstrap exception
 
-During the first migration stage, inherited OpenCode code may still contain direct effect paths. Those paths MUST be inventoried in `docs/security/effect-bypass-register.yaml` with:
+ADR-0039 retired the inherited OpenCode bridge and its bootstrap trust exception. `docs/security/effect-bypass-register.yaml` is a tombstone with no active entries. First-party code receives no inherited-source exception: a discovered direct effect path is a security defect and MUST be fixed or governed by a new adopted ADR before release.
 
-```yaml
-- id: BYPASS-0001
-  owner: runtime-team
-  source: packages/opencode/src/...
-  effect: EXECUTE_LOCAL
-  reason: inherited bootstrap path
-  containment: process-level outer sandbox
-  removal_milestone: M2
-  test: tests/security/bypass/BYPASS-0001.test.ts
-  status: open
-```
-
-The release gate is not “zero entries immediately”; it is “no unknown entries, every entry contained, and all entries removed before the secure-default milestone.”
+The tombstone and `just standalone-check` prove only that the inherited source and dependency paths are absent. They do not retroactively prove that previous parity or bypass-removal declarations represented live behavior.
 
 ---
 
@@ -2310,7 +2307,14 @@ created_at:
 
 ### Task
 
-A task is the unit of accountable work. It is separate from a conversational thread.
+A task is the unit of accountable work. It is separate from a conversational
+thread. An interactive client task nevertheless requires a real session and
+thread context so the client can open its exact conversation. Task and thread
+identity MUST be resolved by the control plane, never inferred by a client.
+Non-interactive task records MAY remain without conversation context, but an
+interactive Board MUST present them as unassigned operational work until an
+operator supplies a real project. V1 and V2 projections of one task share one
+durable task ID; compatibility code MUST NOT create best-effort mapping rows.
 
 ```yaml
 id:
@@ -2565,6 +2569,11 @@ Artifact ingestion algorithm:
 9. delete the temporary file on failure;
 10. quarantine content that violates malware or policy checks rather than exposing it.
 
+An authoritative record MUST NOT be published with an artifact reference until
+its content hash is verified and a durable logical-owner link exists. A failed
+owner-link operation fails the record mutation; it must not leave a live record
+pointing at collectable content.
+
 Artifact metadata includes:
 
 ```yaml
@@ -2610,6 +2619,15 @@ A durable checkpoint contains:
 - external side effects not yet settled;
 - artifact references;
 - final semantic continuation checkpoint.
+
+Checkpoint admission accepts identity and intent, not caller-authored world
+state. The control plane derives checkpoint content from authoritative stores,
+serializes it canonically, verifies its content hash, and links the immutable
+artifact before publishing the checkpoint record. Before reuse as model
+context, the artifact MUST be fetched by hash, strictly schema-decoded, checked
+for canonical encoding, and revalidated against the active task contract and
+known source versions. Invalid, missing, non-canonical, or stale checkpoint
+content fails closed.
 
 Startup recovery procedure:
 
@@ -2661,7 +2679,7 @@ Purpose: clients, IDEs, automation, and remote supervisors.
 - Description: generated OpenAPI 3.1.
 - Clients: generated Promise and Effect TypeScript clients; additional clients MAY be generated.
 - Compatibility: additive within a major version; explicit deprecation windows.
-- Bootstrap: an OpenCode compatibility facade SHALL preserve the subset needed by inherited clients.
+- Ownership: the API and generated clients are Terminus-owned and MUST NOT expose external-harness internal types.
 
 ### Boundary B — Privileged kernel RPC
 
@@ -3093,7 +3111,7 @@ The stable API is organized around:
 /configuration
 ```
 
-The exact HTTP shape MAY retain OpenCode-compatible paths during migration, but the generated client exposes domain-oriented groups.
+The HTTP shape is Terminus-owned. Compatibility routes for any external system require an explicit versioned adapter and MUST NOT define the canonical client contract.
 
 ## 32.2 Minimum stable endpoints
 
@@ -3113,7 +3131,7 @@ POST   /v1/turns
 POST   /v1/turns/{id}/interrupt
 GET    /v1/events?cursor=...
 GET    /v1/context/manifests/{id}
-GET    /v1/artifacts/{hash}
+GET    /v1/artifacts/{hash}?task_id={task_id}
 POST   /v1/approvals/{id}/resolve
 GET    /v1/jobs/{id}
 POST   /v1/jobs/{id}/input
@@ -5667,7 +5685,7 @@ Forge varies one or more versioned components within controlled runs.
 Maintain pinned runners for:
 
 - the Forge minimal shell baseline;
-- upstream OpenCode;
+- OpenCode as an external comparison where automation and licensing permit;
 - current Codex;
 - current Claude Code where automation/licensing permits;
 - Pi;
@@ -5841,7 +5859,7 @@ A feature becomes default only when it:
 - does not create unacceptable regressions in other critical cohorts;
 - has operational observability and rollback;
 - has documentation and migration behavior;
-- remains within maintainability/divergence budgets.
+- remains within maintainability budgets.
 
 
 # 42. Repository blueprint and module ownership
@@ -5853,7 +5871,7 @@ This section is the normative expansion of the high-level repository sketch in S
 ```text
 forge/
 ├── apps/
-│   ├── control-server/             # public API and OpenCode-compatible facade
+│   ├── control-server/             # Terminus public API
 │   ├── cli/                        # non-interactive CLI
 │   ├── tui/                        # terminal client
 │   ├── desktop/                    # optional desktop shell
@@ -5862,9 +5880,9 @@ forge/
 │
 ├── packages/
 │   ├── domain/                     # canonical domain types and invariants
+│   ├── runtime-protocol/           # Agent Runtime Protocol schemas
 │   ├── public-api/                 # Effect/HTTP API definitions and handlers
 │   ├── public-client/              # generated clients plus hand-written facade
-│   ├── open-code-bridge/           # inherited OpenCode integration seam
 │   ├── session-runtime/            # sessions, threads, turns, episodes
 │   ├── task-runtime/               # contracts, phases, scope ledger, budgets
 │   ├── context-ir/                 # fragment, manifest, epoch schemas
@@ -5972,7 +5990,7 @@ forge/
 ├── tools/
 │   ├── codegen/
 │   ├── release/
-│   ├── upstream-sync/
+│   ├── standalone-check/
 │   ├── fixtures/
 │   └── dev/
 ├── docs/
@@ -5985,10 +6003,6 @@ forge/
 │   ├── plans/
 │   ├── runbooks/
 │   └── generated/
-├── upstream/
-│   ├── opencode.lock.json
-│   ├── divergence-budget.yaml
-│   └── patches/
 ├── .github/
 │   ├── workflows/
 │   ├── CODEOWNERS
@@ -6010,17 +6024,16 @@ forge/
 └── deny.toml
 ```
 
-## 42.2 Upstream OpenCode placement
+## 42.2 Standalone source ownership
 
-The initial repository is a fork of OpenCode, so inherited directories MAY coexist with the layout above. Rules:
+ADR-0039 removes inherited OpenCode source from the first-party workspace. Rules:
 
-- inherited files retain upstream structure where possible;
-- Forge-owned packages use clear `forge-*` names;
-- changes to inherited files are tagged in `upstream/divergence-budget.yaml`;
-- generic fixes are proposed upstream;
-- bridge packages translate inherited domain objects into Forge domain objects;
-- new privileged behavior never goes directly into an inherited plugin hook;
-- upstream sync CI tests merge/rebase against the tracked upstream branch.
+- Terminus-owned packages use clear `terminus-*` and `@terminus/*` names;
+- first-party runtime/build code does not import or depend on OpenCode;
+- ARP, the public API, and the public client remain Terminus-owned packages;
+- external harnesses integrate through `adapter-sdk` or ACP, outside canonical domain packages;
+- `just standalone-check` enforces retired paths, imports, workspace dependencies, and direct protocol/client ownership;
+- historical research, design references, and eval baselines are not workspace dependencies.
 
 ## 42.3 Package ownership
 
@@ -6072,7 +6085,8 @@ Implement checks for:
 
 - forbidden TypeScript imports;
 - Cargo dependency cycles and forbidden crate edges;
-- direct Node/Bun process, filesystem, socket, or environment access outside approved bridge modules;
+- direct Node/Bun process, filesystem, socket, or environment access outside approved first-party kernel client modules;
+- retired external-harness imports and workspace dependencies;
 - direct provider SDK use outside provider packages;
 - raw SQL outside storage repositories/migrations;
 - model-visible strings outside versioned prompt/tool-description locations;
@@ -6110,10 +6124,9 @@ A dependency requires an owner, license compatibility, maintenance review, and s
 TypeScript owns product semantics, context, providers, clients, and rapid extension work.
 
 - Target modern Node.js LTS and standards-based ESM.
-- Inherited OpenCode packages MAY continue to use Bun during bootstrap.
-- New Forge packages MUST NOT use Bun-specific APIs except in an explicit compatibility adapter.
+- Production Terminus packages MUST NOT use Bun-specific APIs. Tests and repository tooling MAY use the pinned Bun runner.
 - Use `pnpm` workspaces for Forge-owned package management.
-- Use Effect where inherited architecture or typed service composition benefits; do not require Effect in leaf utility packages without reason.
+- Use Effect where typed service composition benefits; do not require Effect in leaf utility packages without reason.
 - Use runtime schemas at every boundary.
 - Use generated clients rather than hand-written wire code.
 - Prefer immutable domain values and explicit services.
@@ -6132,7 +6145,7 @@ Python is limited to evaluation and offline research.
 
 ## 43.4 Front-end clients
 
-- TUI: reuse or adapt the inherited OpenCode TUI initially.
+- TUI: Terminus-owned terminal client over `@terminus/public-client`.
 - Web/desktop: TypeScript; framework remains replaceable behind generated clients.
 - IDE: ACP adapter and editor-specific thin clients.
 - Clients MUST be stateless enough to reconnect from server snapshots and event cursors.
@@ -6146,7 +6159,7 @@ Python is limited to evaluation and offline research.
 rust = "<pinned-stable>"
 node = "<pinned-lts>"
 pnpm = "<pinned>"
-bun = "<upstream-compatible>"
+bun = "<pinned-test-runner>"
 python = "3.12.x"
 uv = "<pinned>"
 buf = "<pinned>"
@@ -6182,7 +6195,7 @@ security         # local-capable security suite
 e2e              # end-to-end task tests
 eval-smoke       # small deterministic eval suite
 eval-full        # full configured evaluation suite
-upstream-check   # OpenCode parity and divergence checks
+standalone-check # no inherited runtime/build dependency; direct ARP/client ownership
 release-check    # release gate
 run              # run control plane and kernel locally
 ```
@@ -6287,7 +6300,7 @@ Rules:
 - `any` is prohibited outside generated code or a documented compatibility boundary;
 - `unknown` is decoded at boundaries;
 - exhaustive switches use `never` checks;
-- no direct `child_process`, raw filesystem mutation, network socket, or secret environment access outside approved bridge code;
+- no direct `child_process`, raw filesystem mutation, network socket, or secret environment access outside approved kernel client code;
 - async operations accept cancellation/abort signals;
 - services expose typed interfaces and avoid import-time effects;
 - domain objects are immutable by default;
@@ -6369,7 +6382,7 @@ A change requires review from:
 - security owner for policy, sandbox, secret, network, plugin, MCP, auth, or multi-tenant changes;
 - protocol owner for public/proto/schema changes;
 - evaluation owner for default policy/model/context changes;
-- upstream owner for inherited OpenCode changes.
+- architecture owner for changes to standalone dependency boundaries.
 
 High-risk changes require two approvals and passing targeted security/eval suites.
 
@@ -6636,7 +6649,7 @@ Generated protocol descriptor fixtures are tested across:
 - current control plane to current kernel;
 - current control plane to previous supported kernel;
 - previous supported control client to current public API;
-- OpenCode compatibility facade against inherited clients;
+- current and previous supported Terminus public clients against the public API;
 - adapter SDK fixture agent.
 
 Contract tests verify not only decoding but semantic behavior and error codes.
@@ -6751,7 +6764,7 @@ all platforms build
 → kernel integration
 → e2e/recovery
 → security dedicated runners
-→ compatibility and upstream parity
+→ compatibility and standalone dependency check
 → targeted/full evals
 → package and install tests
 ```
@@ -6827,7 +6840,7 @@ Stable release requires:
 - no unresolved critical security finding;
 - migration and recovery tests pass;
 - default policy/eval results meet non-regression thresholds;
-- upstream divergence report accepted;
+- `just standalone-check` passes;
 - schemas and generated clients published;
 - runbooks updated;
 - canary/preview soak completed;
@@ -6941,7 +6954,7 @@ forge explain-cost <task>
 forge explain-completion <task>
 forge replay <turn>
 forge recovery-report <task>
-forge divergence-report
+forge architecture-report
 forge security-report <task>
 ```
 
@@ -7011,7 +7024,7 @@ Required runbooks:
 - leaked/revoked credential;
 - compromised extension/MCP server;
 - provider outage or billing anomaly;
-- upstream OpenCode merge conflict;
+- external harness incompatibility;
 - evaluation regression;
 - security incident and trace export.
 
@@ -7040,10 +7053,10 @@ This section is the normative expansion of the stage summary in Section 21 and t
 
 - Build measurement and security boundaries before sophisticated cognition.
 - Deliver vertical slices that can be exercised through the public API.
-- Keep inherited OpenCode behavior available behind flags until replacement parity is proven.
+- Keep canonical behavior behind Terminus-owned contracts and verify it through the public path.
 - Remove ambient effect paths continuously; do not postpone them to a final security phase.
 - Every milestone has an exit gate. Work may continue experimentally, but the next default layer does not depend on an unpassed gate.
-- Prefer one-way migrations and compatibility facades over broad rewrites.
+- Prefer one-way migrations and versioned public adapters over broad rewrites.
 - Every milestone produces runbooks, tests, and observability, not only code.
 
 ## 48.2 Suggested workstreams
@@ -7052,10 +7065,10 @@ A serious initial team can be organized into four workstreams:
 
 1. **Runtime and security:** Rust kernel, sandbox, process/jobs, policy, secrets, egress, patch engine.
 2. **Control and context:** domain, storage, sessions/tasks, context compiler, providers, orchestration, verification.
-3. **Product and ecosystem:** clients, OpenCode bridge, skills/MCP/plugins/adapters, configuration, docs.
+3. **Product and ecosystem:** clients, public SDK, skills/MCP/plugins/adapters, configuration, docs.
 4. **Evaluation and quality:** benchmark lab, fake provider, conformance, security tests, statistics, release quality.
 
-Cross-cutting owners: protocol, security, upstream integration, and developer experience.
+Cross-cutting owners: protocol, security, standalone architecture, and developer experience.
 
 ## 48.3 Milestone M0 — Governance, reproducibility, and baseline laboratory
 
@@ -7070,12 +7083,12 @@ Without pinned baselines, environment graders, and exact cost/trajectory records
 ### Tasks
 
 1. Create the repository, ownership map, root `AGENTS.md`, contribution guide, security policy, and ADR process.
-2. Pin the initial OpenCode upstream commit and record license/provenance.
-3. Add the divergence-budget file and upstream-sync automation skeleton.
+2. Pin external comparison harness versions and record license/provenance where automation is permitted.
+3. Add the deterministic standalone-dependency and architecture-boundary checks.
 4. Implement the minimal shell-oriented control agent with no advanced retrieval, memory, or subagents.
 5. Build the generic eval task format and environment lock format.
 6. Implement deterministic fake-provider support.
-7. Implement runners for upstream OpenCode and the minimal baseline.
+7. Implement external runners for OpenCode and the minimal baseline where automation is permitted.
 8. Add additional runners for Codex, Pi, Oh My Pi, and other accessible products with honest capability metadata.
 9. Build end-state graders and hidden-test isolation.
 10. Record token/cost/latency, commands, file changes, and final environment state.
@@ -7101,49 +7114,49 @@ Without pinned baselines, environment graders, and exact cost/trajectory records
 - Cost and latency reconcile within documented tolerances.
 - Baseline variance is understood sufficiently to size later experiments.
 
-## 48.4 Milestone M1 — Fork-assisted bootstrap and substrate gate
+## 48.4 Milestone M1 — Standalone contract and ownership gate
 
 ### Objective
 
-Reuse OpenCode without allowing it to define permanent boundaries.
+Establish direct Terminus ownership of the runtime, public client path, and effect boundary.
 
 ### Why
 
-OpenCode already provides valuable session, client, provider, context-epoch, LSP, MCP, and UI machinery. The project should exploit this while determining exactly where overlays end and a shallow fork is required.
+The product needs one canonical runtime architecture. ARP, the public API and client, provider adapters, context state, LSP/MCP integration, and clients must all have first-party owners and testable dependency edges.
 
 ### Tasks
 
-1. Add an OpenCode compatibility and parity test suite.
-2. Inventory all inherited effect paths: process, filesystem, network, environment, plugin, MCP, LSP, formatter, and Git.
-3. Add exact provider-request capture around the inherited model boundary.
+1. Add `just standalone-check` and run it in CI and release checks.
+2. Inventory all first-party effect paths: process, filesystem, network, environment, plugin, MCP, LSP, formatter, and Git.
+3. Add exact provider-request capture at Terminus provider boundaries.
 4. Capture tool definitions and provider options used per request.
-5. Introduce Forge task contracts without changing inherited session behavior.
+5. Introduce Forge task contracts over the canonical session behavior.
 6. Introduce a context-manifest skeleton linked to provider attempts.
-7. Add an artifact store facade for inherited tool spill output.
-8. Define the public Forge API facade and generated client skeleton.
+7. Add an artifact store for bounded tool spill output.
+8. Define the public Forge API and generated client skeleton.
 9. Implement the four substrate tests:
    - exact context visibility;
    - total effect interception feasibility;
    - independent task/checkpoint ownership;
    - provider-specific rendering injection.
-10. Document which OpenCode packages require patching and why.
-11. Build upstream sync CI and behavior parity snapshots.
-12. Isolate Bun-specific APIs behind compatibility modules for Forge-owned code.
+10. Declare direct workspace dependencies from the public API to ARP and from the public client to the public API.
+11. Add current-to-previous protocol and client compatibility fixtures.
+12. Keep production packages Node-compatible; limit Bun use to tests and repository tooling.
 13. Disable or contain automatic plugin installation in the secure Forge profile.
 14. Require explicit extension lockfiles for Forge mode.
-15. Publish the fork/overlay decision ADR based on observed seams.
+15. Adopt ADR-0039 and remove the retired bridge, source pin, overlays, and fork gates.
 
 ### Deliverables
 
-- `packages/open-code-bridge`;
-- effect-bypass register;
+- `packages/runtime-protocol`, `packages/public-api`, and `packages/public-client`;
+- retired effect-bypass tombstone;
 - provider-request recorder;
-- OpenCode parity suite;
-- fork gate report.
+- standalone dependency check;
+- public API/client compatibility suite.
 
 ### Exit gate
 
-Every critical invariant is either achievable through a stable seam or mapped to a narrowly owned fork patch. No critical behavior remains “assumed interceptable.”
+Every critical invariant has a Terminus-owned contract and verification path. No first-party runtime/build dependency on an external harness remains.
 
 ## 48.5 Milestone M2 — Domain model, persistence, artifacts, and public lifecycle
 
@@ -7274,7 +7287,7 @@ Replace transcript accumulation with typed, inspectable, provider-rendered conte
 
 1. Implement Context IR runtime schemas and persistence.
 2. Implement world-state producer registry and safe-boundary admission.
-3. Integrate inherited OpenCode context sources and epochs through the bridge.
+3. Implement Terminus-owned context sources and epochs through Context IR.
 4. Implement project instruction discovery and scope resolution.
 5. Implement task-contract, scope, budget, diagnostics, jobs, tests, and permissions fragments.
 6. Implement retrieval query generation.
@@ -7442,7 +7455,7 @@ Prove the product can be installed, upgraded, operated, secured, and maintained.
 2. Run long-duration soak and resource-leak tests.
 3. Complete full security assessment and fix/accept findings.
 4. Complete migration, backup, restore, and rollback drills.
-5. Complete upstream sync and divergence report.
+5. Re-run the standalone and architecture-boundary checks against the release commit.
 6. Complete benchmark release comparison and publish methodology.
 7. Freeze stable public/proto schema versions.
 8. Complete user/admin/security/runbook documentation.
@@ -7464,10 +7477,10 @@ All release-gate requirements in Section 46.18 and the checklist in Section 50 p
 The sequence is deliberately narrow. Each PR should be independently reviewable.
 
 1. **Repository governance and toolchain pinning.** Add root docs, CODEOWNERS, ADR template, `mise`, `just`, CI skeleton.
-2. **Pin OpenCode upstream and divergence registry.** Record commit, licenses, sync workflow, parity fixture.
+2. **Standalone architecture contract.** Record direct ARP/API/client ownership and dependency checks.
 3. **Eval task schema and fake-provider skeleton.** No production behavior change.
 4. **Minimal shell baseline runner.** Produce first complete trace and grader result.
-5. **OpenCode baseline adapter.** Pin and run the same eval task.
+5. **External comparison adapter.** Pin and run the same eval task where automation is permitted.
 6. **Canonical IDs, URIs, and typed errors.** Unit/property tests.
 7. **SQLite migration framework and schema snapshot.** Integrity/startup tests.
 8. **Workspace/session/thread/task repositories.** State-machine tests.
@@ -7476,7 +7489,7 @@ The sequence is deliberately narrow. Each PR should be independently reviewable.
 11. **Public API initialization, health, and generated client.** Reconnect fixture.
 12. **Task contract, scope ledger, and terminal states.** API and persistence.
 13. **SSE event stream with resumable cursors.** Duplicate/reconnect tests.
-14. **Exact provider-attempt recorder around OpenCode.** Capture request block hashes.
+14. **Exact provider-attempt recorder.** Capture request block hashes at Terminus provider boundaries.
 15. **Context-manifest skeleton.** Persist before provider send.
 16. **Kernel Protobuf v1 and code generation.** Buf compatibility check.
 17. **Authenticated UDS kernel server and fake kernel.** Health and capability token.
@@ -7527,7 +7540,7 @@ MCP, plugins, external harness adapters, memory, learned compression, and remote
 
 ## Rollback or feature flag
 
-## Upstream divergence impact
+## Standalone dependency impact
 ```
 
 ## 49.3 Ownership matrix
@@ -7544,18 +7557,18 @@ MCP, plugins, external harness adapters, memory, learned compression, and remote
 | Memory | memory owner | privacy + evaluation |
 | MCP/plugins/adapters | ecosystem owner | security owner |
 | Storage/migrations | persistence owner | recovery owner |
-| Upstream OpenCode | upstream owner | affected package owner |
+| Standalone dependency boundary | architecture owner | affected package owner |
 | Release | release owner | security + protocol + eval owners |
 
 ## 49.4 Risk register
 
-### R1 — OpenCode divergence becomes expensive
+### R1 — An external harness leaks into the canonical runtime
 
-- **Likelihood:** medium.
+- **Likelihood:** low.
 - **Impact:** high.
-- **Controls:** fork-assisted seams, minimal inherited edits, parity CI, upstream PRs, divergence budget.
-- **Trigger:** repeated sync conflicts or delayed security updates.
-- **Response:** accelerate replacement of the affected package behind Forge interfaces.
+- **Controls:** direct ARP/API/client ownership, manifest/import scans, adapter protocol, CI gate.
+- **Trigger:** a first-party package imports external harness code or declares it as a workspace dependency.
+- **Response:** remove the dependency or move the integration behind the adapter protocol; block release until `just standalone-check` passes.
 
 ### R2 — Rust kernel becomes a monolith
 
@@ -7691,8 +7704,8 @@ A release candidate is not complete until every applicable item is checked with 
 - [ ] Public, kernel, and adapter protocol boundaries are separate.
 - [ ] Domain types are provider neutral.
 - [ ] Dependency-boundary checks pass.
-- [ ] Upstream OpenCode divergence is within budget.
-- [ ] No undocumented inherited effect path exists.
+- [ ] Standalone dependency check passes.
+- [ ] No undocumented first-party effect path exists.
 - [ ] Minimal baseline remains runnable.
 
 ## 50.2 Persistence and recovery
@@ -7798,19 +7811,75 @@ release:
   supported_platforms: []
   security_profile:
   evaluation_report:
-  divergence_report:
+  evidence_manifest:
+    path: artifacts/release-gate/release-evidence-manifest.json
+    sha256: sha256:<64 lowercase hex characters>
   known_limitations: []
   accepted_risks: []
   signatures:
     release_owner:
+      verified: true
+      key_id: <trusted Ed25519 key ID>
+      identity: <identity bound to that trusted key>
+      issued_at: <canonical ISO-8601 timestamp>
+      expires_at: <canonical ISO-8601 timestamp>
+      envelope_sha256: sha256:<64 lowercase hex characters>
+      envelope:
+        schema: terminus.release-approval-envelope.v1
+        algorithm: ed25519
+        key_id: <same trusted key ID>
+        signed_payload: <canonical release-approval JSON>
+        signature_base64: <Ed25519 signature>
     security_owner:
+      verified: true
+      key_id: <trusted Ed25519 key ID>
+      identity: <identity bound to that trusted key>
+      issued_at: <canonical ISO-8601 timestamp>
+      expires_at: <canonical ISO-8601 timestamp>
+      envelope_sha256: sha256:<64 lowercase hex characters>
+      envelope:
+        schema: terminus.release-approval-envelope.v1
+        algorithm: ed25519
+        key_id: <same trusted key ID>
+        signed_payload: <canonical release-approval JSON>
+        signature_base64: <Ed25519 signature>
     protocol_owner:
+      verified: true
+      key_id: <trusted Ed25519 key ID>
+      identity: <identity bound to that trusted key>
+      issued_at: <canonical ISO-8601 timestamp>
+      expires_at: <canonical ISO-8601 timestamp>
+      envelope_sha256: sha256:<64 lowercase hex characters>
+      envelope:
+        schema: terminus.release-approval-envelope.v1
+        algorithm: ed25519
+        key_id: <same trusted key ID>
+        signed_payload: <canonical release-approval JSON>
+        signature_base64: <Ed25519 signature>
     evaluation_owner:
+      verified: true
+      key_id: <trusted Ed25519 key ID>
+      identity: <identity bound to that trusted key>
+      issued_at: <canonical ISO-8601 timestamp>
+      expires_at: <canonical ISO-8601 timestamp>
+      envelope_sha256: sha256:<64 lowercase hex characters>
+      envelope:
+        schema: terminus.release-approval-envelope.v1
+        algorithm: ed25519
+        key_id: <same trusted key ID>
+        signed_payload: <canonical release-approval JSON>
+        signature_base64: <Ed25519 signature>
 ```
+
+Each role supplies its own envelope and trusted identity. The signed payload
+binds the role, identity, candidate commit, release version, issuance and expiration times, and
+the exact `evidence_manifest.sha256`. A plain name, environment string, expired
+envelope, revoked key, role mismatch, or approval for another evidence manifest
+is not a signature and MUST fail the release gate.
 
 # Appendix A — Attachment reconciliation
 
-- `research_forward_coding_agent_harness_blueprint(1).md`: strongest current synthesis; retain its four-plane model, OpenCode foundation, Rust effects plane, provenance DAG, minimal baseline, and eval gates. Refine “fork” into a strangler strategy.
+- `research_forward_coding_agent_harness_blueprint(1).md`: important historical synthesis; retain its four-plane model, Rust effects plane, provenance DAG, minimal baseline, and eval gates. Treat its OpenCode foundation as research input superseded by ADR-0039.
 - `SPEC (1).md`: valuable event/protocol/schema inventory; replace the all-Rust greenfield kernel and pure event-sourcing claim with a hybrid boundary.
 - `ORCHESTRATION.md`: retain contracts, worktrees, typed results, loop protection, and risk-triggered review; replace fixed levels with an expected-value scheduler and reduce compulsory confirmation.
 - `ACI_TOOLS.md`: retain bounded envelopes, progressive disclosure, snapshot edits, search/read design, and durable jobs; test whether `ask` belongs in the permanent schema; allow isolated transient invalid states.
@@ -8219,9 +8288,11 @@ CREATE TABLE approvals (
     task_id                 TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     tool_call_id            TEXT REFERENCES tool_calls(id),
     operation_hash          TEXT NOT NULL,
+    operation_json          TEXT,
     scope_json              TEXT NOT NULL,
     risk_json               TEXT NOT NULL,
     status                  TEXT NOT NULL CHECK (status IN ('pending','allowed','denied','expired','revoked')),
+    decision                TEXT,
     use_limit               INTEGER NOT NULL DEFAULT 1,
     use_count               INTEGER NOT NULL DEFAULT 0,
     expires_at              TEXT,
@@ -9023,12 +9094,6 @@ storage:
     dry_run: false
     interval_hours: 24
 
-upstream:
-  opencode:
-    commit: "<pinned-commit>"
-    compatibility_facade: true
-    parity_tests: true
-
 providers:
   policy:
     allowed_confidentiality:
@@ -9259,7 +9324,7 @@ Build a provider-neutral coding-agent operating system with a non-bypassable Rus
 - Do not add a default feature without a targeted evaluation or a hard security/reliability justification.
 - Do not widen task scope without updating the contract and scope ledger.
 - Do not expose raw credentials in prompts, logs, artifacts, fixtures, or tests.
-- Do not modify inherited OpenCode files without updating the divergence registry.
+- Do not add an external harness dependency to first-party runtime/build code; run `just standalone-check`.
 
 ## Development flow
 
@@ -9271,7 +9336,7 @@ Build a provider-neutral coding-agent operating system with a non-bypassable Rus
 6. Run `just check`.
 7. Run targeted integration/security/eval commands.
 8. Run `just codegen-check`.
-9. Summarize diff, evidence, risks, and upstream impact.
+9. Summarize diff, evidence, risks, and standalone dependency impact.
 
 ## Commands
 
@@ -9283,7 +9348,7 @@ Build a provider-neutral coding-agent operating system with a non-bypassable Rus
 - `just integration`
 - `just security`
 - `just eval-smoke`
-- `just upstream-check`
+- `just standalone-check`
 
 ## Code standards
 
@@ -9320,7 +9385,7 @@ Build a provider-neutral coding-agent operating system with a non-bypassable Rus
 
 ## Pull request report
 
-Include objective, design, alternatives, security/privacy impact, schema/migration impact, test evidence, eval impact, rollback/flag, and upstream divergence.
+Include objective, design, alternatives, security/privacy impact, schema/migration impact, test evidence, eval impact, rollback/flag, and standalone dependency impact.
 ```
 
 Each package/crate `AGENTS.md` adds local boundaries and commands but may not weaken root rules.
@@ -9332,7 +9397,7 @@ Each package/crate `AGENTS.md` adds local boundaries and commands but may not we
 | ADR | Decision | Initial status |
 |---|---|---|
 | ADR-0001 | Optimize verified successful tasks per dollar-hour | ADOPTED |
-| ADR-0002 | Fork-assisted OpenCode strangler strategy | ADOPTED |
+| ADR-0002 | Fork-assisted OpenCode strangler strategy | SUPERSEDED by ADR-0039 |
 | ADR-0003 | TypeScript control plane + Rust effect kernel + Python eval lab | ADOPTED |
 | ADR-0004 | Separate public, kernel, and adapter protocols | ADOPTED |
 | ADR-0005 | Hybrid SQLite/events/artifact persistence | ADOPTED |
@@ -9356,11 +9421,14 @@ Each package/crate `AGENTS.md` adds local boundaries and commands but may not we
 | ADR-0023 | Durable memory disabled until precision/harm gate passes | ADOPTED |
 | ADR-0024 | External text compression shadow-only by default | ADOPTED |
 | ADR-0025 | Permanent minimal baseline and feature promotion gates | ADOPTED |
-| ADR-0026 | Node-compatible Forge packages; Bun isolated to upstream bridge | PROVISIONAL |
+| ADR-0026 | Node-compatible Forge packages; Bun isolated to upstream bridge | SUPERSEDED by ADR-0039 |
 | ADR-0027 | Container/micro-VM backend selection | ADOPTED (OCI digest-pinned) |
 | ADR-0028 | Semantic index implementation | OPEN |
 | ADR-0029 | Public WebSocket transport | OPEN |
 | ADR-0030 | Remote multi-tenant deployment model | ADOPTED (single-tenant remote) |
+| ADR-0039 | Standalone Terminus runtime | ADOPTED |
+| ADR-0040 | Sealed evolution and evidence-derived conformance | ADOPTED |
+| ADR-0041 | Governed computer-use coordinators | ADOPTED |
 
 Every ADR contains context, decision, alternatives, consequences, security impact, evaluation plan, migration, and rollback.
 
@@ -9480,7 +9548,7 @@ Every published result includes:
 | Recent complete tool window + summary can outperform full history in a tested workflow | checkpoint/recent-episode policy; no full-history default |
 | Prompt-cache effectiveness depends on stable prefixes and provider behavior | immutable epochs and provider-specific renderers |
 | SWE-agent ACI ablations show file-view/edit/search feedback matters | ACI treated as first-order, benchmarked subsystem |
-| OpenCode typed context sources and epochs provide useful implemented substrate | reuse/bridge rather than greenfield rewrite |
+| OpenCode typed context sources and epochs provide useful research evidence | implement the useful behavior behind Terminus-owned Context IR and epoch contracts |
 | Codex app-server and Linux sandbox demonstrate typed runtime and OS enforcement patterns | generated protocols, bounded queues, Bubblewrap-class kernel |
 | OpenCode plugins can auto-install packages and receive shell access in the upstream model | secure Forge profile isolates installation and removes ambient plugin authority |
 | MCP permits powerful tool interoperability while security remains implementation responsibility | descriptor pinning, isolation, per-tool scopes, reauthorization |
@@ -9518,7 +9586,7 @@ This map is a navigation aid, not a substitute for the normative requirements in
 |---|---|
 | Product objective, users, modes, non-goals, and success metric | 1, 3, 5, 26 |
 | Research interpretation and competitive synthesis | 2–4, Appendices A, B, J |
-| OpenCode bootstrap, fork gates, and upstream-divergence policy | 5–6, 27, 42, 48–49, ADR-0001/0002 |
+| Standalone runtime ownership and external-harness isolation | 5–6, 27, 42, 48–49, ADR-0039 |
 | Canonical runtime domain and lifecycle state machines | 7, 26–30, Appendices C–E |
 | Public API, kernel RPC, streaming, versioning, idempotency, and errors | 7, 30–32, Appendix D |
 | Persistence, audit events, artifacts, migrations, retention, and recovery | 7, 28–30, Appendices C and E |
@@ -9544,7 +9612,7 @@ This map is a navigation aid, not a substitute for the normative requirements in
 
 Implementation begins with the evaluation baseline and substrate-control tests, not with memory, broad orchestration, or a plugin marketplace. Every vertical slice SHALL establish its contract, fake implementation, tests, production implementation, failure/recovery behavior, observability, and documentation before the next privileged surface is added.
 
-The final architecture is intentionally replaceable: OpenCode is a bootstrap donor, provider APIs are adapters, and external harnesses are workers. Forge-owned contracts, evidence, context manifests, and the Rust effect boundary are the durable product.
+The final architecture is intentionally replaceable: provider APIs are adapters, and external harnesses are workers. Terminus-owned contracts, evidence, context manifests, public clients, and the Rust effect boundary are the durable product.
 ---
 
 **End of `SPEC.md`.**

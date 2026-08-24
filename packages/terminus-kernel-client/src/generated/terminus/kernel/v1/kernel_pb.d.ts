@@ -1876,6 +1876,54 @@ export declare type KernelHealth = Message<"terminus.kernel.v1.KernelHealth"> & 
 export declare const KernelHealthSchema: GenMessage<KernelHealth>;
 
 /**
+ * @generated from message terminus.kernel.v1.BootstrapControlRequest
+ */
+export declare type BootstrapControlRequest = Message<"terminus.kernel.v1.BootstrapControlRequest"> & {
+  /**
+   * Must equal the configured control principal
+   *
+   * @generated from field: string principal = 1;
+   */
+  principal: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.BootstrapControlRequest.
+ * Use `create(BootstrapControlRequestSchema)` to create a new message.
+ */
+export declare const BootstrapControlRequestSchema: GenMessage<BootstrapControlRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.BootstrapControlCapabilities
+ */
+export declare type BootstrapControlCapabilities = Message<"terminus.kernel.v1.BootstrapControlCapabilities"> & {
+  /**
+   * Admin, bound to task control-broker
+   *
+   * @generated from field: string broker_capability_token = 1;
+   */
+  brokerCapabilityToken: string;
+
+  /**
+   * Admin, bound to task control-maintenance
+   *
+   * @generated from field: string maintenance_capability_token = 2;
+   */
+  maintenanceCapabilityToken: string;
+
+  /**
+   * @generated from field: uint64 expires_at_unix = 3;
+   */
+  expiresAtUnix: bigint;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.BootstrapControlCapabilities.
+ * Use `create(BootstrapControlCapabilitiesSchema)` to create a new message.
+ */
+export declare const BootstrapControlCapabilitiesSchema: GenMessage<BootstrapControlCapabilities>;
+
+/**
  * @generated from message terminus.kernel.v1.RegisterWorkspaceRequest
  */
 export declare type RegisterWorkspaceRequest = Message<"terminus.kernel.v1.RegisterWorkspaceRequest"> & {
@@ -1914,6 +1962,14 @@ export declare type RegisterWorkspaceRequest = Message<"terminus.kernel.v1.Regis
    * @generated from field: string kind = 6;
    */
   kind: string;
+
+  /**
+   * Existing control-plane identity to preserve during registry migration.
+   * Empty for a new workspace. Admin authorization is required by the RPC.
+   *
+   * @generated from field: string requested_workspace_id = 7;
+   */
+  requestedWorkspaceId: string;
 };
 
 /**
@@ -1952,6 +2008,53 @@ export declare type WorkspaceEntryMessage = Message<"terminus.kernel.v1.Workspac
  * Use `create(WorkspaceEntryMessageSchema)` to create a new message.
  */
 export declare const WorkspaceEntryMessageSchema: GenMessage<WorkspaceEntryMessage>;
+
+/**
+ * @generated from message terminus.kernel.v1.ResolveWorkspaceRootRequest
+ */
+export declare type ResolveWorkspaceRootRequest = Message<"terminus.kernel.v1.ResolveWorkspaceRootRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string root_uri = 2;
+   */
+  rootUri: string;
+
+  /**
+   * @generated from field: string candidate_root = 3;
+   */
+  candidateRoot: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ResolveWorkspaceRootRequest.
+ * Use `create(ResolveWorkspaceRootRequestSchema)` to create a new message.
+ */
+export declare const ResolveWorkspaceRootRequestSchema: GenMessage<ResolveWorkspaceRootRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.ResolvedWorkspaceRootMessage
+ */
+export declare type ResolvedWorkspaceRootMessage = Message<"terminus.kernel.v1.ResolvedWorkspaceRootMessage"> & {
+  /**
+   * @generated from field: string root_uri = 1;
+   */
+  rootUri: string;
+
+  /**
+   * @generated from field: string canonical_root = 2;
+   */
+  canonicalRoot: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ResolvedWorkspaceRootMessage.
+ * Use `create(ResolvedWorkspaceRootMessageSchema)` to create a new message.
+ */
+export declare const ResolvedWorkspaceRootMessageSchema: GenMessage<ResolvedWorkspaceRootMessage>;
 
 /**
  * @generated from message terminus.kernel.v1.GetWorkspaceRequest
@@ -2156,6 +2259,92 @@ export declare type EvaluatePolicyRequest = Message<"terminus.kernel.v1.Evaluate
 export declare const EvaluatePolicyRequestSchema: GenMessage<EvaluatePolicyRequest>;
 
 /**
+ * @generated from message terminus.kernel.v1.MintTaskCapabilityRequest
+ */
+export declare type MintTaskCapabilityRequest = Message<"terminus.kernel.v1.MintTaskCapabilityRequest"> & {
+  /**
+   * Admin broker capability
+   *
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string principal = 2;
+   */
+  principal: string;
+
+  /**
+   * @generated from field: string session_id = 3;
+   */
+  sessionId: string;
+
+  /**
+   * @generated from field: string task_id = 4;
+   */
+  taskId: string;
+
+  /**
+   * @generated from field: string workspace_id = 5;
+   */
+  workspaceId: string;
+
+  /**
+   * @generated from field: repeated terminus.kernel.v1.CapabilityOperationProto operation_classes = 6;
+   */
+  operationClasses: CapabilityOperationProto[];
+
+  /**
+   * @generated from field: repeated string workspace_paths = 7;
+   */
+  workspacePaths: string[];
+
+  /**
+   * @generated from field: repeated string network_destinations = 8;
+   */
+  networkDestinations: string[];
+
+  /**
+   * @generated from field: repeated string secret_capabilities = 9;
+   */
+  secretCapabilities: string[];
+
+  /**
+   * 1..300
+   *
+   * @generated from field: uint64 ttl_seconds = 10;
+   */
+  ttlSeconds: bigint;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.MintTaskCapabilityRequest.
+ * Use `create(MintTaskCapabilityRequestSchema)` to create a new message.
+ */
+export declare const MintTaskCapabilityRequestSchema: GenMessage<MintTaskCapabilityRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.MintTaskCapabilityResponse
+ */
+export declare type MintTaskCapabilityResponse = Message<"terminus.kernel.v1.MintTaskCapabilityResponse"> & {
+  /**
+   * @generated from field: string capability_token = 1;
+   */
+  capabilityToken: string;
+
+  /**
+   * @generated from field: uint64 expires_at_unix = 2;
+   */
+  expiresAtUnix: bigint;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.MintTaskCapabilityResponse.
+ * Use `create(MintTaskCapabilityResponseSchema)` to create a new message.
+ */
+export declare const MintTaskCapabilityResponseSchema: GenMessage<MintTaskCapabilityResponse>;
+
+/**
  * @generated from message terminus.kernel.v1.MintSecretRequest
  */
 export declare type MintSecretRequest = Message<"terminus.kernel.v1.MintSecretRequest"> & {
@@ -2212,6 +2401,76 @@ export declare type SecretCapabilityMessage = Message<"terminus.kernel.v1.Secret
 export declare const SecretCapabilityMessageSchema: GenMessage<SecretCapabilityMessage>;
 
 /**
+ * @generated from message terminus.kernel.v1.StoreSecretRequest
+ */
+export declare type StoreSecretRequest = Message<"terminus.kernel.v1.StoreSecretRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string capability_uri = 2;
+   */
+  capabilityUri: string;
+
+  /**
+   * Maximum 16 KiB; never logged or persisted outside OS keyring
+   *
+   * @generated from field: bytes value = 3;
+   */
+  value: Uint8Array;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.StoreSecretRequest.
+ * Use `create(StoreSecretRequestSchema)` to create a new message.
+ */
+export declare const StoreSecretRequestSchema: GenMessage<StoreSecretRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.DeleteSecretRequest
+ */
+export declare type DeleteSecretRequest = Message<"terminus.kernel.v1.DeleteSecretRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string capability_uri = 2;
+   */
+  capabilityUri: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.DeleteSecretRequest.
+ * Use `create(DeleteSecretRequestSchema)` to create a new message.
+ */
+export declare const DeleteSecretRequestSchema: GenMessage<DeleteSecretRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.SecretMutationResponse
+ */
+export declare type SecretMutationResponse = Message<"terminus.kernel.v1.SecretMutationResponse"> & {
+  /**
+   * @generated from field: string capability_uri = 1;
+   */
+  capabilityUri: string;
+
+  /**
+   * @generated from field: bool stored = 2;
+   */
+  stored: boolean;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.SecretMutationResponse.
+ * Use `create(SecretMutationResponseSchema)` to create a new message.
+ */
+export declare const SecretMutationResponseSchema: GenMessage<SecretMutationResponse>;
+
+/**
  * @generated from message terminus.kernel.v1.EgressRequest
  */
 export declare type EgressRequest = Message<"terminus.kernel.v1.EgressRequest"> & {
@@ -2259,6 +2518,304 @@ export declare type EgressDecisionMessage = Message<"terminus.kernel.v1.EgressDe
  * Use `create(EgressDecisionMessageSchema)` to create a new message.
  */
 export declare const EgressDecisionMessageSchema: GenMessage<EgressDecisionMessage>;
+
+/**
+ * @generated from message terminus.kernel.v1.ConnectorGrantBindingMessage
+ */
+export declare type ConnectorGrantBindingMessage = Message<"terminus.kernel.v1.ConnectorGrantBindingMessage"> & {
+  /**
+   * @generated from field: string connector_id = 1;
+   */
+  connectorId: string;
+
+  /**
+   * @generated from field: string destination_host = 2;
+   */
+  destinationHost: string;
+
+  /**
+   * @generated from field: uint32 destination_port = 3;
+   */
+  destinationPort: number;
+
+  /**
+   * @generated from field: string scheme = 4;
+   */
+  scheme: string;
+
+  /**
+   * @generated from field: string method = 5;
+   */
+  method: string;
+
+  /**
+   * @generated from field: string path_class = 6;
+   */
+  pathClass: string;
+
+  /**
+   * @generated from field: string effect_id = 7;
+   */
+  effectId: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ConnectorGrantBindingMessage.
+ * Use `create(ConnectorGrantBindingMessageSchema)` to create a new message.
+ */
+export declare const ConnectorGrantBindingMessageSchema: GenMessage<ConnectorGrantBindingMessage>;
+
+/**
+ * @generated from message terminus.kernel.v1.MintConnectorGrantRequest
+ */
+export declare type MintConnectorGrantRequest = Message<"terminus.kernel.v1.MintConnectorGrantRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string capability_uri = 2;
+   */
+  capabilityUri: string;
+
+  /**
+   * @generated from field: terminus.kernel.v1.ConnectorGrantBindingMessage binding = 3;
+   */
+  binding?: ConnectorGrantBindingMessage | undefined;
+
+  /**
+   * @generated from field: uint64 ttl_seconds = 4;
+   */
+  ttlSeconds: bigint;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.MintConnectorGrantRequest.
+ * Use `create(MintConnectorGrantRequestSchema)` to create a new message.
+ */
+export declare const MintConnectorGrantRequestSchema: GenMessage<MintConnectorGrantRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.ConnectorGrantMessage
+ */
+export declare type ConnectorGrantMessage = Message<"terminus.kernel.v1.ConnectorGrantMessage"> & {
+  /**
+   * @generated from field: string encoded_grant = 1;
+   */
+  encodedGrant: string;
+
+  /**
+   * @generated from field: string grant_id = 2;
+   */
+  grantId: string;
+
+  /**
+   * @generated from field: uint64 expires_at_unix = 3;
+   */
+  expiresAtUnix: bigint;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ConnectorGrantMessage.
+ * Use `create(ConnectorGrantMessageSchema)` to create a new message.
+ */
+export declare const ConnectorGrantMessageSchema: GenMessage<ConnectorGrantMessage>;
+
+/**
+ * @generated from message terminus.kernel.v1.ConnectorHeaderMessage
+ */
+export declare type ConnectorHeaderMessage = Message<"terminus.kernel.v1.ConnectorHeaderMessage"> & {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string value = 2;
+   */
+  value: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ConnectorHeaderMessage.
+ * Use `create(ConnectorHeaderMessageSchema)` to create a new message.
+ */
+export declare const ConnectorHeaderMessageSchema: GenMessage<ConnectorHeaderMessage>;
+
+/**
+ * @generated from message terminus.kernel.v1.ConnectorOperationMessage
+ */
+export declare type ConnectorOperationMessage = Message<"terminus.kernel.v1.ConnectorOperationMessage"> & {
+  /**
+   * @generated from field: string method = 1;
+   */
+  method: string;
+
+  /**
+   * @generated from field: string scheme = 2;
+   */
+  scheme: string;
+
+  /**
+   * @generated from field: string host = 3;
+   */
+  host: string;
+
+  /**
+   * @generated from field: uint32 port = 4;
+   */
+  port: number;
+
+  /**
+   * @generated from field: string path = 5;
+   */
+  path: string;
+
+  /**
+   * @generated from field: string query = 6;
+   */
+  query: string;
+
+  /**
+   * @generated from field: repeated terminus.kernel.v1.ConnectorHeaderMessage headers = 7;
+   */
+  headers: ConnectorHeaderMessage[];
+
+  /**
+   * @generated from field: bytes body = 8;
+   */
+  body: Uint8Array;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ConnectorOperationMessage.
+ * Use `create(ConnectorOperationMessageSchema)` to create a new message.
+ */
+export declare const ConnectorOperationMessageSchema: GenMessage<ConnectorOperationMessage>;
+
+/**
+ * @generated from message terminus.kernel.v1.ExecuteConnectorRequest
+ */
+export declare type ExecuteConnectorRequest = Message<"terminus.kernel.v1.ExecuteConnectorRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string encoded_grant = 2;
+   */
+  encodedGrant: string;
+
+  /**
+   * @generated from field: terminus.kernel.v1.ConnectorOperationMessage operation = 3;
+   */
+  operation?: ConnectorOperationMessage | undefined;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ExecuteConnectorRequest.
+ * Use `create(ExecuteConnectorRequestSchema)` to create a new message.
+ */
+export declare const ExecuteConnectorRequestSchema: GenMessage<ExecuteConnectorRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.ConnectorReceiptMessage
+ */
+export declare type ConnectorReceiptMessage = Message<"terminus.kernel.v1.ConnectorReceiptMessage"> & {
+  /**
+   * @generated from field: string grant_id = 1;
+   */
+  grantId: string;
+
+  /**
+   * @generated from field: string task_id = 2;
+   */
+  taskId: string;
+
+  /**
+   * @generated from field: string effect_id = 3;
+   */
+  effectId: string;
+
+  /**
+   * @generated from field: string connector_id = 4;
+   */
+  connectorId: string;
+
+  /**
+   * @generated from field: string method = 5;
+   */
+  method: string;
+
+  /**
+   * @generated from field: string path = 6;
+   */
+  path: string;
+
+  /**
+   * @generated from field: string destination = 7;
+   */
+  destination: string;
+
+  /**
+   * @generated from field: string request_sha256 = 8;
+   */
+  requestSha256: string;
+
+  /**
+   * @generated from field: optional uint32 status_code = 9;
+   */
+  statusCode?: number | undefined;
+
+  /**
+   * @generated from field: optional string response_sha256 = 10;
+   */
+  responseSha256?: string | undefined;
+
+  /**
+   * @generated from field: uint64 response_redactions = 11;
+   */
+  responseRedactions: bigint;
+
+  /**
+   * @generated from field: string outcome = 12;
+   */
+  outcome: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ConnectorReceiptMessage.
+ * Use `create(ConnectorReceiptMessageSchema)` to create a new message.
+ */
+export declare const ConnectorReceiptMessageSchema: GenMessage<ConnectorReceiptMessage>;
+
+/**
+ * @generated from message terminus.kernel.v1.ConnectorResponseMessage
+ */
+export declare type ConnectorResponseMessage = Message<"terminus.kernel.v1.ConnectorResponseMessage"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.ConnectorReceiptMessage receipt = 1;
+   */
+  receipt?: ConnectorReceiptMessage | undefined;
+
+  /**
+   * @generated from field: bytes body = 2;
+   */
+  body: Uint8Array;
+
+  /**
+   * @generated from field: optional string content_type = 3;
+   */
+  contentType?: string | undefined;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ConnectorResponseMessage.
+ * Use `create(ConnectorResponseMessageSchema)` to create a new message.
+ */
+export declare const ConnectorResponseMessageSchema: GenMessage<ConnectorResponseMessage>;
 
 /**
  * @generated from message terminus.kernel.v1.CodeSearchRequest
@@ -2534,6 +3091,196 @@ export declare type GetArtifactMetadataResponse = Message<"terminus.kernel.v1.Ge
 export declare const GetArtifactMetadataResponseSchema: GenMessage<GetArtifactMetadataResponse>;
 
 /**
+ * @generated from message terminus.kernel.v1.LinkArtifactRequest
+ */
+export declare type LinkArtifactRequest = Message<"terminus.kernel.v1.LinkArtifactRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string sha256 = 2;
+   */
+  sha256: string;
+
+  /**
+   * @generated from field: string owner_type = 3;
+   */
+  ownerType: string;
+
+  /**
+   * @generated from field: string owner_id = 4;
+   */
+  ownerId: string;
+
+  /**
+   * @generated from field: string purpose = 5;
+   */
+  purpose: string;
+
+  /**
+   * Authoritative task aggregate that owns the admission. The kernel binds
+   * this to both RequestContext.task_id and the capability token task binder.
+   *
+   * @generated from field: string owner_task_id = 6;
+   */
+  ownerTaskId: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.LinkArtifactRequest.
+ * Use `create(LinkArtifactRequestSchema)` to create a new message.
+ */
+export declare const LinkArtifactRequestSchema: GenMessage<LinkArtifactRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.LinkArtifactResponse
+ */
+export declare type LinkArtifactResponse = Message<"terminus.kernel.v1.LinkArtifactResponse"> & {
+  /**
+   * @generated from field: bool linked = 1;
+   */
+  linked: boolean;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.LinkArtifactResponse.
+ * Use `create(LinkArtifactResponseSchema)` to create a new message.
+ */
+export declare const LinkArtifactResponseSchema: GenMessage<LinkArtifactResponse>;
+
+/**
+ * @generated from message terminus.kernel.v1.ListCheckpointArtifactLinksRequest
+ */
+export declare type ListCheckpointArtifactLinksRequest = Message<"terminus.kernel.v1.ListCheckpointArtifactLinksRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: uint32 page_size = 2;
+   */
+  pageSize: number;
+
+  /**
+   * @generated from field: string continuation_token = 3;
+   */
+  continuationToken: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ListCheckpointArtifactLinksRequest.
+ * Use `create(ListCheckpointArtifactLinksRequestSchema)` to create a new message.
+ */
+export declare const ListCheckpointArtifactLinksRequestSchema: GenMessage<ListCheckpointArtifactLinksRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.CheckpointArtifactLinkMessage
+ */
+export declare type CheckpointArtifactLinkMessage = Message<"terminus.kernel.v1.CheckpointArtifactLinkMessage"> & {
+  /**
+   * @generated from field: string link_id = 1;
+   */
+  linkId: string;
+
+  /**
+   * @generated from field: string sha256 = 2;
+   */
+  sha256: string;
+
+  /**
+   * @generated from field: string checkpoint_id = 3;
+   */
+  checkpointId: string;
+
+  /**
+   * @generated from field: string owner_task_id = 4;
+   */
+  ownerTaskId: string;
+
+  /**
+   * @generated from field: string created_at = 5;
+   */
+  createdAt: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.CheckpointArtifactLinkMessage.
+ * Use `create(CheckpointArtifactLinkMessageSchema)` to create a new message.
+ */
+export declare const CheckpointArtifactLinkMessageSchema: GenMessage<CheckpointArtifactLinkMessage>;
+
+/**
+ * @generated from message terminus.kernel.v1.ListCheckpointArtifactLinksResponse
+ */
+export declare type ListCheckpointArtifactLinksResponse = Message<"terminus.kernel.v1.ListCheckpointArtifactLinksResponse"> & {
+  /**
+   * @generated from field: repeated terminus.kernel.v1.CheckpointArtifactLinkMessage links = 1;
+   */
+  links: CheckpointArtifactLinkMessage[];
+
+  /**
+   * @generated from field: string continuation_token = 2;
+   */
+  continuationToken: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ListCheckpointArtifactLinksResponse.
+ * Use `create(ListCheckpointArtifactLinksResponseSchema)` to create a new message.
+ */
+export declare const ListCheckpointArtifactLinksResponseSchema: GenMessage<ListCheckpointArtifactLinksResponse>;
+
+/**
+ * @generated from message terminus.kernel.v1.UnlinkCheckpointArtifactRequest
+ */
+export declare type UnlinkCheckpointArtifactRequest = Message<"terminus.kernel.v1.UnlinkCheckpointArtifactRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string sha256 = 2;
+   */
+  sha256: string;
+
+  /**
+   * @generated from field: string checkpoint_id = 3;
+   */
+  checkpointId: string;
+
+  /**
+   * @generated from field: string owner_task_id = 4;
+   */
+  ownerTaskId: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.UnlinkCheckpointArtifactRequest.
+ * Use `create(UnlinkCheckpointArtifactRequestSchema)` to create a new message.
+ */
+export declare const UnlinkCheckpointArtifactRequestSchema: GenMessage<UnlinkCheckpointArtifactRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.UnlinkCheckpointArtifactResponse
+ */
+export declare type UnlinkCheckpointArtifactResponse = Message<"terminus.kernel.v1.UnlinkCheckpointArtifactResponse"> & {
+  /**
+   * @generated from field: bool unlinked = 1;
+   */
+  unlinked: boolean;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.UnlinkCheckpointArtifactResponse.
+ * Use `create(UnlinkCheckpointArtifactResponseSchema)` to create a new message.
+ */
+export declare const UnlinkCheckpointArtifactResponseSchema: GenMessage<UnlinkCheckpointArtifactResponse>;
+
+/**
  * @generated from enum terminus.kernel.v1.PatchCommitMode
  */
 export enum PatchCommitMode {
@@ -2635,6 +3382,76 @@ export enum DecisionProto {
 export declare const DecisionProtoSchema: GenEnum<DecisionProto>;
 
 /**
+ * @generated from enum terminus.kernel.v1.CapabilityOperationProto
+ */
+export enum CapabilityOperationProto {
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_UNSPECIFIED = 0;
+   */
+  CAPABILITY_OPERATION_UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_READ = 1;
+   */
+  CAPABILITY_OPERATION_READ = 1,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_PATCH = 2;
+   */
+  CAPABILITY_OPERATION_PATCH = 2,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_EXEC = 3;
+   */
+  CAPABILITY_OPERATION_EXEC = 3,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_JOB = 4;
+   */
+  CAPABILITY_OPERATION_JOB = 4,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_SANDBOX = 5;
+   */
+  CAPABILITY_OPERATION_SANDBOX = 5,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_SECRET = 6;
+   */
+  CAPABILITY_OPERATION_SECRET = 6,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_NETWORK = 7;
+   */
+  CAPABILITY_OPERATION_NETWORK = 7,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_CODE_INTEL = 8;
+   */
+  CAPABILITY_OPERATION_CODE_INTEL = 8,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_EXTENSION = 9;
+   */
+  CAPABILITY_OPERATION_EXTENSION = 9,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_GIT = 10;
+   */
+  CAPABILITY_OPERATION_GIT = 10,
+
+  /**
+   * @generated from enum value: CAPABILITY_OPERATION_ARTIFACT_INGEST = 11;
+   */
+  CAPABILITY_OPERATION_ARTIFACT_INGEST = 11,
+}
+
+/**
+ * Describes the enum terminus.kernel.v1.CapabilityOperationProto.
+ */
+export declare const CapabilityOperationProtoSchema: GenEnum<CapabilityOperationProto>;
+
+/**
  * @generated from service terminus.kernel.v1.KernelInfoService
  */
 export declare const KernelInfoService: GenService<{
@@ -2653,6 +3470,16 @@ export declare const KernelInfoService: GenService<{
     methodKind: "unary";
     input: typeof EmptySchema;
     output: typeof KernelHealthSchema;
+  },
+  /**
+   * Restricted-UDS-only standalone bootstrap. Never exposed by HTTP/TCP.
+   *
+   * @generated from rpc terminus.kernel.v1.KernelInfoService.BootstrapControl
+   */
+  bootstrapControl: {
+    methodKind: "unary";
+    input: typeof BootstrapControlRequestSchema;
+    output: typeof BootstrapControlCapabilitiesSchema;
   },
 }>;
 
@@ -2773,6 +3600,16 @@ export declare const JobService: GenService<{
  */
 export declare const WorkspaceService: GenService<{
   /**
+   * Read-only canonicalization used before durable identity/trust admission.
+   *
+   * @generated from rpc terminus.kernel.v1.WorkspaceService.ResolveRoot
+   */
+  resolveRoot: {
+    methodKind: "unary";
+    input: typeof ResolveWorkspaceRootRequestSchema;
+    output: typeof ResolvedWorkspaceRootMessageSchema;
+  },
+  /**
    * @generated from rpc terminus.kernel.v1.WorkspaceService.Register
    */
   register: {
@@ -2816,6 +3653,14 @@ export declare const PolicyService: GenService<{
     input: typeof EvaluatePolicyRequestSchema;
     output: typeof DecisionReportMessageSchema;
   },
+  /**
+   * @generated from rpc terminus.kernel.v1.PolicyService.MintTaskCapability
+   */
+  mintTaskCapability: {
+    methodKind: "unary";
+    input: typeof MintTaskCapabilityRequestSchema;
+    output: typeof MintTaskCapabilityResponseSchema;
+  },
 }>;
 
 /**
@@ -2830,6 +3675,22 @@ export declare const SecretService: GenService<{
     input: typeof MintSecretRequestSchema;
     output: typeof SecretCapabilityMessageSchema;
   },
+  /**
+   * @generated from rpc terminus.kernel.v1.SecretService.Store
+   */
+  store: {
+    methodKind: "unary";
+    input: typeof StoreSecretRequestSchema;
+    output: typeof SecretMutationResponseSchema;
+  },
+  /**
+   * @generated from rpc terminus.kernel.v1.SecretService.Delete
+   */
+  delete: {
+    methodKind: "unary";
+    input: typeof DeleteSecretRequestSchema;
+    output: typeof SecretMutationResponseSchema;
+  },
 }>;
 
 /**
@@ -2843,6 +3704,28 @@ export declare const NetworkService: GenService<{
     methodKind: "unary";
     input: typeof EgressRequestSchema;
     output: typeof EgressDecisionMessageSchema;
+  },
+}>;
+
+/**
+ * @generated from service terminus.kernel.v1.ConnectorService
+ */
+export declare const ConnectorService: GenService<{
+  /**
+   * @generated from rpc terminus.kernel.v1.ConnectorService.MintGrant
+   */
+  mintGrant: {
+    methodKind: "unary";
+    input: typeof MintConnectorGrantRequestSchema;
+    output: typeof ConnectorGrantMessageSchema;
+  },
+  /**
+   * @generated from rpc terminus.kernel.v1.ConnectorService.Execute
+   */
+  execute: {
+    methodKind: "unary";
+    input: typeof ExecuteConnectorRequestSchema;
+    output: typeof ConnectorResponseMessageSchema;
   },
 }>;
 
@@ -2901,6 +3784,30 @@ export declare const ArtifactIngestService: GenService<{
     methodKind: "unary";
     input: typeof GetArtifactMetadataRequestSchema;
     output: typeof GetArtifactMetadataResponseSchema;
+  },
+  /**
+   * @generated from rpc terminus.kernel.v1.ArtifactIngestService.Link
+   */
+  link: {
+    methodKind: "unary";
+    input: typeof LinkArtifactRequestSchema;
+    output: typeof LinkArtifactResponseSchema;
+  },
+  /**
+   * @generated from rpc terminus.kernel.v1.ArtifactIngestService.ListCheckpointLinks
+   */
+  listCheckpointLinks: {
+    methodKind: "unary";
+    input: typeof ListCheckpointArtifactLinksRequestSchema;
+    output: typeof ListCheckpointArtifactLinksResponseSchema;
+  },
+  /**
+   * @generated from rpc terminus.kernel.v1.ArtifactIngestService.UnlinkCheckpoint
+   */
+  unlinkCheckpoint: {
+    methodKind: "unary";
+    input: typeof UnlinkCheckpointArtifactRequestSchema;
+    output: typeof UnlinkCheckpointArtifactResponseSchema;
   },
 }>;
 

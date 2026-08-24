@@ -200,6 +200,7 @@ pub struct ArtifactLink {
     pub artifact_hash: String,
     pub owner_type: String,
     pub owner_id: String,
+    pub owner_task_id: String,
     pub purpose: String,
     pub created_at: String,
 }

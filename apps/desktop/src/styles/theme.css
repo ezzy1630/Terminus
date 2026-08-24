@@ -1,0 +1,297 @@
+/*
+ * Terminus desktop theme.
+ *
+ * Tokens live in CSS so the renderer has a complete first paint before React
+ * starts. JavaScript only selects theme and density attributes.
+ */
+
+@theme inline {
+  --font-sans: var(--font-family);
+  --font-mono: var(--font-family-mono);
+
+  --text-xs: var(--font-size-xs);
+  --text-xs--line-height: var(--line-height-xs);
+  --text-sm: var(--font-size-sm);
+  --text-sm--line-height: var(--line-height-sm);
+  --text-base: var(--font-size-base);
+  --text-base--line-height: var(--line-height-base);
+  --text-md: var(--font-size-md);
+  --text-md--line-height: var(--line-height-md);
+  --text-body: var(--font-size-body);
+  --text-body--line-height: var(--line-height-body);
+  --text-title: var(--font-size-title);
+  --text-title--line-height: var(--line-height-title);
+  --text-lg: var(--font-size-display);
+  --text-lg--line-height: var(--line-height-display);
+  --text-xl: var(--font-size-display);
+  --text-xl--line-height: var(--line-height-display);
+  --text-2xl: var(--font-size-display);
+  --text-2xl--line-height: var(--line-height-display);
+  --text-display: var(--font-size-display-large);
+  --text-display--line-height: var(--line-height-display-large);
+
+  --color-canvas: var(--bg-canvas);
+  --color-elevated: var(--bg-elevated);
+  --color-sidebar: var(--bg-sidebar);
+  --color-inspector: var(--bg-inspector);
+  --color-terminal: var(--bg-terminal);
+  --color-diff: var(--bg-diff);
+  --color-composer: var(--bg-composer);
+  --color-card: var(--bg-card);
+  --color-hover: var(--bg-hover);
+  --color-selected: var(--bg-selected);
+  --color-surface-subtle: var(--bg-subtle);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--text-on-accent);
+  --color-action-primary: var(--action-primary);
+  --color-inverse: var(--text-inverse);
+  --color-success: var(--semantic-success);
+  --color-error: var(--semantic-error);
+  --color-danger: var(--semantic-error);
+  --color-warning: var(--semantic-warning);
+  --color-info: var(--semantic-info);
+  --color-addition: var(--semantic-addition);
+  --color-deletion: var(--semantic-deletion);
+  --shadow-sm: var(--elevation-sm);
+  --shadow-md: var(--elevation-md);
+  --shadow-lg: var(--elevation-lg);
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+:root {
+  color-scheme: dark;
+
+  --font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+  --font-family-mono: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-base: 13px;
+  --font-size-md: 14px;
+  --font-size-body: 14px;
+  --font-size-title: 15px;
+  --font-size-display: 22px;
+  --font-size-display-large: 30px;
+  --line-height-xs: 16px;
+  --line-height-sm: 18px;
+  --line-height-base: 20px;
+  --line-height-md: 22px;
+  --line-height-body: 22px;
+  --line-height-title: 22px;
+  --line-height-display: 28px;
+  --line-height-display-large: 36px;
+  --tracking-tight: -0.015em;
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.65;
+
+  --space-0: 0px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --control-sm: 24px;
+  --control-md: 28px;
+  --control-lg: 32px;
+  --sidebar-width: 256px;
+  --sidebar-width-compact: 224px;
+  --inspector-width: 280px;
+  --diff-nav-width: 232px;
+  --diff-nav-min-width: 184px;
+  --composer-max-height: 280px;
+  --content-width: 780px;
+  --conversation-max-width: var(--content-width);
+  --start-max-width: var(--content-width);
+  --container-conversation: var(--conversation-max-width);
+  --row-height: 32px;
+  --nav-row-height: 30px;
+
+  --duration-fast: 120ms;
+  --duration-normal: 180ms;
+  --duration-slow: 260ms;
+  --easing-default: cubic-bezier(0.2, 0, 0, 1);
+  --easing-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
+  --easing-spring: var(--easing-emphasized);
+
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-popover: 30;
+  --z-tooltip: 40;
+  --z-dialog: 50;
+  --z-select: 55;
+  --z-toast: 60;
+
+  --bg-canvas: #131417;
+  --bg-elevated: #1a1c20;
+  --bg-sidebar: #0d0e10;
+  --bg-inspector: #17191d;
+  --bg-terminal: #1b1b19;
+  --bg-diff: #101114;
+  --bg-composer: #1c1e23;
+  --bg-card: #191b1f;
+  --bg-hover: #22252b;
+  --bg-selected: #2b2f36;
+  --bg-subtle: #202329;
+  --bg-nav-hover: var(--bg-hover);
+  --bg-control-pressed: #32363e;
+  --bg-popover: #1d2025;
+  --text-primary: #f0f1f4;
+  --text-secondary: #b6bcc6;
+  --text-tertiary: #959ba6;
+  --text-placeholder: #979da8;
+  --text-inverse: #131417;
+  --text-on-accent: #0b1220;
+  --text-code: #eef1f5;
+  --accent: #79a6f6;
+  --accent-dim: color-mix(in srgb, var(--accent) 62%, var(--bg-canvas));
+  --accent-wash: color-mix(in srgb, var(--accent) 12%, transparent);
+  --text-accent: var(--accent);
+  --border-subtle: #24272c;
+  --border-default: #32363d;
+  --border-strong: #4a4f58;
+  --sidebar-separator: #232629;
+  --semantic-success: #57b96d;
+  --semantic-error: #ee6a62;
+  --semantic-warning: #dda746;
+  --semantic-info: #79a6f6;
+  --semantic-addition: var(--semantic-success);
+  --semantic-deletion: var(--semantic-error);
+  --action-primary: var(--accent);
+  --color-success: var(--semantic-success);
+  --color-error: var(--semantic-error);
+  --color-warning: var(--semantic-warning);
+  --color-info: var(--semantic-info);
+  --color-addition: var(--semantic-addition);
+  --color-deletion: var(--semantic-deletion);
+  --color-approval-risk: var(--semantic-warning);
+  --color-agent-working: var(--accent);
+  --color-agent-queued: #6f757f;
+  --color-agent-waiting: var(--semantic-warning);
+  --color-access-full: var(--semantic-success);
+  --color-access-limited: var(--semantic-warning);
+  --focus-color: #79a6f6;
+  --focus-border: color-mix(in srgb, var(--focus-color) 72%, var(--border-strong));
+  --focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px color-mix(in srgb, var(--focus-color) 24%, transparent);
+  --elevation-sm: 0 1px 2px rgb(0 0 0 / 20%);
+  --elevation-md: 0 4px 12px rgb(0 0 0 / 24%);
+  --elevation-lg: 0 12px 32px rgb(0 0 0 / 38%);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 18%);
+  --shadow-card-hover: 0 2px 6px rgb(0 0 0 / 22%);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --bg-canvas: #f6f7f9;
+    --bg-elevated: #ffffff;
+    --bg-sidebar: #ebedf1;
+    --bg-inspector: #ffffff;
+    --bg-terminal: #1b1b19;
+    --bg-diff: #f8f9fb;
+    --bg-composer: #ffffff;
+    --bg-card: #ffffff;
+    --bg-hover: #e4e7eb;
+    --bg-selected: #dce1e8;
+    --bg-subtle: #e9ecf0;
+    --bg-control-pressed: #d5dae2;
+    --bg-popover: #ffffff;
+    --text-primary: #1f2329;
+    --text-secondary: #535b66;
+    --text-tertiary: #5b6470;
+    --text-placeholder: #59626e;
+    --text-inverse: #ffffff;
+    --text-on-accent: #ffffff;
+    --text-code: #ececea;
+    --accent: #356fd6;
+    --border-subtle: #dde1e6;
+    --border-default: #cbd1d9;
+    --border-strong: #a8b0bb;
+    --sidebar-separator: #d7dce2;
+    --semantic-success: #267a3a;
+    --semantic-error: #c93e38;
+    --semantic-warning: #8a6200;
+    --semantic-info: #2868b2;
+    --action-primary: var(--accent);
+    --focus-color: #356fd6;
+    --elevation-sm: 0 1px 2px rgb(35 35 30 / 7%);
+    --elevation-md: 0 8px 24px rgb(35 35 30 / 11%);
+    --elevation-lg: 0 20px 52px rgb(35 35 30 / 16%);
+    --shadow-card: 0 1px 3px rgb(35 35 30 / 7%);
+    --shadow-card-hover: 0 5px 16px rgb(35 35 30 / 12%);
+  }
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg-canvas: #f6f7f9;
+  --bg-elevated: #ffffff;
+  --bg-sidebar: #ebedf1;
+  --bg-inspector: #ffffff;
+  --bg-terminal: #1b1b19;
+  --bg-diff: #f8f9fb;
+  --bg-composer: #ffffff;
+  --bg-card: #ffffff;
+  --bg-hover: #e4e7eb;
+  --bg-selected: #dce1e8;
+  --bg-subtle: #e9ecf0;
+  --bg-control-pressed: #d5dae2;
+  --bg-popover: #ffffff;
+  --text-primary: #1f2329;
+  --text-secondary: #535b66;
+  --text-tertiary: #5b6470;
+  --text-placeholder: #59626e;
+  --text-inverse: #ffffff;
+  --text-on-accent: #ffffff;
+  --text-code: #ececea;
+  --accent: #356fd6;
+  --text-accent: var(--accent);
+  --border-subtle: #dde1e6;
+  --border-default: #cbd1d9;
+  --border-strong: #a8b0bb;
+  --sidebar-separator: #d7dce2;
+  --semantic-success: #267a3a;
+  --semantic-error: #c93e38;
+  --semantic-warning: #8a6200;
+  --semantic-info: #2868b2;
+  --action-primary: var(--accent);
+  --focus-color: #356fd6;
+  --elevation-sm: 0 1px 2px rgb(35 35 30 / 7%);
+  --elevation-md: 0 8px 24px rgb(35 35 30 / 11%);
+  --elevation-lg: 0 20px 52px rgb(35 35 30 / 16%);
+  --shadow-card: 0 1px 3px rgb(35 35 30 / 7%);
+  --shadow-card-hover: 0 5px 16px rgb(35 35 30 / 12%);
+}
+
+[data-density="compact"] {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 8px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 20px;
+  --space-8: 24px;
+  --space-10: 32px;
+  --space-12: 40px;
+  --sidebar-width: 240px;
+  --sidebar-width-compact: 216px;
+  --inspector-width: 272px;
+  --composer-max-height: 224px;
+  --content-width: 720px;
+  --row-height: 28px;
+  --nav-row-height: 28px;
+}

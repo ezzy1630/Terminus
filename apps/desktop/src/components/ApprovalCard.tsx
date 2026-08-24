@@ -30,21 +30,24 @@
  * Per design constraints: subtle warning color, restrained motion,
  * accessible (keyboard nav, focus states, screen-reader labels).
  */
-import { memo, useCallback, useEffect, useState } from "react";
-import { Check, ShieldAlert, ShieldCheck, X } from "lucide-react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { Check, ChevronDown, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, TerminusApiError } from "../lib/api";
+import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
 import type { ApprovalDecision } from "../types";
+import { Button } from "../ui/Button";
 
 // ────────────────────────── Risk model ──────────────────────────────────────
 
-export type ApprovalRisk = "low" | "normal" | "high" | "critical";
+export type ApprovalRisk = "low" | "normal" | "high" | "critical" | "unknown";
 
 const RISK_LABEL: Record<ApprovalRisk, string> = {
   low: "Low risk",
   normal: "Normal risk",
   high: "High risk",
   critical: "Critical risk",
+  unknown: "Risk unknown",
 };
 
 const RISK_COLOR: Record<ApprovalRisk, string> = {
@@ -52,6 +55,7 @@ const RISK_COLOR: Record<ApprovalRisk, string> = {
   normal: "var(--color-info)",
   high: "var(--color-warning)",
   critical: "var(--color-error)",
+  unknown: "var(--color-warning)",
 };
 
 // ────────────────────────── Props ───────────────────────────────────────────
@@ -61,6 +65,8 @@ export interface ApprovalCardProps {
   id: string;
   /** Plain-language action, e.g. "Run database migration". */
   action: string;
+  /** Exact immutable operation hash carried by the authoritative snapshot. */
+  operationHash: string;
   /** Exact command / operation, e.g. "npm run migrate:production". */
   operation?: string;
   /** Why approval is required. */
@@ -73,52 +79,127 @@ export interface ApprovalCardProps {
   affectedEnvironment?: string;
   /** Whether the choice can persist for the rest of the task. */
   canPersist: boolean;
+  /** Decisions the authoritative coordinator can actually settle. */
+  supportedDecisions?: ApprovalDecision[];
+  /** True only when server identity and exact event context bind to one operation hash. */
+  authorizationReady?: boolean;
+  /** False when the pending approval snapshot has not been reconciled. */
+  decisionsEnabled?: boolean;
   /** Optional timestamp shown as muted metadata. */
   requestedAt?: string;
+  /** Server-bound expiry. An elapsed approval cannot be submitted. */
+  expiresAt?: string;
   /** Optional callback fired after a successful resolve. */
   onResolved?: (decision: ApprovalDecision) => void;
+  /** Reconcile the parent resource when the local expiry boundary passes. */
+  onExpired?: () => void;
   /** Optional className. */
   className?: string;
 }
 
 // ────────────────────────── Component ───────────────────────────────────────
 
-type Resolution = "allow_once" | "allow_for_task" | "deny" | null;
+type Resolution = ApprovalDecision | null;
 
 interface DecisionConfig {
   decision: ApprovalDecision;
   label: string;
   icon: typeof Check;
   variant: "primary" | "secondary" | "danger";
+  available: boolean;
+  unavailableReason?: string;
+}
+
+function approvalWasAlreadyResolved(error: unknown): boolean {
+  if (!(error instanceof TerminusApiError) || error.status !== 409) return false;
+  if (error.envelope?.retryable !== false) return false;
+  return new Set(["APPROVAL_ALREADY_RESOLVED", "APPROVAL_NOT_PENDING", "APPROVAL_NOT_FOUND"]).has(error.envelope.code);
+}
+
+function approvalHasExpired(expiresAt: string | undefined, now = Date.now()): boolean {
+  if (!expiresAt) return false;
+  const expiry = Date.parse(expiresAt);
+  return !Number.isFinite(expiry) || expiry <= now;
 }
 
 function ApprovalCardImpl({
   id,
   action,
+  operationHash,
   operation,
   reason,
   risk,
   scope,
   affectedEnvironment,
-  canPersist = true,
+  canPersist = false,
+  supportedDecisions = ["deny_once"],
+  authorizationReady = false,
+  decisionsEnabled = true,
   requestedAt,
+  expiresAt,
   onResolved,
+  onExpired,
   className,
 }: ApprovalCardProps): JSX.Element {
   const [resolution, setResolution] = useState<Resolution>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expired, setExpired] = useState(() => approvalHasExpired(expiresAt));
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const expiryNotificationRef = useRef<string | null>(null);
+  const approvalMutation = useLogicalMutation(`approval.${id}`);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let notified = false;
+    const updateExpiry = (): void => {
+      const nextExpired = approvalHasExpired(expiresAt);
+      setExpired(nextExpired);
+      if (nextExpired) {
+        const expiryIdentity = expiresAt ?? "invalid-expiry";
+        if (!notified && expiryNotificationRef.current !== expiryIdentity) {
+          expiryNotificationRef.current = expiryIdentity;
+          onExpired?.();
+        }
+        notified = true;
+        return;
+      }
+      if (!expiresAt) return;
+      const remaining = Math.max(1, Date.parse(expiresAt) - Date.now() + 1);
+      timer = setTimeout(updateExpiry, Math.min(remaining, 2_147_483_647));
+    };
+    updateExpiry();
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [expiresAt, onExpired]);
 
   const submit = useCallback(
     async (cfg: DecisionConfig): Promise<void> => {
-      if (submitting) return;
+      if (submitting || !decisionsEnabled) return;
+      if (approvalHasExpired(expiresAt)) {
+        setExpired(true);
+        setError("This approval expired. Refresh pending approvals before making a decision.");
+        onExpired?.();
+        return;
+      }
       setSubmitting(true);
       setError(null);
+      let operationKey: string | null = null;
       try {
-        await api.resolveApproval(id, cfg.decision);
-        setResolution(cfg.decision === "deny_once" ? "deny" : cfg.decision === "allow_for_task" ? "allow_for_task" : "allow_once");
+        operationKey = approvalMutation.keyFor(JSON.stringify({ id, decision: cfg.decision }));
+        await api.resolveApproval(id, operationHash, cfg.decision, { idempotencyKey: operationKey });
+        approvalMutation.settle(operationKey);
+        setResolution(cfg.decision);
         onResolved?.(cfg.decision);
       } catch (err) {
+        if (operationKey && isDefinitiveMutationFailure(err)) {
+          approvalMutation.abandon(operationKey);
+          // A non-retryable conflict means another actor already changed the
+          // approval. Let the parent reconcile its pending list immediately.
+          if (approvalWasAlreadyResolved(err)) onResolved?.(cfg.decision);
+        }
         const msg =
           err instanceof TerminusApiError
             ? err.envelope?.message ?? err.message
@@ -130,7 +211,7 @@ function ApprovalCardImpl({
         setSubmitting(false);
       }
     },
-    [id, submitting, onResolved],
+    [approvalMutation, decisionsEnabled, expiresAt, id, onExpired, operationHash, submitting, onResolved],
   );
 
   // Esc cancels submission but doesn't auto-deny (per SPEC §17 — Deny is explicit).
@@ -150,85 +231,113 @@ function ApprovalCardImpl({
   }
 
   const accent = RISK_COLOR[risk];
+  const effectiveDecisionsEnabled = decisionsEnabled && !expired;
+  const allowAuthorizationReady = authorizationReady && !expired;
+  const supported = new Set(supportedDecisions);
   const decisions: DecisionConfig[] = [
     {
       decision: "allow_once",
       label: "Allow once",
       icon: Check,
       variant: "primary",
+      available: allowAuthorizationReady && supported.has("allow_once"),
+      unavailableReason: expired ? "This approval expired." : authorizationReady ? "The coordinator does not support this decision." : "The exact operation binding is not ready.",
     },
-    ...(canPersist
-      ? [
-          {
-            decision: "allow_for_task" as const,
-            label: "Allow for this task",
-            icon: ShieldCheck,
-            variant: "secondary" as const,
-          },
-        ]
-      : []),
+    {
+      decision: "allow_for_action",
+      label: "Allow exact action",
+      icon: ShieldCheck,
+      variant: "secondary",
+      available: allowAuthorizationReady && supported.has("allow_for_action"),
+      unavailableReason: expired ? "This approval expired." : authorizationReady ? "The coordinator does not support this decision." : "The exact operation binding is not ready.",
+    },
+    {
+      decision: "allow_for_task",
+      label: "Allow for this task",
+      icon: ShieldCheck,
+      variant: "secondary",
+      available: allowAuthorizationReady && canPersist && supported.has("allow_for_task"),
+      unavailableReason: !canPersist
+        ? "This approval is bounded to one use."
+        : expired ? "This approval expired." : authorizationReady ? "The coordinator does not support this decision." : "The exact operation binding is not ready.",
+    },
     {
       decision: "deny_once",
-      label: "Deny",
+      label: "Deny once",
       icon: X,
-      variant: "danger" as const,
+      variant: "danger",
+      available: supported.has("deny_once"),
+    },
+    {
+      decision: "deny_and_add_task_rule",
+      label: "Deny and add task rule",
+      icon: ShieldAlert,
+      variant: "danger",
+      available: supported.has("deny_and_add_task_rule"),
+      unavailableReason: "The task policy-rule coordinator is unavailable.",
+    },
+    {
+      decision: "stop_task",
+      label: "Stop task",
+      icon: X,
+      variant: "danger",
+      available: supported.has("stop_task"),
+      unavailableReason: "The kernel-backed task cancellation coordinator is unavailable.",
     },
   ];
+  const visibleDecisions = decisions.filter((decision) => supported.has(decision.decision));
+  const recommendedDecision = visibleDecisions.find((decision) => decision.decision === "allow_once")
+    ?? visibleDecisions.find((decision) => decision.variant !== "danger")
+    ?? visibleDecisions[0];
+  const denyDecision = visibleDecisions.find((decision) => decision.decision === "deny_once" && decision !== recommendedDecision);
+  const secondaryDecisions = visibleDecisions.filter((decision) => decision !== recommendedDecision && decision !== denyDecision);
+  const renderDecision = (cfg: DecisionConfig): JSX.Element => {
+    const Icon = cfg.icon;
+    const isPrimary = cfg === recommendedDecision && cfg.variant !== "danger";
+    const isDanger = cfg.variant === "danger";
+    return (
+      <Button
+        key={cfg.decision}
+        type="button"
+        onClick={() => void submit(cfg)}
+        disabled={submitting || !effectiveDecisionsEnabled || !cfg.available}
+        aria-label={`${cfg.label}${cfg.available ? "" : " (unavailable)"} — ${action}`}
+        data-tooltip={cfg.available ? cfg.label : cfg.unavailableReason}
+        variant={isPrimary ? "primary" : "secondary"}
+        size="md"
+        leading={<Icon size={12} aria-hidden />}
+        className={cn(isDanger && "text-error")}
+      >
+        {cfg.label}
+      </Button>
+    );
+  };
 
   return (
     <section
       role="group"
       aria-label={`Approval required: ${action}`}
-      className={cn(
-        "selectable rounded-md border bg-elevated",
-        className,
-      )}
+      className={cn("selectable border-y border-subtle bg-transparent", className)}
       style={{
-        borderColor: risk === "low" ? "var(--border-default)" : "color-mix(in srgb, " + accent + " 35%, var(--border-default))",
         borderLeftWidth: 3,
         borderLeftColor: accent,
       }}
     >
-      <div className="flex items-start gap-3 px-3 py-2.5">
-        <div
-          aria-hidden
-          className="flex flex-shrink-0 items-center justify-center"
-          style={{
-            width: 24,
-            height: 24,
-            borderRadius: "var(--radius-sm)",
-            background: "color-mix(in srgb, " + accent + " 14%, transparent)",
-            color: accent,
-            marginTop: 2,
-          }}
-        >
-          <ShieldAlert size={14} />
-        </div>
-        <div className="flex min-w-0 flex-1 flex-col" style={{ gap: 6 }}>
+      <div className="flex items-start gap-2.5 px-3 py-2.5">
+        <ShieldAlert size={14} aria-hidden className="mt-0.5 flex-none" style={{ color: accent }} />
+        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
           <div className="flex items-start justify-between gap-2">
-            <div className="flex min-w-0 flex-col" style={{ gap: 2 }}>
-              <span
-                className="text-tertiary"
-                style={{ fontSize: "var(--font-size-xs)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}
-              >
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <span className="ui-meta">
                 Permission required
               </span>
-              <h3
-                className="truncate text-primary"
-                style={{ fontSize: "var(--font-size-md)", fontWeight: 600 }}
-                title={action}
-              >
+              <h3 className="ui-label truncate text-primary" data-tooltip={action}>
                 {action}
               </h3>
             </div>
             <span
-              className="font-mono"
-              style={{
-                fontSize: "var(--font-size-xs)",
-                color: accent,
-                flexShrink: 0,
-                marginTop: 2,
-              }}
+              className="ui-meta flex-none"
+              style={{ color: accent, flexShrink: 0, marginTop: 2 }}
             >
               {RISK_LABEL[risk]}
             </span>
@@ -236,114 +345,120 @@ function ApprovalCardImpl({
 
           {operation ? (
             <pre
-              className="selectable overflow-x-auto rounded-sm bg-terminal px-2 py-1.5 font-mono text-primary"
-              style={{ fontSize: "var(--font-size-sm)", margin: 0 }}
+              className="selectable overflow-x-auto border-l border-subtle bg-terminal px-2 py-1.5 font-mono text-xs leading-5 text-primary"
+              style={{ margin: 0 }}
             >
               <code>{operation}</code>
             </pre>
           ) : null}
 
           {reason ? (
-            <p
-              className="text-secondary"
-              style={{ fontSize: "var(--font-size-sm)", lineHeight: "var(--line-height-relaxed)" }}
-            >
+            <p className="ui-body text-secondary">
               {reason}
             </p>
           ) : null}
 
-          {/* Metadata grid — scope, affected environment, persistence. */}
-          {(scope && scope.length > 0) || affectedEnvironment ? (
-            <dl
-              className="grid"
-              style={{
-                gridTemplateColumns: "auto 1fr",
-                gap: "2px 12px",
-                fontSize: "var(--font-size-xs)",
-                marginTop: 2,
-              }}
+          <div>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => setDetailsOpen((open) => !open)}
+              aria-expanded={detailsOpen}
+              trailing={<ChevronDown size={12} className={cn("transition-transform", detailsOpen && "rotate-180")} aria-hidden />}
+              className="-ml-2 text-tertiary"
             >
-              {scope && scope.length > 0 ? (
-                <>
-                  <dt className="text-tertiary">Scope</dt>
-                  <dd className="truncate font-mono text-secondary" title={scope.join(", ")}>
-                    {scope.join(", ")}
-                  </dd>
-                </>
-              ) : null}
-              {affectedEnvironment ? (
-                <>
-                  <dt className="text-tertiary">Environment</dt>
-                  <dd className="font-mono text-secondary">{affectedEnvironment}</dd>
-                </>
-              ) : null}
-              <dt className="text-tertiary">Persistence</dt>
-              <dd className="text-secondary">
-                {canPersist ? "Allow for this task persists until the task ends." : "Only allow-once is supported for this operation."}
-              </dd>
-            </dl>
+              Details
+            </Button>
+            {detailsOpen ? (
+              <dl className="surface-enter mt-1 grid border-t border-subtle pt-1.5 text-xs" style={{ gridTemplateColumns: "auto 1fr", gap: "3px 12px" }}>
+                {scope && scope.length > 0 ? (
+                  <>
+                    <dt className="text-tertiary">Scope</dt>
+                    <dd className="truncate font-mono text-secondary" data-tooltip={scope.join(", ")}>{scope.join(", ")}</dd>
+                  </>
+                ) : null}
+                {affectedEnvironment ? (
+                  <>
+                    <dt className="text-tertiary">Environment</dt>
+                    <dd className="font-mono text-secondary">{affectedEnvironment}</dd>
+                  </>
+                ) : null}
+                <dt className="text-tertiary">Persistence</dt>
+                <dd className="text-secondary">
+                  {canPersist ? "Task-scoped decisions may be available." : "This decision applies once."}
+                </dd>
+              </dl>
+            ) : null}
+          </div>
+
+          {!authorizationReady ? (
+            <p
+              role="status"
+              className="border-l-2 border-default px-2 py-1 text-secondary text-xs"
+            >
+              Allow actions are disabled until the exact operation, scope, and recognized risk are bound to the server approval hash. Deny remains available.
+            </p>
+          ) : null}
+
+          {!decisionsEnabled ? (
+            <p role="status" className="border-l-2 border-warning px-2 py-1 text-warning text-xs">
+              Decisions are disabled until pending state is reconciled with the control plane.
+            </p>
+          ) : null}
+
+          {expired ? (
+            <p role="alert" className="border-l-2 border-warning px-2 py-1 text-warning text-xs">
+              This approval expired. Decisions are disabled while Terminus reconciles pending state.
+            </p>
+          ) : null}
+
+          {detailsOpen && visibleDecisions.length < decisions.length ? (
+            <p role="note" className="text-tertiary text-xs" >
+              Unsupported choices are hidden. Coordinator-backed choices: {visibleDecisions.map((decision) => decision.label).join(", ") || "none"}.
+            </p>
           ) : null}
 
           {error ? (
             <p
-              className="text-error"
+              className="text-error text-xs"
               role="alert"
-              style={{ fontSize: "var(--font-size-xs)", marginTop: 2 }}
+              style={{ marginTop: 2 }}
             >
               {error}
             </p>
           ) : null}
 
           {/* Action row. */}
-          <div
-            className="flex flex-wrap items-center"
-            style={{ gap: 8, marginTop: 4 }}
-          >
-            {decisions.map((cfg) => {
-              const Icon = cfg.icon;
-              const isPrimary = cfg.variant === "primary";
-              const isDanger = cfg.variant === "danger";
-              return (
-                <button
-                  key={cfg.decision}
-                  type="button"
-                  onClick={() => void submit(cfg)}
-                  disabled={submitting}
-                  aria-label={`${cfg.label} — ${action}`}
-                  className="inline-flex items-center gap-1.5 rounded-md disabled:opacity-50"
-                  style={{
-                    height: 28,
-                    padding: "0 10px",
-                    fontSize: "var(--font-size-sm)",
-                    fontWeight: 500,
-                    background: isPrimary
-                      ? "var(--color-primary)"
-                      : isDanger
-                        ? "color-mix(in srgb, var(--color-error) 14%, transparent)"
-                        : "var(--bg-hover)",
-                    color: isPrimary
-                      ? "var(--text-inverse)"
-                      : isDanger
-                        ? "var(--color-error)"
-                        : "var(--text-primary)",
-                    border: isPrimary || isDanger ? "none" : "1px solid var(--border-default)",
-                    transition: "background var(--duration-fast) var(--easing-default)",
-                  }}
-                >
-                  <Icon size={12} />
-                  <span>{cfg.label}</span>
-                </button>
-              );
-            })}
+          <div className="mt-1 flex flex-wrap items-center gap-2 border-t border-subtle pt-2">
+            {recommendedDecision ? renderDecision(recommendedDecision) : null}
+            {denyDecision ? renderDecision(denyDecision) : null}
+            {secondaryDecisions.length > 0 ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="md"
+                onClick={() => setMoreOpen((open) => !open)}
+                aria-expanded={moreOpen}
+                trailing={<ChevronDown size={12} className={cn("transition-transform", moreOpen && "rotate-180")} aria-hidden />}
+              >
+                More
+              </Button>
+            ) : null}
             {requestedAt ? (
               <span
-                className="ml-auto font-mono text-tertiary"
-                style={{ fontSize: "var(--font-size-xs)" }}
+                className="ml-auto font-mono text-tertiary text-xs"
+
               >
                 {requestedAt}
               </span>
             ) : null}
           </div>
+          {moreOpen && secondaryDecisions.length > 0 ? (
+            <div className="surface-enter flex flex-wrap gap-2 border-t border-subtle pt-2">
+              {secondaryDecisions.map(renderDecision)}
+            </div>
+          ) : null}
         </div>
       </div>
     </section>
@@ -365,25 +480,26 @@ function ResolvedApprovalCard({
   operation?: string;
   className?: string;
 }): JSX.Element {
-  const isAllow = resolution !== "deny";
+  const isAllow = resolution.startsWith("allow_");
   const accent = isAllow ? "var(--color-success)" : "var(--color-error)";
-  const label =
-    resolution === "allow_once"
-      ? "Allowed once"
-      : resolution === "allow_for_task"
-        ? "Allowed for this task"
-        : "Denied";
+  const labels: Record<Exclude<Resolution, null>, string> = {
+    allow_once: "Allowed once",
+    allow_for_action: "Allowed exact action",
+    allow_for_task: "Allowed for this task",
+    deny_once: "Denied once",
+    deny_and_add_task_rule: "Denied and added task rule",
+    stop_task: "Stopped task",
+  };
+  const label = labels[resolution];
   const Icon = isAllow ? Check : X;
 
   return (
     <section
       aria-label={`Approval ${label.toLowerCase()}: ${action}`}
-      className={cn("rounded-md border bg-elevated", className)}
+      className={cn("border-b border-subtle bg-transparent", className)}
       style={{
-        borderColor: "var(--border-subtle)",
         borderLeftWidth: 3,
         borderLeftColor: accent,
-        opacity: 0.9,
       }}
     >
       <div className="flex items-center gap-2 px-3 py-2">
@@ -396,27 +512,23 @@ function ResolvedApprovalCard({
         </div>
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <span
-            className="font-mono"
-            style={{
-              fontSize: "var(--font-size-xs)",
-              color: accent,
-              fontWeight: 600,
-            }}
+            className="ui-meta"
+            style={{ color: accent }}
           >
             {label}
           </span>
           <span
-            className="truncate text-secondary"
-            style={{ fontSize: "var(--font-size-sm)" }}
-            title={action}
+            className="ui-label truncate text-secondary"
+
+            data-tooltip={action}
           >
             {action}
           </span>
           {operation ? (
             <code
-              className="truncate font-mono text-tertiary"
-              style={{ fontSize: "var(--font-size-xs)" }}
-              title={operation}
+              className="truncate font-mono text-tertiary text-xs"
+
+              data-tooltip={operation}
             >
               {operation}
             </code>

@@ -4,7 +4,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import {
   AdmissionService,
   type CandidateAdmissionRepository,
@@ -222,7 +222,10 @@ async function runKernelCommand(
       program,
       args: [...args],
       cwd: { workspaceId, relativePath: "." },
-      publicEnv: {},
+      publicEnv: {
+        ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+        ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+      },
       secretCapabilityUris: [],
       timeout: { seconds: 1800, nanos: 0 },
       allocatePty: false,
@@ -330,7 +333,7 @@ export function createVerificationRuntime(
 }
 
 export async function persistPlanToPrisma(
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   plan: {
     readonly id: string;
     readonly taskId: string;
@@ -393,7 +396,7 @@ export async function persistPlanToPrisma(
 }
 
 export async function persistResultsToPrisma(
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   results: readonly {
     readonly id: string;
     readonly planId: string;
@@ -451,7 +454,7 @@ export async function persistResultsToPrisma(
 }
 
 export async function persistClaimEvidenceGraphToPrisma(
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   graph: ClaimEvidenceGraph,
 ): Promise<void> {
   for (const claim of graph.claims) {

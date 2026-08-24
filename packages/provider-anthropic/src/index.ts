@@ -305,3 +305,5 @@ export function renderRequest(input: CanonicalRenderInput): Promise<RenderedProv
   const renderer = new AnthropicRenderer();
   return renderer.render(input);
 }
+
+export * from "./model_profiles.js";

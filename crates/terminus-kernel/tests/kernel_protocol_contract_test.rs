@@ -61,6 +61,16 @@ fn mint_test_token(issuer: &TokenIssuer, instance_id: &str) -> String {
         .expect("encode token")
 }
 
+fn bound_context(request_id: impl Into<String>, token: String) -> RequestContext {
+    let mut context = RequestContext::new(request_id);
+    context.capability_token = token;
+    context.actor_id = "test-actor".to_string();
+    context.session_id = "sess-1".to_string();
+    context.task_id = "task-1".to_string();
+    context.workspace_id = "ws-1".to_string();
+    context
+}
+
 #[tokio::test]
 async fn test_current_control_previous_kernel_compat() {
     let (_dir, issuer, instance_id) = setup_test_kernel_issuer();
@@ -152,8 +162,7 @@ async fn test_bounded_queue_load_concurrency() {
         let issuer_cloned = issuer_arc.clone();
         let tok = token.clone();
         handles.push(tokio::spawn(async move {
-            let mut ctx = RequestContext::new(format!("req-load-{i}"));
-            ctx.capability_token = tok;
+            let mut ctx = bound_context(format!("req-load-{i}"), tok);
             ctx.idempotency_key = format!("idemp-{i}");
             validate_request_pipeline(
                 &issuer_cloned,
@@ -201,8 +210,7 @@ async fn test_duplicate_idempotency_key_validation() {
     let (_dir, issuer, instance_id) = setup_test_kernel_issuer();
     let token = mint_test_token(&issuer, &instance_id);
 
-    let mut ctx1 = RequestContext::new("req-idemp-1");
-    ctx1.capability_token = token.clone();
+    let mut ctx1 = bound_context("req-idemp-1", token.clone());
     ctx1.idempotency_key = "key-repeat-100".to_string();
 
     let res1 = validate_request_pipeline(
@@ -215,8 +223,7 @@ async fn test_duplicate_idempotency_key_validation() {
     assert!(res1.is_ok());
 
     // Missing idempotency key when required MUST fail
-    let mut ctx2 = RequestContext::new("req-idemp-2");
-    ctx2.capability_token = token;
+    let mut ctx2 = bound_context("req-idemp-2", token);
     ctx2.idempotency_key = "".to_string();
 
     let res2 = validate_request_pipeline(

@@ -14,6 +14,7 @@ import type {
   Question,
   Decision,
   ResourceHandle,
+  TraceId,
 } from "@terminus/domain";
 import { generateUuid7, nowTimestamp, isEffectTransitionAllowed } from "@terminus/domain";
 import type { EventEnvelopeV2, ArpV2EventType } from "@terminus/runtime-protocol";
@@ -56,7 +57,7 @@ export class ArpV2FixtureServer {
       idempotencyKey,
       payload,
       artifactRefs: [],
-      traceId: `trace-${eventId}` as any,
+      traceId: `trace-${eventId}` as TraceId,
     };
 
     this.events.push(ev as unknown as EventEnvelopeV2);
@@ -310,7 +311,7 @@ export class ArpV2FixtureServer {
 
     const filtered = this.events.filter((e) => {
       if (e.aggregateSequence <= startSeq) return false;
-      if (taskId && e.payload && (e.payload as any).taskId && (e.payload as any).taskId !== taskId) return false;
+      if (taskId && payloadTaskId(e.payload) !== null && payloadTaskId(e.payload) !== taskId) return false;
       return true;
     });
 
@@ -327,4 +328,10 @@ export class ArpV2FixtureServer {
 
     return { events: filtered, nextCursor };
   }
+}
+
+function payloadTaskId(payload: unknown): string | null {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const taskId = (payload as Readonly<Record<string, unknown>>).taskId;
+  return typeof taskId === "string" ? taskId : null;
 }

@@ -22,9 +22,10 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: ./.github/actions/setup-terminus
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - uses: ./.github/actions/setup-terminus
       - name: cargo deny (licenses, advisories, bans, sources)
         run: cargo deny check
       - name: bun audit (npm advisories)
@@ -45,7 +46,12 @@ jobs:
           else
             raw_version="${GITHUB_REF_NAME}"
           fi
-          echo "version=${raw_version#v}" >> "$GITHUB_OUTPUT"
+          version="${raw_version#v}"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release version must be stable SemVer (for example 0.2.0): $raw_version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   # ---------- Build signed artifacts across platforms ----------
   build-artifacts:
@@ -59,28 +65,38 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: terminus-kernel-linux-amd64
+            control_artifact: terminus-control-linux-amd64.tar.gz
             binary: terminus-kernel-mini
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact: terminus-kernel-linux-arm64
+            control_artifact: terminus-control-linux-arm64.tar.gz
             binary: terminus-kernel-mini
             linker: aarch64-linux-gnu-gcc
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: terminus-kernel-darwin-arm64
+            control_artifact: terminus-control-darwin-arm64.tar.gz
+            binary: terminus-kernel-mini
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: terminus-kernel-darwin-amd64
+            control_artifact: terminus-control-darwin-amd64.tar.gz
             binary: terminus-kernel-mini
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: terminus-kernel-windows-amd64.exe
+            control_artifact: terminus-control-windows-amd64.tar.gz
             binary: terminus-kernel-mini.exe
     permissions:
       contents: read
       id-token: write
       attestations: write
     steps:
-      - uses: ./.github/actions/setup-terminus
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - uses: ./.github/actions/setup-terminus
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
       - name: Install Linux cross-linker
@@ -90,37 +106,350 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
         run: cargo build --release --target ${{ matrix.target }} --manifest-path mini-services/terminus-kernel/Cargo.toml
-      - name: Build control plane distribution
-        run: bun run build
+      - name: Build self-contained control runtime distribution
+        env:
+          TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
+          TERMINUS_RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+        run: bun run control:package --target=${{ matrix.target }} --output=dist/${{ matrix.control_artifact }}
       - name: Package artifacts
         shell: bash
         run: |
           mkdir -p dist
           cp mini-services/terminus-kernel/target/${{ matrix.target }}/release/${{ matrix.binary }} dist/${{ matrix.artifact }}
+      - name: Verify control runtime package manifest
+        run: >-
+          bun run control:verify-package
+          --commit=${{ github.sha }}
+          --version=${{ needs.supply-chain-gate.outputs.version }}
+          dist/${{ matrix.control_artifact }}
+      - name: Cold-start exact Linux control and kernel artifacts
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: >-
+          bash scripts/smoke-control-runtime.sh
+          --control-archive=dist/${{ matrix.control_artifact }}
+          --kernel-binary=dist/${{ matrix.artifact }}
+          --commit=${{ github.sha }}
+          --version=${{ needs.supply-chain-gate.outputs.version }}
       - name: Generate portable checksums
         shell: bash
-        run: node -e "const fs = require('node:fs'); const crypto = require('node:crypto'); const name = process.argv[1]; const digest = crypto.createHash('sha256').update(fs.readFileSync('dist/' + name)).digest('hex'); fs.writeFileSync('dist/' + name + '.sha256', digest + '  ' + name + '\\n');" "${{ matrix.artifact }}"
-      - name: Generate SBOM (syft, SPDX-JSON)
+        run: |
+          for name in "${{ matrix.artifact }}" "${{ matrix.control_artifact }}"; do
+            node -e "const fs = require('node:fs'); const crypto = require('node:crypto'); const name = process.argv[1]; const digest = crypto.createHash('sha256').update(fs.readFileSync('dist/' + name)).digest('hex'); fs.writeFileSync('dist/' + name + '.sha256', digest + '  ' + name + '\\n');" "$name"
+          done
+      - name: Generate kernel SBOM (syft, SPDX-JSON)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
         with:
           artifact-name: ${{ matrix.artifact }}.sbom.spdx.json
           format: spdx-json
           output-file: dist/${{ matrix.artifact }}.sbom.spdx.json
-      - name: Sign artifact (cosign)
+      - name: Generate control runtime SBOM (syft, SPDX-JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          path: dist/${{ matrix.control_artifact }}
+          artifact-name: ${{ matrix.control_artifact }}.sbom.spdx.json
+          format: spdx-json
+          output-file: dist/${{ matrix.control_artifact }}.sbom.spdx.json
+      - name: Install cosign
         uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
-      - shell: bash
+      - name: Sign kernel and control runtime artifacts
+        shell: bash
         run: |
-          cosign sign-blob --yes dist/${{ matrix.artifact }} \
-            --output-signature dist/${{ matrix.artifact }}.sig \
-            --output-certificate dist/${{ matrix.artifact }}.pem
+          for name in "${{ matrix.artifact }}" "${{ matrix.control_artifact }}"; do
+            cosign sign-blob --yes "dist/$name" \
+              --output-signature "dist/$name.sig" \
+              --output-certificate "dist/$name.pem"
+          done
       - name: Attest build provenance (§46.15)
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
-          subject-path: dist/${{ matrix.artifact }}
+          subject-path: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.control_artifact }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
+
+  # ---------- Signed and notarized desktop artifacts ----------
+  desktop-macos:
+    name: Desktop distribution (macOS arm64 + x64)
+    runs-on: macos-latest
+    needs: [supply-chain-gate, build-artifacts]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-terminus
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: terminus-kernel-darwin-*
+          path: ${{ runner.temp }}/terminus-mac-runtimes
+          merge-multiple: true
+      - name: Stage verified standalone runtimes for desktop packaging
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+          RUNTIME_INPUT: ${{ runner.temp }}/terminus-mac-runtimes
+        run: |
+          for architecture in arm64 x64; do
+            if [ "$architecture" = arm64 ]; then suffix=arm64; else suffix=amd64; fi
+            control="$RUNTIME_INPUT/terminus-control-darwin-$suffix.tar.gz"
+            kernel="$RUNTIME_INPUT/terminus-kernel-darwin-$suffix"
+            bun run control:verify-package --commit="$RELEASE_COMMIT" --version="$RELEASE_VERSION" "$control"
+            (cd "$RUNTIME_INPUT" && shasum -a 256 -c "$(basename "$kernel").sha256")
+            extraction="$RUNNER_TEMP/terminus-control-$architecture"
+            runtime="apps/desktop/runtime/$architecture"
+            mkdir -p "$extraction" "$runtime/terminus-control" "$runtime/bin"
+            tar -xzf "$control" -C "$extraction"
+            cp -R "$extraction/terminus-control/." "$runtime/terminus-control/"
+            cp "$kernel" "$runtime/bin/terminus-kernel-mini"
+            chmod 755 \
+              "$runtime/terminus-control/bin/terminus-control" \
+              "$runtime/bin/terminus-kernel-mini"
+          done
+          test -x apps/desktop/runtime/arm64/terminus-control/bin/terminus-control
+          test -x apps/desktop/runtime/x64/terminus-control/bin/terminus-control
+      - name: Require Apple distribution credentials
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            test -n "${!name}" || { echo "missing required desktop release secret: $name" >&2; exit 1; }
+          done
+      - name: Import Developer ID certificate into an isolated keychain
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/terminus-release.keychain-db"
+          certificate="$RUNNER_TEMP/terminus-release.p12"
+          password="$(openssl rand -hex 24)"
+          echo "::add-mask::$password"
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          echo "TERMINUS_RELEASE_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      - name: Sign and bind embedded standalone runtimes
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+        run: |
+          identity="$(security find-identity -v -p codesigning "$TERMINUS_RELEASE_KEYCHAIN" | awk '/Developer ID Application:/ {print $2; exit}')"
+          test -n "$identity" || { echo "no Developer ID Application identity found" >&2; exit 1; }
+          for architecture in arm64 x64; do
+            runtime="apps/desktop/runtime/$architecture"
+            control="$runtime/terminus-control/bin/terminus-control"
+            query_engine="$runtime/terminus-control/lib/terminus/query-engine.node"
+            kernel="$runtime/bin/terminus-kernel-mini"
+            codesign --force --timestamp --options runtime \
+              --entitlements apps/desktop/electron/entitlements.mac.plist \
+              --keychain "$TERMINUS_RELEASE_KEYCHAIN" --sign "$identity" "$control"
+            for executable in "$query_engine" "$kernel"; do
+              codesign --force --timestamp --options runtime \
+                --keychain "$TERMINUS_RELEASE_KEYCHAIN" --sign "$identity" "$executable"
+            done
+            bun run scripts/create-desktop-runtime-manifest.ts \
+              --runtime-root="$runtime" \
+              --architecture="$architecture" \
+              --commit="$RELEASE_COMMIT" \
+              --version="$RELEASE_VERSION" \
+              --build-kind=release
+          done
+      - name: Build, sign, and notarize desktop distributions
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_KEYCHAIN: ${{ env.TERMINUS_RELEASE_KEYCHAIN }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          TERMINUS_RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+        run: |
+          bun run --cwd apps/desktop build:electron
+          cd apps/desktop
+          bunx electron-builder --mac --arm64 --x64 \
+            --config.forceCodeSigning=true \
+            --config.extraMetadata.version="$TERMINUS_RELEASE_VERSION" \
+            --config.extraMetadata.terminusCommit="$RELEASE_COMMIT" \
+            --config.extraMetadata.terminusBuildKind=release \
+            --config.extraResources.from='runtime/${arch}' \
+            --config.extraResources.to=runtime \
+            --config.mac.signIgnore='/Contents/Resources/runtime/(terminus-control/bin/terminus-control|terminus-control/lib/terminus/query-engine[.]node|bin/terminus-kernel-mini)$'
+      - name: Verify both packaged desktop runtimes
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+        run: |
+          arm64_app=""
+          x64_app=""
+          while IFS= read -r -d '' app; do
+            architectures="$(lipo -archs "$app/Contents/MacOS/Terminus")"
+            case "$architectures" in
+              arm64) arm64_app="$app" ;;
+              x86_64) x64_app="$app" ;;
+              *) echo "unexpected desktop app architecture: $app: $architectures" >&2; exit 1 ;;
+            esac
+          done < <(find apps/desktop/release -type d -name 'Terminus.app' -print0)
+          test -n "$arm64_app" && test -n "$x64_app" || {
+            echo "both architecture-specific app bundles are required" >&2
+            exit 1
+          }
+          bun run scripts/verify-desktop-runtime-resources.ts \
+            --app-arm64="$arm64_app" \
+            --app-x64="$x64_app" \
+            --commit="$RELEASE_COMMIT" \
+            --version="$RELEASE_VERSION"
+      - name: Notarize and staple desktop disk images
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          found_dmg=0
+          while IFS= read -r -d '' dmg; do
+            found_dmg=1
+            xcrun notarytool submit "$dmg" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait
+            xcrun stapler staple "$dmg"
+          done < <(find apps/desktop/release -maxdepth 1 -type f -name '*.dmg' -print0)
+          test "$found_dmg" -eq 1 || { echo "no desktop DMG found for notarization" >&2; exit 1; }
+      - name: Verify signatures, notarization tickets, and Gatekeeper admission
+        env:
+          RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+        run: |
+          found_app=0
+          while IFS= read -r -d '' app; do
+            found_app=$((found_app + 1))
+            codesign --verify --deep --strict --verbose=2 "$app"
+            spctl --assess --type execute --verbose=2 "$app"
+            xcrun stapler validate "$app"
+            bundle_version="$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")"
+            build_version="$(plutil -extract CFBundleVersion raw -o - "$app/Contents/Info.plist")"
+            test "$bundle_version" = "$RELEASE_VERSION" || {
+              echo "bundle version mismatch: expected $RELEASE_VERSION, found $bundle_version in $app" >&2
+              exit 1
+            }
+            test "$build_version" = "$RELEASE_VERSION" || {
+              echo "bundle build version mismatch: expected $RELEASE_VERSION, found $build_version in $app" >&2
+              exit 1
+            }
+          done < <(find apps/desktop/release -type d -name 'Terminus.app' -print0)
+          test "$found_app" -eq 2 || { echo "expected two architecture-specific Terminus.app bundles, found $found_app" >&2; exit 1; }
+          found_dmg=0
+          while IFS= read -r -d '' dmg; do
+            found_dmg=$((found_dmg + 1))
+            xcrun stapler validate "$dmg"
+          done < <(find apps/desktop/release -maxdepth 1 -type f -name '*.dmg' -print0)
+          test "$found_dmg" -eq 2 || { echo "expected two notarized desktop DMGs, found $found_dmg" >&2; exit 1; }
+          for arch in arm64 x64; do
+            for extension in dmg zip; do
+              artifact="apps/desktop/release/Terminus-${RELEASE_VERSION}-${arch}.${extension}"
+              test -f "$artifact" || { echo "missing versioned desktop artifact: $artifact" >&2; exit 1; }
+            done
+          done
+      - name: Generate desktop checksums
+        run: |
+          cd apps/desktop/release
+          find . -maxdepth 1 -type f \( -name '*.dmg' -o -name '*.zip' \) -print0 \
+            | sort -z \
+            | xargs -0 shasum -a 256 > terminus-desktop.sha256
+      - name: Require native arm64 and translated x64 launch coverage
+        run: |
+          test "$(uname -m)" = arm64 || {
+            echo "desktop release launch evidence requires the pinned Apple Silicon macos-15 runner" >&2
+            exit 1
+          }
+          /usr/bin/arch -arm64 /usr/bin/true
+          if ! /usr/bin/arch -x86_64 /usr/bin/true; then
+            sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+          fi
+          /usr/bin/arch -x86_64 /usr/bin/true
+      - name: Inspect exact signed desktop ZIP and DMG contents
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+        run: |
+          inspection="$RUNNER_TEMP/terminus-desktop-inspection"
+          mkdir -p "$inspection"
+          mounted=()
+          cleanup_mounts() {
+            for mount in "${mounted[@]}"; do hdiutil detach "$mount" -quiet || true; done
+          }
+          trap cleanup_mounts EXIT
+          for architecture in arm64 x64; do
+            zip="apps/desktop/release/Terminus-${RELEASE_VERSION}-${architecture}.zip"
+            dmg="apps/desktop/release/Terminus-${RELEASE_VERSION}-${architecture}.dmg"
+            zip_root="$inspection/zip-$architecture"
+            dmg_root="$inspection/dmg-$architecture"
+            mkdir -p "$zip_root" "$dmg_root"
+            ditto -x -k "$zip" "$zip_root"
+            hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$dmg_root" -quiet
+            mounted+=("$dmg_root")
+            test -d "$zip_root/Terminus.app"
+            test -d "$dmg_root/Terminus.app"
+          done
+          bun run scripts/inspect-desktop-release.ts \
+            --commit="$RELEASE_COMMIT" \
+            --version="$RELEASE_VERSION" \
+            --output=apps/desktop/release/terminus-desktop-evidence.json \
+            --zip-arm64="apps/desktop/release/Terminus-${RELEASE_VERSION}-arm64.zip" \
+            --zip-arm64-app="$inspection/zip-arm64/Terminus.app" \
+            --dmg-arm64="apps/desktop/release/Terminus-${RELEASE_VERSION}-arm64.dmg" \
+            --dmg-arm64-app="$inspection/dmg-arm64/Terminus.app" \
+            --zip-x64="apps/desktop/release/Terminus-${RELEASE_VERSION}-x64.zip" \
+            --zip-x64-app="$inspection/zip-x64/Terminus.app" \
+            --dmg-x64="apps/desktop/release/Terminus-${RELEASE_VERSION}-x64.dmg" \
+            --dmg-x64-app="$inspection/dmg-x64/Terminus.app"
+          bun run scripts/verify-desktop-release-evidence.ts \
+            --evidence=apps/desktop/release/terminus-desktop-evidence.json \
+            --artifacts-dir=apps/desktop/release \
+            --commit="$RELEASE_COMMIT" \
+            --version="$RELEASE_VERSION"
+      - name: Generate desktop SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          path: apps/desktop/release
+          artifact-name: terminus-desktop.sbom.spdx.json
+          format: spdx-json
+          output-file: apps/desktop/release/terminus-desktop.sbom.spdx.json
+      - name: Attest desktop build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/terminus-desktop-evidence.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: terminus-desktop-macos
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.sha256
+            apps/desktop/release/*.sbom.spdx.json
+            apps/desktop/release/terminus-desktop-evidence.json
+          if-no-files-found: error
+      - name: Remove isolated release keychain
+        if: always()
+        run: |
+          if [ -n "${TERMINUS_RELEASE_KEYCHAIN:-}" ]; then
+            security delete-keychain "$TERMINUS_RELEASE_KEYCHAIN" || true
+          fi
 
   # ---------- Signed Linux enforcement evidence ----------
   linux-enforcement-evidence:
@@ -131,9 +460,10 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: ./.github/actions/setup-terminus
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - uses: ./.github/actions/setup-terminus
       - name: Install host enforcement dependencies
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap jq python3
       - name: Delegate cgroup-v2 subtree to the kernel probe
@@ -167,6 +497,7 @@ jobs:
       - name: Produce signed evidence
         env:
           TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
+          TERMINUS_RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
           TERMINUS_CGROUP_ROOT: /sys/fs/cgroup/terminus-ci
           TERMINUS_KERNEL_BINARY: /usr/local/lib/terminus/terminus-kernel-mini
           TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
@@ -174,7 +505,7 @@ jobs:
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/terminus-linux-evidence.json.pem
           TERMINUS_LINUX_TEST_LOG: ${{ runner.temp }}/terminus-linux-enforcement.log
-          TERMINUS_LINUX_TEST_COMMAND: sudo --preserve-env=TERMINUS_CGROUP_ROOT,TERMINUS_ENFORCEMENT_REPORT,TERMINUS_KERNEL_BINARY bash scripts/run-linux-enforcement-probe.sh
+          TERMINUS_LINUX_TEST_COMMAND: sudo --preserve-env=TERMINUS_CGROUP_ROOT,TERMINUS_ENFORCEMENT_REPORT,TERMINUS_KERNEL_BINARY,TERMINUS_RELEASE_COMMIT,TERMINUS_RELEASE_VERSION bash scripts/run-linux-enforcement-probe.sh
         run: just linux-enforcement-evidence
       - name: Verify signed evidence
         env:
@@ -199,19 +530,56 @@ jobs:
   release-validation:
     name: Blocking release validation
     runs-on: ubuntu-latest
-    needs: [supply-chain-gate, build-artifacts, linux-enforcement-evidence]
+    needs: [supply-chain-gate, build-artifacts, desktop-macos, linux-enforcement-evidence]
     permissions:
       contents: read
     steps:
-      - uses: ./.github/actions/setup-terminus
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - uses: ./.github/actions/setup-terminus
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: linux-enforcement-evidence
           path: ${{ runner.temp }}/linux-evidence
           merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: terminus-kernel-*
+          path: ${{ runner.temp }}/release-builds
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: terminus-desktop-macos
+          path: ${{ runner.temp }}/desktop-release
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - name: Verify packaged control runtimes and release signatures
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+          RELEASE_BUILDS: ${{ runner.temp }}/release-builds
+        run: |
+          mapfile -d '' archives < <(find "$RELEASE_BUILDS" -maxdepth 1 -type f -name 'terminus-control-*.tar.gz' -print0 | sort -z)
+          test "${#archives[@]}" -eq 5 || { echo "expected five control runtime distributions, found ${#archives[@]}" >&2; exit 1; }
+          bun run control:verify-package --commit="$RELEASE_COMMIT" --version="$RELEASE_VERSION" "${archives[@]}"
+          for archive in "${archives[@]}"; do
+            cosign verify-blob "$archive" \
+              --signature "$archive.sig" \
+              --certificate "$archive.pem" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+          done
+      - name: Verify exact desktop artifact evidence
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+          DESKTOP_RELEASE: ${{ runner.temp }}/desktop-release
+        run: >-
+          bun run scripts/verify-desktop-release-evidence.ts
+          --evidence="$DESKTOP_RELEASE/terminus-desktop-evidence.json"
+          --artifacts-dir="$DESKTOP_RELEASE"
+          --commit="$RELEASE_COMMIT"
+          --version="$RELEASE_VERSION"
       - name: Run the declared release checks
         env:
           TERMINUS_RELEASE_COMMIT: ${{ github.sha }}
@@ -239,12 +607,13 @@ jobs:
   publish-release:
     name: Publish release with SBOM and provenance
     runs-on: ubuntu-latest
-    needs: [supply-chain-gate, build-artifacts, linux-enforcement-evidence, release-validation]
+    needs: [supply-chain-gate, build-artifacts, desktop-macos, linux-enforcement-evidence, release-validation]
     permissions:
       contents: write
     environment: terminus-release
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/setup-terminus
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist
@@ -267,6 +636,16 @@ jobs:
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: dist/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: dist/terminus-linux-evidence.json.pem
         run: bash scripts/verify-release-evidence.sh
+      - name: Verify exact desktop artifact digests before publishing
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.supply-chain-gate.outputs.version }}
+        run: >-
+          bun run scripts/verify-desktop-release-evidence.ts
+          --evidence=dist/terminus-desktop-evidence.json
+          --artifacts-dir=dist
+          --commit="$RELEASE_COMMIT"
+          --version="$RELEASE_VERSION"
       - name: Aggregate SBOMs and signatures
         run: |
           mkdir -p release
@@ -278,6 +657,12 @@ jobs:
           cp dist/terminus-linux-enforcement.log release/
           cp dist/terminus-enforcement-report.json release/
           cp dist/terminus-kernel-* release/
+          cp dist/terminus-control-*.tar.gz release/
+          cp dist/Terminus-*.dmg release/
+          cp dist/Terminus-*.zip release/
+          cp dist/terminus-desktop.sha256 release/
+          cp dist/terminus-desktop.sbom.spdx.json release/
+          cp dist/terminus-desktop-evidence.json release/
       - name: Publish migration bundle
         run: |
           tar -czf release/migrations.tar.gz migrations/
@@ -301,9 +686,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [publish-release, release-validation, supply-chain-gate]
     steps:
-      - uses: ./.github/actions/setup-terminus
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - uses: ./.github/actions/setup-terminus
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: linux-enforcement-evidence

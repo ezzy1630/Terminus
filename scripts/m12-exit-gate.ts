@@ -13,7 +13,30 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
+import {
+  RELEASE_APPROVAL_ROLES,
+  approvalEnvelopeSha256,
+  loadReleaseApprovalTrustStore,
+  parseReleaseApprovalEnvelope,
+  requireExternalTrustStorePath,
+  verifyReleaseApproval,
+  type ReleaseApprovalEnvelope,
+  type ReleaseApprovalTrustStore,
+} from "./release-approval.ts";
+import {
+  RELEASE_EVIDENCE_MANIFEST_PATH,
+  parseReleaseEvidenceManifest,
+  releaseEvidenceManifestSha256,
+  validateDirectEvidenceIdentity,
+  validateReleaseEvidenceManifest,
+  type ReleaseEvidenceManifest,
+} from "./produce-release-evidence-manifest.ts";
+import {
+  inspectReleaseSource,
+  type ReleaseSourceSnapshot,
+  validateReleaseSource,
+} from "./verify-release-source.ts";
 
 export type EvidenceStatus = "present" | "missing" | "invalid" | "requires_ci" | "verified";
 
@@ -26,18 +49,30 @@ export type EvidenceCheck = {
 };
 
 export type ValidationOptions = {
-  expectedCommit?: string;
-  freshSinceMs?: number;
-  requireSignedLinuxEvidence?: boolean;
+  expectedCommit?: string | undefined;
+  expectedVersion?: string | undefined;
+  freshSinceMs?: number | undefined;
+  requireSignedLinuxEvidence?: boolean | undefined;
   /** Allow the explicitly scoped CI M12 fixture tier; stable release stays strict. */
-  allowFixtureEvidence?: boolean;
+  allowFixtureEvidence?: boolean | undefined;
   /** Allow the documented CI-only placeholder metrics snapshot. */
-  allowPlaceholderMetrics?: boolean;
+  allowPlaceholderMetrics?: boolean | undefined;
   /** Allow the deterministic local SBOM fallback when syft is unavailable. */
-  allowSbomFallback?: boolean;
+  allowSbomFallback?: boolean | undefined;
+  approvalTrustStore?: ReleaseApprovalTrustStore | undefined;
+  approvalVerificationTimeMs?: number | undefined;
+  evidenceManifest?: ReleaseEvidenceManifest | undefined;
+  requireDirectIdentity?: boolean | undefined;
 };
 
 export type JsonRecord = Record<string, unknown>;
+
+export type DecisionValidationContext = {
+  expectedVersion?: string | undefined;
+  approvalTrustStore?: ReleaseApprovalTrustStore | undefined;
+  approvalVerificationTimeMs?: number | undefined;
+  evidenceManifest?: ReleaseEvidenceManifest | undefined;
+};
 
 const ROOT = join(import.meta.dir, "..");
 const OUT_DIR = join(ROOT, "artifacts", "release-gate");
@@ -57,8 +92,29 @@ const REQUIRED_LOCAL: ReadonlyArray<{ key: string; file: string; status?: string
   { key: "findings-register-status", file: "findings-register-status.json", status: "ok" },
   { key: "platform-matrix", file: "platform-support.json" },
   { key: "system-card", file: "system-card.json" },
+  { key: "release-evidence-manifest", file: "release-evidence-manifest.json" },
   { key: "release-decision", file: "release-decision.yaml" },
 ];
+
+export function sourceIdentityCheck(
+  snapshot: ReleaseSourceSnapshot = inspectReleaseSource(ROOT),
+): EvidenceCheck {
+  const errors = validateReleaseSource(snapshot);
+  return errors.length === 0
+    ? {
+        key: "release-source",
+        path: ROOT,
+        status: "verified",
+        detail: `clean checkout at ${snapshot.actualCommit}`,
+      }
+    : {
+        key: "release-source",
+        path: ROOT,
+        status: "invalid",
+        detail: errors.join("; "),
+        errors,
+      };
+}
 
 function currentCommit(): string {
   const fromEnv = process.env.TERMINUS_RELEASE_COMMIT ?? process.env.GITHUB_SHA;
@@ -66,6 +122,16 @@ function currentCommit(): string {
   const result = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: ROOT });
   const fromGit = result.stdout.toString().trim();
   return fromGit || "unknown";
+}
+
+function currentVersion(): string {
+  const fromEnv = process.env.TERMINUS_RELEASE_VERSION;
+  if (fromEnv?.trim()) return fromEnv.trim();
+  try {
+    return stringField(readJson(join(ROOT, "package.json")).version) ?? "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 function readJson(path: string): JsonRecord {
@@ -102,15 +168,20 @@ export function validateEvidencePayload(
 ): string[] {
   const errors: string[] = [];
   const expectedCommit = options.expectedCommit;
+  const expectedVersion = options.expectedVersion;
   const allowFixtureEvidence = key === "eval-release" && options.allowFixtureEvidence === true;
 
-  if (expectedCommit) {
-    for (const field of ["commit", "source_commit", "terminus_commit"]) {
-      const actual = stringField(value[field]);
-      if (actual && actual !== expectedCommit) {
-        errors.push(`${key}: ${field} ${actual} does not match HEAD ${expectedCommit}`);
-      }
-    }
+  if (expectedCommit && expectedVersion) {
+    const identityErrors = validateDirectEvidenceIdentity(
+      value,
+      { candidateCommit: expectedCommit, releaseVersion: expectedVersion },
+      key,
+    );
+    errors.push(
+      ...identityErrors.filter(
+        (error) => options.requireDirectIdentity || !error.endsWith("binding is missing"),
+      ),
+    );
   }
 
   const generatedAt = timestampMs(value);
@@ -158,7 +229,7 @@ export function validateEvidencePayload(
   return errors;
 }
 
-function ensureFindingsRegisterStatus(head: string): void {
+function ensureFindingsRegisterStatus(head: string, version: string): void {
   mkdirSync(OUT_DIR, { recursive: true });
   const out = join(OUT_DIR, "findings-register-status.json");
   if (!existsSync(FINDINGS_PATH)) {
@@ -168,7 +239,9 @@ function ensureFindingsRegisterStatus(head: string): void {
         {
           status: "missing_register",
           generatedAt: new Date().toISOString(),
+          candidate_commit: head,
           commit: head,
+          release_version: version,
           path: "docs/security/findings-register.yaml",
           findings: [],
         },
@@ -198,7 +271,9 @@ function ensureFindingsRegisterStatus(head: string): void {
       {
         status: openCritical.length === 0 ? "ok" : "blocking_open_findings",
         generatedAt: new Date().toISOString(),
+        candidate_commit: head,
         commit: head,
+        release_version: version,
         path: "docs/security/findings-register.yaml",
         count: findings.length,
         openCritical: openCritical.length,
@@ -222,6 +297,27 @@ function checkJsonFile(
   try {
     const value = readJson(path);
     const errors = validateEvidencePayload(key, value, options);
+    if (options.expectedCommit && options.expectedVersion) {
+      const directIdentityErrors = validateDirectEvidenceIdentity(
+        value,
+        {
+          candidateCommit: options.expectedCommit,
+          releaseVersion: options.expectedVersion,
+        },
+        key,
+      );
+      const directIdentityMissing = directIdentityErrors.some((error) =>
+        error.endsWith("binding is missing"),
+      );
+      if (directIdentityMissing) {
+        const manifestEntry = options.evidenceManifest?.artifacts.find((entry) => entry.key === key);
+        if (!manifestEntry) {
+          errors.push(
+            `${key}: direct candidate identity is incomplete and no release manifest binding exists`,
+          );
+        }
+      }
+    }
     if (
       expectedStatus === "not_placeholder" &&
       value.status === "placeholder" &&
@@ -241,6 +337,39 @@ function checkJsonFile(
       return { key, path, status: "invalid", detail: errors.join("; "), errors };
     }
     return { key, path, status: "present", detail: "validated" };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { key, path, status: "invalid", detail, errors: [detail] };
+  }
+}
+
+function checkEvidenceManifestFile(options: ValidationOptions): EvidenceCheck {
+  const key = "release-evidence-manifest";
+  const path = RELEASE_EVIDENCE_MANIFEST_PATH;
+  if (!existsSync(path)) return { key, path, status: "missing", detail: "file not found" };
+  if (!options.expectedCommit || !options.expectedVersion) {
+    const detail = "release candidate commit and version are required";
+    return { key, path, status: "invalid", detail, errors: [detail] };
+  }
+  try {
+    const manifest = parseReleaseEvidenceManifest(JSON.parse(readFileSync(path, "utf8")));
+    const errors = validateReleaseEvidenceManifest(manifest, ROOT, OUT_DIR, {
+      candidateCommit: options.expectedCommit,
+      releaseVersion: options.expectedVersion,
+    });
+    const generatedAt = Date.parse(manifest.generated_at);
+    if (options.freshSinceMs !== undefined && generatedAt < options.freshSinceMs) {
+      errors.push(`${key}: generated_at ${manifest.generated_at} is stale`);
+    }
+    if (errors.length > 0) {
+      return { key, path, status: "invalid", detail: errors.join("; "), errors };
+    }
+    return {
+      key,
+      path,
+      status: "verified",
+      detail: `validated ${releaseEvidenceManifestSha256(manifest)}`,
+    };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return { key, path, status: "invalid", detail, errors: [detail] };
@@ -284,7 +413,12 @@ export function validateMatrix(value: JsonRecord, head: string): string[] {
   return errors;
 }
 
-export function validateDecision(value: JsonRecord, head: string, matrix: JsonRecord): string[] {
+export function validateDecision(
+  value: JsonRecord,
+  head: string,
+  matrix: JsonRecord,
+  context: DecisionValidationContext = {},
+): string[] {
   const release = value.release;
   if (typeof release !== "object" || release === null || Array.isArray(release)) {
     return ["release decision is missing release object"];
@@ -292,20 +426,107 @@ export function validateDecision(value: JsonRecord, head: string, matrix: JsonRe
   const decision = release as JsonRecord;
   const errors: string[] = [];
   if (decision.commit !== head) errors.push(`release decision commit ${String(decision.commit)} does not match HEAD ${head}`);
+  if (context.expectedVersion && decision.version !== context.expectedVersion) {
+    errors.push(
+      `release decision version ${String(decision.version)} does not match ${context.expectedVersion}`,
+    );
+  }
   if (JSON.stringify(decision.supported_platforms ?? []) !== JSON.stringify(matrix.supported_platforms ?? [])) {
     errors.push("release decision supported_platforms contradict the evidence matrix");
   }
   const limitations = decision.known_limitations;
   if (!Array.isArray(limitations)) errors.push("release decision known_limitations is missing");
-  else if ((matrix.unverified_or_degraded_platforms ?? []).length > 0 && limitations.length === 0) {
+  else if (Array.isArray(matrix.unverified_or_degraded_platforms) && matrix.unverified_or_degraded_platforms.length > 0 && limitations.length === 0) {
     errors.push("release decision omits limitations for unverified or degraded platforms");
   }
+  const expectedManifestSha256 = context.evidenceManifest
+    ? releaseEvidenceManifestSha256(context.evidenceManifest)
+    : null;
+  const manifestReference = decision.evidence_manifest;
+  if (
+    typeof manifestReference !== "object" ||
+    manifestReference === null ||
+    Array.isArray(manifestReference)
+  ) {
+    errors.push("release decision evidence_manifest is missing");
+  } else {
+    const reference = manifestReference as JsonRecord;
+    if (reference.path !== "artifacts/release-gate/release-evidence-manifest.json") {
+      errors.push("release decision evidence_manifest path is not canonical");
+    }
+    if (!expectedManifestSha256) {
+      errors.push("release decision cannot verify evidence_manifest without the candidate manifest");
+    } else if (reference.sha256 !== expectedManifestSha256) {
+      errors.push("release decision evidence_manifest digest does not match the candidate manifest");
+    }
+  }
+
   const signatures = decision.signatures;
   if (typeof signatures !== "object" || signatures === null || Array.isArray(signatures)) {
     errors.push("release decision signatures are missing");
   } else {
-    for (const owner of ["release_owner", "security_owner", "protocol_owner", "evaluation_owner"]) {
-      if (!stringField((signatures as JsonRecord)[owner])) errors.push(`release decision is unsigned: ${owner}`);
+    for (const owner of RELEASE_APPROVAL_ROLES) {
+      const signatureValue = (signatures as JsonRecord)[owner];
+      if (
+        typeof signatureValue !== "object" ||
+        signatureValue === null ||
+        Array.isArray(signatureValue)
+      ) {
+        errors.push(`release decision is unsigned: ${owner} must be a verified approval record`);
+        continue;
+      }
+      const signature = signatureValue as JsonRecord;
+      if (signature.verified !== true) {
+        errors.push(`release decision is unsigned: ${owner}.verified must be true`);
+      }
+      let envelope: ReleaseApprovalEnvelope;
+      try {
+        envelope = parseReleaseApprovalEnvelope(signature.envelope);
+      } catch (error) {
+        errors.push(
+          `release decision ${owner} envelope is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
+      const envelopeDigest = approvalEnvelopeSha256(envelope);
+      if (signature.envelope_sha256 !== envelopeDigest) {
+        errors.push(`release decision ${owner} envelope_sha256 does not match its envelope`);
+      }
+      if (!context.approvalTrustStore) {
+        errors.push(`release decision ${owner} cannot be verified without the approval trust store`);
+        continue;
+      }
+      if (!context.expectedVersion || !expectedManifestSha256) {
+        errors.push(`release decision ${owner} cannot be verified without candidate identity`);
+        continue;
+      }
+      try {
+        const approval = verifyReleaseApproval(envelope, context.approvalTrustStore, {
+          role: owner,
+          candidateCommit: head,
+          releaseVersion: context.expectedVersion,
+          evidenceManifestSha256: expectedManifestSha256,
+          ...(context.approvalVerificationTimeMs === undefined
+            ? {}
+            : { nowMs: context.approvalVerificationTimeMs }),
+        });
+        if (signature.key_id !== approval.envelope.key_id) {
+          errors.push(`release decision ${owner} key_id does not match the signed envelope`);
+        }
+        if (signature.identity !== approval.payload.identity) {
+          errors.push(`release decision ${owner} identity does not match the signed payload`);
+        }
+        if (signature.issued_at !== approval.payload.issued_at) {
+          errors.push(`release decision ${owner} issued_at does not match the signed payload`);
+        }
+        if (signature.expires_at !== approval.payload.expires_at) {
+          errors.push(`release decision ${owner} expires_at does not match the signed payload`);
+        }
+      } catch (error) {
+        errors.push(
+          `release decision ${owner} approval failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
   return errors;
@@ -321,7 +542,14 @@ function validateCrossArtifacts(head: string, options: ValidationOptions): strin
     const matrix = readJson(matrixPath);
     errors.push(...validateMatrix(matrix, head));
     const decision = Bun.YAML.parse(readFileSync(decisionPath, "utf8")) as JsonRecord;
-    errors.push(...validateDecision(decision, head, matrix));
+    errors.push(
+      ...validateDecision(decision, head, matrix, {
+        expectedVersion: options.expectedVersion,
+        approvalTrustStore: options.approvalTrustStore,
+        approvalVerificationTimeMs: options.approvalVerificationTimeMs,
+        evidenceManifest: options.evidenceManifest,
+      }),
+    );
     const card = readJson(cardPath);
     errors.push(...validateEvidencePayload("system-card", card, { ...options, expectedCommit: head }));
     if (card.commit !== head) errors.push(`system card commit ${String(card.commit)} does not match HEAD ${head}`);
@@ -343,7 +571,11 @@ function linuxEvidence(options: ValidationOptions): EvidenceCheck {
   if (!existsSync(path)) return { key, path, status: "missing", detail: "evidence manifest does not exist" };
   try {
     const value = readJson(path);
-    const errors = validateEvidencePayload(key, value, { ...options, expectedCommit: options.expectedCommit });
+    const errors = validateEvidencePayload(key, value, {
+      ...options,
+      expectedCommit: options.expectedCommit,
+      requireDirectIdentity: true,
+    });
     if (options.requireSignedLinuxEvidence) {
       for (const envName of ["TERMINUS_LINUX_EVIDENCE_SIGNATURE", "TERMINUS_LINUX_EVIDENCE_CERTIFICATE"]) {
         const signaturePath = process.env[envName];
@@ -368,7 +600,16 @@ function checkDecisionFile(key: string, file: string, head: string, options: Val
     if (options.freshSinceMs !== undefined && statSync(path).mtimeMs < options.freshSinceMs) errors.push(`${key}: file mtime is stale`);
     const matrixPath = join(OUT_DIR, "platform-support.json");
     if (!existsSync(matrixPath)) errors.push("platform matrix is missing");
-    else errors.push(...validateDecision(value, head, readJson(matrixPath)));
+    else {
+      errors.push(
+        ...validateDecision(value, head, readJson(matrixPath), {
+          expectedVersion: options.expectedVersion,
+          approvalTrustStore: options.approvalTrustStore,
+          approvalVerificationTimeMs: options.approvalVerificationTimeMs,
+          evidenceManifest: options.evidenceManifest,
+        }),
+      );
+    }
     const release = value.release;
     if (typeof release !== "object" || release === null || Array.isArray(release)) {
       errors.push(`${key}: release object is missing`);
@@ -389,14 +630,55 @@ export function validateReleaseGateArtifacts(
   options: ValidationOptions = {},
 ): { checks: EvidenceCheck[]; errors: string[] } {
   const head = options.expectedCommit ?? currentCommit();
-  const checks = REQUIRED_LOCAL.map((entry) =>
-    entry.file.endsWith(".json")
-      ? checkJsonFile(entry.key, entry.file, entry.status, { ...options, expectedCommit: head })
-      : checkDecisionFile(entry.key, entry.file, head, options),
-  );
-  checks.push(linuxEvidence(options));
+  const version = options.expectedVersion ?? currentVersion();
+  let manifest = options.evidenceManifest;
+  if (!manifest && existsSync(RELEASE_EVIDENCE_MANIFEST_PATH)) {
+    try {
+      manifest = parseReleaseEvidenceManifest(
+        JSON.parse(readFileSync(RELEASE_EVIDENCE_MANIFEST_PATH, "utf8")),
+      );
+    } catch {
+      manifest = undefined;
+    }
+  }
+  let approvalTrustStore = options.approvalTrustStore;
+  let trustStoreError: string | null = null;
+  if (!approvalTrustStore) {
+    const configuredTrustStore = process.env.TERMINUS_RELEASE_APPROVAL_TRUST_STORE?.trim();
+    if (configuredTrustStore) {
+      const trustStorePath = isAbsolute(configuredTrustStore)
+        ? configuredTrustStore
+        : join(ROOT, configuredTrustStore);
+      try {
+        requireExternalTrustStorePath(trustStorePath, ROOT);
+        approvalTrustStore = loadReleaseApprovalTrustStore(trustStorePath);
+      } catch (error) {
+        trustStoreError = error instanceof Error ? error.message : String(error);
+      }
+    }
+  }
+  const candidateOptions: ValidationOptions = {
+    ...options,
+    expectedCommit: head,
+    expectedVersion: version,
+    ...(manifest ? { evidenceManifest: manifest } : {}),
+    ...(approvalTrustStore ? { approvalTrustStore } : {}),
+  };
+  const checks = [
+    sourceIdentityCheck(),
+    ...REQUIRED_LOCAL.map((entry) =>
+      entry.key === "release-evidence-manifest"
+        ? checkEvidenceManifestFile(candidateOptions)
+        : entry.file.endsWith(".json")
+          ? checkJsonFile(entry.key, entry.file, entry.status, candidateOptions)
+          : checkDecisionFile(entry.key, entry.file, head, candidateOptions),
+    ),
+  ];
+  checks.push(linuxEvidence(candidateOptions));
   const errors = checks.flatMap((check) => check.errors ?? []);
-  errors.push(...validateCrossArtifacts(head, options));
+  if (version === "unknown") errors.push("release candidate version is unknown");
+  if (trustStoreError) errors.push(`approval trust store is invalid: ${trustStoreError}`);
+  errors.push(...validateCrossArtifacts(head, candidateOptions));
   if (options.requireSignedLinuxEvidence && checks.at(-1)?.status === "requires_ci") {
     errors.push("linux-enforcement: signed evidence is required for this release");
   }
@@ -406,11 +688,13 @@ export function validateReleaseGateArtifacts(
 function main(): void {
   mkdirSync(OUT_DIR, { recursive: true });
   const head = currentCommit();
-  ensureFindingsRegisterStatus(head);
+  const version = currentVersion();
+  ensureFindingsRegisterStatus(head, version);
   const freshSinceRaw = process.env.TERMINUS_RELEASE_RUN_STARTED_AT;
   const freshSinceMs = freshSinceRaw ? Number(freshSinceRaw) * 1000 : undefined;
   const options: ValidationOptions = {
     expectedCommit: head,
+    expectedVersion: version,
     freshSinceMs: Number.isFinite(freshSinceMs) ? freshSinceMs : undefined,
     requireSignedLinuxEvidence: process.env.TERMINUS_RELEASE_ENFORCE_SIGNED_ARTIFACTS === "1",
     allowFixtureEvidence: process.env.TERMINUS_RELEASE_ALLOW_FIXTURE_EVAL === "1",
@@ -433,7 +717,7 @@ function main(): void {
     commit: head,
     status: gateStatus,
     summary: {
-      required: REQUIRED_LOCAL.length + 1,
+      required: result.checks.length,
       present: present.length,
       missing: missing.length,
       requiresCi: requiresCi.length,

@@ -15,9 +15,13 @@ implemented here.
 - `Router` with `route(input)` and `escalate(current, input, reason)`.
 - `RoutingDecision`, `RoutingCandidate`.
 - `FallbackRecord`, `FallbackReason`, `recordFallback(...)`.
+- `ProfileRegistry`, `PosteriorTracker`, and `StageRouter` for injected,
+  provider-neutral `ModelProfile` values.
 
 ## Invariants
 
 - Never silently downgrade a high-risk reviewer or change privacy class.
 - A model that violates the confidentiality policy is never selected.
 - Escalation is deterministic — no learned router.
+- Concrete model catalogs come from the composition root. This package has no
+  bundled vendor profiles or default registry.

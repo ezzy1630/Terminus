@@ -1,84 +1,30 @@
-# Effect bypass register (SPEC §27.5)
+# Retired inherited-effect bypass register (ADR-0039, SPEC §27.5).
 #
-# Inventories direct effect paths in inherited OpenCode code that have not yet
-# been routed through the Rust kernel. Each entry MUST list: id, owner, source,
-# effect, reason, containment, removal_milestone, test, status.
-#
-# The release gate (SPEC §46.18) is NOT "zero entries immediately"; it is
-# "no unknown entries, every entry contained, and all entries removed before
-# the secure-default milestone (M4)."
-#
-# Status: open | contained | removed
+# This tombstone records that Terminus removed the inherited OpenCode source
+# paths and no longer grants them a bootstrap exception. It does not assert
+# that earlier parity snapshots or per-path `removed` declarations proved live
+# behavior. Current first-party bypasses are release-blocking security defects.
 
-version: 1
-last_updated: "2026-07-23"
+version: 2
+status: retired
+retired_on: "2026-08-23"
 owner: security-runtime
-review_cadence: per-release
+superseded_by: ADR-0039
 
-entries:
-  - id: BYPASS-0001
-    owner: runtime-team
-    source: packages/open-code-bridge/src/inherited/exec.ts
-    effect: EXECUTE_LOCAL
-    reason: "inherited OpenCode subprocess spawn for shell commands and PTY terminal sessions"
-    containment: "Routed through kernel process RPC over UDS (terminus.kernel.v1.ProcessService)"
-    removal_milestone: M3
-    test: packages/open-code-bridge/src/substrate.test.ts
-    status: removed
+active_entries: []
 
-  - id: BYPASS-0002
-    owner: runtime-team
-    source: packages/open-code-bridge/src/inherited/fs.ts
-    effect: WRITE_LOCAL
-    reason: "inherited OpenCode direct filesystem writer for worktree files and session snapshots"
-    containment: "Routed through kernel file/patch RPC over UDS (terminus.kernel.v1.FileService)"
-    removal_milestone: M2
-    test: packages/open-code-bridge/src/substrate.test.ts
-    status: removed
+retirement_evidence:
+  check: just standalone-check
+  verifies:
+    - retired bridge, source-pin, overlay, and fork-gate files are absent
+    - first-party runtime imports and workspace dependencies do not reference OpenCode
+    - runtime-protocol, public-api, and public-client ownership edges are explicit
+  does_not_verify:
+    - historical OpenCode behavior parity
+    - historical execution of each retired bypass path
+    - whole-system non-bypassability
 
-  - id: BYPASS-0003
-    owner: runtime-team
-    source: packages/open-code-bridge/src/inherited/network.ts
-    effect: NETWORK_WRITE
-    reason: "inherited OpenCode direct HTTP fetch for model providers and API requests"
-    containment: "Routed through AuthorizedNetworkBroker proxy client"
-    removal_milestone: M4
-    test: packages/open-code-bridge/src/substrate.test.ts
-    status: removed
-
-  - id: BYPASS-0004
-    owner: security-runtime
-    source: packages/open-code-bridge/src/inherited/secrets.ts
-    effect: SECRET_USE
-    reason: "inherited OpenCode environment variable credential lookups for API keys"
-    containment: "Replaced raw process.env secret reads with brokered secret capability tokens"
-    removal_milestone: M4
-    test: packages/open-code-bridge/src/substrate.test.ts
-    status: removed
-
-  - id: BYPASS-0005
-    owner: runtime-team
-    source: packages/open-code-bridge/src/inherited/plugin.ts
-    effect: PLUGIN_ADMIN
-    reason: "inherited OpenCode in-process plugin hook execution"
-    containment: "Moved inherited plugin hooks out-of-process into worker IPC host"
-    removal_milestone: M9
-    test: packages/open-code-bridge/src/substrate.test.ts
-    status: removed
-
-  - id: BYPASS-0006
-    owner: runtime-team
-    source: packages/open-code-bridge/src/inherited/git.ts
-    effect: WRITE_LOCAL
-    reason: "inherited OpenCode direct git operations and repository state inspection"
-    containment: "Routed through terminus-git kernel RPC"
-    removal_milestone: M4
-    test: packages/open-code-bridge/src/substrate.test.ts
-    status: removed
-
-# Summary for the release gate (SPEC §46.18):
-#   total: 6
-#   contained: 0
-#   open: 0
-#   removed: 6
-#   bypass_register_open: 0 (secure release reaches zero active bypasses)
+current_policy:
+  inherited_exception_allowed: false
+  discovered_first_party_bypass: release_blocking
+  required_action: fix the bypass or adopt a new security ADR before release

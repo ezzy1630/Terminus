@@ -143,7 +143,8 @@ result envelope, log record, artifact, or ledger state. Wired into
   phase contract without weakening security claims.
 - **TLS-terminating L7 proxy:** rejected for this phase; end-to-end TLS stays
   intact, the broker executes requests kernel-side with certificate validation
-  delegated to the platform TLS stack when HTTPS connectors land.
+  delegated to the platform TLS stack. ADR-0044 later lands that HTTPS path
+  with egress-approved DNS pinning.
 
 ## Consequences
 

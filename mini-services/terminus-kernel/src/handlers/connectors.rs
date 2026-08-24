@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::Extension;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use terminus_connector::{CanonicalOperation, ConnectorReceipt};
+use terminus_connector::{CanonicalOperation, ConnectorResponse};
 use terminus_secrets::GrantBinding;
 
 use crate::api::Envelope;
@@ -94,7 +94,8 @@ pub struct ConnectorExecuteRequest {
 
 #[derive(Debug, Serialize)]
 pub struct ConnectorExecuteResponse {
-    pub receipt: ConnectorReceipt,
+    #[serde(flatten)]
+    pub response: ConnectorResponse,
 }
 
 pub async fn execute(
@@ -121,11 +122,11 @@ pub async fn execute(
                 &trace_id.0,
             )
         })?;
-    let receipt = state
+    let response = state
         .kernel
         .connectors
         .execute(&req.envelope.request_context, &req.operation, &grant)
         .await
         .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
-    Ok(Json(ConnectorExecuteResponse { receipt }))
+    Ok(Json(ConnectorExecuteResponse { response }))
 }

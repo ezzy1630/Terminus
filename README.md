@@ -1,8 +1,8 @@
 # Terminus
 
-> A provider-neutral coding-agent operating system with a non-bypassable Rust effect kernel, an inspectable Context Compiler, evidence-based completion, and an eval gate for complexity.
+> A provider-neutral coding-agent operating system designed around a Rust effect kernel, an inspectable Context Compiler, evidence-based completion, and an eval gate for complexity.
 
-Terminus is built from the [complete product, architecture, security, and implementation specification](SPEC.md). The system uses a fork-assisted strangler architecture: the durable contracts, evidence, context manifests, and Rust effect boundary survive any component replacement.
+Terminus is built from the [complete product, architecture, security, and implementation specification](SPEC.md). It is a standalone runtime: Terminus owns ARP, its public API and client, provider-neutral contracts, evidence, context manifests, and the Rust effect boundary.
 
 ---
 
@@ -24,10 +24,10 @@ Terminus is built from the [complete product, architecture, security, and implem
                 │ privileged effects RPC    │ unprivileged capability RPC
 ┌───────────────▼────────────────────┐  ┌───▼──────────────────────┐
 │ EXECUTION/SECURITY MICROKERNEL     │  │ CAPABILITY PLANE         │
-│ Rust, non-bypassable               │  │                          │
+│ Rust effect boundary               │  │                          │
 │                                    │  │ Built-in tools · Skills  │
 │ Sandbox broker (Bubblewrap/Seatbelt)│  │ MCP servers · Plugins   │
-│ PTY/process/job manager            │  │ External harness adapters│
+│ Process supervisor / jobs          │  │ External harness adapters│
 │ FS snapshot/edit transactions      │  │                          │
 │ Network egress proxy               │  │ Runs out of process      │
 │ Secret broker                      │  │                          │
@@ -92,7 +92,6 @@ terminus/
 ├── migrations/sqlite/        # SQL migrations (Appendix C)
 ├── prisma/                   # Prisma schema (TypeScript-facing)
 ├── docs/                     # Architecture, ADRs, runbooks, security, plans
-├── upstream/                 # OpenCode pin + divergence budget
 ├── scripts/                  # Start services, migrations, codegen
 ├── tools/                    # Codegen, boundary checks, scaffolding
 ├── AGENTS.md                 # Root repository instructions (Appendix G)
@@ -138,7 +137,7 @@ curl -sS http://127.0.0.1:3040/v1/health \
 curl -sS http://127.0.0.1:3050/v1/system/health \
   -H "Authorization: Bearer terminus-control-dev-token"
 
-# End-to-end: create workspace → session → task → turn → COMPLETED
+# Local control-path smoke: create workspace → session → task → turn
 W=$(curl -sS -X POST http://127.0.0.1:3050/v1/workspaces/open \
   -d '{"root_uri":"/tmp/terminus-demo"}' \
   -H "Authorization: Bearer terminus-control-dev-token" | jq -r .id)
@@ -162,9 +161,12 @@ curl -sS -X POST http://127.0.0.1:3050/v1/turns \
 
 sleep 5
 
-# Task should be COMPLETED with verification DAG passed
+# Without a kernel-brokered provider transport, the task must fail closed as
+# BLOCKED with provider_transport_unavailable. A synthetic model response is
+# never substituted.
 curl -sS "http://127.0.0.1:3050/v1/tasks/$T" \
-  -H "Authorization: Bearer terminus-control-dev-token" | jq '{status,phase}'
+  -H "Authorization: Bearer terminus-control-dev-token" \
+  | jq '{status,phase,terminal_reason}'
 ```
 
 ### Use the clients
@@ -190,7 +192,7 @@ cd apps/desktop && bun run dev:electron
 
 ### Rust — trusted and performance-sensitive (SPEC §43.1)
 
-The non-bypassable effect kernel. All process, filesystem, network, secret, and patch operations cross this boundary.
+The intended trusted effect boundary. Terminus-owned execution paths route process, filesystem, network, secret, and patch operations through it. Whole-system non-bypassability remains a release claim gated by the supported-platform adversarial suite and signed evidence described in the research ledger.
 
 > Test counts and per-crate inventory are generated from the source tree — see the [static inventory](docs/generated/inventory.md). Maturity per crate: [component maturity registry](docs/generated/component-maturity.md).
 
@@ -202,11 +204,11 @@ The non-bypassable effect kernel. All process, filesystem, network, secret, and 
 | `terminus-policy` | Command policy engine (strictest-wins rule evaluation) |
 | `terminus-sandbox` | Sandbox backend trait + `LocalRestrictive` |
 | `terminus-sandbox-linux` | Bubblewrap backend (real bwrap argv construction) |
-| `terminus-sandbox-macos` | Seatbelt detection + honest reporting |
+| `terminus-sandbox-macos` | Seatbelt backend (deny-default profile generation, ADR-0035 §4) |
 | `terminus-sandbox-windows` | AppContainer detection + honest reporting |
 | `terminus-sandbox-container` | Container/micro-VM backend stub |
-| `terminus-process` | Process manager (env_clear, PTY, process groups, timeout) |
-| `terminus-jobs` | Job state machine + reconciliation (process-local until Phase 2) |
+| `terminus-process` | Process manager (env_clear, process groups, timeout, bounded stdio capture) |
+| `terminus-jobs` | Job state machine (process-local child supervision with durable JSON state and restart reconciliation) |
 | `terminus-fs` | Safe path resolution (traversal/symlink rejection) |
 | `terminus-patch` | Transactional edit engine (journal, snapshots, rollback) |
 | `terminus-artifacts` | CAS (sha256 layout, atomic rename, SQLite metadata) |
@@ -245,7 +247,6 @@ The control plane. Owns sessions, tasks, context compiler, providers, orchestrat
 | `@terminus/testkit` | Fake provider, fake kernel, builders |
 | `@terminus/public-api` | HTTP API definitions, error envelope, SSE, 18 resource groups |
 | `@terminus/public-client` | Generated-style TypeScript client with SSE subscription |
-| `@terminus/open-code-bridge` | OpenCode compatibility facade, bypass register, divergence budget |
 | `@terminus/aci` | Agent-Computer Interface (ToolRegistry, ProgressiveDisclosure) |
 
 Package inventory and declared-test counts are generated — see the [static inventory](docs/generated/inventory.md).
@@ -280,14 +281,15 @@ The evaluation laboratory. Never on the production enforcement path.
 
 ### Desktop application (SPEC §43.4, desktop UI spec)
 
-A production-quality Electron + Vite + React + TypeScript macOS-native desktop application at `apps/desktop/`.
+An experimental Electron + Vite + React + TypeScript desktop application at
+`apps/desktop/`. It uses macOS window integration, but it is not a native
+AppKit/SwiftUI client and has no production maturity claim.
 
-- **Real PTY** — `node-pty` + `xterm.js` terminal drawer with multi-tab, resize, search, session preservation
+- **Mission board and operator cockpit** — task-centered board, attention center modal, real-time SSE stream integration, and fleet budget views
 - **Full virtualization** — `@tanstack/react-virtual` for conversations (thousands of messages), sidebar lists (thousands of tasks), and diff viewers (10k+ lines)
-- **Computer-use PiP** — draggable, resizable picture-in-picture with `desktopCapturer` screen capture, pause/resume, expand-to-main-canvas
-- **Command palette** (⌘K) — fuzzy search, grouped results, keyboard navigation, <100ms open
-- **Diff viewer** — unified + side-by-side, hunk accept/reject/restore, inline comments, ask-agent-to-revise
-- **Dynamic inspector** — sections appear only when relevant (Environment, Activity, Approvals, Computer Use, Subagents, Terminal, Changes, Verification)
+- **Command palette** (⌘K) — fuzzy search, grouped results, and keyboard navigation
+- **Diff viewer** — unified + side-by-side, hunk review, inline feedback, and patch approval workflow
+- **Dynamic inspector** — sections appear only when relevant (Environment, Activity, Approvals, Subagents, Changes, Verification)
 - **Onboarding** — 4-step flow (Welcome → Project → Tools → First task)
 - **Settings** — categories with search, per-setting reset, immediate appearance preview
 
@@ -353,8 +355,8 @@ End-to-end tests verify: operation-class enforcement, path-scope enforcement, ne
 
 ### Sandbox backends (SPEC §13.4, §36.5-§36.8)
 
-- **Linux**: Bubblewrap detection + real `bwrap` argv construction (`--unshare-all`, `--ro-bind`, `--proc`, `--dev`, `--die-with-parent`, `--new-session`, `--cap-drop ALL`). Reports `Enforced` when bwrap is available; honestly reports `Degraded` when not.
-- **macOS**: Seatbelt (`sandbox-exec`) detection. Reports `Degraded` with "profile generation not implemented" note.
+- **Linux**: Bubblewrap detection + real `bwrap` argv construction (`--unshare-all`, `--ro-bind`, `--proc`, `--dev`, `--die-with-parent`, `--new-session`, `--cap-drop ALL`). Reports `Enforced` when bwrap is available; reports `Degraded` when it is unavailable, while profiles that require namespace isolation are refused as `Unsupported`.
+- **macOS**: Seatbelt (`sandbox-exec`) backend translating `SandboxProfile` into deny-by-default Scheme syntax with per-subpath allowances (ADR-0035 §4); reports `Enforced` when functional execution succeeds or `Unsupported` when disabled/unsupported, while profiles that require unavailable controls are refused.
 - **Windows**: AppContainer/Job Object detection. Reports `Degraded` with "CreateProcess+Job Object wiring not implemented" note.
 - **Container/micro-VM**: Stub for gVisor/Firecracker backends.
 
@@ -436,7 +438,7 @@ Completion is evidence-based, not assertion-based. The model cannot produce `COM
 
 ### Baselines (SPEC §18.2)
 
-`terminus-minimal` (Bash-only permanent baseline), `terminus-full`, upstream OpenCode, Codex, Claude Code, Pi, Oh My Pi, mini-SWE-agent.
+`terminus-minimal` (Bash-only permanent baseline), `terminus-full`, and external comparisons such as OpenCode, Codex, Claude Code, Pi, Oh My Pi, and mini-SWE-agent where automation is permitted. External comparisons are eval inputs, not runtime dependencies.
 
 ### Cohorts (SPEC §18.2, §41.3)
 
@@ -454,7 +456,7 @@ A feature becomes default only when it:
 - Does not create unacceptable regressions in other critical cohorts
 - Has operational observability and rollback
 - Has documentation and migration behavior
-- Remains within maintainability/divergence budgets
+- Remains within maintainability budgets
 
 Security guardrail failure blocks promotion regardless of average task success.
 
@@ -476,7 +478,7 @@ just integration    # Integration tests
 just security       # Local-capable security suite
 just e2e            # End-to-end task tests
 just eval-smoke     # Small deterministic eval suite
-just upstream-check # OpenCode parity and divergence checks
+just standalone-check # Standalone runtime and direct ARP/client ownership
 just release-check  # Release gate
 just run            # Run control plane and kernel locally
 ```
@@ -527,7 +529,7 @@ Statuses are recorded per ADR; consult each file's header for its current status
 
 ### Runbooks (SPEC §47.9)
 
-Runbooks at `docs/runbooks/`: database corruption, artifact store inconsistency, kernel/control version mismatch, sandbox unavailable, orphaned jobs, stuck external effect, leaked credential, compromised extension, provider outage, upstream merge conflict, eval regression, security incident.
+Runbooks at `docs/runbooks/`: database corruption, artifact store inconsistency, kernel/control version mismatch, sandbox unavailable, orphaned jobs, stuck external effect, leaked credential, compromised extension, provider outage, eval regression, security incident.
 
 ### Risk register (SPEC §49.4)
 

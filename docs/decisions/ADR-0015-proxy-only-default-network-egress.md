@@ -17,14 +17,23 @@ OpenCode's upstream does not enforce this. Codex's Linux sandbox does (network n
 Adopt **proxy-only default network egress** per SPEC §13.6 and §36.12:
 
 1. **No direct sockets** — sandboxed processes have no network namespace interfaces (Linux) or equivalent denial on macOS/Windows. `network.direct_sockets: deny` in the default policy (SPEC §36.4).
-2. **Proxy required** — all egress goes through the Terminus egress proxy (`crates/terminus-egress`). `network.proxy_required: true`.
+2. **Proxy required for sandboxed payloads** — sandboxed egress goes through
+   the Terminus egress proxy (`crates/terminus-egress`). A kernel-owned L7
+   connector may open the already-authorized numeric destination itself, but it
+   must use the same destination policy, DNS result, grant, byte budget, and
+   fail-closed error path. `network.proxy_required: true` remains the sandbox
+   contract.
 3. **Destination allowlist** — `network.destinations: []` by default (deny all). Capability-scoped allowlists grant specific destinations (e.g., `github.com`, `pypi.org`) per ADR-0016.
 4. **Brokered DNS** — `network.dns: brokered`. DNS resolution happens in the proxy, not in the sandbox, preventing DNS rebinding and private-address SSRF.
 5. **Private-address denial** — the proxy denies RFC 1918, loopback, link-local, and other private ranges unless an explicit capability grants them.
 6. **Rate limits** — per-destination rate limits prevent abuse.
 7. **Fail-closed** — if the proxy is unavailable, egress fails closed (no fallthrough to direct sockets).
 
-Implementation: `crates/terminus-egress` (proxy, policy, destination allowlist). The default network policy is `policies/network/default.yaml`.
+Implementation: `crates/terminus-egress` (proxy, policy, destination allowlist)
+plus the kernel-owned connector transport. A kernel connector may open a
+socket only after the exact egress authorization and connector grant; this is
+not a sandboxed process or TypeScript bypass. The default network policy is
+`policies/network/default.yaml`.
 
 ## Alternatives
 
@@ -35,7 +44,9 @@ Implementation: `crates/terminus-egress` (proxy, policy, destination allowlist).
 
 ## Consequences
 
-- Every outbound connection goes through the proxy, which logs destination, capability, task, and bytes.
+- Every sandboxed outbound connection goes through the proxy. Kernel connector
+  dispatch is the narrow trusted exception and logs the same destination,
+  capability, task, and byte accounting fields.
 - Network capabilities are explicit (`capability-packs/web-browser`, etc.); without one, egress is denied.
 - DNS happens in the proxy; sandbox processes see only the proxy's IP.
 - Rate limits prevent runaway egress.
@@ -54,7 +65,10 @@ Critical. This is what prevents model-generated scripts from exfiltrating secret
 
 ## Migration
 
-The egress proxy is introduced in M4 (SPEC §48.7). OpenCode's direct network paths are removed or routed through the proxy (ADR-0002, `docs/security/effect-bypass-register.yaml`).
+The egress proxy is introduced in M4 (SPEC §48.7). Every sandboxed network
+path routes through a kernel-owned proxy operation; control-plane connector
+dispatch is the narrow trusted L7 exception described above. Direct
+first-party sockets outside the kernel boundary are forbidden.
 
 ## Rollback
 

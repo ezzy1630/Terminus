@@ -11,6 +11,7 @@
  * COMPLETED, …) which we normalize to the UI-facing kind via
  * `normalizeTaskStatus()`.
  */
+import type { ApprovalBindingV1, ApprovalDisplay } from "@terminus/public-api";
 export type Theme = "system" | "light" | "dark";
 export type Density = "spacious" | "compact";
 
@@ -38,6 +39,74 @@ export interface HealthResponse {
   uptime_seconds: number;
   ready: boolean;
   kernel?: KernelHealthSummary;
+}
+
+export interface ProviderConfiguration {
+  program: string;
+  args: string[];
+  model: string;
+  timeout_seconds: number;
+  tools_enabled: boolean;
+  revision: number;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProviderConfigurationUpdate {
+  program: string;
+  args: string[];
+  model: string;
+  timeout_seconds: number;
+  tools_enabled: boolean;
+  expected_revision: number;
+}
+
+export interface ProviderConfigurationResponse {
+  configured: boolean;
+  configuration: ProviderConfiguration | null;
+}
+
+export type GatewayDeployment = "zen" | "go";
+export type GatewayProtocol = "chat_completions" | "responses" | "messages";
+
+export const GATEWAY_PRIVACY_TERMS_VERSIONS: Record<GatewayDeployment, string> = {
+  zen: "opencode-zen-privacy-v1",
+  go: "opencode-go-privacy-v1",
+};
+
+export interface GatewayProviderConfiguration {
+  deployment: GatewayDeployment;
+  protocol: GatewayProtocol;
+  model: string;
+  tools_enabled: boolean;
+  free_model: boolean;
+  workspace_access: boolean;
+  privacy_terms_admitted: boolean;
+  privacy_terms_version: string | null;
+  credential_configured: boolean;
+  revision: number;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GatewayProviderConfigurationUpdate {
+  deployment: GatewayDeployment;
+  protocol: GatewayProtocol;
+  model: string;
+  tools_enabled: boolean;
+  free_model: boolean;
+  workspace_access: boolean;
+  privacy_terms_admitted: boolean;
+  privacy_terms_version: string | null;
+  credential?: string;
+  expected_revision: number;
+}
+
+export interface GatewayProviderConfigurationResponse {
+  configured: boolean;
+  configuration: GatewayProviderConfiguration | null;
 }
 
 // ────────────────────────── /workspaces ────────────────────────────────────
@@ -73,6 +142,11 @@ export interface OpenWorkspaceInput {
 
 export type SessionStatus = "active" | "paused" | "archived" | "deleted";
 
+export interface CollectionTruncation {
+  occurred: boolean;
+  continuation: string | null;
+}
+
 export interface Session {
   id: string;
   workspace_id: string;
@@ -89,6 +163,9 @@ export interface Session {
 
 export interface SessionListResponse {
   sessions: Session[];
+  total: number;
+  next_cursor: string | null;
+  truncation: CollectionTruncation;
 }
 
 export interface CreateSessionInput {
@@ -100,22 +177,19 @@ export interface CreateSessionInput {
 
 // ────────────────────────── /tasks ─────────────────────────────────────────
 
-/**
- * Domain task status as returned by the control plane. Lowercase in DB
- * schema; events use the same strings. We normalize to a UI kind.
- */
+/** Canonical task state machine from SPEC section 28.3. */
 export type TaskDomainStatus =
-  | "PENDING"
+  | "DRAFT"
   | "ACTIVE"
+  | "NEEDS_USER_DECISION"
+  | "BLOCKED"
+  | "VERIFYING"
   | "COMPLETED"
   | "FAILED"
-  | "CANCELLED"
-  | "INTERRUPTED"
-  | "NEEDS_APPROVAL"
-  | "NEEDS_REVIEW"
-  | "QUEUED"
-  | "WAITING"
-  | string;
+  | "FAILED_VERIFICATION"
+  | "BUDGET_EXHAUSTED"
+  | "POLICY_DENIED"
+  | "ABORTED";
 
 export type TaskPhase = string;
 
@@ -141,11 +215,15 @@ export interface Task {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
-  contract?: TaskContract | null;
+  terminal_reason: Record<string, unknown> | null;
+  contract: TaskContract | null;
 }
 
 export interface TaskListResponse {
   tasks: Task[];
+  total: number;
+  next_cursor: string | null;
+  truncation: CollectionTruncation;
 }
 
 export interface CreateTaskInput {
@@ -225,11 +303,81 @@ export interface Approval {
   id: string;
   task_id: string;
   operation_hash: string;
+  binding: ApprovalBindingV1 | null;
+  display: ApprovalDisplay | null;
   status: ApprovalStatus;
+  decision: ApprovalDecision | null;
+  supported_decisions: ApprovalDecision[];
   risk: string;
+  scope: string[];
+  use_limit: number;
+  use_count: number;
+  expires_at: string | null;
   requested_at: string;
   resolved_at: string | null;
   rationale: string | null;
+}
+
+/**
+ * Decoded row from GET /v1/approvals (the control plane parses the stored
+ * risk/scope JSON before sending).
+ */
+export interface ApprovalSummary {
+  id: string;
+  task_id: string;
+  operation_hash: string;
+  binding: ApprovalBindingV1 | null;
+  display: ApprovalDisplay | null;
+  status: ApprovalStatus;
+  decision: ApprovalDecision | null;
+  supported_decisions: ApprovalDecision[];
+  risk: string;
+  scope: string[];
+  use_limit: number;
+  use_count: number;
+  expires_at: string | null;
+  requested_at: string;
+  resolved_at: string | null;
+  rationale: string | null;
+}
+
+export interface ApprovalListResponse {
+  approvals: ApprovalSummary[];
+  total: number;
+  next_cursor: string | null;
+  truncation: CollectionTruncation;
+}
+
+// ────────────────────────── /sandbox ───────────────────────────────────────
+
+/** Kernel sandbox enforcement report (SPEC §13.4). The UI must render degraded controls honestly. */
+export interface SandboxReport {
+  /** Present when a profile was explicitly requested. */
+  profile_id?: string;
+  backend_id: string;
+  status: "enforced" | "degraded" | "unsupported";
+  enforced: string[];
+  degraded: string[];
+  unsupported: string[];
+  notes: string[];
+}
+
+// ────────────────────────── /tasks/:id/artifacts ───────────────────────────
+
+export interface ArtifactSummary {
+  /** CAS address, e.g. `sha256:<hex>` (or a verbatim non-CAS URI). */
+  hash: string;
+  purpose: string;
+  media_type: string;
+  size_bytes: number | null;
+}
+
+export interface TaskArtifactsPage {
+  task_id: string;
+  artifacts: ArtifactSummary[];
+  total: number;
+  /** Opaque continuation token (next skip offset); null on the last page. */
+  next_cursor: string | null;
 }
 
 export type ApprovalDecision =
@@ -300,12 +448,38 @@ export interface ConversationMessage {
   streaming?: boolean;
 }
 
+/**
+ * A turn's visible thinking. These are the real control-plane phases between
+ * `turn.started` and `turn.completed` — the app previously discarded all of
+ * them, so the gap between sending and the first token showed nothing at all.
+ */
+export type ReasoningPhaseKind =
+  | "context_compiling"
+  | "provider_running"
+  | "response_validating"
+  | "finalizing";
+
+export interface ReasoningPhase {
+  kind: ReasoningPhaseKind;
+  /** ISO timestamp the phase was entered. */
+  at: string;
+}
+
+export interface ReasoningBlock {
+  id: string;
+  phases: ReasoningPhase[];
+  startedAt: string;
+  /** Null while the turn is still running. */
+  endedAt: string | null;
+}
+
 export type ActivityBlockStatus =
   | "working"
   | "done"
   | "failed"
   | "waiting"
-  | "interrupted";
+  | "interrupted"
+  | "unknown";
 
 export interface ActivityEntry {
   /** Tool id or human label like "read", "exec", "patch". */
@@ -316,13 +490,19 @@ export interface ActivityEntry {
   detail?: string;
   /** ISO timestamp. */
   at: string;
+  /** Authoritative protocol phase; never inferred from display text. */
+  phase: "proposed" | "authorized" | "settled";
+  /** Structured terminal outcome, present only for settlement. */
+  outcome?: "succeeded" | "failed" | "unknown";
+  /** Durable operation identity used to correlate phases when supplied. */
+  operationId?: string;
 }
 
 export interface ActivityBlock {
   id: string;
   /** Heading like "Explored codebase". */
   title: string;
-  /** Right-aligned metric like "12 files". */
+  /** Metric like "12 files", rendered next to the title. */
   metric?: string;
   status: ActivityBlockStatus;
   entries: ActivityEntry[];
@@ -330,20 +510,11 @@ export interface ActivityBlock {
 
 // ────────────────────────── Terminus Desktop bridge ───────────────────────────
 // Exposed by Electron preload (electron/preload.ts). The runtime `window`
-// augmentation lives in `src/types/global.d.ts` (alongside the
-// `terminusTerminal` bridge); the interfaces here are for code that imports
-// the typed shape directly.
-
-export interface TerminusScreenSource {
-  id: string;
-  name: string;
-  display_id?: string;
-}
+// augmentation lives in `src/types/global.d.ts`; the interface here is for
+// code that imports the typed shape directly.
 
 export interface TerminusDesktopBridge {
   apiBase: string;
-  gateway: string;
-  token: string;
   platform: string;
   isMac: boolean;
   notify: (title: string, body: string) => Promise<unknown>;
@@ -352,26 +523,4 @@ export interface TerminusDesktopBridge {
   windowClose: () => Promise<unknown>;
   getTheme: () => Promise<"system" | "light" | "dark">;
   setTheme: (theme: Theme) => Promise<"system" | "light" | "dark">;
-  getScreenSources: () => Promise<TerminusScreenSource[]>;
-}
-
-export interface TerminusTerminalSpawnResult {
-  id: string;
-  label: string;
-  cwd?: string;
-  error?: string;
-}
-
-export interface TerminusTerminalBridge {
-  spawn: (
-    cwd?: string,
-    command?: string,
-    cols?: number,
-    rows?: number,
-  ) => Promise<TerminusTerminalSpawnResult>;
-  write: (termId: string, data: string) => Promise<void>;
-  resize: (termId: string, cols: number, rows: number) => Promise<void>;
-  kill: (termId: string) => Promise<void>;
-  onData: (termId: string, cb: (data: string) => void) => () => void;
-  onExit: (termId: string, cb: (exitCode: number) => void) => () => void;
 }

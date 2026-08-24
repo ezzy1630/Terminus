@@ -141,6 +141,7 @@ model TaskContractVersion {
   assumptionsJson  String   @map("assumptions_json")
   unknownsJson     String   @map("unknowns_json")
   allowedScopeJson String   @map("allowed_scope_json")
+  v2ProjectionJson String?  @map("v2_projection_json")
   changePolicyJson String   @map("change_policy_json")
   contentHash      String   @map("content_hash")
   createdBy        String   @map("created_by")
@@ -415,9 +416,11 @@ model Approval {
   taskId        String    @map("task_id")
   toolCallId    String?   @unique @map("tool_call_id")
   operationHash String    @map("operation_hash")
+  operationJson String?   @map("operation_json")
   scopeJson     String    @map("scope_json")
   riskJson      String    @map("risk_json")
   status        String // pending | allowed | denied | expired | revoked
+  decision      String?
   useLimit      Int       @default(1) @map("use_limit")
   useCount      Int       @default(0) @map("use_count")
   expiresAt     DateTime? @map("expires_at")
@@ -817,6 +820,46 @@ model Lease {
   @@map("leases")
 }
 
+// The single durable local-provider configuration owned by the control plane.
+// It contains no credentials; provider execution still crosses the kernel Job
+// boundary using this exact argv/model contract.
+model ProviderConfiguration {
+  id            String   @id
+  program       String
+  argsJson      String   @map("args_json")
+  model         String
+  timeoutSeconds Int     @map("timeout_seconds")
+  toolsEnabled  Boolean  @default(false) @map("tools_enabled")
+  revision      Int      @default(1)
+  updatedBy     String   @map("updated_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("provider_configurations")
+}
+
+// OpenCode Zen/Go gateway selection. The credential itself lives only in the
+// OS credential store behind `secretUri`; this row never contains key bytes.
+model GatewayProviderConfiguration {
+  id                   String   @id
+  deployment           String
+  protocol             String
+  model                 String
+  secretUri             String   @map("secret_uri")
+  credentialConfigured Boolean  @default(false) @map("credential_configured")
+  toolsEnabled          Boolean  @default(true) @map("tools_enabled")
+  freeModel             Boolean  @default(false) @map("free_model")
+  workspaceAccess       Boolean  @default(false) @map("workspace_access")
+  privacyTermsAdmitted  Boolean  @default(false) @map("privacy_terms_admitted")
+  privacyTermsVersion   String?  @map("privacy_terms_version")
+  revision              Int      @default(1)
+  updatedBy             String   @map("updated_by")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@map("gateway_provider_configurations")
+}
+
 model SemanticEvent {
   eventId           String   @id @map("event_id")
   eventType         String   @map("event_type")
@@ -866,9 +909,11 @@ model Checkpoint {
   unsettledEffectsJson       String   @default("[]") @map("unsettled_effects_json")
   artifactRefsJson           String   @default("[]") @map("artifact_refs_json")
   continuationJson           String?  @map("continuation_json")
+  admissionState             String   @default("PREPARED") @map("admission_state") // PREPARED | COMMITTED | QUARANTINED
   createdAt                  DateTime @default(now()) @map("created_at")
 
   @@index([threadId, createdAt])
+  @@index([admissionState, createdAt])
   @@map("checkpoints")
 }
 

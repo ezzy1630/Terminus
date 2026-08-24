@@ -30,6 +30,35 @@
       "type": "string",
       "minLength": 1
     },
+    "conversationContext": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attachedAt": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "sessionId",
+            "threadId",
+            "attachedAt"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "contract": {
       "type": "object",
       "properties": {
@@ -66,13 +95,15 @@
                   "scope": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "minLength": 1
                     }
                   },
                   "allowedOperations": {
                     "type": "array",
                     "items": {
-                      "type": "string"
+                      "type": "string",
+                      "minLength": 1
                     }
                   },
                   "principalBinding": {
@@ -99,7 +130,8 @@
                   "expiry": {
                     "anyOf": [
                       {
-                        "type": "string"
+                        "type": "string",
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$"
                       },
                       {
                         "type": "null"
@@ -108,7 +140,7 @@
                   },
                   "integrityHash": {
                     "type": "string",
-                    "minLength": 1
+                    "pattern": "^sha256:[0-9a-f]{64}$"
                   }
                 },
                 "required": [
@@ -124,7 +156,8 @@
                   "trustLabel",
                   "expiry",
                   "integrityHash"
-                ]
+                ],
+                "additionalProperties": false
               }
             },
             "allowedEffectClasses": {
@@ -138,6 +171,34 @@
               "items": {
                 "type": "string"
               }
+            },
+            "pathScope": {
+              "type": "object",
+              "properties": {
+                "readPaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "writePaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "externalSystems": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "readPaths",
+                "writePaths",
+                "externalSystems"
+              ]
             }
           },
           "required": [

@@ -8,7 +8,7 @@
 
 ## Context
 
-The public product API serves TUI, CLI, web, desktop, IDE/ACP, SDK, and CI clients. It must support streaming (for task/turn/tool events), pagination, idempotency, typed errors, and versioning. OpenCode-compatible HTTP/OpenAPI must be retained during bootstrap (ADR-0002).
+The public product API serves TUI, CLI, web, desktop, IDE/ACP, SDK, and CI clients. It must support streaming (for task/turn/tool events), pagination, idempotency, typed errors, and versioning. ADR-0039 makes this a Terminus-owned boundary.
 
 Clients must be stateless enough to reconnect from server snapshots and event cursors (SPEC §43.4). The API must not provide a "generic execute arbitrary code" endpoint at this boundary (SPEC §44.7).
 
@@ -29,7 +29,7 @@ Status is PROVISIONAL because WebSocket (ADR-0029) may eventually complement or 
 
 ## Alternatives
 
-- **gRPC for the public API.** Rejected: poorer browser/IDE story; harder OpenAPI generation; OpenCode compatibility lost.
+- **gRPC for the public API.** Rejected: poorer browser/IDE story and harder OpenAPI generation.
 - **WebSocket only.** Rejected (OPEN in ADR-0029): more complex reconnection; SSE is simpler for the dominant one-way streaming case.
 - **GraphQL.** Rejected: harder to generate multi-language clients; complicates idempotency and pagination; no clear benefit over REST+SSE for our resource model.
 
@@ -53,7 +53,7 @@ Medium. HTTPS enforces transport security. Idempotency keys prevent duplicate ef
 
 ## Migration
 
-OpenCode-compatible HTTP/OpenAPI is retained during bootstrap (ADR-0002). The Terminus public API is layered above it; the OpenCode facade is removed once all clients migrate (M11+).
+Terminus clients migrate to `@terminus/public-client` and versioned generated clients. External systems use explicit adapters; no compatibility facade defines the canonical API.
 
 ## Rollback
 

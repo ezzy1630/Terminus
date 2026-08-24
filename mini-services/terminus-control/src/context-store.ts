@@ -5,7 +5,7 @@
  * Prisma stores only immutable references and the manifest decision record.
  */
 import { randomUUID } from "node:crypto";
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient, Prisma } from "@prisma/client";
 import {
   ArtifactClient,
   type ArtifactKernelClient,
@@ -44,6 +44,9 @@ export interface ContextArtifactScope {
   readonly workspaceId: string;
 }
 
+export type ContextMutationGate = <T>(operation: () => Promise<T>) => Promise<T>;
+export type ContextTransactionFence = (tx: Prisma.TransactionClient) => Promise<void>;
+
 export function createKernelArtifactClient(
   rpc: ArtifactIngestServiceClientImpl,
   context: RequestContext,
@@ -68,12 +71,21 @@ export function createKernelArtifactClient(
       const response: GetArtifactMetadataResponse = await rpc.GetMetadata({ context: nextRequestContext(context), sha256: hash });
       if (response.artifact === undefined) return null;
       return {
+        hash: response.artifact.sha256,
         bytes: response.artifact.sizeBytes,
         mediaType: response.artifact.mediaType,
       };
     },
-    async link(): Promise<void> {
-      throw new Error("artifact link RPC is not part of terminus.kernel.v1 ArtifactIngestService");
+    async link(hash, ownerType, ownerId, purpose): Promise<void> {
+      const response = await rpc.Link({
+        context: nextRequestContext(context),
+        sha256: hash,
+        ownerType,
+        ownerId,
+        purpose,
+        ownerTaskId: context.taskId,
+      });
+      if (!response.linked) throw new Error("kernel did not admit the artifact ownership link");
     },
     async gcDryRun() {
       throw new Error("artifact GC is not part of the control-plane artifact boundary");
@@ -102,6 +114,8 @@ export class PrismaContextStore implements ContextStore {
     private readonly db: PrismaClient,
     private readonly artifacts: ArtifactClient,
     private readonly scope: ContextArtifactScope,
+    private readonly mutate: ContextMutationGate = (operation) => operation(),
+    private readonly fence: ContextTransactionFence = async () => undefined,
   ) {}
 
   async persistManifest(
@@ -212,9 +226,11 @@ export class PrismaContextStore implements ContextStore {
       });
     }
 
-    const existingEpoch = await this.db.contextEpoch.findUnique({ where: { id: durableManifest.epochId } });
-    await this.db.$transaction(async (tx) => {
-      await tx.contextManifest.create({
+    await this.mutate(async () => {
+      const existingEpoch = await this.db.contextEpoch.findUnique({ where: { id: durableManifest.epochId } });
+      await this.db.$transaction(async (tx) => {
+        await this.fence(tx);
+        await tx.contextManifest.create({
         data: {
           id,
           providerAttemptId: null,
@@ -243,9 +259,10 @@ export class PrismaContextStore implements ContextStore {
           }),
         },
       });
-      if (persistedFragments.length > 0) {
-        await tx.contextFragment.createMany({ data: persistedFragments });
-      }
+        if (persistedFragments.length > 0) {
+          await tx.contextFragment.createMany({ data: persistedFragments });
+        }
+      });
     });
     return durableManifest;
   }
@@ -325,10 +342,13 @@ export class PrismaContextStore implements ContextStore {
       request: { ...rendered.request, signal: null },
     };
     const artifact = await this.ingestJson(requestPayload, "provider-request");
-    await this.db.contextManifest.update({
-      where: { id: manifestId },
-      data: { renderedRequestHash: artifact.hash },
-    });
+    await this.mutate(() => this.db.$transaction(async (tx) => {
+      await this.fence(tx);
+      await tx.contextManifest.update({
+        where: { id: manifestId },
+        data: { renderedRequestHash: artifact.hash },
+      });
+    }));
     return artifact;
   }
 
@@ -336,12 +356,17 @@ export class PrismaContextStore implements ContextStore {
     manifestId: Uuid7,
     observation: Readonly<Record<string, unknown>>,
   ): Promise<void> {
-    const row = await this.db.contextManifest.findUnique({ where: { id: manifestId } });
-    if (row === null) throw new Error(`context manifest not found: ${manifestId}`);
-    const current = parseJson(row.experimentJson, {} as Record<string, unknown>);
-    await this.db.contextManifest.update({
-      where: { id: manifestId },
-      data: { experimentJson: safeJson({ ...current, observation }) },
+    await this.mutate(async () => {
+      await this.db.$transaction(async (tx) => {
+        await this.fence(tx);
+        const row = await tx.contextManifest.findUnique({ where: { id: manifestId } });
+        if (row === null) throw new Error(`context manifest not found: ${manifestId}`);
+        const current = parseJson(row.experimentJson, {} as Record<string, unknown>);
+        await tx.contextManifest.update({
+          where: { id: manifestId },
+          data: { experimentJson: safeJson({ ...current, observation }) },
+        });
+      });
     });
   }
 

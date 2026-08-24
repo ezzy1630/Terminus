@@ -3,19 +3,23 @@
  * surfaces. The control plane remains the source of truth; this module only
  * derives presentation state from its existing event contract.
  */
-import type { TerminusSseEvent } from "../types";
+import type { ApprovalSummary, TerminusSseEvent } from "../types";
 
 export interface PendingApproval {
   id: string;
   action: string;
-  risk: "low" | "normal" | "high" | "critical";
+  risk: "low" | "normal" | "high" | "critical" | "unknown";
   reversibility?: string;
+  operationHash?: string;
   operation?: string;
   reason?: string;
   scope?: string[];
   environment?: string;
   requestedAt?: string;
+  expiresAt?: string;
   canPersist: boolean;
+  supportedDecisions: ApprovalSummary["supported_decisions"];
+  authorizationReady: boolean;
 }
 
 export interface SubagentActivity {
@@ -67,7 +71,101 @@ function stringArrayField(value: Record<string, unknown>, ...fields: string[]): 
 }
 
 function approvalRisk(value: string | undefined): PendingApproval["risk"] {
-  return value === "low" || value === "high" || value === "critical" ? value : "normal";
+  return value === "low" || value === "normal" || value === "high" || value === "critical"
+    ? value
+    : "unknown";
+}
+
+/** Short, stable display label for an operation hash when no plain-language summary exists. */
+export function operationLabel(operationHash: string): string {
+  const short = operationHash.length > 14 ? `${operationHash.slice(0, 13)}…` : operationHash;
+  return `Pending effect ${short}`;
+}
+
+/**
+ * Project the authoritative approval snapshot into the UI. Allow choices are
+ * enabled only when the server supplied one complete, internally consistent
+ * operation binding; legacy rows remain denyable but cannot authorize work.
+ */
+export function pendingApprovalFromServerRow(row: ApprovalSummary): PendingApproval {
+  const binding = row.binding;
+  const display = row.display;
+  const expiryMatches = binding?.expires_at === row.expires_at;
+  const expiresAt = row.expires_at ? Date.parse(row.expires_at) : null;
+  const unexpired = expiresAt === null || (Number.isFinite(expiresAt) && expiresAt > Date.now());
+  const risk = approvalRisk(row.risk);
+  const authorizationReady = Boolean(
+    binding
+    && display
+    && binding.task_id === row.task_id
+    && binding.exact_action === display.exact_action
+    && binding.use_limit === row.use_limit
+    && expiryMatches
+    && unexpired
+    && row.scope.length > 0
+    && risk !== "unknown",
+  );
+  return {
+    id: row.id,
+    action: display?.summary ?? operationLabel(row.operation_hash),
+    risk,
+    reversibility: display?.reversibility ?? undefined,
+    operationHash: row.operation_hash,
+    operation: display?.exact_action,
+    reason: display?.reason,
+    scope: row.scope.length > 0 ? row.scope : undefined,
+    environment: display?.environment ?? undefined,
+    requestedAt: row.requested_at,
+    expiresAt: row.expires_at ?? undefined,
+    canPersist: row.use_limit > 1,
+    supportedDecisions: row.supported_decisions,
+    authorizationReady,
+  };
+}
+
+/**
+ * Merge the server's pending-approval snapshot with richer event-derived
+ * entries. A server snapshot anchors identity and operation hash. Event detail
+ * may enrich display context only when it binds to that exact hash; it cannot
+ * independently enable an allow action or widen persistence.
+ */
+export function mergePendingApprovals(
+  server: PendingApproval[],
+  derived: PendingApproval[],
+): PendingApproval[] {
+  const byId = new Map<string, PendingApproval>();
+  for (const entry of server) byId.set(entry.id, entry);
+  for (const entry of derived) {
+    const current = byId.get(entry.id);
+    if (!current) {
+      byId.set(entry.id, { ...entry, canPersist: false, authorizationReady: false });
+      continue;
+    }
+    const operationMatches = Boolean(
+      current.operationHash
+      && entry.operationHash
+      && current.operationHash === entry.operationHash,
+    );
+    if (!operationMatches) continue;
+    if (current.authorizationReady) continue;
+    const risk = entry.risk === "unknown" ? current.risk : entry.risk;
+    const scope = entry.scope ?? current.scope;
+    byId.set(entry.id, {
+      ...current,
+      action: entry.action,
+      risk,
+      reversibility: entry.reversibility,
+      operation: entry.operation,
+      reason: entry.reason,
+      scope,
+      environment: entry.environment,
+      requestedAt: entry.requestedAt ?? current.requestedAt,
+      canPersist: current.canPersist && entry.canPersist,
+      supportedDecisions: current.supportedDecisions,
+      authorizationReady: false,
+    });
+  }
+  return [...byId.values()];
 }
 
 export function derivePendingApprovals(events: TerminusSseEvent[]): PendingApproval[] {
@@ -78,17 +176,28 @@ export function derivePendingApprovals(events: TerminusSseEvent[]): PendingAppro
     if (event.event === "approval.requested") {
       const id = stringField(payload, "approval_id", "approvalId");
       if (!id) continue;
+      const operationHash = stringField(payload, "operation_hash", "operationHash");
+      const operation = stringField(payload, "operation", "command", "exact_operation", "exactOperation");
       pending.set(id, {
         id,
-        action: stringField(payload, "operation_summary", "operationSummary") ?? "Authorize requested operation",
+        action:
+          stringField(payload, "operation_summary", "operationSummary")
+          ?? (operationHash ? operationLabel(operationHash) : "Approval details unavailable"),
         risk: approvalRisk(stringField(payload, "risk")),
         reversibility: stringField(payload, "reversibility"),
-        operation: stringField(payload, "operation", "command", "exact_operation", "exactOperation"),
+        operationHash,
+        operation,
         reason: stringField(payload, "reason", "rationale", "why_required", "whyRequired"),
         scope: stringArrayField(payload, "scope", "affected_paths", "affectedPaths"),
         environment: stringField(payload, "environment", "affected_environment", "affectedEnvironment"),
         requestedAt: stringField(payload, "requested_at", "requestedAt"),
-        canPersist: payload.can_persist !== false && payload.canPersist !== false,
+        expiresAt: stringField(payload, "expires_at", "expiresAt"),
+        canPersist:
+          typeof payload.use_limit === "number"
+            ? payload.use_limit > 1
+            : payload.can_persist === true || payload.canPersist === true,
+        supportedDecisions: ["deny_once"],
+        authorizationReady: false,
       });
     }
     if (event.event === "approval.resolved") {

@@ -29,6 +29,10 @@ pub struct SecretHandle {
 }
 
 impl SecretHandle {
+    pub(crate) fn from_value(metadata: SecretMetadata, value: Vec<u8>) -> Self {
+        Self { metadata, value }
+    }
+
     /// SHA-256 digest of the credential material. Safe to persist with the
     /// grant claims; reveals nothing about the value.
     pub fn digest(&self) -> String {
@@ -93,6 +97,13 @@ pub trait SecretProvider: Send + Sync {
     fn resolve(&self, uri: &str) -> Result<SecretHandle, SecretError>;
 }
 
+/// A production provider that can persist and remove credentials. Writes are
+/// accepted only through the privileged kernel SecretService.
+pub trait WritableSecretProvider: SecretProvider {
+    fn store(&self, uri: &str, value: &[u8]) -> Result<(), SecretError>;
+    fn delete(&self, uri: &str) -> Result<(), SecretError>;
+}
+
 /// **Fixture-only** in-memory provider (maturity: `fixture`, ADR-0035 §1).
 /// Maps `secret://provider/scope` to a static value. Production wiring MUST
 /// use a provider that mints short-lived, operation-scoped credentials;
@@ -149,9 +160,31 @@ impl SecretProvider for InMemoryProvider {
     }
 }
 
+impl WritableSecretProvider for InMemoryProvider {
+    fn store(&self, uri: &str, value: &[u8]) -> Result<(), SecretError> {
+        parse_uri(uri)?;
+        self.entries
+            .lock()
+            .map_err(|error| SecretError::ProviderUnavailable(format!("mutex: {error}")))?
+            .insert(uri.to_string(), value.to_vec());
+        Ok(())
+    }
+
+    fn delete(&self, uri: &str) -> Result<(), SecretError> {
+        parse_uri(uri)?;
+        self.entries
+            .lock()
+            .map_err(|error| SecretError::ProviderUnavailable(format!("mutex: {error}")))?
+            .remove(uri);
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct SecretBroker {
     providers: std::sync::Arc<Mutex<HashMap<String, std::sync::Arc<dyn SecretProvider>>>>,
+    writable_providers:
+        std::sync::Arc<Mutex<HashMap<String, std::sync::Arc<dyn WritableSecretProvider>>>>,
     revocations: std::sync::Arc<Mutex<std::collections::HashSet<String>>>,
     audit: std::sync::Arc<crate::audit::SecretAuditLog>,
 }
@@ -176,6 +209,7 @@ impl SecretBroker {
     pub fn new() -> Self {
         Self {
             providers: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            writable_providers: std::sync::Arc::new(Mutex::new(HashMap::new())),
             revocations: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
             audit: std::sync::Arc::new(crate::audit::SecretAuditLog::new()),
         }
@@ -189,6 +223,43 @@ impl SecretBroker {
         if let Ok(mut g) = self.providers.lock() {
             g.insert(provider_name.to_string(), provider);
         }
+    }
+
+    pub fn register_writable_provider(
+        &self,
+        provider_name: &str,
+        provider: std::sync::Arc<dyn WritableSecretProvider>,
+    ) {
+        if let Ok(mut providers) = self.providers.lock() {
+            providers.insert(provider_name.to_string(), provider.clone());
+        }
+        if let Ok(mut providers) = self.writable_providers.lock() {
+            providers.insert(provider_name.to_string(), provider);
+        }
+    }
+
+    pub fn store(&self, uri: &str, value: &[u8]) -> Result<(), SecretError> {
+        let (provider_name, _scope) = parse_uri(uri)?;
+        let provider = self
+            .writable_providers
+            .lock()
+            .map_err(|error| SecretError::ProviderUnavailable(format!("mutex: {error}")))?
+            .get(&provider_name)
+            .cloned()
+            .ok_or_else(|| SecretError::UnknownCapability(uri.to_string()))?;
+        provider.store(uri, value)
+    }
+
+    pub fn delete(&self, uri: &str) -> Result<(), SecretError> {
+        let (provider_name, _scope) = parse_uri(uri)?;
+        let provider = self
+            .writable_providers
+            .lock()
+            .map_err(|error| SecretError::ProviderUnavailable(format!("mutex: {error}")))?
+            .get(&provider_name)
+            .cloned()
+            .ok_or_else(|| SecretError::UnknownCapability(uri.to_string()))?;
+        provider.delete(uri)
     }
 
     pub fn revoke(&self, uri: &str) {
@@ -344,5 +415,21 @@ mod tests {
             .request("secret://github/repo-read", "task-1")
             .unwrap_err();
         assert!(matches!(err, SecretError::CapabilityRevoked(_)));
+    }
+
+    #[test]
+    fn writable_provider_round_trip_stays_behind_broker() {
+        let broker = SecretBroker::new();
+        let provider = std::sync::Arc::new(InMemoryProvider::new());
+        broker.register_writable_provider("opencode", provider);
+        broker
+            .store("secret://opencode/zen", b"opaque-test-value")
+            .unwrap();
+        let handle = broker.request("secret://opencode/zen", "task-1").unwrap();
+        assert_eq!(handle.digest().len(), 64);
+        assert!(!format!("{handle:?}").contains("opaque-test-value"));
+        drop(handle);
+        broker.delete("secret://opencode/zen").unwrap();
+        assert!(broker.request("secret://opencode/zen", "task-1").is_err());
     }
 }

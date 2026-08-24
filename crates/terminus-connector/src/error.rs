@@ -10,12 +10,14 @@ pub enum ConnectorError {
     Credential(#[from] terminus_secrets::SecretError),
     #[error("egress denied: {0}")]
     Egress(#[from] terminus_egress::EgressError),
-    #[error("https destinations require a validated TLS transport; refusing to send credentials in plaintext")]
-    TlsUnavailable,
     #[error("unknown connector: {0}")]
     UnknownConnector(String),
     #[error("request exceeds bounded size {limit}: {actual} bytes")]
     BodyTooLarge { limit: usize, actual: usize },
+    #[error("response exceeds bounded size {limit}: at least {actual} bytes")]
+    ResponseTooLarge { limit: usize, actual: usize },
+    #[error("request was not dispatched: {0}")]
+    RequestNotDispatched(String),
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("io error: {0}")]

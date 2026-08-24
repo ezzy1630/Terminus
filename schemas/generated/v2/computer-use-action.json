@@ -1,0 +1,237 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/computer-use-action.json",
+  "title": "ComputerUseAction",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "actionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observationVersion": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "click",
+        "double_click",
+        "right_click",
+        "hover",
+        "type_text",
+        "key_press",
+        "key_combination",
+        "scroll",
+        "drag_and_drop",
+        "navigate",
+        "take_screenshot",
+        "extract_dom",
+        "focus_element",
+        "select_option"
+      ]
+    },
+    "target": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "elementId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "role": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string"
+            },
+            "selector": {
+              "type": "string",
+              "minLength": 1
+            },
+            "boundingBox": {
+              "type": "object",
+              "properties": {
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "width": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "height": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "x",
+                "y",
+                "width",
+                "height"
+              ]
+            },
+            "textSnippet": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "semanticHash": {
+              "type": "string",
+              "minLength": 1
+            },
+            "evidenceSources": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "dom",
+                  "accessibility"
+                ]
+              }
+            }
+          },
+          "required": [
+            "elementId",
+            "role",
+            "name",
+            "selector",
+            "boundingBox",
+            "textSnippet",
+            "confidence",
+            "semanticHash",
+            "evidenceSources"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "coordinate": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "text": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "keys": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "scrollDelta": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "dx": {
+              "type": "number"
+            },
+            "dy": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "dx",
+            "dy"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "intent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requiresSemanticVerification": {
+      "type": "boolean"
+    },
+    "effectClass": {
+      "type": "string",
+      "enum": [
+        "read_only",
+        "bufferable_local",
+        "reversible_external",
+        "compensable_external",
+        "irreversible",
+        "unknown_semantics"
+      ]
+    }
+  },
+  "required": [
+    "actionId",
+    "taskId",
+    "observationId",
+    "observationVersion",
+    "kind",
+    "target",
+    "coordinate",
+    "text",
+    "keys",
+    "scrollDelta",
+    "intent",
+    "requiresSemanticVerification",
+    "effectClass"
+  ]
+}

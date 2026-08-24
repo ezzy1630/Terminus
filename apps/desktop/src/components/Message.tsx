@@ -22,6 +22,8 @@ import { memo, useMemo, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { cn } from "../lib/cn";
 import type { ConversationMessage } from "../types";
+import { Button } from "../ui/Button";
+import { ContextMenu } from "../ui/Menu";
 
 interface MessageProps {
   message: ConversationMessage;
@@ -76,8 +78,8 @@ function renderInline(text: string, keyBase: string): JSX.Element[] {
       return (
         <code
           key={`${keyBase}-${i}`}
-          className="rounded bg-hover px-1 py-0.5 font-mono text-primary"
-          style={{ fontSize: "0.92em" }}
+          className="rounded bg-hover px-1 py-0.5 font-mono text-primary text-xs"
+
         >
           {t.content}
         </code>
@@ -102,12 +104,7 @@ function renderProse(text: string, keyBase: string): JSX.Element[] {
     return (
       <p
         key={`${keyBase}-p-${pi}`}
-        className="text-primary"
-        style={{
-          fontSize: "var(--font-size-md)",
-          lineHeight: "var(--line-height-relaxed)" as unknown as string,
-          marginBottom: 12,
-        }}
+        className="ui-prose mb-3 text-primary last:mb-0"
       >
         {lines.map((line, li) => (
           <span key={`${keyBase}-p-${pi}-l-${li}`}>
@@ -122,54 +119,46 @@ function renderProse(text: string, keyBase: string): JSX.Element[] {
 
 function MessageImpl({ message }: MessageProps): JSX.Element {
   const segments = useMemo(() => parseSegments(message.content), [message.content]);
-  const [copiedSegment, setCopiedSegment] = useState<number | null>(null);
+  const [copyState, setCopyState] = useState<{ segment: number; status: "copied" | "failed" } | null>(null);
 
   const copyCode = async (content: string, segment: number): Promise<void> => {
-    await navigator.clipboard.writeText(content.replace(/\n$/, ""));
-    setCopiedSegment(segment);
-    window.setTimeout(() => setCopiedSegment((current) => current === segment ? null : current), 1400);
+    try {
+      await navigator.clipboard.writeText(content.replace(/\n$/, ""));
+      setCopyState({ segment, status: "copied" });
+    } catch {
+      setCopyState({ segment, status: "failed" });
+    }
+    window.setTimeout(() => setCopyState((current) => current?.segment === segment ? null : current), 1600);
   };
+  const contextItems = [{
+    id: "copy-message",
+    label: "Copy message",
+    onSelect: () => void navigator.clipboard?.writeText(message.content),
+  }] as const;
 
   if (message.role === "user") {
     // Restrained low-contrast rounded surface.
     return (
-      <div className="selectable my-3">
+      <ContextMenu items={contextItems}>
+      <div className="selectable my-2.5 flex justify-end">
         <div
-          className="rounded-md border border-subtle px-4 py-3 text-primary"
-          style={{ background: "var(--bg-elevated)" }}
+          className="max-w-[80%] rounded-lg border border-subtle bg-card px-3.5 py-2.5 text-primary"
         >
           <div
-            className="mb-1 text-xs uppercase tracking-wide text-tertiary"
-            style={{ fontSize: "var(--font-size-xs)" }}
-          >
-            You
-          </div>
-          <div
-            className="whitespace-pre-wrap"
-            style={{ fontSize: "var(--font-size-md)", lineHeight: "var(--line-height-relaxed)" as unknown as string }}
+            className="ui-prose whitespace-pre-wrap"
           >
             {message.content}
           </div>
         </div>
-        <div
-          className="mt-1 px-1 text-xs text-tertiary"
-          style={{ fontSize: "var(--font-size-xs)" }}
-        >
-          {new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-        </div>
       </div>
+      </ContextMenu>
     );
   }
 
   // Agent response — clean text directly on canvas.
   return (
-    <div className="selectable my-4">
-      <div
-        className="mb-2 text-xs uppercase tracking-wide text-tertiary"
-        style={{ fontSize: "var(--font-size-xs)" }}
-      >
-        Terminus
-      </div>
+    <ContextMenu items={contextItems}>
+    <div className="selectable my-3.5">
       {segments.map((seg, i) => {
         if (seg.kind === "code") {
           return (
@@ -179,21 +168,22 @@ function MessageImpl({ message }: MessageProps): JSX.Element {
                 "code-surface selectable group my-3 overflow-hidden rounded-md border border-subtle",
               )}
             >
-              <div className="code-toolbar flex h-8 items-center justify-between border-b border-subtle px-3">
-                <span className="font-mono text-tertiary" style={{ fontSize: "var(--font-size-xs)" }}>
+              <div className="code-toolbar flex h-7 items-center justify-between border-b border-subtle px-2.5">
+                <span className="font-mono text-tertiary text-xs" >
                   {seg.lang || "code"}
                 </span>
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="sm"
                   className="code-copy flex h-7 items-center gap-1.5 rounded-md px-2 text-tertiary hover:bg-hover hover:text-primary"
                   onClick={() => void copyCode(seg.content, i)}
-                  aria-label={copiedSegment === i ? "Copied code" : "Copy code"}
+                  aria-label={copyState?.segment === i && copyState.status === "copied" ? "Copied code" : copyState?.segment === i && copyState.status === "failed" ? "Copy failed" : "Copy code"}
                 >
-                  {copiedSegment === i ? <Check size={13} /> : <Copy size={13} />}
-                  <span style={{ fontSize: "var(--font-size-xs)" }}>{copiedSegment === i ? "Copied" : "Copy"}</span>
-                </button>
+                  {copyState?.segment === i && copyState.status === "copied" ? <Check size={13} /> : <Copy size={13} />}
+                  <span className="text-xs">{copyState?.segment === i ? (copyState.status === "copied" ? "Copied" : "Try again") : "Copy"}</span>
+                </Button>
               </div>
-              <pre className="overflow-x-auto rounded-none border-0 px-4 py-3" style={{ fontSize: "var(--font-size-sm)", lineHeight: 1.55 }}>
+              <pre className="overflow-x-auto rounded-none border-0 px-3 py-2.5 text-xs leading-5">
                 <code>{seg.content.replace(/\n$/, "")}</code>
               </pre>
             </div>
@@ -207,12 +197,12 @@ function MessageImpl({ message }: MessageProps): JSX.Element {
       })}
       {message.streaming ? (
         <span
-          className="ml-1 inline-block animate-pulse text-secondary"
-          aria-label="streaming"
-          style={{ width: 6, height: 14, background: "var(--text-secondary)" }}
+          className="streaming-caret ml-1 inline-block"
+          aria-label="Response in progress"
         />
       ) : null}
     </div>
+    </ContextMenu>
   );
 }
 

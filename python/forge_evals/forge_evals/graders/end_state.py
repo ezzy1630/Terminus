@@ -240,6 +240,7 @@ class TestRunGrader(EndStateGrader):
 
     grader_id = "end_state.test_run"
     grader_version = "0.1.0"
+    __test__ = False
 
     def __init__(
         self,

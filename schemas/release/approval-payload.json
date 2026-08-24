@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://terminus.dev/schemas/release/approval-payload.json",
+  "title": "ReleaseApprovalPayload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "role",
+    "identity",
+    "candidate_commit",
+    "release_version",
+    "evidence_manifest_sha256",
+    "issued_at",
+    "expires_at"
+  ],
+  "properties": {
+    "schema": { "const": "terminus.release-approval.v1" },
+    "role": {
+      "enum": [
+        "release_owner",
+        "security_owner",
+        "protocol_owner",
+        "evaluation_owner"
+      ]
+    },
+    "identity": { "type": "string", "minLength": 1 },
+    "candidate_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+    },
+    "release_version": { "type": "string", "minLength": 1 },
+    "evidence_manifest_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" }
+  }
+}

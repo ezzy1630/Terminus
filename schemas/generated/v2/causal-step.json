@@ -1,0 +1,77 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/causal-step.json",
+  "title": "CausalStep",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "stepIndex": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "component": {
+      "type": "string",
+      "minLength": 1
+    },
+    "inputManifestHash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "modelOutputHash": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "effectId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "verifierResult": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "durationMs": {
+      "type": "number",
+      "minimum": 0
+    },
+    "counterfactualAlternative": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "stepIndex",
+    "component",
+    "inputManifestHash",
+    "modelOutputHash",
+    "effectId",
+    "verifierResult",
+    "durationMs",
+    "counterfactualAlternative"
+  ],
+  "additionalProperties": false
+}

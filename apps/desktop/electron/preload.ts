@@ -5,40 +5,69 @@
  * existing typed interfaces. Do not move harness logic into React components
  * or Electron renderer code."
  *
- * The preload exposes three IPC bridges so the renderer can:
+ * The preload exposes one constrained presentation bridge so the renderer can:
  *
  *   1. `terminusDesktop` — read the Terminus API base URL, platform info, send
  *      native notifications, control the window, and read/set the theme.
  *
- *   2. `terminusTerminal` — spawn/write/resize/kill PTY sessions and receive
- *      their output stream (SPEC §15). Backed by `node-pty` in the main
- *      process. The renderer attaches each session to an xterm.js Terminal
- *      instance.
  *
- *   3. `terminusDesktop.getScreenSources` — request desktopCapturer sources for
- *      the computer-use PiP (SPEC §16).
+ * Process execution, workspace filesystem access, and computer-use capture
+ * are intentionally absent. Those effects require kernel-backed contracts.
  *
  * All harness logic stays in the Rust kernel + TS control plane. The renderer
  * uses @terminus/public-client to talk to the control plane over HTTP/SSE.
  */
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
-const TERMINUS_API_BASE = process.env.TERMINUS_API_BASE ?? "http://127.0.0.1:3050";
-const TERMINUS_GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
-// No hardcoded fallback token: the well-known dev token must only be in play
-// when the operator actually configured it (TERMINUS_DEV=1 environments set
-// TERMINUS_TOKEN/TERMINUS_CONTROL_TOKEN explicitly). Production fails closed
-// at the control plane, and a baked-in constant would hand every renderer
-// (and anything it loads) a bearer credential.
-const TERMINUS_TOKEN = process.env.TERMINUS_TOKEN ?? process.env.TERMINUS_CONTROL_TOKEN ?? "";
+function requireLocalOrigin(value: string, variable: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${variable} must be a valid URL`);
+  }
+  const port = Number(url.port);
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost";
+  if (
+    url.protocol !== "http:"
+    || !loopback
+    || url.username
+    || url.password
+    || url.pathname !== "/"
+    || url.search
+    || url.hash
+    || url.port.length === 0
+    || !Number.isInteger(port)
+    || port < 1
+    || port > 65_535
+    || url.origin !== value.replace(/\/$/, "")
+  ) {
+    throw new Error(`${variable} must name an approved local Terminus origin`);
+  }
+  return url.origin;
+}
+
+const TERMINUS_API_BASE = requireLocalOrigin(
+  process.env.TERMINUS_API_BASE ?? "http://127.0.0.1:3050",
+  "TERMINUS_API_BASE",
+);
 const PLATFORM = process.platform;
+
+type WindowBounds = { x: number; y: number; width: number; height: number };
+type DesktopCommandId =
+  | "command-palette"
+  | "open-project"
+  | "settings"
+  | "shortcut-reference"
+  | "new-task"
+  | "show-changes"
+  | "toggle-inspector"
+  | "toggle-sidebar";
 
 // ────────────────────────── terminusDesktop ─────────────────────────────────────
 
 contextBridge.exposeInMainWorld("terminusDesktop", {
   apiBase: TERMINUS_API_BASE,
-  gateway: TERMINUS_GATEWAY,
-  token: TERMINUS_TOKEN,
   platform: PLATFORM,
   isMac: PLATFORM === "darwin",
   // Native notification bridge (SPEC §5: "Use native notifications only when
@@ -53,52 +82,40 @@ contextBridge.exposeInMainWorld("terminusDesktop", {
   getTheme: (): Promise<"system" | "light" | "dark"> => ipcRenderer.invoke("theme:get"),
   setTheme: (theme: "system" | "light" | "dark"): Promise<"system" | "light" | "dark"> =>
     ipcRenderer.invoke("theme:set", theme),
-  // Screen capture (SPEC §16 — computer-use PiP).
-  getScreenSources: (): Promise<Array<{ id: string; name: string; display_id?: string }>> =>
-    ipcRenderer.invoke("desktop:getScreenSources"),
   pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("desktop:pickDirectory"),
-});
-
-// ────────────────────────── terminusTerminal ────────────────────────────────────
-
-/**
- * PTY bridge. Each `spawn()` returns an opaque id; the renderer subscribes
- * to per-id `data` and `exit` events.
- *
- * The spawn response carries an `error` field when node-pty could not be
- * loaded (Linux sandbox without the native toolchain, missing prebuilt
- * binary, etc.). In that case the renderer falls back to the
- * StubTerminalSessionFactory so the drawer still renders a banner.
- */
-contextBridge.exposeInMainWorld("terminusTerminal", {
-  spawn: (
-    cwd?: string,
-    command?: string,
-    cols?: number,
-    rows?: number,
-  ): Promise<{ id: string; label: string; cwd?: string; error?: string }> =>
-    ipcRenderer.invoke("terminusTerminal:spawn", { cwd, command, cols, rows }),
-  write: (termId: string, data: string): Promise<void> =>
-    ipcRenderer.invoke("terminusTerminal:write", termId, data),
-  resize: (termId: string, cols: number, rows: number): Promise<void> =>
-    ipcRenderer.invoke("terminusTerminal:resize", termId, cols, rows),
-  kill: (termId: string): Promise<void> =>
-    ipcRenderer.invoke("terminusTerminal:kill", termId),
-  // Per-id event listeners. Returns an unsubscribe.
-  onData: (termId: string, cb: (data: string) => void): (() => void) => {
-    const channel = `terminusTerminal:data:${termId}`;
-    const listener = (_e: IpcRendererEvent, data: string): void => cb(data);
-    ipcRenderer.on(channel, listener);
+  validateDirectoryDrop: (path: string): Promise<string | null> =>
+    ipcRenderer.invoke("desktop:validateDirectoryDrop", path),
+  onDirectoryDrop: (callback: (path: string) => void): (() => void) => {
+    const allowDrop = (event: DragEvent): void => {
+      if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+    };
+    const listener = (event: DragEvent): void => {
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      const candidate = files[0] as (File & { path?: unknown }) | undefined;
+      if (files.length !== 1 || typeof candidate?.path !== "string") return;
+      event.preventDefault();
+      void ipcRenderer.invoke("desktop:validateDirectoryDrop", candidate.path).then((path: unknown) => {
+        if (typeof path === "string") callback(path);
+      });
+    };
+    document.addEventListener("dragover", allowDrop, true);
+    document.addEventListener("drop", listener, true);
     return () => {
-      ipcRenderer.removeListener(channel, listener);
+      document.removeEventListener("dragover", allowDrop, true);
+      document.removeEventListener("drop", listener, true);
     };
   },
-  onExit: (termId: string, cb: (exitCode: number) => void): (() => void) => {
-    const channel = `terminusTerminal:exit:${termId}`;
-    const listener = (_e: IpcRendererEvent, code: number): void => cb(code);
-    ipcRenderer.on(channel, listener);
-    return () => {
-      ipcRenderer.removeListener(channel, listener);
-    };
+  onCommand: (callback: (commandId: DesktopCommandId) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, commandId: DesktopCommandId): void => callback(commandId);
+    ipcRenderer.on("terminus:command", listener);
+    return () => ipcRenderer.removeListener("terminus:command", listener);
+  },
+  setWindowTitle: (title: string): Promise<string> => ipcRenderer.invoke("window:setTitle", title),
+  getWindowBounds: (): Promise<WindowBounds | null> => ipcRenderer.invoke("window:getBounds"),
+  setWindowBounds: (bounds: WindowBounds): Promise<WindowBounds> => ipcRenderer.invoke("window:setBounds", bounds),
+  onWindowBoundsChange: (callback: (bounds: WindowBounds) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, bounds: WindowBounds): void => callback(bounds);
+    ipcRenderer.on("terminus:window-bounds", listener);
+    return () => ipcRenderer.removeListener("terminus:window-bounds", listener);
   },
 });

@@ -49,13 +49,15 @@ def generate_comparison_dashboard_html(
             f"<td><code>{s.cohort}</code></td>"
             f"<td><strong>{s.harness}</strong></td>"
             f"<td>{s.n}</td>"
-            f"<td>{sr_pct:.1f}% ({s.success_rate_ci_low*100:.1f}% - {s.success_rate_ci_high*100:.1f}%)</td>"
+            f"<td>{sr_pct:.1f}% ({s.success_rate_ci_low * 100:.1f}% - {s.success_rate_ci_high * 100:.1f}%)</td>"
             f"<td>{s.mean_score:.3f}</td>"
             f"<td>${s.p50_cost_usd:.4f}</td>"
             f"<td>{s.median_duration_seconds:.1f}s</td>"
             f"</tr>"
         )
-    sum_table = "\n".join(sum_rows) if sum_rows else "<tr><td colspan='7'>No runs recorded</td></tr>"
+    sum_table = (
+        "\n".join(sum_rows) if sum_rows else "<tr><td colspan='7'>No runs recorded</td></tr>"
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">

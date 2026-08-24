@@ -27,7 +27,7 @@ verified_successful_tasks
 model_cost + compute_cost + elapsed_time_cost + human_attention
 ```
 
-The denominator MUST be reported as separate components as well as any composite. "Verified" requires verification evidence linked to the task's acceptance criteria (SPEC §17, §40). The product dashboard MUST include final/first-patch success, acceptance-criterion coverage, regression rate, changed-line/file excess, user corrections/approvals, token breakdown (input/output/cached/reasoning/tool-schema), context compilation overhead, latency, restart/resume success, unsafe attempts/policy denials/sandbox escapes, stale-context/stale-write incidents, plugin/MCP descriptor changes, upstream divergence, and feature-specific contribution through ablation or replay.
+The denominator MUST be reported as separate components as well as any composite. "Verified" requires verification evidence linked to the task's acceptance criteria (SPEC §17, §40). The product dashboard MUST include final/first-patch success, acceptance-criterion coverage, regression rate, changed-line/file excess, user corrections/approvals, token breakdown (input/output/cached/reasoning/tool-schema), context compilation overhead, latency, restart/resume success, unsafe attempts/policy denials/sandbox escapes, stale-context/stale-write incidents, plugin/MCP descriptor changes, external-integration maintenance cost, and feature-specific contribution through ablation or replay.
 
 **No single aggregate score may conceal a safety regression.**
 

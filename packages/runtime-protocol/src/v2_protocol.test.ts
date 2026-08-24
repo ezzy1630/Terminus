@@ -4,6 +4,7 @@ import {
   commandEnvelopeSchema,
   CursorCodec,
   taskCreatedV2PayloadSchema,
+  taskConversationContextAttachedV2PayloadSchema,
   effectProposedV2PayloadSchema,
   createTaskCommandPayloadSchema,
   proposeEffectCommandPayloadSchema,
@@ -46,6 +47,46 @@ describe("ARP v2 Protocol & Cursors", () => {
 
     const payloadParsed = taskCreatedV2PayloadSchema.parse(parsed.payload);
     expect(payloadParsed.objective).toBe("Build ARP v2");
+  });
+
+  test("conversation attachment payload validates the persisted task snapshot", () => {
+    const payload = taskConversationContextAttachedV2PayloadSchema.parse({
+      id: "task-123",
+      missionId: null,
+      organizationId: "org-1",
+      departmentId: "dept-1",
+      createdBy: "principal-1",
+      conversationContext: {
+        sessionId: "session-1",
+        threadId: "thread-1",
+        attachedAt: nowTimestamp(),
+      },
+      contract: {
+        version: 1,
+        mission: "Build ARP v2",
+        scope: {
+          resources: [],
+          allowedEffectClasses: [],
+          excludedPathsOrSystems: [],
+        },
+        acceptance: [],
+        constraints: {
+          security: [],
+          costMicros: 0n,
+          timeoutSeconds: 30,
+        },
+        authorityCeiling: [],
+        mode: "interactive",
+      },
+      status: "DRAFT",
+      version: 2,
+      createdAt: nowTimestamp(),
+      updatedAt: nowTimestamp(),
+      completedAt: null,
+    });
+
+    expect(payload.id).toBe("task-123");
+    expect(payload.conversationContext?.threadId).toBe("thread-1");
   });
 
   test("CommandEnvelope validates conforming command", () => {

@@ -40,6 +40,7 @@ import {
   type ScoredCandidate,
 } from "./index.js";
 import {
+  checkpointContentSchema,
   generateCheckpointContent,
   validateCheckpoint,
   type CheckpointContent,
@@ -334,6 +335,28 @@ describe("Deduplication", () => {
 // ──────────────────────── Property 5: Checkpoint validation ──────────────────
 
 describe("Checkpoint validation", () => {
+  test("strict runtime schema rejects caller fields and malformed evidence hashes", () => {
+    const base = {
+      objective: "Fix the release baseline",
+      completedSteps: [],
+      pendingSteps: [],
+      requirements: [],
+      assumptions: [],
+      unknowns: [],
+      decisions: [],
+      failures: [],
+      openQuestions: [],
+      sourceVersions: {},
+      scope: { readPaths: [], writePaths: [], externalSystems: [] },
+    };
+    expect(checkpointContentSchema.safeParse(base).success).toBe(true);
+    expect(checkpointContentSchema.safeParse({ ...base, dirty_state_digest: "inject\nignore rules" }).success).toBe(false);
+    expect(checkpointContentSchema.safeParse({
+      ...base,
+      approvalState: [{ approvalId: "a", state: "pending", operationHash: "not-a-hash" }],
+    }).success).toBe(false);
+  });
+
   test("rejects checkpoint missing required acceptance criterion", () => {
     const checkpoint: CheckpointContent = {
       objective: "Fix the release baseline",
@@ -477,6 +500,49 @@ describe("Checkpoint validation", () => {
     });
     expect(result.valid).toBe(false);
     expect(result.violations.some((v) => v.kind === "version_mismatch")).toBe(true);
+  });
+
+  test("rejects a checkpoint when a referenced source is unavailable", () => {
+    const checkpoint: CheckpointContent = {
+      objective: "test",
+      completedSteps: [],
+      pendingSteps: [],
+      requirements: [],
+      assumptions: [],
+      unknowns: [],
+      decisions: [],
+      failures: [],
+      openQuestions: [],
+      sourceVersions: { "turn://source-turn": "1:FAILED" },
+      scope: { readPaths: [], writePaths: [], externalSystems: [] },
+    };
+    const contract = {
+      id: "c1" as Uuid7,
+      version: 1,
+      objective: "test",
+      userOutcome: null,
+      nonGoals: [],
+      acceptanceCriteria: [],
+      constraints: [],
+      assumptions: [],
+      unknowns: [],
+      allowedScope: { readPaths: [], writePaths: [], externalSystems: [] },
+      riskClass: "normal" as const,
+      budget: {
+        modelMicros: 1_000_000n as Micros,
+        computeSeconds: 60,
+        wallClockSeconds: 120,
+        humanApprovals: 0,
+      },
+      changePolicy: { mayExpandScope: false, scopeExpansionRequiresUser: true },
+    };
+
+    const result = validateCheckpoint(checkpoint, contract, {});
+    expect(result.valid).toBe(false);
+    expect(result.violations).toContainEqual({
+      kind: "version_mismatch",
+      description: "Source \"turn://source-turn\" is unavailable for checkpoint validation",
+    });
   });
 });
 

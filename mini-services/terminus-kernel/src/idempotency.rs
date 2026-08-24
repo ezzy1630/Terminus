@@ -1,5 +1,5 @@
 //! Small in-memory idempotency dedup. SPEC §30.5 mandates that mutating
-//! requests accept an `x-idempotency-key` header. The kernel does not yet
+//! requests accept an `Idempotency-Key` header. The kernel does not yet
 //! have a full SQLite-backed idempotency store; this map deduplicates
 //! in-flight requests with the same key + normalized body hash and returns
 //! the same response.

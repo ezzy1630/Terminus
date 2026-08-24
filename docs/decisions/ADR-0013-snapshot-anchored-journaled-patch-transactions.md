@@ -54,7 +54,7 @@ High. Stale-write prevention (SPEC §26.3 #5) requires snapshot anchoring. Path 
 
 ## Migration
 
-The patch engine is introduced in M5 (SPEC §48.8). OpenCode's edit operations are routed through it (ADR-0002). The minimal baseline (ADR-0025) uses the same engine.
+The patch engine is introduced in M5 (SPEC §48.8). Every Terminus edit operation routes through it. The minimal baseline (ADR-0025) uses the same engine.
 
 ## Rollback
 

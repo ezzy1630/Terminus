@@ -34,9 +34,9 @@
 
 <!-- How is this rolled back? Is it behind a flag? What is the migration direction? -->
 
-## Upstream divergence impact
+## Standalone dependency impact
 
-<!-- If you touched inherited OpenCode files, by how much did the divergence budget change? Did you update upstream/divergence-budget.yaml and docs/security/effect-bypass-register.yaml? -->
+<!-- Does this add or change an external-harness dependency? Confirm `just standalone-check` or explain why it does not apply. -->
 
 ---
 

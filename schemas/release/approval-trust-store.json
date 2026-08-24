@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://terminus.dev/schemas/release/approval-trust-store.json",
+  "title": "ReleaseApprovalTrustStore",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "keys"],
+  "properties": {
+    "schema": { "const": "terminus.release-approval-trust.v1" },
+    "keys": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key_id",
+          "algorithm",
+          "identity",
+          "roles",
+          "public_key_pem"
+        ],
+        "properties": {
+          "key_id": { "type": "string", "minLength": 1 },
+          "algorithm": { "const": "ed25519" },
+          "identity": { "type": "string", "minLength": 1 },
+          "roles": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "release_owner",
+                "security_owner",
+                "protocol_owner",
+                "evaluation_owner"
+              ]
+            }
+          },
+          "public_key_pem": { "type": "string", "minLength": 1 },
+          "not_before": { "type": "string", "format": "date-time" },
+          "not_after": { "type": "string", "format": "date-time" },
+          "revoked": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
