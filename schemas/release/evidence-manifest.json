@@ -21,7 +21,9 @@
     "generated_at": { "type": "string", "format": "date-time" },
     "artifacts": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 12,
+      "maxItems": 12,
+      "uniqueItems": true,
       "items": {
         "type": "object",
         "additionalProperties": false,

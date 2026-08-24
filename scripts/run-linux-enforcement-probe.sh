@@ -59,6 +59,9 @@ if [[ -n "$release_version" || -n "$release_commit" ]]; then
   jq --arg commit "$release_commit" --arg version "$release_version" \
     '. + {candidate_commit: $commit, release_version: $version}' \
     "$report" >"$identity_report"
+  # The probe may run under sudo while the evidence producer runs as the
+  # workflow user. Make the hand-off readable before the atomic rename.
+  chmod 0644 "$identity_report"
   mv "$identity_report" "$report"
 fi
 

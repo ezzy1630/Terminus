@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 /**
- * acp-config.ts — scaffold editor and t3code Agent Client Protocol (ACP) configs.
+ * acp-config.ts — scaffold editor configs for the Terminus custom JSON-RPC bridge.
  *
  * Emits copy-pasteable configuration blocks for connecting external editors
- * (t3code, VS Code, Cursor, Zed, Neovim) to the Terminus IDE-ACP bridge.
+ * (t3code, VS Code, Cursor, Zed, Neovim) to the Terminus IDE bridge. The
+ * generated bridge is JSON-RPC-over-stdio and is not ACP v1 compatible.
  *
  * Usage:
  *   bun run tools/scaffold/acp-config.ts
@@ -17,11 +18,13 @@ const ACP_SCRIPT = join(ROOT, "apps", "ide-acp", "src", "index.ts");
 
 const t3codeConfig = {
   name: "Terminus Operator",
-  type: "acp",
+  type: "custom",
+  protocol: "terminus-json-rpc",
   command: "bun",
   args: [ACP_SCRIPT],
   env: {
     TERMINUS_GATEWAY: "http://127.0.0.1:81",
+    TERMINUS_TOKEN: "${TERMINUS_TOKEN}",
   },
   features: {
     contextSync: true,
@@ -32,18 +35,22 @@ const t3codeConfig = {
 };
 
 const vscodeConfig = {
-  "terminus.acp.command": "bun",
-  "terminus.acp.args": [ACP_SCRIPT],
-  "terminus.acp.gateway": "http://127.0.0.1:81",
-  "terminus.acp.autoSyncContext": true,
+  "terminus.bridge.command": "bun",
+  "terminus.bridge.args": [ACP_SCRIPT],
+  "terminus.bridge.gateway": "http://127.0.0.1:81",
+  "terminus.bridge.protocol": "terminus-json-rpc",
+  "terminus.bridge.autoSyncContext": true,
 };
 
 const zedConfig = {
-  lsp: {
-    "terminus-acp": {
-      binary: {
-        path: "bun",
-        arguments: [ACP_SCRIPT],
+  agent_servers: {
+    "Terminus JSON-RPC bridge": {
+      type: "custom",
+      command: "bun",
+      args: [ACP_SCRIPT],
+      env: {
+        TERMINUS_GATEWAY: "http://127.0.0.1:81",
+        TERMINUS_TOKEN: "${TERMINUS_TOKEN}",
       },
     },
   },
@@ -54,7 +61,7 @@ function main(): void {
   const writeVscode = args.includes("--write-vscode");
 
   console.log("==================================================================");
-  console.log(" Terminus Agent Client Protocol (ACP) Configuration Generator");
+  console.log(" Terminus custom JSON-RPC bridge Configuration Generator");
   console.log("==================================================================\n");
 
   console.log("1. t3code Configuration (~/Library/Application Support/t3code/agents.json or t3code.json):");
@@ -79,8 +86,11 @@ function main(): void {
     if (existsSync(settingsPath)) {
       try {
         current = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
-      } catch {
-        current = {};
+      } catch (error: unknown) {
+        throw new Error(
+          `[acp-config] refusing to overwrite ${settingsPath}: expected valid JSON (JSONC comments/trailing commas are not rewritten)`,
+          { cause: error },
+        );
       }
     }
     Object.assign(current, vscodeConfig);

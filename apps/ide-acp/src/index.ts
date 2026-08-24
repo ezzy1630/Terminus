@@ -8,10 +8,10 @@
  * identifiers into resume metadata. The ACP adapter is NOT privileged — it
  * calls the public API and receives no direct filesystem authority.
  *
- * This is the scaffold. It implements the ACP-over-stdio JSON-RPC bridge:
- * the editor speaks ACP on stdin/stdout; this adapter translates to Terminus
- * public API calls. A full ACP implementation (with editor-native approval
- * prompts, patch preview, diagnostics push) is the next milestone.
+ * This is a custom JSON-RPC-over-stdio bridge. It is intentionally not labeled
+ * as ACP v1: the method names and initialize result are Terminus-specific.
+ * A standards-compliant ACP adapter (with editor-native approval prompts,
+ * patch preview, and diagnostics push) is a separate milestone.
  *
  * Usage:
  *   Configure your editor's ACP client to launch:

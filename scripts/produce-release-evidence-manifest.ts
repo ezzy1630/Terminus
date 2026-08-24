@@ -179,6 +179,15 @@ export function parseReleaseEvidenceManifest(value: unknown): ReleaseEvidenceMan
     requiredString(manifest, "release_version", "release evidence manifest"),
     "release evidence manifest.release_version",
   );
+  const expectedKeys = new Set<string>(MANIFEST_BOUND_EVIDENCE.map((entry) => entry.key));
+  const actualKeys = new Set(artifacts.map((entry) => entry.key));
+  const missingKeys = [...expectedKeys].filter((key) => !actualKeys.has(key));
+  const unexpectedKeys = [...actualKeys].filter((key) => !expectedKeys.has(key));
+  if (missingKeys.length > 0 || unexpectedKeys.length > 0) {
+    throw new Error(
+      `release evidence manifest must contain exactly the bound artifact keys (missing: ${missingKeys.join(", ") || "none"}; unexpected: ${unexpectedKeys.join(", ") || "none"})`,
+    );
+  }
   return {
     schema: "terminus.release-evidence-manifest.v1",
     candidate_commit: candidateCommit,
@@ -245,6 +254,11 @@ export function validateReleaseEvidenceManifest(
     errors.push("release evidence manifest release_version does not match the release candidate");
   }
   const entries = new Map(manifest.artifacts.map((entry) => [entry.key, entry]));
+  for (const entry of manifest.artifacts) {
+    if (!MANIFEST_BOUND_EVIDENCE.some((expected) => expected.key === entry.key)) {
+      errors.push(`release evidence manifest contains unexpected artifact ${entry.key}`);
+    }
+  }
   for (const expected of MANIFEST_BOUND_EVIDENCE) {
     const entry = entries.get(expected.key);
     if (!entry) {

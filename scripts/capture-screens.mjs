@@ -1,4 +1,9 @@
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const outputDir = process.env.TERMINUS_SCREENSHOT_DIR ?? process.cwd();
+const port = process.env.TERMINUS_DESKTOP_PORT ?? "5173";
+mkdirSync(outputDir, { recursive: true });
 
 async function run() {
   const versionRes = await fetch("http://127.0.0.1:9222/json/list");
@@ -50,13 +55,13 @@ async function run() {
   const capture = async (filename) => {
     const res = await send("Page.captureScreenshot", { format: "png" });
     const buffer = Buffer.from(res.result.data, "base64");
-    writeFileSync(`/Users/ezzyrappeport/.gemini/antigravity/brain/82e3fc43-df50-4704-9e78-102018f60e6c/${filename}`, buffer);
+    writeFileSync(join(outputDir, filename), buffer);
     console.log(`Saved ${filename}`);
   };
 
   // Wait for initial load
   await new Promise((r) => setTimeout(r, 1000));
-  await send("Page.navigate", { url: "http://localhost:5188/?mock=true" });
+  await send("Page.navigate", { url: `http://localhost:${port}/?mock=true` });
   await new Promise((r) => setTimeout(r, 1200));
 
   // Click on "Sessions" in Sidebar
