@@ -316,6 +316,7 @@ impl ConnectorBroker {
         let (scrubbed, redactions) = redactor.redact(&response_bytes);
 
         let outcome = match (&wire_error, status_code.unwrap_or(0)) {
+            (Some(ConnectorError::RequestNotDispatched(_)), _) => Outcome::NotDispatched,
             (Some(_), _) => Outcome::DispatchUncertain,
             (None, 200..=299) => Outcome::Accepted,
             (None, 400..=499) => Outcome::RejectedNonRetryable,
@@ -344,6 +345,10 @@ impl ConnectorBroker {
         };
 
         if let Some(e) = wire_error {
+            let message = match receipt.outcome {
+                Outcome::NotDispatched => "connector dispatch not dispatched",
+                _ => "connector dispatch uncertain",
+            };
             tracing::warn!(
                 target: "terminus_connector_audit",
                 grant_id = %receipt.grant_id,
@@ -355,7 +360,7 @@ impl ConnectorBroker {
                 response_bytes = receipt.response_bytes,
                 outcome = ?receipt.outcome,
                 consumed_at = consumed.consumed_at_unix,
-                "connector dispatch uncertain: {e}"
+                "{message}: {e}"
             );
         } else {
             tracing::info!(
@@ -419,7 +424,7 @@ async fn dispatch_https(
     } else {
         format!("https://{}:{}{}?{}", op.host, op.port, op.path, op.query)
     };
-    reserve_exact(egress, op.body.len())?;
+    reserve_request_exact(egress, op.body.len())?;
     let method = reqwest::Method::from_bytes(op.method.as_bytes())
         .map_err(|_| ConnectorError::Protocol("invalid HTTP method".to_string()))?;
     let credential_name = HeaderName::from_bytes(credential_header_name.as_bytes())
@@ -465,11 +470,12 @@ async fn dispatch_https(
 fn reserve_exact(egress: &EgressProxy, bytes: usize) -> Result<(), ConnectorError> {
     let requested = u64::try_from(bytes)
         .map_err(|_| ConnectorError::Protocol("byte count exceeds u64".to_string()))?;
-    let reserved = egress.relay(requested)?;
-    if reserved != requested {
-        return Err(terminus_egress::EgressError::ByteBudgetExceeded.into());
-    }
-    Ok(())
+    egress.reserve_exact(requested).map_err(Into::into)
+}
+
+fn reserve_request_exact(egress: &EgressProxy, bytes: usize) -> Result<(), ConnectorError> {
+    reserve_exact(egress, bytes)
+        .map_err(|error| ConnectorError::RequestNotDispatched(error.to_string()))
 }
 
 fn hash_bytes(data: &[u8]) -> String {
@@ -537,7 +543,7 @@ async fn dispatch_http(
     request.extend_from_slice(b"\r\n");
     request.extend_from_slice(&op.body);
 
-    reserve_exact(egress, request.len())?;
+    reserve_request_exact(egress, request.len())?;
     stream.write_all(&request).await?;
 
     // Read the bounded response head + body.

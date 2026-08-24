@@ -608,7 +608,16 @@ async fn capture_stream<R: tokio::io::AsyncRead + Unpin>(
         }
     }
     if read_failed {
-        tracing::warn!(stream = ?kind, cursor, "process output read failed; preserving partial artifact");
+        tracing::warn!(
+            stream = ?kind,
+            cursor,
+            "process output read failed; withholding incomplete artifact"
+        );
+        drop(spill_file.take());
+        if let Some(path) = spill_path.take() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        return None;
     }
     if let Some(path) = spill_path {
         if let Some(mut file) = spill_file {
@@ -810,6 +819,39 @@ mod tests {
             .await
             .expect("closed observers must still receive the complete artifact reference");
         assert_eq!(store.get(&artifact.sha256).unwrap(), expected.as_bytes());
+    }
+
+    struct ReadThenError {
+        emitted: bool,
+    }
+
+    impl tokio::io::AsyncRead for ReadThenError {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.emitted {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "fixture read failure",
+                )));
+            }
+            self.emitted = true;
+            buf.put_slice(b"partial output");
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn read_failure_withholds_incomplete_artifact() {
+        let (_dir, store) = store();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut reader = ReadThenError { emitted: false };
+
+        let artifact = capture_stream(&mut reader, &tx, &store, 32, StreamKind::Stdout).await;
+
+        assert!(artifact.is_none());
     }
 
     #[tokio::test]

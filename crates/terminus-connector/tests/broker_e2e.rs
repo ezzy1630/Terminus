@@ -16,7 +16,7 @@ const KEY: &[u8] = &[42u8; 32];
 const CREDENTIAL: &[u8] = b"canary-ghp_ABCDEF_1234567890";
 const SECRET_URI: &str = "secret://github/repo-read";
 
-fn egress_for_port(port: u16) -> EgressProxy {
+fn egress_for_port_with_limit(port: u16, max_total_bytes: u64) -> EgressProxy {
     let policy = EgressPolicy {
         default_deny: true,
         destinations: vec![DestinationPolicy {
@@ -30,9 +30,13 @@ fn egress_for_port(port: u16) -> EgressProxy {
         policy,
         RateLimit {
             bytes_per_second: 10_000_000,
-            max_total_bytes: 10_000_000,
+            max_total_bytes,
         },
     )
+}
+
+fn egress_for_port(port: u16) -> EgressProxy {
+    egress_for_port_with_limit(port, 10_000_000)
 }
 
 fn binding(port: u16) -> GrantBinding {
@@ -75,6 +79,27 @@ async fn fixture_stack() -> (ConnectorBroker, u16, TcpListener) {
         ConnectorBroker::builder(secret_broker, grants, Arc::new(egress_for_port(port)), KEY)
             .connector("fixture-api", AuthStyle::Bearer)
             .build();
+    (broker, port, listener)
+}
+
+async fn fixture_stack_with_budget(max_total_bytes: u64) -> (ConnectorBroker, u16, TcpListener) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let secret_broker = Arc::new(SecretBroker::new());
+    let provider = Arc::new(InMemoryProvider::new());
+    provider.register(SECRET_URI, CREDENTIAL.to_vec());
+    secret_broker.register_provider("github", provider);
+
+    let grants = Arc::new(GrantStore::new());
+    let broker = ConnectorBroker::builder(
+        secret_broker,
+        grants,
+        Arc::new(egress_for_port_with_limit(port, max_total_bytes)),
+        KEY,
+    )
+    .connector("fixture-api", AuthStyle::Bearer)
+    .build();
     (broker, port, listener)
 }
 
@@ -385,6 +410,19 @@ async fn egress_deny_blocks_before_consumption() {
         0,
         "refused dispatch must not consume the grant"
     );
+}
+
+#[tokio::test]
+async fn request_budget_failure_is_not_dispatched() {
+    let (broker, port, _listener) = fixture_stack_with_budget(1).await;
+    let grant = mint_grant(port);
+    let response = broker
+        .execute(&operation("/repos/acme/widget/pulls", port), &grant)
+        .await
+        .unwrap();
+
+    assert_eq!(response.receipt.outcome, Outcome::NotDispatched);
+    assert_eq!(response.receipt.status_code, None);
 }
 
 #[tokio::test]

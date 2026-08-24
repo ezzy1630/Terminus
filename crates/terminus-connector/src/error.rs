@@ -16,6 +16,8 @@ pub enum ConnectorError {
     BodyTooLarge { limit: usize, actual: usize },
     #[error("response exceeds bounded size {limit}: at least {actual} bytes")]
     ResponseTooLarge { limit: usize, actual: usize },
+    #[error("request was not dispatched: {0}")]
+    RequestNotDispatched(String),
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("io error: {0}")]

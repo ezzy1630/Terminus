@@ -130,6 +130,27 @@ impl EgressProxy {
         }
     }
 
+    /// Reserve an entire byte count without consuming a partial allowance.
+    /// This is for request boundaries where sending only part of a request is
+    /// not a valid dispatch. A failed reservation leaves the counter intact.
+    pub fn reserve_exact(&self, bytes: u64) -> Result<(), EgressError> {
+        loop {
+            let current = self.counter.bytes_transferred.load(Ordering::Acquire);
+            if bytes > self.rate_limit.max_total_bytes.saturating_sub(current) {
+                return Err(EgressError::ByteBudgetExceeded);
+            }
+            let next = current.saturating_add(bytes);
+            if self
+                .counter
+                .bytes_transferred
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
     pub fn bytes_transferred(&self) -> u64 {
         self.counter.bytes_transferred.load(Ordering::Relaxed)
     }
@@ -205,6 +226,25 @@ mod tests {
         assert_eq!(proxy.relay(60).unwrap(), 40);
         let err = proxy.relay(10).unwrap_err();
         assert!(matches!(err, EgressError::ByteBudgetExceeded));
+    }
+
+    #[test]
+    fn exact_reservation_does_not_consume_partial_budget() {
+        let proxy = EgressProxy::new(
+            policy(),
+            RateLimit {
+                bytes_per_second: 1_000_000,
+                max_total_bytes: 100,
+            },
+        );
+        assert_eq!(proxy.relay(60).unwrap(), 60);
+        assert!(matches!(
+            proxy.reserve_exact(50),
+            Err(EgressError::ByteBudgetExceeded)
+        ));
+        assert_eq!(proxy.bytes_transferred(), 60);
+        proxy.reserve_exact(40).unwrap();
+        assert_eq!(proxy.bytes_transferred(), 100);
     }
 
     #[test]
