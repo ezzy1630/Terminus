@@ -103,51 +103,68 @@ impl ProcessExtensionHost {
         // Write stdin from a worker thread: `write_all` parks while the child
         // refuses to read, and a request larger than the pipe buffer would
         // otherwise block before the wall-clock loop ever runs, making the
-        // timeout unenforceable. The channel lets us bound the wait; killing
-        // the child breaks the pipe and releases the writer.
+        // timeout unenforceable. The channel carries the write result so an
+        // early-closed stdin is not silently ignored. Fallible spawn keeps
+        // thread-exhaustion from panicking the host.
         let line = serde_json::to_string(request)?;
         let Some(mut stdin) = child.stdin.take() else {
             return Err(ExtensionError::Denied("stdin unavailable".into()));
         };
-        let (stdin_done_tx, stdin_done_rx) = std::sync::mpsc::channel();
-        let writer = std::thread::spawn(move || {
-            let result = (|| -> std::io::Result<()> {
-                stdin.write_all(line.as_bytes())?;
-                stdin.write_all(b"\n")?;
-                Ok(())
-            })();
-            // Dropping stdin closes the pipe so the child sees EOF.
-            let _ = stdin_done_tx.send(());
-            result
-        });
+        let writer = std::thread::Builder::new()
+            .name("ext-stdin-writer".into())
+            .spawn(move || {
+                let result = (|| -> std::io::Result<()> {
+                    stdin.write_all(line.as_bytes())?;
+                    stdin.write_all(b"\n")?;
+                    Ok(())
+                })();
+                // Dropping stdin closes the pipe so the child sees EOF.
+                result
+            });
+        let writer = match writer {
+            Ok(handle) => handle,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ExtensionError::Denied(format!(
+                    "failed to start stdin writer: {e}"
+                )));
+            }
+        };
 
         // Drain stdout on another thread so a chatty child cannot fill the
         // 64 KiB pipe and wedge itself while we are still in try_wait; the
-        // reader stops buffering one byte past the cap instead of reading
-        // everything first.
+        // reader stops at the cap instead of buffering past it.
         let max_output = self.limits.max_output_bytes;
         let stdout_rx = child.stdout.take().map(|out| {
             let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let mut buf: Vec<u8> = Vec::new();
-                let mut overflowed = false;
-                let mut reader = out;
-                let mut chunk = [0u8; 8192];
-                loop {
-                    match reader.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            buf.extend_from_slice(&chunk[..n]);
-                            if buf.len() > max_output {
-                                overflowed = true;
-                                break;
+            let spawned = std::thread::Builder::new()
+                .name("ext-stdout-reader".into())
+                .spawn(move || {
+                    let mut buf: Vec<u8> = Vec::with_capacity(max_output.min(64 * 1024));
+                    let mut overflowed = false;
+                    let mut reader = out;
+                    let mut chunk = [0u8; 8192];
+                    loop {
+                        match reader.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                // Copy only up to the remaining capacity so
+                                // the cap is enforced exactly, not one chunk
+                                // late.
+                                let remaining = max_output.saturating_sub(buf.len());
+                                if n > remaining {
+                                    buf.extend_from_slice(&chunk[..remaining]);
+                                    overflowed = true;
+                                    break;
+                                }
+                                buf.extend_from_slice(&chunk[..n]);
                             }
                         }
                     }
-                }
-                let _ = tx.send((buf, overflowed));
-            });
-            rx
+                    let _ = tx.send((buf, overflowed));
+                });
+            spawned.map(|_handle| rx)
         });
 
         let timeout = self.limits.wall_clock;
@@ -168,17 +185,27 @@ impl ProcessExtensionHost {
                 Err(e) => return Err(ExtensionError::Io(e)),
             }
         }
+        // The child has exited (or was killed); its stdin pipe is broken and
+        // the writer's outcome is final.
+        let write_result = writer.join().ok();
 
-        // The child is gone or its pipes will close shortly; both worker
-        // threads finish bounded work from here. Give them a short grace
-        // period so a stuck writer/reader cannot hang this host forever.
-        let grace = Duration::from_secs(5);
-        let _ = stdin_done_rx.recv_timeout(grace);
-        if writer.is_finished() {
-            let _ = writer.join();
-        }
+        // Bound the post-exit drain so the host always returns: normally the
+        // reader sees EOF immediately, but a forked descendant that inherited
+        // the stdout pipe can hold it open, so never wait beyond the
+        // remaining wall-clock budget plus a small fixed allowance.
+        let elapsed = start.elapsed();
+        let drain_budget = if elapsed < timeout {
+            (timeout - elapsed) + Duration::from_secs(2)
+        } else {
+            Duration::from_secs(2)
+        };
         let stdout = match stdout_rx {
-            Some(rx) => match rx.recv_timeout(grace) {
+            Some(Err(spawn_err)) => {
+                return Err(ExtensionError::Denied(format!(
+                    "failed to start stdout reader: {spawn_err}"
+                )));
+            }
+            Some(Ok(rx)) => match rx.recv_timeout(drain_budget) {
                 Ok((buf, overflowed)) => {
                     if overflowed {
                         return Err(ExtensionError::Denied(format!(
@@ -201,6 +228,20 @@ impl ProcessExtensionHost {
                 "extension timed out after {}ms",
                 timeout.as_millis()
             )));
+        }
+        // A failed stdin write means the extension never received the request;
+        // treating whatever it printed as a response would be fabrication.
+        match write_result {
+            Some(Ok(())) => {}
+            other => {
+                return Err(ExtensionError::Denied(format!(
+                    "extension did not accept the request: {}",
+                    match other {
+                        Some(Err(e)) => e.to_string(),
+                        _ => "writer lost".to_string(),
+                    }
+                )));
+            }
         }
 
         let text = String::from_utf8_lossy(&stdout);

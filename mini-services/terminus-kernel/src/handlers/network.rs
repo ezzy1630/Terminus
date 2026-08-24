@@ -135,6 +135,8 @@ pub async fn request(
         // memory one request at a time.
         const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         const RELAY_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        // Absolute ceiling on the whole response phase.
+        const RELAY_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
         const MAX_RELAY_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
         let target_addr = std::net::SocketAddr::new(*target_ip, port);
         let connect = tokio::time::timeout(
@@ -169,25 +171,38 @@ pub async fn request(
                     Ok(Ok(())) => {
                         bytes_relayed += http_req.len() as u64;
                         let mut resp_buf = Vec::new();
+                        // One absolute deadline for the entire response phase:
+                        // per-read deadlines alone would let a peer trickle
+                        // bytes just under the idle timeout forever.
+                        let read_deadline = tokio::time::Instant::now() + RELAY_TOTAL_TIMEOUT;
                         loop {
                             let mut chunk = [0u8; 16 * 1024];
                             let read =
-                                tokio::time::timeout(RELAY_IO_TIMEOUT, stream.read(&mut chunk))
+                                tokio::time::timeout_at(read_deadline, stream.read(&mut chunk))
                                     .await;
                             match read {
-                                Ok(Ok(0)) | Err(_) => break,
+                                Ok(Ok(0)) => break,
                                 Ok(Ok(n)) => {
                                     bytes_relayed += n as u64;
-                                    resp_buf.extend_from_slice(&chunk[..n]);
-                                    if resp_buf.len() > MAX_RELAY_RESPONSE_BYTES {
+                                    // Clamp to the cap so retention never
+                                    // overshoots by one chunk.
+                                    let remaining =
+                                        MAX_RELAY_RESPONSE_BYTES.saturating_sub(resp_buf.len());
+                                    if n > remaining {
+                                        resp_buf.extend_from_slice(&chunk[..remaining]);
                                         relay_note = Some(format!(
                                             "relay response exceeded {MAX_RELAY_RESPONSE_BYTES} bytes and was truncated"
                                         ));
                                         break;
                                     }
+                                    resp_buf.extend_from_slice(&chunk[..n]);
                                 }
                                 Ok(Err(e)) => {
                                     relay_note = Some(format!("relay read failed: {e}"));
+                                    break;
+                                }
+                                Err(_) => {
+                                    relay_note = Some("relay response timed out".to_string());
                                     break;
                                 }
                             }
