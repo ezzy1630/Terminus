@@ -66,11 +66,12 @@ the evidence listed in `Terminus — Research/implementation-reconciliation.md`.
   explicit request defaults
 - `9a678ba` — record final candidate validation evidence
 - `ef23012` — reconcile hosted gate status after the main merge
+- `2b15e33` — record dependency cleanup
 
 ### Remaining handoff
 
-The feature branch was merged into `main` at `885e426` and pushed. Main CI
-`32715959418` is green on `ef23012`; the hosted checkout fix executed across
+The feature branch was merged into `main` at `885e426` and pushed. Final main
+CI `32720031136` is green on `2b15e33`; the hosted checkout fix executed across
 the supported jobs. Dependabot PRs #1–#9 were closed as stale/superseded with
 regeneration instructions; regenerated PRs #11–#13 were closed after their
 red CI results showed frozen-lockfile or compatibility failures. No

@@ -15,8 +15,9 @@ implementation commit is `dc5a23f`, following the Cubic fixes in `ab9a5ac`,
 `16472f5`, `030f527`, `defc129`, `30068f6`, and `5cede5c`. Hosted run
 `32714614661` exercised the exact pushed candidate at `9a678ba`. The candidate
 was merged into `main` at `885e426`; the final evidence-doc follow-up is
-`ef23012`, and post-merge `main` run `32715959418` is green. All 24 addressed
-Cubic review threads are resolved.
+`ef23012`; dependency cleanup is recorded in `2b15e33`, and final main run
+`32720031136` is green on that head. All 24 addressed Cubic review threads are
+resolved.
 **Evidence rule:** implemented source, passing local checks, packaged-surface
 inspection, and release evidence are distinct states.
 
