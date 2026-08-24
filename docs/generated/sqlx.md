@@ -19,6 +19,7 @@ compatibility and emits this note so `codegen-check` can detect drift.
 | `0005_checkpoint_artifact_admission.sql` |
 | `0006_provider_configuration.sql` |
 | `0007_gateway_provider_configuration.sql` |
+| `0008_gateway_privacy_admission.sql` |
 
 If a future Rust crate adopts SQLx, replace this script with
 `cargo sqlx prepare --workspace --check` and emit the resulting

@@ -35,3 +35,4 @@ plugins:
       - esModuleInterop=true
       - outputJsonMethods=false
       - useOptionals=none
+      - include_wkt=false
