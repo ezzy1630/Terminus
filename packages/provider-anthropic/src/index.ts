@@ -52,6 +52,7 @@ export interface AnthropicToolSchema {
   readonly name: string;
   readonly description: string;
   readonly input_schema: Readonly<Record<string, unknown>>;
+  readonly cache_control?: { readonly type: "ephemeral" } | undefined;
 }
 
 export interface AnthropicRequestBody {
@@ -248,17 +249,21 @@ function renderMessages(input: CanonicalRenderInput): readonly AnthropicMessage[
       } catch {
         // use raw text
       }
-      messages.push({
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: toolUseId,
-            content: resultContent,
-            ...(isError ? { is_error: true } : {}),
-          },
-        ],
-      });
+      const block: AnthropicContentBlock = {
+        type: "tool_result",
+        tool_use_id: toolUseId,
+        content: resultContent,
+        ...(isError ? { is_error: true } : {}),
+      };
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg && lastMsg.role === "user" && Array.isArray(lastMsg.content)) {
+        (lastMsg.content as AnthropicContentBlock[]).push(block);
+      } else {
+        messages.push({
+          role: "user",
+          content: [block],
+        });
+      }
       continue;
     }
 
@@ -266,17 +271,21 @@ function renderMessages(input: CanonicalRenderInput): readonly AnthropicMessage[
       try {
         const raw = JSON.parse(fragmentText(f)) as Record<string, unknown>;
         if (raw && typeof raw === "object" && raw.protocol === "terminus.tool-call.v1" && typeof raw.provider_call_id === "string") {
-          messages.push({
-            role: "assistant",
-            content: [
-              {
-                type: "tool_use",
-                id: raw.provider_call_id,
-                name: String(raw.tool_name),
-                input: (raw.arguments as Record<string, unknown>) ?? {},
-              },
-            ],
-          });
+          const block: AnthropicContentBlock = {
+            type: "tool_use",
+            id: raw.provider_call_id,
+            name: String(raw.tool_name),
+            input: (raw.arguments as Record<string, unknown>) ?? {},
+          };
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg && lastMsg.role === "assistant" && Array.isArray(lastMsg.content)) {
+            (lastMsg.content as AnthropicContentBlock[]).push(block);
+          } else {
+            messages.push({
+              role: "assistant",
+              content: [block],
+            });
+          }
           continue;
         }
       } catch {
@@ -369,3 +378,5 @@ export function renderRequest(input: CanonicalRenderInput): Promise<RenderedProv
 }
 
 export * from "./model_profiles.js";
+export * from "./stream.js";
+

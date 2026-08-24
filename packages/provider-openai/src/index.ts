@@ -68,6 +68,43 @@ export interface OpenAiRequestBody {
   readonly metadata?: Readonly<Record<string, string>> | undefined;
 }
 
+// ────────────────────────── OpenAI Responses API wire shapes ─────────────────
+
+export interface OpenAiResponsesTool {
+  readonly type: "function";
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: Readonly<Record<string, unknown>>;
+  readonly strict?: boolean | undefined;
+}
+
+export interface OpenAiResponsesReasoningConfig {
+  readonly effort?: "minimal" | "low" | "medium" | "high" | undefined;
+  readonly summary?: "auto" | "none" | undefined;
+}
+
+export interface OpenAiResponsesInputItem {
+  readonly role?: "system" | "developer" | "user" | "assistant" | undefined;
+  readonly content?: string | undefined;
+  readonly type?: "message" | "function_call" | "function_call_output" | undefined;
+  readonly call_id?: string | undefined;
+  readonly output?: string | undefined;
+}
+
+export interface OpenAiResponsesRequestBody {
+  readonly model: string;
+  readonly input: string | readonly OpenAiResponsesInputItem[];
+  readonly tools?: readonly OpenAiResponsesTool[] | undefined;
+  readonly tool_choice?: "auto" | "none" | "required" | { readonly type: "function"; readonly name: string } | undefined;
+  readonly temperature?: number | undefined;
+  readonly max_output_tokens?: number | undefined;
+  readonly reasoning?: OpenAiResponsesReasoningConfig | undefined;
+  readonly store?: boolean | undefined;
+  readonly previous_response_id?: string | undefined;
+  readonly stream: true;
+  readonly metadata?: Readonly<Record<string, string>> | undefined;
+}
+
 // ────────────────────────── Renderer ─────────────────────────────────────────
 
 export class OpenAiRenderer extends BaseProviderRenderer {
@@ -355,12 +392,47 @@ export interface OpenAiTransport extends ProviderTransport {
   ): AsyncIterable<ProviderResponseChunk>;
 }
 
-/** Convenience entrypoint for tests/adapters: render a request body. */
+/** Convenience entrypoint for tests/adapters: render a chat-completions request body. */
 export function renderRequest(input: CanonicalRenderInput): Promise<RenderedProviderRequest> {
   const renderer = new OpenAiRenderer();
   return renderer.render(input);
 }
 
+/** Render a native OpenAI Responses API request body. */
+export async function renderResponsesRequest(input: CanonicalRenderInput): Promise<RenderedProviderRequest> {
+  const renderer = new OpenAiRenderer();
+  const rendered = await renderer.render(input);
+  const body = rendered.body as unknown as OpenAiRequestBody;
+  const responsesBody: OpenAiResponsesRequestBody = {
+    model: body.model,
+    input: body.messages as unknown as readonly OpenAiResponsesInputItem[],
+    stream: true,
+    ...(body.tools && body.tools.length > 0
+      ? {
+          tools: body.tools.map((t) => ({
+            type: "function" as const,
+            name: t.function.name,
+            description: t.function.description,
+            parameters: t.function.parameters,
+            strict: t.function.strict,
+          })),
+        }
+      : {}),
+    ...(body.max_output_tokens !== undefined ? { max_output_tokens: body.max_output_tokens } : {}),
+    ...(body.reasoning_effort !== undefined
+      ? { reasoning: { effort: body.reasoning_effort, summary: "auto" } }
+      : {}),
+    ...(body.previous_response_id !== undefined ? { previous_response_id: body.previous_response_id } : {}),
+    ...(body.store !== undefined ? { store: body.store } : {}),
+  };
+  return {
+    ...rendered,
+    body: responsesBody as unknown as Readonly<Record<string, unknown>>,
+  };
+}
+
 export type { ProviderRenderer, ProviderResponseChunk };
 
 export * from "./model_profiles.js";
+export * from "./stream.js";
+

@@ -270,6 +270,12 @@ impl KernelHandle {
                     grant_key.to_vec(),
                 )
                 .connector("opencode-gateway", terminus_connector::AuthStyle::Bearer)
+                .connector("openai-responses", terminus_connector::AuthStyle::Bearer)
+                .connector("openai-chat", terminus_connector::AuthStyle::Bearer)
+                .connector(
+                    "anthropic-messages",
+                    terminus_connector::AuthStyle::NamedHeader("x-api-key".into()),
+                )
                 .build();
                 ConnectorService::new(
                     Arc::new(broker),
