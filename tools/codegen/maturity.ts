@@ -166,7 +166,7 @@ function emit(registry: Registry): void {
   lines.push("| Component | Kind | Path | Tier | Basis |");
   lines.push("|---|---|---|---|---|");
   for (const c of sorted) {
-    const basis = c.basis.replace(/\|/g, "\\|").replace(/\s+/g, " ").trim();
+    const basis = c.basis.replaceAll("\\", "\\\\").replaceAll("|", "\\|").replace(/\s+/g, " ").trim();
     lines.push(`| \`${c.id}\` | ${c.kind} | \`${c.path}\` | \`${c.tier}\` | ${basis} |`);
   }
   lines.push("");

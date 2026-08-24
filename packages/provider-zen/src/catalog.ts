@@ -77,6 +77,12 @@ const EXPECTED_BASE_URLS: Readonly<Record<GatewayDeployment, string>> = {
   go: "https://opencode.ai/zen/go/v1",
 };
 
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
 export function parseAvailableModels(input: unknown): readonly AvailableModel[] {
   const root = record(input, "gateway model list");
   if (root.object !== "list" || !Array.isArray(root.data)) {
@@ -102,7 +108,9 @@ export function parseModelsDevCatalog(input: unknown): ModelsDevCatalog {
     const rawProvider = root[providerKey];
     if (rawProvider === undefined) continue;
     const provider = record(rawProvider, `Models.dev provider ${providerKey}`);
-    const api = nonEmptyString(provider.api, `Models.dev provider ${providerKey}.api`).replace(/\/+$/, "");
+    const api = trimTrailingSlashes(
+      nonEmptyString(provider.api, `Models.dev provider ${providerKey}.api`),
+    );
     const deployment = providerKey === "opencode" ? "zen" : "go";
     if (api !== EXPECTED_BASE_URLS[deployment]) {
       throw new Error(`Models.dev provider ${providerKey} has untrusted API base URL ${api}`);

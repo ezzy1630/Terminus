@@ -1735,6 +1735,10 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   sendJsonBuffer(res, status, buf);
 }
 
+function logInternalError(operation: string, error: unknown): void {
+  console.error(`[terminus-control] ${operation}`, error);
+}
+
 function sendError(
   res: ServerResponse,
   status: number,
@@ -4254,7 +4258,8 @@ const routes: Route[] = [
       });
       res.end(buf);
     } catch (err) {
-      sendError(res, 500, "ARTIFACT_FETCH_FAILED", String(err), "internal");
+      logInternalError("artifact fetch failed", err);
+      sendError(res, 500, "ARTIFACT_FETCH_FAILED", "artifact fetch failed", "internal");
     }
   }),
   route("GET", "/v1/artifacts/:hash/metadata", async (req, res, params) => {
@@ -4279,7 +4284,8 @@ const routes: Route[] = [
       });
       sendJson(res, 200, meta.artifact ?? { sha256: String(params.hash) });
     } catch (err) {
-      sendError(res, 500, "ARTIFACT_METADATA_FAILED", String(err), "internal");
+      logInternalError("artifact metadata fetch failed", err);
+      sendError(res, 500, "ARTIFACT_METADATA_FAILED", "artifact metadata fetch failed", "internal");
     }
   }),
 
@@ -4556,7 +4562,8 @@ const routes: Route[] = [
       });
       sendJson(res, 200, { ...r, jobId });
     } catch (err) {
-      sendError(res, 500, "JOB_STOP_FAILED", String(err), "internal");
+      logInternalError("job stop failed", err);
+      sendError(res, 500, "JOB_STOP_FAILED", "job stop failed", "internal");
     }
   }),
   // SPEC §32.2 — send input to a job's PTY. Forwards to the kernel
@@ -4581,7 +4588,8 @@ const routes: Route[] = [
       });
       sendJson(res, 200, { ...r, jobId });
     } catch (err) {
-      sendError(res, 500, "JOB_INPUT_FAILED", String(err), "internal");
+      logInternalError("job input failed", err);
+      sendError(res, 500, "JOB_INPUT_FAILED", "job input failed", "internal");
     }
   }),
 
@@ -4640,7 +4648,8 @@ const routes: Route[] = [
       });
       sendJson(res, 200, r);
     } catch (err) {
-      sendError(res, 500, "READ_FAILED", String(err), "internal");
+      logInternalError("file read failed", err);
+      sendError(res, 500, "READ_FAILED", "file read failed", "internal");
     }
   }),
   route("POST", "/v1/tools/patch", async (req, res) => {
@@ -4697,7 +4706,8 @@ const routes: Route[] = [
       });
       sendJson(res, 200, response);
     } catch (err) {
-      sendError(res, 500, "PATCH_FAILED", String(err), "internal");
+      logInternalError("patch failed", err);
+      sendError(res, 500, "PATCH_FAILED", "patch failed", "internal");
     }
   }),
   route("POST", "/v1/tools/exec", async (req, res) => {
@@ -4741,7 +4751,8 @@ const routes: Route[] = [
         : { process_id: "", job_id: "", resolved_executable: "" };
       sendJson(res, 200, r);
     } catch (err) {
-      sendError(res, 500, "EXEC_FAILED", String(err), "internal");
+      logInternalError("exec failed", err);
+      sendError(res, 500, "EXEC_FAILED", "exec failed", "internal");
     }
   }),
   route("POST", "/v1/tools/job", async (req, res) => {
@@ -4863,15 +4874,19 @@ const routes: Route[] = [
       });
       sendJson(res, 201, { ...kernelResult, jobId: controlJobId });
     } catch (err) {
+      logInternalError("job start failed", err);
       if (prepared) {
         const kernelJobId = kernelResult?.jobId;
         const processId = kernelResult?.processId;
+        const settlementError = kernelResult === null
+          ? "job start failed before kernel settlement"
+          : "job start outcome is unknown and requires reconciliation";
         await emit({
           eventType: kernelResult === null ? "job.failed" : "job.orphaned",
           aggregateType: "job",
           aggregateId: controlJobId,
           correlationId: body.task_id,
-          payload: { error: String(err), kernel_job_id: kernelJobId ?? null },
+          payload: { error: settlementError, kernel_job_id: kernelJobId ?? null },
         }, async (tx) => {
           await tx.job.update({
             where: { id: controlJobId },
@@ -4880,7 +4895,7 @@ const routes: Route[] = [
               processIdentityJson: kernelResult === null
                 ? null
                 : JSON.stringify({ kernelJobId, processId }),
-              exitJson: JSON.stringify({ error: String(err), settlement: kernelResult === null ? "failed" : "unknown" }),
+              exitJson: JSON.stringify({ error: settlementError, settlement: kernelResult === null ? "failed" : "unknown" }),
               settledAt: kernelResult === null ? new Date() : null,
             },
           });
@@ -4892,7 +4907,9 @@ const routes: Route[] = [
         res,
         kernelResult === null ? 500 : 409,
         kernelResult === null ? "JOB_START_FAILED" : "JOB_START_UNKNOWN",
-        String(err),
+        kernelResult === null
+          ? "job start failed"
+          : "job start outcome is unknown and requires reconciliation",
         kernelResult === null ? "internal" : "unknown_settlement",
         { job_id: controlJobId, reconciliation_required: kernelResult !== null },
       );
@@ -6400,8 +6417,8 @@ const routes: Route[] = [
       arpV2.workflows.set(result.workflow.id, result.workflow);
       sendJson(res, 200, jsonSafe({ workflow: result.workflow, report: result.report }));
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      return sendError(res, 400, "COMPILATION_FAILED", errorMsg, "validation");
+      logInternalError("workflow compilation failed", err);
+      return sendError(res, 400, "COMPILATION_FAILED", "workflow source failed validation", "validation");
     }
   }),
   route("POST", "/v2/workflows/validate", async (req, res) => {
@@ -10330,9 +10347,9 @@ const server = createServer(async (req, res) => {
         },
       });
     } catch (err) {
-      console.error("health handler error", err);
+      logInternalError("health handler failed", err);
       if (!res.headersSent) {
-        sendError(res, 500, "INTERNAL", String(err), "internal");
+        sendError(res, 500, "INTERNAL", "health check failed", "internal");
       }
     }
     return;
