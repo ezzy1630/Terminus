@@ -20,13 +20,13 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `terminus-kernel-testkit` | rust-crate | `crates/terminus-kernel-testkit` | `fixture` | Fakes/builders/in-memory stores for tests only |
 | `provider-conformance` | ts-package | `packages/provider-conformance` | `fixture` | Conformance kit used to test provider renderers |
 | `testkit` | ts-package | `packages/testkit` | `fixture` | Explicit fixture-only provider/kernel builders with grant references; never a production success path |
-| `adapter-claude-code` | adapter | `adapters/claude-code` | `stub` | Contract-stub runner (protocol only, no inner harness launch, lastVerified null) |
-| `adapter-codex` | adapter | `adapters/codex` | `stub` | Contract-stub runner returns completed without invoking Codex (audit 4.9) |
+| `adapter-claude-code` | adapter | `adapters/claude-code` | `stub` | Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim |
+| `adapter-codex` | adapter | `adapters/codex` | `stub` | Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim |
 | `adapter-oh-my-pi` | adapter | `adapters/oh-my-pi` | `stub` | adapter.yaml declaration only; runner not implemented |
 | `adapter-omnigent` | adapter | `adapters/omnigent` | `stub` | adapter.yaml declaration only; runner not implemented |
 | `adapter-openhands` | adapter | `adapters/openhands` | `stub` | adapter.yaml declaration only; runner not implemented |
-| `adapter-pi` | adapter | `adapters/pi` | `stub` | Contract-stub runner (protocol only, no inner harness launch, lastVerified null) |
-| `terminus-extension-runtime` | rust-crate | `crates/terminus-extension-runtime` | `stub` | WASI extension host stub |
+| `adapter-pi` | adapter | `adapters/pi` | `stub` | Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim |
+| `terminus-extension-runtime` | rust-crate | `crates/terminus-extension-runtime` | `stub` | WASI execution is unavailable without Wasmtime; invocation fails closed with an unavailable error |
 | `terminus-sandbox-microvm` | rust-crate | `crates/terminus-sandbox-microvm` | `stub` | Tier-3 backend selection skeleton: hypervisor detection + pinned rootfs + machine-config generation; fail-closed, EXPERIMENTAL per ADR-0027 |
 | `terminus-sandbox-windows` | rust-crate | `crates/terminus-sandbox-windows` | `stub` | Native AppContainer intentionally absent (unsafe FFI needs dedicated ADR); fail-closed WSL2/container fallback only (ADR-0035 §5) |
 | `app-cli` | app | `apps/cli` | `experimental` | Non-interactive task and Phase 9/10 operator commands; cross-client continuity unverified |
