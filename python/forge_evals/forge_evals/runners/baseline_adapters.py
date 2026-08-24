@@ -1,8 +1,7 @@
 """Runnable baseline harness adapters (SPEC §18.1, §41.2).
 
-Provides concrete :class:`Harness` implementations for all permanent evaluation
-baselines in the catalog: Terminus minimal, Terminus full, pinned OpenCode,
-Codex, Pi, Oh My Pi, Claude Code, and mini-SWE-agent.
+Provides deterministic :class:`Harness` fixtures for unit-testing the runner.
+They are not live competitor adapters and cannot support release claims.
 """
 
 from __future__ import annotations
@@ -23,13 +22,17 @@ from .trajectory_recorder import TrajectoryRecorder
 __all__ = [
     "ClaudeCodeAdapter",
     "CodexAdapter",
+    "ExternalHarnessUnavailable",
     "OhMyPiAdapter",
     "PiAdapter",
-    "PinnedOpenCodeAdapter",
     "TerminusFullAdapter",
     "TerminusMinimalAdapter",
     "get_baseline_harness",
 ]
+
+
+class ExternalHarnessUnavailable(RuntimeError):
+    """Raised when a catalogued competitor has no configured external runner."""
 
 
 @dataclass
@@ -39,7 +42,7 @@ class TerminusMinimalAdapter:
     final_revision: str = "git:terminus@v0.1.0-minimal"
     cost: CostBreakdown | None = None
     outcome: Outcome = Outcome.COMPLETED
-    notes: str = "Terminus minimal shell-only mode (Bash, Read, Edit, List, Search)"
+    notes: str = "fixture-only Terminus minimal shape; not a live harness run"
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
         recorder.record("task.activated", {"task": request.task, "harness": "forge_minimal"})
@@ -49,13 +52,17 @@ class TerminusMinimalAdapter:
             tool_name="read_file",
             arguments={"path": "README.md"},
         )
-        recorder.record_tool_settled(tool_call_id="tool-min-1", success=True, result_artifact_hash=None)
+        recorder.record_tool_settled(
+            tool_call_id="tool-min-1", success=True, result_artifact_hash=None
+        )
         recorder.record_tool_proposed(
             tool_call_id="tool-min-2",
             tool_name="replace_file_content",
             arguments={"path": "main.py"},
         )
-        recorder.record_tool_settled(tool_call_id="tool-min-2", success=True, result_artifact_hash=None)
+        recorder.record_tool_settled(
+            tool_call_id="tool-min-2", success=True, result_artifact_hash=None
+        )
         recorder.record("turn.completed", {"turn": 1})
 
         cost = self.cost or _default_adapter_cost(request.budgets, multiplier=1.0)
@@ -77,7 +84,7 @@ class TerminusFullAdapter:
     final_revision: str = "git:terminus@v0.1.0-full"
     cost: CostBreakdown | None = None
     outcome: Outcome = Outcome.COMPLETED
-    notes: str = "Terminus full mode (Context Compiler, Orchestration, Verification, Memory)"
+    notes: str = "fixture-only Terminus full shape; not a live harness run"
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
         recorder.record("task.activated", {"task": request.task, "harness": "forge_full"})
@@ -95,13 +102,17 @@ class TerminusFullAdapter:
             tool_name="invoke_subagent",
             arguments={"role": "researcher"},
         )
-        recorder.record_tool_settled(tool_call_id="tool-full-1", success=True, result_artifact_hash=None)
+        recorder.record_tool_settled(
+            tool_call_id="tool-full-1", success=True, result_artifact_hash=None
+        )
         recorder.record_tool_proposed(
             tool_call_id="tool-full-2",
             tool_name="verification",
             arguments={"command": "just check"},
         )
-        recorder.record_tool_settled(tool_call_id="tool-full-2", success=True, result_artifact_hash=None)
+        recorder.record_tool_settled(
+            tool_call_id="tool-full-2", success=True, result_artifact_hash=None
+        )
         recorder.record("turn.completed", {"turn": 1})
 
         cost = self.cost or _default_adapter_cost(request.budgets, multiplier=1.2)
@@ -117,45 +128,13 @@ class TerminusFullAdapter:
 
 
 @dataclass
-class PinnedOpenCodeAdapter:
-    """Inherited OpenCode at a pinned commit (SPEC §6.1)."""
-
-    final_revision: str = "git:opencode@pinned"
-    cost: CostBreakdown | None = None
-    outcome: Outcome = Outcome.COMPLETED
-    notes: str = "Upstream OpenCode pinned baseline"
-
-    def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
-        recorder.record("task.activated", {"task": request.task, "harness": "upstream_opencode"})
-        recorder.record("turn.started", {"turn": 1})
-        recorder.record_tool_proposed(
-            tool_call_id="tool-opencode-1",
-            tool_name="bash",
-            arguments={"command": "git status"},
-        )
-        recorder.record_tool_settled(tool_call_id="tool-opencode-1", success=True, result_artifact_hash=None)
-        recorder.record("turn.completed", {"turn": 1})
-
-        cost = self.cost or _default_adapter_cost(request.budgets, multiplier=1.1)
-        return HarnessResult(
-            outcome=self.outcome,
-            final_revision=self.final_revision,
-            cost=cost,
-            artifacts=[],
-            context_manifests=[],
-            grader_outcomes=[],
-            notes=self.notes,
-        )
-
-
-@dataclass
 class CodexAdapter:
     """Codex CLI baseline harness."""
 
     final_revision: str = "release:codex@pinned"
     cost: CostBreakdown | None = None
     outcome: Outcome = Outcome.COMPLETED
-    notes: str = "Codex CLI baseline"
+    notes: str = "fixture-only Codex-shaped trace; not a live Codex run"
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
         recorder.record("task.activated", {"task": request.task, "harness": "codex"})
@@ -165,7 +144,9 @@ class CodexAdapter:
             tool_name="patch",
             arguments={"file": "src/main.rs"},
         )
-        recorder.record_tool_settled(tool_call_id="tool-codex-1", success=True, result_artifact_hash=None)
+        recorder.record_tool_settled(
+            tool_call_id="tool-codex-1", success=True, result_artifact_hash=None
+        )
         recorder.record("turn.completed", {"turn": 1})
 
         cost = self.cost or _default_adapter_cost(request.budgets, multiplier=1.0)
@@ -187,7 +168,7 @@ class PiAdapter:
     final_revision: str = "release:pi@pinned"
     cost: CostBreakdown | None = None
     outcome: Outcome = Outcome.COMPLETED
-    notes: str = "Pi agent baseline"
+    notes: str = "fixture-only Pi-shaped trace; not a live Pi run"
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
         recorder.record("task.activated", {"task": request.task, "harness": "pi"})
@@ -197,7 +178,9 @@ class PiAdapter:
             tool_name="write",
             arguments={"path": "out.txt"},
         )
-        recorder.record_tool_settled(tool_call_id="tool-pi-1", success=True, result_artifact_hash=None)
+        recorder.record_tool_settled(
+            tool_call_id="tool-pi-1", success=True, result_artifact_hash=None
+        )
         recorder.record("turn.completed", {"turn": 1})
 
         cost = self.cost or _default_adapter_cost(request.budgets, multiplier=0.9)
@@ -219,7 +202,7 @@ class OhMyPiAdapter:
     final_revision: str = "release:oh-my-pi@pinned"
     cost: CostBreakdown | None = None
     outcome: Outcome = Outcome.COMPLETED
-    notes: str = "Oh My Pi agent baseline"
+    notes: str = "fixture-only Oh My Pi-shaped trace; not a live Oh My Pi run"
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
         recorder.record("task.activated", {"task": request.task, "harness": "oh_my_pi"})
@@ -229,7 +212,9 @@ class OhMyPiAdapter:
             tool_name="edit",
             arguments={"path": "index.ts"},
         )
-        recorder.record_tool_settled(tool_call_id="tool-omp-1", success=True, result_artifact_hash=None)
+        recorder.record_tool_settled(
+            tool_call_id="tool-omp-1", success=True, result_artifact_hash=None
+        )
         recorder.record("turn.completed", {"turn": 1})
 
         cost = self.cost or _default_adapter_cost(request.budgets, multiplier=0.95)
@@ -251,7 +236,7 @@ class ClaudeCodeAdapter:
     final_revision: str = "release:claude-code@pinned"
     cost: CostBreakdown | None = None
     outcome: Outcome = Outcome.COMPLETED
-    notes: str = "Claude Code CLI baseline"
+    notes: str = "fixture-only Claude Code-shaped trace; not a live Claude Code run"
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
         recorder.record("task.activated", {"task": request.task, "harness": "claude_code"})
@@ -261,7 +246,9 @@ class ClaudeCodeAdapter:
             tool_name="FileEdit",
             arguments={"file_path": "lib.rs"},
         )
-        recorder.record_tool_settled(tool_call_id="tool-cc-1", success=True, result_artifact_hash=None)
+        recorder.record_tool_settled(
+            tool_call_id="tool-cc-1", success=True, result_artifact_hash=None
+        )
         recorder.record("turn.completed", {"turn": 1})
 
         cost = self.cost or _default_adapter_cost(request.budgets, multiplier=1.15)
@@ -279,12 +266,17 @@ class ClaudeCodeAdapter:
 def get_baseline_harness(baseline_id: str, **kwargs: Any) -> Harness:
     """Return a runnable :class:`Harness` instance for ``baseline_id``.
 
-    Raises ``KeyError`` if ``baseline_id`` is unknown.
+    Raises ``ExternalHarnessUnavailable`` for required-but-unconfigured external
+    comparisons and ``KeyError`` if ``baseline_id`` is unknown.
     """
+    if baseline_id == "upstream_opencode":
+        raise ExternalHarnessUnavailable(
+            "OpenCode is an external comparison only; configure an exact pin and "
+            "adapter-protocol runner before executing it"
+        )
     adapters: dict[str, type[Harness]] = {
         "forge_minimal": TerminusMinimalAdapter,
         "forge_full": TerminusFullAdapter,
-        "upstream_opencode": PinnedOpenCodeAdapter,
         "codex": CodexAdapter,
         "pi": PiAdapter,
         "oh_my_pi": OhMyPiAdapter,
@@ -296,6 +288,7 @@ def get_baseline_harness(baseline_id: str, **kwargs: Any) -> Harness:
 
     if baseline_id == "mini_swe_agent" and "turns" not in kwargs:
         from .mini_swe_adapter import MiniSweAgentTurn
+
         kwargs["turns"] = [MiniSweAgentTurn(turn=1, command="ls", stdout="a.py\nb.py\n")]
 
     cls = adapters[baseline_id]

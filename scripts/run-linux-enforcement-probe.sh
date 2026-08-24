@@ -35,4 +35,31 @@ jq -e '
   .exit_status == 0
 ' "$report" >/dev/null
 
+# Release jobs pass the candidate identity through the probe so the signed
+# evidence producer can bind both the enforcement report and its envelope to
+# the exact release. Nightly probes intentionally omit these variables.
+release_version="${TERMINUS_RELEASE_VERSION:-}"
+release_commit="${TERMINUS_RELEASE_COMMIT:-}"
+if [[ -n "$release_version" || -n "$release_commit" ]]; then
+  [[ -n "$release_version" ]] || { echo "[linux-probe] TERMINUS_RELEASE_VERSION is required with release identity" >&2; exit 1; }
+  [[ -n "$release_commit" ]] || { echo "[linux-probe] TERMINUS_RELEASE_COMMIT is required with release identity" >&2; exit 1; }
+  [[ "$release_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+    echo "[linux-probe] TERMINUS_RELEASE_VERSION must be stable SemVer: $release_version" >&2
+    exit 1
+  }
+  [[ "$release_commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || {
+    echo "[linux-probe] TERMINUS_RELEASE_COMMIT must be a full Git object id" >&2
+    exit 1
+  }
+  if [[ -n "${GITHUB_SHA:-}" && "$release_commit" != "$GITHUB_SHA" ]]; then
+    echo "[linux-probe] release commit does not match GITHUB_SHA" >&2
+    exit 1
+  fi
+  identity_report="$(mktemp "${report}.identity.XXXXXX")"
+  jq --arg commit "$release_commit" --arg version "$release_version" \
+    '. + {candidate_commit: $commit, release_version: $version}' \
+    "$report" >"$identity_report"
+  mv "$identity_report" "$report"
+fi
+
 echo "[linux-probe] effective enforcement verified: $report"

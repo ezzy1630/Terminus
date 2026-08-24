@@ -25,6 +25,8 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
+    # Mozilla-derived root certificate data used by rustls-platform-verifier.
+    "CDLA-Permissive-2.0",
     "MPL-2.0",
     "OpenSSL",
 ]

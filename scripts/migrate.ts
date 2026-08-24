@@ -29,6 +29,24 @@ function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+function migrationSql(sql: string): string {
+  // Connection PRAGMAs are applied by the runner before any transaction.
+  // Keeping them out of migration transactions avoids SQLite's
+  // `Safety level may not be changed inside a transaction` restriction.
+  // Pass the remaining program to SQLite intact. Splitting SQL on `;` is not
+  // a parser: semicolons are legal in comments, strings, and trigger bodies.
+  return sql.replace(/^\s*PRAGMA\s+[^;]+;\s*$/gim, "").trim();
+}
+
+function faultAfterStatement(version: number): number | null {
+  const configured = process.env.TERMINUS_MIGRATION_TEST_FAIL_AFTER;
+  if (!configured) return null;
+  const match = /^(\d+):(\d+)$/.exec(configured);
+  if (!match || Number(match[1]) !== version) return null;
+  const count = Number(match[2]);
+  return Number.isInteger(count) && count > 0 ? count : null;
+}
+
 function main(): void {
   mkdirSync(dirname(DB_PATH), { recursive: true });
   const db = new Database(DB_PATH);
@@ -83,16 +101,23 @@ function main(): void {
 
     console.log(`applying migration ${version}: ${name}`);
     try {
-      // Run the migration SQL outside an explicit transaction: SQLite
-      // migrations contain PRAGMAs (e.g. `synchronous = NORMAL`) that cannot
-      // be changed inside a transaction. Each DDL statement is atomically
-      // applied by SQLite; the schema_migrations row is inserted only after
-      // the SQL succeeds, so a failed migration is retried on the next run.
-      db.exec(sql);
+      const program = migrationSql(sql);
+      const injectedFailure = faultAfterStatement(version);
+      db.exec("BEGIN IMMEDIATE");
+      db.exec(program);
+      if (injectedFailure !== null) {
+        // The hook deliberately fails after SQLite has executed the migration
+        // program but before the ledger row and COMMIT. This proves DDL and
+        // ledger publication share one rollback boundary without maintaining
+        // a second, incomplete SQL parser in the runner.
+        throw new Error(`injected migration failure before commit (requested statement ${injectedFailure})`);
+      }
       db.query(
         "INSERT INTO schema_migrations (version, name, checksum_sha256, applied_at) VALUES (?, ?, ?, ?)",
       ).run(version, name, checksum, new Date().toISOString());
+      db.exec("COMMIT");
     } catch (e) {
+      try { db.exec("ROLLBACK"); } catch { /* transaction may not have started */ }
       console.error(`migration ${version} failed: ${e}`);
       process.exit(1);
     }

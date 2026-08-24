@@ -50,20 +50,25 @@ function handle(req: {
       send({
         jsonrpc: "2.0",
         method: "adapter/event",
-        params: { kind: "started", startedAt: nowIso() },
+        params: {
+          kind: "error",
+          errorCode: "adapter_unavailable",
+          errorMessage: "the real Claude Code inner harness is not implemented",
+          timestamp: nowIso(),
+        },
       });
       send({
         jsonrpc: "2.0",
         id: req.id,
         result: {
-          status: "completed",
-          summary: "claude-code adapter completed (untrusted self-report)",
+          status: "blocked",
+          summary: "claude-code adapter unavailable: the real inner harness is not implemented",
           changedFiles: [],
           commit: null,
           tests: [],
           findings: [],
-          risks: ["inner harness self-report is not evidence"],
-          unresolved: [],
+          risks: ["no harness execution or completion evidence exists"],
+          unresolved: ["the real Claude Code inner harness is not implemented"],
           artifacts: [],
           actualBudget: {},
         },

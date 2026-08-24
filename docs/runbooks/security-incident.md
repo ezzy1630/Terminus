@@ -47,7 +47,7 @@ This runbook coordinates with the more specific runbooks (`leaked-credential.md`
    - #9 No blind retry of uncertain effects — duplicate external write?
    - #10 No unpinned experiment as a default — feature without evaluation?
    - #11 No unreported degradation — degraded sandbox not reported?
-   - #12 No uncontrolled upstream divergence — divergence budget exceeded?
+   - #12 No inherited runtime dependency — did a first-party package import an external harness?
 2. Trace the attack path:
    - Which model output, repository file, web content, or extension initiated the attack?
    - Which taint sources propagated?
@@ -80,8 +80,8 @@ sqlite3 db/terminus.db "SELECT * FROM secret_audit WHERE used_at > datetime('now
 sqlite3 db/terminus.db "SELECT * FROM capability_audit WHERE occurred_at > datetime('now', '-24 hours');" > capability-audit.csv
 sqlite3 db/terminus.db "SELECT * FROM policy_decisions WHERE decided_at > datetime('now', '-24 hours');" > policy-decisions.csv
 
-# Export the bypass register
-cp docs/security/effect-bypass-register.yaml bypass-register-<date>.yaml
+# Capture the standalone dependency result
+just standalone-check > standalone-check-<date>.txt 2>&1
 ```
 
 ## Recovery
@@ -106,7 +106,7 @@ cp docs/security/effect-bypass-register.yaml bypass-register-<date>.yaml
    - Action items with owners and dates.
 2. **Update tests:** add the attack signature to the security evals and the non-bypassability tests.
 3. **Update runbooks:** if the runbook was insufficient, update it.
-4. **Update the bypass register:** if a new bypass was discovered, add it to `docs/security/effect-bypass-register.yaml`.
+4. **Close the bypass:** fix the first-party path. If an exception is unavoidable, require a new adopted security ADR before release; the retired inherited-source register cannot authorize it.
 5. **Update ADRs:** if the root cause was an architectural gap, amend or add an ADR.
 6. **Disclosure:** if user data was affected, disclose per the project's disclosure policy (see `SECURITY.md`).
 7. **Sign-off:** security owner, release owner, and (for SEV1) protocol owner sign off on the post-mortem and action items.
@@ -115,7 +115,7 @@ cp docs/security/effect-bypass-register.yaml bypass-register-<date>.yaml
 
 - Non-bypassability tests run continuously (SPEC §27.4).
 - Security evals run per-PR, nightly, and at release (SPEC §46.10).
-- Bypass register tracks inherited effect paths (SPEC §27.5).
+- The retired bypass-register tombstone grants no active first-party exception (SPEC §27.5).
 - Architecture-boundary checks run in CI (SPEC §42.5).
 - Supply-chain scans and SBOM per release (SPEC §46.14, §36.17).
 - Descriptor pinning and reauthorization (SPEC §35.3, ADR-0018).
@@ -130,7 +130,7 @@ cp docs/security/effect-bypass-register.yaml bypass-register-<date>.yaml
 - `docs/runbooks/sandbox-unavailable.md`
 - `docs/architecture/trust-boundaries.md`
 - `docs/security/threat-model.md`
-- `docs/security/effect-bypass-register.yaml`
+- `docs/security/effect-bypass-register.yaml` (retired inherited-source exception tombstone)
 - `docs/security/non-bypassability-tests.md`
 - `SECURITY.md`
 - SPEC §5.2 (non-bypassability), §26.3 (invariants), §27 (trust model), §36 (security impl), §46.10 (security tests).

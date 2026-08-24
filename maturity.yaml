@@ -23,7 +23,7 @@
 # promoted ONLY by adding an `evidence` pointer to a reproducible artifact.
 
 schema_version: 1
-updated: "2026-08-22"
+updated: "2026-08-23"
 
 components:
   # ---------------- Rust crates (trusted/performance plane) ----------------
@@ -40,7 +40,7 @@ components:
   - { id: terminus-sandbox-linux, kind: rust-crate, path: crates/terminus-sandbox-linux, tier: experimental,
       basis: "Strongest platform path (real bwrap argv); needs current signed conformance evidence at HEAD" }
   - { id: terminus-sandbox-macos, kind: rust-crate, path: crates/terminus-sandbox-macos, tier: experimental,
-      basis: "Real Seatbelt profile generation + env -i payload allowlist; live effective-control probes Enforced on dev hosts (ADR-0035 §4)" }
+      basis: "Seatbelt profile generation and env -i payload allowlist exist in source; no current candidate-bound conformance evidence (ADR-0035 §4)" }
   - { id: terminus-sandbox-windows, kind: rust-crate, path: crates/terminus-sandbox-windows, tier: stub,
       basis: "Native AppContainer intentionally absent (unsafe FFI needs dedicated ADR); fail-closed WSL2/container fallback only (ADR-0035 §5)" }
   - { id: terminus-sandbox-container, kind: rust-crate, path: crates/terminus-sandbox-container, tier: experimental,
@@ -48,7 +48,7 @@ components:
   - { id: terminus-sandbox-microvm, kind: rust-crate, path: crates/terminus-sandbox-microvm, tier: stub,
       basis: "Tier-3 backend selection skeleton: hypervisor detection + pinned rootfs + machine-config generation; fail-closed, EXPERIMENTAL per ADR-0027" }
   - { id: terminus-connector, kind: rust-crate, path: crates/terminus-connector, tier: experimental,
-      basis: "L7 connector broker: grant-bound credential injection, exact-operation binding, response scrubbing; https fails closed pending TLS transport" }
+      basis: "L7 connector broker: grant-bound credential injection, exact-operation binding, rustls HTTPS with pinned resolved addresses, bounded response capture, and response scrubbing; real-account inference conformance is not recorded at HEAD" }
   - { id: terminus-process, kind: rust-crate, path: crates/terminus-process, tier: preview,
       basis: "Process groups, bounded capture w/ artifact spill, timeouts; worker primitive" }
   - { id: terminus-jobs, kind: rust-crate, path: crates/terminus-jobs, tier: experimental,
@@ -60,13 +60,13 @@ components:
   - { id: terminus-artifacts, kind: rust-crate, path: crates/terminus-artifacts, tier: preview,
       basis: "CAS sha256 layout, atomic rename+fsync, SQLite metadata bridge tests" }
   - { id: terminus-secrets, kind: rust-crate, path: crates/terminus-secrets, tier: experimental,
-      basis: "Opaque ConnectorGrants (workload identity + exact-operation binding) + residue scanner; raw-value API crate-private, InMemoryProvider fixture-only (ADR-0035 §1)" }
+      basis: "Opaque ConnectorGrants, residue scanner, and exact-URI OS credential-store provider; raw-value API crate-private, InMemoryProvider fixture-only (ADR-0035 §1, ADR-0044)" }
   - { id: terminus-egress, kind: rust-crate, path: crates/terminus-egress, tier: experimental,
       basis: "L4 broker real (DNS/IP/port/scheme/bytes); no L7 intent semantics yet (audit 4.7)" }
   - { id: terminus-code-intel, kind: rust-crate, path: crates/terminus-code-intel, tier: experimental,
       basis: "Tree-sitter symbol index with basic tests" }
   - { id: terminus-extension-runtime, kind: rust-crate, path: crates/terminus-extension-runtime, tier: stub,
-      basis: "WASI extension host stub" }
+      basis: "WASI execution is unavailable without Wasmtime; invocation fails closed with an unavailable error" }
   - { id: terminus-git, kind: rust-crate, path: crates/terminus-git, tier: experimental,
       basis: "Protected worktree/commit/merge operations, small test set" }
   - { id: terminus-remote, kind: rust-crate, path: crates/terminus-remote, tier: experimental,
@@ -82,7 +82,7 @@ components:
   - { id: config, kind: ts-package, path: packages/config, tier: preview,
       basis: "Layered typed configuration with JSON Schema codegen" }
   - { id: public-api, kind: ts-package, path: packages/public-api, tier: preview,
-      basis: "HTTP API definitions/error envelope/SSE with generated client surface" }
+      basis: "HTTP/SSE contracts include typed Phase 9/10 resources and receipt references; trusted computer-use/DLP backends remain absent and fail closed" }
   - { id: aci, kind: ts-package, path: packages/aci, tier: experimental,
       basis: "Agent-Computer Interface tools; unproven at HEAD" }
   - { id: adapter-sdk, kind: ts-package, path: packages/adapter-sdk, tier: experimental,
@@ -100,13 +100,11 @@ components:
   - { id: memory, kind: ts-package, path: packages/memory, tier: experimental,
       basis: "Extraction/consolidation/retrieval with unit tests; promotion gates unproven on cohorts" }
   - { id: model-router, kind: ts-package, path: packages/model-router, tier: experimental,
-      basis: "Deep model profiles (Anthropic, OpenAI, Google, Local), empirical Bayesian posteriors, stage-aware deterministic router, rate limiting, circuit breaker, resumable continuation" }
+      basis: "Provider-neutral profile references, empirical posteriors, deterministic routing, rate limits, circuit breaker, and continuation; live-provider benefit unproven" }
   - { id: observability, kind: ts-package, path: packages/observability, tier: experimental,
       basis: "OTel spans/logging/metrics wrappers" }
-  - { id: open-code-bridge, kind: ts-package, path: packages/open-code-bridge, tier: experimental,
-      basis: "OpenCode compatibility facade governed by divergence budget" }
   - { id: orchestration, kind: ts-package, path: packages/orchestration, tier: experimental,
-      basis: "Expected-value subagent scheduler, isolated candidate workspaces, clean-context reviewers, stagnation supervisor with 11-signal intervention ladder" }
+      basis: "Phase 8 scheduling plus Phase 9/10 typed coordinators; governed browser, desktop, connector, and intervention executors are not integrated" }
   - { id: policy-coordinator, kind: ts-package, path: packages/policy-coordinator, tier: experimental,
       basis: "Bridges task contracts and kernel capability requests" }
   - { id: provider-anthropic, kind: ts-package, path: packages/provider-anthropic, tier: experimental,
@@ -125,8 +123,10 @@ components:
       basis: "Local/open-weight provider renderer; conformance not recorded at HEAD" }
   - { id: provider-openai, kind: ts-package, path: packages/provider-openai, tier: experimental,
       basis: "Provider renderer; conformance not recorded at HEAD" }
+  - { id: provider-zen, kind: ts-package, path: packages/provider-zen, tier: experimental,
+      basis: "Zen and Go renderers, catalog decoder, normalized transport, and kernel gateway wiring have focused tests; real-account inference conformance is not recorded at HEAD" }
   - { id: public-client, kind: ts-package, path: packages/public-client, tier: experimental,
-      basis: "Generated-style TS client with SSE subscription" }
+      basis: "Typed HTTP/SSE client with bearer auth and idempotent mutation support; independent-runtime conformance unproven" }
   - { id: remote, kind: ts-package, path: packages/remote, tier: experimental,
       basis: "Remote execution types/clients" }
   - { id: session-runtime, kind: ts-package, path: packages/session-runtime, tier: experimental,
@@ -136,7 +136,7 @@ components:
   - { id: terminus-kernel-client, kind: ts-package, path: packages/terminus-kernel-client, tier: experimental,
       basis: "Typed kernel RPC client" }
   - { id: testkit, kind: ts-package, path: packages/testkit, tier: fixture,
-      basis: "Fake provider/fake kernel/builders for tests only" }
+      basis: "Explicit fixture-only provider/kernel builders with grant references; never a production success path" }
   - { id: verification, kind: ts-package, path: packages/verification, tier: experimental,
       basis: "Verification DAG engine with predicate tests; completion-gate conformance unproven at HEAD" }
   - { id: workflow-compiler, kind: ts-package, path: packages/workflow-compiler, tier: experimental,
@@ -144,21 +144,21 @@ components:
 
   # ---------------- Clients / services ----------------
   - { id: app-cli, kind: app, path: apps/cli, tier: experimental,
-      basis: "Non-interactive CLI for CI/automation" }
+      basis: "Non-interactive task and Phase 9/10 operator commands; cross-client continuity unverified" }
   - { id: app-desktop, kind: app, path: apps/desktop, tier: experimental,
-      basis: "Electron desktop app; README test-count claims replaced by inventory (Phase 0)" }
+      basis: "Electron cockpit has ten lazy decoded-data views and explicit offline states; fresh offline render tested, populated live flow and latency unverified" }
   - { id: app-ide-acp, kind: app, path: apps/ide-acp, tier: experimental,
-      basis: "ACP-over-stdio adapter for editors" }
+      basis: "TERMINUS_TOKEN-authenticated ACP-over-stdio adapter with typed context injection; editor-host conformance and native editor flows unverified" }
   - { id: app-tui, kind: app, path: apps/tui, tier: experimental,
-      basis: "Terminal client (primary per SPEC §43.4)" }
+      basis: "TERMINUS_TOKEN-authenticated text-mode client with Phase 9 operator reads; interactive intervention, continuity, and usability exit gates unverified" }
   - { id: mini-service-control, kind: mini-service, path: mini-services/terminus-control, tier: experimental,
-      basis: "TS control plane HTTP service; authoritative stores remain process-local until Phase 2" }
+      basis: "TS control plane persists local state and fails closed at an unconfigured provider transport; several Phase 9/10 coordinators remain process-local" }
   - { id: mini-service-kernel, kind: mini-service, path: mini-services/terminus-kernel, tier: experimental,
-      basis: "Rust kernel HTTP mini-service outside root workspace (SPEC §42.5); checked via just kernel-mini-check" }
+      basis: "Rust kernel gRPC-over-private-UDS boundary; file resolution still uses one configured data root, so arbitrary registered-root isolation is unverified" }
 
   # ---------------- Evaluation laboratory ----------------
   - { id: forge-evals, kind: python-package, path: python/forge_evals, tier: experimental,
-      basis: "Runners/graders/statistics/dashboards substantial; release-tier evals are fixture-mode until model-backed runs are wired (scripts/run-release-evals.sh)" }
+      basis: "Runners plus sealed Phase 11/12 structural contracts; no real held-out promotion, trusted signature verifier, canary, or dominance evidence" }
   - { id: eval-corpus, kind: eval-corpus, path: evals, tier: fixture,
       basis: "Benchmark suites/tasks/graders/security fixtures — data, not production code" }
 
@@ -166,9 +166,9 @@ components:
   - { id: adapter-fixture-agent, kind: adapter, path: adapters/fixture-agent, tier: fixture,
       basis: "Deterministic no-model test double; replays recorded trajectories" }
   - { id: adapter-claude-code, kind: adapter, path: adapters/claude-code, tier: stub,
-      basis: "Contract-stub runner (protocol only, no inner harness launch, lastVerified null)" }
+      basis: "Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim" }
   - { id: adapter-codex, kind: adapter, path: adapters/codex, tier: stub,
-      basis: "Contract-stub runner returns completed without invoking Codex (audit 4.9)" }
+      basis: "Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim" }
   - { id: adapter-oh-my-pi, kind: adapter, path: adapters/oh-my-pi, tier: stub,
       basis: "adapter.yaml declaration only; runner not implemented" }
   - { id: adapter-omnigent, kind: adapter, path: adapters/omnigent, tier: stub,
@@ -176,4 +176,4 @@ components:
   - { id: adapter-openhands, kind: adapter, path: adapters/openhands, tier: stub,
       basis: "adapter.yaml declaration only; runner not implemented" }
   - { id: adapter-pi, kind: adapter, path: adapters/pi, tier: stub,
-      basis: "Contract-stub runner (protocol only, no inner harness launch, lastVerified null)" }
+      basis: "Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim" }

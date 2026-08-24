@@ -13,13 +13,18 @@ describe("release gate validators", () => {
       "eval-release",
       {
         status: "passed",
-        commit: "b".repeat(40),
+        candidate_commit: "b".repeat(40),
+        release_version: "0.1.0",
         generatedAt: "2020-01-01T00:00:00.000Z",
       },
-      { expectedCommit: HEAD, freshSinceMs: Date.parse("2025-01-01T00:00:00.000Z") },
+      {
+        expectedCommit: HEAD,
+        expectedVersion: "0.1.0",
+        freshSinceMs: Date.parse("2025-01-01T00:00:00.000Z"),
+      },
     );
 
-    expect(errors.some((error) => error.includes("does not match HEAD"))).toBe(true);
+    expect(errors.some((error) => error.includes("candidate commit binding does not match"))).toBe(true);
     expect(errors.some((error) => error.includes("is stale"))).toBe(true);
   });
 
@@ -77,5 +82,35 @@ describe("release gate validators", () => {
     expect(decisionErrors.some((error) => error.includes("does not match HEAD"))).toBe(true);
     expect(decisionErrors.some((error) => error.includes("contradict"))).toBe(true);
     expect(decisionErrors.some((error) => error.includes("unsigned"))).toBe(true);
+  });
+
+  test("rejects unchecked approval strings", () => {
+    const matrix = {
+      commit: HEAD,
+      supported_platforms: [],
+      unverified_or_degraded_platforms: [],
+      platforms: {},
+    };
+    const errors = validateDecision(
+      {
+        release: {
+          version: "0.1.0",
+          commit: HEAD,
+          supported_platforms: [],
+          known_limitations: [],
+          signatures: {
+            release_owner: "approved",
+            security_owner: "approved",
+            protocol_owner: "approved",
+            evaluation_owner: "approved",
+          },
+        },
+      },
+      HEAD,
+      matrix,
+      { expectedVersion: "0.1.0" },
+    );
+
+    expect(errors.filter((error) => error.includes("verified approval record"))).toHaveLength(4);
   });
 });

@@ -121,7 +121,7 @@ function validate(registry: Registry): void {
     if (!existsSync(yamlPath)) continue; // declaration-only adapters may lack runner but have yaml
     let doc: { adapter?: { id?: string; status?: Tier; last_verified?: string | null } };
     try {
-      doc = Bun.YAML.parse(readFileSync(yamlPath, "utf8"));
+      doc = Bun.YAML.parse(readFileSync(yamlPath, "utf8")) as { adapter?: { id?: string; status?: Tier; last_verified?: string | null } };
     } catch (err) {
       return fail(`${c.id}: adapter.yaml does not parse: ${String(err)}`);
     }

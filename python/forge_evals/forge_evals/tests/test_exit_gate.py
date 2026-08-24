@@ -1,11 +1,15 @@
-"""SPEC exit gate validation suite.
+"""Local mechanics used by the SPEC exit gate.
 
-Verifies the 5 exit gate criteria (SPEC §18, §41, §50, ADR-0025):
-1. Pinned runs reproduce for all baseline harnesses & capability differences are enforced.
+These fixture tests characterize five required mechanisms (SPEC §18, §41,
+§50, ADR-0025):
+1. Runner fixtures reproduce and capability differences are enforced.
 2. Graders catch seeded faults (mutation test suite).
 3. Costs and token accounting reconcile cleanly.
 4. Multi-seed baseline variance and bootstrap confidence bounds are measured.
 5. Promotion rules and rollbacks are machine-enforced.
+
+They do not run live external harnesses, establish multi-seed release evidence,
+or satisfy the signed release gate.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ import pytest
 from ..analysis.cost_analysis import find_anomalies, reconcile_costs
 from ..analysis.seed_variance import compute_seed_variance
 from ..baselines import validate_harness_task_compatibility
+from ..cli import main as eval_cli
 from ..graders.end_state import EndStateGraderInput, FileContainsGrader, WorkspaceSnapshot
 from ..graders.mutation_tests import run_grader_mutation_suite
 from ..hidden_test_guard import (
@@ -40,14 +45,26 @@ from ..runners import (
 )
 
 
-def test_exit_gate_1_pinned_runs_reproduce_and_capability_compatibility(tmp_path: Path) -> None:
-    """Exit Gate Condition 1: Pinned baseline runs execute cleanly and capabilities are enforced."""
-    # Test all baseline harness adapters
-    baseline_ids = ["forge_minimal", "forge_full", "upstream_opencode", "codex", "pi", "oh_my_pi", "claude_code", "mini_swe_agent"]
-    
+def test_fixture_runner_catalog_is_deterministic_and_capability_aware(tmp_path: Path) -> None:
+    """Fixture adapters execute deterministically and enforce declared capabilities."""
+
+    # These adapters exercise the common runner contract. External ids remain
+    # fixtures until their independently pinned processes are launched live.
+    baseline_ids = [
+        "forge_minimal",
+        "forge_full",
+        "codex",
+        "pi",
+        "oh_my_pi",
+        "claude_code",
+        "mini_swe_agent",
+    ]
+
     task_dir = tmp_path / "task-001"
     task_dir.mkdir(parents=True, exist_ok=True)
-    (task_dir / "task.yaml").write_text("source_commit: abc\nimage_digest: sha256:123\n", encoding="utf-8")
+    (task_dir / "task.yaml").write_text(
+        "source_commit: abc\nimage_digest: sha256:123\n", encoding="utf-8"
+    )
 
     model_snapshot = ModelCapabilitySnapshot(
         provider="fake",
@@ -226,7 +243,9 @@ def test_exit_gate_5_machine_enforced_promotion_and_rollback() -> None:
 
 def test_hidden_test_guard_and_leakage_controls(tmp_path: Path) -> None:
     """Verify hidden-test isolation guard and leakage controls."""
-    assert HiddenTestIsolationGuard.is_hidden_path("evals/tasks/tiny-bugfix/01/hidden/test_secret.py")
+    assert HiddenTestIsolationGuard.is_hidden_path(
+        "evals/tasks/tiny-bugfix/01/hidden/test_secret.py"
+    )
     assert not HiddenTestIsolationGuard.is_hidden_path("evals/tasks/tiny-bugfix/01/main.py")
 
     manifest = {"fragments": [{"source_path": "evals/tasks/tiny-bugfix/01/hidden/test_secret.py"}]}
@@ -236,3 +255,74 @@ def test_hidden_test_guard_and_leakage_controls(tmp_path: Path) -> None:
     prompt = f"Here is canary {CANARY_STRING}"
     violations = ContaminationChecker.check_prompt_leakage(prompt, tmp_path)
     assert len(violations) > 0
+
+
+def test_exit_gate_cli_never_reports_success_without_run_evidence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The command must not convert implementation tests into release evidence."""
+
+    assert eval_cli(["exit-gate"]) == 2
+    captured = capsys.readouterr()
+    assert "LOCAL EVIDENCE CHECK: BLOCKED" in captured.err
+    assert "PASS" not in captured.out
+
+
+def test_exit_gate_cli_rejects_structurally_incomplete_evidence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Placeholder revisions, missing graders/costs, and one seed cannot pass."""
+
+    record = RunRecord.new(
+        suite="tiny-bugfix",
+        task="t-1",
+        harness="terminus-minimal",
+        harness_commit="git:HEAD",
+        environment_digest="sha256:environment",
+        random_seed=1,
+    )
+    record.to_json(tmp_path / "run.json")
+
+    assert eval_cli(["exit-gate", "--runs-dir", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert "LOCAL EVIDENCE CHECK: FAIL" in captured.err
+    assert "RELEASE EXIT GATE: UNVERIFIED" in captured.err
+
+
+def test_run_cli_requires_explicit_fixture_mode_and_fixture_output_never_passes_gate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "task.yaml").write_text("id: fixture-task\n", encoding="utf-8")
+    output_dir = tmp_path / "runs"
+    args = [
+        "run",
+        "--suite",
+        "fixture-suite",
+        "--task",
+        "fixture-task",
+        "--task-dir",
+        str(task_dir),
+        "--harness",
+        "terminus-minimal",
+        "--harness-commit",
+        "a" * 40,
+        "--seeds",
+        "5",
+        "--format",
+        "json",
+        "--output-dir",
+        str(output_dir),
+    ]
+
+    assert eval_cli(args) == 2
+    assert "no live harness adapter" in capsys.readouterr().err
+
+    args.insert(1, "--fixture-mode")
+    assert eval_cli(args) == 0
+    capsys.readouterr()
+    assert eval_cli(["exit-gate", "--runs-dir", str(output_dir)]) == 1
+    captured = capsys.readouterr()
+    assert "fixture noop grader" in captured.err
+    assert "fixture harness output" in captured.err

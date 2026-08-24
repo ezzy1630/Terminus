@@ -26,12 +26,13 @@ __all__ = [
 ]
 
 ComparisonMode = Literal["model_fixed", "native_best"]
+PinKind = Literal["git_commit", "image_digest", "release_tag", "unconfigured"]
 
 
 @dataclass(frozen=True)
 class HarnessCapabilities:
     """Explicit capability matrix for a baseline harness (SPEC §41.1).
-    
+
     Prevents pretending all harnesses support identical tasks or features.
     """
 
@@ -72,26 +73,32 @@ class Baseline:
     id: str
     name: str
     description: str
-    pin: str  # git commit, image digest, or release tag
-    pin_kind: Literal["git_commit", "image_digest", "release_tag"]
+    pin: str  # exact pin or "unconfigured" when the external runner is absent
+    pin_kind: PinKind
     capabilities: HarnessCapabilities = field(default_factory=HarnessCapabilities)
     supports_model_fixed: bool = True
     supports_native_best: bool = True
     licensing_permits_automation: bool = True
+    pin_verified: bool = False
+    live_runner_available: bool = False
+    first_party_runtime_dependency: bool = False
     notes: str = ""
     metadata: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.id:
             raise ValueError("baseline id is required")
-        if self.pin_kind not in ("git_commit", "image_digest", "release_tag"):
+        if self.pin_kind not in ("git_commit", "image_digest", "release_tag", "unconfigured"):
             raise ValueError(f"unknown pin_kind: {self.pin_kind}")
+        if self.first_party_runtime_dependency:
+            raise ValueError("evaluation baselines cannot be first-party runtime dependencies")
+        if self.pin_kind == "unconfigured" and self.pin != "unconfigured":
+            raise ValueError("an unconfigured baseline must use the explicit unconfigured pin")
 
 
 # ──────────────────────────── baseline catalog ────────────────────────────
-# SPEC §18.1 lists: upstream OpenCode; Codex; Claude Code (where licensing
-# permits); Pi; Oh My Pi; mini-SWE-agent; Terminus minimal; Terminus full.
-# SPEC §41.2 adds the same set with the explicit "pinned runners" requirement.
+# Competitor entries require independent live adapters and exact version pins
+# before use in a release comparison. The catalog is metadata, not evidence.
 
 BASELINES: list[Baseline] = [
     Baseline(
@@ -110,7 +117,13 @@ BASELINES: list[Baseline] = [
             supports_hidden_tests=True,
             supports_context_compilation=False,
             supports_verification_loop=False,
-            supported_tools=("bash", "read_file", "replace_file_content", "list_dir", "grep_search"),
+            supported_tools=(
+                "bash",
+                "read_file",
+                "replace_file_content",
+                "list_dir",
+                "grep_search",
+            ),
             supported_dialects=("exact_text",),
             max_turns_supported=30,
         ),
@@ -149,13 +162,13 @@ BASELINES: list[Baseline] = [
     ),
     Baseline(
         id="upstream_opencode",
-        name="Upstream OpenCode (pinned)",
+        name="OpenCode external comparison",
         description=(
-            "Inherited OpenCode at a pinned commit. Used for parity / divergence "
-            "tracking (SPEC §6.1, §6.2)."
+            "OpenCode evaluated only through a separately pinned external harness adapter. "
+            "It is never a Terminus runtime or build dependency."
         ),
-        pin="git:opencode@pinned",
-        pin_kind="git_commit",
+        pin="unconfigured",
+        pin_kind="unconfigured",
         capabilities=HarnessCapabilities(
             supports_mcp=True,
             supports_subagents=False,
@@ -164,10 +177,16 @@ BASELINES: list[Baseline] = [
             supports_verification_loop=False,
             supported_tools=("bash", "read", "write", "edit"),
             supported_dialects=("exact_text",),
+            requires_network=True,
             max_turns_supported=50,
         ),
         supports_model_fixed=True,
         supports_native_best=True,
+        pin_verified=False,
+        live_runner_available=False,
+        first_party_runtime_dependency=False,
+        notes="Blocked until an exact external pin and independently verified adapter exist.",
+        metadata={"integration_boundary": "external_adapter_protocol"},
     ),
     Baseline(
         id="codex",
@@ -313,7 +332,10 @@ def validate_harness_task_compatibility(
 
     req_turns = task_requirements.get("required_turns", 1)
     if req_turns > caps.max_turns_supported:
-        return False, f"Task requires {req_turns} turns, but {baseline_id} max is {caps.max_turns_supported}"
+        return (
+            False,
+            f"Task requires {req_turns} turns, but {baseline_id} max is {caps.max_turns_supported}",
+        )
 
     req_tools = task_requirements.get("required_tools", [])
     for tool in req_tools:
@@ -321,4 +343,3 @@ def validate_harness_task_compatibility(
             return False, f"Baseline {baseline_id} lacks required tool: {tool}"
 
     return True, "Compatible"
-

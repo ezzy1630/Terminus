@@ -12,6 +12,8 @@ uv = "0.8.0"
 buf = "1.59.0"
 just = "1.43.0"
 "cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-nextest" = "0.9.85"
+"cargo:sccache" = "0.8.2"
 
 [env]
 # Put pinned toolchain bin dirs first so any system-installed versions do not

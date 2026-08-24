@@ -17,6 +17,8 @@ OUT_DIR="$ROOT/artifacts/release-gate"
 mkdir -p "$OUT_DIR"
 OUT_JSON="$OUT_DIR/eval-baseline.json"
 
+bun run scripts/verify-release-source.ts
+
 commit="$(git rev-parse HEAD)"
 generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 

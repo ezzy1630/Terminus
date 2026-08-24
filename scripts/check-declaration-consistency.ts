@@ -58,7 +58,7 @@ function run(cmd: string[]): string | null {
     try {
       // `on:` may parse as the string "on" (YAML 1.2) or boolean true
       // (YAML 1.1) depending on the parser.
-      ci = Bun.YAML.parse(readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8"));
+      ci = Bun.YAML.parse(readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8")) as Record<string, { push?: { branches?: string[] } }> | null;
     } catch (err) {
       fail(`ci.yml does not parse: ${String(err)}`);
     }

@@ -21,6 +21,7 @@ test = [
     "hypothesis>=6.0",
     "mypy>=1.10",
     "ruff>=0.5",
+    "types-PyYAML",
 ]
 
 [project.scripts]
@@ -52,5 +53,5 @@ warn_unused_configs = true
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["forge_evals/tests"]
 addopts = "-ra"

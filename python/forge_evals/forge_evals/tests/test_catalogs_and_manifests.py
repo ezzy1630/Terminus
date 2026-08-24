@@ -16,6 +16,7 @@ from forge_evals.experiment_manifest import (
     SamplePlan,
     StoppingRule,
 )
+from forge_evals.runners import ExternalHarnessUnavailable, get_baseline_harness
 
 
 def test_cohort_catalog_has_nineteen_cohorts() -> None:
@@ -49,8 +50,18 @@ def test_every_cohort_has_at_least_one_sample_task() -> None:
 
 
 def test_baseline_catalog_has_eight_baselines() -> None:
-    """SPEC §18.1 / §41.2 lists 8 baselines."""
+    """SPEC §18.1 baselines remain catalogued without becoming runtime dependencies."""
     assert len(BASELINES) == 8
+
+
+def test_opencode_is_external_unconfigured_and_never_a_runtime_dependency() -> None:
+    baseline = baseline_by_id("upstream_opencode")
+    assert baseline.pin_kind == "unconfigured"
+    assert not baseline.pin_verified
+    assert not baseline.live_runner_available
+    assert not baseline.first_party_runtime_dependency
+    with pytest.raises(ExternalHarnessUnavailable, match="external comparison only"):
+        get_baseline_harness("upstream_opencode")
 
 
 def test_baseline_by_id_returns_baseline() -> None:

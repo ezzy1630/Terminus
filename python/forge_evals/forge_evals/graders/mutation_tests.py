@@ -64,7 +64,7 @@ class MutationTestReport:
 
 def mutate_code(code: str, operator: str) -> str:
     """Apply a mutation operator to code string.
-    
+
     If the operator cannot be applied, returns an altered fallback string.
     """
     if operator == MutationOperator.SYNTAX_ERROR:
