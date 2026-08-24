@@ -1,0 +1,82 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/browser-desktop-pool.json",
+  "title": "BrowserDesktopPool",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "poolId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "browser",
+        "desktop"
+      ]
+    },
+    "capacity": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "activeLeasesCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "sandboxTier": {
+      "type": "string",
+      "enum": [
+        "tier2_hardened_container",
+        "tier3_microvm"
+      ]
+    },
+    "healthStatus": {
+      "type": "string",
+      "enum": [
+        "healthy",
+        "degraded",
+        "draining",
+        "unhealthy"
+      ]
+    },
+    "endpoint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtimeConfig": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    },
+    "executionSupport": {
+      "type": "string",
+      "enum": [
+        "coordinator_only",
+        "kernel_backed"
+      ]
+    },
+    "enforcementStatus": {
+      "type": "string",
+      "enum": [
+        "unverified",
+        "enforced"
+      ]
+    }
+  },
+  "required": [
+    "poolId",
+    "kind",
+    "capacity",
+    "activeLeasesCount",
+    "sandboxTier",
+    "healthStatus",
+    "endpoint",
+    "runtimeConfig",
+    "executionSupport",
+    "enforcementStatus"
+  ]
+}

@@ -5,20 +5,27 @@
 > When an OpenAPI document is added, this catalog should be replaced by
 > generated OpenAPI clients (SPEC §45.3).
 
-Total exports: **73**
+Total exports: **86**
 
 | Export | Kind |
 |---|---|
 | `AgentSnapshot` | const |
 | `AgentSnapshot` | type |
 | `ApiEndpoint` | interface |
+| `ApprovalBindingV1` | const |
+| `ApprovalBindingV1` | type |
 | `ApprovalDecisionParam` | const |
 | `ApprovalDecisionParam` | type |
+| `ApprovalDisplay` | const |
+| `ApprovalDisplay` | type |
+| `ApprovalOperationV1` | const |
+| `ApprovalOperationV1` | type |
 | `ApprovalSnapshot` | const |
 | `ApprovalSnapshot` | type |
 | `ArtifactSnapshot` | const |
 | `ArtifactSnapshot` | type |
 | `CancelTask` | const |
+| `canonicalApprovalBinding` | function |
 | `ClientHello` | const |
 | `ClientHello` | type |
 | `ConfigurationSnapshot` | const |
@@ -29,6 +36,8 @@ Total exports: **73**
 | `createSseDecoder` | function |
 | `CreateTask` | const |
 | `CreateThread` | const |
+| `DEFAULT_SSE_MAX_BUFFER_BYTES` | const |
+| `DEFAULT_SSE_MAX_FRAME_BYTES` | const |
 | `encodeSseEvent` | function |
 | `EndpointName` | type |
 | `ENDPOINTS` | const |
@@ -66,6 +75,10 @@ Total exports: **73**
 | `SessionSnapshot` | const |
 | `SessionSnapshot` | type |
 | `SseDecoder` | interface |
+| `SseDecoderLimitError` | class |
+| `SseDecoderLimitKind` | type |
+| `SseDecoderOptions` | interface |
+| `SseDecoderProtocolError` | class |
 | `SseEvent` | interface |
 | `StartTask` | const |
 | `StartTurn` | const |

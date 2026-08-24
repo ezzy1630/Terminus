@@ -9,19 +9,19 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 
 | Fact | Value | How derived |
 |---|---:|---|
-| SPEC.md lines | 9550 | wc of SPEC.md |
+| SPEC.md lines | 9618 | wc of SPEC.md |
 | Rust crates | 23 | directories in crates/ |
 | TypeScript packages | 33 | directories in packages/ |
 | Client apps | 4 | directories in apps/ |
 | External harness adapters | 7 | directories in adapters/ |
 | Mini-services | 2 | directories in mini-services/ |
-| Declared Rust tests | 359 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
-| TypeScript test files | 62 | `*.test.{ts,tsx}` in packages/ + apps/ |
-| Declared TypeScript test blocks | 579 | `test(/it(` occurrences in those files |
-| Declared Python tests | 221 | `def test_*` in python/** |
-| ADRs | 37 | docs/decisions/ADR-*.md |
+| Declared Rust tests | 391 | `#[test]` + `#[tokio::test]` occurrences in crates/** (excl. generated) |
+| TypeScript test files | 94 | `*.test.{ts,tsx}` in packages/ + apps/ |
+| Declared TypeScript test blocks | 814 | `test(/it(` occurrences in those files |
+| Declared Python tests | 243 | `def test_*` in python/** |
+| ADRs | 44 | docs/decisions/ADR-*.md |
 | Runbooks | 15 | docs/runbooks/*.md |
-| SQLite migrations | 3 | migrations/sqlite/*.sql |
+| SQLite migrations | 7 | migrations/sqlite/*.sql |
 
 Maturity classification of every component: see the
 [component maturity registry](component-maturity.md) (`maturity.yaml`).

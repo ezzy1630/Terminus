@@ -1,0 +1,178 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/semantic-target-verification.json",
+  "title": "SemanticTargetVerification",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "verificationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "actionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "elementId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "role": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string"
+            },
+            "selector": {
+              "type": "string",
+              "minLength": 1
+            },
+            "boundingBox": {
+              "type": "object",
+              "properties": {
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "width": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "height": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "x",
+                "y",
+                "width",
+                "height"
+              ]
+            },
+            "textSnippet": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "semanticHash": {
+              "type": "string",
+              "minLength": 1
+            },
+            "evidenceSources": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "dom",
+                  "accessibility"
+                ]
+              }
+            }
+          },
+          "required": [
+            "elementId",
+            "role",
+            "name",
+            "selector",
+            "boundingBox",
+            "textSnippet",
+            "confidence",
+            "semanticHash",
+            "evidenceSources"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "matchConfidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "visuallyConfirmed": {
+      "type": "boolean"
+    },
+    "domConfirmed": {
+      "type": "boolean"
+    },
+    "ambiguityScore": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "verifiedCoordinates": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "ambiguous",
+        "divergent",
+        "rejected"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "verificationId",
+    "actionId",
+    "observationId",
+    "target",
+    "matchConfidence",
+    "visuallyConfirmed",
+    "domConfirmed",
+    "ambiguityScore",
+    "verifiedCoordinates",
+    "verdict",
+    "reason"
+  ],
+  "additionalProperties": false
+}

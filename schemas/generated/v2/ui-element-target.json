@@ -1,0 +1,89 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/ui-element-target.json",
+  "title": "UiElementTarget",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "elementId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string"
+    },
+    "selector": {
+      "type": "string",
+      "minLength": 1
+    },
+    "boundingBox": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number",
+          "minimum": 0
+        },
+        "height": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    },
+    "textSnippet": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "semanticHash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidenceSources": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "dom",
+          "accessibility"
+        ]
+      }
+    }
+  },
+  "required": [
+    "elementId",
+    "role",
+    "name",
+    "selector",
+    "boundingBox",
+    "textSnippet",
+    "confidence",
+    "semanticHash",
+    "evidenceSources"
+  ]
+}

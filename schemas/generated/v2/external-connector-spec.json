@@ -1,0 +1,74 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/external-connector-spec.json",
+  "title": "ExternalConnectorSpec",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "connectorId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baseUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "allowedMethods": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "GET",
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE"
+        ]
+      }
+    },
+    "rateLimitRps": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "credentialBindingId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "effectClasses": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "read_only",
+          "bufferable_local",
+          "reversible_external",
+          "compensable_external",
+          "irreversible",
+          "unknown_semantics"
+        ]
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "maintenance",
+        "disabled"
+      ]
+    }
+  },
+  "required": [
+    "connectorId",
+    "provider",
+    "baseUrl",
+    "allowedMethods",
+    "rateLimitRps",
+    "credentialBindingId",
+    "effectClasses",
+    "status"
+  ]
+}

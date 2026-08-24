@@ -1,0 +1,95 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/structured-intervention.json",
+  "title": "StructuredIntervention",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attemptId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "actorPrincipal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "verb": {
+      "type": "string",
+      "enum": [
+        "focus",
+        "ignore",
+        "elaborate",
+        "change_constraint",
+        "edit_plan",
+        "approve_exact_effect",
+        "deny_narrow",
+        "pause",
+        "resume",
+        "takeover",
+        "fork",
+        "rewind",
+        "terminate",
+        "request_independent_review"
+      ]
+    },
+    "targetEntityId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "PROPOSED",
+        "APPLIED",
+        "REJECTED"
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$"
+    }
+  },
+  "required": [
+    "id",
+    "taskId",
+    "attemptId",
+    "actorPrincipal",
+    "verb",
+    "targetEntityId",
+    "payload",
+    "rationale",
+    "status",
+    "timestamp"
+  ],
+  "additionalProperties": false
+}

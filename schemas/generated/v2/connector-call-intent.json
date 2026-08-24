@@ -1,0 +1,76 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/connector-call-intent.json",
+  "title": "ConnectorCallIntent",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "intentId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "connectorId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "operation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "method": {
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+      ]
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parameters": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authorizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "effectClass": {
+      "type": "string",
+      "enum": [
+        "read_only",
+        "bufferable_local",
+        "reversible_external",
+        "compensable_external",
+        "irreversible",
+        "unknown_semantics"
+      ]
+    }
+  },
+  "required": [
+    "intentId",
+    "connectorId",
+    "taskId",
+    "operation",
+    "method",
+    "path",
+    "parameters",
+    "idempotencyKey",
+    "authorizationId",
+    "effectClass"
+  ]
+}

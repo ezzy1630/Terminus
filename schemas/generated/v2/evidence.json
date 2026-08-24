@@ -50,13 +50,16 @@
           "type": "object",
           "properties": {
             "hash": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
             },
             "uri": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^artifact:\\/\\/sha256\\/[0-9a-f]{64}$"
             },
             "mediaType": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1
             },
             "bytes": {}
           },
@@ -65,7 +68,8 @@
             "uri",
             "mediaType",
             "bytes"
-          ]
+          ],
+          "additionalProperties": false
         },
         {
           "type": "null"

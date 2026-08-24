@@ -1,0 +1,94 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/ui-accessibility-node.json",
+  "title": "UiAccessibilityNode",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "nodeId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "value": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "disabled": {
+      "type": "boolean"
+    },
+    "focused": {
+      "type": "boolean"
+    },
+    "boundingBox": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "width": {
+              "type": "number",
+              "minimum": 0
+            },
+            "height": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "x",
+            "y",
+            "width",
+            "height"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "childrenNodeIds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "nodeId",
+    "role",
+    "name",
+    "description",
+    "value",
+    "disabled",
+    "focused",
+    "boundingBox",
+    "childrenNodeIds"
+  ]
+}

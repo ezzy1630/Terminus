@@ -1,0 +1,32 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/ui-viewport.json",
+  "title": "UiViewport",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "width": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "height": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "devicePixelRatio": {
+      "default": 1,
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "scaleFactor": {
+      "default": 1,
+      "type": "number",
+      "exclusiveMinimum": 0
+    }
+  },
+  "required": [
+    "width",
+    "height"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/incident-profile-spec.json",
+  "title": "IncidentProfileSpec",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "profileId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "departmentId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "auditLevel": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "elevated",
+        "forensic"
+      ]
+    },
+    "maxActionTimeoutMs": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "mandatoryCompensation": {
+      "type": "boolean"
+    },
+    "allowedDiagnostics": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "autoEscalateOnFailure": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "profileId",
+    "organizationId",
+    "departmentId",
+    "auditLevel",
+    "maxActionTimeoutMs",
+    "mandatoryCompensation",
+    "allowedDiagnostics",
+    "autoEscalateOnFailure"
+  ]
+}

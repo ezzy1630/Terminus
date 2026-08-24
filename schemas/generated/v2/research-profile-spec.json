@@ -1,0 +1,52 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/research-profile-spec.json",
+  "title": "ResearchProfileSpec",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "profileId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "organizationId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "departmentId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "allowMultiSourceRetrieval": {
+      "type": "boolean"
+    },
+    "notebookSandboxEnabled": {
+      "type": "boolean"
+    },
+    "strictProvenanceTracking": {
+      "type": "boolean"
+    },
+    "citationFormat": {
+      "type": "string",
+      "enum": [
+        "apa",
+        "ieee",
+        "markdown_source"
+      ]
+    },
+    "maxSearchQueries": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    }
+  },
+  "required": [
+    "profileId",
+    "organizationId",
+    "departmentId",
+    "allowMultiSourceRetrieval",
+    "notebookSandboxEnabled",
+    "strictProvenanceTracking",
+    "citationFormat",
+    "maxSearchQueries"
+  ]
+}

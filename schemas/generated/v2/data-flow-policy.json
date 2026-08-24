@@ -1,0 +1,52 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/data-flow-policy.json",
+  "title": "DataFlowPolicy",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "policyId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "clipboardAccess": {
+      "type": "string",
+      "enum": [
+        "none",
+        "read_only",
+        "write_only",
+        "read_write"
+      ]
+    },
+    "allowedUploadMimeTypes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "maxUploadBytes": {},
+    "downloadQuarantine": {
+      "type": "boolean"
+    },
+    "dlpScanRequired": {
+      "type": "boolean"
+    },
+    "quarantineDirectory": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "policyId",
+    "taskId",
+    "clipboardAccess",
+    "allowedUploadMimeTypes",
+    "maxUploadBytes",
+    "downloadQuarantine",
+    "dlpScanRequired",
+    "quarantineDirectory"
+  ]
+}

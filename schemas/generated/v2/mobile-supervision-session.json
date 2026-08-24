@@ -1,0 +1,61 @@
+{
+  "$id": "https://terminus.dev/schemas/v2/mobile-supervision-session.json",
+  "title": "MobileSupervisionSession",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "operatorPrincipal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "devicePlatform": {
+      "type": "string",
+      "enum": [
+        "ios",
+        "android",
+        "web"
+      ]
+    },
+    "connectionState": {
+      "type": "string",
+      "enum": [
+        "CONNECTED",
+        "SUSPENDED",
+        "DISCONNECTED"
+      ]
+    },
+    "quickActions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "pause",
+          "resume",
+          "approve_effect",
+          "terminate",
+          "request_review"
+        ]
+      }
+    },
+    "lastSeenAt": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "taskId",
+    "operatorPrincipal",
+    "devicePlatform",
+    "connectionState",
+    "quickActions",
+    "lastSeenAt"
+  ]
+}

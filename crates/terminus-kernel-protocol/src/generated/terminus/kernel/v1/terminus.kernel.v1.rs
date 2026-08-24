@@ -723,6 +723,23 @@ pub struct KernelHealth {
     #[prost(message, optional, tag="3")]
     pub checked_at: ::core::option::Option<::prost_types::Timestamp>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BootstrapControlRequest {
+    /// Must equal the configured control principal
+    #[prost(string, tag="1")]
+    pub principal: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BootstrapControlCapabilities {
+    /// Admin, bound to task control-broker
+    #[prost(string, tag="1")]
+    pub broker_capability_token: ::prost::alloc::string::String,
+    /// Admin, bound to task control-maintenance
+    #[prost(string, tag="2")]
+    pub maintenance_capability_token: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub expires_at_unix: u64,
+}
 // =============================================================================
 // Workspace service (SPEC §31.1)
 // =============================================================================
@@ -744,6 +761,10 @@ pub struct RegisterWorkspaceRequest {
     /// workspace | container | microvm | remote
     #[prost(string, tag="6")]
     pub kind: ::prost::alloc::string::String,
+    /// Existing control-plane identity to preserve during registry migration.
+    /// Empty for a new workspace. Admin authorization is required by the RPC.
+    #[prost(string, tag="7")]
+    pub requested_workspace_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WorkspaceEntryMessage {
@@ -755,6 +776,22 @@ pub struct WorkspaceEntryMessage {
     pub canonical_root: ::prost::alloc::string::String,
     #[prost(string, tag="4")]
     pub trust: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResolveWorkspaceRootRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(string, tag="2")]
+    pub root_uri: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub candidate_root: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ResolvedWorkspaceRootMessage {
+    #[prost(string, tag="1")]
+    pub root_uri: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub canonical_root: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetWorkspaceRequest {
@@ -827,6 +864,38 @@ pub struct EvaluatePolicyRequest {
     #[prost(message, optional, tag="2")]
     pub command: ::core::option::Option<NormalizedCommandMessage>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MintTaskCapabilityRequest {
+    /// Admin broker capability
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(string, tag="2")]
+    pub principal: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub session_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(enumeration="CapabilityOperationProto", repeated, tag="6")]
+    pub operation_classes: ::prost::alloc::vec::Vec<i32>,
+    #[prost(string, repeated, tag="7")]
+    pub workspace_paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag="8")]
+    pub network_destinations: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag="9")]
+    pub secret_capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// 1..300
+    #[prost(uint64, tag="10")]
+    pub ttl_seconds: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MintTaskCapabilityResponse {
+    #[prost(string, tag="1")]
+    pub capability_token: ::prost::alloc::string::String,
+    #[prost(uint64, tag="2")]
+    pub expires_at_unix: u64,
+}
 // =============================================================================
 // Secret service (SPEC §13.6, §31.1)
 // =============================================================================
@@ -851,6 +920,30 @@ pub struct SecretCapabilityMessage {
     #[prost(uint64, tag="3")]
     pub expires_at_unix: u64,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StoreSecretRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(string, tag="2")]
+    pub capability_uri: ::prost::alloc::string::String,
+    /// Maximum 16 KiB; never logged or persisted outside OS keyring
+    #[prost(bytes="vec", tag="3")]
+    pub value: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteSecretRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(string, tag="2")]
+    pub capability_uri: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SecretMutationResponse {
+    #[prost(string, tag="1")]
+    pub capability_uri: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub stored: bool,
+}
 // =============================================================================
 // Network egress service (SPEC §13.3, §31.1, ADR-0015)
 // =============================================================================
@@ -871,6 +964,118 @@ pub struct EgressDecisionMessage {
     pub allowed: bool,
     #[prost(string, tag="2")]
     pub reason: ::prost::alloc::string::String,
+}
+// =============================================================================
+// Credentialed connector service (SPEC §17.3, ADR-0035, ADR-0044)
+// =============================================================================
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConnectorGrantBindingMessage {
+    #[prost(string, tag="1")]
+    pub connector_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub destination_host: ::prost::alloc::string::String,
+    #[prost(uint32, tag="3")]
+    pub destination_port: u32,
+    #[prost(string, tag="4")]
+    pub scheme: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub method: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub path_class: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub effect_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MintConnectorGrantRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(string, tag="2")]
+    pub capability_uri: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="3")]
+    pub binding: ::core::option::Option<ConnectorGrantBindingMessage>,
+    #[prost(uint64, tag="4")]
+    pub ttl_seconds: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConnectorGrantMessage {
+    #[prost(string, tag="1")]
+    pub encoded_grant: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub grant_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag="3")]
+    pub expires_at_unix: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConnectorHeaderMessage {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub value: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ConnectorOperationMessage {
+    #[prost(string, tag="1")]
+    pub method: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub scheme: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub host: ::prost::alloc::string::String,
+    #[prost(uint32, tag="4")]
+    pub port: u32,
+    #[prost(string, tag="5")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub query: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="7")]
+    pub headers: ::prost::alloc::vec::Vec<ConnectorHeaderMessage>,
+    #[prost(bytes="vec", tag="8")]
+    pub body: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecuteConnectorRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(string, tag="2")]
+    pub encoded_grant: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="3")]
+    pub operation: ::core::option::Option<ConnectorOperationMessage>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConnectorReceiptMessage {
+    #[prost(string, tag="1")]
+    pub grant_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub effect_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub connector_id: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub method: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub destination: ::prost::alloc::string::String,
+    #[prost(string, tag="8")]
+    pub request_sha256: ::prost::alloc::string::String,
+    #[prost(uint32, optional, tag="9")]
+    pub status_code: ::core::option::Option<u32>,
+    #[prost(string, optional, tag="10")]
+    pub response_sha256: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint64, tag="11")]
+    pub response_redactions: u64,
+    #[prost(string, tag="12")]
+    pub outcome: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConnectorResponseMessage {
+    #[prost(message, optional, tag="1")]
+    pub receipt: ::core::option::Option<ConnectorReceiptMessage>,
+    #[prost(bytes="vec", tag="2")]
+    pub body: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, optional, tag="3")]
+    pub content_type: ::core::option::Option<::prost::alloc::string::String>,
 }
 // =============================================================================
 // Code intelligence service (SPEC §11.8, §31.1)
@@ -978,6 +1183,73 @@ pub struct GetArtifactMetadataResponse {
     #[prost(message, optional, tag="1")]
     pub artifact: ::core::option::Option<ArtifactRef>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LinkArtifactRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(string, tag="2")]
+    pub sha256: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub owner_type: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub owner_id: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub purpose: ::prost::alloc::string::String,
+    /// Authoritative task aggregate that owns the admission. The kernel binds
+    /// this to both RequestContext.task_id and the capability token task binder.
+    #[prost(string, tag="6")]
+    pub owner_task_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LinkArtifactResponse {
+    #[prost(bool, tag="1")]
+    pub linked: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListCheckpointArtifactLinksRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(uint32, tag="2")]
+    pub page_size: u32,
+    #[prost(string, tag="3")]
+    pub continuation_token: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckpointArtifactLinkMessage {
+    #[prost(string, tag="1")]
+    pub link_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub sha256: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub checkpoint_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub owner_task_id: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub created_at: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListCheckpointArtifactLinksResponse {
+    #[prost(message, repeated, tag="1")]
+    pub links: ::prost::alloc::vec::Vec<CheckpointArtifactLinkMessage>,
+    #[prost(string, tag="2")]
+    pub continuation_token: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UnlinkCheckpointArtifactRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(string, tag="2")]
+    pub sha256: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub checkpoint_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub owner_task_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UnlinkCheckpointArtifactResponse {
+    #[prost(bool, tag="1")]
+    pub unlinked: bool,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum PatchCommitMode {
@@ -1084,6 +1356,62 @@ impl DecisionProto {
             "DECISION_ALLOW_WITH_CONSTRAINTS" => Some(Self::DecisionAllowWithConstraints),
             "DECISION_PROMPT" => Some(Self::DecisionPrompt),
             "DECISION_DENY" => Some(Self::DecisionDeny),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CapabilityOperationProto {
+    CapabilityOperationUnspecified = 0,
+    CapabilityOperationRead = 1,
+    CapabilityOperationPatch = 2,
+    CapabilityOperationExec = 3,
+    CapabilityOperationJob = 4,
+    CapabilityOperationSandbox = 5,
+    CapabilityOperationSecret = 6,
+    CapabilityOperationNetwork = 7,
+    CapabilityOperationCodeIntel = 8,
+    CapabilityOperationExtension = 9,
+    CapabilityOperationGit = 10,
+    CapabilityOperationArtifactIngest = 11,
+}
+impl CapabilityOperationProto {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::CapabilityOperationUnspecified => "CAPABILITY_OPERATION_UNSPECIFIED",
+            Self::CapabilityOperationRead => "CAPABILITY_OPERATION_READ",
+            Self::CapabilityOperationPatch => "CAPABILITY_OPERATION_PATCH",
+            Self::CapabilityOperationExec => "CAPABILITY_OPERATION_EXEC",
+            Self::CapabilityOperationJob => "CAPABILITY_OPERATION_JOB",
+            Self::CapabilityOperationSandbox => "CAPABILITY_OPERATION_SANDBOX",
+            Self::CapabilityOperationSecret => "CAPABILITY_OPERATION_SECRET",
+            Self::CapabilityOperationNetwork => "CAPABILITY_OPERATION_NETWORK",
+            Self::CapabilityOperationCodeIntel => "CAPABILITY_OPERATION_CODE_INTEL",
+            Self::CapabilityOperationExtension => "CAPABILITY_OPERATION_EXTENSION",
+            Self::CapabilityOperationGit => "CAPABILITY_OPERATION_GIT",
+            Self::CapabilityOperationArtifactIngest => "CAPABILITY_OPERATION_ARTIFACT_INGEST",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CAPABILITY_OPERATION_UNSPECIFIED" => Some(Self::CapabilityOperationUnspecified),
+            "CAPABILITY_OPERATION_READ" => Some(Self::CapabilityOperationRead),
+            "CAPABILITY_OPERATION_PATCH" => Some(Self::CapabilityOperationPatch),
+            "CAPABILITY_OPERATION_EXEC" => Some(Self::CapabilityOperationExec),
+            "CAPABILITY_OPERATION_JOB" => Some(Self::CapabilityOperationJob),
+            "CAPABILITY_OPERATION_SANDBOX" => Some(Self::CapabilityOperationSandbox),
+            "CAPABILITY_OPERATION_SECRET" => Some(Self::CapabilityOperationSecret),
+            "CAPABILITY_OPERATION_NETWORK" => Some(Self::CapabilityOperationNetwork),
+            "CAPABILITY_OPERATION_CODE_INTEL" => Some(Self::CapabilityOperationCodeIntel),
+            "CAPABILITY_OPERATION_EXTENSION" => Some(Self::CapabilityOperationExtension),
+            "CAPABILITY_OPERATION_GIT" => Some(Self::CapabilityOperationGit),
+            "CAPABILITY_OPERATION_ARTIFACT_INGEST" => Some(Self::CapabilityOperationArtifactIngest),
             _ => None,
         }
     }
