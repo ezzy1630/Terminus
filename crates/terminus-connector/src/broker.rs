@@ -424,7 +424,6 @@ async fn dispatch_https(
     } else {
         format!("https://{}:{}{}?{}", op.host, op.port, op.path, op.query)
     };
-    reserve_request_exact(egress, op.body.len())?;
     let method = reqwest::Method::from_bytes(op.method.as_bytes())
         .map_err(|_| ConnectorError::Protocol("invalid HTTP method".to_string()))?;
     let credential_name = HeaderName::from_bytes(credential_header_name.as_bytes())
@@ -437,9 +436,12 @@ async fn dispatch_https(
     for (name, value) in &op.headers {
         request = request.header(name, value);
     }
-    let mut response = request
-        .body(op.body.clone())
-        .send()
+    let request = request.body(op.body.clone()).build().map_err(|error| {
+        ConnectorError::Protocol(format!("HTTPS request setup failed: {error}"))
+    })?;
+    reserve_request_exact(egress, serialized_request_bytes(&request, op.body.len())?)?;
+    let mut response = client
+        .execute(request)
         .await
         .map_err(|error| ConnectorError::Protocol(format!("HTTPS dispatch failed: {error}")))?;
     let status = response.status().as_u16();
@@ -465,6 +467,46 @@ async fn dispatch_https(
         body.extend_from_slice(&chunk);
     }
     Ok((status, body, content_type))
+}
+
+fn serialized_request_bytes(
+    request: &reqwest::Request,
+    body_len: usize,
+) -> Result<usize, ConnectorError> {
+    let target_len =
+        request.url().path().len() + request.url().query().map_or(0, |query| 1 + query.len());
+    let host = request
+        .url()
+        .host_str()
+        .ok_or_else(|| ConnectorError::Protocol("HTTPS request has no host".to_string()))?;
+    let host = match request.url().port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    let mut bytes = request.method().as_str().len() + 1 + target_len + 1 + "HTTP/1.1\r\n".len();
+    let mut has_host = false;
+    let mut has_content_length = false;
+    for (name, value) in request.headers() {
+        has_host |= name.as_str().eq_ignore_ascii_case("host");
+        has_content_length |= name.as_str().eq_ignore_ascii_case("content-length");
+        bytes = bytes
+            .checked_add(name.as_str().len() + 2 + value.as_bytes().len() + 2)
+            .ok_or_else(|| ConnectorError::Protocol("HTTPS request size overflow".to_string()))?;
+    }
+    if !has_host {
+        bytes = bytes
+            .checked_add("Host: ".len() + host.len() + 2)
+            .ok_or_else(|| ConnectorError::Protocol("HTTPS request size overflow".to_string()))?;
+    }
+    if !has_content_length {
+        bytes = bytes
+            .checked_add("Content-Length: ".len() + body_len.to_string().len() + 2)
+            .ok_or_else(|| ConnectorError::Protocol("HTTPS request size overflow".to_string()))?;
+    }
+    bytes = bytes
+        .checked_add(2 + body_len)
+        .ok_or_else(|| ConnectorError::Protocol("HTTPS request size overflow".to_string()))?;
+    Ok(bytes)
 }
 
 fn reserve_exact(egress: &EgressProxy, bytes: usize) -> Result<(), ConnectorError> {

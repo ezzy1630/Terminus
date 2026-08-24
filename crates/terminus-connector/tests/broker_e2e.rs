@@ -35,16 +35,16 @@ fn egress_for_port_with_limit(port: u16, max_total_bytes: u64) -> EgressProxy {
     )
 }
 
-fn egress_for_port(port: u16) -> EgressProxy {
-    egress_for_port_with_limit(port, 10_000_000)
+fn binding(port: u16) -> GrantBinding {
+    binding_for_scheme(port, "http")
 }
 
-fn binding(port: u16) -> GrantBinding {
+fn binding_for_scheme(port: u16, scheme: &str) -> GrantBinding {
     GrantBinding {
         connector_id: "fixture-api".into(),
         destination_host: "localhost".into(),
         destination_port: port,
-        scheme: "http".into(),
+        scheme: scheme.into(),
         method: "POST".into(),
         path_class: "/repos/{owner}/{repo}/pulls".into(),
         task_id: "task-1".into(),
@@ -66,20 +66,7 @@ fn operation(path: &str, port: u16) -> CanonicalOperation {
 }
 
 async fn fixture_stack() -> (ConnectorBroker, u16, TcpListener) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    let secret_broker = Arc::new(SecretBroker::new());
-    let provider = Arc::new(InMemoryProvider::new());
-    provider.register(SECRET_URI, CREDENTIAL.to_vec());
-    secret_broker.register_provider("github", provider);
-
-    let grants = Arc::new(GrantStore::new());
-    let broker =
-        ConnectorBroker::builder(secret_broker, grants, Arc::new(egress_for_port(port)), KEY)
-            .connector("fixture-api", AuthStyle::Bearer)
-            .build();
-    (broker, port, listener)
+    fixture_stack_with_budget(10_000_000).await
 }
 
 async fn fixture_stack_with_budget(max_total_bytes: u64) -> (ConnectorBroker, u16, TcpListener) {
@@ -340,6 +327,33 @@ async fn https_uses_tls_and_records_plaintext_peer_failure_as_uncertain() {
     op.scheme = "https".into();
     let response = broker.execute(&op, &grant).await.unwrap();
     assert_eq!(response.receipt.outcome, Outcome::DispatchUncertain);
+    assert_eq!(response.receipt.status_code, None);
+}
+
+#[tokio::test]
+async fn https_request_budget_failure_is_not_dispatched() {
+    let (broker, port, _listener) = fixture_stack_with_budget(1).await;
+    let issuer = GrantIssuer::new(KEY.to_vec());
+    let grant = issuer
+        .mint(
+            WorkloadIdentity {
+                workload_id: "wl-1".into(),
+                principal: "agent-a".into(),
+                task_id: "task-1".into(),
+            },
+            SECRET_URI,
+            CREDENTIAL,
+            binding_for_scheme(port, "https"),
+            300,
+            1,
+        )
+        .unwrap();
+    let mut op = operation("/repos/acme/widget/pulls", port);
+    op.scheme = "https".into();
+
+    let response = broker.execute(&op, &grant).await.unwrap();
+
+    assert_eq!(response.receipt.outcome, Outcome::NotDispatched);
     assert_eq!(response.receipt.status_code, None);
 }
 

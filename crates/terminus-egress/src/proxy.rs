@@ -136,7 +136,9 @@ impl EgressProxy {
     pub fn reserve_exact(&self, bytes: u64) -> Result<(), EgressError> {
         loop {
             let current = self.counter.bytes_transferred.load(Ordering::Acquire);
-            if bytes > self.rate_limit.max_total_bytes.saturating_sub(current) {
+            if current >= self.rate_limit.max_total_bytes
+                || bytes > self.rate_limit.max_total_bytes.saturating_sub(current)
+            {
                 return Err(EgressError::ByteBudgetExceeded);
             }
             let next = current.saturating_add(bytes);
@@ -245,6 +247,10 @@ mod tests {
         assert_eq!(proxy.bytes_transferred(), 60);
         proxy.reserve_exact(40).unwrap();
         assert_eq!(proxy.bytes_transferred(), 100);
+        assert!(matches!(
+            proxy.reserve_exact(0),
+            Err(EgressError::ByteBudgetExceeded)
+        ));
     }
 
     #[test]
