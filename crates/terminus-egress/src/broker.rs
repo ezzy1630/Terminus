@@ -97,7 +97,8 @@ async fn serve_connection(stream: UnixStream, proxy: Arc<EgressProxy>) -> Result
     while request_line.len() <= MAX_HANDSHAKE_BYTES {
         let mut byte = [0u8; 1];
         match reader.read_exact(&mut byte).await {
-            Ok(()) => request_line.push(byte[0]),
+            Ok(1) => request_line.push(byte[0]),
+            Ok(_) => break,
             Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(EgressError::Io(e)),
         }
