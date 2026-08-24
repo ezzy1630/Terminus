@@ -30,9 +30,9 @@ the evidence listed in `Terminus — Research/implementation-reconciliation.md`.
   fault/fuzz/release drills, E2E, and 60-second soak passed. Full 24-hour soak,
   held-out evidence, signed provenance, and owner approvals remain open.
 - All Cubic review runs and inline findings were audited. The final valid HTTPS
-  budget findings were fixed in `dc5a23f`; the exact candidate CI run
-  `32713205642` passed every required job, with only label-gated eval smoke
-  skipped.
+  budget findings were fixed in `dc5a23f`; exact candidate CI run
+  `32714614661` passed every required job, with only label-gated eval smoke
+  skipped. All 24 addressed Cubic review threads are resolved.
 
 ### Cleanup decisions
 
@@ -64,11 +64,14 @@ the evidence listed in `Terminus — Research/implementation-reconciliation.md`.
   follow-up Cubic contract, kernel, runbook, fixture, and budget findings
 - `dc5a23f` — classify HTTPS pre-dispatch failures correctly and account for
   explicit request defaults
+- `9a678ba` — record final candidate validation evidence
+- `ef23012` — reconcile hosted gate status after the main merge
 
 ### Remaining handoff
 
-The feature branch is pushed and its hosted CI is green. Merge it into `main`,
-push `main`, read back main CI, then close the superseded Dependabot PRs with
-an explanation and verify none remain open. The seven program gates in the
-reconciliation ledger remain deliberately open where their external evidence
-is missing.
+The feature branch was merged into `main` at `885e426` and pushed. Main CI
+`32715959418` is green on `ef23012`; the hosted checkout fix executed across
+the supported jobs. Dependabot PRs #1–#9 were closed as stale/superseded with
+regeneration instructions, and no Dependabot PRs remain open. The seven
+program gates in the reconciliation ledger remain deliberately open where
+their external evidence is missing.
