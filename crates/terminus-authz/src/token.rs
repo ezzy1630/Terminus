@@ -62,6 +62,20 @@ pub struct Scope {
 /// deny-all rather than as an ordinary pattern.
 const DENY_ALL_SCOPE_PATTERN: &str = "\0terminus-deny-all";
 
+/// Tolerance for minor clock differences between the minting and validating
+/// hosts when judging `issued_at_unix`.
+const CLOCK_SKEW_ALLOWANCE_SECONDS: u64 = 60;
+
+/// Current unix time in seconds. Fails closed if the system clock is before
+/// the unix epoch: defaulting to 0 would validate every unexpired token
+/// forever.
+fn system_now_unix() -> Result<u64, AuthzError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| AuthzError::InvalidTimeWindow(format!("system clock regression: {e}")))
+}
+
 impl Scope {
     /// Build a least-authority scope where an omitted resource kind means
     /// "deny that kind". This is the task-capability constructor.
@@ -189,13 +203,20 @@ impl CapabilityToken {
         mac.verify_slice(&signature)
             .map_err(|_| AuthzError::InvalidSignature)?;
 
-        // Check expiry.
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        // Check expiry. The clock read is fallible: a pre-epoch system clock
+        // must fail closed instead of validating every token against now=0.
+        let now = system_now_unix()?;
         if claims.expires_at_unix <= now {
             return Err(AuthzError::Expired);
+        }
+        // A signature-valid token whose issuance timestamp lies in the
+        // future (beyond a small skew allowance) has an incoherent time
+        // window — reject it rather than honoring an arbitrary lifetime.
+        if claims.issued_at_unix > now.saturating_add(CLOCK_SKEW_ALLOWANCE_SECONDS) {
+            return Err(AuthzError::InvalidTimeWindow(format!(
+                "issued_at {} is in the future",
+                claims.issued_at_unix
+            )));
         }
 
         // Check revocation.
@@ -440,11 +461,11 @@ impl TokenIssuer {
         nonce: impl Into<String>,
         action_hash: Option<String>,
     ) -> Result<CapabilityToken, AuthzError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = system_now_unix()?;
         let ttl = ttl_seconds.unwrap_or(self.default_ttl_seconds);
+        let expires_at_unix = now
+            .checked_add(ttl)
+            .ok_or_else(|| AuthzError::InvalidTimeWindow("ttl overflows unix seconds".into()))?;
         let mut binder = binder;
         binder.kernel_instance_id = self.kernel_instance_id.clone();
         let nonce = nonce.into();
@@ -454,7 +475,7 @@ impl TokenIssuer {
         let claims = TokenClaims {
             token_id: terminus_kernel_protocol::new_id(),
             issued_at_unix: now,
-            expires_at_unix: now + ttl,
+            expires_at_unix,
             binder,
             operation_classes,
             max_scope,
@@ -985,6 +1006,33 @@ mod tests {
         let encoded = token.encode().unwrap();
         let err = issuer.validate(&encoded).unwrap_err();
         assert!(matches!(err, AuthzError::Expired));
+    }
+
+    #[test]
+    fn future_issued_token_rejected() {
+        let issuer = issuer();
+        let binder = TokenBinder {
+            principal: "u".into(),
+            ..Default::default()
+        };
+        let mut token = issuer
+            .mint(
+                binder,
+                vec![OperationClass::Read],
+                Scope::default(),
+                None,
+                "n-future",
+            )
+            .unwrap();
+        // Re-sign with an issuance timestamp far in the future: the window is
+        // incoherent even though the signature is valid.
+        token.claims.issued_at_unix += 60 * 60 * 24 * 365;
+        let canonical = token.claims.canonical_json().unwrap();
+        let mut mac = HmacSha256::new_from_slice(b"test-secret-key").unwrap();
+        mac.update(canonical.as_bytes());
+        token.signature = mac.finalize().into_bytes().to_vec();
+        let err = issuer.validate(&token.encode().unwrap()).unwrap_err();
+        assert!(matches!(err, AuthzError::InvalidTimeWindow(_)));
     }
 
     #[test]

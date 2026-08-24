@@ -9,6 +9,7 @@
  *   terminus <command> [options]
  *
  * Commands:
+ *   doctor                          Run system diagnostics and maturity check
  *   health                          Print system + kernel health as JSON
  *   sessions                        List sessions as JSON
  *   session <id>                    Get a session snapshot as JSON
@@ -65,6 +66,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { ProposeInterventionRequestV2 } from "@terminus/public-api";
+import { formatDoctorReportText, runDoctor } from "./doctor/index.js";
 
 const GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
 const PORT_PARAM = "XTransformPort=3050";
@@ -232,6 +234,12 @@ async function waitTask(
   process.exit(3);
 }
 
+// A gateway that stalls or never emits an event boundary must not wedge the
+// CLI silently or grow the buffer without bound (mirrors the desktop
+// client's bounded SSE reader).
+const SSE_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+const SSE_IDLE_TIMEOUT_MS = 120_000;
+
 async function streamSse(body: ReadableStream<Uint8Array>): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -241,9 +249,23 @@ async function streamSse(body: ReadableStream<Uint8Array>): Promise<void> {
   let dataLines: string[] = [];
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const timeout = new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), SSE_IDLE_TIMEOUT_MS),
+      );
+      const result = await Promise.race([reader.read(), timeout]);
+      if (result === "timeout") {
+        await reader.cancel("idle timeout").catch(() => undefined);
+        process.stderr.write(`error: SSE stream idle for ${SSE_IDLE_TIMEOUT_MS / 1000}s\n`);
+        process.exit(4);
+      }
+      const { done, value } = result;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
+      if (buffer.length > SSE_MAX_BUFFER_BYTES) {
+        await reader.cancel("oversized event block").catch(() => undefined);
+        process.stderr.write(`error: SSE event exceeds ${SSE_MAX_BUFFER_BYTES} byte buffer cap\n`);
+        process.exit(5);
+      }
       while (true) {
         const idx = buffer.indexOf("\n\n");
         if (idx < 0) break;
@@ -290,6 +312,7 @@ function showHelp(): void {
 Terminus CLI — non-interactive client for CI and automation (SPEC §42.1).
 
 Commands:
+  doctor [--json] [--profile <p>] Run system diagnostics and maturity check
   health                          System + kernel health (JSON)
   sessions                        List sessions (JSON)
   session <id>                    Session snapshot (JSON)
@@ -367,6 +390,24 @@ async function main(): Promise<void> {
 
   try {
     switch (cmd) {
+      case "doctor": {
+        const profile = typeof flags.profile === "string" ? flags.profile : undefined;
+        const gatewayUrl = typeof flags.gateway === "string" ? flags.gateway : (process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:3050");
+        const report = await runDoctor({
+          profile,
+          gatewayUrl,
+          verbose: Boolean(flags.verbose),
+        });
+        if (flags.json === true) {
+          printJson(report);
+        } else {
+          process.stdout.write(formatDoctorReportText(report, Boolean(flags.verbose)) + "\n");
+        }
+        if (report.profile === "production" && !report.invariants.passed) {
+          process.exit(1);
+        }
+        break;
+      }
       case "health": {
         printJson(await apiGet("/v1/system/health"));
         break;

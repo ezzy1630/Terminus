@@ -56,15 +56,21 @@ export class StdioJsonRpcAdapter implements ExternalAdapter {
       TERMINUS_WORKTREE_ID: contract.worktreeId,
     });
     await this.rpc("initialize", {});
-    if (signal) {
-      signal.addEventListener(
-        "abort",
-        () => {
-          void this.cancel("abort_signal");
-        },
-        { once: true },
-      );
+    // The abort listener must not outlive launch(): a later abort of a shared
+    // signal would otherwise mutate completed adapter state (kill a dead
+    // session, append a spurious cancelled event).
+    const onAbort = (): void => {
+      void this.cancel("abort_signal");
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      await this.runContract(contract);
+    } finally {
+      if (signal) signal.removeEventListener("abort", onAbort);
     }
+  }
+
+  private async runContract(contract: AdapterContract): Promise<void> {
     const runResult = await this.rpc("run", { contract });
     const validated = validateAdapterResult(runResult, true);
     if (!validated.ok) {

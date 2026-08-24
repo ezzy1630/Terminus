@@ -28,6 +28,8 @@ pub enum AuthzError {
     InvalidAudience,
     #[error("token replay detected (nonce already used)")]
     Replay,
+    #[error("token time window invalid: {0}")]
+    InvalidTimeWindow(String),
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("invalid hex encoding: {0}")]

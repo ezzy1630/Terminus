@@ -59,11 +59,17 @@ export function estimateCostMicros(
   economics: ProviderEconomics,
 ): Micros {
   const microsPerMillion = (m: Micros): number => Number(m) / 1_000_000;
+  // Cached tokens are a subset of the prompt. An inconsistent caller that
+  // reports cached > prompt must not produce a negative input cost, which
+  // would deflate budgets through checkBudget/recordSpend.
+  const cachedTokens = input.predictedCachedTokens > input.promptTokens
+    ? input.promptTokens
+    : input.predictedCachedTokens;
   const inputCost =
-    Number(input.promptTokens - input.predictedCachedTokens) *
+    Number(input.promptTokens - cachedTokens) *
     microsPerMillion(economics.inputMicrosPerMillion);
   const cachedCost =
-    Number(input.predictedCachedTokens) *
+    Number(cachedTokens) *
     microsPerMillion(economics.cachedInputMicrosPerMillion);
   const outputCost =
     Number(input.predictedOutputTokens) *
