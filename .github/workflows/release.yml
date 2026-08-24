@@ -185,7 +185,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-terminus
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           pattern: terminus-kernel-darwin-*
           path: ${{ runner.temp }}/terminus-mac-runtimes
@@ -538,17 +538,17 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-terminus
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: linux-enforcement-evidence
           path: ${{ runner.temp }}/linux-evidence
           merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           pattern: terminus-kernel-*
           path: ${{ runner.temp }}/release-builds
           merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: terminus-desktop-macos
           path: ${{ runner.temp }}/desktop-release
@@ -614,7 +614,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           path: dist
           merge-multiple: true
@@ -690,12 +690,12 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-terminus
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: linux-enforcement-evidence
           path: ${{ runner.temp }}/linux-evidence
           merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: release-validation-evidence
           path: artifacts/release-gate
