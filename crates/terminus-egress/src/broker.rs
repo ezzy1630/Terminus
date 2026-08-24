@@ -9,7 +9,7 @@ use crate::{EgressError, EgressProxy};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
 
 const MAX_HANDSHAKE_BYTES: usize = 4 * 1024;
@@ -241,7 +241,7 @@ where
 mod tests {
     use super::*;
     use crate::{DestinationPolicy, EgressPolicy, RateLimit};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
 
     fn localhost_policy(deny_private_ips: bool, port: u16) -> EgressPolicy {
