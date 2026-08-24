@@ -1509,11 +1509,14 @@ mod sandbox_profile_tests {
 
     #[test]
     fn workspace_rules_are_materialized_under_the_registered_root() {
+        let workspace_root = std::path::Path::new("registered-workspace");
         let profile = resolve_sandbox_profile("secure-local-default")
-            .map(|profile| materialize_workspace_profile(profile, std::path::Path::new("/tmp/ws")));
+            .map(|profile| materialize_workspace_profile(profile, workspace_root));
+        let expected_root = workspace_root.display().to_string();
+        let expected_git = workspace_root.join(".git").display().to_string();
         assert!(matches!(profile, Ok(profile) if
-            profile.filesystem.iter().any(|rule| rule.path == "/tmp/ws")
-                && profile.filesystem.iter().any(|rule| rule.path == "/tmp/ws/.git")
+            profile.filesystem.iter().any(|rule| rule.path == expected_root)
+                && profile.filesystem.iter().any(|rule| rule.path == expected_git)
                 && profile.filesystem.iter().all(|rule| !rule.path.starts_with("workspace://"))
         ));
     }
