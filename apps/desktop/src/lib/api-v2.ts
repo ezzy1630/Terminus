@@ -389,7 +389,7 @@ function decodeEvidence(value: unknown): EvidenceSnapshot {
     environmentHash: nullableString(evidence.environmentHash, "v2 evidence.environmentHash"),
     verifierResult: requiredString(evidence.verifierResult, "v2 evidence.verifierResult"),
     artifactRef,
-    metadata: requiredRecord(evidence.metadata, "v2 evidence.metadata"),
+    metadata: requiredRecord(evidence.metadata === undefined ? {} : evidence.metadata, "v2 evidence.metadata"),
     observedAt: requiredTimestamp(evidence.observedAt, "v2 evidence.observedAt"),
   };
 }

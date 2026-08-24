@@ -23,11 +23,17 @@ function recordFrom(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function snapshotFromEventPayload(value: unknown): Record<string, unknown> | null {
+  const record = recordFrom(value);
+  if (record === null) return null;
+  return "snapshot" in record ? recordFrom(record.snapshot) : record;
+}
+
 /** Only task-bound events may advance this task panel's durable replay cursor. */
 export function eventBelongsToTask(envelope: ArpV2EventEnvelope, taskId: string): boolean {
   if (envelope.aggregateType === "task") return envelope.aggregateId === taskId;
   if (envelope.aggregateType !== "effect" && envelope.aggregateType !== "claim") return false;
-  const snapshot = recordFrom(envelope.payload);
+  const snapshot = snapshotFromEventPayload(envelope.payload);
   return snapshot?.id === envelope.aggregateId && snapshot.taskId === taskId;
 }
 

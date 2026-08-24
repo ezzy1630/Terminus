@@ -64,6 +64,7 @@
  *   3   timeout
  */
 import { randomUUID } from "node:crypto";
+import { ProposeInterventionRequestV2 } from "@terminus/public-api";
 
 const GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
 const PORT_PARAM = "XTransformPort=3050";
@@ -159,6 +160,11 @@ function requireFlag(flags: Record<string, string | boolean>, name: string): str
   return v;
 }
 
+function usageError(message: string): never {
+  process.stderr.write(`error: ${message}\n`);
+  process.exit(2);
+}
+
 function requireJsonObjectFlag(flags: Record<string, string | boolean>, name: string): Record<string, unknown> {
   const raw = requireFlag(flags, name);
   let parsed: unknown;
@@ -173,6 +179,31 @@ function requireJsonObjectFlag(flags: Record<string, string | boolean>, name: st
     process.exit(2);
   }
   return parsed as Record<string, unknown>;
+}
+
+function requireInterventionPayload(
+  flags: Record<string, string | boolean>,
+  verb: string,
+  taskId: string,
+  targetEntityId: string | null,
+  rationale: string,
+): Record<string, unknown> {
+  if (flags.payload === true) usageError("--payload requires a JSON object value");
+  const payload = flags.payload === undefined ? {} : requireJsonObjectFlag(flags, "payload");
+  const parsed = ProposeInterventionRequestV2.safeParse({
+    taskId,
+    verb,
+    targetEntityId,
+    payload,
+    rationale,
+  });
+  if (!parsed.success) {
+    const detail = parsed.error.issues
+      .map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`)
+      .join("; ");
+    usageError(`--payload is invalid for --verb ${verb}: ${detail}`);
+  }
+  return payload;
 }
 
 async function waitTask(
@@ -631,9 +662,7 @@ async function main(): Promise<void> {
         const verb = requireFlag(flags, "verb");
         const rationale = requireFlag(flags, "rationale");
         const target = typeof flags.target === "string" ? flags.target : null;
-        const payload = typeof flags.payload === "string"
-          ? requireJsonObjectFlag(flags, "payload")
-          : {};
+        const payload = requireInterventionPayload(flags, verb, taskId, target, rationale);
         printJson(await apiMutate("/v2/interventions", {
           taskId,
           verb,

@@ -67,13 +67,13 @@ function main(): void {
   const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
       .sort();
-  const migrationFiles = new Map<number, string>();
+  const migrationFiles = new Map<number, { file: string; name: string }>();
   for (const file of files) {
     const match = /^(\d+)_(.+)\.sql$/.exec(file);
     if (!match) throw new Error(`invalid migration filename: ${file}`);
     const version = Number.parseInt(match[1] ?? "", 10);
     if (migrationFiles.has(version)) throw new Error(`duplicate migration version ${version}`);
-    migrationFiles.set(version, file);
+    migrationFiles.set(version, { file, name: match[2]! });
   }
   const appliedRows = db
     .query("SELECT version FROM schema_migrations")
@@ -85,14 +85,8 @@ function main(): void {
   }
 
   let appliedCount = 0;
-  for (const file of files) {
-    const m = file.match(/^(\d+)_(.+)\.sql$/);
-    if (!m) {
-      console.warn(`skipping non-migration file: ${file}`);
-      continue;
-    }
-    const version = parseInt(m[1]!, 10);
-    const name = m[2]!;
+  for (const [version, migration] of migrationFiles) {
+    const { file, name } = migration;
     const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
     const checksum = sha256(sql);
 

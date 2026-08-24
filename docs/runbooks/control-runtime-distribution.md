@@ -16,12 +16,15 @@ the upgrade has passed health checks.
 ```text
 tar -xzf terminus-control-linux-amd64.tar.gz
 export DATABASE_URL=file:/var/lib/terminus/control.db
-# Obtain this value from the deployment secret manager; do not commit or
-# paste a long-lived token into a shell history or release artifact.
-export TERMINUS_CONTROL_TOKEN='<deployment-provided-token>'
 export TERMINUS_KERNEL_GRPC_SOCKET=/run/terminus/kernel.sock
 ./terminus-control/bin/terminus-control migrate
-./terminus-control/bin/terminus-control serve
+# The deployment secret manager injects both bearer values into the service
+# process; their values never appear in shell history or release artifacts.
+secret-manager exec \
+  --env TERMINUS_CONTROL_TOKEN=terminus/control-token \
+  --env TERMINUS_KERNEL_CONTROL_BOOTSTRAP=1 \
+  --env TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN=terminus/kernel/control-bootstrap \
+  -- ./terminus-control/bin/terminus-control serve
 ```
 
 `migrate` is explicit and idempotent. It verifies every previously applied

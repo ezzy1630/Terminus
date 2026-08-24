@@ -21,8 +21,9 @@ interface ClaimEvidenceResource {
 
 function ClaimEvidenceForTask({ taskId }: { taskId: string }): JSX.Element {
   const load = useCallback(async (signal: AbortSignal): Promise<ClaimEvidenceResource> => {
-    const [task, claims, evidence] = await Promise.all([
-      arpV2.getTask(taskId, signal),
+    const task = await arpV2.getTask(taskId, signal);
+    if (task === null) return { task: null, claims: [], evidence: [] };
+    const [claims, evidence] = await Promise.all([
       arpV2.listClaims(taskId, signal),
       arpV2.listEvidence(taskId, signal),
     ]);

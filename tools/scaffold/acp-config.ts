@@ -42,20 +42,6 @@ const vscodeConfig = {
   "terminus.bridge.autoSyncContext": true,
 };
 
-const zedConfig = {
-  agent_servers: {
-    "Terminus JSON-RPC bridge": {
-      type: "custom",
-      command: "bun",
-      args: [ACP_SCRIPT],
-      env: {
-        TERMINUS_GATEWAY: "http://127.0.0.1:81",
-        TERMINUS_TOKEN: "${TERMINUS_TOKEN}",
-      },
-    },
-  },
-};
-
 function main(): void {
   const args = process.argv.slice(2);
   const writeVscode = args.includes("--write-vscode");
@@ -72,8 +58,8 @@ function main(): void {
   console.log(JSON.stringify(vscodeConfig, null, 2));
   console.log("\n------------------------------------------------------------------");
 
-  console.log("3. Zed Editor Configuration (~/.config/zed/settings.json):");
-  console.log(JSON.stringify(zedConfig, null, 2));
+  console.log("3. Zed Editor Configuration:");
+  console.log("No native Zed agent_servers block is emitted: this bridge speaks Terminus JSON-RPC, not ACP v1.");
   console.log("\n------------------------------------------------------------------");
 
   if (writeVscode) {
@@ -85,10 +71,14 @@ function main(): void {
     let current: Record<string, unknown> = {};
     if (existsSync(settingsPath)) {
       try {
-        current = JSON.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+        // Bun's JSON5 parser accepts VS Code JSONC comments and trailing
+        // commas while still rejecting malformed content. The output is
+        // canonical JSON, so existing comments are not silently preserved as
+        // stale configuration text.
+        current = Bun.JSON5.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
       } catch (error: unknown) {
         throw new Error(
-          `[acp-config] refusing to overwrite ${settingsPath}: expected valid JSON (JSONC comments/trailing commas are not rewritten)`,
+          `[acp-config] refusing to overwrite ${settingsPath}: expected valid JSONC`,
           { cause: error },
         );
       }

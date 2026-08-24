@@ -329,6 +329,10 @@ describe("ARP v2 event admission", () => {
     expect(eventBelongsToTask(relatedEffect, "task-requested")).toBe(true);
     expect(eventBelongsToTask({
       ...relatedEffect,
+      payload: { snapshot: effect("task-requested") },
+    }, "task-requested")).toBe(true);
+    expect(eventBelongsToTask({
+      ...relatedEffect,
       payload: effect("task-other"),
     }, "task-requested")).toBe(false);
     expect(eventBelongsToTask({

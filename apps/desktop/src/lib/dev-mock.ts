@@ -6,7 +6,7 @@
  */
 import { useTerminusStore } from "../hooks/use-terminus";
 import { arpV2 } from "./api-v2";
-import type { MaterialQuestionSnapshot, TaskV2Snapshot } from "../types/v2";
+import type { ClaimSnapshot, EvidenceSnapshot, MaterialQuestionSnapshot, TaskV2Snapshot } from "../types/v2";
 import type { Task, TaskDomainStatus } from "../types";
 
 export function setupDevMock(): void {
@@ -220,6 +220,30 @@ export function setupDevMock(): void {
     },
   ];
 
+  const claims: ClaimSnapshot[] = tasks.flatMap((task) => task.contract.acceptance.map((criterion) => ({
+    id: criterion.claimId,
+    taskId: task.id,
+    statement: criterion.statement,
+    requiredEvidenceKind: criterion.evidenceRequirement,
+    status: "SATISFIED",
+    evidenceIds: [`evidence-${criterion.claimId}`],
+    waivedRationale: null,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+  })));
+  const evidence: EvidenceSnapshot[] = claims.map((claim) => ({
+    id: claim.evidenceIds[0] ?? `evidence-${claim.id}`,
+    claimId: claim.id,
+    kind: claim.requiredEvidenceKind,
+    summary: "Mock verifier receipt: focused contract test passed.",
+    sourceRevision: "fixture",
+    environmentHash: "fixture-environment",
+    verifierResult: "PASS",
+    artifactRef: null,
+    metadata: { mock: true },
+    observedAt: new Date().toISOString(),
+  }));
+
   const SESSION_BY_TASK: Record<string, string> = {
     "task-101": "session-1",
     "task-102": "session-1",
@@ -237,6 +261,11 @@ export function setupDevMock(): void {
   arpV2.listTasks = async () => tasks;
   arpV2.listMaterialQuestions = async () => questions;
   arpV2.getTask = async (id) => tasks.find((t) => t.id === id) ?? null;
+  arpV2.listClaims = async (taskId) => claims.filter((claim) => claim.taskId === taskId);
+  arpV2.listEvidence = async (taskId) => {
+    const claimIds = new Set(claims.filter((claim) => claim.taskId === taskId).map((claim) => claim.id));
+    return evidence.filter((item) => claimIds.has(item.claimId));
+  };
 
   const V1_STATUS_BY_TASK: Record<string, TaskDomainStatus> = {
     "task-101": "ACTIVE",
