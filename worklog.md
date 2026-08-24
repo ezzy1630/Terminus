@@ -64,6 +64,7 @@ components remain explicitly fail-closed in `maturity.yaml`.
 - `d32f64d` — add Phase 9/10 control contracts
 - `2f81709` — ship the standalone desktop operator cockpit
 - `7074109` — add hosted checks and release evidence gates
+- `292bd51` — refresh generated maturity documentation
 
 ### Handoff
 
