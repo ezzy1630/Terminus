@@ -189,13 +189,11 @@ jobs:
       - name: Produce M12 evidence bundle
         env:
           TERMINUS_SOAK_SECONDS: "30"
-          TERMINUS_RELEASE_OWNER_APPROVAL: "ci-release-owner"
-          TERMINUS_SECURITY_OWNER_APPROVAL: "ci-security-owner"
-          TERMINUS_PROTOCOL_OWNER_APPROVAL: "ci-protocol-owner"
-          TERMINUS_EVALUATION_OWNER_APPROVAL: "ci-evaluation-owner"
           # M12 is the documented local evidence subset. Stable release
-          # validation intentionally omits this override and rejects fixture
-          # eval evidence until a live release harness is available.
+          # validation intentionally omits these overrides and rejects fixture
+          # eval evidence until a live release harness is available. This job
+          # produces the immutable candidate evidence only; it does not mint a
+          # release decision or invent owner approvals.
           TERMINUS_RELEASE_ALLOW_FIXTURE_EVAL: "1"
           # These are explicit M12 local-subset fallbacks. Stable release
           # validation intentionally leaves both disabled.
@@ -203,19 +201,9 @@ jobs:
           TERMINUS_RELEASE_ALLOW_SBOM_FALLBACK: "1"
         run: |
           export TERMINUS_RELEASE_COMMIT="${GITHUB_SHA}"
+          export TERMINUS_RELEASE_VERSION="$(bun -e 'console.log(JSON.parse(await Bun.file("package.json").text()).version)')"
           export TERMINUS_RELEASE_RUN_STARTED_AT="$(date -u +%s)"
-          just fuzz-smoke
-          just fault-injection
-          just release-drills
-          just soak
-          just canary
-          just eval-release
-          just eval-baseline
-          just sbom-verify
-          just schema-freeze-evidence
-          just release-decision
-          just system-card
-          bun run scripts/m12-exit-gate.ts
+          just release-evidence-candidate
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
