@@ -804,6 +804,12 @@ fn inspect_process(pid: u32) -> Result<Option<ProcessSnapshot>, ProcessError> {
             "malformed /proc/{pid}/stat"
         )));
     };
+    let Some((_, command_name)) = stat.split_once(" (") else {
+        return Err(ProcessError::IdentityUnavailable(format!(
+            "missing /proc/{pid} command name"
+        )));
+    };
+    let command_name = command_name.trim_end_matches(')');
     let Some(start_time) = fields.split_whitespace().nth(19) else {
         return Err(ProcessError::IdentityUnavailable(format!(
             "missing /proc/{pid} start time"
@@ -821,17 +827,16 @@ fn inspect_process(pid: u32) -> Result<Option<ProcessSnapshot>, ProcessError> {
         .map_or_else(
             || match std::fs::read_link(format!("/proc/{pid}/exe")) {
                 Ok(path) => Ok(Some(path.display().to_string())),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                // A live process can temporarily expose an empty cmdline and
+                // no exe link while its image is being replaced. The stat
+                // command name is still tied to this PID/start-time fence.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(Some(command_name.to_string()))
+                }
                 Err(error) => Err(ProcessError::Io(error)),
             },
             |value| Ok(Some(String::from_utf8_lossy(value).into_owned())),
         )?;
-    let Some(executable) = executable else {
-        // A Linux zombie retains /proc/<pid>/stat briefly after its command
-        // image and executable link disappear. It cannot receive a useful
-        // signal, so report it as gone to restart reconciliation.
-        return Ok(None);
-    };
     Ok(Some(ProcessSnapshot {
         start_time: start_time.to_string(),
         executable,
@@ -1461,7 +1466,10 @@ mod tests {
         let mgr = ProcessManager::new(store);
         let spawn = NormalizedSpawn {
             program: "sh".into(),
-            args: vec!["-c".into(), "trap '' TERM; while :; do :; done".into()],
+            args: vec![
+                "-c".into(),
+                "trap '' TERM; echo ready; while :; do :; done".into(),
+            ],
             env: std::collections::BTreeMap::new(),
             working_dir: None,
             timeout_ms: 0,
@@ -1469,6 +1477,19 @@ mod tests {
             allocate_pty: false,
         };
         let (outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
+        let ready = time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = rx.recv().await {
+                if let ProcessEvent::Stdout(chunk) = event {
+                    if String::from_utf8_lossy(&chunk.bytes).contains("ready") {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+        .await
+        .unwrap();
+        assert!(ready, "stubborn process did not install its signal handler");
         assert_eq!(
             mgr.cancel(&outcome.process_id, "escalation-test")
                 .await
