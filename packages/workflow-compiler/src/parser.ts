@@ -155,12 +155,10 @@ export function parseSkillMarkdown(markdown: string, sourcePath = "SKILL.md"): W
       continue;
     }
 
-    // Step item detection (e.g. "1. Step description" or "- Step description" inside procedure section)
-    const numberedMatch = /^(\d+)\.\s+(.+)$/.exec(trimmed);
-    const bulletMatch = /^[-*]\s+(.+)$/.exec(trimmed);
+    // Step item detection (e.g. "1. Step description" or "- Step description" inside procedure section).
+    const stepText = parseStepText(trimmed);
 
-    if (inProcedure && (numberedMatch || bulletMatch)) {
-      const stepText = numberedMatch ? numberedMatch[2]! : bulletMatch![1]!;
+    if (inProcedure && stepText) {
       const nodeId = `step-${stepCounter}`;
       stepCounter++;
 
@@ -251,6 +249,29 @@ export function parseSkillMarkdown(markdown: string, sourcePath = "SKILL.md"): W
       compilerVersion: "0.1.0",
     },
   };
+}
+
+function parseStepText(line: string): string | null {
+  let index = 0;
+  while (index < line.length) {
+    const char = line[index];
+    if (char === undefined || char < "0" || char > "9") break;
+    index++;
+  }
+
+  if (index > 0 && line[index] === ".") {
+    index++;
+  } else if (line[0] === "-" || line[0] === "*") {
+    index = 1;
+  } else {
+    return null;
+  }
+
+  const whitespaceStart = index;
+  while (index < line.length && (line[index] === " " || line[index] === "\t")) index++;
+  if (index === whitespaceStart) return null;
+  const text = line.slice(index).trim();
+  return text || null;
 }
 
 /**

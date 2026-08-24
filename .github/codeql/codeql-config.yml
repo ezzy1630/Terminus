@@ -1,0 +1,7 @@
+name: terminus-codeql
+
+# The skills tree is user-facing template and example content, not first-party
+# runtime code. Keep CodeQL focused on executable repository components so a
+# static HTML design demo does not mask findings in the product packages.
+paths-ignore:
+  - skills/**

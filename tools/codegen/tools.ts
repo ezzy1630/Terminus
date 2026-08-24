@@ -99,7 +99,10 @@ function render(tools: ToolSchema[]): string {
     lines.push("| Parameter | Type | Required | Description |");
     lines.push("|---|---|---|---|");
     for (const p of t.props) {
-      const desc = p.description.replace(/\|/g, "\\|").replace(/\n/g, " ");
+      const desc = p.description
+        .replace(/\\/g, "\\\\")
+        .replace(/\|/g, "\\|")
+        .replace(/\n/g, " ");
       lines.push(`| \`${p.name}\` | ${p.type} | ${p.required ? "yes" : "no"} | ${desc} |`);
     }
     lines.push("");

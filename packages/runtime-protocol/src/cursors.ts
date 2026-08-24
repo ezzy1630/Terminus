@@ -30,9 +30,9 @@ export class CursorCodec {
     // Base64url encode
     const b64 = Buffer.from(raw, "utf8")
       .toString("base64")
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
+      .replaceAll("+", "-")
+      .replaceAll("/", "_")
+      .replaceAll("=", "");
     return `${this.PREFIX}${b64}` as CursorToken;
   }
 
@@ -54,7 +54,7 @@ export class CursorCodec {
     }
 
     const b64 = token.slice(this.PREFIX.length);
-    const padded = b64.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (b64.length % 4)) % 4);
+    const padded = b64.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - (b64.length % 4)) % 4);
     const jsonStr = Buffer.from(padded, "base64").toString("utf8");
 
     try {

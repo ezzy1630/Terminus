@@ -68,9 +68,9 @@ export function discoverInstructions(
   const maxDepth = config.maxDepth ?? 50;
   const results: DiscoveredInstruction[] = [];
 
-  // Normalize paths.
-  const root = config.workspaceRoot.replace(/\/+$/, "");
-  const cwd = config.workingDirectory.replace(/\/+$/, "");
+  // Normalize paths without a backtracking regular expression on caller input.
+  const root = trimTrailingSlashes(config.workspaceRoot);
+  const cwd = trimTrailingSlashes(config.workingDirectory);
 
   if (!cwd.startsWith(root)) {
     // Working directory must be within workspace root.
@@ -109,6 +109,12 @@ export function discoverInstructions(
   results.sort((a, b) => b.precedence - a.precedence);
 
   return results;
+}
+
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end--;
+  return value.slice(0, end);
 }
 
 // ──────────────────────── Convert to context fragments ───────────────────────

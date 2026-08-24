@@ -343,6 +343,8 @@ export const forgeConfigSchema = z.object({
 
 export type ForgeConfig = z.infer<typeof forgeConfigSchema>;
 
+const UNSAFE_CONFIG_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 // ────────────────────────── Layered config loader ────────────────────────────
 
 export interface ConfigSource {
@@ -378,17 +380,18 @@ export function mergeConfigLayers(sources: readonly ConfigSource[]): LayeredConf
   const sorted = [...sources].sort(
     (a, b) => LAYER_PRIORITY[a.layer] - LAYER_PRIORITY[b.layer],
   );
-  let merged: Record<string, unknown> = {};
-  const provenance: Record<string, ConfigLayer> = {};
+  let merged: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  const provenance: Record<string, ConfigLayer> = Object.create(null) as Record<string, ConfigLayer>;
   const warnings: string[] = [];
   const lockedWeakenPaths = new Set<string>();
 
   for (const src of sorted) {
+    assertSafeConfigValue(src.value);
     const before = structuredCloneSafe(merged);
     merged = deepMerge(merged, src.value);
     // Re-establish provenance for any newly-set path.
     for (const path of flattenPaths(src.value)) {
-      provenance[path] = src.layer;
+      defineConfigProperty(provenance, path, src.layer);
     }
     // Enforce non-overridable.
     if (src.nonOverridable) {
@@ -435,8 +438,12 @@ function deepMerge(
   base: Readonly<Record<string, unknown>>,
   override: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...base };
+  const out = Object.create(null) as Record<string, unknown>;
+  for (const [k, v] of Object.entries(base)) {
+    defineConfigProperty(out, k, v);
+  }
   for (const [k, v] of Object.entries(override)) {
+    assertSafeConfigKey(k);
     if (v === null || v === undefined) continue;
     if (
       v &&
@@ -446,12 +453,12 @@ function deepMerge(
       typeof out[k] === "object" &&
       !Array.isArray(out[k])
     ) {
-      out[k] = deepMerge(
+      defineConfigProperty(out, k, deepMerge(
         out[k] as Readonly<Record<string, unknown>>,
         v as Readonly<Record<string, unknown>>,
-      );
+      ));
     } else {
-      out[k] = v;
+      defineConfigProperty(out, k, v);
     }
   }
   return out;
@@ -475,7 +482,7 @@ function getPath(obj: unknown, path: string): unknown {
   const parts = path.split(".");
   let cur: unknown = obj;
   for (const p of parts) {
-    if (cur && typeof cur === "object" && p in (cur as Record<string, unknown>)) {
+    if (cur && typeof cur === "object" && Object.prototype.hasOwnProperty.call(cur, p)) {
       cur = (cur as Record<string, unknown>)[p];
     } else {
       return undefined;
@@ -490,13 +497,46 @@ function setPath(obj: Record<string, unknown>, path: string, value: unknown): vo
   let cur: Record<string, unknown> = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     const p = parts[i]!;
+    assertSafeConfigKey(p);
     const next = cur[p];
     if (!next || typeof next !== "object" || Array.isArray(next)) {
-      cur[p] = {};
+      defineConfigProperty(cur, p, Object.create(null) as Record<string, unknown>);
     }
     cur = cur[p] as Record<string, unknown>;
   }
-  cur[parts[parts.length - 1]!] = value;
+  defineConfigProperty(cur, parts[parts.length - 1]!, value);
+}
+
+function assertSafeConfigKey(key: string): void {
+  if (UNSAFE_CONFIG_KEYS.has(key)) {
+    throw new ValidationError("config contains an unsafe object key", { key });
+  }
+}
+
+function assertSafeConfigValue(value: unknown, seen = new WeakSet<object>()): void {
+  if (!value || typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const item of value) assertSafeConfigValue(item, seen);
+    return;
+  }
+
+  for (const [key, nested] of Object.entries(value)) {
+    assertSafeConfigKey(key);
+    assertSafeConfigValue(nested, seen);
+  }
+}
+
+function defineConfigProperty(target: Record<string, unknown>, key: string, value: unknown): void {
+  assertSafeConfigKey(key);
+  Object.defineProperty(target, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
 }
 
 /**

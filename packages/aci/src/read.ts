@@ -280,19 +280,28 @@ export function parseOutline(content: string): readonly OutlineItem[] {
       continue;
     }
 
-    // Markdown Heading
-    const mdMatch = line.match(/^(#{1,6})\s+(.+)$/);
-    if (mdMatch) {
+    // Markdown heading. Parse the bounded prefix directly so a long input line
+    // cannot trigger pathological regular-expression backtracking.
+    const heading = parseMarkdownHeading(line);
+    if (heading) {
       outline.push({
-        name: mdMatch[2]!,
+        name: heading.name,
         kind: "heading",
         range: [lineNum, lineNum],
-        level: mdMatch[1]!.length,
+        level: heading.level,
       });
     }
   }
 
   return outline;
+}
+
+function parseMarkdownHeading(line: string): { readonly name: string; readonly level: number } | null {
+  let level = 0;
+  while (level < line.length && line[level] === "#") level++;
+  if (level === 0 || level > 6 || line[level] !== " ") return null;
+  const name = line.slice(level + 1).trim();
+  return name ? { name, level } : null;
 }
 
 // ────────────────────────── Read Executor ───────────────────────────────────

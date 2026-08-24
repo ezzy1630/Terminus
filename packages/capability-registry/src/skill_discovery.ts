@@ -278,8 +278,10 @@ export function loadSkillBody(
 }
 
 function extractSkillName(md: string): string | null {
-  const m = /^#\s+(.+)$/m.exec(md);
-  return m?.[1]?.trim() ?? null;
+  for (const line of md.split("\n")) {
+    if (line.startsWith("# ") || line.startsWith("#\t")) return line.slice(2).trim() || null;
+  }
+  return null;
 }
 
 function extractSkillDescription(md: string): string | null {

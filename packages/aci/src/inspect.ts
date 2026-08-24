@@ -142,18 +142,19 @@ export function parseStackTrace(rawLog: string): FailureAnalysis {
     if (l.includes("FAIL") || l.includes("AssertionError") || l.includes("Error:")) {
       errorMessage = l.trim();
     }
-    // Match stack frame lines like: "at functionName (path/file.ts:12:34)"
-    const match = l.match(/at\s+([A-Za-z0-9_$.]+)\s+\(([^:]+):(\d+):(\d+)\)/);
-    if (match) {
+    // Parse stack frame lines like: "at functionName (path/file.ts:12:34)"
+    // without applying a backtracking regular expression to log input.
+    const frame = parseStackFrame(l);
+    if (frame) {
       if (frames.length === 0) {
-        path = match[2]!;
+        path = frame.path;
       }
       frames.push({
         frameIndex: frames.length,
-        functionName: match[1]!,
-        path: match[2]!,
-        line: parseInt(match[3]!, 10),
-        column: parseInt(match[4]!, 10),
+        functionName: frame.functionName,
+        path: frame.path,
+        line: frame.line,
+        column: frame.column,
       });
     }
   }
@@ -172,6 +173,31 @@ export function parseStackTrace(rawLog: string): FailureAnalysis {
     stackTrace: frames,
     rootCauseHint,
   };
+}
+
+function parseStackFrame(line: string): {
+  readonly functionName: string;
+  readonly path: string;
+  readonly line: number;
+  readonly column: number;
+} | null {
+  const marker = line.indexOf("at ");
+  if (marker < 0) return null;
+  const open = line.indexOf("(", marker + 3);
+  const close = line.lastIndexOf(")");
+  if (open < 0 || close <= open) return null;
+
+  const functionName = line.slice(marker + 3, open).trim();
+  const location = line.slice(open + 1, close);
+  const lastColon = location.lastIndexOf(":");
+  const previousColon = location.lastIndexOf(":", lastColon - 1);
+  if (!functionName || previousColon <= 0 || lastColon <= previousColon) return null;
+
+  const path = location.slice(0, previousColon);
+  const lineNumber = Number(location.slice(previousColon + 1, lastColon));
+  const column = Number(location.slice(lastColon + 1));
+  if (!path || !Number.isInteger(lineNumber) || !Number.isInteger(column)) return null;
+  return { functionName, path, line: lineNumber, column };
 }
 
 // ────────────────────────── Inspect Executor ──────────────────────────────────
