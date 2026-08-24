@@ -57,9 +57,9 @@ pub async fn require_bearer(
     Ok(next.run(req).await)
 }
 
-/// For mutating endpoints, validate the `x-capability-token` header against
-/// the kernel's `TokenIssuer`. The required `OperationClass` is derived
-/// from the request path.
+/// Validate the `x-capability-token` header against the kernel's
+/// `TokenIssuer` for every privileged read or mutation. The required
+/// `OperationClass` is derived from the request path.
 pub async fn require_capability_for_path(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: Request,
@@ -143,15 +143,16 @@ pub async fn require_capability_for_path(
 /// token (e.g. `POST /v1/info`, `GET /v1/health`).
 fn required_operation_class(method: &axum::http::Method, path: &str) -> Option<OperationClass> {
     use axum::http::Method;
-    // Only POST routes are mutating in this API; GET routes are read-only.
-    if method != Method::POST {
-        return None;
-    }
-    // Read-only POST routes that don't require a capability token.
     if matches!(path, "/v1/info" | "/v1/health") {
         return None;
     }
-    let op = if path.starts_with("/v1/workspaces") || path.starts_with("/v1/files") {
+    let op = if method == Method::GET && path.starts_with("/v1/artifacts/") {
+        OperationClass::ArtifactIngest
+    } else if method != Method::POST {
+        return None;
+    } else if path == "/v1/workspaces/register" {
+        OperationClass::Admin
+    } else if path.starts_with("/v1/workspaces") || path.starts_with("/v1/files") {
         OperationClass::Read
     } else if path.starts_with("/v1/patch") {
         OperationClass::Patch
@@ -214,7 +215,7 @@ pub async fn cors_layer(req: Request, next: Next) -> Response {
     headers.insert(
         axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
         axum::http::HeaderValue::from_static(
-            "Authorization, Content-Type, x-capability-token, x-idempotency-key, x-trace-id, traceparent, X-Transform-Port",
+            "Authorization, Content-Type, x-capability-token, x-terminus-task-id, x-terminus-session-id, x-terminus-workspace-id, Idempotency-Key, x-trace-id, traceparent, X-Transform-Port",
         ),
     );
     headers.insert(
@@ -231,7 +232,7 @@ pub async fn cors_layer(req: Request, next: Next) -> Response {
 /// differences still return early (only the length leaks, never content);
 /// equal-length inputs always compare every byte so response timing does not
 /// reveal how many leading bytes of the bearer token matched.
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;

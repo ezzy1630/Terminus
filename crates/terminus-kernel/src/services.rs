@@ -7,8 +7,8 @@
 //!   2. validate request schema (handled by serde deserialization);
 //!   3. validate capability token and bind to operation class + scope
 //!      (`validate_capability_for_op`);
-//!   4. resolve workspace and sandbox lease (out of scope for the in-process
-//!      kernel; the mini-service wires this);
+//!   4. resolve the registered workspace root and sandbox lease inside the
+//!      kernel before any effect can reach the host;
 //!   5. canonicalize paths and reject traversal/symlink escape
 //!      (`terminus_fs::PathResolver::resolve_strict`);
 //!   6. classify effect and taint (propagate `EffectIntent.taint_sources`
@@ -33,11 +33,14 @@
 
 use crate::approvals::ApprovalStore;
 use crate::error::KernelAssemblyError;
+use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use terminus_artifacts::ArtifactStore;
 use terminus_authz::{OperationClass, Scope, TokenIssuer, TokenRevoker};
-use terminus_code_intel::CodeIntelService;
+use terminus_code_intel::{CodeIntelService, FileSystemWorkspaceSource, WorkspaceSource};
 use terminus_connector::ConnectorBroker;
 use terminus_egress::EgressProxy;
 use terminus_extension_runtime::WasiExtensionHost;
@@ -57,6 +60,7 @@ use terminus_secrets::{GrantIssuer, GrantStore, SecretBroker, WorkloadIdentity};
 /// The top-level kernel handle. Cloning is cheap — everything behind `Arc`.
 #[derive(Clone)]
 pub struct KernelHandle {
+    process_manager: Arc<ProcessManager>,
     pub info: KernelInfoService,
     pub workspaces: WorkspaceService,
     pub files: FileService,
@@ -99,7 +103,15 @@ impl KernelHandle {
     pub fn new(data_dir: PathBuf) -> Result<Self, KernelAssemblyError> {
         Self::new_with_egress_policy(
             data_dir,
-            terminus_egress::EgressPolicy::default(),
+            terminus_egress::EgressPolicy {
+                default_deny: true,
+                destinations: vec![terminus_egress::DestinationPolicy {
+                    allowed_host_suffixes: vec!["opencode.ai".to_string()],
+                    allowed_ports: vec![443],
+                    allowed_schemes: vec!["https".to_string()],
+                }],
+                deny_private_ips: true,
+            },
             terminus_egress::RateLimit::default(),
         )
     }
@@ -118,12 +130,10 @@ impl KernelHandle {
         let job_manager = Arc::new(JobManager::new(Arc::clone(&process_manager)));
         let policy_engine = Arc::new(PolicyEngine::new(terminus_policy::default_rule_set()));
         let info = KernelInfoService::new();
-        // SPEC §13.4 / §36.5: on Linux, prefer the Bubblewrap backend (real
-        // namespace isolation) when bwrap is on PATH; fall back to the
-        // local-restrictive backend (process groups + env sanitization, no
-        // namespace isolation). On other platforms, local-restrictive is the
-        // default and honestly reports Degraded. The selected backend's
-        // `spawn_wrapper` decides whether spawns run inside bwrap.
+        // SPEC §13.4 / §36.5: select the platform-enforced backend first.
+        // Linux uses Bubblewrap; macOS uses a generated Seatbelt profile.
+        // Local-restrictive remains an explicit degraded fallback, so the
+        // secure profile fails closed when the platform primitive is absent.
         let sandbox_manager = {
             #[cfg(target_os = "linux")]
             {
@@ -137,13 +147,27 @@ impl KernelHandle {
                     .with_default(linux)
                     .with_fallback(local)
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
+            {
+                let macos = std::sync::Arc::new(terminus_sandbox_macos::MacOsSandboxBackend::new())
+                    as std::sync::Arc<dyn terminus_sandbox::SandboxBackend>;
+                let local = std::sync::Arc::new(terminus_sandbox::LocalRestrictiveBackend::new())
+                    as std::sync::Arc<dyn terminus_sandbox::SandboxBackend>;
+                SandboxManager::new()
+                    .with_default(macos)
+                    .with_fallback(local)
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 SandboxManager::new()
             }
         };
         let sandbox_manager = Arc::new(sandbox_manager);
         let secret_broker = Arc::new(SecretBroker::new());
+        secret_broker.register_writable_provider(
+            "opencode",
+            Arc::new(terminus_secrets::KeyringSecretProvider::new()),
+        );
         // SPEC §36.6: the capability-signing key must never be a known
         // constant — anyone who reads the public source could otherwise forge
         // admin tokens (HMAC-SHA256 with a public key). When the operator does
@@ -175,48 +199,37 @@ impl KernelHandle {
         ));
         let revocation = token_issuer.revocation_list();
         let _revoker = Arc::new(TokenRevoker::new(revocation));
-        let code_index =
-            terminus_code_intel::PersistentSymbolIndex::open(data_dir.join("code-intel.sqlite"))
-                .map_err(|error| {
-                    KernelAssemblyError::Misconfigured(format!("code-intel index: {error}"))
-                })?;
-        let code_intel = Arc::new(CodeIntelService::with_source(
-            Arc::new(code_index),
-            Arc::new(
-                terminus_code_intel::FileSystemWorkspaceSource::for_kernel_data_dir(
-                    data_dir.clone(),
-                ),
-            ),
-        ));
         let extension_host = Arc::new(WasiExtensionHost::new());
         let egress = Arc::new(EgressProxy::new(egress_policy, rate_limit));
         let egress_broker_root = data_dir.join("egress-brokers");
-        let workspace_resolver = Arc::new(PathResolver::new(&data_dir)?);
-        let patch_engine = PatchEngine::new(
-            // The patch engine needs its own resolver (it does not share
-            // the workspace resolver because patch leases are tracked
-            // separately).
-            PathResolver::new(&data_dir)?,
-            data_dir.join("journal"),
-            data_dir.join("patch-state"),
+        let workspaces = WorkspaceService::open(
+            data_dir.join("state/workspaces.sqlite"),
+            Arc::clone(&token_issuer),
         )?;
         let _git_ops = Arc::new(GitOps::new(Arc::clone(&process_manager), "git"));
         let approvals = Arc::new(ApprovalStore::new());
 
         Ok(Self {
+            process_manager: Arc::clone(&process_manager),
             info,
-            workspaces: WorkspaceService::new(),
+            workspaces: workspaces.clone(),
             files: FileService::new(
                 Arc::clone(&artifact_store),
-                Arc::clone(&workspace_resolver),
+                workspaces.clone(),
                 Arc::clone(&token_issuer),
             ),
-            patches: PatchService::new(Arc::new(patch_engine), Arc::clone(&token_issuer)),
+            patches: PatchService::new(
+                workspaces.clone(),
+                data_dir.join("journal"),
+                data_dir.join("patch-state"),
+                Arc::clone(&token_issuer),
+            ),
             processes: ProcessService::new(
                 Arc::clone(&process_manager),
                 Arc::clone(&policy_engine),
                 Arc::clone(&token_issuer),
                 Arc::clone(&approvals),
+                workspaces.clone(),
             )
             .with_sandbox(Arc::clone(&sandbox_manager))
             .with_egress_broker(Arc::clone(&egress), egress_broker_root.clone()),
@@ -228,6 +241,7 @@ impl KernelHandle {
                     Arc::clone(&policy_engine),
                     Arc::clone(&token_issuer),
                     Arc::clone(&approvals),
+                    workspaces.clone(),
                 )
                 .with_sandbox(Arc::clone(&sandbox_manager))
                 .with_egress_broker(Arc::clone(&egress), egress_broker_root),
@@ -255,6 +269,7 @@ impl KernelHandle {
                     Arc::clone(&egress),
                     grant_key.to_vec(),
                 )
+                .connector("opencode-gateway", terminus_connector::AuthStyle::Bearer)
                 .build();
                 ConnectorService::new(
                     Arc::new(broker),
@@ -266,7 +281,12 @@ impl KernelHandle {
                 )
             },
             network: NetworkService::new(egress, Arc::clone(&token_issuer)),
-            code_intel: CodeIntelligenceService::new(code_intel, Arc::clone(&token_issuer)),
+            code_intel: CodeIntelligenceService::new(
+                workspaces,
+                data_dir.clone(),
+                data_dir.join("state/code-intel"),
+                Arc::clone(&token_issuer),
+            ),
             extensions: ExtensionRuntimeService::new(extension_host, Arc::clone(&token_issuer)),
             artifact_ingest: ArtifactIngestService::new(artifact_store, Arc::clone(&token_issuer)),
             token_issuer,
@@ -279,6 +299,19 @@ impl KernelHandle {
         // list. The HTTP mini-service uses this to honor revocation calls
         // without exposing the signing secret.
         Arc::new(TokenRevoker::new(self.token_issuer.revocation_list()))
+    }
+
+    /// Stop and reap every process group created through this kernel before
+    /// the transport exits. The operation is idempotent and bounded.
+    pub async fn shutdown(&self) -> KernelResult<()> {
+        self.process_manager.shutdown_all().await.map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::Internal,
+                terminus_kernel_protocol::ErrorCategory::Internal,
+                format!("kernel process shutdown failed: {error}"),
+                false,
+            )
+        })
     }
 }
 
@@ -311,7 +344,7 @@ pub fn validate_capability_for_op(
             false,
         ));
     }
-    issuer
+    let token = issuer
         .validate_capability(&ctx.capability_token, op_class, requested_scope)
         .map_err(|e| {
             let (code, msg) = match e {
@@ -354,7 +387,39 @@ pub fn validate_capability_for_op(
                 msg,
                 false,
             )
-        })
+        })?;
+    for (label, binder, request_value) in [
+        (
+            "principal",
+            token.claims.binder.principal.as_str(),
+            ctx.actor_id.as_str(),
+        ),
+        (
+            "session",
+            token.claims.binder.session_id.as_str(),
+            ctx.session_id.as_str(),
+        ),
+        (
+            "task",
+            token.claims.binder.task_id.as_str(),
+            ctx.task_id.as_str(),
+        ),
+        (
+            "workspace",
+            token.claims.binder.workspace_id.as_str(),
+            ctx.workspace_id.as_str(),
+        ),
+    ] {
+        if binder != "*" && binder != request_value {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                format!("capability token {label} binder does not match request context"),
+                false,
+            ));
+        }
+    }
+    Ok(token)
 }
 
 /// Validate the 10-step request pipeline (SPEC §31.3):
@@ -464,9 +529,28 @@ impl KernelInfoService {
 
 // ---------- WorkspaceService ----------
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct WorkspaceService {
-    registered: Arc<std::sync::Mutex<std::collections::HashMap<String, WorkspaceEntry>>>,
+    registry: WorkspaceRegistry,
+    token_issuer: Arc<TokenIssuer>,
+}
+
+#[derive(Clone)]
+enum WorkspaceRegistry {
+    Volatile(Arc<Mutex<std::collections::HashMap<String, WorkspaceEntry>>>),
+    Durable(Arc<Mutex<Connection>>),
+}
+
+impl std::fmt::Debug for WorkspaceService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let durability = match self.registry {
+            WorkspaceRegistry::Volatile(_) => "volatile",
+            WorkspaceRegistry::Durable(_) => "durable",
+        };
+        f.debug_struct("WorkspaceService")
+            .field("durability", &durability)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -477,9 +561,54 @@ pub struct WorkspaceEntry {
     pub trust: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWorkspaceRoot {
+    pub root_uri: String,
+    pub canonical_root: String,
+}
+
 impl WorkspaceService {
-    pub fn new() -> Self {
-        Self::default()
+    /// Construct an isolated in-memory registry. Production assembly uses
+    /// [`WorkspaceService::open`] so workspace IDs survive kernel restarts.
+    pub fn new(token_issuer: Arc<TokenIssuer>) -> Self {
+        Self {
+            registry: WorkspaceRegistry::Volatile(Arc::new(Mutex::new(
+                std::collections::HashMap::new(),
+            ))),
+            token_issuer,
+        }
+    }
+
+    /// Open the kernel-owned durable workspace registry.
+    pub fn open(
+        path: PathBuf,
+        token_issuer: Arc<TokenIssuer>,
+    ) -> Result<Self, KernelAssemblyError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let connection = Connection::open(path).map_err(|error| {
+            KernelAssemblyError::Misconfigured(format!("workspace registry: {error}"))
+        })?;
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;\
+                 PRAGMA journal_mode = WAL;\
+                 PRAGMA synchronous = FULL;\
+                 CREATE TABLE IF NOT EXISTS registered_workspaces (\
+                   id TEXT PRIMARY KEY,\
+                   root_uri TEXT NOT NULL,\
+                   canonical_root TEXT NOT NULL UNIQUE,\
+                   trust TEXT NOT NULL CHECK (trust IN ('trusted','untrusted','restricted'))\
+                 );",
+            )
+            .map_err(|error| {
+                KernelAssemblyError::Misconfigured(format!("workspace registry schema: {error}"))
+            })?;
+        Ok(Self {
+            registry: WorkspaceRegistry::Durable(Arc::new(Mutex::new(connection))),
+            token_issuer,
+        })
     }
 
     pub fn register(
@@ -490,6 +619,29 @@ impl WorkspaceService {
         canonical_root: impl Into<String>,
         trust: &str,
     ) -> KernelResult<String> {
+        self.register_with_id(ctx, _intent, root_uri, canonical_root, trust, None)
+    }
+
+    /// Register a workspace while preserving an authoritative pre-existing
+    /// control-plane ID during the durable-registry upgrade.
+    pub fn register_with_id(
+        &self,
+        ctx: &RequestContext,
+        _intent: &EffectIntent,
+        root_uri: impl Into<String>,
+        canonical_root: impl Into<String>,
+        trust: &str,
+        requested_workspace_id: Option<&str>,
+    ) -> KernelResult<String> {
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Admin,
+            &Scope::default(),
+        )?;
+        let resolved = Self::resolve_root_unchecked(root_uri, canonical_root)?;
+        let root_uri = resolved.root_uri;
+        let canonical_root = resolved.canonical_root;
         // SPEC §28.2 / §13: workspace trust MUST be one of
         // trusted | untrusted | restricted and is caller-supplied. Default
         // to `untrusted` (fail-safe) for any unrecognized value — never
@@ -500,28 +652,237 @@ impl WorkspaceService {
             _ => "untrusted",
         }
         .to_string();
+        let requested_workspace_id = requested_workspace_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+        if requested_workspace_id.is_some_and(|id| id.len() > 200) {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                "requested workspace id is too long",
+                false,
+            ));
+        }
         let entry = WorkspaceEntry {
-            id: terminus_kernel_protocol::new_id(),
-            root_uri: root_uri.into(),
-            canonical_root: canonical_root.into(),
+            id: requested_workspace_id
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(terminus_kernel_protocol::new_id),
+            root_uri,
+            canonical_root,
             trust,
         };
-        let id = entry.id.clone();
-        let mut guard = match self.registered.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        guard.insert(id.clone(), entry);
+        let id = self.insert(entry, requested_workspace_id.is_some())?;
         let _ = ctx;
         Ok(id)
     }
 
-    pub fn get(&self, workspace_id: &str) -> KernelResult<WorkspaceEntry> {
-        let guard = match self.registered.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
+    /// Canonicalize and validate a workspace root without mutating the
+    /// durable registry. The control plane uses this before comparing trust
+    /// and adopting a pre-existing workspace identity.
+    pub fn resolve_root(
+        &self,
+        ctx: &RequestContext,
+        root_uri: impl Into<String>,
+        candidate_root: impl Into<String>,
+    ) -> KernelResult<ResolvedWorkspaceRoot> {
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Admin,
+            &Scope::default(),
+        )?;
+        Self::resolve_root_unchecked(root_uri, candidate_root)
+    }
+
+    fn resolve_root_unchecked(
+        root_uri: impl Into<String>,
+        candidate_root: impl Into<String>,
+    ) -> KernelResult<ResolvedWorkspaceRoot> {
+        let root_uri = root_uri.into();
+        let candidate_root = candidate_root.into();
+        let canonical_root = if root_uri.starts_with("file://") {
+            let requested_path = std::path::Path::new(&candidate_root);
+            if !requested_path.is_absolute() {
+                return Err(KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                    terminus_kernel_protocol::ErrorCategory::Validation,
+                    "local workspace canonical_root must be an absolute host path",
+                    false,
+                ));
+            }
+            let resolved = std::fs::canonicalize(requested_path).map_err(|error| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                    terminus_kernel_protocol::ErrorCategory::Validation,
+                    format!("local workspace root could not be canonicalized: {error}"),
+                    false,
+                )
+            })?;
+            if !resolved.is_dir() {
+                return Err(KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                    terminus_kernel_protocol::ErrorCategory::Validation,
+                    "local workspace root must be a directory",
+                    false,
+                ));
+            }
+            resolved.into_os_string().into_string().map_err(|_| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                    terminus_kernel_protocol::ErrorCategory::Validation,
+                    "local workspace root must be valid UTF-8",
+                    false,
+                )
+            })?
+        } else {
+            candidate_root
         };
-        guard.get(workspace_id).cloned().ok_or_else(|| {
+        Ok(ResolvedWorkspaceRoot {
+            root_uri,
+            canonical_root,
+        })
+    }
+
+    pub fn get(&self, ctx: &RequestContext, workspace_id: &str) -> KernelResult<WorkspaceEntry> {
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Read,
+            &Scope::default(),
+        )?;
+        if ctx.workspace_id != "*" && ctx.workspace_id != workspace_id {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                "workspace lookup must match the request context workspace binder",
+                false,
+            ));
+        }
+        self.get_registered(workspace_id)
+    }
+
+    /// Retrieve a registry entry while handling an administrative registry
+    /// mutation. This is deliberately separate from [`Self::get`]: ordinary
+    /// callers still need `Read`, while `WorkspaceService.Register` can return
+    /// the row it just wrote without broadening the bootstrap broker token.
+    pub fn get_for_admin(
+        &self,
+        ctx: &RequestContext,
+        workspace_id: &str,
+    ) -> KernelResult<WorkspaceEntry> {
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Admin,
+            &Scope::default(),
+        )?;
+        self.get_registered(workspace_id)
+    }
+
+    /// Select one concrete, registered local workspace for an effect.
+    ///
+    /// Both the request context and the validated capability binder must
+    /// agree with `workspace_id` unless either carries the explicit
+    /// development/administrative wildcard. The operation still requires a
+    /// concrete registered ID; `*` is never a filesystem root.
+    fn local_workspace_for_effect(
+        &self,
+        ctx: &RequestContext,
+        token: &terminus_authz::CapabilityToken,
+        workspace_id: &str,
+    ) -> KernelResult<WorkspaceEntry> {
+        if workspace_id.is_empty() || workspace_id == "*" {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                "effect requires a concrete workspace_id",
+                false,
+            ));
+        }
+        if ctx.workspace_id != "*" && ctx.workspace_id != workspace_id {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                format!(
+                    "requested workspace `{workspace_id}` does not match request context workspace `{}`",
+                    ctx.workspace_id
+                ),
+                false,
+            ));
+        }
+        let bound_workspace = token.claims.binder.workspace_id.as_str();
+        if bound_workspace != "*" && bound_workspace != workspace_id {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                format!(
+                    "capability token is bound to workspace `{bound_workspace}`, not `{workspace_id}`"
+                ),
+                false,
+            ));
+        }
+        let workspace = self.get_registered(workspace_id)?;
+        if !workspace.root_uri.starts_with("file://") {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::UnsupportedPlatform,
+                terminus_kernel_protocol::ErrorCategory::SandboxUnavailable,
+                "operation requires a registered local workspace root",
+                false,
+            ));
+        }
+        Ok(workspace)
+    }
+
+    fn resolver_for_effect(
+        &self,
+        ctx: &RequestContext,
+        token: &terminus_authz::CapabilityToken,
+        workspace_id: &str,
+    ) -> KernelResult<PathResolver> {
+        let workspace = self.local_workspace_for_effect(ctx, token, workspace_id)?;
+        PathResolver::new(&workspace.canonical_root).map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PathNotFound,
+                terminus_kernel_protocol::ErrorCategory::NotFound,
+                format!("registered workspace root is unavailable: {error}"),
+                false,
+            )
+        })
+    }
+
+    fn get_registered(&self, workspace_id: &str) -> KernelResult<WorkspaceEntry> {
+        let entry = match &self.registry {
+            WorkspaceRegistry::Volatile(entries) => {
+                let guard = match entries.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                guard.get(workspace_id).cloned()
+            }
+            WorkspaceRegistry::Durable(connection) => {
+                let guard = match connection.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                guard
+                    .query_row(
+                        "SELECT id, root_uri, canonical_root, trust \
+                         FROM registered_workspaces WHERE id = ?1",
+                        params![workspace_id],
+                        |row| {
+                            Ok(WorkspaceEntry {
+                                id: row.get(0)?,
+                                root_uri: row.get(1)?,
+                                canonical_root: row.get(2)?,
+                                trust: row.get(3)?,
+                            })
+                        },
+                    )
+                    .optional()
+                    .map_err(workspace_registry_error)?
+            }
+        };
+        entry.ok_or_else(|| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::WorkspaceNotFound,
                 terminus_kernel_protocol::ErrorCategory::NotFound,
@@ -530,6 +891,153 @@ impl WorkspaceService {
             )
         })
     }
+
+    fn insert(&self, entry: WorkspaceEntry, authoritative_id: bool) -> KernelResult<String> {
+        match &self.registry {
+            WorkspaceRegistry::Volatile(entries) => {
+                let mut guard = match entries.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if authoritative_id {
+                    if let Some(id_owner) = guard.get(&entry.id) {
+                        if id_owner.canonical_root != entry.canonical_root {
+                            return Err(workspace_id_conflict(&entry.id));
+                        }
+                    }
+                }
+                let existing = guard
+                    .values()
+                    .find(|candidate| candidate.canonical_root == entry.canonical_root)
+                    .cloned();
+                if let Some(existing) = existing {
+                    matching_workspace_id(&existing, &entry)?;
+                    if !authoritative_id || existing.id == entry.id {
+                        return Ok(existing.id);
+                    }
+                    if guard.contains_key(&entry.id) {
+                        return Err(workspace_id_conflict(&entry.id));
+                    }
+                    guard.remove(&existing.id);
+                    let id = entry.id.clone();
+                    guard.insert(id.clone(), entry);
+                    return Ok(id);
+                }
+                let id = entry.id.clone();
+                guard.insert(id.clone(), entry);
+                Ok(id)
+            }
+            WorkspaceRegistry::Durable(connection) => {
+                let mut guard = match connection.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                let transaction = guard.transaction().map_err(workspace_registry_error)?;
+                let existing = transaction
+                    .query_row(
+                        "SELECT id, root_uri, canonical_root, trust \
+                         FROM registered_workspaces WHERE canonical_root = ?1",
+                        params![entry.canonical_root],
+                        |row| {
+                            Ok(WorkspaceEntry {
+                                id: row.get(0)?,
+                                root_uri: row.get(1)?,
+                                canonical_root: row.get(2)?,
+                                trust: row.get(3)?,
+                            })
+                        },
+                    )
+                    .optional()
+                    .map_err(workspace_registry_error)?;
+                if let Some(existing) = existing {
+                    matching_workspace_id(&existing, &entry)?;
+                    if authoritative_id && existing.id != entry.id {
+                        let requested_id_exists = transaction
+                            .query_row(
+                                "SELECT 1 FROM registered_workspaces WHERE id = ?1",
+                                params![entry.id],
+                                |_row| Ok(()),
+                            )
+                            .optional()
+                            .map_err(workspace_registry_error)?
+                            .is_some();
+                        if requested_id_exists {
+                            return Err(workspace_id_conflict(&entry.id));
+                        }
+                        transaction
+                            .execute(
+                                "UPDATE registered_workspaces SET id = ?1 WHERE id = ?2",
+                                params![entry.id, existing.id],
+                            )
+                            .map_err(workspace_registry_error)?;
+                        transaction.commit().map_err(workspace_registry_error)?;
+                        return Ok(entry.id);
+                    }
+                    transaction.commit().map_err(workspace_registry_error)?;
+                    return Ok(existing.id);
+                }
+                if authoritative_id {
+                    let requested_id_exists = transaction
+                        .query_row(
+                            "SELECT 1 FROM registered_workspaces WHERE id = ?1",
+                            params![entry.id],
+                            |_row| Ok(()),
+                        )
+                        .optional()
+                        .map_err(workspace_registry_error)?
+                        .is_some();
+                    if requested_id_exists {
+                        return Err(workspace_id_conflict(&entry.id));
+                    }
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO registered_workspaces \
+                         (id, root_uri, canonical_root, trust) VALUES (?1, ?2, ?3, ?4)",
+                        params![entry.id, entry.root_uri, entry.canonical_root, entry.trust],
+                    )
+                    .map_err(workspace_registry_error)?;
+                transaction.commit().map_err(workspace_registry_error)?;
+                Ok(entry.id)
+            }
+        }
+    }
+}
+
+fn workspace_id_conflict(id: &str) -> KernelError {
+    KernelError::new(
+        terminus_kernel_protocol::ErrorCode::AlreadyExists,
+        terminus_kernel_protocol::ErrorCategory::Conflict,
+        format!("workspace id {id} is already registered for a different root"),
+        false,
+    )
+}
+
+fn matching_workspace_id(
+    existing: &WorkspaceEntry,
+    requested: &WorkspaceEntry,
+) -> KernelResult<String> {
+    if existing.canonical_root == requested.canonical_root && existing.trust == requested.trust {
+        return Ok(existing.id.clone());
+    }
+    Err(KernelError::new(
+        terminus_kernel_protocol::ErrorCode::AlreadyExists,
+        terminus_kernel_protocol::ErrorCategory::Conflict,
+        format!(
+            "workspace root {} is already registered with different identity or trust",
+            requested.canonical_root
+        ),
+        false,
+    ))
+}
+
+fn workspace_registry_error(error: rusqlite::Error) -> KernelError {
+    KernelError::new(
+        terminus_kernel_protocol::ErrorCode::Internal,
+        terminus_kernel_protocol::ErrorCategory::Internal,
+        format!("workspace registry operation failed: {error}"),
+        false,
+    )
 }
 
 // ---------- FileService ----------
@@ -537,10 +1045,9 @@ impl WorkspaceService {
 #[derive(Clone)]
 pub struct FileService {
     artifact_store: Arc<ArtifactStore>,
-    /// Path resolver used to reject absolute paths, `..` traversal, symlink
-    /// escapes, and protected prefixes before any bytes touch the
-    /// filesystem. SPEC §31.5 + §31.3 step 5.
-    resolver: Arc<PathResolver>,
+    /// Kernel-owned registry used to select exactly one resolver root from
+    /// `WorkspacePath.workspace_id` before touching the filesystem.
+    workspaces: WorkspaceService,
     /// Capability-token issuer used to validate `OperationClass::Read` and
     /// the requested path scope.
     token_issuer: Arc<TokenIssuer>,
@@ -550,7 +1057,7 @@ impl std::fmt::Debug for FileService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileService")
             .field("artifact_store", &self.artifact_store)
-            .field("resolver_root", &self.resolver.root().display().to_string())
+            .field("workspaces", &self.workspaces)
             .finish()
     }
 }
@@ -558,20 +1065,63 @@ impl std::fmt::Debug for FileService {
 impl FileService {
     pub fn new(
         artifact_store: Arc<ArtifactStore>,
-        resolver: Arc<PathResolver>,
+        workspaces: WorkspaceService,
         token_issuer: Arc<TokenIssuer>,
     ) -> Self {
         Self {
             artifact_store,
-            resolver,
+            workspaces,
             token_issuer,
         }
     }
 
-    /// Expose the resolver so HTTP handlers that implement `list` can reuse
-    /// the same path-safety check.
-    pub fn resolver(&self) -> &Arc<PathResolver> {
-        &self.resolver
+    /// Resolve a read path under its registered workspace root. The
+    /// capability token is bound to that workspace unless it carries the
+    /// explicit development-only wildcard binder.
+    pub fn resolve_for_read(
+        &self,
+        ctx: &RequestContext,
+        path: &WorkspacePath,
+    ) -> KernelResult<terminus_fs::ResolvedPath> {
+        let requested_scope = Scope {
+            workspace_paths: vec![path.relative_path.clone()],
+            network_destinations: Vec::new(),
+            secret_capabilities: Vec::new(),
+        };
+        let token = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Read,
+            &requested_scope,
+        )?;
+        self.resolve_registered_path(ctx, &token, path)
+    }
+
+    fn resolve_registered_path(
+        &self,
+        ctx: &RequestContext,
+        token: &terminus_authz::CapabilityToken,
+        path: &WorkspacePath,
+    ) -> KernelResult<terminus_fs::ResolvedPath> {
+        let safe = terminus_fs::SafePath::new(&path.relative_path).map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                format!("path rejected by SafePath: {error}"),
+                false,
+            )
+        })?;
+        let resolver = self
+            .workspaces
+            .resolver_for_effect(ctx, token, &path.workspace_id)?;
+        resolver.resolve_strict(&safe).map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                format!("path rejected by PathResolver: {error}"),
+                false,
+            )
+        })
     }
 
     /// Read the file at `path.relative_path` (workspace-relative) and ingest
@@ -586,49 +1136,12 @@ impl FileService {
     pub fn read(
         &self,
         ctx: &RequestContext,
-        intent: &EffectIntent,
-        path: &WorkspacePath,
-    ) -> KernelResult<(Vec<u8>, ArtifactRef)> {
-        self.read_with_token(ctx, intent, path, Some(&self.token_issuer))
-    }
-
-    /// Read a file with optional explicit capability-token enforcement. If
-    /// `issuer` is `None`, capability-token validation is skipped (the caller
-    /// is responsible for enforcing it externally, e.g. via the HTTP
-    /// middleware). If `issuer` is `Some`, the token's `operation_classes`
-    /// and `max_scope` are checked against this read.
-    pub fn read_with_token(
-        &self,
-        ctx: &RequestContext,
         _intent: &EffectIntent,
         path: &WorkspacePath,
-        issuer: Option<&TokenIssuer>,
     ) -> KernelResult<(Vec<u8>, ArtifactRef)> {
-        if let Some(iss) = issuer {
-            let requested_scope = Scope {
-                workspace_paths: vec![path.relative_path.clone()],
-                network_destinations: Vec::new(),
-                secret_capabilities: Vec::new(),
-            };
-            let _ = validate_capability_for_op(iss, ctx, OperationClass::Read, &requested_scope)?;
-        }
-        // §31.3 step 5: canonicalize paths and reject traversal/symlink escape.
-        let safe = terminus_fs::SafePath::new(&path.relative_path).map_err(|e| {
-            KernelError::new(
-                terminus_kernel_protocol::ErrorCode::InvalidArgument,
-                terminus_kernel_protocol::ErrorCategory::Validation,
-                format!("path rejected by SafePath: {e}"),
-                false,
-            )
-        })?;
-        let resolved = self.resolver.resolve_strict(&safe).map_err(|e| {
-            KernelError::new(
-                terminus_kernel_protocol::ErrorCode::InvalidArgument,
-                terminus_kernel_protocol::ErrorCategory::Validation,
-                format!("path rejected by PathResolver: {e}"),
-                false,
-            )
-        })?;
+        let resolved = self.resolve_for_read(ctx, path)?;
+        // §31.3 steps 4-5: resolve the registered workspace first, then
+        // canonicalize the relative path and reject traversal/symlink escape.
         if !resolved.host.exists {
             return Err(KernelError::new(
                 terminus_kernel_protocol::ErrorCode::PathNotFound,
@@ -677,24 +1190,73 @@ impl FileService {
 
 #[derive(Clone)]
 pub struct PatchService {
-    engine: Arc<PatchEngine>,
+    workspaces: WorkspaceService,
+    journal_root: PathBuf,
+    state_root: PathBuf,
+    engines: Arc<Mutex<HashMap<String, Arc<PatchEngine>>>>,
     token_issuer: Arc<TokenIssuer>,
 }
 
 impl std::fmt::Debug for PatchService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PatchService")
-            .field("engine", &self.engine)
+            .field("workspaces", &self.workspaces)
+            .field("journal_root", &self.journal_root)
+            .field("state_root", &self.state_root)
             .finish_non_exhaustive()
     }
 }
 
 impl PatchService {
-    pub fn new(engine: Arc<PatchEngine>, token_issuer: Arc<TokenIssuer>) -> Self {
+    pub fn new(
+        workspaces: WorkspaceService,
+        journal_root: PathBuf,
+        state_root: PathBuf,
+        token_issuer: Arc<TokenIssuer>,
+    ) -> Self {
         Self {
-            engine,
+            workspaces,
+            journal_root,
+            state_root,
+            engines: Arc::new(Mutex::new(HashMap::new())),
             token_issuer,
         }
+    }
+
+    fn engine_for_workspace(
+        &self,
+        ctx: &RequestContext,
+        token: &terminus_authz::CapabilityToken,
+        workspace_id: &str,
+    ) -> KernelResult<Arc<PatchEngine>> {
+        let resolver = self
+            .workspaces
+            .resolver_for_effect(ctx, token, workspace_id)?;
+        let mut engines = match self.engines.lock() {
+            Ok(engines) => engines,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(engine) = engines.get(workspace_id) {
+            return Ok(Arc::clone(engine));
+        }
+        let storage_key = workspace_storage_key(workspace_id);
+        let engine = Arc::new(
+            PatchEngine::new(
+                resolver,
+                self.journal_root.join(&storage_key),
+                self.state_root.join(&storage_key),
+            )
+            .map_err(|error| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::Internal,
+                    terminus_kernel_protocol::ErrorCategory::Internal,
+                    format!("workspace patch engine initialization failed: {error}"),
+                    false,
+                )
+            })?,
+        );
+        engines.insert(workspace_id.to_string(), Arc::clone(&engine));
+        Ok(engine)
     }
 
     pub fn apply(
@@ -726,14 +1288,42 @@ impl PatchService {
         edits: &[PatchEdit],
         commit_mode: terminus_kernel_protocol::PatchCommitMode,
     ) -> KernelResult<PatchResponse> {
-        // §31.3 step 3: capability-token validation.
-        let requested_scope = Scope::default();
-        let _ = validate_capability_for_op(
+        let patch_paths = patch_workspace_paths(edits, &baseline.workspace_id)?;
+        for path in baseline
+            .sources
+            .iter()
+            .map(|source| &source.path)
+            .chain(patch_paths.iter())
+        {
+            if path.workspace_id != baseline.workspace_id {
+                return Err(KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                    terminus_kernel_protocol::ErrorCategory::Permission,
+                    format!(
+                        "patch path workspace `{}` does not match baseline workspace `{}`",
+                        path.workspace_id, baseline.workspace_id
+                    ),
+                    false,
+                ));
+            }
+        }
+        let requested_scope = Scope {
+            workspace_paths: patch_paths
+                .iter()
+                .map(|path| path.relative_path.clone())
+                .collect(),
+            network_destinations: Vec::new(),
+            secret_capabilities: Vec::new(),
+        };
+        // §31.3 steps 3-5: validate the capability, bind every edit to the
+        // baseline workspace, then select that workspace's resolver.
+        let token = validate_capability_for_op(
             &self.token_issuer,
             ctx,
             OperationClass::Patch,
             &requested_scope,
         )?;
+        let engine = self.engine_for_workspace(ctx, &token, &baseline.workspace_id)?;
         // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
             target: "terminus_kernel_audit",
@@ -747,7 +1337,7 @@ impl PatchService {
             edit_count = edits.len(),
             "patch apply authorized",
         );
-        self.engine
+        engine
             .apply(
                 transaction_id,
                 baseline,
@@ -771,13 +1361,14 @@ impl PatchService {
         transaction_id: &str,
     ) -> KernelResult<PatchResponse> {
         let requested_scope = Scope::default();
-        let _ = validate_capability_for_op(
+        let token = validate_capability_for_op(
             &self.token_issuer,
             ctx,
             OperationClass::Patch,
             &requested_scope,
         )?;
-        self.engine.reconcile(transaction_id).map_err(|e| {
+        let engine = self.engine_for_workspace(ctx, &token, &ctx.workspace_id)?;
+        engine.reconcile(transaction_id).map_err(|e| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::Internal,
                 terminus_kernel_protocol::ErrorCategory::Internal,
@@ -786,6 +1377,52 @@ impl PatchService {
             )
         })
     }
+}
+
+fn patch_workspace_paths(
+    edits: &[PatchEdit],
+    baseline_workspace_id: &str,
+) -> KernelResult<Vec<WorkspacePath>> {
+    let mut paths = Vec::new();
+    for edit in edits {
+        match edit {
+            PatchEdit::ReplaceSymbol(edit) => paths.push(edit.path.clone()),
+            PatchEdit::ReplaceRange(edit) => paths.push(edit.path.clone()),
+            PatchEdit::ReplaceExactText(edit) => paths.push(edit.path.clone()),
+            PatchEdit::Insert(edit) => paths.push(edit.path.clone()),
+            PatchEdit::DeleteRange(edit) => paths.push(edit.path.clone()),
+            PatchEdit::CreateFile(edit) => paths.push(edit.path.clone()),
+            PatchEdit::MoveFile(edit) => {
+                paths.push(edit.from.clone());
+                paths.push(edit.to.clone());
+            }
+            PatchEdit::DeleteFile(edit) => paths.push(edit.path.clone()),
+            PatchEdit::UnifiedDiff(edit) => {
+                let diff = String::from_utf8_lossy(&edit.diff_utf8);
+                let relative_path = diff
+                    .lines()
+                    .find_map(|line| line.strip_prefix("+++ b/"))
+                    .or_else(|| diff.lines().find_map(|line| line.strip_prefix("--- a/")))
+                    .filter(|path| !path.is_empty())
+                    .ok_or_else(|| {
+                        KernelError::new(
+                            terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                            terminus_kernel_protocol::ErrorCategory::Validation,
+                            "unified diff must identify one workspace-relative target path",
+                            false,
+                        )
+                    })?;
+                paths.push(WorkspacePath::new(baseline_workspace_id, relative_path));
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn workspace_storage_key(workspace_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(workspace_id.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Resolve a sandbox profile id to a `SandboxProfile`. The kernel currently
@@ -797,9 +1434,19 @@ impl PatchService {
 /// registry keyed by id.
 fn resolve_sandbox_profile(profile_id: &str) -> KernelResult<SandboxProfile> {
     match profile_id {
-        "secure-local-default" | "default-restrictive" | "degraded-local" => {
+        "secure-local-default" | "default-restrictive" => {
             let mut profile = SandboxProfile::default_restrictive();
             profile.id = profile_id.to_string();
+            Ok(profile)
+        }
+        "degraded-local" => {
+            let mut profile = SandboxProfile::default_restrictive();
+            profile.id = profile_id.to_string();
+            for rule in &mut profile.filesystem {
+                if rule.path == "workspace://.git" {
+                    rule.access = terminus_sandbox::FilesystemAccess::ReadOnly;
+                }
+            }
             Ok(profile)
         }
         "proxy-required" => {
@@ -817,9 +1464,26 @@ fn resolve_sandbox_profile(profile_id: &str) -> KernelResult<SandboxProfile> {
     }
 }
 
+fn materialize_workspace_profile(
+    mut profile: SandboxProfile,
+    workspace_root: &std::path::Path,
+) -> SandboxProfile {
+    for rule in &mut profile.filesystem {
+        let Some(relative) = rule.path.strip_prefix("workspace://") else {
+            continue;
+        };
+        rule.path = if relative.is_empty() {
+            workspace_root.display().to_string()
+        } else {
+            workspace_root.join(relative).display().to_string()
+        };
+    }
+    profile
+}
+
 #[cfg(test)]
 mod sandbox_profile_tests {
-    use super::resolve_sandbox_profile;
+    use super::{materialize_workspace_profile, resolve_sandbox_profile};
 
     #[test]
     fn proxy_required_is_explicit_and_non_default() {
@@ -842,6 +1506,17 @@ mod sandbox_profile_tests {
     fn unknown_profile_is_rejected() {
         assert!(resolve_sandbox_profile("unknown-profile").is_err());
     }
+
+    #[test]
+    fn workspace_rules_are_materialized_under_the_registered_root() {
+        let profile = resolve_sandbox_profile("secure-local-default")
+            .map(|profile| materialize_workspace_profile(profile, std::path::Path::new("/tmp/ws")));
+        assert!(matches!(profile, Ok(profile) if
+            profile.filesystem.iter().any(|rule| rule.path == "/tmp/ws")
+                && profile.filesystem.iter().any(|rule| rule.path == "/tmp/ws/.git")
+                && profile.filesystem.iter().all(|rule| !rule.path.starts_with("workspace://"))
+        ));
+    }
 }
 
 // ---------- ProcessService ----------
@@ -852,6 +1527,7 @@ pub struct ProcessService {
     policy: Arc<PolicyEngine>,
     token_issuer: Arc<TokenIssuer>,
     approvals: Arc<ApprovalStore>,
+    workspaces: WorkspaceService,
     /// Sandbox manager used to select and validate the enforcement backend
     /// for each process start (SPEC §13, §31.3 step 11). `None` when a unit
     /// test constructs `ProcessService` directly; the production
@@ -924,6 +1600,7 @@ impl std::fmt::Debug for ProcessService {
         f.debug_struct("ProcessService")
             .field("process", &self.process)
             .field("policy", &self.policy)
+            .field("workspaces", &self.workspaces)
             .finish_non_exhaustive()
     }
 }
@@ -934,12 +1611,14 @@ impl ProcessService {
         policy: Arc<PolicyEngine>,
         token_issuer: Arc<TokenIssuer>,
         approvals: Arc<ApprovalStore>,
+        workspaces: WorkspaceService,
     ) -> Self {
         Self {
             process,
             policy,
             token_issuer,
             approvals,
+            workspaces,
             sandbox: None,
             egress_broker: None,
         }
@@ -1150,12 +1829,42 @@ impl ProcessService {
             network_destinations: Vec::new(),
             secret_capabilities: command.secret_capability_uris.clone(),
         };
-        let _ = validate_capability_for_op(
+        let token = validate_capability_for_op(
             &self.token_issuer,
             ctx,
             OperationClass::Exec,
             &requested_scope,
         )?;
+        let cwd_safe = terminus_fs::SafePath::new(&command.cwd.relative_path).map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                format!("process cwd rejected by SafePath: {error}"),
+                false,
+            )
+        })?;
+        let cwd_resolver =
+            self.workspaces
+                .resolver_for_effect(ctx, &token, &command.cwd.workspace_id)?;
+        let resolved_cwd = cwd_resolver.resolve_strict(&cwd_safe).map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                format!("process cwd rejected by PathResolver: {error}"),
+                false,
+            )
+        })?;
+        if !resolved_cwd.host.exists || !resolved_cwd.host.host_path.is_dir() {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PathNotFound,
+                terminus_kernel_protocol::ErrorCategory::NotFound,
+                format!(
+                    "process cwd is not an existing directory: {}",
+                    command.cwd.relative_path
+                ),
+                false,
+            ));
+        }
 
         // §31.3 step 6: classify effect and taint. Propagate untrusted
         // provenance from the EffectIntent onto the normalized command so
@@ -1288,6 +1997,7 @@ impl ProcessService {
                 false,
             )
         })?;
+        spawn.working_dir = Some(resolved_cwd.host.host_path.clone());
         if matches!(report.decision, Decision::AllowWithConstraints) {
             spawn = Self::apply_constraints(spawn, &report.constraints);
         }
@@ -1298,7 +2008,10 @@ impl ProcessService {
         // enabled (`TERMINUS_STRICT_SANDBOX=1`). Otherwise audit the effective
         // (degraded) enforcement and proceed — degraded is an explicit,
         // audited state, never a silent downgrade.
-        let profile = resolve_sandbox_profile(sandbox_profile_id)?;
+        let profile = materialize_workspace_profile(
+            resolve_sandbox_profile(sandbox_profile_id)?,
+            cwd_resolver.root(),
+        );
         let (enforcement, sandbox_backend) = if let Some(mgr) = &self.sandbox {
             match mgr.select(&profile) {
                 Ok(backend) => (backend.enforcement_report(), Some(backend)),
@@ -1328,6 +2041,8 @@ impl ProcessService {
         };
         #[cfg(unix)]
         let mut egress_broker: Option<ActiveEgressBroker> = None;
+        let mut sandbox_command = command.clone();
+        sandbox_command.cwd.relative_path = resolved_cwd.host.host_path.display().to_string();
         let sandbox_wrapper = if matches!(
             profile.network,
             terminus_sandbox::NetworkAccess::ProxyRequired
@@ -1337,7 +2052,11 @@ impl ProcessService {
                 let broker = self.start_egress_broker().await?;
                 let wrapper = broker.broker_dir.as_deref().and_then(|broker_dir| {
                     sandbox_backend.as_ref().and_then(|backend| {
-                        backend.spawn_wrapper_with_egress_broker(&command, &profile, broker_dir)
+                        backend.spawn_wrapper_with_egress_broker(
+                            &sandbox_command,
+                            &profile,
+                            broker_dir,
+                        )
                     })
                 });
                 egress_broker = Some(broker);
@@ -1351,7 +2070,7 @@ impl ProcessService {
         } else {
             sandbox_backend
                 .as_ref()
-                .and_then(|backend| backend.spawn_wrapper(&command, &profile))
+                .and_then(|backend| backend.spawn_wrapper(&sandbox_command, &profile))
         };
         // Defense in depth: any profile that promises a network namespace
         // must have an actual wrapper. A backend report is not sufficient on
@@ -1840,6 +2559,72 @@ impl SecretService {
                 )
             })
     }
+
+    /// Persist a provider credential in the registered OS credential store.
+    /// The value exists only in the caller's UDS request and this stack frame.
+    pub fn store(&self, ctx: &RequestContext, uri: &str, value: &[u8]) -> KernelResult<()> {
+        let requested_scope = Scope {
+            workspace_paths: Vec::new(),
+            network_destinations: Vec::new(),
+            secret_capabilities: vec![uri.to_string()],
+        };
+        let _ = validate_request_pipeline(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Secret,
+            &requested_scope,
+            true,
+        )?;
+        self.broker.store(uri, value).map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                error.to_string(),
+                false,
+            )
+        })?;
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "secret.stored",
+            request_id = %ctx.request_id,
+            actor_id = %ctx.actor_id,
+            secret_uri = %uri,
+            "provider credential stored"
+        );
+        Ok(())
+    }
+
+    pub fn delete(&self, ctx: &RequestContext, uri: &str) -> KernelResult<()> {
+        let requested_scope = Scope {
+            workspace_paths: Vec::new(),
+            network_destinations: Vec::new(),
+            secret_capabilities: vec![uri.to_string()],
+        };
+        let _ = validate_request_pipeline(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Secret,
+            &requested_scope,
+            true,
+        )?;
+        self.broker.delete(uri).map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                error.to_string(),
+                false,
+            )
+        })?;
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "secret.deleted",
+            request_id = %ctx.request_id,
+            actor_id = %ctx.actor_id,
+            secret_uri = %uri,
+            "provider credential deleted"
+        );
+        Ok(())
+    }
 }
 
 // ---------- ConnectorService ----------
@@ -1988,13 +2773,13 @@ impl ConnectorService {
 
     /// Execute one grant-bound operation through the trusted connector
     /// path. Requires the `Network` operation class scoped to the exact
-    /// destination. Returns the typed receipt only.
+    /// destination. Returns the typed receipt and bounded scrubbed response.
     pub async fn execute(
         &self,
         ctx: &RequestContext,
         op: &terminus_connector::CanonicalOperation,
         grant: &terminus_secrets::ConnectorGrant,
-    ) -> KernelResult<terminus_connector::ConnectorReceipt> {
+    ) -> KernelResult<terminus_connector::ConnectorResponse> {
         let dest = format!("{}:{}", op.host, op.port);
         let requested_scope = Scope {
             workspace_paths: Vec::new(),
@@ -2007,7 +2792,7 @@ impl ConnectorService {
             OperationClass::Network,
             &requested_scope,
         )?;
-        let receipt = self.broker.execute(op, grant).await.map_err(|e| {
+        let response = self.broker.execute(op, grant).await.map_err(|e| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::PermissionDenied,
                 terminus_kernel_protocol::ErrorCategory::Permission,
@@ -2021,13 +2806,13 @@ impl ConnectorService {
             request_id = %ctx.request_id,
             task_id = %ctx.task_id,
             actor_id = %ctx.actor_id,
-            grant_id = %receipt.grant_id,
-            outcome = ?receipt.outcome,
-            status_code = ?receipt.status_code,
-            response_redactions = receipt.response_redactions,
+            grant_id = %response.receipt.grant_id,
+            outcome = ?response.receipt.outcome,
+            status_code = ?response.receipt.status_code,
+            response_redactions = response.receipt.response_redactions,
             "connector operation executed"
         );
-        Ok(receipt)
+        Ok(response)
     }
 
     pub fn consumed_grants(&self) -> usize {
@@ -2124,24 +2909,84 @@ impl NetworkService {
 
 #[derive(Clone)]
 pub struct CodeIntelligenceService {
-    inner: Arc<CodeIntelService>,
+    workspaces: WorkspaceService,
+    kernel_data_root: PathBuf,
+    index_root: PathBuf,
+    services: Arc<Mutex<HashMap<String, Arc<CodeIntelService>>>>,
     token_issuer: Arc<TokenIssuer>,
 }
 
 impl std::fmt::Debug for CodeIntelligenceService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CodeIntelligenceService")
-            .field("inner", &self.inner)
+            .field("workspaces", &self.workspaces)
+            .field("kernel_data_root", &self.kernel_data_root)
+            .field("index_root", &self.index_root)
             .finish_non_exhaustive()
     }
 }
 
 impl CodeIntelligenceService {
-    pub fn new(inner: Arc<CodeIntelService>, token_issuer: Arc<TokenIssuer>) -> Self {
+    pub fn new(
+        workspaces: WorkspaceService,
+        kernel_data_root: PathBuf,
+        index_root: PathBuf,
+        token_issuer: Arc<TokenIssuer>,
+    ) -> Self {
         Self {
-            inner,
+            workspaces,
+            kernel_data_root,
+            index_root,
+            services: Arc::new(Mutex::new(HashMap::new())),
             token_issuer,
         }
+    }
+
+    fn service_for_context(
+        &self,
+        ctx: &RequestContext,
+        token: &terminus_authz::CapabilityToken,
+    ) -> KernelResult<Arc<CodeIntelService>> {
+        let workspace =
+            self.workspaces
+                .local_workspace_for_effect(ctx, token, &ctx.workspace_id)?;
+        let mut services = match self.services.lock() {
+            Ok(services) => services,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(service) = services.get(&workspace.id) {
+            return Ok(Arc::clone(service));
+        }
+        let index_path = self
+            .index_root
+            .join(format!("{}.sqlite", workspace_storage_key(&workspace.id)));
+        let index =
+            terminus_code_intel::PersistentSymbolIndex::open(index_path).map_err(|error| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::Internal,
+                    terminus_kernel_protocol::ErrorCategory::Internal,
+                    format!("workspace code-intelligence index initialization failed: {error}"),
+                    false,
+                )
+            })?;
+        let kernel_data_root = std::fs::canonicalize(&self.kernel_data_root).ok();
+        let workspace_root = PathBuf::from(&workspace.canonical_root);
+        let source: Arc<dyn WorkspaceSource> = if kernel_data_root.as_ref() == Some(&workspace_root)
+        {
+            // A workspace can deliberately be rooted at TERMINUS_DATA (the
+            // deterministic harness does this). Keep kernel-owned SQLite,
+            // artifact, journal, and state files out of semantic indexing.
+            // Per-workspace indexes live under `state/code-intel`, which the
+            // kernel-data source excludes with the rest of `state`.
+            Arc::new(FileSystemWorkspaceSource::for_kernel_data_dir(
+                workspace_root,
+            ))
+        } else {
+            Arc::new(FileSystemWorkspaceSource::new(workspace_root))
+        };
+        let service = Arc::new(CodeIntelService::with_source(Arc::new(index), source));
+        services.insert(workspace.id, Arc::clone(&service));
+        Ok(service)
     }
 
     pub fn inspect(
@@ -2152,12 +2997,13 @@ impl CodeIntelligenceService {
     ) -> KernelResult<terminus_code_intel::InspectResult> {
         // §31.3 step 3: capability-token validation. Inspect requires the
         // `CodeIntel` operation class.
-        let _ = validate_capability_for_op(
+        let token = validate_capability_for_op(
             &self.token_issuer,
             ctx,
             OperationClass::CodeIntel,
             &Scope::default(),
         )?;
+        let service = self.service_for_context(ctx, &token)?;
         // §31.3 step 10: persist AUTHORIZED state.
         tracing::info!(
             target: "terminus_kernel_audit",
@@ -2169,7 +3015,7 @@ impl CodeIntelligenceService {
             symbol = %symbol,
             "code-intel inspect authorized",
         );
-        self.inner.inspect_symbol(symbol).map_err(|e| {
+        service.inspect_symbol(symbol).map_err(|e| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::Internal,
                 terminus_kernel_protocol::ErrorCategory::Internal,
@@ -2185,13 +3031,14 @@ impl CodeIntelligenceService {
         _intent: &EffectIntent,
         symbol: &str,
     ) -> KernelResult<terminus_code_intel::ReferenceResult> {
-        let _ = validate_capability_for_op(
+        let token = validate_capability_for_op(
             &self.token_issuer,
             ctx,
             OperationClass::CodeIntel,
             &Scope::default(),
         )?;
-        self.inner.find_references(symbol).map_err(|e| {
+        let service = self.service_for_context(ctx, &token)?;
+        service.find_references(symbol).map_err(|e| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::Internal,
                 terminus_kernel_protocol::ErrorCategory::Internal,
@@ -2207,7 +3054,7 @@ impl CodeIntelligenceService {
         _intent: &EffectIntent,
         paths: &[String],
     ) -> KernelResult<Vec<terminus_code_intel::DiagnoseResult>> {
-        let _ = validate_capability_for_op(
+        let token = validate_capability_for_op(
             &self.token_issuer,
             ctx,
             OperationClass::CodeIntel,
@@ -2217,7 +3064,8 @@ impl CodeIntelligenceService {
                 secret_capabilities: Vec::new(),
             },
         )?;
-        self.inner.diagnose_files(paths).map_err(|e| {
+        let service = self.service_for_context(ctx, &token)?;
+        service.diagnose_files(paths).map_err(|e| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::Internal,
                 terminus_kernel_protocol::ErrorCategory::Internal,
@@ -2354,12 +3202,6 @@ impl ArtifactIngestService {
         }
     }
 
-    /// Direct accessor for the underlying `ArtifactStore`. Used by the HTTP
-    /// mini-service to fetch artifact bytes and metadata.
-    pub fn store(&self) -> &Arc<ArtifactStore> {
-        &self.store
-    }
-
     pub fn ingest(
         &self,
         ctx: &RequestContext,
@@ -2385,13 +3227,14 @@ impl ArtifactIngestService {
             size_bytes = bytes.len(),
             "artifact ingest authorized",
         );
-        self.ingest_with_bytes(bytes)
-    }
-
-    /// Ingest raw bytes without a request context. Used by the HTTP
-    /// mini-service's binary `POST /v1/artifacts/ingest` endpoint where the
-    /// body IS the artifact bytes (not a JSON envelope).
-    pub fn ingest_with_bytes(&self, bytes: &[u8]) -> KernelResult<ArtifactRef> {
+        if ctx.task_id.is_empty() || ctx.task_id == "control-maintenance" {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                "artifact ingest requires a concrete owner task",
+                false,
+            ));
+        }
         let (_, artifact) = self.store.ingest(bytes).map_err(|e| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::Internal,
@@ -2400,16 +3243,32 @@ impl ArtifactIngestService {
                 false,
             )
         })?;
+        // The owner tuple must identify one task-artifact relationship, not
+        // one global ingest slot for the task. Including the immutable hash
+        // keeps re-ingest idempotent while allowing a task to own many
+        // artifacts and allowing distinct tasks to own identical bytes.
+        let ownership_purpose = format!("ingest:{}", artifact.sha256);
+        self.store
+            .link_task_bound(
+                &artifact.sha256,
+                "task",
+                &ctx.task_id,
+                &ctx.task_id,
+                &ownership_purpose,
+            )
+            .map_err(|error| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::Internal,
+                    terminus_kernel_protocol::ErrorCategory::Internal,
+                    format!("artifact ownership binding failed: {error}"),
+                    false,
+                )
+            })?;
         Ok(artifact)
     }
 
     pub fn get(&self, ctx: &RequestContext, sha256: &str) -> KernelResult<Vec<u8>> {
-        let _ = validate_capability_for_op(
-            &self.token_issuer,
-            ctx,
-            OperationClass::ArtifactIngest,
-            &Scope::default(),
-        )?;
+        self.validate_read_access(ctx, sha256)?;
         self.store.get(sha256).map_err(|e| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::ArtifactNotFound,
@@ -2421,24 +3280,508 @@ impl ArtifactIngestService {
     }
 
     pub fn metadata(&self, ctx: &RequestContext, sha256: &str) -> KernelResult<ArtifactRef> {
-        let _ = validate_capability_for_op(
-            &self.token_issuer,
-            ctx,
-            OperationClass::ArtifactIngest,
-            &Scope::default(),
-        )?;
-        let metadata = self.store.metadata(sha256).map_err(|e| {
+        let metadata = self.metadata_record(ctx, sha256)?;
+        Ok(ArtifactRef::new(
+            metadata.hash,
+            metadata.size_bytes,
+            metadata.media_type,
+        ))
+    }
+
+    pub fn metadata_record(
+        &self,
+        ctx: &RequestContext,
+        sha256: &str,
+    ) -> KernelResult<terminus_artifacts::ArtifactMetadata> {
+        self.validate_read_access(ctx, sha256)?;
+        self.store.metadata(sha256).map_err(|e| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::ArtifactNotFound,
                 terminus_kernel_protocol::ErrorCategory::NotFound,
                 e.to_string(),
                 false,
             )
-        })?;
-        Ok(ArtifactRef::new(
-            metadata.hash,
-            metadata.size_bytes,
-            metadata.media_type,
-        ))
+        })
+    }
+
+    fn validate_read_access(&self, ctx: &RequestContext, sha256: &str) -> KernelResult<()> {
+        if ctx.task_id == "control-maintenance" {
+            return self.validate_maintenance(ctx);
+        }
+        match validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::ArtifactIngest,
+            &Scope::default(),
+        ) {
+            Ok(_) => {
+                if ctx.task_id.is_empty()
+                    || !self
+                        .store
+                        .has_task_link(sha256, &ctx.task_id)
+                        .map_err(|error| {
+                            KernelError::new(
+                                terminus_kernel_protocol::ErrorCode::Internal,
+                                terminus_kernel_protocol::ErrorCategory::Internal,
+                                error.to_string(),
+                                false,
+                            )
+                        })?
+                {
+                    return Err(KernelError::new(
+                        terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                        terminus_kernel_protocol::ErrorCategory::Permission,
+                        "artifact is not owned by the requesting task",
+                        false,
+                    ));
+                }
+                Ok(())
+            }
+            Err(error) if error.code() == terminus_kernel_protocol::ErrorCode::PermissionDenied => {
+                self.validate_maintenance(ctx)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn validate_maintenance(&self, ctx: &RequestContext) -> KernelResult<()> {
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Admin,
+            &Scope::default(),
+        )?;
+        if ctx.task_id != "control-maintenance" {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                "kernel maintenance capability must be bound to control-maintenance",
+                false,
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn gc_dry_run(
+        &self,
+        ctx: &RequestContext,
+        live: &HashSet<String>,
+    ) -> KernelResult<terminus_artifacts::GcDryRunReport> {
+        self.validate_maintenance(ctx)?;
+        self.store.gc_dry_run(live).map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::Internal,
+                terminus_kernel_protocol::ErrorCategory::Internal,
+                error.to_string(),
+                false,
+            )
+        })
+    }
+
+    pub fn gc_collect(
+        &self,
+        ctx: &RequestContext,
+        live: &HashSet<String>,
+    ) -> KernelResult<terminus_artifacts::GcReport> {
+        self.validate_maintenance(ctx)?;
+        self.store.gc_collect(live).map_err(|error| {
+            KernelError::new(
+                terminus_kernel_protocol::ErrorCode::Internal,
+                terminus_kernel_protocol::ErrorCategory::Internal,
+                error.to_string(),
+                false,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn link(
+        &self,
+        ctx: &RequestContext,
+        _intent: &EffectIntent,
+        sha256: &str,
+        owner_type: &str,
+        owner_id: &str,
+        purpose: &str,
+        owner_task_id: &str,
+    ) -> KernelResult<()> {
+        let token = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::ArtifactIngest,
+            &Scope::default(),
+        )?;
+        let bound_task = token.claims.binder.task_id.as_str();
+        if owner_task_id.is_empty()
+            || ctx.task_id != owner_task_id
+            || (bound_task != "*" && bound_task != owner_task_id)
+        {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                "artifact owner task must match the request and capability task binders",
+                false,
+            ));
+        }
+        let is_checkpoint_content = owner_type == "checkpoint" && purpose == "content";
+        let is_turn_initiating_input = owner_type == "turn" && purpose == "initiating-input";
+        if !is_checkpoint_content && !is_turn_initiating_input {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                "the public artifact-link boundary admits only checkpoint content or turn initiating-input ownership",
+                false,
+            ));
+        }
+        for (name, value, max_bytes) in [
+            ("owner_type", owner_type, 64_usize),
+            ("owner_id", owner_id, 256_usize),
+            ("purpose", purpose, 128_usize),
+        ] {
+            if value.is_empty() || value.len() > max_bytes {
+                return Err(KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                    terminus_kernel_protocol::ErrorCategory::Validation,
+                    format!("artifact link {name} must contain 1..={max_bytes} bytes"),
+                    false,
+                ));
+            }
+        }
+        if is_turn_initiating_input {
+            if ctx.turn_id.is_empty()
+                || ctx.turn_id.contains('*')
+                || owner_id.contains('*')
+                || owner_task_id.contains('*')
+            {
+                return Err(KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                    terminus_kernel_protocol::ErrorCategory::Validation,
+                    "turn initiating-input ownership requires concrete non-wildcard turn and task identifiers",
+                    false,
+                ));
+            }
+            if owner_id != ctx.turn_id || bound_task == "*" {
+                return Err(KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                    terminus_kernel_protocol::ErrorCategory::Permission,
+                    "turn initiating-input ownership must match the request turn and a task-bound capability",
+                    false,
+                ));
+            }
+        }
+        if !is_canonical_sha256(sha256) {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                "artifact link hash must use canonical sha256:<64 lowercase hex> encoding",
+                false,
+            ));
+        }
+        if !self.store.exists(sha256) {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::ArtifactNotFound,
+                terminus_kernel_protocol::ErrorCategory::NotFound,
+                "artifact link target does not exist",
+                false,
+            ));
+        }
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "authorized",
+            service = "artifact.link",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            actor_id = %ctx.actor_id,
+            artifact_hash = %sha256,
+            owner_type = %owner_type,
+            owner_id = %owner_id,
+            owner_task_id = %owner_task_id,
+            purpose = %purpose,
+            "artifact ownership link authorized",
+        );
+        self.store
+            .link_task_bound(sha256, owner_type, owner_id, owner_task_id, purpose)
+            .map_err(|error| match error {
+                terminus_artifacts::ArtifactError::OwnerConflict(message) => KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::AlreadyExists,
+                    terminus_kernel_protocol::ErrorCategory::Conflict,
+                    message,
+                    false,
+                ),
+                other => KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::Internal,
+                    terminus_kernel_protocol::ErrorCategory::Internal,
+                    other.to_string(),
+                    false,
+                ),
+            })
+    }
+
+    pub fn list_checkpoint_links(
+        &self,
+        ctx: &RequestContext,
+        continuation_token: &str,
+        page_size: usize,
+    ) -> KernelResult<Vec<terminus_artifacts::ArtifactLink>> {
+        self.validate_maintenance(ctx)?;
+        if continuation_token.len() > 256 || page_size == 0 || page_size > 1_000 {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                "checkpoint link pagination is invalid",
+                false,
+            ));
+        }
+        self.store
+            .list_checkpoint_links(continuation_token, page_size)
+            .map_err(|error| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::Internal,
+                    terminus_kernel_protocol::ErrorCategory::Internal,
+                    error.to_string(),
+                    false,
+                )
+            })
+    }
+
+    pub fn unlink_checkpoint(
+        &self,
+        ctx: &RequestContext,
+        sha256: &str,
+        checkpoint_id: &str,
+        owner_task_id: &str,
+    ) -> KernelResult<bool> {
+        let task_authorized = if owner_task_id.is_empty() {
+            false
+        } else {
+            validate_capability_for_op(
+                &self.token_issuer,
+                ctx,
+                OperationClass::ArtifactIngest,
+                &Scope::default(),
+            )
+            .is_ok()
+                && ctx.task_id == owner_task_id
+        };
+        if !task_authorized {
+            self.validate_maintenance(ctx)?;
+        }
+        if checkpoint_id.is_empty() || checkpoint_id.len() > 256 || !is_canonical_sha256(sha256) {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                "checkpoint unlink binding is invalid",
+                false,
+            ));
+        }
+        self.store
+            .unlink_checkpoint(sha256, checkpoint_id, owner_task_id)
+            .map_err(|error| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::Internal,
+                    terminus_kernel_protocol::ErrorCategory::Internal,
+                    error.to_string(),
+                    false,
+                )
+            })
+    }
+}
+
+fn is_canonical_sha256(value: &str) -> bool {
+    let Some(hex_hash) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex_hash.len() == 64
+        && hex_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(test)]
+mod artifact_ingest_tests {
+    #![allow(clippy::panic)]
+
+    use super::*;
+    use terminus_authz::{OperationClass, Scope, TokenBinder};
+    use terminus_kernel_protocol::{ErrorCode, RequestContext};
+
+    fn task_context(
+        kernel: &KernelHandle,
+        task_id: &str,
+        nonce: &str,
+    ) -> terminus_kernel_protocol::RequestContext {
+        let token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "artifact-test".to_string(),
+                    session_id: "artifact-session".to_string(),
+                    task_id: task_id.to_string(),
+                    workspace_id: "artifact-workspace".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![OperationClass::ArtifactIngest],
+                Scope::default(),
+                Some(300),
+                nonce,
+            )
+            .and_then(|token| token.encode());
+        let token = match token {
+            Ok(token) => token,
+            Err(error) => panic!("test capability issuance failed: {error}"),
+        };
+        RequestContext {
+            request_id: terminus_kernel_protocol::new_id(),
+            idempotency_key: String::new(),
+            session_id: "artifact-session".to_string(),
+            task_id: task_id.to_string(),
+            turn_id: "artifact-turn".to_string(),
+            actor_id: "artifact-test".to_string(),
+            traceparent: String::new(),
+            capability_token: token,
+            workspace_id: "artifact-workspace".to_string(),
+            deadline_unix_ms: 0,
+            resource_budgets: Default::default(),
+            policy_version: String::new(),
+        }
+    }
+
+    #[test]
+    fn distinct_artifacts_keep_independent_task_ownership_links() {
+        let directory = match tempfile::tempdir() {
+            Ok(directory) => directory,
+            Err(error) => panic!("test directory creation failed: {error}"),
+        };
+        let kernel = match KernelHandle::new(directory.path().to_path_buf()) {
+            Ok(kernel) => kernel,
+            Err(error) => panic!("test kernel creation failed: {error}"),
+        };
+        let owner = task_context(&kernel, "owner-task", "owner-token");
+        let other = task_context(&kernel, "other-task", "other-token");
+
+        let command = kernel
+            .artifact_ingest
+            .ingest(&owner, &Default::default(), b"job command");
+        let command = match command {
+            Ok(artifact) => artifact,
+            Err(error) => panic!("first task artifact ingest failed: {error}"),
+        };
+        let output = kernel
+            .artifact_ingest
+            .ingest(&owner, &Default::default(), b"");
+        let output = match output {
+            Ok(artifact) => artifact,
+            Err(error) => panic!("second task artifact ingest failed: {error}"),
+        };
+        assert_ne!(command.sha256, output.sha256);
+
+        for (artifact, expected) in [
+            (&command, b"job command".as_slice()),
+            (&output, b"".as_slice()),
+        ] {
+            match kernel.artifact_ingest.get(&owner, &artifact.sha256) {
+                Ok(bytes) => assert_eq!(bytes, expected),
+                Err(error) => panic!("owner could not read task artifact: {error}"),
+            }
+            let denied = kernel.artifact_ingest.get(&other, &artifact.sha256);
+            assert!(matches!(denied, Err(error) if error.code() == ErrorCode::PermissionDenied));
+        }
+
+        let collectable = kernel.artifact_ingest.store.gc_dry_run_sqlite();
+        assert!(matches!(
+            collectable,
+            Ok(hashes) if !hashes.contains(&command.sha256) && !hashes.contains(&output.sha256)
+        ));
+    }
+
+    #[test]
+    fn turn_initiating_input_links_are_concrete_and_task_bound() {
+        let directory = match tempfile::tempdir() {
+            Ok(directory) => directory,
+            Err(error) => panic!("test directory creation failed: {error}"),
+        };
+        let kernel = match KernelHandle::new(directory.path().to_path_buf()) {
+            Ok(kernel) => kernel,
+            Err(error) => panic!("test kernel creation failed: {error}"),
+        };
+        let owner = task_context(&kernel, "owner-task", "turn-owner-token");
+        let other = task_context(&kernel, "other-task", "turn-other-token");
+        let artifact = match kernel.artifact_ingest.ingest(
+            &owner,
+            &Default::default(),
+            b"initiating turn input",
+        ) {
+            Ok(artifact) => artifact,
+            Err(error) => panic!("turn input ingest failed: {error}"),
+        };
+
+        assert!(kernel
+            .artifact_ingest
+            .link(
+                &owner,
+                &Default::default(),
+                &artifact.sha256,
+                "turn",
+                "artifact-turn",
+                "initiating-input",
+                "owner-task",
+            )
+            .is_ok());
+        assert!(kernel
+            .artifact_ingest
+            .link(
+                &owner,
+                &Default::default(),
+                &artifact.sha256,
+                "checkpoint",
+                "checkpoint-id",
+                "content",
+                "owner-task",
+            )
+            .is_ok());
+
+        let cross_task = kernel.artifact_ingest.link(
+            &other,
+            &Default::default(),
+            &artifact.sha256,
+            "turn",
+            "artifact-turn",
+            "initiating-input",
+            "owner-task",
+        );
+        assert!(matches!(
+            cross_task,
+            Err(error) if error.code() == ErrorCode::PermissionDenied
+        ));
+
+        let wildcard_turn = kernel.artifact_ingest.link(
+            &owner,
+            &Default::default(),
+            &artifact.sha256,
+            "turn",
+            "*",
+            "initiating-input",
+            "owner-task",
+        );
+        assert!(matches!(
+            wildcard_turn,
+            Err(error) if error.code() == ErrorCode::InvalidArgument
+        ));
+
+        let mut wildcard_capability = task_context(&kernel, "*", "turn-wildcard-token");
+        wildcard_capability.task_id = "owner-task".to_string();
+        let wildcard_task_authority = kernel.artifact_ingest.link(
+            &wildcard_capability,
+            &Default::default(),
+            &artifact.sha256,
+            "turn",
+            "artifact-turn",
+            "initiating-input",
+            "owner-task",
+        );
+        assert!(matches!(
+            wildcard_task_authority,
+            Err(error) if error.code() == ErrorCode::PermissionDenied
+        ));
     }
 }

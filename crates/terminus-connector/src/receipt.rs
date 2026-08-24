@@ -39,3 +39,12 @@ pub struct ConnectorReceipt {
     pub response_redactions: usize,
     pub outcome: Outcome,
 }
+
+/// Bounded response returned to the trusted caller. `body` has already been
+/// scanned for the injected credential and contains the redacted bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorResponse {
+    pub receipt: ConnectorReceipt,
+    pub body: Vec<u8>,
+    pub content_type: Option<String>,
+}

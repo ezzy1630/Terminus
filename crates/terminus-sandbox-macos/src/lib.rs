@@ -103,6 +103,20 @@ pub fn generate_seatbelt_profile(
     let mut sb = String::new();
     sb.push_str("(version 1)\n");
     sb.push_str("(deny default)\n");
+
+    let mapped_filesystem = profile
+        .filesystem
+        .iter()
+        .map(|rule| {
+            let host = map_rule_path(&rule.path, workspace_root).ok_or_else(|| {
+                SandboxError::Misconfigured(format!(
+                    "filesystem rule `{}` is not an absolute path and has no concrete workspace root",
+                    rule.path
+                ))
+            })?;
+            Ok((rule, host))
+        })
+        .collect::<Result<Vec<_>, SandboxError>>()?;
     // Minimal system plumbing required for ANY process to start and run.
     sb.push_str("; darwin userland plumbing: read-only system trees only\n");
     sb.push_str("(allow sysctl-read)\n");
@@ -123,10 +137,7 @@ pub fn generate_seatbelt_profile(
     sb.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
 
     // ---- filesystem -----------------------------------------------------
-    for rule in &profile.filesystem {
-        let Some(host) = map_rule_path(&rule.path, workspace_root) else {
-            continue;
-        };
+    for (rule, host) in &mapped_filesystem {
         match rule.access {
             FilesystemAccess::ReadOnly => {
                 sb.push_str(&format!("(allow file-read* (subpath \"{host}\"))\n"));
@@ -135,12 +146,17 @@ pub fn generate_seatbelt_profile(
                 sb.push_str(&format!("(allow file-write* (subpath \"{host}\"))\n"));
                 sb.push_str(&format!("(allow file-read* (subpath \"{host}\"))\n"));
             }
-            FilesystemAccess::Deny => {
-                // Deny default already covers it; emit an explicit rule so
-                // intent survives review and future default changes.
-                sb.push_str(&format!("(deny file-write* (subpath \"{host}\"))\n"));
-                sb.push_str(&format!("(deny file-read* (subpath \"{host}\"))\n"));
-            }
+            FilesystemAccess::Deny => continue,
+        }
+    }
+
+    // Keep explicit denials after the allowances so the protected path rule
+    // is the most specific matching rule on Seatbelt implementations that
+    // resolve rules from the end of the program.
+    for (rule, host) in &mapped_filesystem {
+        if matches!(rule.access, FilesystemAccess::Deny) {
+            sb.push_str(&format!("(deny file-write* (subpath \"{host}\"))\n"));
+            sb.push_str(&format!("(deny file-read* (subpath \"{host}\"))\n"));
         }
     }
 
@@ -274,19 +290,9 @@ impl SandboxBackend for MacOsSandboxBackend {
     ) -> Option<(std::path::PathBuf, Vec<String>)> {
         let exec = self.sandbox_exec_path.as_ref()?;
         let sb_text = generate_seatbelt_profile(profile, self.workspace_root.as_deref()).ok()?;
-        // Write the profile to a private per-spawn file. mkstemp-style
-        // naming under the OS temp dir keeps it out of the workspace and
-        // unreachable to other users on single-user dev hosts.
-        let dir = std::env::temp_dir().join(format!("terminus-seatbelt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok()?;
-        let profile_path = dir.join(format!(
-            "profile-{}.sb",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_nanos()
-        ));
-        std::fs::write(&profile_path, sb_text).ok()?;
+        // Pass the generated profile directly. It contains policy paths but
+        // no credentials, and avoiding a temporary file also avoids leaving
+        // mutable policy artifacts behind after a crash.
         // Seatbelt constrains filesystem/network/process rights but does
         // NOT scrub environment variables. Ambient-secret denial is
         // therefore enforced structurally: every payload launches under
@@ -297,8 +303,8 @@ impl SandboxBackend for MacOsSandboxBackend {
             .clone()
             .unwrap_or_else(|| PathBuf::from("/var/empty"));
         let mut argv = vec![
-            "-f".to_string(),
-            profile_path.display().to_string(),
+            "-p".to_string(),
+            sb_text,
             "--".to_string(),
             "/usr/bin/env".to_string(),
             "-i".to_string(),
@@ -307,6 +313,12 @@ impl SandboxBackend for MacOsSandboxBackend {
             "TERM=dumb".to_string(),
             "__CF_USER_TEXT_ENCODING=0x0:0:0".to_string(),
         ];
+        argv.extend(
+            command
+                .public_env
+                .iter()
+                .map(|(name, value)| format!("{name}={value}")),
+        );
         argv.push(command.program.clone());
         argv.extend(command.args.clone());
         Some((exec.clone(), argv))
@@ -333,30 +345,13 @@ fn which_sandbox_exec() -> Option<PathBuf> {
         candidates.push(system);
     }
     for candidate in candidates {
-        let dir =
-            std::env::temp_dir().join(format!("terminus-seatbelt-probe-{}", std::process::id()));
-        if std::fs::create_dir_all(&dir).is_err() {
-            continue;
-        }
-        let profile_path = dir.join("probe.sb");
-        if std::fs::write(&profile_path, PROBE_PROFILE).is_err() {
-            continue;
-        }
         let ok = std::process::Command::new(&candidate)
-            .args([
-                "-f",
-                profile_path.display().to_string().as_str(),
-                "--",
-                "/bin/sh",
-                "-c",
-                "exit 0",
-            ])
+            .args(["-p", PROBE_PROFILE, "--", "/bin/sh", "-c", "exit 0"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        let _ = std::fs::remove_file(&profile_path);
         if ok {
             return Some(candidate);
         }
@@ -400,7 +395,7 @@ mod phase4_tests {
     fn proxy_required_restricts_outbound_to_broker_socket() {
         let mut profile = SandboxProfile::default_restrictive();
         profile.network = NetworkAccess::ProxyRequired;
-        let sb = generate_seatbelt_profile(&profile, None).unwrap();
+        let sb = generate_seatbelt_profile(&profile, Some(Path::new("/tmp/ws-root"))).unwrap();
         assert!(sb.contains("(allow network-outbound (to unix-socket*))"));
         assert!(!sb.contains("(allow network-outbound)\n"));
     }
@@ -414,12 +409,15 @@ mod phase4_tests {
     }
 
     #[test]
-    fn spawn_wrapper_uses_generated_profile_file() {
+    fn spawn_wrapper_uses_inline_generated_profile() {
         let b = backend();
         let cmd = terminus_kernel_protocol::CommandSpec {
             program: "echo".to_string(),
             args: vec!["hi".to_string()],
             cwd: terminus_kernel_protocol::WorkspacePath::new("ws", "."),
+            public_env: [("TERMINUS_PROVIDER_PROTOCOL".to_string(), "v1".to_string())]
+                .into_iter()
+                .collect(),
             timeout_ms: 1000,
             ..Default::default()
         };
@@ -427,21 +425,28 @@ mod phase4_tests {
             .spawn_wrapper(&cmd, &SandboxProfile::default_restrictive())
             .expect("wrapper with seatbelt available");
         assert_eq!(bin, PathBuf::from("/usr/bin/sandbox-exec"));
-        assert_eq!(argv[0], "-f");
-        let profile_path = PathBuf::from(&argv[1]);
-        let text = std::fs::read_to_string(&profile_path).unwrap();
-        assert!(text.contains("(deny default)"));
+        assert_eq!(argv[0], "-p");
+        assert!(argv[1].contains("(deny default)"));
         // Payloads launch under `env -i` so ambient secrets cannot leak.
         assert_eq!(argv[2], "--");
         assert_eq!(argv[3], "/usr/bin/env");
         assert!(argv.contains(&"-i".to_string()));
         assert!(argv.contains(&"PATH=/usr/bin:/bin:/usr/sbin:/sbin".to_string()));
+        assert!(argv.contains(&"TERMINUS_PROVIDER_PROTOCOL=v1".to_string()));
         let prog_idx = argv
             .iter()
             .position(|a| a == "echo")
             .expect("original program preserved after env allowlist");
         assert!(prog_idx > argv.iter().position(|a| a == "--").unwrap());
-        let _ = std::fs::remove_file(&profile_path);
+    }
+
+    #[test]
+    fn unresolved_workspace_rules_fail_closed() {
+        let b = MacOsSandboxBackend::with_mocked_sandbox_exec(true);
+        let error = b
+            .supports_profile(&SandboxProfile::default_restrictive())
+            .expect_err("workspace rules require a concrete root");
+        assert!(format!("{error}").contains("concrete workspace root"));
     }
 
     #[test]
@@ -485,7 +490,8 @@ mod live_probe_tests {
     /// the CLI is absent.
     #[test]
     fn live_seatbelt_blocks_escape_and_ambient_secrets() {
-        let backend = MacOsSandboxBackend::new();
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let backend = MacOsSandboxBackend::new().with_workspace_root(workspace.path());
         if !backend.is_seatbelt_available() {
             // Honest skip: no evidence, no claim.
             return;
@@ -502,5 +508,69 @@ mod live_probe_tests {
         assert_eq!(fs_v, ProbeVerdict::Enforced, "fs escape: {fs_d}");
         let (env_v, env_d) = verdict(ProbeKind::AmbientSecretDenial);
         assert_eq!(env_v, ProbeVerdict::Enforced, "ambient secret: {env_d}");
+    }
+
+    #[test]
+    fn live_seatbelt_preserves_workspace_contract() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let canonical_root = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let root = canonical_root.as_path();
+        std::fs::create_dir(root.join("active-worktree")).expect("active worktree");
+        std::fs::create_dir(root.join(".git")).expect("git directory");
+        std::fs::create_dir(root.join(".terminus")).expect("Terminus directory");
+        std::fs::write(root.join(".git/secret"), "git-secret").expect("git fixture");
+        std::fs::write(root.join(".terminus/credentials"), "credential-secret")
+            .expect("credential fixture");
+
+        let backend = MacOsSandboxBackend::new().with_workspace_root(root);
+        if !backend.is_seatbelt_available() {
+            return;
+        }
+        let command = terminus_kernel_protocol::CommandSpec {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "test \"$TERMINUS_PROVIDER_PROTOCOL\" = v1 || exit 21; \
+                 pwd > active-worktree/pwd || exit 22; \
+                 printf allowed > active-worktree/result || exit 23; \
+                 if cat .git/secret >/dev/null 2>&1; then exit 24; fi; \
+                 if cat .terminus/credentials >/dev/null 2>&1; then exit 25; fi"
+                    .to_string(),
+            ],
+            cwd: terminus_kernel_protocol::WorkspacePath::new(
+                "probe-workspace",
+                root.display().to_string(),
+            ),
+            public_env: [("TERMINUS_PROVIDER_PROTOCOL".to_string(), "v1".to_string())]
+                .into_iter()
+                .collect(),
+            timeout_ms: 5_000,
+            ..Default::default()
+        };
+        let (binary, argv) = backend
+            .spawn_wrapper(&command, &SandboxProfile::default_restrictive())
+            .expect("Seatbelt wrapper");
+        let output = std::process::Command::new(binary)
+            .args(argv)
+            .current_dir(root)
+            .output()
+            .expect("Seatbelt payload");
+        assert!(
+            output.status.success(),
+            "Seatbelt payload failed (status={}): stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("active-worktree/pwd"))
+                .expect("working-directory output")
+                .trim(),
+            root.display().to_string()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("active-worktree/result")).expect("allowed output"),
+            "allowed"
+        );
     }
 }

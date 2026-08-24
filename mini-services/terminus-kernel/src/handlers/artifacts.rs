@@ -7,14 +7,16 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::header;
-use axum::http::HeaderValue;
+use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use terminus_artifacts::ArtifactMetadata;
+use terminus_authz::TokenClaims;
+use terminus_kernel_protocol::RequestContext;
 
 use crate::api::Envelope;
+use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
 use crate::state::AppState;
 use crate::trace_id::TraceId;
@@ -23,16 +25,17 @@ use crate::trace_id::TraceId;
 /// (`Content-Type: application/octet-stream`) and returns an `ArtifactRef`.
 pub async fn ingest(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
+    Extension(claims): Extension<TokenClaims>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<terminus_kernel_protocol::ArtifactRef>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    // For the dev mini-service, the body IS the artifact bytes; no envelope
-    // is required (and we cannot parse an envelope from binary content).
-    // We use the kernel's artifact ingest directly.
+    let context = artifact_context(&headers, &cap_token, &claims, &trace_id)?;
     let artifact = state
         .kernel
         .artifact_ingest
-        .ingest_with_bytes(&body)
+        .ingest(&context, &Default::default(), &body)
         .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
     Ok(Json(artifact))
 }
@@ -41,20 +44,22 @@ pub async fn ingest(
 pub async fn get(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
+    Extension(claims): Extension<TokenClaims>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let store = state.kernel.artifact_ingest.store();
-    let bytes = store.get(&hash).map_err(|e| {
-        ApiError::new(
-            terminus_kernel_protocol::ErrorCode::ArtifactNotFound,
-            terminus_kernel_protocol::ErrorCategory::NotFound,
-            format!("{e}"),
-            &trace_id.0,
-        )
-    })?;
+    let context = artifact_context(&headers, &cap_token, &claims, &trace_id)?;
+    let bytes = state
+        .kernel
+        .artifact_ingest
+        .get(&context, &hash)
+        .map_err(|error| ApiError::from_kernel(error, &trace_id.0))?;
     // Infer media type from metadata if available.
-    let media_type = store
-        .metadata(&hash)
+    let media_type = state
+        .kernel
+        .artifact_ingest
+        .metadata_record(&context, &hash)
         .map(|m| m.media_type)
         .unwrap_or_else(|_| "application/octet-stream".to_string());
     let mut resp = bytes.into_response();
@@ -70,18 +75,85 @@ pub async fn get(
 pub async fn metadata(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
+    Extension(claims): Extension<TokenClaims>,
+    headers: HeaderMap,
 ) -> Result<Json<ArtifactMetadata>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let store = state.kernel.artifact_ingest.store();
-    let meta = store.metadata(&hash).map_err(|e| {
-        ApiError::new(
-            terminus_kernel_protocol::ErrorCode::ArtifactNotFound,
-            terminus_kernel_protocol::ErrorCategory::NotFound,
-            format!("{e}"),
-            &trace_id.0,
-        )
-    })?;
+    let context = artifact_context(&headers, &cap_token, &claims, &trace_id)?;
+    let meta = state
+        .kernel
+        .artifact_ingest
+        .metadata_record(&context, &hash)
+        .map_err(|error| ApiError::from_kernel(error, &trace_id.0))?;
     Ok(Json(meta))
+}
+
+fn artifact_context(
+    headers: &HeaderMap,
+    cap_token: &ValidatedCapabilityToken,
+    claims: &TokenClaims,
+    trace_id: &TraceId,
+) -> Result<RequestContext, ApiError> {
+    let task_id = if claims.binder.task_id == "*" {
+        required_header(headers, "x-terminus-task-id", trace_id)?
+    } else {
+        claims.binder.task_id.clone()
+    };
+    let mut context = RequestContext::new(uuid::Uuid::now_v7().to_string());
+    context.actor_id = if claims.binder.principal == "*" {
+        "terminus-kernel-http".to_string()
+    } else {
+        claims.binder.principal.clone()
+    };
+    context.session_id = bound_or_header(
+        &claims.binder.session_id,
+        headers,
+        "x-terminus-session-id",
+        "artifact-http",
+    );
+    context.task_id = task_id;
+    context.workspace_id = bound_or_header(
+        &claims.binder.workspace_id,
+        headers,
+        "x-terminus-workspace-id",
+        "",
+    );
+    context.traceparent = trace_id.0.clone();
+    context.capability_token = cap_token.0.clone();
+    Ok(context)
+}
+
+fn bound_or_header(binder: &str, headers: &HeaderMap, name: &str, fallback: &str) -> String {
+    if binder != "*" {
+        return binder.to_string();
+    }
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn required_header(
+    headers: &HeaderMap,
+    name: &str,
+    trace_id: &TraceId,
+) -> Result<String, ApiError> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            ApiError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidRequest,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                format!("{name} is required when the capability uses a wildcard task binder"),
+                &trace_id.0,
+            )
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,16 +181,20 @@ pub struct GcResponse {
 /// artifacts.
 pub async fn gc(
     State(state): State<Arc<AppState>>,
+    Extension(cap_token): Extension<ValidatedCapabilityToken>,
     body: Bytes,
 ) -> Result<Json<GcResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
-    let req: GcRequest = serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
-    let store = state.kernel.artifact_ingest.store();
+    let mut req: GcRequest =
+        serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
+    req.envelope.inject_capability_token(&cap_token);
     let live: HashSet<String> = req.live.into_iter().collect();
     if req.dry_run {
-        let report = store
-            .gc_dry_run(&live)
-            .map_err(|e| ApiError::internal(format!("gc dry-run: {e}"), &trace_id.0))?;
+        let report = state
+            .kernel
+            .artifact_ingest
+            .gc_dry_run(&req.envelope.request_context, &live)
+            .map_err(|error| ApiError::from_kernel(error, &trace_id.0))?;
         Ok(Json(GcResponse {
             dry_run: true,
             scanned: report.scanned,
@@ -129,9 +205,11 @@ pub async fn gc(
             errors: Vec::new(),
         }))
     } else {
-        let report = store
-            .gc_collect(&live)
-            .map_err(|e| ApiError::internal(format!("gc collect: {e}"), &trace_id.0))?;
+        let report = state
+            .kernel
+            .artifact_ingest
+            .gc_collect(&req.envelope.request_context, &live)
+            .map_err(|error| ApiError::from_kernel(error, &trace_id.0))?;
         Ok(Json(GcResponse {
             dry_run: false,
             scanned: report.dry_run.scanned,

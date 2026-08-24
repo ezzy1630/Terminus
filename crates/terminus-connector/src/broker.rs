@@ -11,7 +11,8 @@
 use crate::error::ConnectorError;
 use crate::operation::path_matches_class;
 use crate::operation::CanonicalOperation;
-use crate::receipt::{ConnectorReceipt, Outcome};
+use crate::receipt::{ConnectorReceipt, ConnectorResponse, Outcome};
+use reqwest::header::{HeaderName, HeaderValue};
 use sha2::{Digest as ShaDigest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -170,7 +171,7 @@ impl ConnectorBroker {
         &self,
         op: &CanonicalOperation,
         grant: &ConnectorGrant,
-    ) -> Result<ConnectorReceipt, ConnectorError> {
+    ) -> Result<ConnectorResponse, ConnectorError> {
         let claims = &grant.claims;
         let binding = &claims.binding;
 
@@ -213,17 +214,14 @@ impl ConnectorBroker {
             )));
         }
 
-        // -- 2. Transport safety: refuse plaintext credential delivery ---
-        if op.scheme.eq_ignore_ascii_case("https") {
-            // Fail closed BEFORE resolving any credential.
-            return Err(ConnectorError::TlsUnavailable);
-        }
-        if !op.scheme.eq_ignore_ascii_case("http") {
+        // -- 2. Transport and caller-header safety -------------------------
+        if !op.scheme.eq_ignore_ascii_case("http") && !op.scheme.eq_ignore_ascii_case("https") {
             return Err(ConnectorError::Protocol(format!(
                 "unsupported scheme {}",
                 op.scheme
             )));
         }
+        validate_headers(&op.headers)?;
 
         // -- 3. Resolve credential inside the trusted boundary -----------
         let handle = self
@@ -271,17 +269,31 @@ impl ConnectorBroker {
         )?;
 
         // -- 7. Dispatch the exact HTTP/1.1 request ------------------------
-        let dispatch = tokio::time::timeout(
-            self.timeout,
-            dispatch_http(
-                op,
-                &header_name,
-                &header_value,
-                addresses,
-                &self.egress,
-                self.max_response_bytes,
-            ),
-        )
+        let dispatch = tokio::time::timeout(self.timeout, async {
+            if op.scheme.eq_ignore_ascii_case("https") {
+                dispatch_https(
+                    op,
+                    &header_name,
+                    &header_value,
+                    addresses,
+                    &self.egress,
+                    self.max_response_bytes,
+                    self.timeout,
+                )
+                .await
+            } else {
+                dispatch_http(
+                    op,
+                    &header_name,
+                    &header_value,
+                    addresses,
+                    &self.egress,
+                    self.max_response_bytes,
+                )
+                .await
+                .map(|(status, body)| (status, body, None))
+            }
+        })
         .await;
 
         // Response scrubbing: echoed credential material never escapes.
@@ -291,12 +303,13 @@ impl ConnectorBroker {
             redactor.add_literal("connector-credential-bare", bare);
         }
 
-        let (status_code, response_bytes, wire_error) = match dispatch {
-            Ok(Ok((code, body))) => (Some(code), body, None),
-            Ok(Err(e)) => (None, Vec::new(), Some(e)),
+        let (status_code, response_bytes, content_type, wire_error) = match dispatch {
+            Ok(Ok((code, body, content_type))) => (Some(code), body, content_type, None),
+            Ok(Err(e)) => (None, Vec::new(), None, Some(e)),
             Err(_elapsed) => (
                 None,
                 Vec::new(),
+                None,
                 Some(ConnectorError::Protocol("dispatch timed out".into())),
             ),
         };
@@ -349,8 +362,104 @@ impl ConnectorBroker {
                 "connector dispatch recorded"
             );
         }
-        Ok(receipt)
+        Ok(ConnectorResponse {
+            receipt,
+            body: scrubbed,
+            content_type,
+        })
     }
+}
+
+fn validate_headers(headers: &[(String, String)]) -> Result<(), ConnectorError> {
+    const ALLOWED: &[&str] = &["accept", "content-type", "anthropic-version"];
+    for (name, value) in headers {
+        let normalized = name.to_ascii_lowercase();
+        if !ALLOWED.contains(&normalized.as_str()) {
+            return Err(ConnectorError::Protocol(format!(
+                "request header `{name}` is not admitted"
+            )));
+        }
+        HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| ConnectorError::Protocol(format!("invalid request header {name}")))?;
+        HeaderValue::from_str(value)
+            .map_err(|_| ConnectorError::Protocol(format!("invalid value for header {name}")))?;
+    }
+    Ok(())
+}
+
+async fn dispatch_https(
+    op: &CanonicalOperation,
+    credential_header_name: &str,
+    credential_header_value: &str,
+    addresses: Vec<std::net::SocketAddr>,
+    egress: &EgressProxy,
+    max_response_bytes: usize,
+    timeout: Duration,
+) -> Result<(u16, Vec<u8>, Option<String>), ConnectorError> {
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .no_proxy()
+        .connect_timeout(timeout)
+        .timeout(timeout)
+        .resolve_to_addrs(&op.host, &addresses)
+        .build()
+        .map_err(|error| ConnectorError::Protocol(format!("TLS client setup failed: {error}")))?;
+    let url = if op.query.is_empty() {
+        format!("https://{}:{}{}", op.host, op.port, op.path)
+    } else {
+        format!("https://{}:{}{}?{}", op.host, op.port, op.path, op.query)
+    };
+    reserve_exact(egress, op.body.len())?;
+    let method = reqwest::Method::from_bytes(op.method.as_bytes())
+        .map_err(|_| ConnectorError::Protocol("invalid HTTP method".to_string()))?;
+    let credential_name = HeaderName::from_bytes(credential_header_name.as_bytes())
+        .map_err(|_| ConnectorError::Protocol("invalid credential header".to_string()))?;
+    let credential_value = HeaderValue::from_str(credential_header_value)
+        .map_err(|_| ConnectorError::Protocol("invalid credential value".to_string()))?;
+    let mut request = client
+        .request(method, url)
+        .header(credential_name, credential_value);
+    for (name, value) in &op.headers {
+        request = request.header(name, value);
+    }
+    let mut response = request
+        .body(op.body.clone())
+        .send()
+        .await
+        .map_err(|error| ConnectorError::Protocol(format!("HTTPS dispatch failed: {error}")))?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| ConnectorError::Protocol(format!("HTTPS response failed: {error}")))?
+    {
+        let next = body.len().saturating_add(chunk.len());
+        if next > max_response_bytes {
+            return Err(ConnectorError::ResponseTooLarge {
+                limit: max_response_bytes,
+                actual: next,
+            });
+        }
+        reserve_exact(egress, chunk.len())?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok((status, body, content_type))
+}
+
+fn reserve_exact(egress: &EgressProxy, bytes: usize) -> Result<(), ConnectorError> {
+    let requested = u64::try_from(bytes)
+        .map_err(|_| ConnectorError::Protocol("byte count exceeds u64".to_string()))?;
+    let reserved = egress.relay(requested)?;
+    if reserved != requested {
+        return Err(terminus_egress::EgressError::ByteBudgetExceeded.into());
+    }
+    Ok(())
 }
 
 fn hash_bytes(data: &[u8]) -> String {
@@ -371,6 +480,12 @@ pub(crate) fn hash_operation(op: &CanonicalOperation) -> String {
     h.update(b"|");
     h.update(op.query.as_bytes());
     h.update(b"|");
+    for (name, value) in &op.headers {
+        h.update(name.to_ascii_lowercase().as_bytes());
+        h.update(b":");
+        h.update(value.as_bytes());
+        h.update(b"|");
+    }
     h.update(&op.body);
     hex::encode(h.finalize())
 }
@@ -399,10 +514,17 @@ async fn dispatch_http(
         format!("?{}", op.query)
     };
     let mut request = format!(
-        "{} {}{} HTTP/1.1\r\nHost: {}\r\nAccept: */*\r\n{header_name}: {header_value}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{} {}{} HTTP/1.1\r\nHost: {}\r\n{header_name}: {header_value}\r\nContent-Length: {}\r\nConnection: close\r\n",
         op.method, op.path, query, op.host, op.body.len()
     )
     .into_bytes();
+    for (name, value) in &op.headers {
+        request.extend_from_slice(name.as_bytes());
+        request.extend_from_slice(b": ");
+        request.extend_from_slice(value.as_bytes());
+        request.extend_from_slice(b"\r\n");
+    }
+    request.extend_from_slice(b"\r\n");
     request.extend_from_slice(&op.body);
 
     egress.relay(request.len() as u64)?;
@@ -419,7 +541,7 @@ async fn dispatch_http(
         egress.relay(n as u64)?;
         raw.extend_from_slice(&buf[..n]);
         if raw.len() > max_response_bytes {
-            return Err(ConnectorError::BodyTooLarge {
+            return Err(ConnectorError::ResponseTooLarge {
                 limit: max_response_bytes,
                 actual: raw.len(),
             });

@@ -10,6 +10,7 @@
 #![allow(clippy::default_trait_access)]
 #![allow(clippy::map_flatten)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{transport::Server, Request, Response, Status};
@@ -19,11 +20,15 @@ pub mod protocol {
     tonic::include_proto!("terminus.kernel.v1");
 }
 
+use crate::auth::constant_time_eq;
 use protocol::artifact_ingest_service_server::{
     ArtifactIngestService as ArtifactIngestRpc, ArtifactIngestServiceServer,
 };
 use protocol::code_intelligence_service_server::{
     CodeIntelligenceService as CodeIntelligenceRpc, CodeIntelligenceServiceServer,
+};
+use protocol::connector_service_server::{
+    ConnectorService as ConnectorServiceRpc, ConnectorServiceServer,
 };
 use protocol::extension_runtime_service_server::{
     ExtensionRuntimeService as ExtensionRuntimeRpc, ExtensionRuntimeServiceServer,
@@ -50,12 +55,536 @@ use protocol::{
 #[derive(Clone)]
 pub struct GrpcKernel {
     kernel: terminus_kernel::KernelHandle,
+    control_bootstrap: ControlBootstrapConfig,
+    job_stream_tasks: std::sync::Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
+    job_streams:
+        std::sync::Arc<tokio::sync::Mutex<HashMap<String, std::sync::Arc<JobStreamBuffer>>>>,
+}
+
+const MAX_REPLAYED_JOB_EVENTS: usize = 4_096;
+const MAX_REPLAYED_JOB_BYTES: usize = 8 * 1_024 * 1_024;
+
+#[derive(Default)]
+struct JobStreamState {
+    events: Vec<protocol::JobEvent>,
+    bytes: usize,
+    closed: bool,
+    failure: Option<String>,
+}
+
+#[derive(Default)]
+struct JobStreamBuffer {
+    state: tokio::sync::Mutex<JobStreamState>,
+    changed: tokio::sync::Notify,
 }
 
 impl GrpcKernel {
-    pub fn new(kernel: terminus_kernel::KernelHandle) -> Self {
-        Self { kernel }
+    fn new(
+        kernel: terminus_kernel::KernelHandle,
+        control_bootstrap: ControlBootstrapConfig,
+    ) -> Self {
+        Self {
+            kernel,
+            control_bootstrap,
+            job_stream_tasks: std::sync::Arc::new(tokio::sync::Mutex::new(
+                tokio::task::JoinSet::new(),
+            )),
+            job_streams: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
     }
+
+    async fn retain_job_stream(
+        &self,
+        job_id: String,
+        mut receiver: tokio::sync::mpsc::Receiver<terminus_kernel_protocol::ProcessEvent>,
+    ) {
+        let stream = std::sync::Arc::new(JobStreamBuffer::default());
+        self.job_streams
+            .lock()
+            .await
+            .insert(job_id.clone(), std::sync::Arc::clone(&stream));
+        let manager = std::sync::Arc::clone(self.kernel.jobs.manager());
+        let mut tasks = self.job_stream_tasks.lock().await;
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result {
+                tracing::warn!(
+                    target: "terminus_kernel_audit",
+                    event = "job_stream_task_failed",
+                    cancelled = error.is_cancelled(),
+                    panicked = error.is_panic(),
+                    "job stream retention task did not complete normally"
+                );
+            }
+        }
+        tasks.spawn(async move {
+            let mut sequence = 0_u64;
+            let mut saw_exit = false;
+            while let Some(event) = receiver.recv().await {
+                sequence = sequence.saturating_add(1);
+                let exited = matches!(event, terminus_kernel_protocol::ProcessEvent::Exited(_));
+                if exited {
+                    if let Some(record) = manager.get(&job_id).await {
+                        if !record.state.is_terminal() {
+                            if let Err(error) = manager.mark_exited(&job_id).await {
+                                tracing::error!(
+                                    target: "terminus_kernel_audit",
+                                    event = "job_exit_state_failed",
+                                    %job_id,
+                                    %error,
+                                    "process exited but durable job settlement failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                let event = job_event(&job_id, sequence, event);
+                let event_bytes = job_event_size(&event);
+                {
+                    let mut state = stream.state.lock().await;
+                    if state.failure.is_none()
+                        && (state.events.len() >= MAX_REPLAYED_JOB_EVENTS
+                            || state.bytes.saturating_add(event_bytes) > MAX_REPLAYED_JOB_BYTES)
+                    {
+                        state.failure = Some(format!(
+                            "job output exceeded the replay buffer ({} events or {} bytes); output was not silently truncated",
+                            MAX_REPLAYED_JOB_EVENTS, MAX_REPLAYED_JOB_BYTES
+                        ));
+                    }
+                    if state.failure.is_none() {
+                        state.bytes = state.bytes.saturating_add(event_bytes);
+                        state.events.push(event);
+                    }
+                    if exited {
+                        state.closed = true;
+                        saw_exit = true;
+                    }
+                }
+                stream.changed.notify_waiters();
+                if saw_exit {
+                    break;
+                }
+            }
+            if !saw_exit {
+                if let Some(record) = manager.get(&job_id).await {
+                    if !record.state.is_terminal() {
+                        let _ = manager.mark_orphaned(&job_id).await;
+                    }
+                }
+                let mut state = stream.state.lock().await;
+                state.closed = true;
+                if state.failure.is_none() {
+                    state.failure = Some(
+                        "job process event stream ended before an exit event; settlement is unknown"
+                            .to_string(),
+                    );
+                }
+                drop(state);
+                stream.changed.notify_waiters();
+            }
+        });
+    }
+}
+
+const DEFAULT_CONTROL_PRINCIPAL: &str = "terminus-control-bearer";
+const DEFAULT_BOOTSTRAP_TTL_SECONDS: u64 = 900;
+const MIN_BOOTSTRAP_TTL_SECONDS: u64 = 60;
+const MAX_BOOTSTRAP_TTL_SECONDS: u64 = 3_600;
+const MAX_BINDER_BYTES: usize = 200;
+const MAX_SCOPE_ENTRIES_PER_KIND: usize = 64;
+const MAX_TOTAL_SCOPE_ENTRIES: usize = 128;
+const MAX_SCOPE_VALUE_BYTES: usize = 2_048;
+const MAX_TOTAL_SCOPE_BYTES: usize = 64 * 1_024;
+const MAX_TASK_CAPABILITY_TTL_SECONDS: u64 = 300;
+const CONTROL_BOOTSTRAP_METADATA: &str = "x-terminus-control-bootstrap";
+
+#[derive(Clone)]
+struct ControlBootstrapConfig {
+    enabled: bool,
+    principal: String,
+    ttl_seconds: u64,
+    token: String,
+}
+
+impl ControlBootstrapConfig {
+    fn from_uds_environment() -> Result<Self, String> {
+        let enabled = match std::env::var("TERMINUS_KERNEL_CONTROL_BOOTSTRAP") {
+            Ok(value) => value == "1",
+            Err(std::env::VarError::NotPresent) => false,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err("TERMINUS_KERNEL_CONTROL_BOOTSTRAP must contain valid UTF-8".to_string())
+            }
+        };
+        let principal = Self::configured_principal()?;
+        if !enabled {
+            return Ok(Self {
+                enabled: false,
+                principal,
+                ttl_seconds: DEFAULT_BOOTSTRAP_TTL_SECONDS,
+                token: String::new(),
+            });
+        }
+
+        let token = match std::env::var("TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN") {
+            Ok(value) if valid_bootstrap_token(&value) => value,
+            Ok(_) => {
+                return Err(
+                    "TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN must contain 32..128 base64url characters"
+                        .to_string(),
+                )
+            }
+            Err(std::env::VarError::NotPresent) => {
+                return Err(
+                    "TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN is required when control bootstrap is enabled"
+                        .to_string(),
+                )
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(
+                    "TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN must contain valid UTF-8".to_string(),
+                )
+            }
+        };
+
+        let ttl_seconds = match std::env::var("TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TTL_SECONDS") {
+            Ok(value) => value.parse::<u64>().map_err(|_| {
+                "TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TTL_SECONDS must be an integer".to_string()
+            })?,
+            Err(std::env::VarError::NotPresent) => DEFAULT_BOOTSTRAP_TTL_SECONDS,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(
+                    "TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TTL_SECONDS must contain valid UTF-8"
+                        .to_string(),
+                )
+            }
+        };
+        if !(MIN_BOOTSTRAP_TTL_SECONDS..=MAX_BOOTSTRAP_TTL_SECONDS).contains(&ttl_seconds) {
+            return Err(format!(
+                "TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TTL_SECONDS must be between {MIN_BOOTSTRAP_TTL_SECONDS} and {MAX_BOOTSTRAP_TTL_SECONDS}"
+            ));
+        }
+
+        Ok(Self {
+            enabled: true,
+            principal,
+            ttl_seconds,
+            token,
+        })
+    }
+
+    fn disabled_from_environment() -> Result<Self, String> {
+        Ok(Self {
+            enabled: false,
+            principal: Self::configured_principal()?,
+            ttl_seconds: DEFAULT_BOOTSTRAP_TTL_SECONDS,
+            token: String::new(),
+        })
+    }
+
+    fn configured_principal() -> Result<String, String> {
+        let principal = match std::env::var("TERMINUS_KERNEL_CONTROL_PRINCIPAL") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => DEFAULT_CONTROL_PRINCIPAL.to_string(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err("TERMINUS_KERNEL_CONTROL_PRINCIPAL must contain valid UTF-8".to_string())
+            }
+        };
+        validate_concrete_binder("configured control principal", &principal)
+            .map_err(|status| status.message().to_string())?;
+        Ok(principal)
+    }
+}
+
+fn valid_bootstrap_token(value: &str) -> bool {
+    (32..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+struct IssuedCapability {
+    encoded: String,
+    expires_at_unix: u64,
+}
+
+fn mint_bootstrap_capability(
+    kernel: &terminus_kernel::KernelHandle,
+    principal: &str,
+    task_id: &str,
+    ttl_seconds: u64,
+) -> Result<IssuedCapability, Status> {
+    let token = kernel
+        .token_issuer
+        .mint(
+            terminus_authz::TokenBinder {
+                principal: principal.to_string(),
+                session_id: "control".to_string(),
+                task_id: task_id.to_string(),
+                workspace_id: "*".to_string(),
+                kernel_instance_id: String::new(),
+            },
+            vec![terminus_authz::OperationClass::Admin],
+            terminus_authz::Scope::default(),
+            Some(ttl_seconds),
+            format!(
+                "control-bootstrap-{task_id}-{}",
+                terminus_kernel_protocol::new_id()
+            ),
+        )
+        .map_err(|_| Status::internal("control bootstrap capability issuance failed"))?;
+    let expires_at_unix = token.claims.expires_at_unix;
+    let encoded = token
+        .encode()
+        .map_err(|_| Status::internal("control bootstrap capability encoding failed"))?;
+    Ok(IssuedCapability {
+        encoded,
+        expires_at_unix,
+    })
+}
+
+fn validate_broker_capability(
+    context: &terminus_kernel_protocol::RequestContext,
+    claims: &terminus_authz::TokenClaims,
+    configured_principal: &str,
+) -> Result<(), Status> {
+    let binder = &claims.binder;
+    let is_broker = binder.principal == configured_principal
+        && binder.session_id == "control"
+        && binder.task_id == "control-broker"
+        && binder.workspace_id == "*"
+        && context.actor_id == configured_principal
+        && context.session_id == "control"
+        && context.task_id == "control-broker"
+        && context.workspace_id == "*"
+        && claims.operation_classes.as_slice() == [terminus_authz::OperationClass::Admin];
+    if !is_broker {
+        tracing::warn!(
+            target: "terminus_kernel_audit",
+            security_event = "task_capability_mint_denied",
+            reason = "not_control_broker",
+            "denied task capability mint"
+        );
+        return Err(Status::permission_denied(
+            "task capabilities require the control broker capability",
+        ));
+    }
+    Ok(())
+}
+
+fn audit_task_capability_denial(reason: &'static str, error: Status) -> Status {
+    tracing::warn!(
+        target: "terminus_kernel_audit",
+        security_event = "task_capability_mint_denied",
+        reason,
+        grpc_code = ?error.code(),
+        "denied task capability mint"
+    );
+    error
+}
+
+fn validate_task_capability_request(
+    request: &protocol::MintTaskCapabilityRequest,
+    configured_principal: &str,
+) -> Result<(), Status> {
+    if request.principal != configured_principal {
+        return Err(Status::permission_denied(
+            "task capability principal must equal the configured control principal",
+        ));
+    }
+    validate_concrete_binder("principal", &request.principal)?;
+    validate_concrete_binder("session_id", &request.session_id)?;
+    validate_concrete_binder("task_id", &request.task_id)?;
+    validate_concrete_binder("workspace_id", &request.workspace_id)?;
+    if matches!(
+        request.task_id.as_str(),
+        "control-broker" | "control-maintenance"
+    ) {
+        return Err(Status::invalid_argument(
+            "task_id uses a reserved control capability binder",
+        ));
+    }
+    if !(1..=MAX_TASK_CAPABILITY_TTL_SECONDS).contains(&request.ttl_seconds) {
+        return Err(Status::invalid_argument(format!(
+            "ttl_seconds must be between 1 and {MAX_TASK_CAPABILITY_TTL_SECONDS}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_concrete_binder(label: &str, value: &str) -> Result<(), Status> {
+    if value.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "{label} must not be empty"
+        )));
+    }
+    if value.len() > MAX_BINDER_BYTES {
+        return Err(Status::invalid_argument(format!(
+            "{label} exceeds {MAX_BINDER_BYTES} bytes"
+        )));
+    }
+    if value.trim() != value {
+        return Err(Status::invalid_argument(format!(
+            "{label} must not contain leading or trailing whitespace"
+        )));
+    }
+    if value.contains('*') {
+        return Err(Status::invalid_argument(format!(
+            "{label} must be a concrete non-wildcard value"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Status::invalid_argument(format!(
+            "{label} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_task_operation_classes(
+    raw_operations: &[i32],
+) -> Result<Vec<terminus_authz::OperationClass>, Status> {
+    if raw_operations.is_empty() {
+        return Err(Status::invalid_argument(
+            "at least one operation class is required",
+        ));
+    }
+    if raw_operations.len() > 11 {
+        return Err(Status::invalid_argument(
+            "too many operation classes requested",
+        ));
+    }
+
+    let mut operations = Vec::with_capacity(raw_operations.len());
+    for raw in raw_operations {
+        let proto = protocol::CapabilityOperationProto::try_from(*raw)
+            .map_err(|_| Status::invalid_argument("unknown operation class"))?;
+        let operation = match proto {
+            protocol::CapabilityOperationProto::CapabilityOperationUnspecified => {
+                return Err(Status::invalid_argument(
+                    "operation class must not be unspecified",
+                ))
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationRead => {
+                terminus_authz::OperationClass::Read
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationPatch => {
+                terminus_authz::OperationClass::Patch
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationExec => {
+                terminus_authz::OperationClass::Exec
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationJob => {
+                terminus_authz::OperationClass::Job
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationSandbox => {
+                terminus_authz::OperationClass::Sandbox
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationSecret => {
+                terminus_authz::OperationClass::Secret
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationNetwork => {
+                terminus_authz::OperationClass::Network
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationCodeIntel => {
+                terminus_authz::OperationClass::CodeIntel
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationExtension => {
+                terminus_authz::OperationClass::Extension
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationGit => {
+                terminus_authz::OperationClass::Git
+            }
+            protocol::CapabilityOperationProto::CapabilityOperationArtifactIngest => {
+                terminus_authz::OperationClass::ArtifactIngest
+            }
+        };
+        if operations.contains(&operation) {
+            return Err(Status::invalid_argument(
+                "operation classes must not contain duplicates",
+            ));
+        }
+        operations.push(operation);
+    }
+    validate_task_operation_classes(&operations)?;
+    Ok(operations)
+}
+
+fn validate_task_operation_classes(
+    operations: &[terminus_authz::OperationClass],
+) -> Result<(), Status> {
+    if operations.is_empty() {
+        return Err(Status::invalid_argument(
+            "at least one operation class is required",
+        ));
+    }
+    if operations.iter().any(|operation| {
+        matches!(
+            operation,
+            terminus_authz::OperationClass::Admin | terminus_authz::OperationClass::Policy
+        )
+    }) {
+        return Err(Status::permission_denied(
+            "Admin and Policy operation classes cannot be delegated",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_task_scope(
+    workspace_paths: Vec<String>,
+    network_destinations: Vec<String>,
+    secret_capabilities: Vec<String>,
+) -> Result<terminus_authz::Scope, Status> {
+    for (label, values) in [
+        ("workspace_paths", workspace_paths.as_slice()),
+        ("network_destinations", network_destinations.as_slice()),
+        ("secret_capabilities", secret_capabilities.as_slice()),
+    ] {
+        if values.len() > MAX_SCOPE_ENTRIES_PER_KIND {
+            return Err(Status::invalid_argument(format!(
+                "{label} exceeds {MAX_SCOPE_ENTRIES_PER_KIND} entries"
+            )));
+        }
+        for value in values {
+            if value.is_empty() {
+                return Err(Status::invalid_argument(format!(
+                    "{label} entries must not be empty"
+                )));
+            }
+            if value.len() > MAX_SCOPE_VALUE_BYTES {
+                return Err(Status::invalid_argument(format!(
+                    "{label} entry exceeds {MAX_SCOPE_VALUE_BYTES} bytes"
+                )));
+            }
+            if value.chars().any(char::is_control) {
+                return Err(Status::invalid_argument(format!(
+                    "{label} entries must not contain control characters"
+                )));
+            }
+        }
+    }
+    let total_entries =
+        workspace_paths.len() + network_destinations.len() + secret_capabilities.len();
+    if total_entries > MAX_TOTAL_SCOPE_ENTRIES {
+        return Err(Status::invalid_argument(format!(
+            "capability scope exceeds {MAX_TOTAL_SCOPE_ENTRIES} total entries"
+        )));
+    }
+    let total_bytes = workspace_paths
+        .iter()
+        .chain(&network_destinations)
+        .chain(&secret_capabilities)
+        .map(String::len)
+        .sum::<usize>();
+    if total_bytes > MAX_TOTAL_SCOPE_BYTES {
+        return Err(Status::invalid_argument(format!(
+            "capability scope exceeds {MAX_TOTAL_SCOPE_BYTES} total bytes"
+        )));
+    }
+    Ok(terminus_authz::Scope::deny_unspecified(
+        workspace_paths,
+        network_destinations,
+        secret_capabilities,
+    ))
 }
 
 #[tonic::async_trait]
@@ -82,10 +611,106 @@ impl KernelInfoServiceRpc for GrpcKernel {
             checked_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
         }))
     }
+
+    async fn bootstrap_control(
+        &self,
+        request: Request<protocol::BootstrapControlRequest>,
+    ) -> Result<Response<protocol::BootstrapControlCapabilities>, Status> {
+        if !self.control_bootstrap.enabled {
+            tracing::warn!(
+                target: "terminus_kernel_audit",
+                security_event = "control_capability_bootstrap_denied",
+                reason = "disabled_or_non_uds_transport",
+                "denied control capability bootstrap"
+            );
+            return Err(Status::permission_denied("control bootstrap is disabled"));
+        }
+
+        let presented_token = request
+            .metadata()
+            .get(CONTROL_BOOTSTRAP_METADATA)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !constant_time_eq(presented_token, &self.control_bootstrap.token) {
+            tracing::warn!(
+                target: "terminus_kernel_audit",
+                security_event = "control_capability_bootstrap_denied",
+                reason = "invalid_bootstrap_credential",
+                "denied control capability bootstrap"
+            );
+            return Err(Status::permission_denied(
+                "control bootstrap credential is not authorized",
+            ));
+        }
+
+        let request = request.into_inner();
+        if request.principal != self.control_bootstrap.principal {
+            tracing::warn!(
+                target: "terminus_kernel_audit",
+                security_event = "control_capability_bootstrap_denied",
+                reason = "principal_mismatch",
+                "denied control capability bootstrap"
+            );
+            return Err(Status::permission_denied(
+                "control bootstrap principal is not authorized",
+            ));
+        }
+
+        let broker = mint_bootstrap_capability(
+            &self.kernel,
+            &self.control_bootstrap.principal,
+            "control-broker",
+            self.control_bootstrap.ttl_seconds,
+        )?;
+        let maintenance = mint_bootstrap_capability(
+            &self.kernel,
+            &self.control_bootstrap.principal,
+            "control-maintenance",
+            self.control_bootstrap.ttl_seconds,
+        )?;
+        let expires_at_unix = broker.expires_at_unix.min(maintenance.expires_at_unix);
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            security_event = "control_capability_bootstrap",
+            principal = %self.control_bootstrap.principal,
+            broker_task = "control-broker",
+            maintenance_task = "control-maintenance",
+            expires_at_unix,
+            "issued bounded control capabilities"
+        );
+        Ok(Response::new(protocol::BootstrapControlCapabilities {
+            broker_capability_token: broker.encoded,
+            maintenance_capability_token: maintenance.encoded,
+            expires_at_unix,
+        }))
+    }
 }
 
 #[tonic::async_trait]
 impl WorkspaceServiceRpc for GrpcKernel {
+    async fn resolve_root(
+        &self,
+        request: Request<protocol::ResolveWorkspaceRootRequest>,
+    ) -> Result<Response<protocol::ResolvedWorkspaceRootMessage>, Status> {
+        let request = request.into_inner();
+        let ctx = authorize_context(
+            &self.kernel,
+            request
+                .context
+                .ok_or_else(|| Status::invalid_argument("context is required"))?,
+            terminus_authz::OperationClass::Admin,
+        )?;
+        let resolved = self
+            .kernel
+            .workspaces
+            .resolve_root(&ctx, request.root_uri, request.candidate_root)
+            .map_err(status)?;
+        Ok(Response::new(protocol::ResolvedWorkspaceRootMessage {
+            root_uri: resolved.root_uri,
+            canonical_root: resolved.canonical_root,
+        }))
+    }
+
     async fn register(
         &self,
         request: Request<protocol::RegisterWorkspaceRequest>,
@@ -101,15 +726,21 @@ impl WorkspaceServiceRpc for GrpcKernel {
         let id = self
             .kernel
             .workspaces
-            .register(
+            .register_with_id(
                 &ctx,
                 &Default::default(),
                 request.root_uri.clone(),
                 request.canonical_root.clone(),
                 &request.trust,
+                (!request.requested_workspace_id.is_empty())
+                    .then_some(request.requested_workspace_id.as_str()),
             )
             .map_err(status)?;
-        let entry = self.kernel.workspaces.get(&id).map_err(status)?;
+        let entry = self
+            .kernel
+            .workspaces
+            .get_for_admin(&ctx, &id)
+            .map_err(status)?;
         Ok(Response::new(WorkspaceEntryMessage {
             id: entry.id,
             root_uri: entry.root_uri,
@@ -123,17 +754,24 @@ impl WorkspaceServiceRpc for GrpcKernel {
         request: Request<protocol::GetWorkspaceRequest>,
     ) -> Result<Response<WorkspaceEntryMessage>, Status> {
         let request = request.into_inner();
-        authorize_context(
-            &self.kernel,
+        let mut ctx = context(
             request
                 .context
                 .ok_or_else(|| Status::invalid_argument("context is required"))?,
+        );
+        ctx.workspace_id = request.workspace_id.clone();
+        terminus_kernel::validate_request_pipeline(
+            &self.kernel.token_issuer,
+            &ctx,
             terminus_authz::OperationClass::Read,
-        )?;
+            &terminus_authz::Scope::default(),
+            false,
+        )
+        .map_err(status)?;
         let entry = self
             .kernel
             .workspaces
-            .get(&request.workspace_id)
+            .get(&ctx, &request.workspace_id)
             .map_err(status)?;
         Ok(Response::new(WorkspaceEntryMessage {
             id: entry.id,
@@ -267,11 +905,12 @@ impl ArtifactIngestRpc for GrpcKernel {
             .context
             .map(context)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let request_id = ctx.request_id.clone();
         let artifact = self
             .kernel
             .artifact_ingest
             .ingest(&ctx, &Default::default(), &request.content)
-            .map_err(status)?;
+            .map_err(|error| log_kernel_rpc_error("artifact.ingest", &request_id, error))?;
         Ok(Response::new(protocol::IngestArtifactResponse {
             artifact: Some(artifact_ref(artifact)),
             already_present: false,
@@ -325,6 +964,104 @@ impl ArtifactIngestRpc for GrpcKernel {
             .map_err(status)?;
         Ok(Response::new(protocol::GetArtifactMetadataResponse {
             artifact: Some(artifact_ref(artifact)),
+        }))
+    }
+
+    async fn link(
+        &self,
+        request: Request<protocol::LinkArtifactRequest>,
+    ) -> Result<Response<protocol::LinkArtifactResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        self.kernel
+            .artifact_ingest
+            .link(
+                &ctx,
+                &Default::default(),
+                &request.sha256,
+                &request.owner_type,
+                &request.owner_id,
+                &request.purpose,
+                &request.owner_task_id,
+            )
+            .map_err(status)?;
+        Ok(Response::new(protocol::LinkArtifactResponse {
+            linked: true,
+        }))
+    }
+
+    async fn list_checkpoint_links(
+        &self,
+        request: Request<protocol::ListCheckpointArtifactLinksRequest>,
+    ) -> Result<Response<protocol::ListCheckpointArtifactLinksResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let page_size = if request.page_size == 0 {
+            100_usize
+        } else {
+            request.page_size as usize
+        };
+        if page_size > 999 {
+            return Err(Status::invalid_argument("page_size must be at most 999"));
+        }
+        let mut links = self
+            .kernel
+            .artifact_ingest
+            .list_checkpoint_links(&ctx, &request.continuation_token, page_size + 1)
+            .map_err(status)?;
+        let has_more = links.len() > page_size;
+        if has_more {
+            links.pop();
+        }
+        let continuation_token = if has_more {
+            links.last().map(|link| link.id.clone()).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(Response::new(
+            protocol::ListCheckpointArtifactLinksResponse {
+                links: links
+                    .into_iter()
+                    .map(|link| protocol::CheckpointArtifactLinkMessage {
+                        link_id: link.id,
+                        sha256: link.artifact_hash,
+                        checkpoint_id: link.owner_id,
+                        owner_task_id: link.owner_task_id,
+                        created_at: link.created_at,
+                    })
+                    .collect(),
+                continuation_token,
+            },
+        ))
+    }
+
+    async fn unlink_checkpoint(
+        &self,
+        request: Request<protocol::UnlinkCheckpointArtifactRequest>,
+    ) -> Result<Response<protocol::UnlinkCheckpointArtifactResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let unlinked = self
+            .kernel
+            .artifact_ingest
+            .unlink_checkpoint(
+                &ctx,
+                &request.sha256,
+                &request.checkpoint_id,
+                &request.owner_task_id,
+            )
+            .map_err(status)?;
+        Ok(Response::new(protocol::UnlinkCheckpointArtifactResponse {
+            unlinked,
         }))
     }
 }
@@ -408,6 +1145,87 @@ impl PolicyServiceRpc for GrpcKernel {
                 max_output_bytes: report.constraints.max_output_bytes,
                 disallowed_env: report.constraints.disallowed_env,
             }),
+        }))
+    }
+
+    async fn mint_task_capability(
+        &self,
+        request: Request<protocol::MintTaskCapabilityRequest>,
+    ) -> Result<Response<protocol::MintTaskCapabilityResponse>, Status> {
+        let request = request.into_inner();
+        let broker_context = request
+            .context
+            .clone()
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let broker = terminus_kernel::validate_request_pipeline(
+            &self.kernel.token_issuer,
+            &broker_context,
+            terminus_authz::OperationClass::Admin,
+            &terminus_authz::Scope::default(),
+            false,
+        )
+        .map_err(status)
+        .map_err(|error| audit_task_capability_denial("broker_authorization", error))?;
+        validate_broker_capability(
+            &broker_context,
+            &broker.claims,
+            &self.control_bootstrap.principal,
+        )?;
+        validate_task_capability_request(&request, &self.control_bootstrap.principal)
+            .map_err(|error| audit_task_capability_denial("invalid_binder_or_ttl", error))?;
+        let operation_classes = decode_task_operation_classes(&request.operation_classes)
+            .map_err(|error| audit_task_capability_denial("invalid_operations", error))?;
+        let scope = validate_task_scope(
+            request.workspace_paths,
+            request.network_destinations,
+            request.secret_capabilities,
+        )
+        .map_err(|error| audit_task_capability_denial("invalid_scope", error))?;
+
+        let token = self
+            .kernel
+            .token_issuer
+            .mint(
+                terminus_authz::TokenBinder {
+                    principal: request.principal.clone(),
+                    session_id: request.session_id.clone(),
+                    task_id: request.task_id.clone(),
+                    workspace_id: request.workspace_id.clone(),
+                    kernel_instance_id: String::new(),
+                },
+                operation_classes.clone(),
+                scope,
+                Some(request.ttl_seconds),
+                format!(
+                    "task-capability-{}-{}",
+                    request.task_id,
+                    terminus_kernel_protocol::new_id()
+                ),
+            )
+            .map_err(|_| Status::internal("task capability issuance failed"))?;
+        let expires_at_unix = token.claims.expires_at_unix;
+        let capability_token = token
+            .encode()
+            .map_err(|_| Status::internal("task capability encoding failed"))?;
+        let operation_names = operation_classes
+            .iter()
+            .map(|operation| operation.as_str())
+            .collect::<Vec<_>>();
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            security_event = "task_capability_minted",
+            principal = %request.principal,
+            session_id = %request.session_id,
+            task_id = %request.task_id,
+            workspace_id = %request.workspace_id,
+            operations = ?operation_names,
+            expires_at_unix,
+            "issued task-scoped capability"
+        );
+        Ok(Response::new(protocol::MintTaskCapabilityResponse {
+            capability_token,
+            expires_at_unix,
         }))
     }
 }
@@ -500,6 +1318,175 @@ impl SecretServiceRpc for GrpcKernel {
             expires_at_unix: requested_expiry,
         }))
     }
+
+    async fn store(
+        &self,
+        request: Request<protocol::StoreSecretRequest>,
+    ) -> Result<Response<protocol::SecretMutationResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        if request.capability_uri.is_empty() {
+            return Err(Status::invalid_argument("capability_uri is required"));
+        }
+        if request.value.is_empty() || request.value.len() > 16 * 1_024 {
+            return Err(Status::invalid_argument(
+                "secret value must contain 1..=16384 bytes",
+            ));
+        }
+        self.kernel
+            .secrets
+            .store(&ctx, &request.capability_uri, &request.value)
+            .map_err(status)?;
+        Ok(Response::new(protocol::SecretMutationResponse {
+            capability_uri: request.capability_uri,
+            stored: true,
+        }))
+    }
+
+    async fn delete(
+        &self,
+        request: Request<protocol::DeleteSecretRequest>,
+    ) -> Result<Response<protocol::SecretMutationResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        if request.capability_uri.is_empty() {
+            return Err(Status::invalid_argument("capability_uri is required"));
+        }
+        self.kernel
+            .secrets
+            .delete(&ctx, &request.capability_uri)
+            .map_err(status)?;
+        Ok(Response::new(protocol::SecretMutationResponse {
+            capability_uri: request.capability_uri,
+            stored: false,
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl ConnectorServiceRpc for GrpcKernel {
+    async fn mint_grant(
+        &self,
+        request: Request<protocol::MintConnectorGrantRequest>,
+    ) -> Result<Response<protocol::ConnectorGrantMessage>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let binding = request
+            .binding
+            .ok_or_else(|| Status::invalid_argument("binding is required"))?;
+        let destination_port = u16::try_from(binding.destination_port)
+            .map_err(|_| Status::invalid_argument("destination_port exceeds 65535"))?;
+        let grant = self
+            .kernel
+            .connectors
+            .mint_grant(
+                &ctx,
+                &request.capability_uri,
+                terminus_secrets::GrantBinding {
+                    connector_id: binding.connector_id,
+                    destination_host: binding.destination_host,
+                    destination_port,
+                    scheme: binding.scheme,
+                    method: binding.method,
+                    path_class: binding.path_class,
+                    task_id: ctx.task_id.clone(),
+                    effect_id: binding.effect_id,
+                },
+                request.ttl_seconds,
+                1,
+            )
+            .map_err(status)?;
+        let encoded_grant = grant
+            .encode()
+            .map_err(|_| Status::internal("connector grant encoding failed"))?;
+        Ok(Response::new(protocol::ConnectorGrantMessage {
+            encoded_grant,
+            grant_id: grant.claims.grant_id,
+            expires_at_unix: grant.claims.expires_at_unix,
+        }))
+    }
+
+    async fn execute(
+        &self,
+        request: Request<protocol::ExecuteConnectorRequest>,
+    ) -> Result<Response<protocol::ConnectorResponseMessage>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let operation = request
+            .operation
+            .ok_or_else(|| Status::invalid_argument("operation is required"))?;
+        let port = u16::try_from(operation.port)
+            .map_err(|_| Status::invalid_argument("operation port exceeds 65535"))?;
+        let grant = self
+            .kernel
+            .connectors
+            .decode_grant(&request.encoded_grant)
+            .map_err(|_| Status::permission_denied("connector grant is invalid"))?;
+        let response = self
+            .kernel
+            .connectors
+            .execute(
+                &ctx,
+                &terminus_connector::CanonicalOperation {
+                    method: operation.method,
+                    scheme: operation.scheme,
+                    host: operation.host,
+                    port,
+                    path: operation.path,
+                    query: operation.query,
+                    headers: operation
+                        .headers
+                        .into_iter()
+                        .map(|header| (header.name, header.value))
+                        .collect(),
+                    body: operation.body,
+                },
+                &grant,
+            )
+            .await
+            .map_err(status)?;
+        let receipt = response.receipt;
+        Ok(Response::new(protocol::ConnectorResponseMessage {
+            receipt: Some(protocol::ConnectorReceiptMessage {
+                grant_id: receipt.grant_id,
+                task_id: receipt.task_id,
+                effect_id: receipt.effect_id,
+                connector_id: receipt.connector_id,
+                method: receipt.method,
+                path: receipt.path,
+                destination: receipt.destination,
+                request_sha256: receipt.request_sha256,
+                status_code: receipt.status_code.map(u32::from),
+                response_sha256: receipt.response_sha256,
+                response_redactions: u64::try_from(receipt.response_redactions)
+                    .map_err(|_| Status::internal("response redaction count exceeds u64"))?,
+                outcome: connector_outcome(receipt.outcome).to_string(),
+            }),
+            body: response.body,
+            content_type: response.content_type,
+        }))
+    }
+}
+
+fn connector_outcome(outcome: terminus_connector::Outcome) -> &'static str {
+    match outcome {
+        terminus_connector::Outcome::Accepted => "accepted",
+        terminus_connector::Outcome::RejectedNonRetryable => "rejected_non_retryable",
+        terminus_connector::Outcome::DispatchUncertain => "dispatch_uncertain",
+        terminus_connector::Outcome::NotDispatched => "not_dispatched",
+    }
 }
 
 #[tonic::async_trait]
@@ -509,12 +1496,35 @@ impl CodeIntelligenceRpc for GrpcKernel {
         request: Request<protocol::CodeSearchRequest>,
     ) -> Result<Response<protocol::CodeSearchResponse>, Status> {
         let request = request.into_inner();
-        let ctx = request
+        let mut ctx = request
             .context
             .map(context)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         if request.query.is_empty() {
             return Err(Status::invalid_argument("query is required"));
+        }
+        let requested_workspace = request.workspace_id.trim();
+        if requested_workspace.is_empty() {
+            if ctx.workspace_id.is_empty() || ctx.workspace_id == "*" {
+                return Err(Status::invalid_argument(
+                    "workspace_id is required when the request context has no concrete workspace",
+                ));
+            }
+        } else {
+            if requested_workspace == "*" {
+                return Err(Status::invalid_argument(
+                    "workspace_id must identify one concrete workspace",
+                ));
+            }
+            if ctx.workspace_id != "*"
+                && !ctx.workspace_id.is_empty()
+                && ctx.workspace_id != requested_workspace
+            {
+                return Err(Status::permission_denied(
+                    "search workspace_id does not match the request context workspace binder",
+                ));
+            }
+            ctx.workspace_id = requested_workspace.to_string();
         }
         let result = self
             .kernel
@@ -528,14 +1538,12 @@ impl CodeIntelligenceRpc for GrpcKernel {
         };
         let mut results = Vec::new();
         if let Some(symbol) = result.symbol {
-            if request.workspace_id.is_empty() || symbol.path.starts_with(&request.workspace_id) {
-                results.push(protocol::CodeSearchResult {
-                    path: symbol.path,
-                    line: symbol.start_line,
-                    symbol: symbol.name,
-                    method: "symbol-index".to_string(),
-                });
-            }
+            results.push(protocol::CodeSearchResult {
+                path: symbol.path,
+                line: symbol.start_line,
+                symbol: symbol.name,
+                method: "symbol-index".to_string(),
+            });
         }
         let truncated = results.len() > limit;
         results.truncate(limit);
@@ -697,16 +1705,17 @@ impl JobServiceRpc for GrpcKernel {
         } else {
             request.sandbox_profile_id.as_str()
         };
-        let (job_id, outcome, mut receiver) = self
+        let request_id = ctx.request_id.clone();
+        let (job_id, outcome, receiver) = self
             .kernel
             .jobs
             .start(&ctx, &intent, command, profile, request.durable)
             .await
-            .map_err(status)?;
-        // Keep consuming the bounded process stream when the caller only
-        // wants the durable start response. Job.Stream reconnects through the
-        // durable job record instead of leaving the child backpressured.
-        tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+            .map_err(|error| log_kernel_rpc_error("job.start", &request_id, error))?;
+        // Retain the one real process stream in a bounded, replayable buffer.
+        // Job.Stream reads this buffer; it must never poll a synthetic state
+        // while another task discards stdout/stderr/exit events.
+        self.retain_job_stream(job_id.clone(), receiver).await;
         Ok(Response::new(protocol::StartJobResponse {
             job_id,
             process_id: outcome.process_id,
@@ -724,45 +1733,52 @@ impl JobServiceRpc for GrpcKernel {
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         authorize_job_control(&self.kernel, &ctx)?;
         let job_id = request.job_id;
-        let record = self
-            .kernel
+        self.kernel
             .jobs
             .manager()
             .get(&job_id)
             .await
             .ok_or_else(|| Status::not_found("job not found"))?;
-        let manager = self.kernel.jobs.manager().clone();
+        let retained = self
+            .job_streams
+            .lock()
+            .await
+            .get(&job_id)
+            .cloned()
+            .ok_or_else(|| {
+                Status::failed_precondition(
+                    "job has no replayable event stream in this kernel instance; reconcile its settlement before continuing",
+                )
+            })?;
         let from_sequence = request.from_sequence;
         let stream = async_stream::try_stream! {
-            let mut sequence = from_sequence;
-            if sequence == 0 {
-                sequence = 1;
-                yield protocol::JobEvent {
-                    sequence,
-                    occurred_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
-                    event: Some(protocol::job_event::Event::Started(protocol::ProcessStarted {
-                        process_id: record.process_identity.clone().unwrap_or_default(),
-                        job_id: job_id.clone(),
-                        resolved_executable: record.resolved_executable.clone(),
-                        started_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
-                    })),
-                };
-            }
+            let mut cursor = from_sequence;
             loop {
-                let current = manager.get(&job_id).await.ok_or_else(|| Status::not_found("job disappeared"))?;
-                if current.state.is_terminal() {
-                    sequence = sequence.saturating_add(1);
-                    yield protocol::JobEvent {
-                        sequence,
-                        occurred_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
-                        event: Some(protocol::job_event::Event::Reconciled(protocol::JobReconciled {
-                            state: current.state.as_str().to_ascii_lowercase(),
-                            explanation: "durable job reached a terminal state".to_string(),
-                        })),
-                    };
+                let notified = retained.changed.notified();
+                let (events, closed, failure) = {
+                    let state = retained.state.lock().await;
+                    (
+                        state
+                            .events
+                            .iter()
+                            .filter(|event| event.sequence > cursor)
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        state.closed,
+                        state.failure.clone(),
+                    )
+                };
+                for event in events {
+                    cursor = event.sequence;
+                    yield event;
+                }
+                if let Some(message) = failure {
+                    Err(Status::resource_exhausted(message))?;
+                }
+                if closed {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                notified.await;
             }
         };
         Ok(Response::new(Box::pin(stream)))
@@ -868,6 +1884,25 @@ fn job_state(job_id: &str, state: terminus_jobs::JobState) -> protocol::JobState
     }
 }
 
+fn log_kernel_rpc_error(
+    service: &'static str,
+    request_id: &str,
+    error: terminus_kernel_protocol::KernelError,
+) -> Status {
+    tracing::error!(
+        target: "terminus_kernel_audit",
+        event = "rpc_failed",
+        service,
+        request_id,
+        error_code = error.code_name(),
+        error_category = error.category().as_str(),
+        retryable = error.retryable(),
+        kernel_error = %error,
+        "kernel RPC failed"
+    );
+    status(error)
+}
+
 fn context(value: ProtoContext) -> terminus_kernel_protocol::RequestContext {
     let deadline_unix_ms = value
         .deadline
@@ -968,6 +2003,88 @@ fn timestamp(value: &str) -> Option<prost_types::Timestamp> {
         nanos: parsed.timestamp_subsec_nanos() as i32,
     })
 }
+
+fn job_event(
+    job_id: &str,
+    sequence: u64,
+    value: terminus_kernel_protocol::ProcessEvent,
+) -> protocol::JobEvent {
+    use protocol::job_event::Event;
+    match value {
+        terminus_kernel_protocol::ProcessEvent::Started(event) => protocol::JobEvent {
+            sequence,
+            occurred_at: timestamp(&event.started_at),
+            event: Some(Event::Started(protocol::ProcessStarted {
+                process_id: event.process_id,
+                job_id: job_id.to_string(),
+                resolved_executable: event.resolved_executable,
+                started_at: timestamp(&event.started_at),
+            })),
+        },
+        terminus_kernel_protocol::ProcessEvent::Stdout(event) => protocol::JobEvent {
+            sequence,
+            occurred_at: None,
+            event: Some(Event::Stdout(protocol::OutputChunk {
+                cursor: event.cursor,
+                bytes: event.bytes,
+                redacted: event.redacted,
+            })),
+        },
+        terminus_kernel_protocol::ProcessEvent::Stderr(event) => protocol::JobEvent {
+            sequence,
+            occurred_at: None,
+            event: Some(Event::Stderr(protocol::OutputChunk {
+                cursor: event.cursor,
+                bytes: event.bytes,
+                redacted: event.redacted,
+            })),
+        },
+        terminus_kernel_protocol::ProcessEvent::Exited(event) => protocol::JobEvent {
+            sequence,
+            occurred_at: timestamp(&event.exited_at),
+            event: Some(Event::Exited(protocol::ProcessExited {
+                exit_code: event.exit_code,
+                signal: event.signal,
+                exited_at: timestamp(&event.exited_at),
+                stdout_artifact: event.stdout_artifact.map(artifact_ref),
+                stderr_artifact: event.stderr_artifact.map(artifact_ref),
+            })),
+        },
+        terminus_kernel_protocol::ProcessEvent::Policy(event) => protocol::JobEvent {
+            sequence,
+            occurred_at: None,
+            event: Some(Event::Policy(protocol::PolicyDecision {
+                decision_id: event.decision_id,
+                decision: event.decision,
+                rule_ids: event.rule_ids,
+                explanation: event.explanation,
+            })),
+        },
+    }
+}
+
+fn job_event_size(event: &protocol::JobEvent) -> usize {
+    use protocol::job_event::Event;
+    let payload = match event.event.as_ref() {
+        Some(Event::Stdout(chunk) | Event::Stderr(chunk)) => chunk.bytes.len(),
+        Some(Event::Started(started)) => {
+            started.process_id.len() + started.job_id.len() + started.resolved_executable.len()
+        }
+        Some(Event::Exited(exited)) => exited.signal.len() + 128,
+        Some(Event::Policy(policy)) => {
+            policy.decision_id.len()
+                + policy.decision.len()
+                + policy.explanation.len()
+                + policy.rule_ids.iter().map(String::len).sum::<usize>()
+        }
+        Some(Event::Reconciled(reconciled)) => {
+            reconciled.state.len() + reconciled.explanation.len()
+        }
+        None => 0,
+    };
+    payload.saturating_add(128)
+}
+
 fn process_event(value: terminus_kernel_protocol::ProcessEvent) -> protocol::ProcessEvent {
     use protocol::process_event::Event;
     match value {
@@ -1268,7 +2385,10 @@ fn strings(value: &serde_json::Value, key: &str) -> Vec<String> {
 pub async fn serve_grpc(
     socket_path: PathBuf,
     kernel: terminus_kernel::KernelHandle,
+    desktop_parent_pid: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let control_bootstrap = ControlBootstrapConfig::from_uds_environment()
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
     if let Some(parent) = socket_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
         #[cfg(unix)]
@@ -1357,7 +2477,18 @@ pub async fn serve_grpc(
 
     tracing::info!(socket = %socket_path.display(), "kernel gRPC listening on UDS");
     const MAX_GRPC_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
-    let service = GrpcKernel::new(kernel);
+    let signal_shutdown_kernel = kernel.clone();
+    let fallback_shutdown_kernel = kernel.clone();
+    let (shutdown_result_sender, shutdown_result_receiver) = tokio::sync::oneshot::channel();
+    let shutdown = async move {
+        crate::shutdown_signal(desktop_parent_pid).await;
+        let result = signal_shutdown_kernel
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string());
+        let _ = shutdown_result_sender.send(result);
+    };
+    let service = GrpcKernel::new(kernel, control_bootstrap);
     let result = Server::builder()
         .add_service(
             KernelInfoServiceServer::new(service.clone())
@@ -1410,6 +2541,11 @@ pub async fn serve_grpc(
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
         )
         .add_service(
+            ConnectorServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
             CodeIntelligenceServiceServer::new(service.clone())
                 .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
@@ -1424,10 +2560,24 @@ pub async fn serve_grpc(
                 .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
         )
-        .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener))
+        .serve_with_incoming_shutdown(
+            tokio_stream::wrappers::UnixListenerStream::new(listener),
+            shutdown,
+        )
         .await;
+    // If the server failed before a shutdown signal, its shutdown future was
+    // dropped. Reap every owned process before returning the transport error.
+    let shutdown_result = match shutdown_result_receiver.await {
+        Ok(result) => result,
+        Err(_) => fallback_shutdown_kernel
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string()),
+    };
     let _ = tokio::fs::remove_file(&socket_path).await;
     result?;
+    shutdown_result
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
     Ok(())
 }
 
@@ -1437,6 +2587,8 @@ pub async fn serve_grpc_mtls(
     kernel: terminus_kernel::KernelHandle,
     material: &terminus_remote::MtlsMaterial,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let control_bootstrap = ControlBootstrapConfig::disabled_from_environment()
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
     material
         .validate()
         .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
@@ -1456,8 +2608,22 @@ pub async fn serve_grpc_mtls(
         "kernel gRPC listening on mTLS"
     );
     const MAX_GRPC_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
-    let service = GrpcKernel::new(kernel);
-    Server::builder()
+    // Bootstrap is a local owner-only UDS trust boundary. The remote mTLS
+    // listener can use an externally provisioned broker but can never mint
+    // that broker through KernelInfoService.
+    let signal_shutdown_kernel = kernel.clone();
+    let fallback_shutdown_kernel = kernel.clone();
+    let (shutdown_result_sender, shutdown_result_receiver) = tokio::sync::oneshot::channel();
+    let shutdown = async move {
+        crate::shutdown_signal(None).await;
+        let result = signal_shutdown_kernel
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string());
+        let _ = shutdown_result_sender.send(result);
+    };
+    let service = GrpcKernel::new(kernel, control_bootstrap);
+    let result = Server::builder()
         .tls_config(tls)?
         .add_service(
             KernelInfoServiceServer::new(service.clone())
@@ -1510,6 +2676,11 @@ pub async fn serve_grpc_mtls(
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
         )
         .add_service(
+            ConnectorServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
             CodeIntelligenceServiceServer::new(service.clone())
                 .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
@@ -1524,8 +2695,18 @@ pub async fn serve_grpc_mtls(
                 .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
         )
-        .serve(bind_addr)
-        .await?;
+        .serve_with_shutdown(bind_addr, shutdown)
+        .await;
+    let shutdown_result = match shutdown_result_receiver.await {
+        Ok(result) => result,
+        Err(_) => fallback_shutdown_kernel
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string()),
+    };
+    result?;
+    shutdown_result
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
     Ok(())
 }
 
@@ -1535,6 +2716,7 @@ pub async fn serve_grpc_mtls(
 pub async fn serve_grpc(
     _socket_path: PathBuf,
     _kernel: terminus_kernel::KernelHandle,
+    _desktop_parent_pid: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Err("the kernel gRPC UDS transport is unsupported on this platform".into())
 }
@@ -1544,7 +2726,10 @@ pub async fn serve_grpc(
 mod tests {
     use super::*;
     use hyper_util::rt::TokioIo;
+    use protocol::artifact_ingest_service_client::ArtifactIngestServiceClient;
+    use protocol::job_service_client::JobServiceClient;
     use protocol::kernel_info_service_client::KernelInfoServiceClient;
+    use protocol::process_service_client::ProcessServiceClient;
     use protocol::sandbox_service_client::SandboxServiceClient;
     use protocol::workspace_service_client::WorkspaceServiceClient;
     use std::os::unix::fs::PermissionsExt;
@@ -1553,6 +2738,565 @@ mod tests {
     use tonic::transport::{Endpoint, Uri};
     use tower::service_fn;
 
+    const TEST_BOOTSTRAP_TOKEN: &str = "test_bootstrap_token_0123456789abcdef";
+
+    fn test_bootstrap_config(enabled: bool) -> ControlBootstrapConfig {
+        ControlBootstrapConfig {
+            enabled,
+            principal: "terminus-control-test".to_string(),
+            ttl_seconds: 120,
+            token: if enabled {
+                TEST_BOOTSTRAP_TOKEN.to_string()
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    fn bootstrap_request(principal: &str) -> Request<protocol::BootstrapControlRequest> {
+        let mut request = Request::new(protocol::BootstrapControlRequest {
+            principal: principal.to_string(),
+        });
+        request.metadata_mut().insert(
+            CONTROL_BOOTSTRAP_METADATA,
+            tonic::metadata::MetadataValue::from_static(TEST_BOOTSTRAP_TOKEN),
+        );
+        request
+    }
+
+    fn test_kernel() -> (tempfile::TempDir, terminus_kernel::KernelHandle) {
+        let data_dir = tempfile::tempdir().expect("kernel data dir");
+        let kernel =
+            terminus_kernel::KernelHandle::new(data_dir.path().to_path_buf()).expect("test kernel");
+        (data_dir, kernel)
+    }
+
+    fn register_test_workspace(
+        kernel: &terminus_kernel::KernelHandle,
+        workspace_id: &str,
+        root: &std::path::Path,
+    ) {
+        let token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "terminus-control-test".to_string(),
+                    session_id: "control".to_string(),
+                    task_id: "control-maintenance".to_string(),
+                    workspace_id: "*".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![OperationClass::Admin],
+                Scope::default(),
+                None,
+                format!("register-{workspace_id}"),
+            )
+            .expect("admin capability")
+            .encode()
+            .expect("encoded admin capability");
+        let mut context =
+            terminus_kernel_protocol::RequestContext::new(format!("register-{workspace_id}"));
+        context.session_id = "control".to_string();
+        context.task_id = "control-maintenance".to_string();
+        context.actor_id = "terminus-control-test".to_string();
+        context.workspace_id = "*".to_string();
+        context.capability_token = token;
+        kernel
+            .workspaces
+            .register_with_id(
+                &context,
+                &Default::default(),
+                format!("file://{}", root.display()),
+                root.display().to_string(),
+                "restricted",
+                Some(workspace_id),
+            )
+            .expect("registered test workspace");
+    }
+
+    fn broker_context(token: String, task_id: &str) -> protocol::RequestContext {
+        protocol::RequestContext {
+            request_id: terminus_kernel_protocol::new_id(),
+            idempotency_key: String::new(),
+            session_id: "control".to_string(),
+            task_id: task_id.to_string(),
+            turn_id: "bootstrap-test".to_string(),
+            actor_id: "terminus-control-test".to_string(),
+            traceparent: String::new(),
+            capability_token: token,
+            workspace_id: "*".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn task_capability_request(
+        token: String,
+        broker_task_id: &str,
+    ) -> protocol::MintTaskCapabilityRequest {
+        protocol::MintTaskCapabilityRequest {
+            context: Some(broker_context(token, broker_task_id)),
+            principal: "terminus-control-test".to_string(),
+            session_id: "session-1".to_string(),
+            task_id: "task-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            operation_classes: vec![
+                protocol::CapabilityOperationProto::CapabilityOperationRead as i32,
+                protocol::CapabilityOperationProto::CapabilityOperationArtifactIngest as i32,
+            ],
+            workspace_paths: vec!["src/**".to_string()],
+            network_destinations: Vec::new(),
+            secret_capabilities: Vec::new(),
+            ttl_seconds: 120,
+        }
+    }
+
+    #[tokio::test]
+    async fn control_bootstrap_is_disabled_and_principal_bound() {
+        let (_data_dir, kernel) = test_kernel();
+        let disabled = GrpcKernel::new(kernel.clone(), test_bootstrap_config(false));
+        let denied = KernelInfoServiceRpc::bootstrap_control(
+            &disabled,
+            bootstrap_request("terminus-control-test"),
+        )
+        .await
+        .expect_err("bootstrap must fail closed when disabled");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+
+        let enabled = GrpcKernel::new(kernel, test_bootstrap_config(true));
+        let denied = KernelInfoServiceRpc::bootstrap_control(
+            &enabled,
+            Request::new(protocol::BootstrapControlRequest {
+                principal: "terminus-control-test".to_string(),
+            }),
+        )
+        .await
+        .expect_err("same-UID callers without the bootstrap credential must be denied");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+
+        let mut wrong_credential = bootstrap_request("terminus-control-test");
+        wrong_credential.metadata_mut().insert(
+            CONTROL_BOOTSTRAP_METADATA,
+            tonic::metadata::MetadataValue::from_static("wrong_bootstrap_token_0123456789abcdef"),
+        );
+        let denied = KernelInfoServiceRpc::bootstrap_control(&enabled, wrong_credential)
+            .await
+            .expect_err("an incorrect bootstrap credential must be denied");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+
+        let denied =
+            KernelInfoServiceRpc::bootstrap_control(&enabled, bootstrap_request("other-principal"))
+                .await
+                .expect_err("bootstrap must require the configured principal exactly");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn control_bootstrap_mints_distinct_bounded_capabilities() {
+        let (_data_dir, kernel) = test_kernel();
+        let service = GrpcKernel::new(kernel.clone(), test_bootstrap_config(true));
+        let response = KernelInfoServiceRpc::bootstrap_control(
+            &service,
+            bootstrap_request("terminus-control-test"),
+        )
+        .await
+        .expect("enabled bootstrap succeeds")
+        .into_inner();
+        assert_ne!(
+            response.broker_capability_token,
+            response.maintenance_capability_token
+        );
+
+        let broker = kernel
+            .token_issuer
+            .validate(&response.broker_capability_token)
+            .expect("broker token validates");
+        let maintenance = kernel
+            .token_issuer
+            .validate(&response.maintenance_capability_token)
+            .expect("maintenance token validates");
+        for (token, task_id) in [
+            (&broker, "control-broker"),
+            (&maintenance, "control-maintenance"),
+        ] {
+            assert_eq!(token.claims.binder.principal, "terminus-control-test");
+            assert_eq!(token.claims.binder.session_id, "control");
+            assert_eq!(token.claims.binder.task_id, task_id);
+            assert_eq!(token.claims.binder.workspace_id, "*");
+            assert_eq!(token.claims.operation_classes, vec![OperationClass::Admin]);
+            assert!(token.claims.expires_at_unix >= response.expires_at_unix);
+            assert!(token.claims.expires_at_unix <= response.expires_at_unix + 1);
+            assert_eq!(
+                token.claims.expires_at_unix - token.claims.issued_at_unix,
+                120
+            );
+        }
+        assert_ne!(broker.claims.nonce, maintenance.claims.nonce);
+    }
+
+    #[tokio::test]
+    async fn broker_mints_only_concrete_non_admin_task_capabilities() {
+        let (_data_dir, kernel) = test_kernel();
+        let service = GrpcKernel::new(kernel.clone(), test_bootstrap_config(true));
+        let bootstrap = KernelInfoServiceRpc::bootstrap_control(
+            &service,
+            bootstrap_request("terminus-control-test"),
+        )
+        .await
+        .expect("bootstrap succeeds")
+        .into_inner();
+
+        let issued = PolicyServiceRpc::mint_task_capability(
+            &service,
+            Request::new(task_capability_request(
+                bootstrap.broker_capability_token.clone(),
+                "control-broker",
+            )),
+        )
+        .await
+        .expect("broker mints task capability")
+        .into_inner();
+        let task_token = kernel
+            .token_issuer
+            .validate(&issued.capability_token)
+            .expect("task capability validates");
+        assert_eq!(task_token.claims.binder.principal, "terminus-control-test");
+        assert_eq!(task_token.claims.binder.session_id, "session-1");
+        assert_eq!(task_token.claims.binder.task_id, "task-1");
+        assert_eq!(task_token.claims.binder.workspace_id, "workspace-1");
+        assert_eq!(
+            task_token.claims.operation_classes,
+            vec![OperationClass::Read, OperationClass::ArtifactIngest]
+        );
+        assert_eq!(task_token.claims.max_scope.workspace_paths, ["src/**"]);
+        assert_eq!(
+            task_token.claims.expires_at_unix - task_token.claims.issued_at_unix,
+            120
+        );
+
+        let mut wildcard =
+            task_capability_request(bootstrap.broker_capability_token.clone(), "control-broker");
+        wildcard.task_id = "*".to_string();
+        let denied = PolicyServiceRpc::mint_task_capability(&service, Request::new(wildcard))
+            .await
+            .expect_err("wildcard task binder must be rejected");
+        assert_eq!(denied.code(), tonic::Code::InvalidArgument);
+
+        let wrong_broker = task_capability_request(
+            bootstrap.maintenance_capability_token,
+            "control-maintenance",
+        );
+        let denied = PolicyServiceRpc::mint_task_capability(&service, Request::new(wrong_broker))
+            .await
+            .expect_err("maintenance capability is not a broker");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+
+        for forbidden in [OperationClass::Admin, OperationClass::Policy] {
+            let denied = validate_task_operation_classes(&[forbidden])
+                .expect_err("privileged operation must not be delegated");
+            assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+        }
+    }
+
+    #[tokio::test]
+    async fn task_exec_capability_with_no_declared_secrets_denies_arbitrary_secret_uri() {
+        let (_data_dir, kernel) = test_kernel();
+        let service = GrpcKernel::new(kernel.clone(), test_bootstrap_config(true));
+        let bootstrap = KernelInfoServiceRpc::bootstrap_control(
+            &service,
+            bootstrap_request("terminus-control-test"),
+        )
+        .await
+        .expect("bootstrap succeeds")
+        .into_inner();
+        let mut request =
+            task_capability_request(bootstrap.broker_capability_token, "control-broker");
+        request.operation_classes =
+            vec![protocol::CapabilityOperationProto::CapabilityOperationExec as i32];
+        request.workspace_paths = vec![".".to_string()];
+        request.secret_capabilities.clear();
+        let issued = PolicyServiceRpc::mint_task_capability(&service, Request::new(request))
+            .await
+            .expect("broker mints bounded Exec capability")
+            .into_inner();
+        let context = terminus_kernel_protocol::RequestContext {
+            request_id: "exec-secret-denial".to_string(),
+            session_id: "session-1".to_string(),
+            task_id: "task-1".to_string(),
+            actor_id: "terminus-control-test".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            capability_token: issued.capability_token,
+            ..Default::default()
+        };
+        let denied = kernel
+            .processes
+            .start_in_profile(
+                &context,
+                &Default::default(),
+                terminus_kernel_protocol::CommandSpec {
+                    program: "/bin/cat".to_string(),
+                    cwd: terminus_kernel_protocol::WorkspacePath::new("workspace-1", "."),
+                    secret_capability_uris: vec!["secret://github/not-declared".to_string()],
+                    ..Default::default()
+                },
+                "degraded-local",
+            )
+            .await
+            .expect_err("omitted task secret scope must deny secret use");
+        assert_eq!(
+            denied.code(),
+            terminus_kernel_protocol::ErrorCode::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn task_capability_inputs_have_hard_scope_and_ttl_bounds() {
+        let (_data_dir, kernel) = test_kernel();
+        let service = GrpcKernel::new(kernel, test_bootstrap_config(true));
+        let bootstrap = KernelInfoServiceRpc::bootstrap_control(
+            &service,
+            bootstrap_request("terminus-control-test"),
+        )
+        .await
+        .expect("bootstrap succeeds")
+        .into_inner();
+
+        let mut oversized_scope =
+            task_capability_request(bootstrap.broker_capability_token.clone(), "control-broker");
+        oversized_scope.workspace_paths = vec!["src/**".to_string(); 65];
+        let denied =
+            PolicyServiceRpc::mint_task_capability(&service, Request::new(oversized_scope))
+                .await
+                .expect_err("oversized scope must be rejected");
+        assert_eq!(denied.code(), tonic::Code::InvalidArgument);
+
+        let mut excessive_ttl =
+            task_capability_request(bootstrap.broker_capability_token, "control-broker");
+        excessive_ttl.ttl_seconds = 301;
+        let denied = PolicyServiceRpc::mint_task_capability(&service, Request::new(excessive_ttl))
+            .await
+            .expect_err("excessive TTL must be rejected");
+        assert_eq!(denied.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn code_search_inherits_concrete_context_workspace_and_rejects_cross_root_requests() {
+        let (_data_dir, kernel) = test_kernel();
+        let first = tempfile::tempdir().expect("first workspace");
+        let second = tempfile::tempdir().expect("second workspace");
+        std::fs::write(first.path().join("first.rs"), "fn isolated_symbol() {}\n")
+            .expect("first source");
+        std::fs::write(second.path().join("second.rs"), "fn isolated_symbol() {}\n")
+            .expect("second source");
+        register_test_workspace(&kernel, "workspace-a", first.path());
+        register_test_workspace(&kernel, "workspace-b", second.path());
+        let token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "terminus-control-test".to_string(),
+                    session_id: "session-1".to_string(),
+                    task_id: "task-1".to_string(),
+                    workspace_id: "workspace-a".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![OperationClass::CodeIntel],
+                Scope::default(),
+                None,
+                "code-search-workspace-a",
+            )
+            .expect("code-intel capability")
+            .encode()
+            .expect("encoded code-intel capability");
+        let context = protocol::RequestContext {
+            request_id: "code-search".to_string(),
+            session_id: "session-1".to_string(),
+            task_id: "task-1".to_string(),
+            actor_id: "terminus-control-test".to_string(),
+            workspace_id: "workspace-a".to_string(),
+            capability_token: token,
+            ..Default::default()
+        };
+        let service = GrpcKernel::new(kernel, test_bootstrap_config(false));
+
+        let inherited = CodeIntelligenceRpc::search(
+            &service,
+            Request::new(protocol::CodeSearchRequest {
+                context: Some(context.clone()),
+                workspace_id: String::new(),
+                query: "isolated_symbol".to_string(),
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("empty request workspace inherits concrete context")
+        .into_inner();
+        assert_eq!(inherited.results.len(), 1);
+        assert_eq!(inherited.results[0].path, "first.rs");
+
+        let denied = CodeIntelligenceRpc::search(
+            &service,
+            Request::new(protocol::CodeSearchRequest {
+                context: Some(context),
+                workspace_id: "workspace-b".to_string(),
+                query: "isolated_symbol".to_string(),
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("search request cannot override a concrete context workspace");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+
+        let missing = CodeIntelligenceRpc::search(
+            &service,
+            Request::new(protocol::CodeSearchRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "missing-code-search-workspace".to_string(),
+                    ..Default::default()
+                }),
+                workspace_id: String::new(),
+                query: "isolated_symbol".to_string(),
+                limit: 10,
+            }),
+        )
+        .await
+        .expect_err("search requires a concrete workspace from request or context");
+        assert_eq!(missing.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn code_search_excludes_kernel_storage_when_data_root_is_the_workspace() {
+        let (data_dir, kernel) = test_kernel();
+        std::fs::write(
+            data_dir.path().join("workspace-source.rs"),
+            "fn fixture_symbol() {}\n",
+        )
+        .expect("workspace source");
+        register_test_workspace(&kernel, "kernel-data-workspace", data_dir.path());
+        let token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "terminus-control-test".to_string(),
+                    session_id: "session-1".to_string(),
+                    task_id: "task-1".to_string(),
+                    workspace_id: "kernel-data-workspace".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![OperationClass::CodeIntel],
+                Scope::default(),
+                None,
+                "code-search-kernel-data-workspace",
+            )
+            .expect("code-intel capability")
+            .encode()
+            .expect("encoded code-intel capability");
+        let service = GrpcKernel::new(kernel, test_bootstrap_config(false));
+        let response = CodeIntelligenceRpc::search(
+            &service,
+            Request::new(protocol::CodeSearchRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "code-search-kernel-data".to_string(),
+                    session_id: "session-1".to_string(),
+                    task_id: "task-1".to_string(),
+                    actor_id: "terminus-control-test".to_string(),
+                    workspace_id: "kernel-data-workspace".to_string(),
+                    capability_token: token,
+                    ..Default::default()
+                }),
+                workspace_id: String::new(),
+                query: "free text without an exact symbol".to_string(),
+                limit: 10,
+            }),
+        )
+        .await
+        .expect("kernel-owned binary state must not fail workspace search")
+        .into_inner();
+
+        assert!(response.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_job_start_accepts_task_scoped_exec_and_job_capability() {
+        let (_data_dir, kernel) = test_kernel();
+        let workspace = tempfile::tempdir().expect("job workspace");
+        register_test_workspace(&kernel, "workspace-1", workspace.path());
+        let token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "terminus-control-test".to_string(),
+                    session_id: "session-1".to_string(),
+                    task_id: "task-1".to_string(),
+                    workspace_id: "workspace-1".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![
+                    OperationClass::Exec,
+                    OperationClass::Job,
+                    OperationClass::ArtifactIngest,
+                ],
+                Scope {
+                    workspace_paths: vec![".".to_string()],
+                    network_destinations: Vec::new(),
+                    secret_capabilities: Vec::new(),
+                },
+                Some(300),
+                "job-start-task-token",
+            )
+            .expect("task capability")
+            .encode()
+            .expect("encoded task capability");
+        let context = terminus_kernel_protocol::RequestContext {
+            request_id: terminus_kernel_protocol::new_id(),
+            idempotency_key: "job-start-test".to_string(),
+            session_id: "session-1".to_string(),
+            task_id: "task-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            actor_id: "terminus-control-test".to_string(),
+            traceparent: String::new(),
+            capability_token: token,
+            workspace_id: "workspace-1".to_string(),
+            deadline_unix_ms: 0,
+            resource_budgets: Default::default(),
+            policy_version: String::new(),
+        };
+        let command = terminus_kernel_protocol::CommandSpec {
+            program: "/bin/cat".to_string(),
+            args: Vec::new(),
+            cwd: terminus_kernel_protocol::WorkspacePath {
+                workspace_id: "workspace-1".to_string(),
+                relative_path: ".".to_string(),
+            },
+            public_env: Default::default(),
+            secret_capability_uris: Vec::new(),
+            timeout_ms: 60_000,
+            allocate_pty: false,
+            shell: Default::default(),
+        };
+
+        let started = kernel
+            .jobs
+            .start(
+                &context,
+                &Default::default(),
+                command,
+                "degraded-local",
+                true,
+            )
+            .await;
+        assert!(
+            started.is_ok(),
+            "durable JobService start failed before gRPC mapping: {:?}",
+            started.as_ref().err()
+        );
+        let Some((job_id, outcome, mut receiver)) = started.ok() else {
+            return;
+        };
+        assert!(!outcome.process_id.is_empty());
+        let _ = kernel.jobs.stop(&job_id, "focused test cleanup").await;
+        while receiver.try_recv().is_ok() {}
+    }
+
     #[tokio::test]
     async fn generated_client_reaches_generated_server_over_restricted_uds() {
         let dir = tempfile::tempdir().expect("temporary directory");
@@ -1560,6 +3304,13 @@ mod tests {
             .expect("private test directory");
         let socket = dir.path().join("kernel.sock");
         let server_socket = socket.clone();
+        let workspace_dir = dir.path().join("workspace");
+        std::fs::create_dir(&workspace_dir).expect("test workspace");
+        let workspace_root = std::fs::canonicalize(&workspace_dir).expect("canonical workspace");
+        let workspace_root = workspace_root
+            .to_str()
+            .expect("UTF-8 test workspace")
+            .to_string();
         let data_dir = tempfile::tempdir().expect("kernel data dir");
         let kernel =
             terminus_kernel::KernelHandle::new(data_dir.path().to_path_buf()).expect("kernel");
@@ -1573,7 +3324,7 @@ mod tests {
                     workspace_id: "workspace".to_string(),
                     kernel_instance_id: String::new(),
                 },
-                vec![OperationClass::Admin],
+                vec![OperationClass::Admin, OperationClass::ArtifactIngest],
                 Scope::default(),
                 None,
                 "grpc-test-nonce",
@@ -1581,7 +3332,73 @@ mod tests {
             .expect("test capability")
             .encode()
             .expect("encoded capability");
-        let server = tokio::spawn(async move { serve_grpc(server_socket, kernel).await });
+        let maintenance_token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "grpc-test".to_string(),
+                    session_id: "control".to_string(),
+                    task_id: "control-maintenance".to_string(),
+                    workspace_id: "*".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![OperationClass::Admin],
+                Scope::default(),
+                None,
+                "grpc-maintenance-nonce",
+            )
+            .expect("maintenance capability")
+            .encode()
+            .expect("encoded maintenance capability");
+        let job_token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "grpc-test".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    workspace_id: "workspace".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![
+                    OperationClass::Exec,
+                    OperationClass::Job,
+                    OperationClass::ArtifactIngest,
+                ],
+                Scope {
+                    workspace_paths: vec![".".to_string()],
+                    network_destinations: Vec::new(),
+                    secret_capabilities: Vec::new(),
+                },
+                Some(300),
+                "grpc-job-nonce",
+            )
+            .expect("job capability")
+            .encode()
+            .expect("encoded job capability");
+        let exec_token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "grpc-test".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    workspace_id: "workspace".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![OperationClass::Exec],
+                Scope {
+                    workspace_paths: vec![".".to_string()],
+                    network_destinations: Vec::new(),
+                    secret_capabilities: Vec::new(),
+                },
+                Some(300),
+                "grpc-exec-nonce",
+            )
+            .expect("exec capability")
+            .encode()
+            .expect("encoded exec capability");
+        let server = tokio::spawn(async move { serve_grpc(server_socket, kernel, None).await });
 
         for _ in 0..100 {
             if socket.exists() {
@@ -1630,18 +3447,464 @@ mod tests {
                     actor_id: "grpc-test".to_string(),
                     traceparent: String::new(),
                     capability_token: token.clone(),
+                    workspace_id: "workspace".to_string(),
                     ..Default::default()
                 }),
-                root_uri: "file:///tmp/terminus-grpc".to_string(),
-                canonical_root: "/tmp/terminus-grpc".to_string(),
+                root_uri: format!("file://{workspace_root}"),
+                canonical_root: workspace_root.clone(),
                 trust: "restricted".to_string(),
                 remote_environment_json: String::new(),
                 kind: "local_directory".to_string(),
+                requested_workspace_id: "workspace".to_string(),
             })
             .await
             .expect("Workspace.Register succeeds")
             .into_inner();
         assert_eq!(workspace.trust, "restricted");
+
+        let mut process_events = ProcessServiceClient::new(channel.clone())
+            .start(protocol::StartProcessRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-process-start".to_string(),
+                    idempotency_key: "grpc-process-start".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: exec_token,
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                intent: Some(protocol::EffectIntent {
+                    user_intent_ref: "control-plane".to_string(),
+                    task_contract_hash: String::new(),
+                    trust_label: "trusted".to_string(),
+                    confidentiality_label: "workspace".to_string(),
+                    taint_sources: Vec::new(),
+                    policy_profile_id: "secure-local-default".to_string(),
+                    expected_effect_class: String::new(),
+                }),
+                command: Some(protocol::CommandSpec {
+                    program: "/bin/ls".to_string(),
+                    args: vec!["-d".to_string(), ".".to_string()],
+                    cwd: Some(protocol::WorkspacePath {
+                        workspace_id: "workspace".to_string(),
+                        relative_path: ".".to_string(),
+                    }),
+                    public_env: Default::default(),
+                    secret_capability_uris: Vec::new(),
+                    timeout: None,
+                    allocate_pty: false,
+                    shell: None,
+                }),
+                sandbox_profile_id: "degraded-local".to_string(),
+                output_policy_id: "default".to_string(),
+            })
+            .await
+            .expect("Process.Start succeeds over UDS")
+            .into_inner();
+        let first_process_event = process_events
+            .message()
+            .await
+            .expect("first process event is readable")
+            .expect("process stream starts with an event");
+        assert!(matches!(
+            first_process_event.event,
+            Some(protocol::process_event::Event::Started(_))
+        ));
+        drop(process_events);
+
+        let mut artifacts = ArtifactIngestServiceClient::new(channel.clone());
+        let ingested = artifacts
+            .ingest(protocol::IngestArtifactRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-artifact-ingest".to_string(),
+                    idempotency_key: "grpc-artifact-ingest".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: token.clone(),
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                content: b"durable checkpoint artifact".to_vec(),
+                media_type: "application/json".to_string(),
+            })
+            .await
+            .expect("ArtifactIngest.Ingest succeeds")
+            .into_inner();
+        let artifact = ingested.artifact.expect("ingest returns an artifact");
+        let initial_output = artifacts
+            .ingest(protocol::IngestArtifactRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-artifact-ingest-empty".to_string(),
+                    idempotency_key: "grpc-artifact-ingest-empty".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: token.clone(),
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                content: Vec::new(),
+                media_type: "application/octet-stream".to_string(),
+            })
+            .await
+            .expect("a task can ingest a second, empty artifact")
+            .into_inner()
+            .artifact
+            .expect("second ingest returns an artifact");
+        assert_ne!(artifact.sha256, initial_output.sha256);
+        for (request_id, expected_artifact, expected_content) in [
+            (
+                "grpc-artifact-get-command",
+                &artifact,
+                b"durable checkpoint artifact".as_slice(),
+            ),
+            ("grpc-artifact-get-empty", &initial_output, b"".as_slice()),
+        ] {
+            let owned = artifacts
+                .get(protocol::GetArtifactRequest {
+                    context: Some(protocol::RequestContext {
+                        request_id: request_id.to_string(),
+                        idempotency_key: request_id.to_string(),
+                        session_id: "session".to_string(),
+                        task_id: "task".to_string(),
+                        turn_id: "turn".to_string(),
+                        actor_id: "grpc-test".to_string(),
+                        traceparent: String::new(),
+                        capability_token: token.clone(),
+                        workspace_id: "workspace".to_string(),
+                        ..Default::default()
+                    }),
+                    sha256: expected_artifact.sha256.clone(),
+                })
+                .await
+                .expect("task reads each independently owned artifact")
+                .into_inner();
+            assert_eq!(owned.content, expected_content);
+        }
+        let linked = artifacts
+            .link(protocol::LinkArtifactRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-artifact-link".to_string(),
+                    idempotency_key: "grpc-artifact-link".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: token.clone(),
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                sha256: artifact.sha256.clone(),
+                owner_type: "checkpoint".to_string(),
+                owner_id: "checkpoint-id".to_string(),
+                purpose: "content".to_string(),
+                owner_task_id: "task".to_string(),
+            })
+            .await
+            .expect("ArtifactIngest.Link succeeds")
+            .into_inner();
+        assert!(linked.linked);
+        let turn_linked = artifacts
+            .link(protocol::LinkArtifactRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-turn-input-link".to_string(),
+                    idempotency_key: "grpc-turn-input-link".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: token.clone(),
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                sha256: artifact.sha256.clone(),
+                owner_type: "turn".to_string(),
+                owner_id: "turn".to_string(),
+                purpose: "initiating-input".to_string(),
+                owner_task_id: "task".to_string(),
+            })
+            .await
+            .expect("task-bound turn initiating-input link succeeds")
+            .into_inner();
+        assert!(turn_linked.linked);
+
+        let cross_task_turn = artifacts
+            .link(protocol::LinkArtifactRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-turn-input-link-cross-task".to_string(),
+                    idempotency_key: "grpc-turn-input-link-cross-task".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "other-turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: token.clone(),
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                sha256: artifact.sha256.clone(),
+                owner_type: "turn".to_string(),
+                owner_id: "other-turn".to_string(),
+                purpose: "initiating-input".to_string(),
+                owner_task_id: "other-task".to_string(),
+            })
+            .await
+            .expect_err("turn initiating-input ownership cannot cross task binders");
+        assert_eq!(cross_task_turn.code(), tonic::Code::PermissionDenied);
+
+        let owner_links = artifacts
+            .list_checkpoint_links(protocol::ListCheckpointArtifactLinksRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-artifact-inventory".to_string(),
+                    idempotency_key: "grpc-artifact-inventory".to_string(),
+                    session_id: "control".to_string(),
+                    task_id: "control-maintenance".to_string(),
+                    turn_id: "reconcile".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: maintenance_token,
+                    workspace_id: "*".to_string(),
+                    ..Default::default()
+                }),
+                continuation_token: String::new(),
+                page_size: 10,
+            })
+            .await
+            .expect("checkpoint owner links are readable")
+            .into_inner()
+            .links;
+        assert_eq!(owner_links.len(), 1);
+        assert_eq!(owner_links[0].sha256, artifact.sha256);
+        assert_eq!(owner_links[0].owner_task_id, "task");
+
+        let missing = artifacts
+            .link(protocol::LinkArtifactRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-artifact-link-missing".to_string(),
+                    idempotency_key: "grpc-artifact-link-missing".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: token.clone(),
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                sha256: format!("sha256:{}", "0".repeat(64)),
+                owner_type: "checkpoint".to_string(),
+                owner_id: "missing-checkpoint".to_string(),
+                purpose: "content".to_string(),
+                owner_task_id: "task".to_string(),
+            })
+            .await
+            .expect_err("linking an unknown artifact must fail");
+        assert_eq!(missing.code(), tonic::Code::NotFound);
+
+        for malformed_hash in ["", "sha256:", "abc", &artifact.sha256[7..]] {
+            let malformed = artifacts
+                .link(protocol::LinkArtifactRequest {
+                    context: Some(protocol::RequestContext {
+                        request_id: format!("grpc-artifact-link-invalid-{malformed_hash}"),
+                        idempotency_key: format!("grpc-artifact-link-invalid-{malformed_hash}"),
+                        session_id: "session".to_string(),
+                        task_id: "task".to_string(),
+                        turn_id: "turn".to_string(),
+                        actor_id: "grpc-test".to_string(),
+                        traceparent: String::new(),
+                        capability_token: token.clone(),
+                        workspace_id: "workspace".to_string(),
+                        ..Default::default()
+                    }),
+                    sha256: malformed_hash.to_string(),
+                    owner_type: "checkpoint".to_string(),
+                    owner_id: "invalid-checkpoint".to_string(),
+                    purpose: "content".to_string(),
+                    owner_task_id: "task".to_string(),
+                })
+                .await
+                .expect_err("malformed artifact link hashes must fail");
+            assert_eq!(malformed.code(), tonic::Code::InvalidArgument);
+        }
+
+        let wrong_owner_task = artifacts
+            .link(protocol::LinkArtifactRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-artifact-link-wrong-owner".to_string(),
+                    idempotency_key: "grpc-artifact-link-wrong-owner".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: token.clone(),
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                sha256: artifact.sha256.clone(),
+                owner_type: "checkpoint".to_string(),
+                owner_id: "wrong-owner-checkpoint".to_string(),
+                purpose: "content".to_string(),
+                owner_task_id: "other-task".to_string(),
+            })
+            .await
+            .expect_err("artifact ownership cannot cross task binders");
+        assert_eq!(wrong_owner_task.code(), tonic::Code::PermissionDenied);
+
+        let mut jobs = JobServiceClient::new(channel.clone());
+        let started_job = jobs
+            .start(protocol::StartJobRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-job-start".to_string(),
+                    idempotency_key: "grpc-job-start".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: job_token.clone(),
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                intent: Some(protocol::EffectIntent {
+                    user_intent_ref: "control-plane".to_string(),
+                    task_contract_hash: String::new(),
+                    trust_label: "trusted".to_string(),
+                    confidentiality_label: "workspace".to_string(),
+                    taint_sources: Vec::new(),
+                    policy_profile_id: "secure-local-default".to_string(),
+                    expected_effect_class: String::new(),
+                }),
+                command: Some(protocol::CommandSpec {
+                    program: "/bin/cat".to_string(),
+                    args: Vec::new(),
+                    cwd: Some(protocol::WorkspacePath {
+                        workspace_id: "workspace".to_string(),
+                        relative_path: ".".to_string(),
+                    }),
+                    public_env: Default::default(),
+                    secret_capability_uris: Vec::new(),
+                    timeout: None,
+                    allocate_pty: false,
+                    shell: None,
+                }),
+                sandbox_profile_id: "degraded-local".to_string(),
+                output_policy_id: "default".to_string(),
+                durable: true,
+            })
+            .await
+            .expect("Job.Start succeeds over UDS")
+            .into_inner();
+        assert!(!started_job.job_id.is_empty());
+        assert!(!started_job.process_id.is_empty());
+        let mut job_events = jobs
+            .stream(protocol::JobStreamRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-job-stream".to_string(),
+                    idempotency_key: "grpc-job-stream".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: job_token.clone(),
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                job_id: started_job.job_id.clone(),
+                from_sequence: 0,
+            })
+            .await
+            .expect("Job.Stream opens over UDS")
+            .into_inner();
+        let first_job_event = job_events
+            .message()
+            .await
+            .expect("Job.Stream first event is readable")
+            .expect("Job.Stream emits a started event");
+        assert!(matches!(
+            first_job_event.event,
+            Some(protocol::job_event::Event::Started(_))
+        ));
+        jobs.input(protocol::JobInputRequest {
+            context: Some(protocol::RequestContext {
+                request_id: "grpc-job-input".to_string(),
+                idempotency_key: "grpc-job-input".to_string(),
+                session_id: "session".to_string(),
+                task_id: "task".to_string(),
+                turn_id: "turn".to_string(),
+                actor_id: "grpc-test".to_string(),
+                traceparent: String::new(),
+                capability_token: job_token.clone(),
+                workspace_id: "workspace".to_string(),
+                ..Default::default()
+            }),
+            job_id: started_job.job_id.clone(),
+            stdin: b"kernel job stream\n".to_vec(),
+        })
+        .await
+        .expect("Job.Input succeeds over UDS");
+        let stdout_event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let event = job_events
+                    .message()
+                    .await
+                    .expect("Job.Stream remains readable")
+                    .expect("Job.Stream remains open until process exit");
+                if let Some(protocol::job_event::Event::Stdout(stdout)) = event.event {
+                    break stdout;
+                }
+            }
+        })
+        .await
+        .expect("Job.Stream forwards stdout without polling synthetic state");
+        assert_eq!(stdout_event.bytes, b"kernel job stream\n");
+        let stopped_job = jobs
+            .stop(protocol::JobStopRequest {
+                context: Some(protocol::RequestContext {
+                    request_id: "grpc-job-stop".to_string(),
+                    idempotency_key: "grpc-job-stop".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: "task".to_string(),
+                    turn_id: "turn".to_string(),
+                    actor_id: "grpc-test".to_string(),
+                    traceparent: String::new(),
+                    capability_token: job_token,
+                    workspace_id: "workspace".to_string(),
+                    ..Default::default()
+                }),
+                job_id: started_job.job_id,
+                reason: "focused test cleanup".to_string(),
+            })
+            .await
+            .expect("Job.Stop succeeds over UDS")
+            .into_inner();
+        assert_eq!(stopped_job.state, "exited");
+        let exit_event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let event = job_events
+                    .message()
+                    .await
+                    .expect("Job.Stream remains readable after stop")
+                    .expect("Job.Stream emits the process exit");
+                if let Some(protocol::job_event::Event::Exited(exited)) = event.event {
+                    break exited;
+                }
+            }
+        })
+        .await
+        .expect("Job.Stream forwards the real exit event");
+        assert!(!exit_event.signal.is_empty() || exit_event.exit_code != 0);
 
         let report = SandboxServiceClient::new(channel)
             .report(protocol::SandboxReportRequest {
@@ -1654,6 +3917,7 @@ mod tests {
                     actor_id: "grpc-test".to_string(),
                     traceparent: String::new(),
                     capability_token: token,
+                    workspace_id: "workspace".to_string(),
                     ..Default::default()
                 }),
 

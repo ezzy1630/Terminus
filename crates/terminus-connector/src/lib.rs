@@ -15,10 +15,8 @@
 //! 6. a typed [`ConnectorReceipt`] records hashes and outcome — no secret
 //!    material.
 //!
-//! TLS: this build executes `http` destinations only and fails closed with
-//! [`ConnectorError::TlsUnavailable`] for `https` rather than sending
-//! credentials in plaintext. A validated TLS transport is a follow-up and
-//! will be conformance-tested before any https connector is declared.
+//! HTTPS uses rustls with platform certificate verification and a resolver
+//! override pinned to the exact IP set approved by the egress broker.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
@@ -31,4 +29,4 @@ mod receipt;
 pub use broker::{AuthStyle, ConnectorBroker, ConnectorBrokerBuilder};
 pub use error::ConnectorError;
 pub use operation::{path_matches_class, CanonicalOperation};
-pub use receipt::{ConnectorReceipt, Outcome};
+pub use receipt::{ConnectorReceipt, ConnectorResponse, Outcome};

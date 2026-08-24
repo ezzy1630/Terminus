@@ -64,11 +64,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// anything unmeasurable is reported honestly as `Unmeasurable`.
 pub fn run_probes(backend: &dyn crate::SandboxBackend, workspace_root: &Path) -> Vec<ProbeResult> {
     let mut results = vec![
-        filesystem_escape_probe(backend),
-        ambient_secret_probe(backend),
-        network_egress_probe(backend),
+        filesystem_escape_probe(backend, workspace_root),
+        ambient_secret_probe(backend, workspace_root),
+        network_egress_probe(backend, workspace_root),
     ];
-    let _ = workspace_root;
     for r in &mut results {
         r.backend_id = backend.id().to_string();
     }
@@ -80,12 +79,26 @@ pub fn run_probes(backend: &dyn crate::SandboxBackend, workspace_root: &Path) ->
 /// probe payload — no argv splicing — so every layer the wrapper applies
 /// (env sanitization, profile rights) applies to the probe exactly as it
 /// would to real workloads.
-fn execute(backend: &dyn crate::SandboxBackend, script: &str) -> Result<String, String> {
-    let profile = SandboxProfile::default_restrictive();
+fn execute(
+    backend: &dyn crate::SandboxBackend,
+    workspace_root: &Path,
+    script: &str,
+) -> Result<String, String> {
+    let mut profile = SandboxProfile::default_restrictive();
+    for rule in &mut profile.filesystem {
+        let Some(relative) = rule.path.strip_prefix("workspace://") else {
+            continue;
+        };
+        rule.path = if relative.is_empty() {
+            workspace_root.display().to_string()
+        } else {
+            workspace_root.join(relative).display().to_string()
+        };
+    }
     let cmd = CommandSpec {
         program: "/bin/sh".to_string(),
         args: vec!["-c".to_string(), script.to_string()],
-        cwd: WorkspacePath::new("probe-ws", "."),
+        cwd: WorkspacePath::new("probe-ws", workspace_root.display().to_string()),
         timeout_ms: PROBE_TIMEOUT.as_millis() as u64,
         ..Default::default()
     };
@@ -96,6 +109,7 @@ fn execute(backend: &dyn crate::SandboxBackend, script: &str) -> Result<String, 
     // still prevent the payload from seeing it.
     let output = std::process::Command::new(binary)
         .args(&argv)
+        .current_dir(workspace_root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -110,7 +124,10 @@ fn execute(backend: &dyn crate::SandboxBackend, script: &str) -> Result<String, 
     Ok(text.chars().take(400).collect())
 }
 
-fn filesystem_escape_probe(backend: &dyn crate::SandboxBackend) -> ProbeResult {
+fn filesystem_escape_probe(
+    backend: &dyn crate::SandboxBackend,
+    workspace_root: &Path,
+) -> ProbeResult {
     let backend_id = backend.id();
     // Attempt to escape the workspace by writing into the OS temp dir,
     // which is OUTSIDE every workspace mapping.
@@ -125,7 +142,7 @@ fn filesystem_escape_probe(backend: &dyn crate::SandboxBackend) -> ProbeResult {
         "printf x >> '{t}' 2>/dev/null && echo WROTE || echo BLOCKED",
         t = escape_target.display()
     );
-    match execute(backend, &script) {
+    match execute(backend, workspace_root, &script) {
         Ok(out) if out.contains("BLOCKED") => ProbeResult {
             backend_id: backend_id.to_string(),
             probe: ProbeKind::FilesystemEscape,
@@ -156,11 +173,11 @@ fn filesystem_escape_probe(backend: &dyn crate::SandboxBackend) -> ProbeResult {
     }
 }
 
-fn ambient_secret_probe(backend: &dyn crate::SandboxBackend) -> ProbeResult {
+fn ambient_secret_probe(backend: &dyn crate::SandboxBackend, workspace_root: &Path) -> ProbeResult {
     const BACKEND_PLACEHOLDER: &str = "";
     let script =
         format!("if [ -n \"${PROBE_SECRET_VAR}\" ]; then echo LEAKED; else echo CLEAN; fi");
-    match execute(backend, &script) {
+    match execute(backend, workspace_root, &script) {
         Ok(out) if out.contains("CLEAN") => ProbeResult {
             backend_id: BACKEND_PLACEHOLDER.to_string(),
             probe: ProbeKind::AmbientSecretDenial,
@@ -188,7 +205,7 @@ fn ambient_secret_probe(backend: &dyn crate::SandboxBackend) -> ProbeResult {
     }
 }
 
-fn network_egress_probe(backend: &dyn crate::SandboxBackend) -> ProbeResult {
+fn network_egress_probe(backend: &dyn crate::SandboxBackend, workspace_root: &Path) -> ProbeResult {
     // Bind a listener the payload must NOT be able to reach.
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0));
     let port = match listener {
@@ -210,7 +227,7 @@ fn network_egress_probe(backend: &dyn crate::SandboxBackend) -> ProbeResult {
          curl --max-time 2 -o /dev/null http://127.0.0.1:{port}/ 2>/dev/null \
          && echo CONNECTED || echo BLOCKED"
     );
-    match execute(backend, &script) {
+    match execute(backend, workspace_root, &script) {
         Ok(out) if out.contains("BLOCKED") || out.contains("NOCURL") => {
             let detail = if out.contains("NOCURL") {
                 "curl unavailable; cannot assert either way".to_string()

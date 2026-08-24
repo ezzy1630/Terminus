@@ -24,7 +24,7 @@ use axum::middleware::{self, from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::{cors_layer, require_bearer, require_capability_for_path};
@@ -77,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let state = Arc::new(AppState::from_env()?);
     let app = build_router(state.clone());
+    let desktop_parent_pid = desktop_parent_pid_from_env()?;
 
     let grpc_socket = std::env::var("TERMINUS_KERNEL_GRPC_SOCKET")
         .ok()
@@ -118,7 +119,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if require_uds {
         let socket = grpc_socket
             .ok_or("TERMINUS_KERNEL_REQUIRE_UDS=1 requires TERMINUS_KERNEL_GRPC_SOCKET")?;
-        grpc::serve_grpc(std::path::PathBuf::from(socket), state.kernel.clone()).await?;
+        grpc::serve_grpc(
+            std::path::PathBuf::from(socket),
+            state.kernel.clone(),
+            desktop_parent_pid,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -140,16 +146,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(sock) = grpc_socket {
         let kernel = state.kernel.clone();
         let sock_path = std::path::PathBuf::from(sock);
-        tokio::spawn(async move {
-            if let Err(e) = grpc::serve_grpc(sock_path, kernel).await {
-                tracing::error!(error = %e, "terminus-kernel gRPC server exited with error");
-            }
-        });
+        state
+            .spawn_background(async move {
+                if let Err(e) = grpc::serve_grpc(sock_path, kernel, desktop_parent_pid).await {
+                    tracing::error!(error = %e, "terminus-kernel gRPC server exited with error");
+                }
+            })
+            .await;
     }
 
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let signal_shutdown_kernel = state.kernel.clone();
+    let http_result = axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(async move {
+            shutdown_signal(desktop_parent_pid).await;
+            if let Err(error) = signal_shutdown_kernel.shutdown().await {
+                error!(%error, "kernel failed to reap owned processes during HTTP shutdown");
+            }
+        })
+        .await;
+    let process_shutdown = state.kernel.shutdown().await;
+    state.shutdown_background().await;
+    http_result?;
+    process_shutdown.map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -240,30 +258,74 @@ fn build_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-#[allow(clippy::expect_used)] // signal-handler installation failure is fatal;
-                              // there is no useful recovery, so surfacing it
-                              // immediately is correct.
-async fn shutdown_signal() {
+fn desktop_parent_pid_from_env() -> Result<Option<u32>, String> {
+    match std::env::var("TERMINUS_DESKTOP_PARENT_PID") {
+        Ok(value) => {
+            let parsed = value.parse::<u32>().map_err(|_| {
+                "TERMINUS_DESKTOP_PARENT_PID must be a positive process ID".to_string()
+            })?;
+            if parsed <= 1 {
+                return Err(
+                    "TERMINUS_DESKTOP_PARENT_PID must be a positive process ID greater than one"
+                        .to_string(),
+                );
+            }
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("TERMINUS_DESKTOP_PARENT_PID must contain valid UTF-8".to_string())
+        }
+    }
+}
+
+pub(crate) async fn shutdown_signal(desktop_parent_pid: Option<u32>) {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl-C handler");
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            error!(%error, "failed to receive Ctrl-C shutdown signal");
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                error!(%error, "failed to install termination-signal handler");
+            }
+        }
     };
 
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
+    let parent_exit = async move {
+        match desktop_parent_pid {
+            Some(expected) => loop {
+                #[cfg(unix)]
+                {
+                    let observed = nix::unistd::getppid().as_raw();
+                    if observed <= 1 || i64::from(observed) != i64::from(expected) {
+                        error!(expected, observed, "desktop supervisor disappeared");
+                        break;
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = expected;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            },
+            None => std::future::pending::<()>().await,
+        }
+    };
+
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+        _ = parent_exit => {},
     }
 
     info!("shutdown signal received");

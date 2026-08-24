@@ -73,11 +73,17 @@ export class ArtifactClient {
       readonly custom?: Readonly<Record<string, unknown>> | undefined;
     },
   ): Promise<ArtifactMetadata> {
+    const expectedHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}` as ContentHash;
     const hash = await this.deps.kernel.ingest(bytes, {
       mediaType: metadata.mediaType,
       compression: metadata.compression ?? "none",
       custom: metadata.custom ?? {},
     });
+    if (hash !== expectedHash) {
+      throw new ValidationError(
+        `artifact ingest hash mismatch: expected ${expectedHash}, kernel returned ${hash}`,
+      );
+    }
     const meta: ArtifactMetadata = {
       hash,
       uri: `artifact://sha256/${hash.replace(/^sha256:/, "")}` as ArtifactUri,
@@ -117,6 +123,11 @@ export class ArtifactClient {
     if (cached) return cached;
     const raw = await this.deps.kernel.getMetadata(hash);
     if (raw === null) throw new NotFoundError("artifact metadata", hash);
+    if (raw.hash !== hash) {
+      throw new ValidationError(
+        `artifact metadata hash mismatch: requested ${hash}, kernel returned ${String(raw.hash)}`,
+      );
+    }
     const meta: ArtifactMetadata = {
       hash,
       uri: `artifact://sha256/${hash.replace(/^sha256:/, "")}` as ArtifactUri,
@@ -168,6 +179,12 @@ export class ArtifactClient {
       offset = appended.nextOffset;
     }
     const hash = await commit(started.sessionId);
+    const expectedHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}` as ContentHash;
+    if (hash !== expectedHash) {
+      throw new ValidationError(
+        `artifact resumable ingest hash mismatch: expected ${expectedHash}, kernel returned ${hash}`,
+      );
+    }
     const meta: ArtifactMetadata = {
       hash,
       uri: `artifact://sha256/${hash.replace(/^sha256:/, "")}` as ArtifactUri,

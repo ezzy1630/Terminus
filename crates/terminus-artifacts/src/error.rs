@@ -18,6 +18,8 @@ pub enum ArtifactError {
     InvalidPath,
     #[error("quarantine rejected: {0}")]
     Quarantine(String),
+    #[error("artifact owner binding conflict: {0}")]
+    OwnerConflict(String),
     #[error("sqlite error: {0}")]
     Sqlite(String),
 }

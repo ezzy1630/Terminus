@@ -21,6 +21,7 @@ impl NormalizedSpawn {
     /// Build from a protocol `CommandSpec`. Exactly one of `program` or
     /// `shell.script` must be present.
     pub fn from_spec(cmd: &CommandSpec) -> Result<Self, ProcessError> {
+        validate_public_environment(&cmd.public_env)?;
         let shell = cmd.shell.enabled;
         if shell {
             if cmd.shell.script.is_empty() {
@@ -73,6 +74,63 @@ impl NormalizedSpawn {
             shell: false,
             allocate_pty: cmd.allocate_pty,
         })
+    }
+}
+
+fn validate_public_environment(environment: &BTreeMap<String, String>) -> Result<(), ProcessError> {
+    for (name, value) in environment {
+        let mut characters = name.chars();
+        let valid_first = characters
+            .next()
+            .is_some_and(|character| character == '_' || character.is_ascii_alphabetic());
+        let valid_rest =
+            characters.all(|character| character == '_' || character.is_ascii_alphanumeric());
+        if !valid_first || !valid_rest {
+            return Err(ProcessError::InvalidSpec(format!(
+                "public environment key `{name}` is not a portable environment name"
+            )));
+        }
+        if value.contains('\0') {
+            return Err(ProcessError::InvalidSpec(format!(
+                "public environment value for `{name}` contains NUL"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NormalizedSpawn;
+    use terminus_kernel_protocol::CommandSpec;
+
+    #[test]
+    fn public_environment_requires_portable_names() {
+        let mut command = CommandSpec {
+            program: "/usr/bin/true".to_string(),
+            ..CommandSpec::default()
+        };
+        command
+            .public_env
+            .insert("TERMINUS_PROVIDER_PROTOCOL".to_string(), "v1".to_string());
+        assert!(NormalizedSpawn::from_spec(&command).is_ok());
+
+        command
+            .public_env
+            .insert("INVALID=NAME".to_string(), "value".to_string());
+        assert!(NormalizedSpawn::from_spec(&command).is_err());
+    }
+
+    #[test]
+    fn public_environment_rejects_nul_values() {
+        let command = CommandSpec {
+            program: "/usr/bin/true".to_string(),
+            public_env: [("PUBLIC_VALUE".to_string(), "bad\0value".to_string())]
+                .into_iter()
+                .collect(),
+            ..CommandSpec::default()
+        };
+        assert!(NormalizedSpawn::from_spec(&command).is_err());
     }
 }
 

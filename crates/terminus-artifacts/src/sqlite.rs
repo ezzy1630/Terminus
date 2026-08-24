@@ -8,7 +8,7 @@
 //!           redaction_status, source_uri, source_version, created_at,
 //!           last_verified_at, quarantine_reason)
 //! artifact_links(id PRIMARY KEY, artifact_hash, owner_type, owner_id,
-//!                purpose, created_at, UNIQUE(artifact_hash, owner_type,
+//!                owner_task_id, purpose, created_at, UNIQUE(artifact_hash, owner_type,
 //!                owner_id, purpose))
 //! ```
 //!
@@ -23,7 +23,7 @@ use crate::metadata::{
     ArtifactLink, ArtifactMetadata, Confidentiality, ContentEncoding, RedactionStatus,
     RetentionClass, TrustLabel,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS artifact_links (
     artifact_hash TEXT NOT NULL,
     owner_type    TEXT NOT NULL,
     owner_id      TEXT NOT NULL,
+    owner_task_id TEXT NOT NULL DEFAULT '',
     purpose       TEXT NOT NULL,
     created_at    TEXT NOT NULL,
     UNIQUE(artifact_hash, owner_type, owner_id, purpose)
@@ -81,6 +82,7 @@ impl SqliteMetadataStore {
         }
         let conn = Connection::open(path).map_err(sqlite_err)?;
         conn.execute_batch(SCHEMA_SQL).map_err(sqlite_err)?;
+        ensure_owner_task_column(&conn)?;
         // Best-effort WAL mode for concurrent readers — ignore errors (e.g.
         // in-memory databases do not support WAL).
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
@@ -94,6 +96,7 @@ impl SqliteMetadataStore {
     pub fn open_in_memory() -> Result<Self, ArtifactError> {
         let conn = Connection::open_in_memory().map_err(sqlite_err)?;
         conn.execute_batch(SCHEMA_SQL).map_err(sqlite_err)?;
+        ensure_owner_task_column(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -164,11 +167,69 @@ impl SqliteMetadataStore {
         let now = now_rfc3339();
         conn.execute(
             "INSERT OR IGNORE INTO artifact_links
-                (id, artifact_hash, owner_type, owner_id, purpose, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (id, artifact_hash, owner_type, owner_id, owner_task_id, purpose, created_at)
+             VALUES (?1, ?2, ?3, ?4, '', ?5, ?6)",
             params![id, hash, owner_type, owner_id, purpose, now],
         )
         .map_err(sqlite_err)?;
+        Ok(())
+    }
+
+    /// Create the immutable task-bound owner link used by checkpoint
+    /// admission. One checkpoint owner cannot be rebound to new bytes or a
+    /// different task.
+    pub fn link_task_bound(
+        &self,
+        hash: &str,
+        owner_type: &str,
+        owner_id: &str,
+        owner_task_id: &str,
+        purpose: &str,
+    ) -> Result<(), ArtifactError> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction().map_err(sqlite_err)?;
+        let existing = transaction
+            .query_row(
+                "SELECT artifact_hash, owner_task_id FROM artifact_links
+                 WHERE owner_type = ?1 AND owner_id = ?2 AND purpose = ?3
+                 LIMIT 1",
+                params![owner_type, owner_id, purpose],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(sqlite_err)?;
+        if let Some((existing_hash, existing_task_id)) = existing {
+            if existing_hash != hash
+                || (!existing_task_id.is_empty() && existing_task_id != owner_task_id)
+            {
+                return Err(ArtifactError::OwnerConflict(format!(
+                    "{owner_type}/{owner_id}/{purpose} is already bound to task {existing_task_id} and {existing_hash}",
+                )));
+            }
+            if existing_task_id.is_empty() {
+                transaction
+                    .execute(
+                        "UPDATE artifact_links SET owner_task_id = ?1
+                         WHERE owner_type = ?2 AND owner_id = ?3 AND purpose = ?4
+                           AND artifact_hash = ?5 AND owner_task_id = ''",
+                        params![owner_task_id, owner_type, owner_id, purpose, hash],
+                    )
+                    .map_err(sqlite_err)?;
+            }
+            transaction.commit().map_err(sqlite_err)?;
+            return Ok(());
+        }
+        let id = terminus_kernel_protocol::new_id();
+        let now = now_rfc3339();
+        transaction
+            .execute(
+                "INSERT INTO artifact_links
+                    (id, artifact_hash, owner_type, owner_id, owner_task_id, purpose, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, hash, owner_type, owner_id, owner_task_id, purpose, now],
+            )
+            .map_err(sqlite_err)?;
+        transaction.commit().map_err(sqlite_err)?;
         Ok(())
     }
 
@@ -181,7 +242,7 @@ impl SqliteMetadataStore {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, artifact_hash, owner_type, owner_id, purpose, created_at
+                "SELECT id, artifact_hash, owner_type, owner_id, owner_task_id, purpose, created_at
                  FROM artifact_links
                  WHERE owner_type = ?1 AND owner_id = ?2
                  ORDER BY created_at ASC",
@@ -194,8 +255,9 @@ impl SqliteMetadataStore {
                     artifact_hash: row.get(1)?,
                     owner_type: row.get(2)?,
                     owner_id: row.get(3)?,
-                    purpose: row.get(4)?,
-                    created_at: row.get(5)?,
+                    owner_task_id: row.get(4)?,
+                    purpose: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
             })
             .map_err(sqlite_err)?;
@@ -204,6 +266,77 @@ impl SqliteMetadataStore {
             out.push(r.map_err(sqlite_err)?);
         }
         Ok(out)
+    }
+
+    pub fn list_checkpoint_links(
+        &self,
+        after_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ArtifactLink>, ArtifactError> {
+        let conn = self.lock()?;
+        let mut statement = conn
+            .prepare(
+                "SELECT id, artifact_hash, owner_type, owner_id, owner_task_id, purpose, created_at
+                 FROM artifact_links
+                 WHERE owner_type = 'checkpoint' AND purpose = 'content' AND id > ?1
+                 ORDER BY id ASC LIMIT ?2",
+            )
+            .map_err(sqlite_err)?;
+        let rows = statement
+            .query_map(params![after_id, limit as i64], |row| {
+                Ok(ArtifactLink {
+                    id: row.get(0)?,
+                    artifact_hash: row.get(1)?,
+                    owner_type: row.get(2)?,
+                    owner_id: row.get(3)?,
+                    owner_task_id: row.get(4)?,
+                    purpose: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })
+            .map_err(sqlite_err)?;
+        let mut links = Vec::new();
+        for row in rows {
+            links.push(row.map_err(sqlite_err)?);
+        }
+        Ok(links)
+    }
+
+    /// Return whether an artifact is durably linked to the requesting task.
+    /// Artifact hashes are not bearer capabilities: callers must prove this
+    /// ownership relation before bytes or metadata cross the kernel boundary.
+    pub fn has_task_link(&self, hash: &str, owner_task_id: &str) -> Result<bool, ArtifactError> {
+        let conn = self.lock()?;
+        let present = conn
+            .query_row(
+                "SELECT 1 FROM artifact_links
+                 WHERE artifact_hash = ?1 AND owner_task_id = ?2
+                 LIMIT 1",
+                params![hash, owner_task_id],
+                |_row| Ok(()),
+            )
+            .optional()
+            .map_err(sqlite_err)?
+            .is_some();
+        Ok(present)
+    }
+
+    pub fn unlink_checkpoint(
+        &self,
+        hash: &str,
+        checkpoint_id: &str,
+        owner_task_id: &str,
+    ) -> Result<bool, ArtifactError> {
+        let conn = self.lock()?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM artifact_links
+                 WHERE artifact_hash = ?1 AND owner_type = 'checkpoint'
+                   AND owner_id = ?2 AND owner_task_id = ?3 AND purpose = 'content'",
+                params![hash, checkpoint_id, owner_task_id],
+            )
+            .map_err(sqlite_err)?;
+        Ok(deleted == 1)
     }
 
     /// Find artifact hashes that have NO links and whose `retention_class`
@@ -294,6 +427,39 @@ fn opt_str(s: &str) -> Option<&str> {
 
 fn sqlite_err(e: rusqlite::Error) -> ArtifactError {
     ArtifactError::Sqlite(e.to_string())
+}
+
+fn ensure_owner_task_column(connection: &Connection) -> Result<(), ArtifactError> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(artifact_links)")
+        .map_err(sqlite_err)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sqlite_err)?;
+    let mut has_owner_task_id = false;
+    for column in columns {
+        if column.map_err(sqlite_err)? == "owner_task_id" {
+            has_owner_task_id = true;
+            break;
+        }
+    }
+    drop(statement);
+    if !has_owner_task_id {
+        connection
+            .execute(
+                "ALTER TABLE artifact_links ADD COLUMN owner_task_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(sqlite_err)?;
+    }
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifact_links_task
+             ON artifact_links(owner_task_id, owner_type)",
+            [],
+        )
+        .map_err(sqlite_err)?;
+    Ok(())
 }
 
 fn now_rfc3339() -> String {
@@ -387,6 +553,103 @@ mod tests {
         store.link(&hash, "task", "task-1", "input").expect("link2");
         let links = store.list_by_owner("task", "task-1").expect("list");
         assert_eq!(links.len(), 1);
+    }
+
+    #[test]
+    fn checkpoint_link_binding_is_immutable_and_reconcilable() {
+        let store = SqliteMetadataStore::open_in_memory().expect("open");
+        let first_hash = format!("sha256:{}", "2".repeat(64));
+        let other_hash = format!("sha256:{}", "3".repeat(64));
+        store
+            .upsert(&sample_meta(&"2".repeat(64), 1), "/first")
+            .expect("first artifact");
+        store
+            .link_task_bound(
+                &first_hash,
+                "checkpoint",
+                "checkpoint-1",
+                "task-1",
+                "content",
+            )
+            .expect("initial task-bound link");
+        store
+            .link_task_bound(
+                &first_hash,
+                "checkpoint",
+                "checkpoint-1",
+                "task-1",
+                "content",
+            )
+            .expect("idempotent task-bound link");
+
+        assert!(matches!(
+            store.link_task_bound(
+                &other_hash,
+                "checkpoint",
+                "checkpoint-1",
+                "task-1",
+                "content",
+            ),
+            Err(ArtifactError::OwnerConflict(_)),
+        ));
+        assert!(matches!(
+            store.link_task_bound(
+                &first_hash,
+                "checkpoint",
+                "checkpoint-1",
+                "task-2",
+                "content",
+            ),
+            Err(ArtifactError::OwnerConflict(_)),
+        ));
+
+        let links = store
+            .list_checkpoint_links("", 10)
+            .expect("checkpoint links");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].owner_task_id, "task-1");
+        assert!(store
+            .unlink_checkpoint(&first_hash, "checkpoint-1", "task-1")
+            .expect("unlink exact binding"));
+        assert_eq!(store.count_links().expect("link count"), 0);
+    }
+
+    #[test]
+    fn opening_legacy_metadata_adds_checkpoint_task_binding() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("metadata.sqlite");
+        let connection = Connection::open(&path).expect("legacy database");
+        connection
+            .execute_batch(
+                "CREATE TABLE artifact_links (
+                    id TEXT PRIMARY KEY,
+                    artifact_hash TEXT NOT NULL,
+                    owner_type TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(artifact_hash, owner_type, owner_id, purpose)
+                );",
+            )
+            .expect("legacy schema");
+        drop(connection);
+
+        let store = SqliteMetadataStore::open(&path).expect("upgraded metadata store");
+        let hash = format!("sha256:{}", "4".repeat(64));
+        store
+            .link_task_bound(
+                &hash,
+                "checkpoint",
+                "checkpoint-legacy",
+                "task-1",
+                "content",
+            )
+            .expect("task-bound link after upgrade");
+        let links = store
+            .list_checkpoint_links("", 10)
+            .expect("upgraded checkpoint links");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].owner_task_id, "task-1");
     }
 
     #[test]

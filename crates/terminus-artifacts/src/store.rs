@@ -225,7 +225,45 @@ impl ArtifactStore {
         owner_id: &str,
         purpose: &str,
     ) -> Result<(), ArtifactError> {
+        canonical_sha256_hex(hash)?;
         self.sqlite.link(hash, owner_type, owner_id, purpose)
+    }
+
+    pub fn link_task_bound(
+        &self,
+        hash: &str,
+        owner_type: &str,
+        owner_id: &str,
+        owner_task_id: &str,
+        purpose: &str,
+    ) -> Result<(), ArtifactError> {
+        canonical_sha256_hex(hash)?;
+        self.sqlite
+            .link_task_bound(hash, owner_type, owner_id, owner_task_id, purpose)
+    }
+
+    pub fn list_checkpoint_links(
+        &self,
+        after_id: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::metadata::ArtifactLink>, ArtifactError> {
+        self.sqlite.list_checkpoint_links(after_id, limit)
+    }
+
+    pub fn has_task_link(&self, hash: &str, owner_task_id: &str) -> Result<bool, ArtifactError> {
+        canonical_sha256_hex(hash)?;
+        self.sqlite.has_task_link(hash, owner_task_id)
+    }
+
+    pub fn unlink_checkpoint(
+        &self,
+        hash: &str,
+        checkpoint_id: &str,
+        owner_task_id: &str,
+    ) -> Result<bool, ArtifactError> {
+        canonical_sha256_hex(hash)?;
+        self.sqlite
+            .unlink_checkpoint(hash, checkpoint_id, owner_task_id)
     }
 
     /// List all artifact links for a given owner.
@@ -248,7 +286,7 @@ impl ArtifactStore {
 
     /// True if the artifact exists in the store.
     pub fn exists(&self, hash: &str) -> bool {
-        let Ok(hex) = strip_sha256_prefix(hash) else {
+        let Ok(hex) = canonical_sha256_hex(hash) else {
             return false;
         };
         self.cas_path(hex).exists()
@@ -330,6 +368,20 @@ fn strip_sha256_prefix(hash: &str) -> Result<&str, ArtifactError> {
     })
 }
 
+fn canonical_sha256_hex(hash: &str) -> Result<&str, ArtifactError> {
+    let Some(hex_hash) = hash.strip_prefix("sha256:") else {
+        return Err(ArtifactError::InvalidHash(hash.to_string()));
+    };
+    if hex_hash.len() != 64
+        || !hex_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ArtifactError::InvalidHash(hash.to_string()));
+    }
+    Ok(hex_hash)
+}
+
 fn validate_hex_hash(hex_hash: &str) -> Result<(), ArtifactError> {
     if hex_hash.len() != 64 || !hex_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(ArtifactError::InvalidHash(hex_hash.to_string()));
@@ -387,6 +439,19 @@ mod tests {
         let (m2, r2) = store.ingest(bytes).unwrap();
         assert_eq!(r1.sha256, r2.sha256);
         assert_eq!(m1.hash, m2.hash);
+    }
+
+    #[test]
+    fn exists_and_link_reject_noncanonical_hashes_without_panicking() {
+        let (_dir, store) = open_store();
+        let (_, artifact) = store.ingest(b"canonical identity").unwrap();
+        for malformed in ["", "a", "sha256:", "sha256:abc", &artifact.sha256[7..]] {
+            assert!(!store.exists(malformed));
+            assert!(matches!(
+                store.link(malformed, "checkpoint", "checkpoint-id", "content"),
+                Err(ArtifactError::InvalidHash(_))
+            ));
+        }
     }
 
     #[test]

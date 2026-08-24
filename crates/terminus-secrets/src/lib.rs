@@ -17,15 +17,20 @@ mod audit;
 mod broker;
 mod error;
 mod grant;
+mod keyring_provider;
 mod redact;
 mod residue;
 
 pub use audit::{AuditEntry, SecretAuditLog};
-pub use broker::{InMemoryProvider, SecretBroker, SecretHandle, SecretMetadata, SecretProvider};
+pub use broker::{
+    InMemoryProvider, SecretBroker, SecretHandle, SecretMetadata, SecretProvider,
+    WritableSecretProvider,
+};
 pub use error::SecretError;
 pub use grant::{
     ConnectorGrant, ConsumedGrant, GrantBinding, GrantClaims, GrantIssuer, GrantStore,
     WorkloadIdentity, MAX_GRANT_TTL_SECS,
 };
+pub use keyring_provider::KeyringSecretProvider;
 pub use redact::{RedactionPattern, Redactor};
 pub use residue::{CanaryMaterial, ResidueHit, ResidueScanner, ResidueSurface};

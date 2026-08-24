@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use terminus_kernel_protocol::{CommandSpec, OutputChunk, ProcessEvent};
-use tokio::task::JoinHandle;
 
 use crate::api::Envelope;
 use crate::auth::ValidatedCapabilityToken;
@@ -46,7 +45,7 @@ pub async fn start(
 
     // The kernel's ProcessService.start returns a Receiver<ProcessEvent>. We
     // spawn the process, take the Started event to get the process_id, then
-    // consume the rest in a background task that accumulates output chunks.
+    // consume the rest in a lifecycle-owned task that accumulates output.
     let mut rx = state
         .kernel
         .processes
@@ -85,29 +84,31 @@ pub async fn start(
         }
     };
 
-    // Spawn a background task that accumulates stdout/stderr chunks and
-    // captures the Exited event.
+    // The AppState supervisor owns this task and aborts/joins it during
+    // server shutdown.
     let outputs = Arc::clone(&state.process_outputs);
     let exits = Arc::clone(&state.process_exits);
     let pid = process_id.clone();
-    let _handle: JoinHandle<()> = tokio::spawn(async move {
-        let mut chunks: Vec<OutputChunk> = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                ProcessEvent::Stdout(c) | ProcessEvent::Stderr(c) => {
-                    chunks.push(c);
+    state
+        .spawn_background(async move {
+            let mut chunks: Vec<OutputChunk> = Vec::new();
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    ProcessEvent::Stdout(c) | ProcessEvent::Stderr(c) => {
+                        chunks.push(c);
+                    }
+                    ProcessEvent::Exited(e) => {
+                        let mut guard = exits.lock().await;
+                        guard.insert(pid.clone(), e);
+                        break;
+                    }
+                    _ => {}
                 }
-                ProcessEvent::Exited(e) => {
-                    let mut guard = exits.lock().await;
-                    guard.insert(pid.clone(), e);
-                    break;
-                }
-                _ => {}
             }
-        }
-        let mut guard = outputs.lock().await;
-        guard.insert(pid, chunks);
-    });
+            let mut guard = outputs.lock().await;
+            guard.insert(pid, chunks);
+        })
+        .await;
 
     Ok(Json(StartProcessResponse {
         process_id,

@@ -57,6 +57,38 @@ pub struct Scope {
     pub secret_capabilities: Vec<String>,
 }
 
+/// Internal marker for a deliberately empty authority set. The leading NUL
+/// keeps it outside every valid RPC scope value, and the matcher treats it as
+/// deny-all rather than as an ordinary pattern.
+const DENY_ALL_SCOPE_PATTERN: &str = "\0terminus-deny-all";
+
+impl Scope {
+    /// Build a least-authority scope where an omitted resource kind means
+    /// "deny that kind". This is the task-capability constructor.
+    ///
+    /// `Scope::default()` deliberately retains its separate operator/admin
+    /// meaning of unrestricted authority for backwards compatibility.
+    pub fn deny_unspecified(
+        workspace_paths: Vec<String>,
+        network_destinations: Vec<String>,
+        secret_capabilities: Vec<String>,
+    ) -> Self {
+        fn explicit_or_deny(values: Vec<String>) -> Vec<String> {
+            if values.is_empty() {
+                vec![DENY_ALL_SCOPE_PATTERN.to_string()]
+            } else {
+                values
+            }
+        }
+
+        Self {
+            workspace_paths: explicit_or_deny(workspace_paths),
+            network_destinations: explicit_or_deny(network_destinations),
+            secret_capabilities: explicit_or_deny(secret_capabilities),
+        }
+    }
+}
+
 /// Static binding for a token: principal/session/task/workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TokenBinder {
@@ -539,6 +571,12 @@ fn all_match_or_unrestricted(
     requested: &[String],
     matcher: fn(&str, &str) -> bool,
 ) -> bool {
+    if maxes
+        .iter()
+        .any(|pattern| pattern == DENY_ALL_SCOPE_PATTERN)
+    {
+        return requested.is_empty();
+    }
     // If maxes is empty for this kind, the kind is unrestricted.
     if maxes.is_empty() {
         return true;
@@ -552,83 +590,115 @@ fn all_match_or_unrestricted(
     true
 }
 
-/// Simple glob matcher supporting `*` (any non-slash) and `**` (any).
+/// Glob matcher kept in parity with `@terminus/task-runtime`:
+/// - `*` matches zero or more characters within one path segment;
+/// - `?` matches one non-slash character;
+/// - `**` matches recursively across path separators;
+/// - the slash immediately following `**` is optional, so `**/*.rs`
+///   matches both `main.rs` and `src/main.rs`.
 fn glob_match(pattern: &str, value: &str) -> bool {
-    if pattern == "**" || pattern == "*" {
-        return true;
+    #[derive(Clone, Copy)]
+    enum GlobToken {
+        Literal(char),
+        OneSegmentCharacter,
+        SegmentStar,
+        RecursiveStar,
     }
-    // Tiny glob: split on `**`.
-    if let Some(idx) = pattern.find("**") {
-        let prefix = &pattern[..idx];
-        let suffix = &pattern[idx + 2..];
-        if !value.starts_with(prefix) {
-            return false;
-        }
-        let rest = &value[prefix.len()..];
-        if suffix.is_empty() {
-            return true;
-        }
-        return rest.ends_with(suffix);
-    }
-    // Otherwise: literal `*` matches any non-slash characters.
-    glob_star(pattern, value)
-}
 
-fn glob_star(pattern: &str, value: &str) -> bool {
-    let mut pi = 0usize;
-    let mut vi = 0usize;
-    let p_bytes = pattern.as_bytes();
-    let v_bytes = value.as_bytes();
-    let mut star_p: Option<usize> = None;
-    let mut star_v: usize = 0;
-    while vi < v_bytes.len() {
-        if pi < p_bytes.len() && (p_bytes[pi] == v_bytes[vi] || p_bytes[pi] == b'?') {
-            pi += 1;
-            vi += 1;
-        } else if pi < p_bytes.len() && p_bytes[pi] == b'*' {
-            star_p = Some(pi);
-            star_v = vi;
-            pi += 1;
-        } else if let Some(sp) = star_p {
-            pi = sp + 1;
-            star_v += 1;
-            vi = star_v;
-        } else {
-            return false;
-        }
-    }
-    while pi < p_bytes.len() && p_bytes[pi] == b'*' {
-        pi += 1;
-    }
-    pi == p_bytes.len()
-}
-
-/// Network destination matcher: host suffix match (with optional `:port`).
-fn network_match(pattern: &str, value: &str) -> bool {
-    if let Some((host, port)) = pattern.split_once(':') {
-        if let Some((vhost, vport)) = value.split_once(':') {
-            if let Ok(p) = port.parse::<u16>() {
-                if let Ok(vp) = vport.parse::<u16>() {
-                    return vhost.ends_with(host) && p == vp;
+    let pattern_chars = pattern.chars().collect::<Vec<_>>();
+    let mut tokens = Vec::with_capacity(pattern_chars.len());
+    let mut index = 0usize;
+    while index < pattern_chars.len() {
+        match pattern_chars[index] {
+            '*' if pattern_chars.get(index + 1) == Some(&'*') => {
+                tokens.push(GlobToken::RecursiveStar);
+                index += 2;
+                if pattern_chars.get(index) == Some(&'/') {
+                    index += 1;
                 }
             }
+            '*' => {
+                tokens.push(GlobToken::SegmentStar);
+                index += 1;
+            }
+            '?' => {
+                tokens.push(GlobToken::OneSegmentCharacter);
+                index += 1;
+            }
+            literal => {
+                tokens.push(GlobToken::Literal(literal));
+                index += 1;
+            }
         }
-        // Pattern had a port but value didn't (or vice versa) — fall back to
-        // host-suffix match.
-        return value.ends_with(host);
     }
-    // No port in pattern: match the host part only.
-    let value_host = value.split_once(':').map(|(h, _)| h).unwrap_or(value);
-    value_host.ends_with(pattern)
+
+    let value_chars = value.chars().collect::<Vec<_>>();
+    let mut previous = vec![false; value_chars.len() + 1];
+    previous[0] = true;
+    for token in tokens {
+        let mut current = vec![false; value_chars.len() + 1];
+        match token {
+            GlobToken::SegmentStar | GlobToken::RecursiveStar => current[0] = previous[0],
+            GlobToken::Literal(_) | GlobToken::OneSegmentCharacter => {}
+        }
+        for value_index in 1..=value_chars.len() {
+            let value_character = value_chars[value_index - 1];
+            current[value_index] = match token {
+                GlobToken::Literal(expected) => {
+                    previous[value_index - 1] && expected == value_character
+                }
+                GlobToken::OneSegmentCharacter => {
+                    previous[value_index - 1] && value_character != '/'
+                }
+                GlobToken::SegmentStar => {
+                    previous[value_index] || (value_character != '/' && current[value_index - 1])
+                }
+                GlobToken::RecursiveStar => previous[value_index] || current[value_index - 1],
+            };
+        }
+        previous = current;
+    }
+    previous[value_chars.len()]
+}
+
+/// Network destination matcher: exact host or a dot-delimited subdomain,
+/// with an optional exact port. Raw string suffixes are not host authority:
+/// `example.com` must never authorize `evilexample.com`.
+fn network_match(pattern: &str, value: &str) -> bool {
+    fn destination(value: &str) -> (&str, Option<u16>) {
+        match value.rsplit_once(':') {
+            Some((host, port)) => match port.parse::<u16>() {
+                Ok(port) => (host, Some(port)),
+                Err(_) => (value, None),
+            },
+            None => (value, None),
+        }
+    }
+
+    fn host_matches(pattern: &str, value: &str) -> bool {
+        let pattern = pattern.trim_end_matches('.').to_ascii_lowercase();
+        let value = value.trim_end_matches('.').to_ascii_lowercase();
+        value == pattern
+            || value
+                .strip_suffix(&pattern)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    }
+
+    let (pattern_host, pattern_port) = destination(pattern);
+    let (value_host, value_port) = destination(value);
+    if pattern_port.is_some() && pattern_port != value_port {
+        return false;
+    }
+    host_matches(pattern_host, value_host)
 }
 
 /// Prefix match for secret capability URIs (e.g. `secret://github/*`).
 fn prefix_match(pattern: &str, value: &str) -> bool {
     if let Some(stripped) = pattern.strip_suffix("/*") {
-        return value.starts_with(stripped) || value == stripped;
-    }
-    if let Some(stripped) = pattern.strip_suffix('*') {
-        return value.starts_with(stripped);
+        return value == stripped
+            || value
+                .strip_prefix(stripped)
+                .is_some_and(|suffix| suffix.starts_with('/'));
     }
     value == pattern
 }
@@ -739,6 +809,95 @@ mod tests {
 
     fn issuer() -> TokenIssuer {
         TokenIssuer::new(b"test-secret-key".to_vec(), "kernel-1".to_string(), 3600)
+    }
+
+    #[test]
+    fn workspace_globs_match_task_runtime_segment_and_recursive_semantics() {
+        assert!(glob_match("src/*", "src/main.rs"));
+        assert!(!glob_match("src/*", "src/generated/main.rs"));
+        assert!(!glob_match("*", "src/main.rs"));
+        assert!(glob_match("src/**", "src/generated/main.rs"));
+        assert!(glob_match("**/*.rs", "main.rs"));
+        assert!(glob_match("**/*.rs", "src/generated/main.rs"));
+        assert!(!glob_match("**/*.rs", "src/generated/main.ts"));
+    }
+
+    #[test]
+    fn single_segment_scope_cannot_authorize_a_nested_path() {
+        let issuer = issuer();
+        let token = issuer
+            .mint(
+                TokenBinder::default(),
+                vec![OperationClass::Read],
+                Scope {
+                    workspace_paths: vec!["src/*".to_string()],
+                    network_destinations: Vec::new(),
+                    secret_capabilities: Vec::new(),
+                },
+                None,
+                "single-segment-scope",
+            )
+            .unwrap()
+            .encode()
+            .unwrap();
+        let nested = Scope {
+            workspace_paths: vec!["src/generated/main.rs".to_string()],
+            network_destinations: Vec::new(),
+            secret_capabilities: Vec::new(),
+        };
+        let error = issuer
+            .validate_capability(&token, OperationClass::Read, &nested)
+            .unwrap_err();
+        assert!(matches!(error, AuthzError::ScopeExceeded));
+    }
+
+    #[test]
+    fn deny_unspecified_scope_denies_omitted_kinds_but_default_remains_unrestricted() {
+        let bounded = Scope::deny_unspecified(vec!["src/**".to_string()], Vec::new(), Vec::new());
+        assert!(!scope_contained(
+            &bounded,
+            &Scope {
+                workspace_paths: Vec::new(),
+                network_destinations: vec!["api.example.com:443".to_string()],
+                secret_capabilities: Vec::new(),
+            }
+        ));
+        assert!(!scope_contained(
+            &bounded,
+            &Scope {
+                workspace_paths: Vec::new(),
+                network_destinations: Vec::new(),
+                secret_capabilities: vec!["secret://github/repo".to_string()],
+            }
+        ));
+        assert!(scope_contained(
+            &Scope::default(),
+            &Scope {
+                workspace_paths: Vec::new(),
+                network_destinations: vec!["api.example.com:443".to_string()],
+                secret_capabilities: vec!["secret://github/repo".to_string()],
+            }
+        ));
+    }
+
+    #[test]
+    fn network_and_secret_scopes_require_authority_boundaries() {
+        assert!(network_match("example.com", "example.com:443"));
+        assert!(network_match("example.com:443", "api.example.com:443"));
+        assert!(!network_match("example.com", "evilexample.com:443"));
+        assert!(!network_match("example.com:443", "api.example.com:444"));
+        assert!(prefix_match(
+            "secret://github/*",
+            "secret://github/repo-read"
+        ));
+        assert!(!prefix_match(
+            "secret://github/*",
+            "secret://github-evil/repo-read"
+        ));
+        assert!(!prefix_match(
+            "secret://github*",
+            "secret://github-evil/repo-read"
+        ));
     }
 
     #[test]
