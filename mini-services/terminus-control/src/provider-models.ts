@@ -14,9 +14,9 @@
  * they expected is missing.
  *
  * Before this route existed the only model metadata Terminus had was whatever
- * an operator hand-typed into the gateway configuration, which is why
- * `configuredGatewayModel` still has to assert `reasoning: false` and a
- * 32k context for any model it has not discovered.
+ * an operator hand-typed into the gateway configuration. That input is now
+ * configuration-only: a turn cannot construct a runnable gateway model until
+ * this exact deployment/model pair has been discovered.
  *
  * Egress: the gateway call reuses the existing credential-bound connector (same
  * host, same secret, read-only path). Models.dev is public, but a decision RPC
@@ -87,12 +87,9 @@ export function resetProviderModelsCache(): void {
 /**
  * The discovered record for a configured model id, if one has been seen.
  *
- * Without this the turn path builds its capability snapshot from
- * `configuredGatewayModel`, which can only assert conservative placeholders —
- * `reasoning: false`, a 32k window, zero cost — because the stored
- * configuration holds nothing else. Those values reach the context compiler
- * and the economics ledger, so a discovered record is strictly better than a
- * guess whenever one exists.
+ * A missing record is a fail-closed routing condition. The stored configuration
+ * proves only the operator's selected id and wire protocol; it does not prove
+ * that this deployment exposes the model or what capabilities it has.
  */
 export function describeConfiguredModel(
   deployment: GatewayDeployment,
@@ -160,13 +157,11 @@ export async function discoverProviderModels(input: {
   readonly observedAt: string;
   readonly signal?: AbortSignal | null;
 }): Promise<ProviderModelsResult> {
-  // Both sources are needed for a usable answer, so they are fetched together
-  // and a failure in either fails the discovery rather than returning a
-  // half-described catalogue.
-  const [available, catalog] = await Promise.all([
-    fetchAvailableModels(input),
-    fetchModelsDevCatalog(),
-  ]);
+  // Resolve the public catalogue first. It currently fails closed because no
+  // kernel-owned public-fetch connector is available. Do not start a
+  // credential-bound gateway request that will be discarded on that path.
+  const catalog = await fetchModelsDevCatalog();
+  const available = await fetchAvailableModels(input);
   const discovered = discoverGatewayModels({
     deployment: input.deployment,
     available,

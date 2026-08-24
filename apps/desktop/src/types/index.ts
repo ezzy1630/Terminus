@@ -70,6 +70,11 @@ export interface ProviderConfigurationResponse {
 export type GatewayDeployment = "zen" | "go";
 export type GatewayProtocol = "chat_completions" | "responses" | "messages";
 
+export const GATEWAY_PRIVACY_TERMS_VERSIONS: Record<GatewayDeployment, string> = {
+  zen: "opencode-zen-privacy-v1",
+  go: "opencode-go-privacy-v1",
+};
+
 export interface GatewayProviderConfiguration {
   deployment: GatewayDeployment;
   protocol: GatewayProtocol;
@@ -77,6 +82,8 @@ export interface GatewayProviderConfiguration {
   tools_enabled: boolean;
   free_model: boolean;
   workspace_access: boolean;
+  privacy_terms_admitted: boolean;
+  privacy_terms_version: string | null;
   credential_configured: boolean;
   revision: number;
   updated_by: string;
@@ -91,6 +98,8 @@ export interface GatewayProviderConfigurationUpdate {
   tools_enabled: boolean;
   free_model: boolean;
   workspace_access: boolean;
+  privacy_terms_admitted: boolean;
+  privacy_terms_version: string | null;
   credential?: string;
   expected_revision: number;
 }

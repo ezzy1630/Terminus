@@ -47,6 +47,8 @@ export function useModelRouting(): ModelRouting {
       tools_enabled: current.tools_enabled && model.toolCalling === true,
       free_model: model.free ?? false,
       workspace_access: current.workspace_access,
+      privacy_terms_admitted: current.privacy_terms_admitted,
+      privacy_terms_version: current.privacy_terms_version,
       expected_revision: revision,
     }, { idempotencyKey: createIdempotencyKey(`gateway-model:${model.id}:${revision}`) });
   }, []);

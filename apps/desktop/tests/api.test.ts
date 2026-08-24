@@ -307,6 +307,8 @@ describe("TerminusApiClient — URL + headers (offline)", () => {
           tools_enabled: submitted.tools_enabled ?? true,
           free_model: submitted.free_model ?? true,
           workspace_access: submitted.workspace_access ?? false,
+          privacy_terms_admitted: submitted.privacy_terms_admitted ?? false,
+          privacy_terms_version: submitted.privacy_terms_version ?? null,
           credential_configured: true,
           revision: 1,
           updated_by: "control",
@@ -325,6 +327,8 @@ describe("TerminusApiClient — URL + headers (offline)", () => {
       tools_enabled: true,
       free_model: true,
       workspace_access: false,
+      privacy_terms_admitted: false,
+      privacy_terms_version: null,
       credential: "private-key-value",
       expected_revision: 0,
     }, { idempotencyKey: "gateway:create:1" });

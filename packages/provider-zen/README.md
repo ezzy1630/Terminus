@@ -21,8 +21,8 @@ destination-bound connector. Unknown models and protocols fail closed.
 Discovered profiles allow `public` content only. The control-plane setting can
 admit `workspace` content only when the operator explicitly enables it and
 persists admission of the provider's current privacy/retention terms. A
-hand-entered model id remains a conservative fallback; it does not prove that
-the gateway exposes that model, protocol, capability set, or privacy terms.
+hand-entered model id is configuration input only: it cannot construct a
+runnable renderer until an exact admitted catalogue record exists.
 
 ## Runtime wiring
 

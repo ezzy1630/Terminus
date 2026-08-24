@@ -5141,6 +5141,7 @@ const routes: Route[] = [
         freeModel: input.free_model,
         workspaceAccess: input.workspace_access,
         privacyTermsAdmitted: input.privacy_terms_admitted,
+        privacyTermsVersion: input.privacy_terms_version,
         updatedBy: SERVER_PRINCIPAL,
         updatedAt: now,
       };
@@ -9236,6 +9237,7 @@ async function agentLoop(turnId: string): Promise<void> {
           gatewayProviderConfiguration?.revision ?? 0,
           gatewayProviderConfiguration?.workspaceAccess ?? false,
           gatewayProviderConfiguration?.privacyTermsAdmitted ?? false,
+          gatewayProviderConfiguration?.privacyTermsVersion ?? null,
         );
     const selectedModel: ModelCapabilitySnapshot = gatewayModel === null
       ? localModel

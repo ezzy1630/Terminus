@@ -7,5 +7,8 @@ ALTER TABLE gateway_provider_configurations
 -- Existing workspace-enabled rows predate the admission bit. Disable that
 -- capability until an operator explicitly re-saves the configuration.
 UPDATE gateway_provider_configurations
-SET workspace_access = 0
+SET workspace_access = 0,
+    revision = revision + 1,
+    updated_at = CURRENT_TIMESTAMP,
+    updated_by = 'migration:0008_gateway_privacy_admission'
 WHERE workspace_access = 1 AND privacy_terms_admitted = 0;

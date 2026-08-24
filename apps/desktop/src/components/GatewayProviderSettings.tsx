@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { KeyRound } from "lucide-react";
 import { api, createIdempotencyKey } from "../lib/api";
+import { GATEWAY_PRIVACY_TERMS_VERSIONS } from "../types";
 import type {
   GatewayDeployment,
   GatewayProtocol,
@@ -21,6 +22,8 @@ interface GatewayDraft {
   readonly toolsEnabled: boolean;
   readonly freeModel: boolean;
   readonly workspaceAccess: boolean;
+  readonly privacyTermsAdmitted: boolean;
+  readonly privacyTermsVersion: string | null;
   readonly credential: string;
   readonly credentialConfigured: boolean;
   readonly revision: number;
@@ -33,6 +36,8 @@ const EMPTY_DRAFT: GatewayDraft = {
   toolsEnabled: true,
   freeModel: true,
   workspaceAccess: false,
+  privacyTermsAdmitted: false,
+  privacyTermsVersion: null,
   credential: "",
   credentialConfigured: false,
   revision: 0,
@@ -69,6 +74,14 @@ export function GatewayProviderSettings(): JSX.Element {
       setError("OpenCode key is required the first time you connect this account.");
       return;
     }
+    const currentTermsVersion = GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment];
+    if (draft.workspaceAccess && (
+      !draft.privacyTermsAdmitted
+      || draft.privacyTermsVersion !== currentTermsVersion
+    )) {
+      setError("Review and admit the current provider privacy terms before allowing workspace content.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -79,6 +92,8 @@ export function GatewayProviderSettings(): JSX.Element {
         tools_enabled: draft.toolsEnabled,
         free_model: draft.freeModel,
         workspace_access: draft.workspaceAccess,
+        privacy_terms_admitted: draft.privacyTermsAdmitted,
+        privacy_terms_version: draft.privacyTermsVersion,
         ...(draft.credential.length > 0 ? { credential: draft.credential } : {}),
         expected_revision: draft.revision,
       }, { idempotencyKey: createIdempotencyKey("gateway-provider-config") });
@@ -142,6 +157,8 @@ export function GatewayProviderSettings(): JSX.Element {
               credential: "",
               credentialConfigured: value === draft.deployment && draft.credentialConfigured,
               freeModel: value === "zen",
+              privacyTermsAdmitted: false,
+              privacyTermsVersion: null,
             })}
           />
         </label>
@@ -197,6 +214,30 @@ export function GatewayProviderSettings(): JSX.Element {
             />
           </div>
         )}
+        <div className="border-b border-subtle pb-2.5">
+          <div>
+            <div className="ui-label text-secondary">Provider privacy terms</div>
+            <p className="ui-meta mt-0.5">
+              Admit the current {draft.deployment === "zen" ? "Zen" : "Go"} terms before repository code or tool results can leave Terminus.
+            </p>
+          </div>
+          <label className="mt-2 flex items-start gap-2 text-xs text-secondary">
+            <input
+              type="checkbox"
+              checked={draft.privacyTermsAdmitted && draft.privacyTermsVersion === GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment]}
+              onChange={(event) => {
+                const admitted = event.target.checked;
+                setDraft({
+                  ...draft,
+                  privacyTermsAdmitted: admitted,
+                  privacyTermsVersion: admitted ? GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment] : null,
+                  workspaceAccess: admitted ? draft.workspaceAccess : false,
+                });
+              }}
+            />
+            <span>I reviewed the current provider privacy and retention terms ({GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment]}).</span>
+          </label>
+        </div>
         <div className="flex items-start justify-between gap-4 border-b border-subtle pb-2.5">
           <div>
             <div className="ui-label text-secondary">Allow workspace content</div>
@@ -204,9 +245,11 @@ export function GatewayProviderSettings(): JSX.Element {
           </div>
           <Switch
             checked={draft.workspaceAccess}
+            disabled={!draft.privacyTermsAdmitted || draft.privacyTermsVersion !== GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment]}
             onCheckedChange={(workspaceAccess) => setDraft({ ...draft, workspaceAccess })}
             label="Allow OpenCode models to receive workspace content"
           />
+        </div>
         </div>
         {error ? <p className="text-error text-xs" role="alert">{error}</p> : null}
         <div className="flex gap-2">
@@ -232,6 +275,8 @@ function draftFromConfiguration(configuration: GatewayProviderConfiguration): Ga
     toolsEnabled: configuration.tools_enabled,
     freeModel: configuration.free_model,
     workspaceAccess: configuration.workspace_access,
+    privacyTermsAdmitted: configuration.privacy_terms_admitted,
+    privacyTermsVersion: configuration.privacy_terms_version,
     credential: "",
     credentialConfigured: configuration.credential_configured,
     revision: configuration.revision,

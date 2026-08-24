@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   describeConfiguredModel,
+  discoverProviderModels,
   fetchAvailableModels,
   fetchModelsDevCatalog,
   providerModelsWire,
@@ -44,6 +45,24 @@ describe("provider model discovery", () => {
 
   test("fails closed until the kernel exposes a bounded public catalogue fetch", async () => {
     await expect(fetchModelsDevCatalog()).rejects.toThrow(/kernel-owned bounded public-fetch connector/);
+  });
+
+  test("does not contact the credential-bound gateway when catalogue discovery is unavailable", async () => {
+    let contacted = false;
+    const client = {
+      // eslint-disable-next-line require-yield
+      async *stream(): AsyncIterable<Uint8Array> {
+        contacted = true;
+        yield new TextEncoder().encode("{}");
+      },
+    };
+    await expect(discoverProviderModels({
+      client,
+      deployment: "zen",
+      secretUri: "secret://opencode/zen",
+      observedAt: "2026-08-24T00:00:00.000Z",
+    })).rejects.toThrow(/kernel-owned bounded public-fetch connector/);
+    expect(contacted).toBe(false);
   });
 
   test("reports an empty inventory with its reason rather than failing the request", () => {
@@ -127,6 +146,7 @@ const configuredRow = {
   freeModel: false,
   workspaceAccess: false,
   privacyTermsAdmitted: false,
+  privacyTermsVersion: null,
   revision: 3,
   updatedBy: "control",
   createdAt: new Date("2026-08-24T00:00:00Z"),
@@ -136,14 +156,13 @@ const configuredRow = {
 const observedAt = "2026-08-24T01:00:00.000Z" as Rfc3339Timestamp;
 
 describe("configured gateway model capabilities", () => {
-  test("asserts conservative placeholders when the model was never discovered", () => {
+  test("fails closed when the model was never discovered", () => {
     resetProviderModelsCache();
-    const model = configuredGatewayModel(configuredRow, observedAt, describeConfiguredModel("zen", "grok-code"));
-    // Nothing in the stored configuration describes the model, so the turn
-    // path must not claim capabilities it cannot know.
-    expect(model.reasoning).toBe(false);
-    expect(model.contextTokens).toBe(32_768);
-    expect(model.inputMicrosPerMillion).toBe(0);
+    expect(() => configuredGatewayModel(
+      configuredRow,
+      observedAt,
+      describeConfiguredModel("zen", "grok-code"),
+    )).toThrow("has no admitted discovery record");
   });
 
   test("prefers discovered capabilities over placeholders", () => {
@@ -181,12 +200,10 @@ describe("configured gateway model capabilities", () => {
       { deployment: "zen", observedAt: "2026-08-24T00:00:00.000Z", models: [discoveredGrok], rejected: [] },
       Date.now(),
     );
-    const model = configuredGatewayModel(
+    expect(() => configuredGatewayModel(
       { ...configuredRow, model: "something-else" },
       observedAt,
       describeConfiguredModel("zen", "something-else"),
-    );
-    expect(model.reasoning).toBe(false);
-    expect(model.contextTokens).toBe(32_768);
+    )).toThrow("has no admitted discovery record");
   });
 });

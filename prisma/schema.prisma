@@ -851,6 +851,7 @@ model GatewayProviderConfiguration {
   freeModel             Boolean  @default(false) @map("free_model")
   workspaceAccess       Boolean  @default(false) @map("workspace_access")
   privacyTermsAdmitted  Boolean  @default(false) @map("privacy_terms_admitted")
+  privacyTermsVersion   String?  @map("privacy_terms_version")
   revision              Int      @default(1)
   updatedBy             String   @map("updated_by")
   createdAt             DateTime @default(now()) @map("created_at")

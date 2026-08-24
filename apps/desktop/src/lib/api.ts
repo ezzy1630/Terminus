@@ -406,6 +406,8 @@ function decodeGatewayProviderConfigurationResponse(
     tools_enabled: responseBoolean(row.tools_enabled, "gateway provider configuration.tools_enabled"),
     free_model: responseBoolean(row.free_model, "gateway provider configuration.free_model"),
     workspace_access: responseBoolean(row.workspace_access, "gateway provider configuration.workspace_access"),
+    privacy_terms_admitted: responseBoolean(row.privacy_terms_admitted, "gateway provider configuration.privacy_terms_admitted"),
+    privacy_terms_version: responseNullableString(row.privacy_terms_version, "gateway provider configuration.privacy_terms_version"),
     credential_configured: responseBoolean(row.credential_configured, "gateway provider configuration.credential_configured"),
     revision: responseNonNegativeInteger(row.revision, "gateway provider configuration.revision"),
     updated_by: responseString(row.updated_by, "gateway provider configuration.updated_by"),
