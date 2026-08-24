@@ -9,10 +9,11 @@ implementation from evidence still required for a stable product claim.
 **Candidate branch:** `codex/terminus-standalone-harness`
 **Base revision:** `299e7517e4836a7ecf11f4925385f013704a1026`
 **Candidate identity:** generated contracts are committed in `2080b0d`; the
-follow-on slices, Cubic review fixes, and audited dependency refresh are
-committed on this branch before hosted-CI evidence is collected. The latest
-codegen stabilization is `f0a7932`; the latest kernel, desktop, and release
-fixes are `c3a3c59`, `ecafd9a`, and `ee140ca`.
+standalone-retirement, artifact-owner, Phase 9/10, desktop, CI/release, and
+audit slices are separated into logical commits on this branch. The latest
+implementation commit is `dc5a23f`, following the Cubic fixes in `ab9a5ac`,
+`16472f5`, `030f527`, `defc129`, `30068f6`, and `5cede5c`. Hosted run
+`32713205642` exercised the exact `dc5a23f` source revision.
 **Evidence rule:** implemented source, passing local checks, packaged-surface
 inspection, and release evidence are distinct states.
 
@@ -99,14 +100,18 @@ intentionally out of scope for this candidate, per the operator decision.
 ## Current validation boundary
 
 The local verification matrix is green for `bun audit --production`,
-`just check-all`, `just e2e`,
+`just check-all` (463 TypeScript tests, 229 Python tests, and the Rust
+workspace/unit/integration suites), `just e2e`,
 `just fault-injection`, `just fuzz-smoke`, `just release-drills`,
 `just eval-smoke`, `just eval-full`, `just eval-release`, `just canary`, and a
-60-second soak after the Cubic fixes. `just sbom-verify` passed with the repository's fallback SPDX
-generator because `syft` is not installed. The strict `just release-check`
-still rejects fixture-tier evaluation as stable release evidence, and the
-full 24-hour soak, hosted supported-platform evidence, and signed provenance
-remain unverified.
+60-second soak after the Cubic fixes. `just sbom-verify` passed with the
+repository's fallback SPDX generator because `syft` is not installed. Hosted
+run `32713205642` passed the supported Linux, macOS, and Windows jobs, security,
+integration, public-path, M12 evidence, standalone, architecture, protobuf,
+and codegen checks; every job executed `actions/checkout`. Eval smoke was
+skipped because the repository has no `agent-behavior` label. The strict
+`just release-check` still rejects fixture-tier evaluation as stable release
+evidence, and the full 24-hour soak and signed provenance remain unverified.
 
 ## Remaining program gates
 

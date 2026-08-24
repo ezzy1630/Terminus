@@ -3,7 +3,7 @@
 This records the standalone candidate only. Release claims stay bounded by
 the evidence listed in `Terminus — Research/implementation-reconciliation.md`.
 
-## 2026-08-23 — candidate reconciliation
+## 2026-08-24 — candidate reconciliation
 
 ### Done locally
 
@@ -19,16 +19,20 @@ the evidence listed in `Terminus — Research/implementation-reconciliation.md`.
   constraints, complete artifact spill capture, task evidence receipts, safe
   desktop routing/state transitions, ACP/Zed configuration, release probes, and
   exact release-manifest binding.
-- `just check-all` is green: Rust workspace/unit/integration, 462 TypeScript
+- `just check-all` is green: Rust workspace/unit/integration, 463 TypeScript
   tests, 229 Python tests, boundary/standalone checks, codegen, lint/typecheck,
   audit, licenses, and sources. Focused provider, desktop, migration, release,
   artifact, and process suites also pass.
-- Anonymous OpenCode Zen reachability passed with
-  `nemotron-3.5-lightning-free`; no supported Zen credential exists, so this is
-  not kernel-mediated live-provider evidence. Fixture evaluation, fallback SPDX
-  SBOM, local isolation/recovery, fault/fuzz/release drills, E2E, and 60-second
-  soak passed. Full 24-hour soak, held-out evidence, signed provenance, and
-  owner approvals remain open.
+- Anonymous OpenCode Zen reachability passed with the free
+  `nemotron-3.5-lightning-free` model; an invalid credential returned 401. No
+  supported Zen credential exists, so this is not kernel-mediated live-provider
+  evidence. Fixture evaluation, fallback SPDX SBOM, local isolation/recovery,
+  fault/fuzz/release drills, E2E, and 60-second soak passed. Full 24-hour soak,
+  held-out evidence, signed provenance, and owner approvals remain open.
+- All Cubic review runs and inline findings were audited. The final valid HTTPS
+  budget findings were fixed in `dc5a23f`; the exact candidate CI run
+  `32713205642` passed every required job, with only label-gated eval smoke
+  skipped.
 
 ### Cleanup decisions
 
@@ -56,9 +60,15 @@ the evidence listed in `Terminus — Research/implementation-reconciliation.md`.
 - `c3a3c59` — close Cubic kernel/security boundary findings
 - `ecafd9a` — surface task evidence and safe routing state
 - `ee140ca` — harden release evidence and ACP boundaries
+- `ab9a5ac`, `16472f5`, `030f527`, `defc129`, `30068f6`, `5cede5c` — close
+  follow-up Cubic contract, kernel, runbook, fixture, and budget findings
+- `dc5a23f` — classify HTTPS pre-dispatch failures correctly and account for
+  explicit request defaults
 
 ### Remaining handoff
 
-Push the feature branch, wait for every hosted job to complete, merge it into
-`main`, push `main`, read back main CI, then close the superseded Dependabot
-PRs with an explanation and verify none remain open.
+The feature branch is pushed and its hosted CI is green. Merge it into `main`,
+push `main`, read back main CI, then close the superseded Dependabot PRs with
+an explanation and verify none remain open. The seven program gates in the
+reconciliation ledger remain deliberately open where their external evidence
+is missing.
