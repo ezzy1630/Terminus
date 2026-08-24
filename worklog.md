@@ -72,6 +72,8 @@ the evidence listed in `Terminus — Research/implementation-reconciliation.md`.
 The feature branch was merged into `main` at `885e426` and pushed. Main CI
 `32715959418` is green on `ef23012`; the hosted checkout fix executed across
 the supported jobs. Dependabot PRs #1–#9 were closed as stale/superseded with
-regeneration instructions, and no Dependabot PRs remain open. The seven
-program gates in the reconciliation ledger remain deliberately open where
-their external evidence is missing.
+regeneration instructions; regenerated PRs #11–#13 were closed after their
+red CI results showed frozen-lockfile or compatibility failures. No
+Dependabot PRs remain open at handoff. The seven program gates in the
+reconciliation ledger remain deliberately open where their external evidence
+is missing.
