@@ -1,0 +1,348 @@
+{
+  "openai": {
+    "id": "openai",
+    "name": "OpenAI",
+    "api": "https://api.openai.com/v1",
+    "npm": "@ai-sdk/openai",
+    "models": {
+      "gpt-4o": {
+        "id": "gpt-4o",
+        "name": "GPT-4o",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": false,
+        "modalities": {
+          "input": ["text", "image"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "cost": {
+          "input": 2.5,
+          "output": 10.0,
+          "cache_read": 1.25
+        }
+      },
+      "gpt-4o-mini": {
+        "id": "gpt-4o-mini",
+        "name": "GPT-4o mini",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": false,
+        "modalities": {
+          "input": ["text", "image"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "cost": {
+          "input": 0.15,
+          "output": 0.6,
+          "cache_read": 0.075
+        }
+      },
+      "o1": {
+        "id": "o1",
+        "name": "o1",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": true,
+        "modalities": {
+          "input": ["text", "image"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 200000,
+          "output": 100000
+        },
+        "cost": {
+          "input": 15.0,
+          "output": 60.0,
+          "cache_read": 7.5
+        }
+      },
+      "o3-mini": {
+        "id": "o3-mini",
+        "name": "o3-mini",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": true,
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 200000,
+          "output": 100000
+        },
+        "cost": {
+          "input": 1.1,
+          "output": 4.4,
+          "cache_read": 0.55
+        }
+      }
+    }
+  },
+  "anthropic": {
+    "id": "anthropic",
+    "name": "Anthropic",
+    "api": "https://api.anthropic.com/v1",
+    "npm": "@ai-sdk/anthropic",
+    "models": {
+      "claude-3-5-sonnet-20241022": {
+        "id": "claude-3-5-sonnet-20241022",
+        "name": "Claude 3.5 Sonnet",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": false,
+        "modalities": {
+          "input": ["text", "image"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 200000,
+          "output": 8192
+        },
+        "cost": {
+          "input": 3.0,
+          "output": 15.0,
+          "cache_read": 0.3
+        }
+      },
+      "claude-3-5-haiku-20241022": {
+        "id": "claude-3-5-haiku-20241022",
+        "name": "Claude 3.5 Haiku",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": false,
+        "modalities": {
+          "input": ["text", "image"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 200000,
+          "output": 8192
+        },
+        "cost": {
+          "input": 0.8,
+          "output": 4.0,
+          "cache_read": 0.08
+        }
+      },
+      "claude-3-opus-20240229": {
+        "id": "claude-3-opus-20240229",
+        "name": "Claude 3 Opus",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": false,
+        "modalities": {
+          "input": ["text", "image"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 200000,
+          "output": 4096
+        },
+        "cost": {
+          "input": 15.0,
+          "output": 75.0,
+          "cache_read": 1.5
+        }
+      }
+    }
+  },
+  "ollama": {
+    "id": "ollama",
+    "name": "Ollama",
+    "api": "http://localhost:11434/v1",
+    "npm": "@ai-sdk/openai-compatible",
+    "models": {
+      "llama3.3:70b": {
+        "id": "llama3.3:70b",
+        "name": "Llama 3.3 70B",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": false,
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 128000,
+          "output": 8192
+        },
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cache_read": 0
+        }
+      },
+      "qwen2.5-coder:32b": {
+        "id": "qwen2.5-coder:32b",
+        "name": "Qwen 2.5 Coder 32B",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": false,
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 32768,
+          "output": 8192
+        },
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cache_read": 0
+        }
+      },
+      "deepseek-r1:70b": {
+        "id": "deepseek-r1:70b",
+        "name": "DeepSeek R1 70B",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": true,
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 65536,
+          "output": 8192
+        },
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cache_read": 0
+        }
+      }
+    }
+  },
+  "opencode": {
+    "id": "opencode",
+    "name": "OpenCode Zen",
+    "api": "https://opencode.ai/zen/v1",
+    "npm": "@ai-sdk/openai-compatible",
+    "models": {
+      "grok-code": {
+        "id": "grok-code",
+        "name": "Grok Code",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": true,
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 256000,
+          "output": 64000
+        },
+        "cost": {
+          "input": 3.0,
+          "output": 15.0,
+          "cache_read": 0.75
+        }
+      },
+      "free-chat": {
+        "id": "free-chat",
+        "name": "Free Chat",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": false,
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 100000,
+          "output": 8000
+        },
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cache_read": 0
+        }
+      },
+      "paid-responses": {
+        "id": "paid-responses",
+        "name": "Paid Responses",
+        "provider": {
+          "npm": "@ai-sdk/openai"
+        },
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": false,
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 200000,
+          "output": 32000
+        },
+        "cost": {
+          "input": 1.0,
+          "output": 4.0,
+          "cache_read": 0.1
+        }
+      },
+      "messages-model": {
+        "id": "messages-model",
+        "name": "Messages Model",
+        "provider": {
+          "npm": "@ai-sdk/anthropic"
+        },
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": false,
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 128000,
+          "output": 16000
+        },
+        "cost": {
+          "input": 0.3,
+          "output": 1.2,
+          "cache_read": 0.03
+        }
+      }
+    }
+  },
+  "opencode-go": {
+    "id": "opencode-go",
+    "name": "OpenCode Go",
+    "api": "https://opencode.ai/zen/go/v1",
+    "npm": "@ai-sdk/openai-compatible",
+    "models": {
+      "grok-code": {
+        "id": "grok-code",
+        "name": "Grok Code",
+        "tool_call": true,
+        "structured_output": true,
+        "reasoning": true,
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "limit": {
+          "context": 256000,
+          "output": 64000
+        },
+        "cost": {
+          "input": 3.0,
+          "output": 15.0,
+          "cache_read": 0.75
+        }
+      }
+    }
+  }
+}

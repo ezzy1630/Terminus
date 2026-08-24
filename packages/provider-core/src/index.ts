@@ -776,6 +776,7 @@ export type {
 };
 
 export * from "./model_profile.js";
+export * from "./catalog/index.js";
 export * from "./conformance/types.js";
 export * from "./conformance/episodes.js";
 export * from "./conformance/validator.js";
