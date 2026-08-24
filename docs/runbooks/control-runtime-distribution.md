@@ -18,11 +18,18 @@ tar -xzf terminus-control-linux-amd64.tar.gz
 export DATABASE_URL=file:/var/lib/terminus/control.db
 export TERMINUS_KERNEL_GRPC_SOCKET=/run/terminus/kernel.sock
 ./terminus-control/bin/terminus-control migrate
-# The deployment secret manager injects both bearer values into the service
+# Provision the standalone kernel separately. The kernel process, not the
+# control process, must enable bootstrap with this exact secret. The control
+# process receives the same token below to authenticate its UDS bootstrap.
+secret-manager exec \
+  --env TERMINUS_KERNEL_CONTROL_BOOTSTRAP=1 \
+  --env TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN=terminus/kernel/control-bootstrap \
+  -- ./terminus-kernel ...
+
+# The deployment secret manager injects both bearer values into the control
 # process; their values never appear in shell history or release artifacts.
 secret-manager exec \
   --env TERMINUS_CONTROL_TOKEN=terminus/control-token \
-  --env TERMINUS_KERNEL_CONTROL_BOOTSTRAP=1 \
   --env TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN=terminus/kernel/control-bootstrap \
   -- ./terminus-control/bin/terminus-control serve
 ```
@@ -33,9 +40,12 @@ individual `BEGIN IMMEDIATE` transactions. A mismatch or failed integrity check
 stops startup. Back up the SQLite database before applying an irreversible
 release migration.
 
-`serve` requires `TERMINUS_CONTROL_TOKEN` and `TERMINUS_KERNEL_GRPC_SOCKET`. The
-kernel must expose its owner-restricted UDS and standalone control bootstrap as
-defined by ADR-0039. The control process forces Prisma to load the query engine
+`serve` requires `TERMINUS_CONTROL_TOKEN`,
+`TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN`, and
+`TERMINUS_KERNEL_GRPC_SOCKET`. The separately provisioned kernel must be
+running with `TERMINUS_KERNEL_CONTROL_BOOTSTRAP=1` and the identical
+`TERMINUS_KERNEL_CONTROL_BOOTSTRAP_TOKEN`, and must expose its owner-restricted
+UDS as defined by ADR-0039. The control process forces Prisma to load the query engine
 inside the same signed package; an ambient `PRISMA_QUERY_ENGINE_LIBRARY` cannot
 redirect it.
 

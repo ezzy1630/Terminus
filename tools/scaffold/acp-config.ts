@@ -42,6 +42,33 @@ const vscodeConfig = {
   "terminus.bridge.autoSyncContext": true,
 };
 
+function assertJsoncValues(value: unknown, path: string): void {
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    throw new Error(`[acp-config] ${path} contains a non-finite number`);
+  }
+  if (value === undefined) {
+    throw new Error(`[acp-config] ${path} contains an undefined value`);
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertJsoncValues(item, `${path}[${index}]`));
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      assertJsoncValues(item, `${path}.${key}`);
+    }
+  }
+}
+
+function parseSettingsJsonc(source: string, path: string): Record<string, unknown> {
+  const parsed = Bun.JSON5.parse(source) as unknown;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`[acp-config] refusing to overwrite ${path}: expected a JSONC object`);
+  }
+  assertJsoncValues(parsed, path);
+  return parsed as Record<string, unknown>;
+}
+
 function main(): void {
   const args = process.argv.slice(2);
   const writeVscode = args.includes("--write-vscode");
@@ -75,7 +102,7 @@ function main(): void {
         // commas while still rejecting malformed content. The output is
         // canonical JSON, so existing comments are not silently preserved as
         // stale configuration text.
-        current = Bun.JSON5.parse(readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+        current = parseSettingsJsonc(readFileSync(settingsPath, "utf8"), settingsPath);
       } catch (error: unknown) {
         throw new Error(
           `[acp-config] refusing to overwrite ${settingsPath}: expected valid JSONC`,

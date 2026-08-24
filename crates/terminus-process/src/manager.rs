@@ -608,11 +608,7 @@ async fn capture_stream<R: tokio::io::AsyncRead + Unpin>(
         }
     }
     if read_failed {
-        spill_file.take();
-        if let Some(path) = spill_path.take() {
-            let _ = tokio::fs::remove_file(path).await;
-        }
-        return None;
+        tracing::warn!(stream = ?kind, cursor, "process output read failed; preserving partial artifact");
     }
     if let Some(path) = spill_path {
         if let Some(mut file) = spill_file {

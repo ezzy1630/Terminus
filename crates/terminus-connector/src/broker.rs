@@ -331,12 +331,14 @@ impl ConnectorBroker {
             path: op.path.clone(),
             destination: format!("{}://{}:{}", op.scheme, op.host, op.port),
             request_sha256: hash_operation(op),
+            request_bytes: op.body.len(),
             status_code,
             response_sha256: if response_bytes.is_empty() {
                 None
             } else {
                 Some(hash_bytes(&scrubbed))
             },
+            response_bytes: scrubbed.len(),
             response_redactions: redactions,
             outcome,
         };
@@ -347,6 +349,10 @@ impl ConnectorBroker {
                 grant_id = %receipt.grant_id,
                 effect_id = %receipt.effect_id,
                 task_id = %receipt.task_id,
+                connector_id = %receipt.connector_id,
+                destination = %receipt.destination,
+                request_bytes = receipt.request_bytes,
+                response_bytes = receipt.response_bytes,
                 outcome = ?receipt.outcome,
                 consumed_at = consumed.consumed_at_unix,
                 "connector dispatch uncertain: {e}"
@@ -357,6 +363,10 @@ impl ConnectorBroker {
                 grant_id = %receipt.grant_id,
                 effect_id = %receipt.effect_id,
                 task_id = %receipt.task_id,
+                connector_id = %receipt.connector_id,
+                destination = %receipt.destination,
+                request_bytes = receipt.request_bytes,
+                response_bytes = receipt.response_bytes,
                 status = ?receipt.status_code,
                 outcome = ?receipt.outcome,
                 "connector dispatch recorded"
@@ -527,7 +537,7 @@ async fn dispatch_http(
     request.extend_from_slice(b"\r\n");
     request.extend_from_slice(&op.body);
 
-    egress.relay(request.len() as u64)?;
+    reserve_exact(egress, request.len())?;
     stream.write_all(&request).await?;
 
     // Read the bounded response head + body.
@@ -538,7 +548,7 @@ async fn dispatch_http(
         if n == 0 {
             break;
         }
-        egress.relay(n as u64)?;
+        reserve_exact(egress, n)?;
         raw.extend_from_slice(&buf[..n]);
         if raw.len() > max_response_bytes {
             return Err(ConnectorError::ResponseTooLarge {

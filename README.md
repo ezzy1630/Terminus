@@ -356,7 +356,7 @@ End-to-end tests verify: operation-class enforcement, path-scope enforcement, ne
 ### Sandbox backends (SPEC §13.4, §36.5-§36.8)
 
 - **Linux**: Bubblewrap detection + real `bwrap` argv construction (`--unshare-all`, `--ro-bind`, `--proc`, `--dev`, `--die-with-parent`, `--new-session`, `--cap-drop ALL`). Reports `Enforced` when bwrap is available; reports `Degraded` when it is unavailable, while profiles that require namespace isolation are refused as `Unsupported`.
-- **macOS**: Seatbelt (`sandbox-exec`) backend translating `SandboxProfile` into deny-by-default Scheme syntax with per-subpath allowances (ADR-0035 §4); reports `Enforced` when functional execution succeeds or `Degraded` when disabled/unsupported, while profiles that require unavailable controls are refused.
+- **macOS**: Seatbelt (`sandbox-exec`) backend translating `SandboxProfile` into deny-by-default Scheme syntax with per-subpath allowances (ADR-0035 §4); reports `Enforced` when functional execution succeeds or `Unsupported` when disabled/unsupported, while profiles that require unavailable controls are refused.
 - **Windows**: AppContainer/Job Object detection. Reports `Degraded` with "CreateProcess+Job Object wiring not implemented" note.
 - **Container/micro-VM**: Stub for gVisor/Firecracker backends.
 

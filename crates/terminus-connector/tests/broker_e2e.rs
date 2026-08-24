@@ -227,6 +227,8 @@ async fn happy_path_injects_credential_and_returns_receipt() {
     assert_eq!(receipt.status_code, Some(201));
     assert_eq!(receipt.task_id, "task-1");
     assert_eq!(receipt.effect_id, "eff-1");
+    assert_eq!(receipt.request_bytes, op.body.len());
+    assert_eq!(receipt.response_bytes, response.body.len());
 
     let sent = String::from_utf8_lossy(&request_bytes);
     // Credential injected into the exact bound request...
