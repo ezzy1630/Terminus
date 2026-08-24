@@ -36,6 +36,10 @@ merge. Keep release claims bounded by exact evidence.
   `just eval-release`, `just canary`, and a 60-second soak. `just sbom-verify`
   passed with fallback SPDX because `syft` is unavailable. The strict release
   evaluator still rejects fixture-tier evidence as stable-release proof.
+- Refreshed the desktop/root dependency graph with the compatible Vite,
+  Vitest, Electron Builder, ESLint, and test-library updates. Added the
+  required safe transitive floors for js-yaml, minimatch, esbuild, and undici;
+  `bun audit --production` now reports no vulnerabilities.
 
 ### Cleanup decisions
 
@@ -65,6 +69,9 @@ components remain explicitly fail-closed in `maturity.yaml`.
 - `2f81709` — ship the standalone desktop operator cockpit
 - `7074109` — add hosted checks and release evidence gates
 - `292bd51` — refresh generated maturity documentation
+- `6aa5dfa` — record the final codegen refresh
+- `9bca3d2` — harden provider inputs and error responses
+- `ee6fef8` — refresh the audited workspace dependency graph
 
 ### Handoff
 
