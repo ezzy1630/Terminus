@@ -2,7 +2,7 @@
 
 ## When to use
 
-Use this runbook when the kernel reports that the requested sandbox backend cannot be enforced (e.g., Bubblewrap not installed on Linux, macOS/Windows backend unavailable, container runtime unavailable). Per SPEC §26.3 #11, Terminus MUST fail closed or require explicit user selection of a named degraded profile.
+Use this runbook when the kernel reports that the requested sandbox backend cannot be enforced (e.g., Bubblewrap not installed on Linux, macOS backend unavailable, Windows backend degraded, container runtime unavailable). Per SPEC §26.3 #11, Terminus MUST fail closed or require explicit user selection of a named degraded profile.
 
 ## Symptoms
 

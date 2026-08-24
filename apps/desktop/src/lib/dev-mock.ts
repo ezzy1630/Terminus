@@ -229,7 +229,7 @@ export function setupDevMock(): void {
     // immutable artifact or verifier, so leave its claims and receipts
     // explicitly unadmitted.
     status: "PROPOSED",
-    evidenceIds: [`evidence-${criterion.claimId}`],
+    evidenceIds: [],
     waivedRationale: null,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
