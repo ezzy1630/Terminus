@@ -181,9 +181,7 @@ fn scan_directory(base: &std::path::Path) -> std::io::Result<DirectoryScan> {
         // Stream-hash small files in fixed-size chunks instead of loading
         // them whole: a multi-gigabyte file used to be fully resident before
         // hashing even started.
-        let hash = if kind == "file"
-            && size <= MAX_HASH_FILE_BYTES
-        {
+        let hash = if kind == "file" && size <= MAX_HASH_FILE_BYTES {
             hash_file_streaming(entry.path()).unwrap_or_default()
         } else {
             String::new()

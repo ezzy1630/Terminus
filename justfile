@@ -91,6 +91,8 @@ nextest:
 # Lint + test the kernel HTTP mini-service, which intentionally sits outside
 # the root Cargo workspace (SPEC §42.5 boundary). The root `cargo clippy
 # --workspace` does not cover it, so it is checked explicitly here and in CI.
+# cargo-deny runs WITHOUT the advisories DB update so this stays usable
+# offline; nightly CI scans advisories for this workspace.
 kernel-mini-check:
     #!/usr/bin/env bash
     set -eu
@@ -98,6 +100,7 @@ kernel-mini-check:
     cargo fmt -- --check
     cargo clippy --all-targets
     cargo test
+    cargo deny check bans licenses sources
 
 # Architecture boundary checks (SPEC §42.5).
 boundary-check:

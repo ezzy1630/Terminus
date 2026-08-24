@@ -28,9 +28,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::{cors_layer, require_bearer, require_capability_for_path};
-use crate::state::{
-    AppState, EXITED_PROCESS_RETENTION, PROCESS_JANITOR_INTERVAL,
-};
+use crate::state::{AppState, EXITED_PROCESS_RETENTION, PROCESS_JANITOR_INTERVAL};
 
 /// Loopback bootstrap port. Production uses the UDS transport; the env
 /// override keeps deterministic local harnesses isolated from other runs.

@@ -16,7 +16,7 @@ import type {
   AcceptanceCriterion,
   Rfc3339Timestamp,
   Uuid7,
-} from "../../../packages/domain/src/index.ts";
+} from "@terminus/domain";
 import {
   InMemoryVerificationStore,
   VerificationEngine,
@@ -28,7 +28,7 @@ import {
   type ClaimEvidenceGraph,
   type VerificationAttemptRecord,
   type PredicateType,
-} from "../../../packages/verification/src/index.ts";
+} from "@terminus/verification";
 import type { KernelUdsClients } from "./kernel-uds.js";
 import type {
   ProcessEvent,

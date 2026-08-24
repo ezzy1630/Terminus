@@ -119,8 +119,8 @@ import type {
   ModelKey,
   Rfc3339Timestamp,
   TokenCount,
-} from "../../../packages/domain/src/index.ts";
-import { generateUuid7 } from "../../../packages/domain/src/index.ts";
+} from "@terminus/domain";
+import { generateUuid7 } from "@terminus/domain";
 import {
   authorizationInstanceSchema,
   artifactUriSchema,
@@ -200,8 +200,8 @@ import {
   type NodeRun,
   type TaskContractV2,
   type TaskV2,
-} from "../../../packages/domain/src/index.ts";
-import { ARP_V2_COMMAND_TYPES, ARP_V2_EVENT_TYPES } from "../../../packages/runtime-protocol/src/index.ts";
+} from "@terminus/domain";
+import { ARP_V2_COMMAND_TYPES, ARP_V2_EVENT_TYPES } from "@terminus/runtime-protocol";
 import { z } from "zod";
 import {
   checkpointContentSchema,
