@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "bun --hot src/index.ts",
     "start": "bun src/index.ts",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "package:runtime": "bun run ../../scripts/package-control-runtime.ts",
+    "test:distribution": "bun test ../../scripts/control-runtime"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.13.4",
@@ -19,6 +21,7 @@
     "@terminus/provider-anthropic": "workspace:*",
     "@terminus/provider-google": "workspace:*",
     "@terminus/provider-local": "workspace:*",
+    "@terminus/provider-zen": "workspace:*",
     "@terminus/model-router": "workspace:*",
     "@terminus/task-runtime": "workspace:*",
     "@terminus/session-runtime": "workspace:*",
@@ -28,6 +31,7 @@
     "@terminus/capability-registry": "workspace:*",
     "@terminus/policy-coordinator": "workspace:*",
     "@terminus/artifact-client": "workspace:*",
+    "@terminus/aci": "workspace:*",
     "@terminus/observability": "workspace:*",
     "@terminus/config": "workspace:*",
     "@terminus/testkit": "workspace:*",

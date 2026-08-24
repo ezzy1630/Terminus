@@ -25,50 +25,71 @@ export class CompatibilityGateway {
     missionId: null;
     organizationId: string;
     departmentId: string;
-    contract: any;
+    v1Context: { sessionId: string; threadId: string };
+    contract: TaskV2Snapshot["contract"];
   } {
     const claims = (v1Input.acceptanceCriteria ?? []).map((ac) => ({
       claimId: ac.id,
       statement: ac.statement,
       evidenceRequirement: ac.verificationHint ?? "DETERMINISTIC_TEST",
     }));
+    const pathScope = {
+      readPaths: [...(v1Input.allowedScope?.readPaths ?? [])],
+      writePaths: [...(v1Input.allowedScope?.writePaths ?? [])],
+      externalSystems: [...(v1Input.allowedScope?.externalSystems ?? [])],
+    };
+    const allowedEffectClasses = [
+      ...(pathScope.readPaths.length > 0 ? ["LOCAL_FS_READ"] : []),
+      ...(pathScope.writePaths.length > 0 ? ["LOCAL_FS_WRITE"] : []),
+    ];
+    const authorityCeiling = [
+      ...(pathScope.readPaths.length > 0 ? ["FS_READ"] : []),
+      ...(pathScope.writePaths.length > 0 ? ["FS_WRITE"] : []),
+    ];
+
+    const contract: TaskV2Snapshot["contract"] = {
+      version: 1,
+      mission: v1Input.objective,
+      scope: {
+        resources: [],
+        allowedEffectClasses,
+        excludedPathsOrSystems: [],
+        pathScope,
+      },
+      acceptance: claims.length > 0 ? claims : [
+        {
+          claimId: "claim-default",
+          statement: v1Input.objective,
+          evidenceRequirement: "DETERMINISTIC_TEST",
+        },
+      ],
+      constraints: {
+        security: ["NO_AMBIENT_SECRETS"],
+        costMicros: "5000000",
+        timeoutSeconds: 3600,
+      },
+      authorityCeiling,
+      mode: "interactive",
+    };
 
     return {
       missionId: null,
       organizationId: "default-org",
       departmentId: "default-dept",
-      contract: {
-        version: 1,
-        mission: v1Input.objective,
-        scope: {
-          resources: [],
-          allowedEffectClasses: ["LOCAL_FS_WRITE", "LOCAL_PROCESS_SPAWN"],
-          excludedPathsOrSystems: [],
-        },
-        acceptance: claims.length > 0 ? claims : [
-          {
-            claimId: "claim-default",
-            statement: v1Input.objective,
-            evidenceRequirement: "DETERMINISTIC_TEST",
-          },
-        ],
-        constraints: {
-          security: ["NO_AMBIENT_SECRETS"],
-          costMicros: 10_000_000n,
-          timeoutSeconds: 3600,
-        },
-        authorityCeiling: ["FS_WRITE", "PROCESS_SPAWN"],
-        mode: "interactive",
-      },
+      v1Context: { sessionId: v1Input.sessionId, threadId: v1Input.threadId },
+      contract,
     };
   }
 
   /** Translates a canonical v2 Task snapshot to a legacy v1 TaskSnapshot. */
-  static translateV2TaskToV1(v2Task: TaskV2Snapshot, sessionId = "session-legacy", threadId = "thread-legacy"): TaskSnapshot {
+  static translateV2TaskToV1(
+    v2Task: TaskV2Snapshot,
+    context: { sessionId: string; threadId: string },
+  ): TaskSnapshot {
     return {
       id: v2Task.id,
-      session_id: sessionId,
-      thread_id: threadId,
+      session_id: context.sessionId,
+      thread_id: context.threadId,
       status: v2Task.status,
       phase: "IMPLEMENT",
       active_contract_version: v2Task.contract.version,
@@ -76,6 +97,7 @@ export class CompatibilityGateway {
       created_at: v2Task.createdAt,
       updated_at: v2Task.updatedAt,
       completed_at: v2Task.completedAt,
+      terminal_reason: null,
     };
   }
 

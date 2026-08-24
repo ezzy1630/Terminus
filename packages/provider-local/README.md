@@ -9,6 +9,8 @@ pattern as other providers (OpenAI-compatible local endpoint).
 - `LocalTokenizer` interface and `WhitespaceTokenizer` default implementation.
 - `LocalTransport` — interface for the HTTP transport.
 - `renderRequest(input)` — convenience helper.
+- `LOCAL_MODEL_PROFILES` and `LOCAL_RENDERING_PROFILES`: concrete catalog data
+  owned by this adapter.
 - Wire type: `LocalRequestBody`.
 
 ## Invariants

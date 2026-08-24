@@ -19,7 +19,7 @@ export interface CleanReviewContext {
     readonly summary: string;
   }[];
   readonly riskClass: RiskClass;
-  readonly implementerProviderId: string;
+  readonly implementerModelFamilyRef: string;
 }
 
 export interface ReviewFinding {
@@ -34,7 +34,7 @@ export interface ReviewFinding {
 
 export interface CleanReviewReport {
   readonly taskId: string;
-  readonly reviewerProviderId: string;
+  readonly reviewerModelFamilyRef: string;
   readonly isDiverseFamily: boolean;
   readonly passed: boolean;
   readonly findings: readonly ReviewFinding[];
@@ -77,11 +77,11 @@ export class CleanContextReviewer {
    */
   evaluateFindings(
     taskId: string,
-    reviewerProviderId: string,
-    implementerProviderId: string,
+    reviewerModelFamilyRef: string,
+    implementerModelFamilyRef: string,
     findings: readonly ReviewFinding[],
   ): CleanReviewReport {
-    const isDiverseFamily = reviewerProviderId !== implementerProviderId;
+    const isDiverseFamily = reviewerModelFamilyRef !== implementerModelFamilyRef;
     const hasBlockers = findings.some(
       (f) => f.severity === "critical" || f.severity === "high",
     );
@@ -93,7 +93,7 @@ export class CleanContextReviewer {
 
     return {
       taskId,
-      reviewerProviderId,
+      reviewerModelFamilyRef,
       isDiverseFamily,
       passed,
       findings,

@@ -13,6 +13,8 @@ request body. HTTP is delegated to an `OpenAiTransport` interface.
 - `OpenAiRenderer` — implements `ProviderRenderer`.
 - `OpenAiTransport` — interface for the HTTP transport (supplied by adapter).
 - `renderRequest(input)` — convenience helper.
+- `OPENAI_MODEL_PROFILES` and `OPENAI_RENDERING_PROFILES`: concrete catalog
+  data owned by this adapter.
 - Wire types: `OpenAiChatMessage`, `OpenAiToolCall`, `OpenAiToolSchema`,
   `OpenAiRequestBody`.
 

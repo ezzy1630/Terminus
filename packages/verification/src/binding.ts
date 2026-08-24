@@ -208,7 +208,7 @@ export function allRequiredBindingsValid(
       expiresAt: expected.expiresAt,
       invalidated: expected.invalidatedNodeIds.has(node.id),
     });
-    if (!validity.ok) {
+    if (validity.ok === false) {
       failures.push({ nodeId: node.id, reason: validity.detail });
       continue;
     }

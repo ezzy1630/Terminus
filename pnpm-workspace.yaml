@@ -1,8 +1,6 @@
 # pnpm workspace manifest (SPEC §42.1, §43.2).
-# Terminus-owned packages use pnpm workspaces. Bun is only used for the upstream
-# OpenCode bridge (see ADR-0026). This manifest documents the workspace
-# structure; the actual install is `bun install` against bun.lock during
-# development.
+# Terminus owns every workspace package. Bun remains the pinned development and
+# test runner; no workspace entry is an inherited runtime compatibility layer.
 
 packages:
   - "packages/*"

@@ -68,6 +68,14 @@ export type CompletionGateDecision =
     };
 
 export function evaluateCompletionGate(input: CompletionGateInput): CompletionGateDecision {
+  if (!input.criteria.some((criterion) => criterion.required)) {
+    return {
+      allow: false,
+      reason: "uncovered_criteria",
+      detail: "completion requires at least one required acceptance criterion",
+      coverage: bindAcceptanceCriteria(input.criteria, input.plan.nodes),
+    };
+  }
   const coverage = bindAcceptanceCriteria(input.criteria, input.plan.nodes);
   if (!coverage.complete) {
     return {
@@ -193,7 +201,7 @@ export function assertCompletionAllowed(
   clock: () => Rfc3339Timestamp,
 ): CompletionRecord {
   const decision = evaluateCompletionGate(input);
-  if (!decision.allow) {
+  if (decision.allow === false) {
     throw new ValidationError("completion denied by verification gate", {
       reason: decision.reason,
       detail: decision.detail,

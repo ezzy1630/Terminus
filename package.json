@@ -16,12 +16,23 @@
     "nanoid": "3.3.18"
   },
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "apps/*",
+    "mini-services/terminus-control"
   ],
   "scripts": {
+    "standalone-check": "bun run tools/standalone-check.ts",
+    "control:package": "bun run scripts/package-control-runtime.ts",
+    "control:verify-package": "bun run scripts/verify-control-runtime-package.ts",
+    "control:test-distribution": "bun test scripts/control-runtime",
+    "desktop:inspect-release": "bun run scripts/inspect-desktop-release.ts",
+    "desktop:create-runtime-manifest": "bun run scripts/create-desktop-runtime-manifest.ts",
+    "desktop:verify-runtime-resources": "bun run scripts/verify-desktop-runtime-resources.ts",
+    "desktop:verify-release-evidence": "bun run scripts/verify-desktop-release-evidence.ts",
     "typecheck:packages": "tsc --noEmit -p tsconfig.packages.json",
+    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
     "typecheck": "tsc --noEmit",
-    "typecheck:all": "bun run typecheck:packages && bun run typecheck",
+    "typecheck:all": "bun run typecheck:packages && bun run typecheck:scripts && bun run typecheck",
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
     "build": "next build && bun scripts/package-standalone.mjs",
     "build:packages": "bun run typecheck:packages",
@@ -35,7 +46,8 @@
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:reset": "prisma migrate reset"
+    "db:reset": "prisma migrate reset",
+    "dev:stack": "bun run scripts/dev-stack.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.12.1",

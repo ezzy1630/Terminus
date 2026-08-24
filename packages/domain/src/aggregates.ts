@@ -23,6 +23,13 @@ import type {
   TraceId,
   CursorToken,
 } from "./ids.js";
+import {
+  artifactUriSchema,
+  byteCountSchema,
+  contentHashSchema,
+  microsSchema,
+  rfc3339Schema,
+} from "./ids.js";
 import type {
   TaskStatus,
   TaskPhase,
@@ -349,11 +356,11 @@ export interface ArtifactRef {
 }
 
 export const artifactRefSchema = z.object({
-  hash: z.string(),
-  uri: z.string(),
-  mediaType: z.string(),
-  bytes: z.bigint(),
-});
+  hash: contentHashSchema,
+  uri: artifactUriSchema,
+  mediaType: z.string().min(1),
+  bytes: byteCountSchema,
+}).strict();
 
 // ───────────────────────── Context epoch (§28.8, §33.15) ─────────────────────
 
@@ -1011,7 +1018,7 @@ export const organizationSchema = z.object({
   id: z.string().min(1),
   displayName: z.string().min(1),
   rootPolicyProfile: z.string().min(1),
-  createdAt: z.string(),
+  createdAt: rfc3339Schema,
 });
 
 export interface Department {
@@ -1029,7 +1036,7 @@ export const departmentSchema = z.object({
   displayName: z.string().min(1),
   policyProfile: z.string().min(1),
   defaultOperatorId: z.string().nullable(),
-  createdAt: z.string(),
+  createdAt: rfc3339Schema,
 });
 
 export interface OperatorAgent {
@@ -1071,16 +1078,16 @@ export const resourceHandleSchema = z.object({
   objectId: z.string().min(1),
   objectType: z.string().min(1),
   version: z.number().int().nonnegative(),
-  scope: z.array(z.string()),
-  allowedOperations: z.array(z.string()),
+  scope: z.array(z.string().min(1)),
+  allowedOperations: z.array(z.string().min(1)),
   principalBinding: z.string().min(1),
   taskBinding: z.string().min(1),
   authorityEpoch: z.number().int().nonnegative(),
   provenance: z.string().min(1),
   trustLabel: z.string().min(1),
-  expiry: z.string().nullable(),
-  integrityHash: z.string().min(1),
-});
+  expiry: rfc3339Schema.nullable(),
+  integrityHash: contentHashSchema,
+}).strict();
 
 // 3. Claims & Evidence (SPEC §6, §28)
 
@@ -1163,6 +1170,11 @@ export interface TaskContractV2 {
     readonly resources: readonly ResourceHandle[];
     readonly allowedEffectClasses: readonly string[];
     readonly excludedPathsOrSystems: readonly string[];
+    readonly pathScope?: {
+      readonly readPaths: readonly string[];
+      readonly writePaths: readonly string[];
+      readonly externalSystems: readonly string[];
+    } | undefined;
   };
   readonly acceptance: readonly {
     readonly claimId: string;
@@ -1185,6 +1197,11 @@ export const taskContractV2Schema = z.object({
     resources: z.array(resourceHandleSchema),
     allowedEffectClasses: z.array(z.string()),
     excludedPathsOrSystems: z.array(z.string()),
+    pathScope: z.object({
+      readPaths: z.array(z.string()),
+      writePaths: z.array(z.string()),
+      externalSystems: z.array(z.string()),
+    }).optional(),
   }),
   acceptance: z.array(
     z.object({
@@ -1202,12 +1219,26 @@ export const taskContractV2Schema = z.object({
   mode: z.string().min(1),
 });
 
+/** Durable context required to open an interactive task in its exact conversation. */
+export interface TaskConversationContextV2 {
+  readonly sessionId: string;
+  readonly threadId: string;
+  readonly attachedAt: Rfc3339Timestamp;
+}
+
+export const taskConversationContextV2Schema = z.object({
+  sessionId: z.string().min(1),
+  threadId: z.string().min(1),
+  attachedAt: z.string(),
+});
+
 export interface TaskV2 {
   readonly id: string;
   readonly missionId: string | null;
   readonly organizationId: string;
   readonly departmentId: string;
   readonly createdBy: string;
+  readonly conversationContext?: TaskConversationContextV2 | null;
   readonly contract: TaskContractV2;
   readonly status:
     | "DRAFT"
@@ -1235,6 +1266,7 @@ export const taskV2Schema = z.object({
   organizationId: z.string().min(1),
   departmentId: z.string().min(1),
   createdBy: z.string().min(1),
+  conversationContext: taskConversationContextV2Schema.nullable().default(null),
   contract: taskContractV2Schema,
   status: z.enum([
     "DRAFT",
@@ -1941,35 +1973,18 @@ export const budgetConsumptionSchema = z.object({
 
 export interface ModelProfile {
   readonly id: string;
-  readonly providerId: "anthropic" | "openai" | "google" | "local" | "custom";
+  /** Opaque reference resolved by the provider registry. */
+  readonly adapterRef: string;
+  /** Opaque reference resolved only inside the selected provider package. */
+  readonly renderingProfileRef: string;
   readonly modelKey: string;
   readonly version: string;
-  readonly contextLayout: {
-    readonly systemPromptPlacement: "top_level" | "system_message" | "developer_message";
-    readonly maxContextTokens: number;
-    readonly testedSafeTokens: number;
-    readonly supportsImages: boolean;
-  };
-  readonly toolDialect: "anthropic_tools" | "openai_function_calling" | "gemini_function_declarations" | "standard_json_schema";
-  readonly editDialect: "hash_anchored_diff" | "search_replace_blocks" | "whole_file" | "ast_transform" | "unified_diff";
-  readonly reasoningEffortPolicy: "none" | "low" | "medium" | "high" | "budget_constrained";
-  readonly continuationStrategy: "native_token" | "server_history" | "client_replay";
-  readonly compactionStrategy: "structured_claims_with_evidence" | "rolling_summary" | "episodic_anchor";
-  readonly cachingStrategy: {
-    readonly mode: "none" | "automatic_prefix" | "explicit_breakpoints" | "explicit_resource";
-    readonly minTokens: number;
-    readonly exactPrefixRequired: boolean;
-  };
-  readonly structuredOutputRepair: {
-    readonly dialect: "strict_json_schema" | "prompt_guided_json" | "grammar_constrained";
-    readonly autoRepair: boolean;
-    readonly retryPromptTemplate: string;
-  };
-  readonly knownFailureMitigations: readonly string[];
+  /** Opaque model-family reference used for independent-review diversity. */
+  readonly modelFamilyRef: string;
   readonly economics: {
-    readonly inputMicrosPerMillion: bigint;
-    readonly cachedInputMicrosPerMillion: bigint;
-    readonly outputMicrosPerMillion: bigint;
+    readonly inputMicrosPerMillion: Micros;
+    readonly cachedInputMicrosPerMillion: Micros;
+    readonly outputMicrosPerMillion: Micros;
     readonly reasoningAccounting: boolean;
   };
   readonly latencyModel: {
@@ -1978,64 +1993,74 @@ export interface ModelProfile {
     readonly p99Ms: number;
     readonly ttftMs: number;
   };
-  readonly confidentialityPolicy: readonly ("public" | "workspace" | "secret_adjacent" | "secret")[];
+  readonly allowedConfidentiality: readonly ConfidentialityLabel[];
   readonly capabilities: {
     readonly codingQuality: "low" | "medium" | "high";
     readonly toolReliability: "low" | "medium" | "high";
     readonly structuredOutput: boolean;
-    readonly contextTokens: number;
+    readonly imageInput: boolean;
+    readonly advertisedContextTokens: number;
+    readonly testedSafeContextTokens: number;
     readonly securityReasoning: "low" | "medium" | "high";
+    readonly reasoningStrength: "none" | "low" | "medium" | "high";
+    readonly offlineExecution: boolean;
   };
 }
 
-export const modelProfileSchema = z.object({
-  id: z.string().min(1),
-  providerId: z.enum(["anthropic", "openai", "google", "local", "custom"]),
-  modelKey: z.string().min(1),
-  version: z.string().min(1),
-  contextLayout: z.object({
-    systemPromptPlacement: z.enum(["top_level", "system_message", "developer_message"]),
-    maxContextTokens: z.number().int().positive(),
-    testedSafeTokens: z.number().int().positive(),
-    supportsImages: z.boolean(),
-  }),
-  toolDialect: z.enum(["anthropic_tools", "openai_function_calling", "gemini_function_declarations", "standard_json_schema"]),
-  editDialect: z.enum(["hash_anchored_diff", "search_replace_blocks", "whole_file", "ast_transform", "unified_diff"]),
-  reasoningEffortPolicy: z.enum(["none", "low", "medium", "high", "budget_constrained"]),
-  continuationStrategy: z.enum(["native_token", "server_history", "client_replay"]),
-  compactionStrategy: z.enum(["structured_claims_with_evidence", "rolling_summary", "episodic_anchor"]),
-  cachingStrategy: z.object({
-    mode: z.enum(["none", "automatic_prefix", "explicit_breakpoints", "explicit_resource"]),
-    minTokens: z.number().int().nonnegative(),
-    exactPrefixRequired: z.boolean(),
-  }),
-  structuredOutputRepair: z.object({
-    dialect: z.enum(["strict_json_schema", "prompt_guided_json", "grammar_constrained"]),
-    autoRepair: z.boolean(),
-    retryPromptTemplate: z.string(),
-  }),
-  knownFailureMitigations: z.array(z.string()),
-  economics: z.object({
-    inputMicrosPerMillion: z.bigint().nonnegative(),
-    cachedInputMicrosPerMillion: z.bigint().nonnegative(),
-    outputMicrosPerMillion: z.bigint().nonnegative(),
-    reasoningAccounting: z.boolean(),
-  }),
-  latencyModel: z.object({
-    p50Ms: z.number().nonnegative(),
-    p90Ms: z.number().nonnegative(),
-    p99Ms: z.number().nonnegative(),
-    ttftMs: z.number().nonnegative(),
-  }),
-  confidentialityPolicy: z.array(z.enum(["public", "workspace", "secret_adjacent", "secret"])),
-  capabilities: z.object({
-    codingQuality: z.enum(["low", "medium", "high"]),
-    toolReliability: z.enum(["low", "medium", "high"]),
-    structuredOutput: z.boolean(),
-    contextTokens: z.number().int().positive(),
-    securityReasoning: z.enum(["low", "medium", "high"]),
-  }),
-});
+export const modelProfileSchema = z
+  .object({
+    id: z.string().min(1),
+    adapterRef: z.string().min(1),
+    renderingProfileRef: z.string().min(1),
+    modelKey: z.string().min(1),
+    version: z.string().min(1),
+    modelFamilyRef: z.string().min(1),
+    economics: z
+      .object({
+        inputMicrosPerMillion: microsSchema.refine((value) => value >= 0n),
+        cachedInputMicrosPerMillion: microsSchema.refine(
+          (value) => value >= 0n,
+        ),
+        outputMicrosPerMillion: microsSchema.refine((value) => value >= 0n),
+        reasoningAccounting: z.boolean(),
+      })
+      .strict(),
+    latencyModel: z
+      .object({
+        p50Ms: z.number().nonnegative(),
+        p90Ms: z.number().nonnegative(),
+        p99Ms: z.number().nonnegative(),
+        ttftMs: z.number().nonnegative(),
+      })
+      .strict()
+      .refine(({ p50Ms, p90Ms, p99Ms }) => p50Ms <= p90Ms && p90Ms <= p99Ms, {
+        message: "latency percentiles must be ordered p50 <= p90 <= p99",
+      }),
+    allowedConfidentiality: z.array(
+      z.enum(["public", "workspace", "secret_adjacent", "secret"]),
+    ),
+    capabilities: z
+      .object({
+        codingQuality: z.enum(["low", "medium", "high"]),
+        toolReliability: z.enum(["low", "medium", "high"]),
+        structuredOutput: z.boolean(),
+        imageInput: z.boolean(),
+        advertisedContextTokens: z.number().int().positive(),
+        testedSafeContextTokens: z.number().int().positive(),
+        securityReasoning: z.enum(["low", "medium", "high"]),
+        reasoningStrength: z.enum(["none", "low", "medium", "high"]),
+        offlineExecution: z.boolean(),
+      })
+      .strict()
+      .refine(
+        ({ advertisedContextTokens, testedSafeContextTokens }) =>
+          testedSafeContextTokens <= advertisedContextTokens,
+        {
+          message: "tested safe context must not exceed the advertised context",
+        },
+      ),
+  })
+  .strict();
 
 export interface RouteDecisionV2 {
   readonly stage: "classifier" | "implementer" | "reviewer" | "specialist" | "vision" | "local_safe";
@@ -2058,7 +2083,7 @@ export const routeDecisionV2Schema = z.object({
   fallbackProfileIds: z.array(z.string()),
   expectedCostMicros: z.bigint().nonnegative(),
   expectedLatencyMs: z.number().nonnegative(),
-  timestamp: z.string(),
+  timestamp: rfc3339Schema,
 });
 
 export interface ModelCohortPosterior {
@@ -2171,7 +2196,7 @@ export const stagnationReportSchema = z.object({
     "terminate",
   ]),
   rationale: z.string().min(1),
-  timestamp: z.string(),
+  timestamp: rfc3339Schema,
 });
 
 export interface ProviderContinuation {
@@ -2195,6 +2220,1257 @@ export const providerContinuationSchema = z.object({
   continuationToken: z.string().nullable(),
   retryCount: z.number().int().nonnegative(),
   lastFailureKind: z.string().nullable(),
-  createdAt: z.string(),
+  createdAt: rfc3339Schema,
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. Phase 9: Unified Clients, Operator Cockpit & Attention (SPEC §1, §4, §16, §29, §33)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 13.1 Organization Topology & Agent Rooms (SPEC §4, §16.1)
+export interface AgentRoom {
+  readonly id: string;
+  readonly departmentId: string;
+  readonly name: string;
+  readonly operatorId: string;
+  readonly activeWorkerIds: readonly string[];
+  readonly specialistIds: readonly string[];
+  readonly reviewerIds: readonly string[];
+  readonly supervisorId: string | null;
+  readonly createdAt: Rfc3339Timestamp;
+}
+
+export const agentRoomSchema = z.object({
+  id: z.string().min(1),
+  departmentId: z.string().min(1),
+  name: z.string().min(1),
+  operatorId: z.string().min(1),
+  activeWorkerIds: z.array(z.string()),
+  specialistIds: z.array(z.string()),
+  reviewerIds: z.array(z.string()),
+  supervisorId: z.string().nullable(),
+  createdAt: rfc3339Schema,
+});
+
+export interface CapabilityDirectoryEntry {
+  readonly id: string;
+  readonly capabilityId: string;
+  readonly category: string;
+  readonly providerOperatorId: string;
+  readonly resourceDomain: string;
+  readonly authorityRequirement: readonly string[];
+  readonly status: "AVAILABLE" | "RESTRICTED" | "OFFLINE";
+}
+
+export const capabilityDirectoryEntrySchema = z.object({
+  id: z.string().min(1),
+  capabilityId: z.string().min(1),
+  category: z.string().min(1),
+  providerOperatorId: z.string().min(1),
+  resourceDomain: z.string().min(1),
+  authorityRequirement: z.array(z.string()),
+  status: z.enum(["AVAILABLE", "RESTRICTED", "OFFLINE"]),
+});
+
+// 13.2 Attention Coordinator & Material Questions (SPEC §29.3, §16.2)
+export type MaterialityTrigger =
+  | "interpretation_divergence"
+  | "authority_expansion"
+  | "irreversible_effect"
+  | "external_effect"
+  | "missing_grant"
+  | "human_taste"
+  | "confidence_collapse";
+
+export interface MaterialQuestion {
+  readonly id: string;
+  readonly taskId: string;
+  readonly trigger: MaterialityTrigger;
+  readonly questionText: string;
+  readonly consequenceMatrix: Readonly<Record<string, string>>;
+  readonly options: readonly string[];
+  readonly status: "PENDING" | "ANSWERED" | "DISMISSED";
+  readonly suggestedOption: string | null;
+  readonly selectedOption: string | null;
+  readonly createdAt: Rfc3339Timestamp;
+  readonly resolvedAt: Rfc3339Timestamp | null;
+}
+
+export const materialQuestionSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  trigger: z.enum([
+    "interpretation_divergence",
+    "authority_expansion",
+    "irreversible_effect",
+    "external_effect",
+    "missing_grant",
+    "human_taste",
+    "confidence_collapse",
+  ]),
+  questionText: z.string().min(1),
+  consequenceMatrix: z.record(z.string(), z.string()),
+  options: z.array(z.string()),
+  status: z.enum(["PENDING", "ANSWERED", "DISMISSED"]),
+  suggestedOption: z.string().nullable(),
+  selectedOption: z.string().nullable(),
+  createdAt: rfc3339Schema,
+  resolvedAt: rfc3339Schema.nullable(),
+});
+
+export interface AttentionAssessment {
+  readonly taskId: string;
+  readonly requiresAttention: boolean;
+  readonly urgency: "LOW" | "NORMAL" | "HIGH" | "BLOCKING";
+  readonly pendingQuestions: readonly MaterialQuestion[];
+  readonly reason: string;
+  readonly timestamp: Rfc3339Timestamp;
+}
+
+export const attentionAssessmentSchema = z.object({
+  taskId: z.string().min(1),
+  requiresAttention: z.boolean(),
+  urgency: z.enum(["LOW", "NORMAL", "HIGH", "BLOCKING"]),
+  pendingQuestions: z.array(materialQuestionSchema),
+  reason: z.string().min(1),
+  timestamp: rfc3339Schema,
+});
+
+// 13.3 Structured Interventions (SPEC §16.3)
+export type StructuredInterventionVerb =
+  | "focus"
+  | "ignore"
+  | "elaborate"
+  | "change_constraint"
+  | "edit_plan"
+  | "approve_exact_effect"
+  | "deny_narrow"
+  | "pause"
+  | "resume"
+  | "takeover"
+  | "fork"
+  | "rewind"
+  | "terminate"
+  | "request_independent_review";
+
+export const structuredInterventionVerbSchema = z.enum([
+  "focus",
+  "ignore",
+  "elaborate",
+  "change_constraint",
+  "edit_plan",
+  "approve_exact_effect",
+  "deny_narrow",
+  "pause",
+  "resume",
+  "takeover",
+  "fork",
+  "rewind",
+  "terminate",
+  "request_independent_review",
+]);
+
+const interventionTextSchema = z.string().trim().min(1).max(4_000);
+const interventionStringArraySchema = z.array(interventionTextSchema).min(1).max(64);
+const interventionTimeoutSecondsSchema = z
+  .union([
+    z.number().int().positive().safe(),
+    z.string().regex(/^[1-9][0-9]*$/, "timeout_seconds must be a positive integer"),
+  ])
+  .transform((value, context) => {
+    const seconds = typeof value === "number" ? value : Number(value);
+    if (!Number.isSafeInteger(seconds)) {
+      context.addIssue({
+        code: "custom",
+        message: "timeout_seconds exceeds the safe integer range",
+      });
+      return z.NEVER;
+    }
+    return seconds;
+  });
+
+/** Canonical JSON payload contract for every structured intervention verb. */
+export const INTERVENTION_PAYLOAD_SCHEMAS = {
+  focus: z.object({ scope: interventionStringArraySchema }).strict(),
+  ignore: z.object({}).strict(),
+  elaborate: z.object({ text: interventionTextSchema }).strict(),
+  change_constraint: z.discriminatedUnion("constraint", [
+    z.object({
+      constraint: z.literal("cost_micros"),
+      value: z.string().regex(/^(0|[1-9][0-9]*)$/, "cost_micros must be a canonical non-negative decimal string"),
+    }).strict(),
+    z.object({
+      constraint: z.literal("timeout_seconds"),
+      value: interventionTimeoutSecondsSchema,
+    }).strict(),
+    z.object({
+      constraint: z.literal("security_policy"),
+      value: interventionTextSchema,
+    }).strict(),
+  ]),
+  edit_plan: z.object({
+    operation: z.enum(["replace_node", "add_node", "remove_node", "change_edge"]),
+    instruction: interventionTextSchema,
+  }).strict(),
+  approve_exact_effect: z.object({ effectId: interventionTextSchema }).strict(),
+  deny_narrow: z.object({
+    effectId: interventionTextSchema,
+    restrictedCapabilities: interventionStringArraySchema,
+  }).strict(),
+  pause: z.object({}).strict(),
+  resume: z.object({}).strict(),
+  takeover: z.object({ humanPrincipal: interventionTextSchema }).strict(),
+  fork: z.object({ label: interventionTextSchema }).strict(),
+  rewind: z.object({ checkpointHash: contentHashSchema }).strict(),
+  terminate: z.object({}).strict(),
+  request_independent_review: z.object({ scope: interventionTextSchema }).strict(),
+} as const satisfies Readonly<Record<StructuredInterventionVerb, z.ZodType>>;
+
+export interface StructuredIntervention {
+  readonly id: string;
+  readonly taskId: string;
+  readonly attemptId: string | null;
+  readonly actorPrincipal: string;
+  readonly verb: StructuredInterventionVerb;
+  readonly targetEntityId: string | null;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly rationale: string;
+  readonly status: "PROPOSED" | "APPLIED" | "REJECTED";
+  readonly timestamp: Rfc3339Timestamp;
+}
+
+export const structuredInterventionSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  attemptId: z.string().nullable(),
+  actorPrincipal: z.string().min(1),
+  verb: structuredInterventionVerbSchema,
+  targetEntityId: z.string().nullable(),
+  payload: z.record(z.string(), z.unknown()),
+  rationale: z.string().min(1),
+  status: z.enum(["PROPOSED", "APPLIED", "REJECTED"]),
+  timestamp: rfc3339Schema,
+}).strict().superRefine((intervention, context) => {
+  const payload = INTERVENTION_PAYLOAD_SCHEMAS[intervention.verb].safeParse(intervention.payload);
+  if (!payload.success) {
+    for (const issue of payload.error.issues) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", ...issue.path],
+        message: issue.message,
+      });
+    }
+    return;
+  }
+
+  const taskTargetVerbs: readonly StructuredInterventionVerb[] = [
+    "elaborate",
+    "change_constraint",
+    "pause",
+    "resume",
+    "takeover",
+    "fork",
+    "terminate",
+    "request_independent_review",
+  ];
+  if (taskTargetVerbs.includes(intervention.verb)) {
+    if (intervention.targetEntityId !== intervention.taskId) {
+      context.addIssue({
+        code: "custom",
+        path: ["targetEntityId"],
+        message: "task intervention target must equal taskId",
+      });
+    }
+    return;
+  }
+  if (intervention.targetEntityId === null) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetEntityId"],
+      message: "entity intervention requires an exact target",
+    });
+    return;
+  }
+  if (intervention.verb === "approve_exact_effect") {
+    const effectPayload = INTERVENTION_PAYLOAD_SCHEMAS.approve_exact_effect.parse(intervention.payload);
+    if (effectPayload.effectId !== intervention.targetEntityId) {
+      context.addIssue({
+        code: "custom",
+        path: ["targetEntityId"],
+        message: "effect intervention target must equal payload.effectId",
+      });
+    }
+  }
+  if (intervention.verb === "deny_narrow") {
+    const effectPayload = INTERVENTION_PAYLOAD_SCHEMAS.deny_narrow.parse(intervention.payload);
+    if (effectPayload.effectId !== intervention.targetEntityId) {
+      context.addIssue({
+        code: "custom",
+        path: ["targetEntityId"],
+        message: "effect intervention target must equal payload.effectId",
+      });
+    }
+  }
+  if (intervention.verb === "rewind") {
+    const rewindPayload = INTERVENTION_PAYLOAD_SCHEMAS.rewind.parse(intervention.payload);
+    if (rewindPayload.checkpointHash !== intervention.targetEntityId) {
+      context.addIssue({
+        code: "custom",
+        path: ["targetEntityId"],
+        message: "rewind target must equal payload.checkpointHash",
+      });
+    }
+  }
+});
+
+// 13.4 Causal Replay & Counterfactuals (SPEC §33, §19)
+export interface CausalStep {
+  readonly stepIndex: number;
+  readonly component: string;
+  readonly inputManifestHash: ContentHash;
+  readonly modelOutputHash: ContentHash | null;
+  readonly effectId: string | null;
+  readonly verifierResult: string | null;
+  readonly durationMs: number;
+  readonly counterfactualAlternative: string | null;
+}
+
+export const causalStepSchema = z
+  .object({
+    stepIndex: z.number().int().nonnegative(),
+    component: z.string().min(1),
+    inputManifestHash: contentHashSchema,
+    modelOutputHash: contentHashSchema.nullable(),
+    effectId: z.string().nullable(),
+    verifierResult: z.string().nullable(),
+    durationMs: z.number().nonnegative(),
+    counterfactualAlternative: z.string().nullable(),
+  })
+  .strict();
+
+export interface CausalReplayTrace {
+  readonly id: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly pinnedInputsHash: ContentHash;
+  readonly steps: readonly CausalStep[];
+  readonly divergencePoints: readonly string[];
+  readonly omissionDiagnostics: readonly {
+    readonly blockId: string;
+    readonly sourcePath: string;
+    readonly omittedReason: string;
+    readonly causalRelevanceScore: number;
+    readonly evaluatorId: string;
+    readonly evidenceRefs: readonly (ArtifactUri | ContentHash)[];
+  }[];
+  readonly createdAt: Rfc3339Timestamp;
+}
+
+export const causalReplayTraceSchema = z
+  .object({
+    id: z.string().min(1),
+    taskId: z.string().min(1),
+    attemptId: z.string().min(1),
+    pinnedInputsHash: contentHashSchema,
+    steps: z.array(causalStepSchema),
+    divergencePoints: z.array(z.string()),
+    omissionDiagnostics: z.array(
+      z
+        .object({
+          blockId: z.string().min(1),
+          sourcePath: z.string().min(1),
+          omittedReason: z.string().min(1),
+          causalRelevanceScore: z.number().min(0).max(1),
+          evaluatorId: z.string().min(1),
+          evidenceRefs: z.array(z.union([artifactUriSchema, contentHashSchema])).min(1),
+        })
+        .strict(),
+    ),
+    createdAt: rfc3339Schema,
+  })
+  .strict();
+
+export interface CounterfactualExperiment {
+  readonly id: string;
+  readonly sourceTaskId: string;
+  readonly variationType: "profile" | "prompt" | "retrieval" | "intervention";
+  readonly variationDetails: Readonly<Record<string, unknown>>;
+  readonly executionStatus: "planned" | "completed";
+  readonly predictedOutcome: string;
+  readonly actualOutcome: string | null;
+  readonly deltaSuccess: boolean | null;
+  readonly deltaCostMicros: Micros | null;
+  readonly deltaLatencyMs: number | null;
+}
+
+export const counterfactualExperimentSchema = z.object({
+  id: z.string().min(1),
+  sourceTaskId: z.string().min(1),
+  variationType: z.enum(["profile", "prompt", "retrieval", "intervention"]),
+  variationDetails: z.record(z.string(), z.unknown()),
+  executionStatus: z.enum(["planned", "completed"]),
+  predictedOutcome: z.string().min(1),
+  actualOutcome: z.string().nullable(),
+  deltaSuccess: z.boolean().nullable(),
+  deltaCostMicros: microsSchema.nullable(),
+  deltaLatencyMs: z.number().nullable(),
+});
+
+// 13.5 Mobile Supervision & ACP Context Injection (SPEC §1, §9, §32.6)
+export interface MobileSupervisionSession {
+  readonly id: string;
+  readonly taskId: string;
+  readonly operatorPrincipal: string;
+  readonly devicePlatform: "ios" | "android" | "web";
+  readonly connectionState: "CONNECTED" | "SUSPENDED" | "DISCONNECTED";
+  readonly quickActions: readonly (
+    "pause" | "resume" | "approve_effect" | "terminate" | "request_review"
+  )[];
+  readonly lastSeenAt: Rfc3339Timestamp;
+}
+
+export const mobileSupervisionSessionSchema = z.object({
+  id: z.string().min(1),
+  taskId: z.string().min(1),
+  operatorPrincipal: z.string().min(1),
+  devicePlatform: z.enum(["ios", "android", "web"]),
+  connectionState: z.enum(["CONNECTED", "SUSPENDED", "DISCONNECTED"]),
+  quickActions: z.array(
+    z.enum([
+      "pause",
+      "resume",
+      "approve_effect",
+      "terminate",
+      "request_review",
+    ]),
+  ),
+  lastSeenAt: z.string(),
+});
+
+export interface AcpContextInjection {
+  readonly workspaceRootUri: string;
+  readonly activeFileUri: string | null;
+  readonly selectedRange: {
+    readonly startLine: number;
+    readonly startCol: number;
+    readonly endLine: number;
+    readonly endCol: number;
+  } | null;
+  readonly diagnostics: readonly {
+    readonly fileUri: string;
+    readonly line: number;
+    readonly severity: "error" | "warning" | "info" | "hint";
+    readonly message: string;
+  }[];
+  readonly openEditorUris: readonly string[];
+}
+
+export const acpContextInjectionSchema = z.object({
+  workspaceRootUri: z.string().min(1),
+  activeFileUri: z.string().nullable(),
+  selectedRange: z
+    .object({
+      startLine: z.number().int().nonnegative(),
+      startCol: z.number().int().nonnegative(),
+      endLine: z.number().int().nonnegative(),
+      endCol: z.number().int().nonnegative(),
+    })
+    .nullable(),
+  diagnostics: z.array(
+    z.object({
+      fileUri: z.string().min(1),
+      line: z.number().int().nonnegative(),
+      severity: z.enum(["error", "warning", "info", "hint"]),
+      message: z.string().min(1),
+    }),
+  ),
+  openEditorUris: z.array(z.string()),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 14. Phase 10 — Computer Use & General Agency Aggregates (SPEC §25, §18.3, §17, §30)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// 14.1 UI Observation Model & Hierarchy (SPEC §25.1)
+export interface UiViewport {
+  readonly width: number;
+  readonly height: number;
+  readonly devicePixelRatio: number;
+  readonly scaleFactor: number;
+}
+
+export const uiViewportSchema = z.object({
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  devicePixelRatio: z.number().positive().default(1),
+  scaleFactor: z.number().positive().default(1),
+});
+
+export interface UiBoundingBox {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export const uiBoundingBoxSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+  width: z.number().nonnegative(),
+  height: z.number().nonnegative(),
+});
+
+export interface UiDomNode {
+  readonly nodeId: string;
+  readonly tag: string;
+  readonly attributes: Readonly<Record<string, string>>;
+  readonly text: string | null;
+  readonly boundingBox: UiBoundingBox | null;
+  readonly isInteractive: boolean;
+  readonly childrenNodeIds: readonly string[];
+}
+
+export const uiDomNodeSchema = z.object({
+  nodeId: z.string().min(1),
+  tag: z.string().min(1),
+  attributes: z.record(z.string(), z.string()),
+  text: z.string().nullable(),
+  boundingBox: uiBoundingBoxSchema.nullable(),
+  isInteractive: z.boolean(),
+  childrenNodeIds: z.array(z.string()),
+});
+
+export interface UiAccessibilityNode {
+  readonly nodeId: string;
+  readonly role: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly value: string | null;
+  readonly disabled: boolean;
+  readonly focused: boolean;
+  readonly boundingBox: UiBoundingBox | null;
+  readonly childrenNodeIds: readonly string[];
+}
+
+export const uiAccessibilityNodeSchema = z.object({
+  nodeId: z.string().min(1),
+  role: z.string().min(1),
+  name: z.string(),
+  description: z.string().nullable(),
+  value: z.string().nullable(),
+  disabled: z.boolean(),
+  focused: z.boolean(),
+  boundingBox: uiBoundingBoxSchema.nullable(),
+  childrenNodeIds: z.array(z.string()),
+});
+
+export interface UiElementTarget {
+  readonly elementId: string;
+  readonly role: string;
+  readonly name: string;
+  readonly selector: string;
+  readonly boundingBox: UiBoundingBox;
+  readonly textSnippet: string | null;
+  readonly confidence: number;
+  readonly semanticHash: string;
+  /** Structural sources that independently identified this target. */
+  readonly evidenceSources: readonly ("dom" | "accessibility")[];
+}
+
+export const uiElementTargetSchema = z.object({
+  elementId: z.string().min(1),
+  role: z.string().min(1),
+  name: z.string(),
+  selector: z.string().min(1),
+  boundingBox: uiBoundingBoxSchema,
+  textSnippet: z.string().nullable(),
+  confidence: z.number().min(0).max(1),
+  semanticHash: z.string().min(1),
+  evidenceSources: z.array(z.enum(["dom", "accessibility"])).min(1),
+});
+
+/** Raw adapter observation accepted by the fusion coordinator. */
+export interface UiObservationInput {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly taskId: string;
+  readonly timestamp: Rfc3339Timestamp;
+  readonly viewport: UiViewport;
+  readonly screenshotArtifactId: string | null;
+  readonly domTreeArtifactId: string | null;
+  readonly documentUri: string | null;
+  readonly domNodes: readonly UiDomNode[];
+  readonly accessibilityNodes: readonly UiAccessibilityNode[];
+  readonly focusedElementId: string | null;
+  readonly taintLabel:
+    "SYSTEM_TRUSTED" | "USER_TRUSTED" | "UNTRUSTED_UI" | "UNTRUSTED_WEB";
+  readonly version: number;
+}
+
+export const uiObservationInputSchema = z.object({
+  id: z.string().min(1),
+  sessionId: z.string().min(1),
+  taskId: z.string().min(1),
+  timestamp: rfc3339Schema,
+  viewport: uiViewportSchema,
+  screenshotArtifactId: z.string().min(1).nullable(),
+  domTreeArtifactId: z.string().min(1).nullable(),
+  documentUri: z.string().min(1).nullable(),
+  domNodes: z.array(uiDomNodeSchema),
+  accessibilityNodes: z.array(uiAccessibilityNodeSchema),
+  focusedElementId: z.string().min(1).nullable(),
+  taintLabel: z.enum([
+    "SYSTEM_TRUSTED",
+    "USER_TRUSTED",
+    "UNTRUSTED_UI",
+    "UNTRUSTED_WEB",
+  ]),
+  version: z.number().int().positive(),
+});
+
+export interface UiObservation {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly taskId: string;
+  readonly timestamp: Rfc3339Timestamp;
+  readonly viewport: UiViewport;
+  readonly screenshotArtifactId: string | null;
+  readonly domTreeArtifactId: string | null;
+  readonly documentUri: string | null;
+  readonly accessibilityTree: readonly UiAccessibilityNode[];
+  readonly focusedElementId: string | null;
+  readonly targetElements: readonly UiElementTarget[];
+  readonly taintLabel:
+    "SYSTEM_TRUSTED" | "USER_TRUSTED" | "UNTRUSTED_UI" | "UNTRUSTED_WEB";
+  readonly version: number;
+}
+
+export const uiObservationSchema = z.object({
+  id: z.string().min(1),
+  sessionId: z.string().min(1),
+  taskId: z.string().min(1),
+  timestamp: rfc3339Schema,
+  viewport: uiViewportSchema,
+  screenshotArtifactId: z.string().nullable(),
+  domTreeArtifactId: z.string().nullable(),
+  documentUri: z.string().min(1).nullable(),
+  accessibilityTree: z.array(uiAccessibilityNodeSchema),
+  focusedElementId: z.string().nullable(),
+  targetElements: z.array(uiElementTargetSchema),
+  taintLabel: z.enum([
+    "SYSTEM_TRUSTED",
+    "USER_TRUSTED",
+    "UNTRUSTED_UI",
+    "UNTRUSTED_WEB",
+  ]),
+  version: z.number().int().positive(),
+});
+
+// 14.2 Computer Use Actions (SPEC §25.1)
+export type ComputerUseActionKind =
+  | "click"
+  | "double_click"
+  | "right_click"
+  | "hover"
+  | "type_text"
+  | "key_press"
+  | "key_combination"
+  | "scroll"
+  | "drag_and_drop"
+  | "navigate"
+  | "take_screenshot"
+  | "extract_dom"
+  | "focus_element"
+  | "select_option";
+
+export type ComputerUseEffectClass =
+  | "read_only"
+  | "bufferable_local"
+  | "reversible_external"
+  | "compensable_external"
+  | "irreversible"
+  | "unknown_semantics";
+
+export interface ComputerUseAction {
+  readonly actionId: string;
+  readonly taskId: string;
+  readonly observationId: string;
+  readonly observationVersion: number;
+  readonly kind: ComputerUseActionKind;
+  readonly target: UiElementTarget | null;
+  readonly coordinate: { readonly x: number; readonly y: number } | null;
+  readonly text: string | null;
+  readonly keys: readonly string[] | null;
+  readonly scrollDelta: { readonly dx: number; readonly dy: number } | null;
+  readonly intent: string;
+  readonly requiresSemanticVerification: boolean;
+  readonly effectClass: ComputerUseEffectClass;
+}
+
+export const computerUseActionSchema = z.object({
+  actionId: z.string().min(1),
+  taskId: z.string().min(1),
+  observationId: z.string().min(1),
+  observationVersion: z.number().int().positive(),
+  kind: z.enum([
+    "click",
+    "double_click",
+    "right_click",
+    "hover",
+    "type_text",
+    "key_press",
+    "key_combination",
+    "scroll",
+    "drag_and_drop",
+    "navigate",
+    "take_screenshot",
+    "extract_dom",
+    "focus_element",
+    "select_option",
+  ]),
+  target: uiElementTargetSchema.nullable(),
+  coordinate: z
+    .object({
+      x: z.number(),
+      y: z.number(),
+    })
+    .nullable(),
+  text: z.string().nullable(),
+  keys: z.array(z.string()).nullable(),
+  scrollDelta: z
+    .object({
+      dx: z.number(),
+      dy: z.number(),
+    })
+    .nullable(),
+  intent: z.string().min(1),
+  requiresSemanticVerification: z.boolean(),
+  effectClass: z.enum([
+    "read_only",
+    "bufferable_local",
+    "reversible_external",
+    "compensable_external",
+    "irreversible",
+    "unknown_semantics",
+  ]),
+});
+
+// 14.3 Semantic Target Verification & Evidence (SPEC §25.2)
+export interface SemanticTargetVerification {
+  readonly verificationId: string;
+  readonly actionId: string;
+  readonly observationId: string;
+  readonly target: UiElementTarget | null;
+  readonly matchConfidence: number;
+  readonly visuallyConfirmed: boolean;
+  readonly domConfirmed: boolean;
+  readonly ambiguityScore: number;
+  readonly verifiedCoordinates: { readonly x: number; readonly y: number } | null;
+  readonly verdict: "verified" | "ambiguous" | "divergent" | "rejected";
+  readonly reason: string;
+}
+
+export const semanticTargetVerificationSchema = z
+  .object({
+    verificationId: z.string().min(1),
+    actionId: z.string().min(1),
+    observationId: z.string().min(1),
+    target: uiElementTargetSchema.nullable(),
+    matchConfidence: z.number().min(0).max(1),
+    visuallyConfirmed: z.boolean(),
+    domConfirmed: z.boolean(),
+    ambiguityScore: z.number().min(0).max(1),
+    verifiedCoordinates: z
+      .object({
+        x: z.number(),
+        y: z.number(),
+      })
+      .nullable(),
+    verdict: z.enum(["verified", "ambiguous", "divergent", "rejected"]),
+    reason: z.string().min(1),
+  })
+  .strict()
+  .superRefine((verification, context) => {
+    if (verification.verdict === "rejected") {
+      if (verification.target !== null) {
+        context.addIssue({
+          code: "custom",
+          path: ["target"],
+          message: "rejected target verification must not retain a target",
+        });
+      }
+      if (verification.verifiedCoordinates !== null) {
+        context.addIssue({
+          code: "custom",
+          path: ["verifiedCoordinates"],
+          message: "rejected target verification must not retain dispatch coordinates",
+        });
+      }
+      return;
+    }
+    if (verification.target === null || verification.verifiedCoordinates === null) {
+      context.addIssue({
+        code: "custom",
+        message: "non-rejected target verification requires a target and verified coordinates",
+      });
+    }
+  });
+
+export interface UiEvidenceRecord {
+  readonly evidenceId: string;
+  readonly actionId: string;
+  readonly taskId: string;
+  readonly preScreenshotArtifactId: string | null;
+  readonly postScreenshotArtifactId: string | null;
+  readonly domMutationsCount: number;
+  readonly durationMs: number;
+  readonly observedChanges: readonly string[];
+  readonly timestamp: Rfc3339Timestamp;
+}
+
+export const uiEvidenceRecordSchema = z.object({
+  evidenceId: z.string().min(1),
+  actionId: z.string().min(1),
+  taskId: z.string().min(1),
+  preScreenshotArtifactId: z.string().nullable(),
+  postScreenshotArtifactId: z.string().nullable(),
+  domMutationsCount: z.number().int().nonnegative(),
+  durationMs: z.number().nonnegative(),
+  observedChanges: z.array(z.string()),
+  timestamp: rfc3339Schema,
+});
+
+// 14.4 Browser & Desktop Pools (SPEC §19, §25)
+export interface BrowserDesktopPool {
+  readonly poolId: string;
+  readonly kind: "browser" | "desktop";
+  readonly capacity: number;
+  readonly activeLeasesCount: number;
+  readonly sandboxTier: "tier2_hardened_container" | "tier3_microvm";
+  readonly healthStatus: "healthy" | "degraded" | "draining" | "unhealthy";
+  readonly endpoint: string;
+  readonly runtimeConfig: Readonly<Record<string, unknown>>;
+  /** Coordinator-only pools never claim that a browser/desktop backend exists. */
+  readonly executionSupport: "coordinator_only" | "kernel_backed";
+  readonly enforcementStatus: "unverified" | "enforced";
+}
+
+export const browserDesktopPoolSchema = z.object({
+  poolId: z.string().min(1),
+  kind: z.enum(["browser", "desktop"]),
+  capacity: z.number().int().positive(),
+  activeLeasesCount: z.number().int().nonnegative(),
+  sandboxTier: z.enum(["tier2_hardened_container", "tier3_microvm"]),
+  healthStatus: z.enum(["healthy", "degraded", "draining", "unhealthy"]),
+  endpoint: z.string().min(1),
+  runtimeConfig: z.record(z.string(), z.unknown()),
+  executionSupport: z.enum(["coordinator_only", "kernel_backed"]),
+  enforcementStatus: z.enum(["unverified", "enforced"]),
+});
+
+export interface PoolLease {
+  readonly leaseId: string;
+  readonly poolId: string;
+  readonly taskId: string;
+  readonly workerId: string;
+  readonly assignedInstanceId: string;
+  readonly acquiredAt: Rfc3339Timestamp;
+  readonly expiresAt: Rfc3339Timestamp;
+  readonly status: "active" | "released" | "expired" | "evicted";
+}
+
+export const poolLeaseSchema = z.object({
+  leaseId: z.string().min(1),
+  poolId: z.string().min(1),
+  taskId: z.string().min(1),
+  workerId: z.string().min(1),
+  assignedInstanceId: z.string().min(1),
+  acquiredAt: rfc3339Schema,
+  expiresAt: rfc3339Schema,
+  status: z.enum(["active", "released", "expired", "evicted"]),
+});
+
+// 14.5 Human Takeover Protocol (SPEC §25.4)
+export interface HumanTakeoverSession {
+  readonly takeoverId: string;
+  readonly taskId: string;
+  readonly poolId: string;
+  readonly surface: "browser" | "desktop";
+  readonly state:
+    "human_control" | "resume_pending_observation" | "agent_control";
+  readonly startedAt: Rfc3339Timestamp;
+  readonly resumedAt: Rfc3339Timestamp | null;
+  readonly preTakeoverObservationId: string;
+  readonly preTakeoverObservationVersion: number;
+  readonly resumeObservationId: string | null;
+  readonly reason: string;
+}
+
+export const humanTakeoverSessionSchema = z.object({
+  takeoverId: z.string().min(1),
+  taskId: z.string().min(1),
+  poolId: z.string().min(1),
+  surface: z.enum(["browser", "desktop"]),
+  state: z.enum([
+    "human_control",
+    "resume_pending_observation",
+    "agent_control",
+  ]),
+  startedAt: rfc3339Schema,
+  resumedAt: rfc3339Schema.nullable(),
+  preTakeoverObservationId: z.string().min(1),
+  preTakeoverObservationVersion: z.number().int().positive(),
+  resumeObservationId: z.string().min(1).nullable(),
+  reason: z.string().min(1),
+});
+
+// 14.6 Data-Flow Policy & Clipboard/Download Quarantine (SPEC §18.3, §19.2)
+export interface DataFlowPolicy {
+  readonly policyId: string;
+  readonly taskId: string;
+  readonly clipboardAccess: "none" | "read_only" | "write_only" | "read_write";
+  readonly allowedUploadMimeTypes: readonly string[];
+  readonly maxUploadBytes: ByteCount;
+  readonly downloadQuarantine: boolean;
+  readonly dlpScanRequired: boolean;
+  readonly quarantineDirectory: string;
+}
+
+export const dataFlowPolicySchema = z.object({
+  policyId: z.string().min(1),
+  taskId: z.string().min(1),
+  clipboardAccess: z.enum(["none", "read_only", "write_only", "read_write"]),
+  allowedUploadMimeTypes: z.array(z.string()),
+  maxUploadBytes: byteCountSchema,
+  downloadQuarantine: z.boolean(),
+  dlpScanRequired: z.boolean(),
+  quarantineDirectory: z.string().min(1),
+});
+
+export interface DataTransferAudit {
+  readonly transferId: string;
+  readonly taskId: string;
+  readonly direction:
+    "upload" | "download" | "clipboard_read" | "clipboard_write";
+  readonly source: string;
+  readonly destination: string;
+  readonly bytesCount: ByteCount;
+  readonly mimeType: string;
+  readonly dlpScanPassed: boolean | null;
+  readonly quarantinedPath: string | null;
+  readonly artifactId: ArtifactUri | null;
+  readonly contentHash: ContentHash | null;
+  readonly dlpReceiptArtifactId: ArtifactUri | null;
+  readonly destinationEvidenceArtifactId: ArtifactUri | null;
+  readonly timestamp: Rfc3339Timestamp;
+}
+
+export const dataTransferAuditSchema = z.object({
+  transferId: z.string().min(1),
+  taskId: z.string().min(1),
+  direction: z.enum([
+    "upload",
+    "download",
+    "clipboard_read",
+    "clipboard_write",
+  ]),
+  source: z.string().min(1),
+  destination: z.string().min(1),
+  bytesCount: byteCountSchema,
+  mimeType: z.string().min(1),
+  dlpScanPassed: z.boolean().nullable(),
+  quarantinedPath: z.string().nullable(),
+  artifactId: artifactUriSchema.nullable(),
+  contentHash: contentHashSchema.nullable(),
+  dlpReceiptArtifactId: artifactUriSchema.nullable(),
+  destinationEvidenceArtifactId: artifactUriSchema.nullable(),
+  timestamp: rfc3339Schema,
+}).strict();
+
+export interface DataFlowCheckResult {
+  readonly allowed: boolean;
+  readonly reason: string;
+  readonly audit: DataTransferAudit;
+}
+
+export const dataFlowCheckResultSchema = z.object({
+  allowed: z.boolean(),
+  reason: z.string().min(1),
+  audit: dataTransferAuditSchema,
+});
+
+// 14.7 External Connector Library (SPEC §17.2, §18.2)
+export interface ExternalConnectorSpec {
+  readonly connectorId: string;
+  /** External system identity. The canonical domain does not enumerate vendors. */
+  readonly provider: string;
+  readonly baseUrl: string;
+  readonly allowedMethods: readonly (
+    "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+  )[];
+  readonly rateLimitRps: number;
+  readonly credentialBindingId: string;
+  readonly effectClasses: readonly ComputerUseEffectClass[];
+  readonly status: "active" | "maintenance" | "disabled";
+}
+
+export const externalConnectorSpecSchema = z.object({
+  connectorId: z.string().min(1),
+  provider: z.string().min(1),
+  baseUrl: z.url(),
+  allowedMethods: z.array(z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"])),
+  rateLimitRps: z.number().positive(),
+  credentialBindingId: z.string().min(1),
+  effectClasses: z
+    .array(
+      z.enum([
+        "read_only",
+        "bufferable_local",
+        "reversible_external",
+        "compensable_external",
+        "irreversible",
+        "unknown_semantics",
+      ]),
+    )
+    .min(1),
+  status: z.enum(["active", "maintenance", "disabled"]),
+});
+
+export interface ConnectorCallIntent {
+  readonly intentId: string;
+  readonly connectorId: string;
+  readonly taskId: string;
+  readonly operation: string;
+  readonly method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  readonly path: string;
+  readonly parameters: Readonly<Record<string, unknown>>;
+  readonly idempotencyKey: string;
+  readonly authorizationId: string;
+  readonly effectClass: ComputerUseEffectClass;
+}
+
+export const connectorCallIntentSchema = z.object({
+  intentId: z.string().min(1),
+  connectorId: z.string().min(1),
+  taskId: z.string().min(1),
+  operation: z.string().min(1),
+  method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
+  path: z.string().min(1),
+  parameters: z.record(z.string(), z.unknown()),
+  idempotencyKey: z.string().min(1),
+  authorizationId: z.string().min(1),
+  effectClass: z.enum([
+    "read_only",
+    "bufferable_local",
+    "reversible_external",
+    "compensable_external",
+    "irreversible",
+    "unknown_semantics",
+  ]),
+});
+
+/** Source-shaped result returned by the trusted L7 connector boundary. */
+export interface ConnectorExecutionObservation {
+  readonly settlement: "success" | "failure" | "uncertain";
+  readonly httpStatusCode: number | null;
+  readonly responseBody: Readonly<Record<string, unknown>>;
+  readonly executedAt: Rfc3339Timestamp;
+  readonly failureCode: string | null;
+  readonly failureMessage: string | null;
+}
+
+export const connectorExecutionObservationSchema = z.object({
+  settlement: z.enum(["success", "failure", "uncertain"]),
+  httpStatusCode: z.number().int().min(100).max(599).nullable(),
+  responseBody: z.record(z.string(), z.unknown()),
+  executedAt: rfc3339Schema,
+  failureCode: z.string().min(1).nullable(),
+  failureMessage: z.string().min(1).nullable(),
+});
+
+export interface ConnectorCallResult {
+  readonly receiptId: string;
+  readonly intentId: string;
+  readonly connectorId: string;
+  readonly status: "success" | "failure" | "uncertain";
+  readonly httpStatusCode: number | null;
+  readonly responseBody: Readonly<Record<string, unknown>>;
+  readonly requestHash: ContentHash;
+  readonly responseHash: ContentHash;
+  readonly executedAt: Rfc3339Timestamp;
+  readonly failureCode: string | null;
+  readonly failureMessage: string | null;
+}
+
+export const connectorCallResultSchema = z.object({
+  receiptId: z.string().min(1),
+  intentId: z.string().min(1),
+  connectorId: z.string().min(1),
+  status: z.enum(["success", "failure", "uncertain"]),
+  httpStatusCode: z.number().int().min(100).max(599).nullable(),
+  responseBody: z.record(z.string(), z.unknown()),
+  requestHash: contentHashSchema,
+  responseHash: contentHashSchema,
+  executedAt: rfc3339Schema,
+  failureCode: z.string().min(1).nullable(),
+  failureMessage: z.string().min(1).nullable(),
+});
+
+// 14.8 Ambiguous Submit Reconciliation (SPEC §25.3, §16.1)
+export interface AmbiguousSubmitReconciliation {
+  readonly reconciliationId: string;
+  readonly effectId: string;
+  readonly taskId: string;
+  readonly previousObservationId: string;
+  readonly postTimeoutObservationId: string;
+  readonly submitState:
+    | "confirmed_executed"
+    | "confirmed_not_executed"
+    | "ambiguous_manual_required";
+  readonly reconciliationEvidence: string;
+  readonly receiptId: string | null;
+  readonly safeToRetry: boolean;
+  readonly reconciledAt: Rfc3339Timestamp;
+}
+
+export const ambiguousSubmitReconciliationSchema = z.object({
+  reconciliationId: z.string().min(1),
+  effectId: z.string().min(1),
+  taskId: z.string().min(1),
+  previousObservationId: z.string().min(1),
+  postTimeoutObservationId: z.string().min(1),
+  submitState: z.enum([
+    "confirmed_executed",
+    "confirmed_not_executed",
+    "ambiguous_manual_required",
+  ]),
+  reconciliationEvidence: z.string().min(1),
+  receiptId: z.string().min(1).nullable(),
+  safeToRetry: z.boolean(),
+  reconciledAt: rfc3339Schema,
+});
+
+// 14.9 Incident & Research Profiles (SPEC §30)
+export interface IncidentProfileSpec {
+  readonly profileId: string;
+  readonly organizationId: string;
+  readonly departmentId: string;
+  readonly auditLevel: "standard" | "elevated" | "forensic";
+  readonly maxActionTimeoutMs: number;
+  readonly mandatoryCompensation: boolean;
+  readonly allowedDiagnostics: readonly string[];
+  readonly autoEscalateOnFailure: boolean;
+}
+
+export const incidentProfileSpecSchema = z.object({
+  profileId: z.string().min(1),
+  organizationId: z.string().min(1),
+  departmentId: z.string().min(1),
+  auditLevel: z.enum(["standard", "elevated", "forensic"]),
+  maxActionTimeoutMs: z.number().int().positive(),
+  mandatoryCompensation: z.boolean(),
+  allowedDiagnostics: z.array(z.string()),
+  autoEscalateOnFailure: z.boolean(),
+});
+
+export interface IncidentExecutionRecord {
+  readonly executionId: string;
+  readonly taskId: string;
+  readonly profileId: string;
+  readonly diagnosticActions: readonly string[];
+  readonly forensicAuditLog: readonly string[];
+  readonly compensationVerified: boolean;
+  readonly escalated: boolean;
+  readonly state: "active" | "blocked_compensation" | "resolved";
+  readonly startedAt: Rfc3339Timestamp;
+  readonly completedAt: Rfc3339Timestamp | null;
+}
+
+export const incidentExecutionRecordSchema = z.object({
+  executionId: z.string().min(1),
+  taskId: z.string().min(1),
+  profileId: z.string().min(1),
+  diagnosticActions: z.array(z.string().min(1)),
+  forensicAuditLog: z.array(z.string().min(1)),
+  compensationVerified: z.boolean(),
+  escalated: z.boolean(),
+  state: z.enum(["active", "blocked_compensation", "resolved"]),
+  startedAt: rfc3339Schema,
+  completedAt: rfc3339Schema.nullable(),
+});
+
+export interface ResearchProfileSpec {
+  readonly profileId: string;
+  readonly organizationId: string;
+  readonly departmentId: string;
+  readonly allowMultiSourceRetrieval: boolean;
+  readonly notebookSandboxEnabled: boolean;
+  readonly strictProvenanceTracking: boolean;
+  readonly citationFormat: "apa" | "ieee" | "markdown_source";
+  readonly maxSearchQueries: number;
+}
+
+export const researchProfileSpecSchema = z.object({
+  profileId: z.string().min(1),
+  organizationId: z.string().min(1),
+  departmentId: z.string().min(1),
+  allowMultiSourceRetrieval: z.boolean(),
+  notebookSandboxEnabled: z.boolean(),
+  strictProvenanceTracking: z.boolean(),
+  citationFormat: z.enum(["apa", "ieee", "markdown_source"]),
+  maxSearchQueries: z.number().int().positive(),
+});
+
+export interface ResearchProvenanceRecord {
+  readonly researchId: string;
+  readonly taskId: string;
+  readonly profileId: string;
+  readonly sourcesConsulted: readonly {
+    readonly sourceId: string;
+    readonly title: string;
+    readonly uri: string;
+    readonly hash: ContentHash;
+    readonly citation: string;
+  }[];
+  readonly notebookOutputs: readonly {
+    readonly cellIndex: number;
+    readonly codeSnippet: string;
+    readonly resultSummary: string;
+    readonly artifactRef: ArtifactUri;
+  }[];
+  readonly hypotheses: readonly {
+    readonly statement: string;
+    readonly outcome: "confirmed" | "refuted" | "inconclusive";
+  }[];
+  readonly createdAt: Rfc3339Timestamp;
+}
+
+export const researchProvenanceRecordSchema = z.object({
+  researchId: z.string().min(1),
+  taskId: z.string().min(1),
+  profileId: z.string().min(1),
+  sourcesConsulted: z.array(
+    z.object({
+      sourceId: z.string().min(1),
+      title: z.string().min(1),
+      uri: z.url(),
+      hash: contentHashSchema,
+      citation: z.string().min(1),
+    }),
+  ),
+  notebookOutputs: z.array(
+    z.object({
+      cellIndex: z.number().int().nonnegative(),
+      codeSnippet: z.string(),
+      resultSummary: z.string(),
+      artifactRef: artifactUriSchema,
+    }),
+  ),
+  hypotheses: z.array(
+    z.object({
+      statement: z.string().min(1),
+      outcome: z.enum(["confirmed", "refuted", "inconclusive"]),
+    }),
+  ),
+  createdAt: rfc3339Schema,
+});

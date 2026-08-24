@@ -13,9 +13,8 @@
  */
 import { z } from "zod";
 
-/** Branding marker for nominal typing. */
-declare const __brand: unique symbol;
-export type Brand<T extends string> = { readonly [__brand]: T };
+/** Branding marker shared with runtime schemas so parse output is assignable. */
+export type Brand<T extends string> = z.$brand<T>;
 
 export type Uuid7 = string & Brand<"Uuid7">;
 export type ContentHash = string & Brand<"ContentHash">;
@@ -313,4 +312,3 @@ export function canonicalizeResourceUri(uri: string): ResourceUri {
   const canon = canonicalizeUri(uri);
   return resourceUriSchema.parse(canon) as unknown as ResourceUri;
 }
-

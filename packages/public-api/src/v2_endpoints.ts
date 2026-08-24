@@ -10,9 +10,12 @@ import {
   taskV2Schema,
   taskContractV2Schema,
   workflowSchema,
+  workflowNodeSchema,
+  guardedEdgeSchema,
   nodeRunSchema,
   claimSchema,
   evidenceSchema,
+  artifactRefSchema,
   effectRecordSchema,
   authorizationInstanceSchema,
   questionSchema,
@@ -21,14 +24,127 @@ import {
   workerLeaseSchema,
   taskAttemptSchema,
   budgetConsumptionSchema,
+  resourceHandleSchema,
   approvalDecisionSchema,
   taskStatusV2Schema,
   workflowStatusSchema,
+  organizationSchema,
+  departmentSchema,
+  operatorAgentSchema,
+  agentRoomSchema,
+  capabilityDirectoryEntrySchema,
+  materialQuestionSchema,
+  attentionAssessmentSchema,
+  structuredInterventionSchema,
+  causalStepSchema,
+  causalReplayTraceSchema,
+  counterfactualExperimentSchema,
+  mobileSupervisionSessionSchema,
+  acpContextInjectionSchema,
+  uiObservationSchema,
+  computerUseActionSchema,
+  semanticTargetVerificationSchema,
+  uiEvidenceRecordSchema,
+  browserDesktopPoolSchema,
+  poolLeaseSchema,
+  humanTakeoverSessionSchema,
+  dataTransferAuditSchema,
+  externalConnectorSpecSchema,
+  connectorCallIntentSchema,
+  connectorCallResultSchema,
+  ambiguousSubmitReconciliationSchema,
+  incidentExecutionRecordSchema,
+  researchProvenanceRecordSchema,
+  contentHashSchema,
+  modelProfileSchema,
+  routeDecisionV2Schema,
+  modelCohortPosteriorSchema,
+  stagnationReportSchema,
+  INTERVENTION_PAYLOAD_SCHEMAS,
 } from "@terminus/domain";
+
+/** JSON boundary representation for non-negative bigint-backed quantities. */
+export const DecimalCountWire = z.string().regex(/^(0|[1-9]\d*)$/);
+export const ByteCountWire = DecimalCountWire;
+export const MicrosWire = DecimalCountWire;
+
+export const ArtifactRefWire = artifactRefSchema
+  .omit({ bytes: true })
+  .extend({ bytes: ByteCountWire });
+
+export const TaskContractV2Wire = taskContractV2Schema
+  .omit({ constraints: true })
+  .extend({
+    constraints: taskContractV2Schema.shape.constraints
+      .omit({ costMicros: true })
+      .extend({ costMicros: MicrosWire }),
+  });
+
+export const TaskV2Wire = taskV2Schema
+  .omit({ contract: true })
+  .extend({ contract: TaskContractV2Wire });
+
+export const EvidenceWire = evidenceSchema
+  .omit({ artifactRef: true })
+  .extend({ artifactRef: ArtifactRefWire.nullable() });
+
+export const BudgetConsumptionWire = budgetConsumptionSchema
+  .omit({ consumedCostMicros: true, consumedInputTokens: true, consumedOutputTokens: true })
+  .extend({
+    consumedCostMicros: MicrosWire,
+    consumedInputTokens: DecimalCountWire,
+    consumedOutputTokens: DecimalCountWire,
+  });
+
+export const ModelProfileWire = modelProfileSchema
+  .omit({ economics: true })
+  .extend({
+    economics: modelProfileSchema.shape.economics
+      .omit({ inputMicrosPerMillion: true, cachedInputMicrosPerMillion: true, outputMicrosPerMillion: true })
+      .extend({
+        inputMicrosPerMillion: MicrosWire,
+        cachedInputMicrosPerMillion: MicrosWire,
+        outputMicrosPerMillion: MicrosWire,
+      }),
+  });
+
+export const RouteDecisionV2Wire = routeDecisionV2Schema
+  .omit({ expectedCostMicros: true })
+  .extend({ expectedCostMicros: MicrosWire });
+
+export const ModelCohortPosteriorWire = modelCohortPosteriorSchema
+  .omit({ observedCostMicros: true })
+  .extend({ observedCostMicros: MicrosWire });
+
+export const CounterfactualExperimentWire = counterfactualExperimentSchema
+  .omit({ deltaCostMicros: true })
+  .extend({ deltaCostMicros: MicrosWire.nullable() });
+
+export const DataTransferAuditWire = dataTransferAuditSchema
+  .omit({ bytesCount: true })
+  .extend({ bytesCount: ByteCountWire });
+
+export const DataFlowCheckResultWire = z.object({
+  allowed: z.boolean(),
+  reason: z.string().min(1),
+  audit: DataTransferAuditWire,
+});
+
+/**
+ * Immutable receipt references accepted at trust boundaries. The referenced
+ * receipt is still verified by a kernel/trusted-adapter verifier before the
+ * subject can be admitted; possession of these strings is not proof.
+ */
+export const TrustedReceiptReferenceWire = z.object({
+  sourceAdapterRef: z.string().min(1),
+  subjectArtifactRef: ArtifactRefWire,
+  receiptArtifactRef: ArtifactRefWire,
+  bindingHash: contentHashSchema,
+}).strict();
 
 // ────────────────────────── Snapshot Schemas ─────────────────────────────────
 
-export const TaskV2Snapshot = taskV2Schema;
+export const TaskV2Snapshot = TaskV2Wire;
 export type TaskV2Snapshot = z.infer<typeof TaskV2Snapshot>;
 
 export const WorkflowSnapshot = workflowSchema;
@@ -40,7 +156,7 @@ export type NodeRunSnapshot = z.infer<typeof NodeRunSnapshot>;
 export const ClaimSnapshot = claimSchema;
 export type ClaimSnapshot = z.infer<typeof ClaimSnapshot>;
 
-export const EvidenceSnapshot = evidenceSchema;
+export const EvidenceSnapshot = EvidenceWire;
 export type EvidenceSnapshot = z.infer<typeof EvidenceSnapshot>;
 
 export const EffectSnapshot = effectRecordSchema;
@@ -64,7 +180,7 @@ export type WorkerLeaseSnapshot = z.infer<typeof WorkerLeaseSnapshot>;
 export const TaskAttemptSnapshot = taskAttemptSchema;
 export type TaskAttemptSnapshot = z.infer<typeof TaskAttemptSnapshot>;
 
-export const BudgetConsumptionSnapshot = budgetConsumptionSchema;
+export const BudgetConsumptionSnapshot = BudgetConsumptionWire;
 export type BudgetConsumptionSnapshot = z.infer<typeof BudgetConsumptionSnapshot>;
 
 // ────────────────────────── Endpoint Declarations ────────────────────────────
@@ -103,7 +219,11 @@ export const CreateTaskV2 = {
     missionId: z.string().nullable().default(null),
     organizationId: z.string().default("default-org"),
     departmentId: z.string().default("default-dept"),
-    contract: taskContractV2Schema,
+    v1Context: z.object({
+      sessionId: z.string().min(1),
+      threadId: z.string().min(1),
+    }).nullable().default(null),
+    contract: TaskContractV2Wire,
   }),
   response: TaskV2Snapshot,
 };
@@ -112,6 +232,25 @@ export const GetTaskV2 = {
   method: "GET" as const,
   path: "/v2/tasks/{id}",
   request: z.object({ id: z.string() }),
+  response: TaskV2Snapshot,
+};
+
+export const GetTaskConversationContextV2 = {
+  method: "GET" as const,
+  path: "/v2/tasks/{id}/conversation-context",
+  request: z.object({ id: z.string() }),
+  response: taskV2Schema.shape.conversationContext,
+};
+
+export const AttachTaskConversationContextV2 = {
+  method: "POST" as const,
+  path: "/v2/tasks/{id}/conversation-context",
+  request: z.object({
+    id: z.string(),
+    sessionId: z.string().min(1),
+    threadId: z.string().min(1),
+    expectedVersion: z.number().int().nonnegative().nullable().default(null),
+  }),
   response: TaskV2Snapshot,
 };
 
@@ -132,7 +271,7 @@ export const UpdateTaskContractV2 = {
   path: "/v2/tasks/{id}/contract",
   request: z.object({
     id: z.string(),
-    contract: taskContractV2Schema,
+    contract: TaskContractV2Wire,
     expectedVersion: z.number().int().nonnegative().nullable().default(null),
   }),
   response: TaskV2Snapshot,
@@ -144,8 +283,8 @@ export const CreateWorkflowV2 = {
   path: "/v2/workflows",
   request: z.object({
     taskId: z.string(),
-    nodes: z.array(z.any()),
-    edges: z.array(z.any()),
+    nodes: z.array(workflowNodeSchema),
+    edges: z.array(guardedEdgeSchema),
   }),
   response: WorkflowSnapshot,
 };
@@ -172,8 +311,8 @@ export const ValidateWorkflowV2 = {
   method: "POST" as const,
   path: "/v2/workflows/validate",
   request: z.object({
-    nodes: z.array(z.any()),
-    edges: z.array(z.any()),
+    nodes: z.array(workflowNodeSchema),
+    edges: z.array(guardedEdgeSchema),
     authorityCeiling: z.array(z.string()).optional(),
     mandatorySteps: z.array(z.string()).optional(),
     strictMode: z.boolean().default(false),
@@ -253,14 +392,11 @@ export const RecordEvidenceV2 = {
   method: "POST" as const,
   path: "/v2/evidence",
   request: z.object({
-    claimId: z.string(),
-    kind: z.string(),
-    summary: z.string(),
-    verifierResult: z.string(),
-    sourceRevision: z.string().nullable().default(null),
-    environmentHash: z.string().nullable().default(null),
-    metadata: z.record(z.string(), z.unknown()).default({}),
-  }),
+    claimId: z.string().min(1),
+    verifierId: z.string().min(1),
+    verifierVersion: z.string().min(1),
+    receipt: TrustedReceiptReferenceWire,
+  }).strict(),
   response: EvidenceSnapshot,
 };
 
@@ -269,15 +405,15 @@ export const ProposeEffectV2 = {
   method: "POST" as const,
   path: "/v2/effects",
   request: z.object({
-    taskId: z.string(),
-    attemptId: z.string(),
-    connectorOrWorker: z.string(),
-    intentType: z.string(),
+    taskId: z.string().min(1),
+    attemptId: z.string().min(1),
+    connectorOrWorker: z.string().min(1),
+    intentType: z.string().min(1),
     canonicalParameters: z.record(z.string(), z.unknown()),
-    resourceHandles: z.array(z.any()).default([]),
-    effectClass: z.string(),
-    semanticIdempotencyKey: z.string(),
-  }),
+    resourceHandles: z.array(resourceHandleSchema).default([]),
+    effectClass: z.string().min(1),
+    semanticIdempotencyKey: z.string().min(1),
+  }).strict(),
   response: EffectSnapshot,
 };
 
@@ -285,9 +421,9 @@ export const AuthorizeEffectV2 = {
   method: "POST" as const,
   path: "/v2/effects/{id}/authorize",
   request: z.object({
-    id: z.string(),
-    authorizationId: z.string(),
-  }),
+    id: z.string().min(1),
+    authorizationId: z.string().min(1),
+  }).strict(),
   response: EffectSnapshot,
 };
 
@@ -297,7 +433,8 @@ export const CommitEffectV2 = {
   request: z.object({
     id: z.string(),
     expectedVersion: z.number().int().nonnegative().nullable().default(null),
-  }),
+    validationReceiptArtifactRef: ArtifactRefWire,
+  }).strict(),
   response: EffectSnapshot,
 };
 
@@ -305,10 +442,9 @@ export const ReconcileEffectV2 = {
   method: "POST" as const,
   path: "/v2/effects/{id}/reconcile",
   request: z.object({
-    id: z.string(),
-    observedOutcome: z.string(),
-    evidenceArtifactHash: z.string().nullable().default(null),
-  }),
+    id: z.string().min(1),
+    reconciliationReceipt: TrustedReceiptReferenceWire,
+  }).strict(),
   response: EffectSnapshot,
 };
 
@@ -318,6 +454,7 @@ export const ResolveApprovalV2 = {
   path: "/v2/approvals/{id}/resolve",
   request: z.object({
     id: z.string(),
+    operationHash: z.string().min(1),
     decision: approvalDecisionSchema,
     rationale: z.string().nullable().default(null),
   }),
@@ -440,12 +577,19 @@ export const ConsumeBudgetV2 = {
   path: "/v2/tasks/{id}/budget/consume",
   request: z.object({
     id: z.string(),
-    costMicros: z.bigint().nonnegative().default(0n),
+    costMicros: MicrosWire.default("0"),
     computeSeconds: z.number().int().nonnegative().default(0),
-    inputTokens: z.bigint().nonnegative().default(0n),
-    outputTokens: z.bigint().nonnegative().default(0n),
+    inputTokens: DecimalCountWire.default("0"),
+    outputTokens: DecimalCountWire.default("0"),
     approvals: z.number().int().nonnegative().default(0),
   }),
+  response: BudgetConsumptionSnapshot,
+};
+
+export const GetTaskBudgetV2 = {
+  method: "GET" as const,
+  path: "/v2/tasks/{id}/budget",
+  request: z.object({ id: z.string().min(1) }),
   response: BudgetConsumptionSnapshot,
 };
 
@@ -466,11 +610,11 @@ export const ListModelProfilesV2 = {
   method: "GET" as const,
   path: "/v2/models/profiles",
   request: z.object({
-    providerId: z.string().optional(),
+    adapterRef: z.string().optional(),
     confidentiality: z.enum(["public", "workspace", "secret_adjacent", "secret"]).optional(),
   }).optional(),
   response: z.object({
-    profiles: z.array(z.any()),
+    profiles: z.array(ModelProfileWire),
   }),
 };
 
@@ -478,7 +622,7 @@ export const GetModelProfileV2 = {
   method: "GET" as const,
   path: "/v2/models/profiles/:id",
   request: z.void(),
-  response: z.any(),
+  response: ModelProfileWire,
 };
 
 export const RouteModelStageV2 = {
@@ -487,11 +631,11 @@ export const RouteModelStageV2 = {
   request: z.object({
     stage: z.enum(["classifier", "implementer", "reviewer", "specialist", "vision", "local_safe"]),
     confidentiality: z.enum(["public", "workspace", "secret_adjacent", "secret"]).default("workspace"),
-    allowedProviders: z.array(z.string()).optional(),
-    implementerProviderId: z.string().nullable().optional(),
+    allowedAdapterRefs: z.array(z.string()).optional(),
+    implementerModelFamilyRef: z.string().nullable().optional(),
     requireOffline: z.boolean().default(false),
-  }),
-  response: z.any(),
+  }).strict(),
+  response: RouteDecisionV2Wire,
 };
 
 export const UpdateModelPosteriorV2 = {
@@ -504,17 +648,17 @@ export const UpdateModelPosteriorV2 = {
     structuredOutputSucceeded: z.boolean(),
     editCohortSucceeded: z.boolean(),
     latencyMs: z.number().nonnegative(),
-    costMicros: z.bigint().nonnegative(),
+    costMicros: MicrosWire,
     cacheHitRate: z.number().min(0).max(1),
   }),
-  response: z.any(),
+  response: ModelCohortPosteriorWire,
 };
 
 export const GetModelPosteriorV2 = {
   method: "GET" as const,
   path: "/v2/models/posterior/:modelKey",
   request: z.void(),
-  response: z.any(),
+  response: ModelCohortPosteriorWire,
 };
 
 // /v2/orchestration
@@ -533,7 +677,7 @@ export const ScheduleEVWorkerV2 = {
     budgetRemainingRatio: z.number().min(0).max(1),
     activeWorkerCount: z.number().int().nonnegative(),
   }),
-  response: z.any(),
+  response: z.unknown(),
 };
 
 export const CheckStagnationV2 = {
@@ -541,21 +685,550 @@ export const CheckStagnationV2 = {
   path: "/v2/orchestration/stagnation/check",
   request: z.object({
     taskId: z.string().min(1),
-    observations: z.array(z.any()).default([]),
+    observations: z.array(z.unknown()).default([]),
   }),
-  response: z.any(),
+  response: stagnationReportSchema,
 };
+
+export const ReviewFindingWire = z.object({
+  id: z.string().min(1),
+  path: z.string().min(1),
+  line: z.number().int().positive().optional(),
+  severity: z.enum(["critical", "high", "medium", "low", "suggestion"]),
+  title: z.string().min(1),
+  description: z.string().min(1),
+  proposedRemediation: z.string().optional(),
+}).strict();
 
 export const EvaluateCleanReviewV2 = {
   method: "POST" as const,
   path: "/v2/orchestration/review/clean",
   request: z.object({
     taskId: z.string().min(1),
-    reviewerProviderId: z.string().min(1),
-    implementerProviderId: z.string().min(1),
-    findings: z.array(z.any()).default([]),
+    reviewerModelFamilyRef: z.string().min(1),
+    implementerModelFamilyRef: z.string().min(1),
+    findings: z.array(ReviewFindingWire).default([]),
+  }).strict(),
+  response: z.object({
+    taskId: z.string().min(1),
+    reviewerModelFamilyRef: z.string().min(1),
+    isDiverseFamily: z.boolean(),
+    passed: z.boolean(),
+    findings: z.array(ReviewFindingWire),
+    summary: z.string().min(1),
+    timestamp: z.string().min(1),
+  }).strict(),
+};
+
+// ────────────────────────── Phase 9: Cockpit, Attention & Interventions ──────
+
+// /v2/organization & topology
+export const ListOrganizationsV2 = {
+  method: "GET" as const,
+  path: "/v2/organizations",
+  request: z.void(),
+  response: z.object({
+    organizations: z.array(organizationSchema),
   }),
-  response: z.any(),
+};
+
+export const ListDepartmentsV2 = {
+  method: "GET" as const,
+  path: "/v2/departments",
+  request: z.object({ organizationId: z.string().optional() }).optional(),
+  response: z.object({
+    departments: z.array(departmentSchema),
+  }),
+};
+
+export const ListOperatorsV2 = {
+  method: "GET" as const,
+  path: "/v2/operators",
+  request: z.object({ departmentId: z.string().optional() }).optional(),
+  response: z.object({
+    operators: z.array(operatorAgentSchema),
+  }),
+};
+
+export const ListAgentRoomsV2 = {
+  method: "GET" as const,
+  path: "/v2/agent-rooms",
+  request: z.object({ departmentId: z.string().optional() }).optional(),
+  response: z.object({
+    rooms: z.array(agentRoomSchema),
+  }),
+};
+
+export const ListCapabilityDirectoryV2 = {
+  method: "GET" as const,
+  path: "/v2/capabilities/directory",
+  request: z.void(),
+  response: z.object({
+    capabilities: z.array(capabilityDirectoryEntrySchema),
+  }),
+};
+
+export const ResolveCapabilityV2 = {
+  method: "POST" as const,
+  path: "/v2/capabilities/resolve",
+  request: z.object({
+    capabilityId: z.string().min(1),
+    category: z.string().optional(),
+    resourceDomain: z.string().optional(),
+    requiredAuthority: z.array(z.string()).optional(),
+  }),
+  response: z.object({
+    matched: z.boolean(),
+    entry: capabilityDirectoryEntrySchema.nullable(),
+    operator: operatorAgentSchema.nullable(),
+    department: departmentSchema.nullable(),
+    reason: z.string(),
+  }),
+};
+
+// /v2/attention
+export const AssessTaskAttentionV2 = {
+  method: "GET" as const,
+  path: "/v2/attention/assess/:taskId",
+  request: z.void(),
+  response: attentionAssessmentSchema,
+};
+
+export const ListMaterialQuestionsV2 = {
+  method: "GET" as const,
+  path: "/v2/attention/questions",
+  request: z.object({ taskId: z.string().optional() }).optional(),
+  response: z.object({
+    questions: z.array(materialQuestionSchema),
+  }),
+};
+
+export const AskMaterialQuestionV2 = {
+  method: "POST" as const,
+  path: "/v2/attention/questions",
+  request: z.object({
+    taskId: z.string().min(1),
+    trigger: z.enum([
+      "interpretation_divergence",
+      "authority_expansion",
+      "irreversible_effect",
+      "external_effect",
+      "missing_grant",
+      "human_taste",
+      "confidence_collapse",
+    ]),
+    questionText: z.string().min(1),
+    options: z.array(z.string()),
+    consequenceMatrix: z.record(z.string(), z.string()),
+    suggestedOption: z.string().nullable().optional(),
+  }).strict(),
+  response: z.object({
+    accepted: z.boolean(),
+    question: materialQuestionSchema.nullable(),
+    reason: z.string(),
+  }),
+};
+
+export const ResolveMaterialQuestionV2 = {
+  method: "POST" as const,
+  path: "/v2/attention/questions/:id/resolve",
+  request: z.object({
+    id: z.string().min(1),
+    selectedOption: z.string().min(1),
+  }),
+  response: z.object({
+    success: z.boolean(),
+    question: materialQuestionSchema.nullable(),
+    error: z.string().optional(),
+  }),
+};
+
+// /v2/interventions
+const interventionRequestBase = {
+  taskId: z.string().min(1),
+  attemptId: z.string().nullable().optional(),
+  rationale: z.string().min(1),
+} as const;
+const taskInterventionTarget = z.string().min(1).nullable().optional();
+const entityInterventionTarget = z.string().min(1);
+
+export const ProposeInterventionRequestV2 = z.discriminatedUnion("verb", [
+  z.object({ ...interventionRequestBase, verb: z.literal("focus"), targetEntityId: entityInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.focus }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("ignore"), targetEntityId: entityInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.ignore }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("elaborate"), targetEntityId: taskInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.elaborate }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("change_constraint"), targetEntityId: taskInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.change_constraint }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("edit_plan"), targetEntityId: entityInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.edit_plan }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("approve_exact_effect"), targetEntityId: entityInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.approve_exact_effect }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("deny_narrow"), targetEntityId: entityInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.deny_narrow }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("pause"), targetEntityId: taskInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.pause }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("resume"), targetEntityId: taskInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.resume }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("takeover"), targetEntityId: taskInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.takeover }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("fork"), targetEntityId: taskInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.fork }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("rewind"), targetEntityId: entityInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.rewind }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("terminate"), targetEntityId: taskInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.terminate }).strict(),
+  z.object({ ...interventionRequestBase, verb: z.literal("request_independent_review"), targetEntityId: taskInterventionTarget, payload: INTERVENTION_PAYLOAD_SCHEMAS.request_independent_review }).strict(),
+]).superRefine((request, context) => {
+  const taskTargetVerbs = [
+    "elaborate",
+    "change_constraint",
+    "pause",
+    "resume",
+    "takeover",
+    "fork",
+    "terminate",
+    "request_independent_review",
+  ] as const;
+  if (
+    taskTargetVerbs.includes(request.verb as (typeof taskTargetVerbs)[number])
+    && request.targetEntityId !== undefined
+    && request.targetEntityId !== null
+    && request.targetEntityId !== request.taskId
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetEntityId"],
+      message: "task intervention target must equal taskId",
+    });
+  }
+  if (
+    (request.verb === "approve_exact_effect" || request.verb === "deny_narrow")
+    && request.targetEntityId !== request.payload.effectId
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetEntityId"],
+      message: "effect intervention target must equal payload.effectId",
+    });
+  }
+  if (request.verb === "rewind" && request.targetEntityId !== request.payload.checkpointHash) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetEntityId"],
+      message: "rewind target must equal payload.checkpointHash",
+    });
+  }
+});
+
+export const ProposeInterventionV2 = {
+  method: "POST" as const,
+  path: "/v2/interventions",
+  request: ProposeInterventionRequestV2,
+  response: structuredInterventionSchema,
+};
+
+export const ApplyInterventionV2 = {
+  method: "POST" as const,
+  path: "/v2/interventions/:id/apply",
+  request: z.object({
+    id: z.string().min(1),
+  }),
+  response: z.object({
+    success: z.boolean(),
+    intervention: structuredInterventionSchema,
+    appliedChanges: z.record(z.string(), z.unknown()),
+    error: z.string().optional(),
+  }),
+};
+
+export const ListInterventionsV2 = {
+  method: "GET" as const,
+  path: "/v2/interventions",
+  request: z.object({ taskId: z.string().optional() }).optional(),
+  response: z.object({
+    interventions: z.array(structuredInterventionSchema),
+  }),
+};
+
+// /v2/replay & counterfactual
+export const CreateCausalTraceV2 = {
+  method: "POST" as const,
+  path: "/v2/replay/traces",
+  request: z.object({
+    taskId: z.string().min(1),
+    attemptId: z.string().min(1),
+    pinnedInputsHash: contentHashSchema,
+  }).strict(),
+  response: causalReplayTraceSchema,
+};
+
+export const GetCausalTraceV2 = {
+  method: "GET" as const,
+  path: "/v2/replay/traces/:taskId",
+  request: z.void(),
+  response: causalReplayTraceSchema.nullable(),
+};
+
+export const RecordCausalStepV2 = {
+  method: "POST" as const,
+  path: "/v2/replay/steps",
+  request: z.object({
+    traceId: z.string().min(1),
+    step: causalStepSchema,
+  }),
+  response: causalReplayTraceSchema,
+};
+
+export const DiagnoseCausalOmissionsV2 = {
+  method: "POST" as const,
+  path: "/v2/replay/traces/:traceId/diagnose",
+  request: z.object({
+    traceId: z.string().min(1),
+    failureStepIndex: z.number().int().nonnegative(),
+    omittedCandidates: z.array(z.object({
+      blockId: z.string().trim().min(1),
+      sourcePath: z.string().trim().min(1),
+      omittedReason: z.string().trim().min(1),
+      tokenEstimate: z.number().int().nonnegative(),
+    }).strict()),
+  }).strict(),
+  response: causalReplayTraceSchema,
+};
+
+export const RunCounterfactualV2 = {
+  method: "POST" as const,
+  path: "/v2/replay/counterfactual",
+  request: z.object({
+    sourceTaskId: z.string().min(1),
+    variationType: z.enum(["profile", "prompt", "retrieval", "intervention"]),
+    variationDetails: z.record(z.string(), z.unknown()),
+  }),
+  response: CounterfactualExperimentWire,
+};
+
+// /v2/mobile & /v2/ide
+export const GetMobileSessionV2 = {
+  method: "GET" as const,
+  path: "/v2/mobile/sessions/:taskId",
+  request: z.void(),
+  response: mobileSupervisionSessionSchema,
+};
+
+export const ExecuteMobileActionV2 = {
+  method: "POST" as const,
+  path: "/v2/mobile/sessions/:taskId/action",
+  request: z.object({
+    taskId: z.string().min(1),
+    action: z.enum(["pause", "resume", "approve_effect", "terminate", "request_review"]),
+    effectId: z.string().optional(),
+    rationale: z.string().optional(),
+  }),
+  response: z.object({
+    success: z.boolean(),
+    action: z.string(),
+    timestamp: z.string(),
+  }),
+};
+
+export const SyncAcpContextV2 = {
+  method: "POST" as const,
+  path: "/v2/ide/context-sync",
+  request: acpContextInjectionSchema,
+  response: z.object({
+    synced: z.boolean(),
+    contextHash: contentHashSchema,
+    receivedDiagnostics: z.number().int().nonnegative(),
+    durability: z.literal("process_local"),
+  }),
+};
+
+// ────────────────────────── Phase 10: Computer Use & Agency ───────────────────
+
+// /v2/computer/observe & observations
+export const CreateUiObservationV2 = {
+  method: "POST" as const,
+  path: "/v2/computer/observe",
+  request: z.object({
+    taskId: z.string().min(1),
+    receipt: TrustedReceiptReferenceWire,
+  }).strict(),
+  response: uiObservationSchema,
+};
+
+export const GetUiObservationV2 = {
+  method: "GET" as const,
+  path: "/v2/computer/observations/:id",
+  request: z.object({ id: z.string().min(1) }),
+  response: uiObservationSchema,
+};
+
+export const VerifyUiTargetV2 = {
+  method: "POST" as const,
+  path: "/v2/computer/verify-target",
+  request: z.object({
+    observationId: z.string().min(1),
+    action: computerUseActionSchema,
+  }),
+  response: semanticTargetVerificationSchema,
+};
+
+export const DispatchComputerActionV2 = {
+  method: "POST" as const,
+  path: "/v2/computer/action",
+  request: z.object({
+    action: computerUseActionSchema,
+    observationId: z.string().min(1),
+  }),
+  response: z.object({
+    actionId: z.string().min(1),
+    status: z.enum(["dispatched", "rejected"]),
+    backendSupport: z.enum(["coordinator_only", "kernel_backed"]),
+    verification: semanticTargetVerificationSchema.nullable(),
+    dispatchedAt: z.string().nullable(),
+    reason: z.string().min(1),
+  }),
+};
+
+export const RecordUiEvidenceV2 = {
+  method: "POST" as const,
+  path: "/v2/computer/evidence",
+  request: z.object({
+    taskId: z.string().min(1),
+    actionId: z.string().min(1),
+    observationId: z.string().min(1),
+    receipt: TrustedReceiptReferenceWire,
+  }).strict(),
+  response: uiEvidenceRecordSchema,
+};
+
+// /v2/computer/pools
+export const ListComputerPoolsV2 = {
+  method: "GET" as const,
+  path: "/v2/computer/pools",
+  request: z.object({}),
+  response: z.array(browserDesktopPoolSchema),
+};
+
+export const AcquirePoolLeaseV2 = {
+  method: "POST" as const,
+  path: "/v2/computer/pools/:poolId/lease",
+  request: z.object({
+    poolId: z.string().min(1),
+    taskId: z.string().min(1),
+    workerId: z.string().min(1),
+    ttlMs: z.number().int().positive().default(300000),
+  }),
+  response: poolLeaseSchema,
+};
+
+export const ReleasePoolLeaseV2 = {
+  method: "POST" as const,
+  path: "/v2/computer/pools/:poolId/leases/:leaseId/release",
+  request: z.object({
+    poolId: z.string().min(1),
+    leaseId: z.string().min(1),
+  }),
+  response: poolLeaseSchema,
+};
+
+// /v2/computer/takeover
+export const InitiateHumanTakeoverV2 = {
+  method: "POST" as const,
+  path: "/v2/computer/takeover",
+  request: z.object({
+    taskId: z.string().min(1),
+    poolId: z.string().min(1),
+    surface: z.enum(["browser", "desktop"]),
+    reason: z.string().min(1),
+    currentObservationId: z.string().min(1),
+  }),
+  response: humanTakeoverSessionSchema,
+};
+
+export const ResumeFromTakeoverV2 = {
+  method: "POST" as const,
+  path: "/v2/computer/takeover/:takeoverId/resume",
+  request: z.object({
+    takeoverId: z.string().min(1),
+    newObservationId: z.string().min(1),
+  }),
+  response: humanTakeoverSessionSchema,
+};
+
+// /v2/data-flow
+export const EvaluateDataFlowV2 = {
+  method: "POST" as const,
+  path: "/v2/data-flow/evaluate",
+  request: z.object({
+    taskId: z.string().min(1),
+    policyId: z.string().min(1),
+    direction: z.enum(["upload", "download", "clipboard_read", "clipboard_write"]),
+    payloadHandle: resourceHandleSchema,
+    dlpReceiptArtifactRef: ArtifactRefWire,
+    destination: z.string().nullable().default(null),
+    destinationEvidenceArtifactRef: ArtifactRefWire.nullable().default(null),
+    fileName: z.string().optional(),
+    mimeType: z.string().optional(),
+    bytesCount: ByteCountWire.optional(),
+  }).strict(),
+  response: DataFlowCheckResultWire,
+};
+
+export const QuarantineDownloadV2 = {
+  method: "POST" as const,
+  path: "/v2/data-flow/quarantine",
+  request: z.object({
+    taskId: z.string().min(1),
+    policyId: z.string().min(1),
+    downloadHandle: resourceHandleSchema,
+    fileName: z.string().min(1),
+    mimeType: z.string().min(1),
+    bytesCount: ByteCountWire,
+    quarantineReceiptArtifactRef: ArtifactRefWire,
+    scanReceiptArtifactRef: ArtifactRefWire,
+  }).strict(),
+  response: DataTransferAuditWire,
+};
+
+// /v2/computer/reconcile-submit
+export const ReconcileSubmitV2 = {
+  method: "POST" as const,
+  path: "/v2/computer/reconcile-submit",
+  request: z.object({
+    effectId: z.string().min(1),
+    taskId: z.string().min(1),
+    semanticIdempotencyKey: z.string().min(1),
+    previousObservationId: z.string().min(1),
+    postTimeoutObservationId: z.string().min(1),
+    settlementProbeReceiptArtifactRef: ArtifactRefWire,
+  }).strict(),
+  response: ambiguousSubmitReconciliationSchema,
+};
+
+// /v2/connectors
+export const ListConnectorsV2 = {
+  method: "GET" as const,
+  path: "/v2/connectors",
+  request: z.object({}),
+  response: z.array(externalConnectorSpecSchema),
+};
+
+export const ExecuteConnectorCallV2 = {
+  method: "POST" as const,
+  path: "/v2/connectors/:connectorId/call",
+  request: connectorCallIntentSchema,
+  response: connectorCallResultSchema,
+};
+
+// /v2/profiles/incident & research
+export const StartIncidentTaskV2 = {
+  method: "POST" as const,
+  path: "/v2/profiles/incident/start",
+  request: z.object({
+    profileId: z.string(),
+    taskId: z.string(),
+    initialDiagnostics: z.array(z.string()),
+  }),
+  response: incidentExecutionRecordSchema,
+};
+
+export const StartResearchTaskV2 = {
+  method: "POST" as const,
+  path: "/v2/profiles/research/start",
+  request: z.object({
+    profileId: z.string(),
+    taskId: z.string(),
+  }),
+  response: researchProvenanceRecordSchema,
 };
 
 // ────────────────────────── V2 Endpoint Registry ─────────────────────────────
@@ -565,6 +1238,8 @@ export const V2_ENDPOINTS = {
   GetSchemaRegistryV2,
   CreateTaskV2,
   GetTaskV2,
+  GetTaskConversationContextV2,
+  AttachTaskConversationContextV2,
   TransitionTaskV2,
   UpdateTaskContractV2,
   CreateWorkflowV2,
@@ -591,6 +1266,7 @@ export const V2_ENDPOINTS = {
   RenewLeaseV2,
   ReleaseLeaseV2,
   ConsumeBudgetV2,
+  GetTaskBudgetV2,
   ListModelProfilesV2,
   GetModelProfileV2,
   RouteModelStageV2,
@@ -599,9 +1275,45 @@ export const V2_ENDPOINTS = {
   ScheduleEVWorkerV2,
   CheckStagnationV2,
   EvaluateCleanReviewV2,
+  ListOrganizationsV2,
+  ListDepartmentsV2,
+  ListOperatorsV2,
+  ListAgentRoomsV2,
+  ListCapabilityDirectoryV2,
+  ResolveCapabilityV2,
+  AssessTaskAttentionV2,
+  ListMaterialQuestionsV2,
+  AskMaterialQuestionV2,
+  ResolveMaterialQuestionV2,
+  ProposeInterventionV2,
+  ApplyInterventionV2,
+  ListInterventionsV2,
+  CreateCausalTraceV2,
+  GetCausalTraceV2,
+  RecordCausalStepV2,
+  DiagnoseCausalOmissionsV2,
+  RunCounterfactualV2,
+  GetMobileSessionV2,
+  ExecuteMobileActionV2,
+  SyncAcpContextV2,
+  CreateUiObservationV2,
+  GetUiObservationV2,
+  VerifyUiTargetV2,
+  DispatchComputerActionV2,
+  RecordUiEvidenceV2,
+  ListComputerPoolsV2,
+  AcquirePoolLeaseV2,
+  ReleasePoolLeaseV2,
+  InitiateHumanTakeoverV2,
+  ResumeFromTakeoverV2,
+  EvaluateDataFlowV2,
+  QuarantineDownloadV2,
+  ReconcileSubmitV2,
+  ListConnectorsV2,
+  ExecuteConnectorCallV2,
+  StartIncidentTaskV2,
+  StartResearchTaskV2,
   SubscribeEventsV2,
 } as const;
 
 export type V2EndpointName = keyof typeof V2_ENDPOINTS;
-
-

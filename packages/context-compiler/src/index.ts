@@ -106,6 +106,7 @@ export type {
 
 // Structured checkpoints + provenance DAG (SPEC §9, §33.16, ADR-0011)
 export {
+  checkpointContentSchema,
   generateCheckpointContent,
   validateCheckpoint,
   shouldCreateCheckpoint,
@@ -210,6 +211,11 @@ export interface CompileInput {
   readonly epoch: ContextEpochSnapshot | null;
   readonly worldState: WorldStateSnapshot;
   readonly recentEpisodes: readonly Episode[];
+  /**
+   * UTF-8 artifact bytes keyed by their verified content hash. Complete tool
+   * episode pairs must be present; missing or mismatched bytes fail closed.
+   */
+  readonly episodeContent: ReadonlyMap<ContentHash, string>;
   readonly checkpoint: Checkpoint | null;
   readonly userDirectives: readonly ContextDirective[];
   readonly activeCapabilities: readonly CapabilityDescriptorSnapshot[];
@@ -678,10 +684,19 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
       const complete = pair !== undefined && pair.callId !== null && pair.resultId !== null;
       if (!complete) continue;
     }
+    const hydratedText = episode.contentRef === null
+      ? undefined
+      : input.episodeContent.get(episode.contentRef);
+    if (isToolEpisode && hydratedText === undefined) {
+      throw new Error(`complete tool episode ${episode.id} is missing its persisted content`);
+    }
+    if (hydratedText !== undefined && computeContentHash(hydratedText) !== episode.contentRef) {
+      throw new Error(`episode ${episode.id} content does not match ${episode.contentRef ?? "its persisted hash"}`);
+    }
     const evidence = episode.contentRef === null
       ? []
       : [artifactRefFromContentHash(episode.contentRef)];
-    const text = [
+    const text = hydratedText ?? [
       `# Episode ${episode.sequence}: ${episode.kind}`,
       `turn: ${episode.turnId}`,
       episode.toolCallId === null ? null : `tool_call: ${episode.toolCallId}`,
@@ -693,7 +708,7 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
         : episode.kind === "tool_result"
           ? `runtime:episode:${episode.id}:tool_result`
           : `runtime:episode:${episode.id}`,
-      kind: "recent_episode",
+      kind: episode.kind === "tool_result" ? "tool_result" : "recent_episode",
       uri: `episode://${episode.id}`,
       text,
       sourceVersion: episode.contentRef,
@@ -702,7 +717,7 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
       trust: "derived",
       confidentiality: "workspace",
       injectionRisk: "low",
-      exactness: "recoverable_by_reference",
+      exactness: hydratedText === undefined ? "recoverable_by_reference" : "exact",
       scope,
       modelKey,
       features,
@@ -713,8 +728,19 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
         : [toolEpisodeIds.get(episode.toolCallId)?.callId ?? ""].filter(Boolean),
       invalidation: [{ kind: "ttl", selector: `episode://${episode.id}` }],
     });
+    const exactFragment: ContextFragment = hydratedText === undefined || episode.contentRef === null
+      ? fragment
+      : {
+          ...fragment,
+          contentRef: {
+            hash: episode.contentRef,
+            uri: `artifact://sha256/${episode.contentRef.slice("sha256:".length)}` as ArtifactUri,
+            mediaType: "application/json",
+            bytes: BigInt(new TextEncoder().encode(hydratedText).byteLength) as ByteCount,
+          },
+        };
     results.push({
-      fragment,
+      fragment: exactFragment,
       method: "exact_user_reference",
       rawScore: 0.8,
       rerankedScore: 0.8,

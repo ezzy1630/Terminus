@@ -292,3 +292,5 @@ export function renderRequest(input: CanonicalRenderInput): Promise<RenderedProv
   const renderer = new GoogleRenderer();
   return renderer.render(input);
 }
+
+export * from "./model_profiles.js";

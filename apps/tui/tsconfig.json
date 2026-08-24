@@ -5,6 +5,7 @@
     "composite": false,
     "declaration": false,
     "declarationMap": false,
+    "types": ["bun-types"],
     "rootDir": ".",
     "baseUrl": "..",
     "paths": {
@@ -12,5 +13,5 @@
       "@terminus/public-client": ["./packages/public-client/src/index.ts"]
     }
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
 }

@@ -9,6 +9,8 @@ providers.
 - `GoogleRenderer` — implements `ProviderRenderer`.
 - `GoogleTransport` — interface for the HTTP transport.
 - `renderRequest(input)` — convenience helper.
+- `GOOGLE_MODEL_PROFILES` and `GOOGLE_RENDERING_PROFILES`: concrete catalog
+  data owned by this adapter.
 - Wire types: `GeminiRequestBody`, `GeminiContent`, `GeminiPart`,
   `GeminiFunctionDeclaration`.
 

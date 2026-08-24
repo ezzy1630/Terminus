@@ -35,7 +35,8 @@
  *   health-v2                       Check v2 system health
  *   schema-registry                 Get v2 schema registry metadata
  *   task-v2 <id>                    Get v2 task snapshot
- *   new-task-v2 --objective <o>     Create a canonical v2 proof-carrying task
+ *   new-task-v2 --objective <o> [--session <id> --thread <id>]
+ *                                    Create an operational or conversation-backed v2 task
  *   transition-task-v2 <id> --status <s>
  *                                   Transition v2 task state (READY, RUNNING, etc.)
  *   propose-effect --task <id> --class <c> --intent <i>
@@ -62,6 +63,8 @@
  *   2   usage error
  *   3   timeout
  */
+import { randomUUID } from "node:crypto";
+
 const GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
 const PORT_PARAM = "XTransformPort=3050";
 // Bearer token for control planes that require auth (SPEC §30.8). The
@@ -122,11 +125,14 @@ async function apiGet<T>(path: string): Promise<T> {
 async function apiMutate<T>(
   path: string,
   body: unknown,
-  idempotencyKey?: string,
+  idempotencyKey: string,
 ): Promise<T> {
+  if (idempotencyKey.trim().length === 0) {
+    throw new TypeError("Idempotency-Key must be a non-empty string");
+  }
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (BEARER_TOKEN) headers.authorization = `Bearer ${BEARER_TOKEN}`;
-  if (idempotencyKey) headers["x-idempotency-key"] = idempotencyKey;
+  headers["Idempotency-Key"] = idempotencyKey;
   const res = await fetch(forgeUrl(path), {
     method: "POST",
     headers,
@@ -134,7 +140,7 @@ async function apiMutate<T>(
   });
   if (!res.ok) {
     const text = await res.text();
-    process.stderr.write(`error: POST ${path} -> HTTP ${res.status}: ${text}\n`);
+    process.stderr.write(`error: POST ${path} -> HTTP ${res.status}: ${text}\nidempotency-key: ${idempotencyKey}\n`);
     process.exit(1);
   }
   return (await res.json()) as T;
@@ -261,7 +267,8 @@ ARP v2 Commands:
   health-v2                       v2 system health (JSON)
   schema-registry                 v2 schema registry (JSON)
   task-v2 <id>                    v2 task snapshot (JSON)
-  new-task-v2 --objective <o>     Create a canonical v2 task
+  new-task-v2 --objective <o> [--session <id> --thread <id>]
+                                  Create a canonical v2 task
   transition-task-v2 <id> --status <s> [--expected-version <n>]
                                   Transition the v2 task state machine
   propose-effect --task <id> --class <c> --intent <i>
@@ -272,6 +279,16 @@ ARP v2 Commands:
   submit-claim --task <id> --statement <s>
   record-evidence --claim <id> --summary <s> --result <r>
   events-v2 [--task <id>] [--cursor <c>]   Stream v2 SSE envelopes as JSONL
+
+Operator cockpit:
+  orgs | departments [--org <id>] | operators [--dept <id>] | agent-rooms [--dept <id>]
+  directory | resolve-capability --capability <id> [--category <name>]
+  assess-attention <task-id> | questions-material [--task <id>]
+  resolve-question-material <id> --option <value>
+  intervene --task <id> --verb <verb> --rationale <text>
+  apply-intervention <id> | interventions [--task <id>]
+  replay <task-id> | counterfactual --task <id> --type <type>
+  mobile-supervise <task-id> | mobile-action --task <id> --action <action>
 
 Options:
   --gateway <url>    Gateway base URL (env: TERMINUS_GATEWAY, default: http://127.0.0.1:81)
@@ -294,7 +311,12 @@ async function main(): Promise<void> {
     process.exit(cmd ? 0 : 2);
   }
 
-  const idem = typeof flags.idempotency === "string" ? flags.idempotency : undefined;
+  const explicitIdempotency = typeof flags.idempotency === "string" ? flags.idempotency.trim() : null;
+  if (typeof flags.idempotency === "string" && explicitIdempotency?.length === 0) {
+    process.stderr.write("error: --idempotency must be a non-empty string\n");
+    process.exit(2);
+  }
+  const mutationKey = explicitIdempotency ?? `cli:${cmd}:${randomUUID()}`;
 
   try {
     switch (cmd) {
@@ -326,40 +348,40 @@ async function main(): Promise<void> {
       }
       case "new-workspace": {
         const root = requireFlag(flags, "root");
-        printJson(await apiMutate("/v1/workspaces/open", { root_uri: root }, idem));
+        printJson(await apiMutate("/v1/workspaces/open", { root_uri: root }, mutationKey));
         break;
       }
       case "new-session": {
         const wid = requireFlag(flags, "workspace");
         const title = requireFlag(flags, "title");
-        printJson(await apiMutate("/v1/sessions", { workspace_id: wid, title }, idem));
+        printJson(await apiMutate("/v1/sessions", { workspace_id: wid, title }, mutationKey));
         break;
       }
       case "new-task": {
         const sid = requireFlag(flags, "session");
         const tid = requireFlag(flags, "thread");
         const objective = requireFlag(flags, "objective");
-        printJson(await apiMutate("/v1/tasks", { session_id: sid, thread_id: tid, objective }, idem));
+        printJson(await apiMutate("/v1/tasks", { session_id: sid, thread_id: tid, objective }, mutationKey));
         break;
       }
       case "start-task": {
         const id = positional[1];
         if (!id) { process.stderr.write("error: start-task <id>\n"); process.exit(2); }
-        printJson(await apiMutate(`/v1/tasks/${id}/start`, {}, idem));
+        printJson(await apiMutate(`/v1/tasks/${id}/start`, {}, mutationKey));
         break;
       }
       case "cancel-task": {
         const id = positional[1];
         if (!id) { process.stderr.write("error: cancel-task <id>\n"); process.exit(2); }
         const reason = typeof flags.reason === "string" ? flags.reason : null;
-        printJson(await apiMutate(`/v1/tasks/${id}/cancel`, { reason }));
+        printJson(await apiMutate(`/v1/tasks/${id}/cancel`, { reason }, mutationKey));
         break;
       }
       case "start-turn": {
         const tid = requireFlag(flags, "thread");
         const taskId = requireFlag(flags, "task");
         const input = requireFlag(flags, "input");
-        printJson(await apiMutate("/v1/turns", { thread_id: tid, task_id: taskId, user_input: input }, idem));
+        printJson(await apiMutate("/v1/turns", { thread_id: tid, task_id: taskId, user_input: input }, mutationKey));
         break;
       }
       case "wait": {
@@ -404,7 +426,7 @@ async function main(): Promise<void> {
           | "allow_once" | "allow_exact" | "allow_task_scope"
           | "deny_once" | "deny_and_rule" | "stop_task";
         const rationale = typeof flags.rationale === "string" ? flags.rationale : null;
-        printJson(await apiMutate(`/v1/approvals/${id}/resolve`, { decision, rationale }));
+        printJson(await apiMutate(`/v1/approvals/${id}/resolve`, { decision, rationale }, mutationKey));
         break;
       }
       case "evals": {
@@ -433,13 +455,20 @@ async function main(): Promise<void> {
       case "new-task-v2": {
         const objective = requireFlag(flags, "objective");
         const mission = typeof flags.mission === "string" ? flags.mission : null;
-        const mode = typeof flags.mode === "string" ? flags.mode : "interactive";
+        const sessionId = typeof flags.session === "string" ? flags.session : null;
+        const threadId = typeof flags.thread === "string" ? flags.thread : null;
+        if ((sessionId === null) !== (threadId === null)) {
+          process.stderr.write("error: --session and --thread must be supplied together\n");
+          process.exit(2);
+        }
+        const mode = typeof flags.mode === "string" ? flags.mode : sessionId === null ? "operational" : "interactive";
         // JSON has no bigint: Micros travel as decimal strings on the wire
         // and the control plane coerces them back to bigint at the boundary.
         const body = {
           missionId: mission,
           organizationId: "default-org",
           departmentId: "default-dept",
+          v1Context: sessionId === null || threadId === null ? null : { sessionId, threadId },
           contract: {
             version: 1,
             mission: objective,
@@ -450,7 +479,7 @@ async function main(): Promise<void> {
             mode,
           },
         };
-        printJson(await apiMutate("/v2/tasks", body, idem));
+        printJson(await apiMutate("/v2/tasks", body, mutationKey));
         break;
       }
       case "transition-task-v2": {
@@ -458,7 +487,7 @@ async function main(): Promise<void> {
         if (!id) { process.stderr.write("error: transition-task-v2 <id>\n"); process.exit(2); }
         const status = requireFlag(flags, "status");
         const expVer = typeof flags["expected-version"] === "string" ? parseInt(flags["expected-version"], 10) : null;
-        printJson(await apiMutate(`/v2/tasks/${id}/transition`, { id, targetStatus: status, expectedVersion: expVer }, idem));
+        printJson(await apiMutate(`/v2/tasks/${id}/transition`, { id, targetStatus: status, expectedVersion: expVer }, mutationKey));
         break;
       }
       case "propose-effect": {
@@ -474,16 +503,16 @@ async function main(): Promise<void> {
           canonicalParameters: {},
           resourceHandles: [],
           effectClass,
-          semanticIdempotencyKey: idem ?? `eff-${Date.now()}`,
+          semanticIdempotencyKey: mutationKey,
         };
-        printJson(await apiMutate("/v2/effects", body, idem));
+        printJson(await apiMutate("/v2/effects", body, mutationKey));
         break;
       }
       case "commit-effect": {
         const id = positional[1];
         if (!id) { process.stderr.write("error: commit-effect <id>\n"); process.exit(2); }
         const expVer = typeof flags["expected-version"] === "string" ? parseInt(flags["expected-version"], 10) : null;
-        printJson(await apiMutate(`/v2/effects/${id}/commit`, { id, expectedVersion: expVer }, idem));
+        printJson(await apiMutate(`/v2/effects/${id}/commit`, { id, expectedVersion: expVer }, mutationKey));
         break;
       }
       case "advance-effect": {
@@ -494,14 +523,14 @@ async function main(): Promise<void> {
         if (!id) { process.stderr.write("error: advance-effect <id> --to <STATE>\n"); process.exit(2); }
         const to = requireFlag(flags, "to");
         const expVer = typeof flags["expected-version"] === "string" ? parseInt(flags["expected-version"], 10) : null;
-        printJson(await apiMutate(`/v2/effects/${id}/transition`, { targetState: to, expectedVersion: expVer }, idem));
+        printJson(await apiMutate(`/v2/effects/${id}/transition`, { targetState: to, expectedVersion: expVer }, mutationKey));
         break;
       }
       case "submit-claim": {
         const taskId = requireFlag(flags, "task");
         const statement = requireFlag(flags, "statement");
         const evidence = typeof flags.evidence === "string" ? flags.evidence : "DETERMINISTIC_TEST";
-        printJson(await apiMutate("/v2/claims", { taskId, statement, requiredEvidenceKind: evidence }, idem));
+        printJson(await apiMutate("/v2/claims", { taskId, statement, requiredEvidenceKind: evidence }, mutationKey));
         break;
       }
       case "record-evidence": {
@@ -509,7 +538,7 @@ async function main(): Promise<void> {
         const summary = requireFlag(flags, "summary");
         const result = requireFlag(flags, "result");
         const body = { claimId, kind: "DETERMINISTIC_TEST", summary, verifierResult: result };
-        printJson(await apiMutate("/v2/evidence", body, idem));
+        printJson(await apiMutate("/v2/evidence", body, mutationKey));
         break;
       }
       case "events-v2": {
@@ -528,6 +557,115 @@ async function main(): Promise<void> {
           process.exit(1);
         }
         await streamSse(res.body);
+        break;
+      }
+      case "orgs": {
+        printJson(await apiGet("/v2/organizations"));
+        break;
+      }
+      case "departments": {
+        const orgId = typeof flags.org === "string" ? flags.org : undefined;
+        const qs = orgId ? `?organizationId=${encodeURIComponent(orgId)}` : "";
+        printJson(await apiGet(`/v2/departments${qs}`));
+        break;
+      }
+      case "operators": {
+        const deptId = typeof flags.dept === "string" ? flags.dept : undefined;
+        const qs = deptId ? `?departmentId=${encodeURIComponent(deptId)}` : "";
+        printJson(await apiGet(`/v2/operators${qs}`));
+        break;
+      }
+      case "agent-rooms": {
+        const deptId = typeof flags.dept === "string" ? flags.dept : undefined;
+        const qs = deptId ? `?departmentId=${encodeURIComponent(deptId)}` : "";
+        printJson(await apiGet(`/v2/agent-rooms${qs}`));
+        break;
+      }
+      case "directory": {
+        printJson(await apiGet("/v2/capabilities/directory"));
+        break;
+      }
+      case "resolve-capability": {
+        const cap = requireFlag(flags, "capability");
+        const category = typeof flags.category === "string" ? flags.category : undefined;
+        printJson(await apiMutate("/v2/capabilities/resolve", { capabilityId: cap, category }, mutationKey));
+        break;
+      }
+      case "assess-attention": {
+        const id = positional[1];
+        if (!id) { process.stderr.write("error: assess-attention <task-id>\n"); process.exit(2); }
+        printJson(await apiGet(`/v2/attention/assess/${encodeURIComponent(id)}`));
+        break;
+      }
+      case "questions-material": {
+        const taskId = typeof flags.task === "string" ? flags.task : undefined;
+        const qs = taskId ? `?taskId=${encodeURIComponent(taskId)}` : "";
+        printJson(await apiGet(`/v2/attention/questions${qs}`));
+        break;
+      }
+      case "resolve-question-material": {
+        const id = positional[1];
+        if (!id) { process.stderr.write("error: resolve-question-material <id> --option <o>\n"); process.exit(2); }
+        const option = requireFlag(flags, "option");
+        printJson(await apiMutate(`/v2/attention/questions/${encodeURIComponent(id)}/resolve`, { id, selectedOption: option }, mutationKey));
+        break;
+      }
+      case "intervene": {
+        const taskId = requireFlag(flags, "task");
+        const verb = requireFlag(flags, "verb");
+        const rationale = requireFlag(flags, "rationale");
+        const target = typeof flags.target === "string" ? flags.target : null;
+        printJson(await apiMutate("/v2/interventions", {
+          taskId,
+          actorPrincipal: "cli-user",
+          verb,
+          targetEntityId: target,
+          payload: {},
+          rationale,
+        }, mutationKey));
+        break;
+      }
+      case "apply-intervention": {
+        const id = positional[1];
+        if (!id) { process.stderr.write("error: apply-intervention <id>\n"); process.exit(2); }
+        printJson(await apiMutate(`/v2/interventions/${encodeURIComponent(id)}/apply`, { id }, mutationKey));
+        break;
+      }
+      case "interventions": {
+        const taskId = typeof flags.task === "string" ? flags.task : undefined;
+        const qs = taskId ? `?taskId=${encodeURIComponent(taskId)}` : "";
+        printJson(await apiGet(`/v2/interventions${qs}`));
+        break;
+      }
+      case "replay": {
+        const id = positional[1];
+        if (!id) { process.stderr.write("error: replay <task-id>\n"); process.exit(2); }
+        printJson(await apiGet(`/v2/replay/traces/${encodeURIComponent(id)}`));
+        break;
+      }
+      case "counterfactual": {
+        const taskId = requireFlag(flags, "task");
+        const type = requireFlag(flags, "type");
+        printJson(await apiMutate("/v2/replay/counterfactual", {
+          sourceTaskId: taskId,
+          variationType: type,
+          variationDetails: {},
+        }, mutationKey));
+        break;
+      }
+      case "mobile-supervise": {
+        const id = positional[1];
+        if (!id) { process.stderr.write("error: mobile-supervise <task-id>\n"); process.exit(2); }
+        printJson(await apiGet(`/v2/mobile/sessions/${encodeURIComponent(id)}`));
+        break;
+      }
+      case "mobile-action": {
+        const taskId = requireFlag(flags, "task");
+        const action = requireFlag(flags, "action");
+        printJson(await apiMutate(`/v2/mobile/sessions/${encodeURIComponent(taskId)}/action`, {
+          taskId,
+          action,
+        }, mutationKey));
         break;
       }
       default:

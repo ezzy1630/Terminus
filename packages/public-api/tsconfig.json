@@ -3,6 +3,7 @@
   "compilerOptions": { "composite": true, "outDir": "dist", "rootDir": "src" },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../domain" }
+    { "path": "../domain" },
+    { "path": "../runtime-protocol" }
   ]
 }

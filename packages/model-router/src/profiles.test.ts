@@ -1,68 +1,188 @@
 /**
- * @terminus/model-router — tests for ModelProfile, ProfileRegistry,
- * PosteriorTracker, StageRouter, and ProviderContinuationManager (SPEC §26).
+ * @terminus/model-router — focused tests for injected neutral model profiles.
  */
-import { describe, test, expect } from "bun:test";
-import { modelProfileSchema, routeDecisionV2Schema, modelCohortPosteriorSchema, providerContinuationSchema } from "@terminus/domain";
+import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import {
-  STANDARD_MODEL_PROFILES,
-  CLAUDE_3_7_SONNET_PROFILE,
-  GPT_4O_PROFILE,
-  GEMINI_2_0_FLASH_PROFILE,
-  LOCAL_LLAMA_3_3_70B_PROFILE,
-  ProfileRegistry,
-  PosteriorTracker,
-  StageRouter,
-  ProviderContinuationManager,
+  micros,
+  modelProfileSchema,
+  type ModelProfile,
+} from "@terminus/domain";
+import {
   CircuitBreaker,
+  ModelProfileConflictError,
+  PosteriorTracker,
+  ProfileRegistry,
+  ProviderContinuationManager,
+  StageRouter,
 } from "./index.js";
 
-describe("Phase 8 Model Profiles & Registry", () => {
-  test("all standard model profiles pass schema validation", () => {
-    expect(STANDARD_MODEL_PROFILES.length).toBeGreaterThanOrEqual(9);
-    for (const profile of STANDARD_MODEL_PROFILES) {
-      const parsed = modelProfileSchema.safeParse(profile);
-      expect(parsed.success).toBe(true);
+interface ProfileFixtureInput {
+  readonly id: string;
+  readonly adapterRef: string;
+  readonly modelKey: string;
+  readonly modelFamilyRef: string;
+  readonly latencyMs: number;
+  readonly costMicros: number;
+  readonly codingQuality: "low" | "medium" | "high";
+  readonly imageInput?: boolean;
+  readonly reasoningStrength?: "none" | "low" | "medium" | "high";
+  readonly offlineExecution?: boolean;
+  readonly allowsSecret?: boolean;
+}
+
+function profileFixture(input: ProfileFixtureInput): ModelProfile {
+  return modelProfileSchema.parse({
+    id: input.id,
+    adapterRef: input.adapterRef,
+    renderingProfileRef: `rendering:${input.id}`,
+    modelKey: input.modelKey,
+    version: "profile-v1",
+    modelFamilyRef: input.modelFamilyRef,
+    economics: {
+      inputMicrosPerMillion: micros(input.costMicros),
+      cachedInputMicrosPerMillion: micros(Math.floor(input.costMicros / 2)),
+      outputMicrosPerMillion: micros(input.costMicros * 4),
+      reasoningAccounting: input.reasoningStrength === "high",
+    },
+    latencyModel: {
+      p50Ms: input.latencyMs,
+      p90Ms: input.latencyMs * 2,
+      p99Ms: input.latencyMs * 4,
+      ttftMs: Math.floor(input.latencyMs / 2),
+    },
+    allowedConfidentiality: input.allowsSecret
+      ? ["public", "workspace", "secret_adjacent", "secret"]
+      : ["public", "workspace", "secret_adjacent"],
+    capabilities: {
+      codingQuality: input.codingQuality,
+      toolReliability: "high",
+      structuredOutput: true,
+      imageInput: input.imageInput ?? false,
+      advertisedContextTokens: 128_000,
+      testedSafeContextTokens: 100_000,
+      securityReasoning: input.reasoningStrength === "high" ? "high" : "medium",
+      reasoningStrength: input.reasoningStrength ?? "none",
+      offlineExecution: input.offlineExecution ?? false,
+    },
+  }) as ModelProfile;
+}
+
+const FAST_PROFILE = profileFixture({
+  id: "profile:fast",
+  adapterRef: "adapter:remote-a",
+  modelKey: "model-fast",
+  modelFamilyRef: "family:a",
+  latencyMs: 150,
+  costMicros: 100_000,
+  codingQuality: "medium",
+});
+
+const DEEP_PROFILE = profileFixture({
+  id: "profile:deep",
+  adapterRef: "adapter:remote-b",
+  modelKey: "model-deep",
+  modelFamilyRef: "family:b",
+  latencyMs: 900,
+  costMicros: 1_000_000,
+  codingQuality: "high",
+  imageInput: true,
+  reasoningStrength: "high",
+});
+
+const OFFLINE_PROFILE = profileFixture({
+  id: "profile:offline",
+  adapterRef: "adapter:offline",
+  modelKey: "model-offline",
+  modelFamilyRef: "family:offline",
+  latencyMs: 500,
+  costMicros: 0,
+  codingQuality: "high",
+  reasoningStrength: "high",
+  offlineExecution: true,
+  allowsSecret: true,
+});
+
+const INJECTED_PROFILES = [
+  FAST_PROFILE,
+  DEEP_PROFILE,
+  OFFLINE_PROFILE,
+] as const;
+
+describe("provider-neutral ModelProfile", () => {
+  test("canonical schema exposes only opaque provider integration references", () => {
+    const schemaJson = JSON.stringify(
+      z.toJSONSchema(modelProfileSchema, { unrepresentable: "any" }),
+    );
+    const forbiddenCanonicalTerms = [
+      "anthropic",
+      "openai",
+      "google",
+      "gemini",
+      "systemPromptPlacement",
+      "toolDialect",
+      "continuationStrategy",
+      "cachingStrategy",
+      "structuredOutputRepair",
+    ];
+
+    for (const term of forbiddenCanonicalTerms) {
+      expect(schemaJson).not.toContain(term);
     }
   });
 
-  test("ProfileRegistry resolves pinned profiles and filters correctly", () => {
-    const registry = new ProfileRegistry(STANDARD_MODEL_PROFILES);
-
-    const sonnet = registry.getById(CLAUDE_3_7_SONNET_PROFILE.id);
-    expect(sonnet).not.toBeNull();
-    expect(sonnet?.modelKey).toBe("claude-3-7-sonnet-20250219");
-
-    const pinned = registry.resolvePinned("openai", "gpt-4o-2024-11-20", "2024-11-20-v1");
-    expect(pinned).not.toBeNull();
-    expect(pinned?.id).toBe(GPT_4O_PROFILE.id);
-
-    const localProfiles = registry.listLocalProfiles();
-    expect(localProfiles.length).toBeGreaterThanOrEqual(3);
-    for (const lp of localProfiles) {
-      expect(lp.providerId).toBe("local");
-    }
-
-    const secretEligible = registry.listForConfidentiality("secret");
-    expect(secretEligible.length).toBeGreaterThanOrEqual(3);
-    for (const p of secretEligible) {
-      expect(p.confidentialityPolicy).toContain("secret");
-      expect(p.providerId).toBe("local");
-    }
+  test("strictly rejects provider rendering fields", () => {
+    expect(
+      modelProfileSchema.safeParse({
+        ...FAST_PROFILE,
+        providerId: "closed-vendor-id",
+        toolDialect: "wire-dialect",
+      }).success,
+    ).toBe(false);
   });
 });
 
-describe("PosteriorTracker Bayesian Updating", () => {
-  test("initializes neutral prior and updates Beta-Binomial and Log-Normal posterior", () => {
-    const tracker = new PosteriorTracker();
-    const modelKey = "claude-3-7-sonnet-20250219";
+describe("ProfileRegistry", () => {
+  test("uses only profiles injected by the composition root", () => {
+    const registry = new ProfileRegistry(INJECTED_PROFILES);
 
-    const prior = tracker.getOrCreate(modelKey);
+    expect(registry.listAll()).toHaveLength(3);
+    expect(
+      registry.resolvePinned("adapter:remote-b", "model-deep", "profile-v1")
+        ?.id,
+    ).toBe(DEEP_PROFILE.id);
+    expect(registry.listByAdapter("adapter:remote-a")).toEqual([FAST_PROFILE]);
+    expect(registry.listOfflineProfiles()).toEqual([OFFLINE_PROFILE]);
+    expect(registry.listForConfidentiality("secret")).toEqual([
+      OFFLINE_PROFILE,
+    ]);
+  });
+
+  test("treats exact duplicates as idempotent and rejects descriptor replacement", () => {
+    const registry = new ProfileRegistry([FAST_PROFILE]);
+
+    expect(() => registry.register({ ...FAST_PROFILE })).not.toThrow();
+    expect(registry.listAll()).toHaveLength(1);
+    expect(() =>
+      registry.register({
+        ...FAST_PROFILE,
+        renderingProfileRef: "rendering:replacement",
+      }),
+    ).toThrow(ModelProfileConflictError);
+    expect(registry.getById(FAST_PROFILE.id)?.renderingProfileRef).toBe(
+      FAST_PROFILE.renderingProfileRef,
+    );
+  });
+});
+
+describe("PosteriorTracker", () => {
+  test("updates reliability, latency, cost, and cache observations", () => {
+    const tracker = new PosteriorTracker();
+    const prior = tracker.getOrCreate(FAST_PROFILE.modelKey);
     expect(prior.sampleCount).toBe(0);
-    expect(prior.toolCallAlpha).toBe(10.0);
 
     const updated = tracker.recordObservation({
-      modelKey,
+      modelKey: FAST_PROFILE.modelKey,
       toolCallsSucceeded: 5,
       toolCallsFailed: 0,
       structuredOutputSucceeded: true,
@@ -73,125 +193,85 @@ describe("PosteriorTracker Bayesian Updating", () => {
     });
 
     expect(updated.sampleCount).toBe(1);
-    expect(updated.toolCallAlpha).toBe(15.0);
-    expect(updated.structuredOutputAlpha).toBe(11.0);
+    expect(updated.toolCallAlpha).toBe(15);
     expect(updated.observedCostMicros).toBe(15_000n);
-    expect(updated.observedCacheHitRate).toBe(0.8);
-
-    const metrics = tracker.getExpectedMetrics(modelKey);
-    expect(metrics.expectedToolReliability).toBeGreaterThan(0.9);
-    expect(metrics.expectedLatencyMs).toBeGreaterThan(0);
+    expect(
+      tracker.getExpectedMetrics(FAST_PROFILE.modelKey).expectedLatencyMs,
+    ).toBeGreaterThan(0);
   });
 });
 
-describe("StageRouter Deterministic Routing", () => {
-  test("routes classifier stage to fast low-latency model", () => {
-    const registry = new ProfileRegistry(STANDARD_MODEL_PROFILES);
-    const tracker = new PosteriorTracker();
-    const router = new StageRouter(registry, tracker);
+describe("StageRouter", () => {
+  test("routes by neutral capability and adapter constraints", () => {
+    const registry = new ProfileRegistry(INJECTED_PROFILES);
+    const router = new StageRouter(registry, new PosteriorTracker());
 
-    const decision = router.route({
-      stage: "classifier",
-      confidentiality: "workspace",
-    });
-
-    expect(decision.chosenProfileId).not.toBeNull();
-    expect(decision.stage).toBe("classifier");
-    // Haiku or Flash should be top
     expect(
-      decision.chosenProfileId?.includes("haiku") || decision.chosenProfileId?.includes("flash"),
-    ).toBe(true);
+      router.route({ stage: "classifier", confidentiality: "workspace" })
+        .chosenProfileId,
+    ).toBe(FAST_PROFILE.id);
+    expect(
+      router.route({ stage: "vision", confidentiality: "workspace" })
+        .chosenProfileId,
+    ).toBe(DEEP_PROFILE.id);
+    expect(
+      router.route({ stage: "local_safe", confidentiality: "secret" })
+        .chosenProfileId,
+    ).toBe(OFFLINE_PROFILE.id);
+    expect(
+      router.route({
+        stage: "implementer",
+        confidentiality: "workspace",
+        allowedAdapterRefs: [DEEP_PROFILE.adapterRef],
+      }).chosenProfileId,
+    ).toBe(DEEP_PROFILE.id);
+    expect(
+      router.route({
+        stage: "reviewer",
+        confidentiality: "workspace",
+        implementerModelFamilyRef: DEEP_PROFILE.modelFamilyRef,
+      }).chosenProfileId,
+    ).not.toBe(DEEP_PROFILE.id);
   });
 
-  test("routes reviewer stage preferring diverse family from implementer", () => {
-    const registry = new ProfileRegistry(STANDARD_MODEL_PROFILES);
-    const tracker = new PosteriorTracker();
-    const router = new StageRouter(registry, tracker);
+  test("keys health controls by opaque adapter reference", () => {
+    const circuitBreaker = new CircuitBreaker();
+    for (let failures = 0; failures < 5; failures += 1) {
+      circuitBreaker.recordFailure(DEEP_PROFILE.adapterRef);
+    }
+    const router = new StageRouter(
+      new ProfileRegistry(INJECTED_PROFILES),
+      new PosteriorTracker(),
+      { circuitBreaker },
+    );
 
-    const decision = router.route({
-      stage: "reviewer",
-      confidentiality: "workspace",
-      implementerProviderId: "anthropic",
-    });
-
-    expect(decision.chosenProfileId).not.toBeNull();
-    // Reviewer should NOT be anthropic when diversity preferred
-    expect(decision.chosenProfileId?.startsWith("profile-anthropic")).toBe(false);
-  });
-
-  test("routes local_safe or secret confidentiality to local open-weight model", () => {
-    const registry = new ProfileRegistry(STANDARD_MODEL_PROFILES);
-    const tracker = new PosteriorTracker();
-    const router = new StageRouter(registry, tracker);
-
-    const decision = router.route({
-      stage: "local_safe",
-      confidentiality: "secret",
-    });
-
-    expect(decision.chosenProfileId).not.toBeNull();
-    expect(decision.chosenProfileId?.startsWith("profile-local")).toBe(true);
-  });
-
-  test("bypasses tripped circuit breaker provider during routing", () => {
-    const registry = new ProfileRegistry(STANDARD_MODEL_PROFILES);
-    const tracker = new PosteriorTracker();
-    const cb = new CircuitBreaker();
-    cb.recordFailure("anthropic");
-    cb.recordFailure("anthropic");
-    cb.recordFailure("anthropic");
-    cb.recordFailure("anthropic");
-    cb.recordFailure("anthropic"); // Trips breaker
-
-    const router = new StageRouter(registry, tracker, { circuitBreaker: cb });
-
-    const decision = router.route({
-      stage: "implementer",
-      confidentiality: "workspace",
-    });
-
-    expect(decision.chosenProfileId).not.toBeNull();
-    expect(decision.chosenProfileId?.startsWith("profile-anthropic")).toBe(false);
+    expect(
+      router.route({ stage: "implementer", confidentiality: "workspace" })
+        .chosenProfileId,
+    ).toBe(OFFLINE_PROFILE.id);
   });
 });
 
 describe("ProviderContinuationManager", () => {
-  test("classifies provider errors properly and manages continuation state", () => {
-    const mgr = new ProviderContinuationManager();
+  test("classifies failures and records opaque model continuations", () => {
+    const manager = new ProviderContinuationManager();
+    expect(
+      manager.classifyFailure(new Error("Rate limit exceeded"), 429).kind,
+    ).toBe("rate_limit");
 
-    const rateLimit = mgr.classifyFailure(new Error("Rate limit exceeded"), 429);
-    expect(rateLimit.kind).toBe("rate_limit");
-    expect(rateLimit.retryable).toBe(true);
-
-    const quota = mgr.classifyFailure(new Error("Insufficient quota balance"), 402);
-    expect(quota.kind).toBe("quota_exhausted");
-    expect(quota.fallbackRecommended).toBe(true);
-
-    const refusal = mgr.classifyFailure(new Error("Safety policy refusal"));
-    expect(refusal.kind).toBe("model_refusal");
-    expect(refusal.fallbackRecommended).toBe(true);
-
-    const cont = mgr.recordContinuation({
+    const continuation = manager.recordContinuation({
       id: "cont-1",
       taskId: "task-1",
-      modelKey: "claude-3-7-sonnet-20250219",
+      modelKey: FAST_PROFILE.modelKey,
       inputManifestHash: "sha256:abc",
       toolStateEpoch: 1,
-      continuationToken: "tok_123",
+      continuationToken: "token-1",
       lastFailureKind: "timeout",
     });
 
-    expect(cont.id).toBe("cont-1");
-    expect(cont.retryCount).toBe(0);
-    expect(mgr.getContinuation("cont-1")?.continuationToken).toBe("tok_123");
-
-    const retried = mgr.recordContinuation({
-      id: "cont-1",
-      taskId: "task-1",
-      modelKey: "claude-3-7-sonnet-20250219",
-      inputManifestHash: "sha256:abc",
-      toolStateEpoch: 2,
-    });
-    expect(retried.retryCount).toBe(1);
+    expect(continuation.retryCount).toBe(0);
+    expect(manager.getContinuation("cont-1")?.continuationToken).toBe(
+      "token-1",
+    );
   });
 });

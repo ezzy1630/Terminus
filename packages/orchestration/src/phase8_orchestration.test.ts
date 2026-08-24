@@ -127,7 +127,7 @@ describe("CleanContextReviewer (SPEC §27.4, §15.3)", () => {
         },
       ],
       riskClass: "normal",
-      implementerProviderId: "anthropic",
+      implementerModelFamilyRef: "family-a",
     });
 
     expect(payload.systemPrompt).toContain("independent, adversarial code reviewer");
@@ -141,8 +141,8 @@ describe("CleanContextReviewer (SPEC §27.4, §15.3)", () => {
 
     const report = reviewer.evaluateFindings(
       "task-100",
-      "openai", // Reviewer is OpenAI (diverse from Anthropic implementer)
-      "anthropic",
+      "family-b",
+      "family-a",
       [
         {
           id: "find-1",

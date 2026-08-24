@@ -9,10 +9,10 @@
  *      commands) creates and advances the task.
  *   2. The graphical client's real adapter module (`apps/desktop`
  *      `lib/api-v2.ts`) reads the same task over `/v2/tasks/:id`,
- *      subscribes to `/v2/events` SSE, proposes an effect, and walks the
- *      server-enforced effect state machine to COMMITTED.
- *   3. Cross-checks: each client observes the other's writes on the same
- *      aggregate id (no per-client state).
+ *      subscribes to `/v2/events` SSE, and proposes an effect.
+ *   3. Cross-checks: each client observes the other's proposals on the same
+ *      aggregate id, and the server rejects state advancement without a
+ *      trusted receipt (no per-client state or success-shaped fallback).
  *
  * The harness (`scripts/e2e/deterministic.sh`) owns process supervision:
  * it exports TERMINUS_E2E_CONTROL_URL / TERMINUS_E2E_CONTROL_TOKEN after
@@ -115,7 +115,7 @@ describeLive("ARP v2 live lifecycle — CLI ↔ graphical client parity", () => 
   // Shared across the ordered steps below (single lifecycle, two clients).
   let taskId = "";
   let cliEffectId = "";
-  let desktopCommittedEffectId = "";
+  let desktopProposedEffectId = "";
   let desktopClient: TerminusArpV2Client | null = null;
 
   async function loadDesktopAdapter(): Promise<TerminusArpV2Client> {
@@ -167,7 +167,7 @@ describeLive("ARP v2 live lifecycle — CLI ↔ graphical client parity", () => 
     stream.close();
   });
 
-  test("CLI proposes an effect; graphical client walks it to COMMITTED over the server state machine", async () => {
+  test("CLI proposes an effect; graphical client sees the same PROPOSED ledger record", async () => {
     expect(taskId).not.toBe("");
     const proposed = cliJson<{ id: string; state: string; taskId: string }>(
       await cli(["propose-effect", "--task", taskId, "--class", "LOCAL_FS_WRITE", "--intent", "write_file"]),
@@ -181,53 +181,77 @@ describeLive("ARP v2 live lifecycle — CLI ↔ graphical client parity", () => 
     expect(visibleToDesktop.some((effect) => effect.id === cliEffectId)).toBe(true);
   });
 
-  test("graphical client confirms its own effect end-to-end (authorize → … → COMMITTED)", async () => {
+  test("graphical client proposal remains PROPOSED without trusted receipts", async () => {
     expect(taskId).not.toBe("");
     const desktop = await loadDesktopAdapter();
 
-    // Human confirmation flow from useTaskV2.confirmEffect: propose → policy
-    // check → authorize → deterministic settlement → commit.
+    // Either client may submit a semantic proposal. Neither may manufacture
+    // the receipts required to advance the authoritative state machine.
     const effect = await desktop.proposeEffect({
       taskId,
       intentType: "run_tests",
       effectClass: "LOCAL_PROCESS_SPAWN",
       canonicalParameters: { command: "bun test" },
-    });
+    }, { idempotencyKey: `desktop-effect:${taskId}` });
+    expect(effect.state).toBe("PROPOSED");
+    desktopProposedEffectId = effect.id;
 
-    let current = await desktop.advanceEffect(effect.id, "POLICY_CHECKED", effect.version);
-    current = await desktop.confirmEffect(current.id, `human:${taskId}:e2e`);
+    const rejected = await cli([
+      "advance-effect",
+      effect.id,
+      "--to",
+      "POLICY_CHECKED",
+      "--expected-version",
+      String(effect.version),
+    ]);
+    expect(rejected.code).not.toBe(0);
+    expect(rejected.stderr).toContain("EXTERNAL_DEPENDENCY_FAILED");
 
-    for (const target of ["PREPARED", "DISPATCHED", "OBSERVED", "VALIDATED"] as const) {
-      current = await desktop.advanceEffect(effect.id, target, current.version);
-    }
-    const committed = await desktop.commitEffect(effect.id, current.version);
-    expect(committed.state).toBe("COMMITTED");
-    expect(committed.settledAt).not.toBeNull();
-    desktopCommittedEffectId = committed.id;
+    const visibleToDesktop = await desktop.listEffects(taskId);
+    const unchanged = visibleToDesktop.find((candidate) => candidate.id === effect.id);
+    expect(unchanged?.state).toBe("PROPOSED");
+    expect(unchanged?.version).toBe(effect.version);
   });
 
-  test("server rejects illegal jumps and stale versions (conformance at the HTTP boundary)", async () => {
+  test("server rejects unverified and illegal advancement while preserving ledger state", async () => {
     expect(cliEffectId).not.toBe("");
-    expect(desktopCommittedEffectId).not.toBe("");
-    const desktop = await loadDesktopAdapter();
+    expect(desktopProposedEffectId).not.toBe("");
 
-    // Stale optimistic-concurrency version is rejected before anything else.
-    const stale = await desktop
-      .advanceEffect(desktopCommittedEffectId, "VALIDATED", 999)
-      .then(
-        () => null,
-        (err: Error) => err,
-      );
-    expect(stale).toBeInstanceOf(Error);
-    expect(String(stale)).toContain("VERSION_CONFLICT");
+    const cliRejected = await cli([
+      "advance-effect",
+      cliEffectId,
+      "--to",
+      "POLICY_CHECKED",
+    ]);
+    expect(cliRejected.code).not.toBe(0);
+    expect(cliRejected.stderr).toContain("EXTERNAL_DEPENDENCY_FAILED");
 
-    // Terminal effects accept no further transitions.
-    const settled = await desktop.listEffects(taskId);
-    const target = settled.find((effect) => effect.id === cliEffectId);
-    expect(target?.state).toBe("PROPOSED");
-    // PROPOSED → PREPARED skips the canonical policy/authorization path.
-    const illegal = await desktop.advanceEffect(cliEffectId, "PREPARED").catch((err: Error) => err);
-    expect(String(illegal)).toContain("ILLEGAL_TRANSITION");
+    for (const [effectId, targetState] of [
+      [cliEffectId, "DENIED"],
+      [desktopProposedEffectId, "CANCELLED"],
+    ] as const) {
+      const terminalRejected = await cli([
+        "advance-effect",
+        effectId,
+        "--to",
+        targetState,
+      ]);
+      expect(terminalRejected.code).not.toBe(0);
+      expect(terminalRejected.stderr).toContain("EXTERNAL_DEPENDENCY_FAILED");
+    }
+
+    const desktopRejected = await cli([
+      "advance-effect",
+      desktopProposedEffectId,
+      "--to",
+      "PREPARED",
+    ]);
+    expect(desktopRejected.code).not.toBe(0);
+    expect(desktopRejected.stderr).toContain("ILLEGAL_TRANSITION");
+
+    const effects = await (await loadDesktopAdapter()).listEffects(taskId);
+    expect(effects.find((effect) => effect.id === cliEffectId)?.state).toBe("PROPOSED");
+    expect(effects.find((effect) => effect.id === desktopProposedEffectId)?.state).toBe("PROPOSED");
   });
 
   test("schema registry exposes the canonical event catalog to both clients", async () => {

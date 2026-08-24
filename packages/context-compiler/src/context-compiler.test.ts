@@ -227,6 +227,7 @@ function compileInput(store: ContextStore, renderer: ProviderRenderer = new Fake
     epoch: null,
     worldState: { sections: {}, observedAt: NOW, sourceVersions: {} },
     recentEpisodes: [],
+    episodeContent: new Map(),
     checkpoint: null,
     userDirectives: [],
     activeCapabilities: [],

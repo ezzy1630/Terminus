@@ -87,6 +87,7 @@ export const ARP_V2_EVENT_TYPES = [
   "task.failed",
   "task.contract_updated",
   "task.scope_updated",
+  "task.conversation_context_attached",
 
   // Workflow lifecycle
   "workflow.created",
@@ -195,6 +196,14 @@ export const taskTransitionV2PayloadSchema = z.object({
   reason: z.string().nullable().default(null),
 });
 export type TaskTransitionV2Payload = z.infer<typeof taskTransitionV2PayloadSchema>;
+
+export const taskConversationContextAttachedV2PayloadSchema = z.object({
+  taskId: z.string(),
+  sessionId: z.string(),
+  threadId: z.string(),
+  attachedAt: z.string(),
+});
+export type TaskConversationContextAttachedV2Payload = z.infer<typeof taskConversationContextAttachedV2PayloadSchema>;
 
 // Workflow Payloads
 export const workflowCreatedPayloadSchema = z.object({
@@ -459,6 +468,7 @@ export interface ArpV2PayloadMap {
   "task.failed": TaskTransitionV2Payload;
   "task.contract_updated": Readonly<Record<string, unknown>>;
   "task.scope_updated": Readonly<Record<string, unknown>>;
+  "task.conversation_context_attached": TaskConversationContextAttachedV2Payload;
 
   "workflow.created": WorkflowCreatedPayload;
   "workflow.node_started": WorkflowNodeStartedPayload;

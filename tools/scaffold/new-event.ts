@@ -16,12 +16,11 @@ import { join } from "node:path";
 
 const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
 const type = process.argv[2];
-const aggregate = process.argv[3] ?? type.split(".")[0] ?? "unknown";
-
 if (!type) {
   console.error("Usage: bun run tools/scaffold/new-event.ts <type> [aggregate]");
   process.exit(1);
 }
+const aggregate = process.argv[3] ?? type.split(".")[0] ?? "unknown";
 if (!/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(type)) {
   console.error(`Invalid event type "${type}": must be dotted lowercase, e.g. "task.created".`);
   process.exit(1);

@@ -827,9 +827,7 @@ export class ModelHealthMonitor {
 
 // ────────────────────────── Phase 8 Exports (§26, §38) ──────────────────────────
 
-export * from "./profiles.js";
 export * from "./profile_registry.js";
 export * from "./posterior.js";
 export * from "./stage_router.js";
 export * from "./continuation.js";
-

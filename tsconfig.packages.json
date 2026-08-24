@@ -36,7 +36,6 @@
       "@terminus/testkit": ["./packages/testkit/src/index.ts"],
       "@terminus/public-api": ["./packages/public-api/src/index.ts"],
       "@terminus/public-client": ["./packages/public-client/src/index.ts"],
-      "@terminus/open-code-bridge": ["./packages/open-code-bridge/src/index.ts"],
       "@terminus/aci": ["./packages/aci/src/index.ts"],
       "@terminus/workflow-compiler": ["./packages/workflow-compiler/src/index.ts"]
     }

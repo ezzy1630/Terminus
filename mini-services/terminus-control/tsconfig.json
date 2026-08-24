@@ -33,9 +33,8 @@
       "@terminus/testkit": ["../../packages/testkit/src/index.ts"],
       "@terminus/public-api": ["../../packages/public-api/src/index.ts"],
       "@terminus/public-client": ["../../packages/public-client/src/index.ts"],
-      "@terminus/open-code-bridge": ["../../packages/open-code-bridge/src/index.ts"]
+      "bun:test": ["../../node_modules/bun-types/test.d.ts"]
     }
   },
   "include": ["src/**/*.ts"]
 }
-
