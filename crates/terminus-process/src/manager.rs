@@ -809,19 +809,29 @@ fn inspect_process(pid: u32) -> Result<Option<ProcessSnapshot>, ProcessError> {
             "missing /proc/{pid} start time"
         )));
     };
-    let commandline = std::fs::read(format!("/proc/{pid}/cmdline"))?;
+    let commandline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(commandline) => commandline,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ProcessError::Io(error)),
+    };
     let executable = commandline
         .split(|byte| *byte == 0)
         .next()
         .filter(|value| !value.is_empty())
         .map_or_else(
-            || {
-                std::fs::read_link(format!("/proc/{pid}/exe"))
-                    .map(|path| path.display().to_string())
-                    .map_err(ProcessError::Io)
+            || match std::fs::read_link(format!("/proc/{pid}/exe")) {
+                Ok(path) => Ok(Some(path.display().to_string())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(ProcessError::Io(error)),
             },
-            |value| Ok(String::from_utf8_lossy(value).into_owned()),
+            |value| Ok(Some(String::from_utf8_lossy(value).into_owned())),
         )?;
+    let Some(executable) = executable else {
+        // A Linux zombie retains /proc/<pid>/stat briefly after its command
+        // image and executable link disappear. It cannot receive a useful
+        // signal, so report it as gone to restart reconciliation.
+        return Ok(None);
+    };
     Ok(Some(ProcessSnapshot {
         start_time: start_time.to_string(),
         executable,
@@ -1109,7 +1119,12 @@ fn send_process_signal(pid: u32, signal: i32) -> Result<(), ProcessError> {
     if result == 0 {
         Ok(())
     } else {
-        Err(ProcessError::Io(std::io::Error::last_os_error()))
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            Err(ProcessError::Io(error))
+        }
     }
 }
 
