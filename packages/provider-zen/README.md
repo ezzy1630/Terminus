@@ -19,8 +19,10 @@ higher layer must implement `CredentialBoundGatewayClient` through the kernel's
 destination-bound connector. Unknown models and protocols fail closed.
 
 Discovered profiles allow `public` content only. The control-plane setting can
-admit `workspace` content for the configured account after the user explicitly
-enables it.
+admit `workspace` content only when the operator explicitly enables it and
+persists admission of the provider's current privacy/retention terms. A
+hand-entered model id remains a conservative fallback; it does not prove that
+the gateway exposes that model, protocol, capability set, or privacy terms.
 
 ## Runtime wiring
 

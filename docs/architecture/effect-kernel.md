@@ -171,10 +171,16 @@ Implementation: `crates/terminus-patch` + `crates/terminus-fs`.
 ## Process and job ownership (SPEC §11.7, §34.11, §34.12)
 
 - Every subprocess is owned by a process-tree supervisor (`ManagedProcess`).
-- Process-tree kill reaps forked children across process groups.
-- Structured stdio streaming with bounded inline capture and CAS artifact spillover.
-- Timeout and cancellation propagate cleanly without detached background tasks.
-- Job state records and output artifacts persist across restarts for deterministic reconciliation (`JobReconciled` event).
+- Unix process-tree kill reaps forked children across process groups. Non-Unix
+  builds use platform child-wait behavior and do not claim equivalent tree-kill
+  coverage until a platform backend proves it.
+- Structured stdio streaming keeps inline memory bounded and stores the full
+  output in CAS when it spills; the artifact reference is the continuation.
+- Timeout and cancellation propagate cleanly without detached background tasks
+  on the supported supervisor paths.
+- `JobManager::with_storage` persists job records for restart reconciliation;
+  the default in-memory constructor is a local/test mode and is not release
+  evidence for durable recovery.
 
 Implementation: `crates/terminus-process` + `crates/terminus-jobs`.
 

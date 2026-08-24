@@ -1,66 +1,47 @@
 # Terminus worklog
 
-This file records the current standalone-candidate work only. Historical Forge
-bootstrap notes were retired because they described a different product and
-contained stale completion claims.
+This records the standalone candidate only. Release claims stay bounded by
+the evidence listed in `Terminus — Research/implementation-reconciliation.md`.
 
-## 2026-08-23 — standalone candidate reconciliation
+## 2026-08-23 — candidate reconciliation
 
-Objective: take the 565-file candidate tree through code generation, local
-verification, cleanup, logical commits, hosted CI, and the requested GitHub
-merge. Keep release claims bounded by exact evidence.
+### Done locally
 
-### Completed locally
-
-- Ran `just codegen`; staged only regenerated files; `just codegen-check` is
-  green. Generated-only commit: `2080b0d` (`chore(codegen): regenerate
-  protocol and v2 contracts`).
-- `just standalone-check` passed; first-party runtime/build code has no
-  retired OpenCode runtime dependency.
-- Targeted TypeScript suites passed: 193 tests across artifact, routing,
-  orchestration, provider-Zen, public API, and verification packages.
-- Kernel isolation/recovery suites passed: 13 tests across workspace-root
-  registration, two-root effect isolation, and crash recovery.
-- Desktop Vitest passed 337 tests with 11 environment skips; desktop lint and
-  build passed after removing an effect-driven picker reset and replacing two
-  nonstandard text sizes.
-- `just e2e` passed, including checkpoint artifact hashing, owner-link
-  reconciliation, restart/recovery/resume, SSE replay, writer fencing, and
-  ARP v2 lifecycle checks.
-- The live OpenCode Zen endpoint accepted a minimal anonymous probe using the
-  current free catalog id `nemotron-3.5-lightning-free`. The supported local
-  keyring has no Zen or Go credential, so this is provider reachability only,
-  not kernel-mediated runtime evidence.
-- The local matrix also passed `just check-all`, `just fault-injection`,
-  `just fuzz-smoke`, `just release-drills`, `just eval-smoke`, `just eval-full`,
-  `just eval-release`, `just canary`, and a 60-second soak. `just sbom-verify`
-  passed with fallback SPDX because `syft` is unavailable. The strict release
-  evaluator still rejects fixture-tier evidence as stable-release proof.
-- Refreshed the desktop/root dependency graph with the compatible Vite,
-  Vitest, Electron Builder, ESLint, and test-library updates. Added the
-  required safe transitive floors for js-yaml, minimatch, esbuild, and undici;
-  `bun audit --production` now reports no vulnerabilities.
+- Started from the 565-file tree and preserved the 58 pre-existing staged
+  generated paths. Ran `just codegen`, staged only its regenerated output, and
+  confirmed `just codegen-check` green. The hosted WKT drift was fixed by
+  excluding ts-proto WKT output and refreshing the derived docs.
+- Retired the OpenCode runtime dependency, added the artifact-owner `Link` RPC,
+  shipped the Phase 9/10 contracts and desktop cockpit, and added the CI/release
+  evidence gates described by the Unreleased changelog.
+- Closed the valid Cubic findings: provider privacy/network admission,
+  fail-closed catalog discovery, exact approval bindings, migration locking and
+  constraints, complete artifact spill capture, task evidence receipts, safe
+  desktop routing/state transitions, ACP/Zed configuration, release probes, and
+  exact release-manifest binding.
+- `just check-all` is green: Rust workspace/unit/integration, 462 TypeScript
+  tests, 229 Python tests, boundary/standalone checks, codegen, lint/typecheck,
+  audit, licenses, and sources. Focused provider, desktop, migration, release,
+  artifact, and process suites also pass.
+- Anonymous OpenCode Zen reachability passed with
+  `nemotron-3.5-lightning-free`; no supported Zen credential exists, so this is
+  not kernel-mediated live-provider evidence. Fixture evaluation, fallback SPDX
+  SBOM, local isolation/recovery, fault/fuzz/release drills, E2E, and 60-second
+  soak passed. Full 24-hour soak, held-out evidence, signed provenance, and
+  owner approvals remain open.
 
 ### Cleanup decisions
 
-- `.codex-tmp/` and its temporary copy were removed from the repository and
-  moved to Trash as a recoverable cleanup action.
-- Vite/Electron outputs under `apps/desktop/dist/` and
-  `apps/desktop/dist-electron/` are generated candidate artifacts, not source.
-  They are ignored and removed from Git tracking; packaging scripts remain the
-  source of truth.
+- Removed `.codex-tmp/` and its temporary copy through recoverable Trash
+  cleanup.
+- `apps/desktop/dist/` and `apps/desktop/dist-electron/` remain ignored build
+  output and are not tracked; packaging scripts and source remain tracked.
+- Removed the `repo-audit` worktree and deleted branch
+  `repo-audit/20260823T1855`.
+- Apple signing/notarization is intentionally skipped; no configured signing
+  identity was found.
 
-### Seven program gates
-
-The reconciliation document distinguishes implemented contracts from release
-evidence. Local security, chaos/fault, migration, soak-smoke, fixture-eval,
-multi-root, and checkpoint-link drills passed against the candidate. A full
-24-hour soak, real kernel-mediated provider run, sealed held-out cohort, signed
-SBOM/owner approvals, and hosted supported-platform evidence remain
-unverified. Apple signing/notarization is intentionally skipped. Stub-tier
-components remain explicitly fail-closed in `maturity.yaml`.
-
-### Logical commits
+### Local logical commits
 
 - `2080b0d` — regenerate protocol and v2 contracts
 - `ef76fec` — retire the OpenCode runtime dependency
@@ -68,15 +49,16 @@ components remain explicitly fail-closed in `maturity.yaml`.
 - `d32f64d` — add Phase 9/10 control contracts
 - `2f81709` — ship the standalone desktop operator cockpit
 - `7074109` — add hosted checks and release evidence gates
-- `292bd51` — refresh generated maturity documentation
-- `6aa5dfa` — record the final codegen refresh
-- `9bca3d2` — harden provider inputs and error responses
-- `ee6fef8` — refresh the audited workspace dependency graph
+- `292bd51`, `6aa5dfa` — refresh maturity/codegen evidence
+- `9bca3d2`, `ee6fef8`, `7d7e4bb`, `7485e63`, `f398199`, `46f8ea3` — audit,
+  CI, build, generator, and dependency fixes
+- `f0a7932` — stabilize WKT generation and refresh derived docs
+- `c3a3c59` — close Cubic kernel/security boundary findings
+- `ecafd9a` — surface task evidence and safe routing state
+- `ee140ca` — harden release evidence and ACP boundaries
 
-### Handoff
+### Remaining handoff
 
-Before merge: run the final source checks from the committed candidate, push
-the feature branch, wait for its hosted checks, resolve only safe green
-Dependabot updates, merge into `main`, push `main`, and read back the resulting
-CI state. Do not describe fixture or anonymous-provider evidence as
-stable-release proof.
+Push the feature branch, wait for every hosted job to complete, merge it into
+`main`, push `main`, read back main CI, then close the superseded Dependabot
+PRs with an explanation and verify none remain open.

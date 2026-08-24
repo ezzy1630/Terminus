@@ -25,10 +25,11 @@ turning a fixture, an unsigned report, or a declaration into product evidence.
    components, predicted improvements and regression floors, resource/security
    effects, required tests, and an immutable causal-ablation plan before
    evaluation.
-3. Evaluation proceeds in order: static, replay, focused holdout, broad
-   holdout, then security/chaos. Receipts are bound to the candidate identity,
-   version, exact partition, and immutable artifact. Broad holdout evidence must
-   transfer across at least two cohorts and two model profiles.
+3. Evaluation proceeds in order: static, source-failure, replay, focused
+   holdout, broad holdout, then security/chaos. Receipts are bound to the
+   candidate identity, version, exact partition, feature/configuration identity,
+   and immutable artifact. Broad holdout evidence must transfer across at least
+   two cohorts and two model profiles.
 4. A separate promotion signature binds the candidate and the ordered receipt
    set. Canary observations are candidate-bound. A violated prediction,
    regression floor, or hard guardrail automatically rolls the candidate back.
@@ -43,6 +44,11 @@ turning a fixture, an unsigned report, or a declaration into product evidence.
    or dominance claim. A separately trusted verifier must resolve immutable
    artifacts, validate signatures and signer authority, and emit the release
    system card.
+
+8. A caller-supplied evaluator label is metadata, not evaluator authority.
+   Partition access and promotion admission require separately authenticated
+   evaluator and promotion identities; the current fixture runner does not
+   provide that isolation and cannot emit release evidence.
 
 ## Alternatives
 

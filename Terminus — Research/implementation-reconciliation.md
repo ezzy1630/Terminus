@@ -9,8 +9,10 @@ implementation from evidence still required for a stable product claim.
 **Candidate branch:** `codex/terminus-standalone-harness`
 **Base revision:** `299e7517e4836a7ecf11f4925385f013704a1026`
 **Candidate identity:** generated contracts are committed in `2080b0d`; the
-follow-on slices and the audited dependency refresh are committed on this
-branch before hosted-CI evidence is collected.
+follow-on slices, Cubic review fixes, and audited dependency refresh are
+committed on this branch before hosted-CI evidence is collected. The latest
+codegen stabilization is `f0a7932`; the latest kernel, desktop, and release
+fixes are `c3a3c59`, `ecafd9a`, and `ee140ca`.
 **Evidence rule:** implemented source, passing local checks, packaged-surface
 inspection, and release evidence are distinct states.
 
@@ -33,8 +35,9 @@ plane and fails visibly when that authority is unavailable.
 This is a substantial implementation slice, not proof that every north-star
 gate has passed. `maturity.yaml` remains authoritative: no component is
 `production` until exact-candidate conformance and signed evidence exist.
-The dependency graph is refreshed in `ee6fef8`; `bun audit --production`
-reports no vulnerabilities on the committed candidate.
+The dependency graph is refreshed in `ee6fef8` and the root asar importer is
+recorded in `46f8ea3`; `bun audit --production` reports no vulnerabilities on
+the committed candidate.
 
 ## Twelve-leap reconciliation
 
@@ -99,7 +102,7 @@ The local verification matrix is green for `bun audit --production`,
 `just check-all`, `just e2e`,
 `just fault-injection`, `just fuzz-smoke`, `just release-drills`,
 `just eval-smoke`, `just eval-full`, `just eval-release`, `just canary`, and a
-60-second soak. `just sbom-verify` passed with the repository's fallback SPDX
+60-second soak after the Cubic fixes. `just sbom-verify` passed with the repository's fallback SPDX
 generator because `syft` is not installed. The strict `just release-check`
 still rejects fixture-tier evaluation as stable release evidence, and the
 full 24-hour soak, hosted supported-platform evidence, and signed provenance

@@ -38,7 +38,9 @@ capability. Models.dev provides provider-owned protocol and capability metadata.
    capability URI. The provider package never reads environment variables,
    files, OpenCode's credential store, or raw credential values.
 6. Credential injection and HTTPS dispatch remain kernel connector operations.
-   A TypeScript `fetch` fallback is forbidden.
+   A TypeScript `fetch` fallback is forbidden. The current Models.dev catalogue
+   path therefore fails closed until the kernel exposes a bounded public-fetch
+   connector; `NetworkService.Decide` alone is authorization, not transport.
    The connector validates platform TLS roots, pins the request to the DNS
    addresses approved by egress policy, bounds request and response bytes,
    consumes a one-use grant before dispatch, and redacts an echoed credential.
@@ -46,7 +48,8 @@ capability. Models.dev provides provider-owned protocol and capability metadata.
    URIs `secret://opencode/zen` and `secret://opencode/go`. Provider selection
    state stores only the URI and a configured marker.
 8. Gateway profiles allow public context by default. Sending repository content
-   requires the operator's explicit `workspace_access` setting.
+   requires both `workspace_access: true` and the persisted
+   `privacy_terms_admitted: true` setting for the current provider terms.
 9. Free-model status and provider privacy claims are routing inputs, not trust
    guarantees. Models whose terms allow training or non-zero retention are
    restricted by confidentiality policy until separately admitted.

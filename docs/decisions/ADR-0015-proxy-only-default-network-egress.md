@@ -24,7 +24,11 @@ Adopt **proxy-only default network egress** per SPEC §13.6 and §36.12:
 6. **Rate limits** — per-destination rate limits prevent abuse.
 7. **Fail-closed** — if the proxy is unavailable, egress fails closed (no fallthrough to direct sockets).
 
-Implementation: `crates/terminus-egress` (proxy, policy, destination allowlist). The default network policy is `policies/network/default.yaml`.
+Implementation: `crates/terminus-egress` (proxy, policy, destination allowlist)
+plus the kernel-owned connector transport. A kernel connector may open a
+socket only after the exact egress authorization and connector grant; this is
+not a sandboxed process or TypeScript bypass. The default network policy is
+`policies/network/default.yaml`.
 
 ## Alternatives
 
@@ -54,7 +58,9 @@ Critical. This is what prevents model-generated scripts from exfiltrating secret
 
 ## Migration
 
-The egress proxy is introduced in M4 (SPEC §48.7). Every Terminus network path routes through it; direct first-party sockets are forbidden.
+The egress proxy is introduced in M4 (SPEC §48.7). Every sandboxed and
+control-plane network path routes through a kernel-owned proxy/connector
+operation; direct first-party sockets outside that boundary are forbidden.
 
 ## Rollback
 

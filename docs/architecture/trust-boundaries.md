@@ -92,7 +92,7 @@ audit, evidence, and reconciliation
 
 ## Non-bypassability tests (SPEC §27.4)
 
-The build includes tests that deliberately attempt to bypass the kernel from:
+The security test plan includes deliberate bypass attempts from:
 
 - ordinary TypeScript code;
 - a first-party plugin hook;
@@ -107,7 +107,11 @@ The build includes tests that deliberately attempt to bypass the kernel from:
 - a direct socket connection;
 - environment-variable secret access.
 
-A supported configuration passes only when each attempt is denied or routed through an audited kernel capability. These tests are required before any release may call the effect boundary non-bypassable. See `docs/security/non-bypassability-tests.md` for the test plan.
+A supported configuration may call the effect boundary non-bypassable only
+after each attempt is denied or routed through an audited kernel capability.
+The repository's current boundary checks are mechanical coverage, not proof
+that every listed fixture has run; see `docs/security/non-bypassability-tests.md`
+and the implementation reconciliation for the remaining execution evidence.
 
 ## Retired bootstrap trust exception (SPEC §27.5)
 
@@ -128,7 +132,9 @@ The build mechanically checks for:
 - direct secret environment reads;
 - checked-in generated-file drift.
 
-These checks run in CI alongside the non-bypassability tests.
+These checks run in CI alongside whatever non-bypassability fixtures are
+currently admitted. An external-harness fixture and a complete first-party
+plugin fixture remain explicit security-gate work, not implied by this list.
 
 ## Related documents
 
