@@ -281,6 +281,10 @@ platform-matrix:
 platform-probes:
     cargo run -p terminus-sandbox --example platform-probes -- docs/generated/platform-probes.json
 
+# Run system diagnostics and verify environment health.
+doctor:
+    bun apps/cli/src/index.ts doctor
+
 # Cross-check source declarations against release metadata and CI config.
 truth-check:
     bun run scripts/check-declaration-consistency.ts

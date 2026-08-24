@@ -62,6 +62,7 @@ export interface AnthropicRequestBody {
   readonly tool_choice?: { readonly type: "auto" | "any" | "tool"; readonly name?: string } | undefined;
   readonly max_tokens: number;
   readonly temperature?: number | undefined;
+  readonly thinking?: { readonly type: "enabled"; readonly budget_tokens: number } | undefined;
   readonly stream: true;
   readonly metadata?: { readonly user_id?: string } | undefined;
 }
@@ -90,6 +91,7 @@ export class AnthropicRenderer extends BaseProviderRenderer {
     const system = renderSystemBlocks(input);
     const messages = renderMessages(input);
     const tools = renderTools(input.toolSchemas);
+    const hasThinking = input.reasoningReserveTokens > 0n;
     const body: AnthropicRequestBody = {
       model: input.model.modelKey,
       system,
@@ -97,11 +99,13 @@ export class AnthropicRenderer extends BaseProviderRenderer {
       max_tokens: Number(input.outputReserveTokens),
       stream: true,
       ...(tools.length > 0 ? { tools } : {}),
-      ...(input.outputProfile === "terse"
-        ? { temperature: 0.2 }
-        : input.outputProfile === "structured"
-          ? { temperature: 0 }
-          : {}),
+      ...(hasThinking
+        ? { thinking: { type: "enabled" as const, budget_tokens: Number(input.reasoningReserveTokens) } }
+        : input.outputProfile === "terse"
+          ? { temperature: 0.2 }
+          : input.outputProfile === "structured"
+            ? { temperature: 0 }
+            : {}),
     };
     return {
       providerId: this.providerId,
@@ -227,9 +231,67 @@ function renderMessages(input: CanonicalRenderInput): readonly AnthropicMessage[
   const messages: AnthropicMessage[] = [];
   for (const f of input.fragments) {
     if (isSystemKind(f.kind)) continue;
-    const role: "user" | "assistant" = f.kind === "recent_episode" ? "assistant" : "user";
+
+    if (f.kind === "tool_result") {
+      let toolUseId = f.id;
+      let resultContent = fragmentText(f);
+      let isError = false;
+      try {
+        const raw = JSON.parse(fragmentText(f)) as Record<string, unknown>;
+        if (raw && typeof raw === "object") {
+          if (raw.protocol === "terminus.tool-result.v1" && typeof raw.provider_call_id === "string") {
+            toolUseId = raw.provider_call_id;
+            resultContent = typeof raw.result === "string" ? raw.result : JSON.stringify(raw.result);
+            isError = Boolean(raw.is_error);
+          }
+        }
+      } catch {
+        // use raw text
+      }
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: toolUseId,
+            content: resultContent,
+            ...(isError ? { is_error: true } : {}),
+          },
+        ],
+      });
+      continue;
+    }
+
+    if (f.kind === "recent_episode") {
+      try {
+        const raw = JSON.parse(fragmentText(f)) as Record<string, unknown>;
+        if (raw && typeof raw === "object" && raw.protocol === "terminus.tool-call.v1" && typeof raw.provider_call_id === "string") {
+          messages.push({
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: raw.provider_call_id,
+                name: String(raw.tool_name),
+                input: (raw.arguments as Record<string, unknown>) ?? {},
+              },
+            ],
+          });
+          continue;
+        }
+      } catch {
+        // use raw text
+      }
+      messages.push({
+        role: "assistant",
+        content: fragmentText(f),
+      });
+      continue;
+    }
+
+    // Default user fragment
     messages.push({
-      role,
+      role: "user",
       content: fragmentText(f),
     });
   }

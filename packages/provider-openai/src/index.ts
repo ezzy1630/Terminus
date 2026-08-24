@@ -199,8 +199,59 @@ function renderMessages(input: CanonicalRenderInput): readonly OpenAiChatMessage
   const messages: OpenAiChatMessage[] = [];
   let firstUserBlock = true;
   for (const frag of input.fragments) {
-    const role = fragmentRole(frag.kind);
     const cacheBreakpoint = input.cachePlan.breakpoints.includes(messages.length);
+
+    if (frag.kind === "tool_result") {
+      let toolCallId = frag.id;
+      let resultContent = fragmentText(frag);
+      try {
+        const raw = JSON.parse(fragmentText(frag)) as Record<string, unknown>;
+        if (raw && typeof raw === "object" && raw.protocol === "terminus.tool-result.v1" && typeof raw.provider_call_id === "string") {
+          toolCallId = raw.provider_call_id;
+          resultContent = typeof raw.result === "string" ? raw.result : JSON.stringify(raw.result);
+        }
+      } catch {
+        // use raw text
+      }
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: resultContent,
+      });
+      continue;
+    }
+
+    if (frag.kind === "recent_episode") {
+      try {
+        const raw = JSON.parse(fragmentText(frag)) as Record<string, unknown>;
+        if (raw && typeof raw === "object" && raw.protocol === "terminus.tool-call.v1" && typeof raw.provider_call_id === "string") {
+          messages.push({
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              {
+                id: raw.provider_call_id,
+                type: "function",
+                function: {
+                  name: String(raw.tool_name),
+                  arguments: JSON.stringify(raw.arguments ?? {}),
+                },
+              },
+            ],
+          });
+          continue;
+        }
+      } catch {
+        // use raw text
+      }
+      messages.push({
+        role: "assistant",
+        content: fragmentText(frag),
+      });
+      continue;
+    }
+
+    const role = fragmentRole(frag.kind);
     messages.push({
       role,
       content: fragmentText(frag),
