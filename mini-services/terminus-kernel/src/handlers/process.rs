@@ -12,7 +12,7 @@ use terminus_kernel_protocol::{CommandSpec, OutputChunk, ProcessEvent};
 use crate::api::Envelope;
 use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
-use crate::state::AppState;
+use crate::state::{AppState, ProcessOutputBuffer, MAX_RETAINED_OUTPUT_BYTES};
 use crate::trace_id::TraceId;
 
 #[derive(Debug, Deserialize)]
@@ -92,10 +92,25 @@ pub async fn start(
     state
         .spawn_background(async move {
             let mut chunks: Vec<OutputChunk> = Vec::new();
+            let mut retained_bytes = 0usize;
+            let mut truncated = false;
             while let Some(ev) = rx.recv().await {
                 match ev {
                     ProcessEvent::Stdout(c) | ProcessEvent::Stderr(c) => {
+                        retained_bytes += c.bytes.len();
                         chunks.push(c);
+                        // Bound retention: drop OLDEST chunks once the byte
+                        // cap is hit (cursors keep increasing, so cursor-
+                        // based polls remain correct). Full output for the
+                        // job already lives in the artifact spill.
+                        while retained_bytes > MAX_RETAINED_OUTPUT_BYTES {
+                            let Some(first) = chunks.first() else {
+                                break;
+                            };
+                            retained_bytes -= first.bytes.len();
+                            chunks.remove(0);
+                            truncated = true;
+                        }
                     }
                     ProcessEvent::Exited(e) => {
                         let mut guard = exits.lock().await;
@@ -106,7 +121,7 @@ pub async fn start(
                 }
             }
             let mut guard = outputs.lock().await;
-            guard.insert(pid, chunks);
+            guard.insert(pid, ProcessOutputBuffer::new(chunks, truncated));
         })
         .await;
 
@@ -170,6 +185,11 @@ pub struct OutputResponse {
     pub cursor: u64,
     pub chunks: Vec<OutputChunk>,
     pub exited: Option<terminus_kernel_protocol::ProcessExited>,
+    /// True when older output was dropped from the retained buffer because
+    /// the per-process byte cap was hit (the full stream remains in the
+    /// artifact spill).
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 pub async fn output(
@@ -182,12 +202,24 @@ pub async fn output(
         .get("cursor")
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
-    let chunks = {
+    let (chunks, truncated) = {
+        // Clone only the tail the client has not seen; cloning the whole
+        // history per poll made every request O(total output).
         let guard = state.process_outputs.lock().await;
-        guard.get(&id).cloned().unwrap_or_default()
+        match guard.get(&id) {
+            Some(buffer) => (
+                buffer
+                    .chunks
+                    .iter()
+                    .filter(|c| c.cursor > cursor)
+                    .cloned()
+                    .collect(),
+                buffer.truncated,
+            ),
+            None => (Vec::new(), false),
+        }
     };
-    let filtered: Vec<OutputChunk> = chunks.into_iter().filter(|c| c.cursor > cursor).collect();
-    let new_cursor = filtered.last().map(|c| c.cursor).unwrap_or(cursor);
+    let new_cursor = chunks.last().map(|c| c.cursor).unwrap_or(cursor);
     let exited = {
         let guard = state.process_exits.lock().await;
         guard.get(&id).cloned()
@@ -195,7 +227,8 @@ pub async fn output(
     Ok(Json(OutputResponse {
         process_id: id,
         cursor: new_cursor,
-        chunks: filtered,
+        chunks,
         exited,
+        truncated,
     }))
 }

@@ -19,7 +19,7 @@ use crate::api::Envelope;
 use crate::auth::ValidatedCapabilityToken;
 use crate::error::{json_error, ApiError};
 use crate::state::AppState;
-use crate::trace_id::{sha256_hex, TraceId};
+use crate::trace_id::TraceId;
 
 #[derive(Debug, Deserialize)]
 pub struct ReadFileRequest {
@@ -89,7 +89,20 @@ pub struct ListEntry {
 pub struct ListFilesResponse {
     pub entries: Vec<ListEntry>,
     pub scanned: usize,
+    /// True when the directory scan stopped early because the entry cap was
+    /// reached. Truncation is always reported (SPEC §1.3 bounded-output rule).
+    #[serde(default)]
+    pub truncated: bool,
 }
+
+/// Hard caps for `files/list`: a capability holder can point the call at any
+/// registered workspace directory, so unbounded scanning/hashing of huge
+/// trees is a memory and latency lever against the kernel.
+const MAX_LIST_ENTRIES: usize = 10_000;
+/// Files above this size are not hashed inline; their sha256 is left empty
+/// (same encoding as directories/unreadable files) so listing stays
+/// O(entries), not O(bytes).
+const MAX_HASH_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub async fn list(
     State(state): State<Arc<AppState>>,
@@ -107,22 +120,49 @@ pub async fn list(
         .files
         .resolve_for_read(&req.envelope.request_context, &req.path)
         .map_err(|error| ApiError::from_kernel(error, &trace_id.0))?;
-    let base = &resolved.host.host_path;
+    let base = resolved.host.host_path.clone();
+    // The scan performs blocking syscalls per entry; run it on the blocking
+    // pool so a large directory cannot stall tokio workers.
+    let base_for_display = base.display().to_string();
+    let scan = tokio::task::spawn_blocking(move || scan_directory(&base)).await;
+    match scan {
+        Ok(Ok(result)) => Ok(Json(ListFilesResponse {
+            entries: result.entries,
+            scanned: result.scanned,
+            truncated: result.truncated,
+        })),
+        Ok(Err(e)) => Err(ApiError::new(
+            terminus_kernel_protocol::ErrorCode::PathNotFound,
+            terminus_kernel_protocol::ErrorCategory::NotFound,
+            format!("list {base_for_display}: {e}"),
+            trace_id.0,
+        )),
+        Err(e) => Err(ApiError::new(
+            terminus_kernel_protocol::ErrorCode::Internal,
+            terminus_kernel_protocol::ErrorCategory::Internal,
+            format!("list scan failed: {e}"),
+            trace_id.0,
+        )),
+    }
+}
+
+struct DirectoryScan {
+    entries: Vec<ListEntry>,
+    scanned: usize,
+    truncated: bool,
+}
+
+fn scan_directory(base: &std::path::Path) -> std::io::Result<DirectoryScan> {
+    let read_dir = std::fs::read_dir(base)?;
     let mut entries = Vec::new();
-    let read_dir = match std::fs::read_dir(base) {
-        Ok(rd) => rd,
-        Err(e) => {
-            return Err(ApiError::new(
-                terminus_kernel_protocol::ErrorCode::PathNotFound,
-                terminus_kernel_protocol::ErrorCategory::NotFound,
-                format!("list {}: {e}", base.display()),
-                trace_id.0,
-            ));
-        }
-    };
     let mut scanned = 0usize;
+    let mut truncated = false;
     for entry in read_dir.flatten() {
         scanned += 1;
+        if entries.len() >= MAX_LIST_ENTRIES {
+            truncated = true;
+            break;
+        }
         let file_type = entry.file_type();
         let kind = match &file_type {
             Ok(ft) if ft.is_dir() => "directory",
@@ -136,16 +176,15 @@ pub async fn list(
             .unwrap_or(&entry.path())
             .to_string_lossy()
             .to_string();
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        let hash = if kind == "file" {
-            match std::fs::read(entry.path()) {
-                Ok(bytes) => {
-                    let mut h = Sha256::new();
-                    h.update(&bytes);
-                    format!("sha256:{}", hex::encode(h.finalize()))
-                }
-                Err(_) => String::new(),
-            }
+        let metadata = entry.metadata().ok();
+        let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+        // Stream-hash small files in fixed-size chunks instead of loading
+        // them whole: a multi-gigabyte file used to be fully resident before
+        // hashing even started.
+        let hash = if kind == "file"
+            && size <= MAX_HASH_FILE_BYTES
+        {
+            hash_file_streaming(entry.path()).unwrap_or_default()
         } else {
             String::new()
         };
@@ -158,6 +197,25 @@ pub async fn list(
     }
     // Sort for determinism.
     entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    let _ = sha256_hex; // re-export marker
-    Ok(Json(ListFilesResponse { entries, scanned }))
+    Ok(DirectoryScan {
+        entries,
+        scanned,
+        truncated,
+    })
+}
+
+fn hash_file_streaming(path: std::path::PathBuf) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    // Heap-allocated chunk: 64 KiB on the stack trips large_stack_arrays.
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&chunk[..n]);
+    }
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }

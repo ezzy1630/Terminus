@@ -17,6 +17,35 @@ use crate::idempotency::IdempotencyMap;
 /// Default bearer token if `TERMINUS_KERNEL_TOKEN` is unset.
 pub const DEFAULT_BEARER_TOKEN: &str = "terminus-kernel-dev-token";
 
+/// Per-process cap on retained output chunks. The artifact spill in the
+/// process manager keeps the full stream; this buffer only serves
+/// `/v1/processes/{id}/output` polls, so unbounded retention here would grow
+/// with the chattiest process for the life of the service.
+pub const MAX_RETAINED_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+/// Exited processes' buffers are reaped by a janitor after this long.
+pub const EXITED_PROCESS_RETENTION: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// How often the janitor sweeps exited process state.
+pub const PROCESS_JANITOR_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Bounded retained output for one process.
+#[derive(Debug)]
+pub struct ProcessOutputBuffer {
+    pub chunks: Vec<OutputChunk>,
+    /// True once older chunks were dropped to honor the byte cap.
+    pub truncated: bool,
+    pub created_at: std::time::Instant,
+}
+
+impl ProcessOutputBuffer {
+    pub fn new(chunks: Vec<OutputChunk>, truncated: bool) -> Self {
+        Self {
+            chunks,
+            truncated,
+            created_at: std::time::Instant::now(),
+        }
+    }
+}
+
 /// Lifecycle owner for bounded background work started by request handlers.
 /// Dropping the last clone drops the `JoinSet`, which aborts any remaining
 /// tasks; normal server shutdown explicitly aborts and joins them first.
@@ -68,8 +97,10 @@ pub struct AppState {
     /// In-flight idempotency dedup map.
     pub idempotency: Arc<IdempotencyMap>,
     /// Captured process output chunks, keyed by process_id. Populated by a
-    /// background task that consumes the ProcessEvent stream.
-    pub process_outputs: Arc<Mutex<HashMap<String, Vec<OutputChunk>>>>,
+    /// background task that consumes the ProcessEvent stream. Retention is
+    /// bounded per process (`MAX_RETAINED_OUTPUT_BYTES`) and exited processes
+    /// are reaped by a janitor task; the maps are not insert-only sinks.
+    pub process_outputs: Arc<Mutex<HashMap<String, ProcessOutputBuffer>>>,
     /// Final ProcessEvent per process, used to expose exit status.
     pub process_exits: Arc<Mutex<HashMap<String, terminus_kernel_protocol::ProcessExited>>>,
     background_tasks: BackgroundTaskSupervisor,

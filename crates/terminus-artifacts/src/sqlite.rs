@@ -86,6 +86,10 @@ impl SqliteMetadataStore {
         // Best-effort WAL mode for concurrent readers — ignore errors (e.g.
         // in-memory databases do not support WAL).
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        // Two processes may legitimately open the same store file (kernel
+        // library and HTTP mini-service share the TERMINUS_DATA layout);
+        // without a busy timeout the second writer gets immediate SQLITE_BUSY.
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(5_000));
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })

@@ -91,7 +91,21 @@ async fn serve_connection(stream: UnixStream, proxy: Arc<EgressProxy>) -> Result
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut request_line = Vec::new();
-    let read = reader.read_until(b'\n', &mut request_line).await?;
+    // Cap DURING buffering: `read_until` appends whatever arrives until a
+    // newline shows up, so a sandboxed payload could stream gigabytes before
+    // the length check ever ran. Read at most one byte past the cap instead.
+    while request_line.len() <= MAX_HANDSHAKE_BYTES {
+        let mut byte = [0u8; 1];
+        match reader.read_exact(&mut byte).await {
+            Ok(()) => request_line.push(byte[0]),
+            Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(EgressError::Io(e)),
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    let read = request_line.len();
     if read == 0 || read > MAX_HANDSHAKE_BYTES || !request_line.ends_with(b"\n") {
         return write_error(&mut write_half, "invalid broker handshake").await;
     }

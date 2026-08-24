@@ -595,6 +595,7 @@ impl WorkspaceService {
                 "PRAGMA foreign_keys = ON;\
                  PRAGMA journal_mode = WAL;\
                  PRAGMA synchronous = FULL;\
+                 PRAGMA busy_timeout = 5000;\
                  CREATE TABLE IF NOT EXISTS registered_workspaces (\
                    id TEXT PRIMARY KEY,\
                    root_uri TEXT NOT NULL,\
@@ -1166,6 +1167,31 @@ impl FileService {
             resolved_host_path = %resolved.host.host_path.display(),
             "file read authorized",
         );
+        // Reject oversized files BEFORE reading: the ingest ceiling is only
+        // enforced after a full in-memory read otherwise, so a near-ceiling
+        // file would be resident (and hashed) before rejection.
+        let file_len = std::fs::metadata(&resolved.host.host_path)
+            .map_err(|e| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::PathNotFound,
+                    terminus_kernel_protocol::ErrorCategory::NotFound,
+                    format!("read {}: {e}", resolved.host.host_path.display()),
+                    false,
+                )
+            })?
+            .len();
+        let max_bytes = self.artifact_store.max_bytes();
+        if file_len > max_bytes {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::ResourceExhausted,
+                    terminus_kernel_protocol::ErrorCategory::ResourceExhausted,
+                format!(
+                    "read {}: file is {file_len} bytes, above the {max_bytes}-byte artifact ceiling",
+                    resolved.host.host_path.display()
+                ),
+                false,
+            ));
+        }
         let bytes = std::fs::read(&resolved.host.host_path).map_err(|e| {
             KernelError::new(
                 terminus_kernel_protocol::ErrorCode::PathNotFound,
@@ -1691,6 +1717,10 @@ impl ProcessService {
                         error = %error,
                         "egress broker rejected or closed a client connection"
                     );
+                    // A persistent accept failure (fd exhaustion, detached
+                    // listener) must not spin the loop hot; back off before
+                    // retrying.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
             }
         });

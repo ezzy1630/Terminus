@@ -53,6 +53,13 @@ impl ArtifactStore {
         self
     }
 
+    /// Configured per-artifact size ceiling. Callers that read whole files
+    /// before ingesting use this to reject oversized inputs BEFORE the bytes
+    /// are resident.
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

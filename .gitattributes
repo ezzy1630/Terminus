@@ -1,0 +1,6 @@
+# Exclude skill fixtures, references, and templates from language stats & diff noise
+skills/** linguist-vendored
+
+# Mark generated artifacts
+docs/generated/** linguist-generated=true
+**/generated-ts-proto/** linguist-generated=true

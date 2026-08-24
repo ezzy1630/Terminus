@@ -28,7 +28,9 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::{cors_layer, require_bearer, require_capability_for_path};
-use crate::state::AppState;
+use crate::state::{
+    AppState, EXITED_PROCESS_RETENTION, PROCESS_JANITOR_INTERVAL,
+};
 
 /// Loopback bootstrap port. Production uses the UDS transport; the env
 /// override keeps deterministic local harnesses isolated from other runs.
@@ -138,6 +140,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "terminus-kernel mini-service listening (loopback only)");
+
+    // Janitor: process output buffers and exit records are insert-only while
+    // a process runs; without reaping they grow for the life of the service.
+    // Exited processes' state is dropped after a retention window (the full
+    // output stream remains in the artifact spill).
+    {
+        let outputs = Arc::clone(&state.process_outputs);
+        let exits = Arc::clone(&state.process_exits);
+        state
+            .spawn_background(async move {
+                let mut ticker = tokio::time::interval(PROCESS_JANITOR_INTERVAL);
+                loop {
+                    ticker.tick().await;
+                    // Buffers are inserted by the collector task only once
+                    // the process has exited, so age alone identifies
+                    // reapable state; live processes keep accumulating in
+                    // their collector task, not here.
+                    let mut stale_ids = Vec::new();
+                    {
+                        let guard = outputs.lock().await;
+                        for (pid, buffer) in guard.iter() {
+                            if buffer.created_at.elapsed() > EXITED_PROCESS_RETENTION {
+                                stale_ids.push(pid.clone());
+                            }
+                        }
+                    }
+                    if stale_ids.is_empty() {
+                        continue;
+                    }
+                    let mut out_guard = outputs.lock().await;
+                    let mut exit_guard = exits.lock().await;
+                    for pid in stale_ids {
+                        out_guard.remove(&pid);
+                        exit_guard.remove(&pid);
+                    }
+                }
+            })
+            .await;
+    }
 
     // ADR-0007 gRPC-over-UDS transport: if TERMINUS_KERNEL_GRPC_SOCKET is set,
     // serve KernelInfoService over a Unix-domain socket alongside the HTTP
