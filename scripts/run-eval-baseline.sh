@@ -23,8 +23,9 @@ commit="$(git rev-parse HEAD)"
 generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 echo "[eval-baseline] running smoke suite (deterministic fixtures)"
-just eval-smoke >/tmp/terminus-eval-smoke.log 2>&1 || {
-  echo "[eval-baseline] FAIL: just eval-smoke failed; see /tmp/terminus-eval-smoke.log" >&2
+SMOKE_LOG="$(mktemp -t terminus-eval-smoke-log.XXXXXX)"
+just eval-smoke >"$SMOKE_LOG" 2>&1 || {
+  echo "[eval-baseline] FAIL: just eval-smoke failed; see $SMOKE_LOG" >&2
   exit 1
 }
 

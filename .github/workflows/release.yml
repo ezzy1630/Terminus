@@ -580,6 +580,25 @@ jobs:
           --artifacts-dir="$DESKTOP_RELEASE"
           --commit="$RELEASE_COMMIT"
           --version="$RELEASE_VERSION"
+      - name: Require M12 evidence before the blocking gate
+        # `just release-check` includes `m12-exit-gate`, which requires a full
+        # evidence set (fuzz-smoke, soak, canary, eval-release, SBOM, schema
+        # freeze, signed four-owner release decision, ...) under
+        # artifacts/release-gate/. That set is produced by
+        # `just release-evidence-candidate` plus owner sign-off on the
+        # manifest digest; it cannot be minted inside this fresh checkout.
+        # Fail fast with an actionable message instead of a late wall of
+        # "missing" checks.
+        run: |
+          missing="$(ls artifacts/release-gate/release-evidence-manifest.json artifacts/release-gate/release-decision.yaml 2>/dev/null | wc -l || true)"
+          if [[ "$missing" -lt 2 ]]; then
+            echo "M12 release evidence is absent from this checkout." >&2
+            echo "Produce it with 'just release-evidence-candidate', collect the four" >&2
+            echo "owner signatures via 'just release-decision', and provide the signed" >&2
+            echo "artifacts/release-gate/ set to this job (or run this validation where" >&2
+            echo "the evidence set already exists) before re-tagging the release." >&2
+            exit 1
+          fi
       - name: Run the declared release checks
         env:
           TERMINUS_RELEASE_COMMIT: ${{ github.sha }}

@@ -1,12 +1,15 @@
 #!/bin/bash
 # Start Terminus mini-services (kernel + control plane) in fully detached
 # subshells that survive shell exits. Parent PID becomes 1.
-set -e
-LOGDIR=/tmp/terminus
+set -euo pipefail
+LOGDIR="${TERMINUS_LOG_DIR:-$(mktemp -d -t terminus-logs.XXXXXX)}"
 mkdir -p "$LOGDIR"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Kill only processes started by this script (binary/script paths below are
+# distinctive); a matching server from another checkout can still be caught,
+# which is acceptable for a local dev helper.
 pkill -f "terminus-kernel-mini" 2>/dev/null || true
-pkill -f "bun.*mini-services/terminus-control" 2>/dev/null || true
+pkill -f "bun.*mini-services/terminus-control/src/index.ts" 2>/dev/null || true
 sleep 1
 
 # TERMINUS_DEV=1 permits the well-known dev tokens for local development
@@ -30,9 +33,17 @@ cd "$ROOT"
 echo "control started, log: $LOGDIR/control.log"
 
 sleep 3
+health_failures=0
 echo "--- kernel health ---"
-curl -sS http://127.0.0.1:3040/v1/health -X POST -H "Authorization: Bearer $TERMINUS_KERNEL_TOKEN" -d '{}' 2>&1 | head -c 200
+if ! curl -sS -f http://127.0.0.1:3040/v1/health -X POST -H "Authorization: Bearer $TERMINUS_KERNEL_TOKEN" -d '{}' 2>&1 | head -c 200; then
+  echo "(kernel health check failed; see $LOGDIR/kernel.log)" >&2
+  health_failures=$((health_failures + 1))
+fi
 echo
 echo "--- control health ---"
-curl -sS http://127.0.0.1:3050/v1/system/health -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" 2>&1 | head -c 200
+if ! curl -sS -f http://127.0.0.1:3050/v1/system/health -H "Authorization: Bearer $TERMINUS_CONTROL_TOKEN" 2>&1 | head -c 200; then
+  echo "(control health check failed; see $LOGDIR/control.log)" >&2
+  health_failures=$((health_failures + 1))
+fi
 echo
+exit "$health_failures"

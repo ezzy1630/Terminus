@@ -30,12 +30,15 @@ while (( SECONDS < deadline )); do
     failures=$((failures + 1))
   fi
   if ! bun test packages/domain/src/ids.test.ts >/dev/null 2>&1; then
-    # Fallback if package path differs: still count a lightweight bun invocation.
-    if ! bun --version >/dev/null 2>&1; then
-      failures=$((failures + 1))
-    fi
+    # Fail closed: a moved or failing fixture is a soak failure, not a
+    # skippable condition.
+    failures=$((failures + 1))
   fi
 done
+
+if (( iterations == 0 )); then
+  failures=$((failures + 1))
+fi
 
 end_rss="$(rss_kb)"
 end_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

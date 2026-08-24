@@ -4,10 +4,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG="${TERMINUS_NEXT_LOG:-/tmp/terminus-next.log}"
+LOG="${TERMINUS_NEXT_LOG:-$(mktemp -t terminus-next-log.XXXXXX)}"
+# mktemp creates the file; the server needs the path, not a pre-created file.
+rm -f "$LOG"
 
-pkill -f "next dev" 2>/dev/null || true
-pkill -f "next-server (v|running)" 2>/dev/null || true
+# Kill only servers started by this script (the --webpack flag is part of
+# every invocation below); a same-flag server in another checkout can still
+# match, which is acceptable for a local dev helper.
+pkill -f "next dev -p 3000 --webpack" 2>/dev/null || true
 sleep 1
 (
   setsid bash -c "cd '$ROOT' && exec node node_modules/.bin/next dev -p 3000 --webpack" \

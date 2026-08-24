@@ -117,17 +117,19 @@ jobs:
         run: bun run test:unit
 
   # Container profile build (SPEC §46.13) — compile inside a pinned Linux image.
+  # Required gate: the image tag tracks the workspace rust-version pin
+  # (rust-toolchain.toml), and failures here mean the container profile
+  # silently stopped compiling if this job were allowed to fail.
   build-container:
     name: Build (linux-container)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Build workspace inside rust:bookworm container
+      - name: Build workspace inside pinned rust container
         run: |
           docker run --rm \
             -v "$PWD":/src -w /src \
-            rust:bookworm \
+            rust:1.97-bookworm \
             bash -c 'source /usr/local/cargo/env && apt-get update -qq && apt-get install -y -qq protobuf-compiler && cargo build --workspace --all-targets --locked'
 
 

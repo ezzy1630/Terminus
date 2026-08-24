@@ -58,10 +58,22 @@ if [[ -n "$expected_commit" ]]; then
   [[ "$actual_commit" == "$expected_commit" ]] || fail "manifest commit $actual_commit is not bound to release commit $expected_commit"
 fi
 
+# Bind the keyless certificate to THIS repository's CI workflows by default.
+# The previous default (https://github.com/.+/.github/workflows/.+) accepted
+# evidence signed by any repository, so a fork could mint a passing manifest.
+# Override only with an equally strict identity when running outside GitHub
+# Actions (where GITHUB_REPOSITORY is unset).
+if [[ -z "${TERMINUS_EVIDENCE_CERTIFICATE_IDENTITY:-}" ]]; then
+  if [[ -z "${GITHUB_REPOSITORY:-}" ]]; then
+    fail "refusing to verify with a broad certificate identity: set GITHUB_REPOSITORY or TERMINUS_EVIDENCE_CERTIFICATE_IDENTITY"
+  fi
+  TERMINUS_EVIDENCE_CERTIFICATE_IDENTITY="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/.+"
+fi
+
 cosign verify-blob \
   --certificate "$certificate_path" \
   --signature "$signature_path" \
-  --certificate-identity-regexp "${TERMINUS_EVIDENCE_CERTIFICATE_IDENTITY:-https://github.com/.+/.github/workflows/.+}" \
+  --certificate-identity-regexp "$TERMINUS_EVIDENCE_CERTIFICATE_IDENTITY" \
   --certificate-oidc-issuer "${TERMINUS_EVIDENCE_OIDC_ISSUER:-https://token.actions.githubusercontent.com}" \
   "$evidence_path" >/dev/null || fail "evidence signature verification failed"
 

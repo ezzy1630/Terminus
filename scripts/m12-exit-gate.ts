@@ -254,11 +254,38 @@ function ensureFindingsRegisterStatus(head: string, version: string): void {
   }
   const raw = readFileSync(FINDINGS_PATH, "utf8");
   let findings: unknown[] = [];
+  let parseFailed = false;
   try {
-    const parsed = Bun.YAML.parse(raw) as { findings?: unknown[] };
-    findings = Array.isArray(parsed.findings) ? parsed.findings : [];
+    const parsed = Bun.YAML.parse(raw) as { findings?: unknown[] } | null;
+    if (parsed === null || typeof parsed !== "object") {
+      parseFailed = true;
+    } else {
+      findings = Array.isArray(parsed.findings) ? parsed.findings : [];
+    }
   } catch {
-    findings = [];
+    // Fail closed: an unparseable register must not read as an empty
+    // (zero-open-criticals) register.
+    parseFailed = true;
+  }
+  if (parseFailed) {
+    writeFileSync(
+      out,
+      `${JSON.stringify(
+        {
+          status: "invalid_register",
+          generatedAt: new Date().toISOString(),
+          candidate_commit: head,
+          commit: head,
+          release_version: version,
+          path: "docs/security/findings-register.yaml",
+          findings: [],
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+    return;
   }
   const openCritical = findings.filter((f) => {
     if (typeof f !== "object" || f === null) return false;

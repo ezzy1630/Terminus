@@ -60,7 +60,11 @@ if ((${#bun_args[@]} > 0)); then
     failures=$((failures + 1))
   fi
 else
+  # Fail closed: a release gate must never report success because the property
+  # fixtures it is supposed to run are missing (they are tracked in git; their
+  # absence means the suite was moved or deleted, which is a gate failure).
   bun_status="fixture_missing"
+  failures=$((failures + 1))
 fi
 
 if (( failures > 0 )); then
