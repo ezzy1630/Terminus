@@ -106,10 +106,12 @@ workspace/unit/integration suites), `just e2e`,
 `just eval-smoke`, `just eval-full`, `just eval-release`, `just canary`, and a
 60-second soak after the Cubic fixes. `just sbom-verify` passed with the
 repository's fallback SPDX generator because `syft` is not installed. Hosted
-run `32713205642` passed the supported Linux, macOS, and Windows jobs, security,
-integration, public-path, M12 evidence, standalone, architecture, protobuf,
-and codegen checks; every job executed `actions/checkout`. Eval smoke was
-skipped because the repository has no `agent-behavior` label. The strict
+run `32714614661` passed the exact pushed candidate across the supported Linux,
+macOS, and Windows jobs, security, integration, public-path, M12 evidence,
+standalone, architecture, protobuf, and codegen checks; every running job
+executed `actions/checkout`. Eval smoke was skipped because this pull request
+did not carry the `agent-behavior` label, as required by the workflow condition.
+The strict
 `just release-check` still rejects fixture-tier evaluation as stable release
 evidence, and the full 24-hour soak and signed provenance remain unverified.
 
@@ -117,10 +119,10 @@ evidence, and the full 24-hour soak and signed provenance remain unverified.
 
 The following are deliberate blockers, not hidden completion claims:
 
-1. **Exact-candidate matrix — local slice passed; program gate open.** The
+1. **Exact-candidate matrix — hosted slice passed; program gate open.** The
    security, chaos, property/fuzz, migration/release-drill, fixture-eval, and
-   short-soak commands pass locally. The exact committed candidate still needs
-   hosted supported-platform evidence and the required 24-hour soak.
+   short-soak commands pass locally. Hosted run `32714614661` is green for the
+   exact pushed candidate; the required 24-hour soak remains.
 2. **Live provider — blocked by credential state.** The anonymous OpenCode Zen
    endpoint answered a minimal `nemotron-3.5-lightning-free` request, but the
    kernel-mediated provider path requires a real `secret://opencode/zen`
