@@ -1,4 +1,4 @@
-# Implementation Reconciliation — August 23, 2026
+# Implementation Reconciliation — August 24, 2026
 
 This is the current implementation companion to the August 21 research cut.
 The original audit, scorecard, roadmap, and source analysis remain point-in-time
@@ -6,18 +6,14 @@ documents. This file does not rewrite their historical observations. It maps
 their recommendations to the current Terminus candidate and separates source
 implementation from evidence still required for a stable product claim.
 
-**Candidate branch:** `codex/terminus-standalone-harness`
-**Base revision:** `299e7517e4836a7ecf11f4925385f013704a1026`
-**Candidate identity:** generated contracts are committed in `2080b0d`; the
-standalone-retirement, artifact-owner, Phase 9/10, desktop, CI/release, and
-audit slices are separated into logical commits on this branch. The latest
-implementation commit is `dc5a23f`, following the Cubic fixes in `ab9a5ac`,
-`16472f5`, `030f527`, `defc129`, `30068f6`, and `5cede5c`. Hosted run
-`32714614661` exercised the exact pushed candidate at `9a678ba`. The candidate
-was merged into `main` at `885e426`; the final evidence-doc follow-up is
-`ef23012`; dependency cleanup is recorded in `2b15e33`, and final main run
-`32720031136` is green on that head. All 24 addressed Cubic review threads are
-resolved.
+**Candidate branch:** `main`
+**Candidate identity:** the standalone-retirement, artifact-owner, Phase 9/10,
+desktop, CI/release, and audit slices were merged into `main` at `885e426`.
+The final security hardening and generated-inventory update are `37135ec`.
+Hosted CI run `32747525109` and CodeQL run `32747524047` are green on that
+commit; the M12 evidence artifact was uploaded successfully. The former
+`codex/terminus-standalone-harness` branch and all stale remote branches were
+removed. All 24 addressed Cubic review threads are resolved.
 **Evidence rule:** implemented source, passing local checks, packaged-surface
 inspection, and release evidence are distinct states.
 
@@ -103,19 +99,17 @@ intentionally out of scope for this candidate, per the operator decision.
 
 ## Current validation boundary
 
-The local verification matrix is green for `bun audit --production`,
-`just check-all` (463 TypeScript tests, 229 Python tests, and the Rust
-workspace/unit/integration suites), `just e2e`,
-`just fault-injection`, `just fuzz-smoke`, `just release-drills`,
-`just eval-smoke`, `just eval-full`, `just eval-release`, `just canary`, and a
-60-second soak after the Cubic fixes. `just sbom-verify` passed with the
-repository's fallback SPDX generator because `syft` is not installed. Hosted
-run `32714614661` passed the exact pushed candidate across the supported Linux,
-macOS, and Windows jobs, security, integration, public-path, M12 evidence,
-standalone, architecture, protobuf, and codegen checks; every running job
-executed `actions/checkout`. Eval smoke was skipped because this pull request
-did not carry the `agent-behavior` label, as required by the workflow condition.
-The strict
+The current local verification matrix is green for `just check-all`,
+`just codegen-check`, `just security`, `just e2e`, `just fault-injection`,
+`just fuzz-smoke`, `just release-drills`, `just eval-smoke`, `just eval-full`,
+`just eval-release`, `just canary`, and the short soak. `just sbom-verify`
+passed with the repository's fallback SPDX generator because `syft` is not
+installed. Hosted run `32747525109` passed the exact pushed candidate across
+the supported Linux, macOS, and Windows jobs, security, integration,
+public-path, M12 evidence, standalone, architecture, protobuf, and codegen
+checks; CodeQL run `32747524047` also passed. Eval smoke was skipped because
+the push did not carry the `agent-behavior` label, as required by the workflow
+condition. The strict
 `just release-check` still rejects fixture-tier evaluation as stable release
 evidence, and the full 24-hour soak and signed provenance remain unverified.
 
@@ -125,7 +119,7 @@ The following are deliberate blockers, not hidden completion claims:
 
 1. **Exact-candidate matrix — hosted slice passed; program gate open.** The
    security, chaos, property/fuzz, migration/release-drill, fixture-eval, and
-   short-soak commands pass locally. Hosted run `32714614661` is green for the
+   short-soak commands pass locally. Hosted run `32747525109` is green for the
    exact pushed candidate; the required 24-hour soak remains.
 2. **Live provider — blocked by credential state.** The anonymous OpenCode Zen
    endpoint answered a minimal `nemotron-3.5-lightning-free` request, but the
