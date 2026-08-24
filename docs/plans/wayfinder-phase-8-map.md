@@ -2,13 +2,13 @@
 
 **tracker:** local-markdown
 **label:** wayfinder:map
-**status:** complete
+**status:** local-slice-complete; roadmap-exit-unverified
 
 ## Destination
 
-Phase 8 is complete when Terminus provides production-grade model profiles, stage-aware deterministic routing, empirical Bayesian posteriors, expected-value subagent scheduling, candidate workspace isolation, independent clean-context reviewers, and stagnation/safety supervision across all supported providers (Anthropic, OpenAI, Google, and Local open-weight models).
+The Phase 8 local slice is complete when Terminus provides model-profile contracts, stage-aware deterministic routing, empirical Bayesian posteriors, expected-value subagent scheduling, candidate workspace isolation, independent clean-context reviewers, and stagnation/safety supervision for the declared provider profiles.
 
-Phase 0–7 work is complete and verified with zero gaps; no earlier-phase claim is treated as complete from source declarations alone.
+Earlier-phase source exists, but its roadmap gates remain independently evidence-bound. No earlier phase is inferred complete from source declarations.
 
 ## Notes
 
@@ -30,7 +30,7 @@ Canonical terms:
 
 ## Completion evidence
 
-The Phase 8 model profiles, routing, and orchestration subsystem is implemented and verified end-to-end:
+The Phase 8 model profiles, routing, and orchestration local slice is implemented:
 - Deep model profiles for Anthropic, OpenAI, Google, and Local open-weight models with tested-safe tokens, caching breakpoints, and structured repair.
 - Pinned, versioned Profile Registry with provider, local/offline, and confidentiality policy filtering.
 - Online conjugate Beta-Binomial and Log-Normal posterior updating from verified execution observations.
@@ -41,4 +41,7 @@ The Phase 8 model profiles, routing, and orchestration subsystem is implemented 
 - Clean-context reviewer stripping actor rationalizations, enforcing read-only authority, and preferring model family diversity.
 - Stagnation supervisor detecting 11 diagnostic signals and triggering the structured intervention ladder.
 - OpenAPI definitions in `@terminus/public-api`, client methods in `@terminus/public-client`, and HTTP endpoints in `terminus-control`.
-- ADR-0037 recorded and all checks (`just check`, `just codegen-check`, `just check-all`, `eval-smoke`) passing cleanly.
+- ADR-0037 records the decision. Integrated checks are rerun at handoff.
+
+Live-provider conformance and preregistered routing/orchestration benefit remain
+unverified; see `terminus-research-execution-ledger.md`.

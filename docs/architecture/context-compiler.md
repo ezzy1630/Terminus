@@ -52,6 +52,12 @@ The Context Compiler assembles fragments in layers:
 
 Exact fragments MUST remain exact across all renders. Semantics-preserving and recoverable-by-reference fragments are labeled as such in the manifest.
 
+Complete tool call/result episode pairs are rehydrated from CAS through the
+task-scoped kernel client before continuation. The compiler verifies each
+SHA-256 identity, preserves the exact bytes, and gives results the provider
+tool role. Missing or mismatched episode content prevents the next manifest
+and provider request.
+
 ## Assembly algorithm (SPEC §33.12)
 
 ```

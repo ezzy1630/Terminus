@@ -54,7 +54,7 @@ Critical. This is what enforces "No raw model-visible secrets" (SPEC §26.3 #6).
 
 ## Migration
 
-The secret broker is introduced in M4 (SPEC §48.7). OpenCode's environment-based secrets are routed through the broker (ADR-0002, `docs/security/effect-bypass-register.yaml`).
+The secret broker is introduced in M4 (SPEC §48.7). Every Terminus secret use routes through brokered capabilities; ambient first-party secret reads are forbidden.
 
 ## Rollback
 

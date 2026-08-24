@@ -56,7 +56,7 @@ Medium. Verification prevents false completion (SPEC §26.3 #3). Verification is
 
 ## Migration
 
-The verification engine is introduced in M8 (SPEC §48.11). OpenCode's completion model is replaced by the Terminus verification DAG (ADR-0002).
+The verification engine is introduced in M8 (SPEC §48.11). Terminus completion depends on its verification DAG and evidence admission path.
 
 ## Rollback
 

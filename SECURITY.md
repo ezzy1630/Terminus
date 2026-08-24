@@ -26,7 +26,7 @@ Enforced structurally:
 - All outbound sockets use a destination-aware proxy.
 - Secrets are short-lived process capabilities, never environment-wide values.
 
-Bypass attempts are tested continuously by `tests/security/bypass/` per SPEC §27.4 and tracked in `docs/security/effect-bypass-register.yaml`. Any release calling the effect boundary "non-bypassable" MUST pass every test in `docs/security/non-bypassability-tests.md`.
+`docs/security/non-bypassability-tests.md` defines the required bypass suite. The dedicated `tests/security/bypass/` fixtures are not all present, so the repository MUST NOT treat the full non-bypassability claim as proven. Any release making that claim must implement and pass every required fixture.
 
 ## Threat model (SPEC §36.2, Appendix I.1)
 
@@ -72,9 +72,9 @@ No single layer substitutes for another. Approval does not disable sandboxing. S
 
 Every requested effect is classified into one of: `READ_LOCAL`, `WRITE_LOCAL`, `EXECUTE_LOCAL`, `NETWORK_READ`, `NETWORK_WRITE`, `EXTERNAL_STATE_READ`, `EXTERNAL_STATE_WRITE`, `SECRET_USE`, `PROCESS_CONTROL`, `SANDBOX_ADMIN`, `PLUGIN_ADMIN`, `CREDENTIAL_ADMIN`. Each effect records resource identity, scope, operation class, reversibility, idempotency class, trust/confidentiality labels, user-intent linkage, policy decision, approval decision, settlement state, and evidence artifact.
 
-## Bootstrap trust exception (SPEC §27.5)
+## Retired bootstrap trust exception (SPEC §27.5)
 
-During the first migration stage, inherited OpenCode code may still contain direct effect paths. Those paths MUST be inventoried in `docs/security/effect-bypass-register.yaml` with: `id`, `owner`, `source`, `effect`, `reason`, `containment`, `removal_milestone`, `test`, `status`. The release gate is not "zero entries immediately"; it is "no unknown entries, every entry contained, and all entries removed before the secure-default milestone (M4)."
+ADR-0039 removed the inherited OpenCode source and retired its exception. `docs/security/effect-bypass-register.yaml` now records no active entries. A direct effect path in first-party code is a release-blocking defect; the tombstone does not prove whole-system non-bypassability or historical parity.
 
 ## Reporting security issues
 

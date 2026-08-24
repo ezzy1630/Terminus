@@ -24,7 +24,7 @@ This document specifies how Terminus interprets research and vendor claims. The 
 | Recent complete tool window + summary can outperform full history | Checkpoint/recent-episode policy; no full-history default (ADR-0011). |
 | Prompt-cache effectiveness depends on stable prefixes | Immutable epochs and provider-specific renderers (ADR-0010). |
 | SWE-agent ACI ablations show file-view/edit/search feedback matters | ACI treated as first-order, benchmarked subsystem (ADR-0012). |
-| OpenCode typed context sources and epochs provide useful implemented substrate | Reuse/bridge rather than greenfield rewrite (ADR-0002). |
+| OpenCode typed context sources and epochs provide useful research evidence | Implement the useful behavior behind Terminus-owned Context IR and epoch contracts (ADR-0039). |
 | Codex app-server and Linux sandbox demonstrate typed runtime and OS enforcement patterns | Generated protocols, bounded queues, Bubblewrap-class kernel (ADR-0014). |
 | OpenCode plugins can auto-install packages and receive shell access in the upstream model | Secure Terminus profile isolates installation and removes ambient plugin authority (ADR-0019). |
 | MCP permits powerful tool interoperability while security remains implementation responsibility | Descriptor pinning, isolation, per-tool scopes, reauthorization (ADR-0018). |

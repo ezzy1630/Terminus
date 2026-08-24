@@ -1,10 +1,12 @@
 # ADR-0026: Node-compatible Terminus packages; Bun isolated to upstream bridge
 
-- **Status:** PROVISIONAL
+- **Status:** SUPERSEDED by ADR-0039
 - **Date:** 2025-07-11
 - **Decision owner:** upstream owner
 - **Supersedes:** none
 - **Related:** SPEC §43.2, §42.2
+
+> Historical decision. ADR-0039 removed the upstream bridge. Terminus-owned packages remain Node-compatible; Bun is no longer justified as an OpenCode compatibility requirement.
 
 ## Context
 

@@ -23,6 +23,8 @@
  *     string" is a template literal containing `SELECT`, `INSERT`,
  *     `UPDATE`, `DELETE`, `CREATE TABLE`, or `PRAGMA` (case-insensitive)
  *     that is not inside a `.sql` file.
+ *  6. The ADR-0039 packaged-runtime supervisor is the only production app
+ *     module allowed to import or invoke a direct process-creation API.
  *
  * Exit code is non-zero if any violation is found. The script is
  * deliberately dependency-light so it runs in CI without extra installs.
@@ -128,8 +130,6 @@ function checkPackagesForbiddenImports(): void {
     const allowed = CRYPTO_ALLOW.has(pkg);
     for (const file of walk(join(PACKAGES_DIR, pkg, "src"))) {
       if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
-      // Inherited OpenCode bridge files under packages/open-code-bridge/src/inherited/ are contained effect wrappers
-      if (file.includes("packages/open-code-bridge/src/inherited/")) continue;
       const text = readFileSync(file, "utf8");
       const lines = text.split("\n");
       for (let i = 0; i < lines.length; i++) {
@@ -302,8 +302,8 @@ function checkNoRawSqlOutsideRepositories(): void {
     join(ROOT, "docs"),
     join(ROOT, "skills"),
     join(ROOT, "tools"),
-    // Vendored upstream sources are checked by their own parity/divergence
-    // gates and are not part of Terminus's first-party architecture surface.
+    // Ignored local vendor sources are not part of Terminus's first-party
+    // architecture. `standalone-check` proves they are not workspace inputs.
     join(ROOT, "vendor"),
     join(ROOT, "python", "forge_evals", ".venv"),
   ];
@@ -374,7 +374,6 @@ function checkNoDirectProcessExec(): void {
   for (const pkg of listPackages()) {
     for (const file of walk(join(PACKAGES_DIR, pkg, "src"))) {
       if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
-      if (file.includes("packages/open-code-bridge/src/inherited/")) continue;
       if (file.endsWith(".test.ts") || file.endsWith(".spec.ts")) continue;
       const text = readFileSync(file, "utf8");
       const lines = text.split("\n");
@@ -410,7 +409,6 @@ function checkNoDirectFsMutation(): void {
     if (pkg === "artifact-client") continue; // artifact client manages local cache files
     for (const file of walk(join(PACKAGES_DIR, pkg, "src"))) {
       if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
-      if (file.includes("packages/open-code-bridge/src/inherited/")) continue;
       if (file.endsWith(".test.ts") || file.endsWith(".spec.ts")) continue;
       const text = readFileSync(file, "utf8");
       const lines = text.split("\n");
@@ -515,7 +513,6 @@ function checkNoRawGitEffects(): void {
   for (const pkg of listPackages()) {
     for (const file of walk(join(PACKAGES_DIR, pkg, "src"))) {
       if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
-      if (file.includes("packages/open-code-bridge/src/inherited/")) continue;
       if (file.endsWith(".test.ts") || file.endsWith(".spec.ts")) continue;
       const text = readFileSync(file, "utf8");
       const lines = text.split("\n");
@@ -539,11 +536,46 @@ function checkNoRawGitEffects(): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Rule 11: exact packaged supervisor exception for app process execution
+// ───────────────────────────────────────────────────────────────────────────
+
+const PACKAGED_SUPERVISOR = "apps/desktop/electron/runtime-supervisor.ts";
+const APP_PROCESS_PATTERNS = [
+  /\bfrom\s+["'](?:node:)?child_process["']/,
+  /\brequire\(["'](?:node:)?child_process["']\)/,
+  /\bimport\(\s*["'](?:node:)?child_process["']\s*\)/,
+  /\bBun\.spawn(?:Sync)?\(/,
+];
+
+function checkAppsProcessSupervisorBoundary(): void {
+  for (const file of walk(APPS_DIR)) {
+    if (!file.endsWith(".ts") && !file.endsWith(".tsx")) continue;
+    const rel = relative(ROOT, file).split("\\").join("/");
+    if (rel.includes("/tests/") || rel.endsWith(".test.ts") || rel.endsWith(".test.tsx")) continue;
+    const lines = readFileSync(file, "utf8").split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]!;
+      const trimmed = line.trim();
+      if (trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) continue;
+      if (rel === PACKAGED_SUPERVISOR) continue;
+      if (APP_PROCESS_PATTERNS.some((pattern) => pattern.test(line))) {
+        violations.push({
+          rule: "R11: app process execution outside packaged supervisor",
+          file: rel,
+          line: index + 1,
+          detail: `ADR-0039 permits direct process execution only in ${PACKAGED_SUPERVISOR}`,
+        });
+      }
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Main
 // ───────────────────────────────────────────────────────────────────────────
 
 function main(): void {
-  console.log("[boundary-check] running 10 SPEC §42.5 mechanical checks…");
+  console.log("[boundary-check] running 11 SPEC §42.5 mechanical checks…");
   checkPackagesForbiddenImports();
   checkPackagesNoDeployableDeps();
   checkKernelNoUIOrProvider();
@@ -554,6 +586,7 @@ function main(): void {
   checkNoDirectSocketAccess();
   checkNoEnvironmentSecretReads();
   checkNoRawGitEffects();
+  checkAppsProcessSupervisorBoundary();
 
   if (violations.length === 0) {
     console.log("[boundary-check] OK — no architecture-boundary violations");
@@ -567,4 +600,3 @@ function main(): void {
 }
 
 main();
-

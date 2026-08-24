@@ -51,7 +51,7 @@ High. Manifests are the audit trail for "what did the model see." They are requi
 
 ## Migration
 
-OpenCode's context epochs are bridged (ADR-0002). Terminus manifests are introduced in M6 (SPEC §48.9) and become the source of truth; OpenCode's context is removed once parity is proven.
+Terminus-owned context epochs and manifests are introduced in M6 (SPEC §48.9) and are the source of truth (ADR-0039).
 
 ## Rollback
 

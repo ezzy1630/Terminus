@@ -49,11 +49,11 @@ Low. UUIDv7's millisecond timestamp reveals coarse creation time, which is accep
 
 - Property tests verify UUIDv7 generation is monotonic within a millisecond and unique across 1M generations.
 - Artifact hash stability tests verify the same content produces the same hash across compression/encoding.
-- Migration tests verify existing v4 IDs (if any from OpenCode) are mapped to v7 with a one-time migration.
+- Migration tests verify imported legacy v4 IDs, if any, are mapped to v7 with a one-time migration.
 
 ## Migration
 
-OpenCode-derived entities may use UUIDv4 initially; they are migrated to UUIDv7 during M2 (SPEC §48.5). The migration is one-way with a recorded mapping table.
+Imported legacy entities may use UUIDv4; they are migrated to UUIDv7 during M2 (SPEC §48.5). The migration is one-way with a recorded mapping table.
 
 ## Rollback
 

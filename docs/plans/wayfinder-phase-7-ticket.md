@@ -2,7 +2,7 @@
 
 **parent:** [Wayfinder Map — Phase 7 Workflow and Skill Compiler](wayfinder-phase-7-map.md)
 **label:** wayfinder:task
-**status:** complete
+**status:** local-slice-complete; roadmap-exit-unverified
 **assignee:** codex
 
 ## Question
@@ -32,6 +32,7 @@ checkout, including any Phase 0–6 gap that blocks its acceptance surface?
 
 ## Resolution
 
-Implemented the Phase 7 workflow and skill compiler vertical slice end to end,
-with comprehensive static validation, deterministic controller, standard workflows,
-and verified test suites. ADR-0036 recorded.
+Implemented the Phase 7 workflow and skill compiler local vertical slice with
+static validation, a deterministic controller, and standard workflows.
+ADR-0036 records the decision. The roadmap exit remains unverified as recorded
+in `terminus-research-execution-ledger.md`.

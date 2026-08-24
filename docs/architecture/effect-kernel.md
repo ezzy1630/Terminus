@@ -42,8 +42,9 @@ connection through the L4 egress proxy (`terminus-egress` remains the lower
 layer), consumes the grant immediately before wire dispatch, scrubs echoed
 credential material from responses, and returns a hashed typed receipt.
 Models, tools, extensions and artifacts never see credential bytes.
-`https` destinations fail closed with `TlsUnavailable` until a validated TLS
-transport lands — credentials are never sent in plaintext.
+For `https`, rustls validates platform roots while reqwest connects only to the
+DNS address set approved by the egress broker. Request and response bytes are
+bounded and charged to the egress budget. Unsupported schemes fail closed.
 
 **Sandbox enforcement truth.** Backends report what they MEASURE:
 
@@ -118,7 +119,7 @@ Tokens are validated on every RPC. Compromised tokens are revocable. The `termin
 | Backend | Platform | Status | Use case |
 |---|---|---|---|
 | `terminus-sandbox-linux` (Bubblewrap) | Linux | ADOPTED | Default local trusted workspace |
-| `terminus-sandbox-macos` | macOS | Scaffolded | macOS client/control (honest degraded reporting) |
+| `terminus-sandbox-macos` | macOS | ADOPTED (Phase 4) | Deny-by-default Seatbelt profile generation (ADR-0035 §4) |
 | `terminus-sandbox-windows` | Windows | Scaffolded | Windows client/control (honest degraded reporting) |
 | `terminus-sandbox-container` | Linux | OPEN (ADR-0027) | Untrusted repos, evals, extensions |
 
@@ -169,12 +170,11 @@ Implementation: `crates/terminus-patch` + `crates/terminus-fs`.
 
 ## Process and job ownership (SPEC §11.7, §34.11, §34.12)
 
-- Every subprocess is owned by a process-tree abstraction.
-- Process-tree kill includes forked children (PID namespace).
-- PTY input/output streaming.
-- Timeout and cancellation propagate.
-- Jobs are durable (survive control-plane restart).
-- Job reconciliation on restart (`JobReconciled` event).
+- Every subprocess is owned by a process-tree supervisor (`ManagedProcess`).
+- Process-tree kill reaps forked children across process groups.
+- Structured stdio streaming with bounded inline capture and CAS artifact spillover.
+- Timeout and cancellation propagate cleanly without detached background tasks.
+- Job state records and output artifacts persist across restarts for deterministic reconciliation (`JobReconciled` event).
 
 Implementation: `crates/terminus-process` + `crates/terminus-jobs`.
 

@@ -1,10 +1,12 @@
 # ADR-0002: Fork-assisted OpenCode strangler strategy
 
-- **Status:** ADOPTED
+- **Status:** SUPERSEDED by ADR-0039
 - **Date:** 2025-07-11
 - **Decision owner:** upstream owner
 - **Supersedes:** none
 - **Related:** SPEC §6, §42.2
+
+> Historical decision. ADR-0039 removed the OpenCode runtime and build dependency after Terminus took direct ownership of ARP, its public API, and its public client.
 
 ## Context
 

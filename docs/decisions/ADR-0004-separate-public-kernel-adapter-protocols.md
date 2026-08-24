@@ -16,7 +16,7 @@ OpenCode uses one JSON-RPC protocol for client/server and inherits that for plug
 
 Adopt **three separate protocols** per SPEC §7.1:
 
-1. **Public product API** — HTTP/OpenAPI + SSE (or WebSocket, ADR-0029 OPEN) for clients (TUI, CLI, web, desktop, IDE/ACP, SDK, CI). Generated TypeScript/Rust/Python clients. OpenCode-compatible HTTP/OpenAPI retained during bootstrap (ADR-0008).
+1. **Public product API** — Terminus-owned HTTP/OpenAPI + SSE (or WebSocket, ADR-0029 OPEN) for clients (TUI, CLI, web, desktop, IDE/ACP, SDK, CI). Generated TypeScript/Rust/Python clients.
 2. **Internal privileged RPC** — Protobuf/gRPC over Unix-domain socket locally, mTLS remotely. Strict schemas, deadlines, cancellation, idempotency, capability tokens. No generic "execute arbitrary JSON" escape hatch (ADR-0007).
 3. **External-agent adapter protocol** — ACP v1 where supported; native adapters for Codex/Claude Code/Pi/OpenHands. Capability probes discover observed behavior; adapters normalize lifecycle, artifacts, budgets, and results while preserving a machine-readable declaration of what remains opaque (SPEC §35.11).
 
@@ -25,7 +25,7 @@ Each protocol has its own source of truth, code generator, version, and compatib
 ## Alternatives
 
 - **One JSON-RPC protocol for everything.** Rejected: leaky privileged surface; cannot enforce capability tokens; cannot evolve public API independently.
-- **gRPC for the public API too.** Rejected: poorer browser/IDE story; harder OpenAPI generation; OpenCode compatibility lost.
+- **gRPC for the public API too.** Rejected: poorer browser/IDE story and harder OpenAPI generation.
 - **Adapter protocol folded into public API.** Rejected: external harnesses are Z4 untrusted; they need their own boundary with capability probes.
 
 ## Consequences

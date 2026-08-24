@@ -95,7 +95,7 @@ audit, evidence, and reconciliation
 The build includes tests that deliberately attempt to bypass the kernel from:
 
 - ordinary TypeScript code;
-- an OpenCode-derived plugin hook;
+- a first-party plugin hook;
 - a local project plugin;
 - an npm plugin;
 - an MCP server;
@@ -109,11 +109,9 @@ The build includes tests that deliberately attempt to bypass the kernel from:
 
 A supported configuration passes only when each attempt is denied or routed through an audited kernel capability. These tests are required before any release may call the effect boundary non-bypassable. See `docs/security/non-bypassability-tests.md` for the test plan.
 
-## Bootstrap trust exception (SPEC §27.5)
+## Retired bootstrap trust exception (SPEC §27.5)
 
-During the first migration stage, inherited OpenCode code may still contain direct effect paths. Those paths are inventoried in `docs/security/effect-bypass-register.yaml` with: `id`, `owner`, `source`, `effect`, `reason`, `containment`, `removal_milestone`, `test`, `status`.
-
-The release gate is not "zero entries immediately"; it is "**no unknown entries, every entry contained, and all entries removed before the secure-default milestone (M4)**."
+ADR-0039 removed inherited OpenCode source and retired the bootstrap exception. `docs/security/effect-bypass-register.yaml` is a tombstone with no active entries. A direct first-party effect path blocks release and requires a fix or a new adopted security ADR.
 
 ## Architecture-boundary checks (SPEC §42.5)
 
@@ -121,7 +119,8 @@ The build mechanically checks for:
 
 - forbidden TypeScript imports;
 - Cargo dependency cycles and forbidden crate edges;
-- direct Node/Bun process, filesystem, socket, or environment access outside approved bridge modules;
+- direct Node/Bun process, filesystem, socket, or environment access outside approved kernel client modules;
+- external-harness imports or workspace dependencies in first-party runtime/build code;
 - direct provider SDK use outside provider packages;
 - raw SQL outside storage repositories/migrations;
 - model-visible strings outside versioned prompt/tool-description locations;
@@ -134,7 +133,7 @@ These checks run in CI alongside the non-bypassability tests.
 ## Related documents
 
 - `docs/security/threat-model.md` — threat actors and threat/control matrix.
-- `docs/security/effect-bypass-register.yaml` — bootstrap bypass inventory.
+- `docs/security/effect-bypass-register.yaml` — retired inherited-source exception tombstone.
 - `docs/security/non-bypassability-tests.md` — the test plan.
 - `docs/runbooks/security-incident.md` — incident response.
 - `docs/runbooks/sandbox-unavailable.md` — degraded-mode handling.

@@ -53,7 +53,7 @@ High. The language split is what makes non-bypassability enforceable. Rust's `un
 
 ## Migration
 
-N/A — founding decision. OpenCode-derived TypeScript is bridged via `open-code-bridge` (ADR-0002); inherited Python analysis is migrated to `python/forge_evals/` as it is identified.
+ADR-0039 establishes the TypeScript control plane as Terminus-owned. External harnesses integrate through the adapter protocol and do not define control-plane packages.
 
 ## Rollback
 

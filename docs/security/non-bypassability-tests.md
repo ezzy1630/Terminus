@@ -2,12 +2,14 @@
 
 This document specifies the test plan that MUST pass before any release may call the Terminus effect boundary "non-bypassable." The tests deliberately attempt to bypass the kernel from every zone and every entry point.
 
+> Current evidence status: this is a required test plan, not a passing report. The dedicated `tests/security/bypass/` directory is absent. Existing kernel and boundary tests provide partial coverage only, so a full non-bypassability claim remains blocked.
+
 ## Test inventory (SPEC §27.4)
 
 The build MUST include tests that deliberately attempt to bypass the kernel from:
 
 1. ordinary TypeScript code;
-2. an OpenCode-derived plugin hook;
+2. a first-party plugin hook;
 3. a local project plugin;
 4. an npm plugin;
 5. an MCP server;
@@ -29,11 +31,11 @@ A supported configuration passes only when each attempt is **denied or routed th
 - **Expected:** Architecture-boundary check fails at build time; the import is forbidden.
 - **Test:** `tests/security/bypass/T01-ts-direct-process.test.ts` — verify the import is rejected by the linter/compiler.
 
-### T2: OpenCode-derived plugin hook bypass
+### T2: First-party plugin hook bypass
 
-- **Attempt:** A plugin loaded via the OpenCode bridge attempts to spawn a process directly.
-- **Expected:** The bridge routes through the kernel; direct spawn is denied.
-- **Test:** `tests/security/bypass/T02-opencode-plugin-hook.test.ts` — verify the plugin's spawn is denied or routed.
+- **Attempt:** A first-party plugin hook attempts to spawn a process directly.
+- **Expected:** The extension host routes through the kernel; direct spawn is denied.
+- **Required fixture:** `tests/security/bypass/T02-first-party-plugin-hook.test.ts` must verify the spawn is denied or routed.
 
 ### T3: Local project plugin bypass
 
@@ -130,12 +132,12 @@ A supported configuration passes only when:
 
 - **Any failure blocks the release** (SPEC §26.3 #1).
 - File a security incident (`docs/runbooks/security-incident.md`).
-- The bypass is added to `docs/security/effect-bypass-register.yaml` if it's an inherited path, or fixed immediately if it's a Terminus-owned path.
+- Fix the first-party bypass immediately. The retired inherited-source register cannot authorize it.
 
 ## Related
 
 - `docs/architecture/trust-boundaries.md` — non-bypassability invariant.
-- `docs/security/effect-bypass-register.yaml` — bootstrap bypass inventory.
+- `docs/security/effect-bypass-register.yaml` — retired inherited-source exception tombstone.
 - `docs/security/threat-model.md` — threat/control matrix.
 - `docs/runbooks/security-incident.md` — incident response.
 - SPEC §27.4 (non-bypassability tests), §46.10 (security test tiers).

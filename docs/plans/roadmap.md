@@ -6,7 +6,7 @@ This document is Terminus's implementation roadmap (SPEC §48), organized into m
 
 - Build measurement and security boundaries before sophisticated cognition.
 - Deliver vertical slices that can be exercised through the public API.
-- Keep inherited OpenCode behavior available behind flags until replacement parity is proven.
+- Keep canonical behavior behind Terminus-owned contracts and verify it through the public path.
 - Remove ambient effect paths continuously; do not postpone them to a final security phase.
 - Every milestone has an exit gate.
 - Prefer one-way migrations and compatibility facades over broad rewrites.
@@ -16,10 +16,10 @@ This document is Terminus's implementation roadmap (SPEC §48), organized into m
 
 1. **Runtime and security** — Rust kernel, sandbox, process/jobs, policy, secrets, egress, patch engine.
 2. **Control and context** — domain, storage, sessions/tasks, context compiler, providers, orchestration, verification.
-3. **Product and ecosystem** — clients, OpenCode bridge, skills/MCP/plugins/adapters, configuration, docs.
+3. **Product and ecosystem** — clients, public SDK, skills/MCP/plugins/adapters, configuration, docs.
 4. **Evaluation and quality** — benchmark lab, fake provider, conformance, security tests, statistics, release quality.
 
-Cross-cutting owners: protocol, security, upstream integration, developer experience.
+Cross-cutting owners: protocol, security, standalone architecture, developer experience.
 
 ## Milestones
 
@@ -27,27 +27,27 @@ Cross-cutting owners: protocol, security, upstream integration, developer experi
 
 **Objective:** Create the conditions to know whether the project is improving.
 
-**Tasks:** Repository, ownership, root AGENTS.md, contribution guide, security policy, ADR process; pin OpenCode upstream; divergence-budget file; minimal shell-oriented control agent; generic eval task format and environment lock format; deterministic fake-provider support; runners for upstream OpenCode and minimal baseline; additional runners for Codex, Pi, Oh My Pi, etc.; end-state graders and hidden-test isolation; token/cost/latency recording; repeated-run variance; primary metrics and promotion rules; evaluation-results schema and Parquet export; dashboard/notebook; benchmark data-handling policy.
+**Tasks:** Repository, ownership, root AGENTS.md, contribution guide, security policy, ADR process; deterministic standalone-dependency gate; minimal shell-oriented control agent; generic eval task format and environment lock format; deterministic fake-provider support; external comparison runners where automation is permitted; additional runners for Codex, Pi, Oh My Pi, etc.; end-state graders and hidden-test isolation; token/cost/latency recording; repeated-run variance; primary metrics and promotion rules; evaluation-results schema and Parquet export; dashboard/notebook; benchmark data-handling policy.
 
 **Deliverables:** `evals/` task runner; baseline harness adapters; fake provider; first reproducibility report; ADR-0001 through ADR-0005; minimal reference mode.
 
 **Exit gate:** The same pinned configuration can be rerun and produce complete comparable records. Graders detect intentionally broken patches. Cost and latency reconcile within documented tolerances. Baseline variance is understood sufficiently to size later experiments.
 
-### M1 — Fork-assisted bootstrap and substrate gate (SPEC §48.4)
+### M1 — Standalone contract and ownership gate (SPEC §48.4)
 
-**Objective:** Reuse OpenCode without allowing it to define permanent boundaries.
+**Objective:** Establish direct Terminus ownership of the runtime, public client path, and effect boundary.
 
-**Tasks:** OpenCode compatibility/parity test suite; inventory all inherited effect paths; exact provider-request capture; Terminus task contracts; context-manifest skeleton; artifact store facade; public Terminus API facade and generated client skeleton; four substrate tests (exact context visibility, total effect interception feasibility, independent task/checkpoint ownership, provider-specific rendering injection); document which OpenCode packages require patching; upstream sync CI; isolate Bun-specific APIs; disable automatic plugin installation; explicit extension lockfiles; fork/overlay decision ADR.
+**Tasks:** `just standalone-check`; inventory all first-party effect paths; exact provider-request capture; Terminus task contracts; context-manifest skeleton; artifact store; public Terminus API and generated client; four substrate tests (exact context visibility, total effect interception feasibility, independent task/checkpoint ownership, provider-specific rendering injection); direct ARP/API/client dependency edges; current-to-previous compatibility fixtures; Node-compatible production packages; disable automatic plugin installation; explicit extension lockfiles; ADR-0039.
 
-**Deliverables:** `packages/open-code-bridge`; effect-bypass register; provider-request recorder; OpenCode parity suite; fork gate report.
+**Deliverables:** `packages/runtime-protocol`, `packages/public-api`, `packages/public-client`; retired effect-bypass tombstone; provider-request recorder; standalone dependency check; public API/client compatibility suite.
 
-**Exit gate:** Every critical invariant is either achievable through a stable seam or mapped to a narrowly owned fork patch. No critical behavior remains "assumed interceptable."
+**Exit gate:** Every critical invariant has a Terminus-owned contract and verification path. No first-party runtime/build dependency on an external harness remains.
 
 ### M2 — Domain model, persistence, artifacts, and public lifecycle (SPEC §48.5)
 
 **Objective:** Make sessions, tasks, turns, events, artifacts, and recovery durable before privileged execution moves.
 
-**Tasks:** UUIDv7 IDs and URI types; SQLite migration framework and schema checksum; workspace/session/thread/task/turn/provider-attempt/event repositories; state-machine guards and property tests; semantic event envelope and event catalog generator; content-addressed artifact ingestion, metadata, streaming, and GC dry run; task contract versioning and scope ledger; task terminal states and completion record skeleton; SSE event stream with cursors and reconnect; idempotency-key storage; portable trace export; startup recovery report; database/artifact backup and restore test; public API resource snapshots and health endpoints; integrate inherited TUI through public facade.
+**Tasks:** UUIDv7 IDs and URI types; SQLite migration framework and schema checksum; workspace/session/thread/task/turn/provider-attempt/event repositories; state-machine guards and property tests; semantic event envelope and event catalog generator; content-addressed artifact ingestion, metadata, streaming, and GC dry run; task contract versioning and scope ledger; task terminal states and completion record skeleton; SSE event stream with cursors and reconnect; idempotency-key storage; portable trace export; startup recovery report; database/artifact backup and restore test; public API resource snapshots and health endpoints; integrate the Terminus TUI through the public client.
 
 **Exit gate:** A task can be created, streamed, interrupted, control-plane restarted, resumed, completed, and exported without a privileged kernel or real model.
 
@@ -55,15 +55,15 @@ Cross-cutting owners: protocol, security, upstream integration, developer experi
 
 **Objective:** Establish the privileged Rust boundary and route all new effects through it.
 
-**Tasks:** `terminus.kernel.v1` Protobuf packages and Buf compatibility checks; authenticated gRPC over UDS; request context, idempotency, deadline, cancellation, typed error mapping; kernel instance identity and short-lived capability tokens; safe workspace/path types; artifact ingest service integration; structured `exec` without sandbox (temporary test backend); process-tree ownership, output streaming, timeout, cancellation; durable jobs and PTY streams; control-plane kernel client and fake kernel; route one inherited command path through kernel; route all Terminus-owned commands through kernel; direct-effect architecture checks in TypeScript; process restart and job reconciliation; kernel protocol compatibility tests; load/backpressure tests.
+**Tasks:** `terminus.kernel.v1` Protobuf packages and Buf compatibility checks; authenticated gRPC over UDS; request context, idempotency, deadline, cancellation, typed error mapping; kernel instance identity and short-lived capability tokens; safe workspace/path types; artifact ingest service integration; structured `exec` without sandbox (temporary test backend); process-tree ownership, output streaming, timeout, cancellation; durable jobs and PTY streams; control-plane kernel client and fake kernel; route a representative command path through kernel; route all Terminus-owned commands through kernel; direct-effect architecture checks in TypeScript; process restart and job reconciliation; kernel protocol compatibility tests; load/backpressure tests.
 
-**Exit gate:** No Terminus-owned process or file mutation bypasses the kernel. Remaining inherited bypasses are known, contained, tested, and scheduled for removal.
+**Exit gate:** No Terminus-owned process or file mutation bypasses the kernel. The retired inherited-source exception has no active entries.
 
 ### M4 — Sandbox, policy, secrets, network, and Git protection (SPEC §48.7)
 
 **Objective:** Make the effect boundary enforce meaningful security.
 
-**Tasks:** Common sandbox policy model and backend trait; Linux Bubblewrap backend with read-only root and writable worktree; re-protect `.git`, Terminus state, secret paths, denied globs; user/PID/network namespaces, no-new-privileges, seccomp, cgroup controls; explicit degraded-mode detection; structured command normalization and shell AST parser; versioned command/effect policy engine; approval records bound to normalized action hashes; secret capability broker with short-lived child injection; output redaction and secret-use audit; proxy-only network namespace and destination allowlists; DNS rebinding/private-address protections; protected Git worktree/branch/commit operations; disable untrusted Git hooks and filters; macOS and Windows backend scaffolds with honest capability reporting; container backend for untrusted evals/extensions; run sandbox, secret, network, and process-tree adversarial suites; remove inherited direct effect paths or place inherited control plane in outer sandbox until removed.
+**Tasks:** Common sandbox policy model and backend trait; Linux Bubblewrap backend with read-only root and writable worktree; re-protect `.git`, Terminus state, secret paths, denied globs; user/PID/network namespaces, no-new-privileges, seccomp, cgroup controls; explicit degraded-mode detection; structured command normalization and shell AST parser; versioned command/effect policy engine; approval records bound to normalized action hashes; secret capability broker with short-lived child injection; output redaction and secret-use audit; proxy-only network namespace and destination allowlists; DNS rebinding/private-address protections; protected Git worktree/branch/commit operations; disable untrusted Git hooks and filters; macOS and Windows backend scaffolds with honest capability reporting; container backend for untrusted evals/extensions; run sandbox, secret, network, and process-tree adversarial suites; remove any direct first-party effect path before release.
 
 **Exit gate:** The secure local profile passes the non-bypassability and adversarial security suite on supported Linux. Unsupported platforms fail closed or explicitly select a degraded profile.
 
@@ -79,7 +79,7 @@ Cross-cutting owners: protocol, security, upstream integration, developer experi
 
 **Objective:** Replace transcript accumulation with typed, inspectable, provider-rendered context.
 
-**Tasks:** Context IR runtime schemas and persistence; world-state producer registry; integrate inherited OpenCode context sources and epochs through bridge; project instruction discovery and scope resolution; task-contract, scope, budget, diagnostics, jobs, tests, permissions fragments; retrieval query generation; integrate lexical/AST/LSP retrieval; deduplication and source-version validation; evidence-coverage matrix and gap expansion; scoring and budget allocator; recent complete-episode selection; structured checkpoint schema and generator; checkpoint validation against contract/requirements/failures; provenance DAG and source expansion; exact context manifest persisted before provider send; context explanation UI/CLI; counterfactual replay support; full-history vs. checkpoint/recent-window experiments; retrieval and position ablations.
+**Tasks:** Context IR runtime schemas and persistence; world-state producer registry; implement Terminus-owned context sources and epochs; project instruction discovery and scope resolution; task-contract, scope, budget, diagnostics, jobs, tests, permissions fragments; retrieval query generation; integrate lexical/AST/LSP retrieval; deduplication and source-version validation; evidence-coverage matrix and gap expansion; scoring and budget allocator; recent complete-episode selection; structured checkpoint schema and generator; checkpoint validation against contract/requirements/failures; provenance DAG and source expansion; exact context manifest persisted before provider send; context explanation UI/CLI; counterfactual replay support; full-history vs. checkpoint/recent-window experiments; retrieval and position ablations.
 
 **Exit gate:** Long-horizon target tasks achieve non-inferior or improved success with lower context/cost, and requirement-loss tests pass. Every provider request is explainable from a manifest.
 
@@ -129,25 +129,25 @@ Cross-cutting owners: protocol, security, upstream integration, developer experi
 
 **Objective:** Prove the product can be installed, upgraded, operated, secured, and maintained.
 
-**Tasks:** Complete supported platform matrix; long-duration soak and resource-leak tests; full security assessment and fix/accept findings; migration, backup, restore, and rollback drills; upstream sync and divergence report; benchmark release comparison and publish methodology; freeze stable public/proto schema versions; complete user/admin/security/runbook documentation; sign binaries/images and publish SBOM/provenance; preview canary and collect operational metrics; resolve critical UX and approval-fatigue issues; establish incident, disclosure, and patch processes.
+**Tasks:** Complete supported platform matrix; long-duration soak and resource-leak tests; full security assessment and fix/accept findings; migration, backup, restore, and rollback drills; standalone and architecture-boundary checks at the release commit; benchmark release comparison and publish methodology; freeze stable public/proto schema versions; complete user/admin/security/runbook documentation; sign binaries/images and publish SBOM/provenance; preview canary and collect operational metrics; resolve critical UX and approval-fatigue issues; establish incident, disclosure, and patch processes.
 
 **Exit gate:** All release-gate requirements in SPEC §46.18 and the checklist in §50 pass.
 
 ## Current status (0.1.0 development)
 
-- M0 tasks: functional (eval lab operational, 200/200 unit and integration tests passing).
-- M1 tasks: active (OpenCode bridge, divergence budget tracking, parity suite).
+- M0 tasks: local truth/eval mechanisms and focused tests exist; exact-candidate reproducibility, live comparison, and signed release evidence remain unverified.
+- M1 tasks: source ownership is implemented (ADR-0039, standalone check, direct ARP/API/client edges); public-path compatibility and release verification continue under later milestones.
 - M2 tasks: active (Prisma schema, migrations, repositories).
 - M3 tasks: active (kernel proto v1, mini-service gRPC, resource budgets, non-bypassability tests).
 - M4 tasks: active (sandbox backends, Linux enforcement probe, policy, secret isolation).
 - M5 tasks: active (ACI tools, patch engine, truncation/elision handlers, transaction rollbacks).
 - M6 tasks: active (context IR, tokenizer, compiler, budget controls).
-- M7 tasks: active (provider renderers, adapter SDK, router).
+- M7 tasks: active (provider-owned model catalogs/renderers, provider-neutral profile references, adapter SDK, router); live-provider conformance remains unverified.
 - M8 tasks: active (verification engine, loop detector, orchestration).
 - M9 tasks: active (capability registry, MCP relay, extension host isolation).
-- M10 tasks: complete in `@terminus/memory` (disabled by default; fixture exit gate passes, product enablement still gated by ADR-0023).
-- M11 tasks: in progress (client integration & remote kernel scaffolding).
-- M12 tasks: active — release engineering scaffold complete (property/fuzz targets, fault-injection matrix, platform CI, drills, soak/canary evidence writers, findings register, schema freeze, four-owner decision). Stable promote still requires signed `TERMINUS_LINUX_EVIDENCE` from the dedicated Linux runner and recorded owner approvals.
+- M10 tasks: a local `@terminus/memory` implementation exists and remains disabled by default; its product enablement and outcome gate remain blocked by ADR-0023.
+- M11 tasks: in progress (authenticated client integrations, experimental desktop cockpit, and remote-kernel scaffolding); continuity and remote-operation exit evidence remains unverified.
+- M12 tasks: active — release-engineering mechanisms exist (property/fuzz targets, fault-injection matrix, platform CI, drills, soak/canary evidence writers, findings register, schema freeze, four-owner decision). Stable promotion remains blocked on exact-candidate signed Linux evidence, owner approvals, release-tier evaluations, and the full required security suite.
 
 See `docs/plans/pr-sequence.md` for the first 40 PRs.
 

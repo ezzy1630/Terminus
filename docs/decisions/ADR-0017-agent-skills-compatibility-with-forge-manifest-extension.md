@@ -53,7 +53,7 @@ Medium. Hash pinning prevents silent skill replacement. Capability declaration p
 
 ## Migration
 
-Skills are introduced in M9 (SPEC §48.12). OpenCode's plugin/skill model is replaced by the Terminus capability registry (ADR-0002).
+Skills are introduced in M9 (SPEC §48.12) through the Terminus capability registry. External skill formats are decoded at that first-party boundary.
 
 ## Rollback
 

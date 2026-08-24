@@ -51,7 +51,7 @@ High. Confidentiality labels on fragments prevent secret-adjacent content from r
 
 ## Migration
 
-OpenCode's typed context sources are bridged via `open-code-bridge` (ADR-0002). Context epochs are preserved. The Terminus Context IR is introduced in M6 (SPEC §48.9) and OpenCode's context is removed once parity is proven.
+Terminus Context IR and context epochs are first-party contracts (ADR-0039). M6 verifies their manifests, selection behavior, and provider renderings directly.
 
 ## Rollback
 

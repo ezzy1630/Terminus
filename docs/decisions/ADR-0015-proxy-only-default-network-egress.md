@@ -54,7 +54,7 @@ Critical. This is what prevents model-generated scripts from exfiltrating secret
 
 ## Migration
 
-The egress proxy is introduced in M4 (SPEC §48.7). OpenCode's direct network paths are removed or routed through the proxy (ADR-0002, `docs/security/effect-bypass-register.yaml`).
+The egress proxy is introduced in M4 (SPEC §48.7). Every Terminus network path routes through it; direct first-party sockets are forbidden.
 
 ## Rollback
 

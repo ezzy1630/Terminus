@@ -58,7 +58,7 @@ Critical. This is the primary enforcement mechanism on Linux. The non-bypassabil
 
 ## Migration
 
-The Linux backend is introduced in M4 (SPEC §48.7). OpenCode's direct effect paths are removed or placed in an outer sandbox until removed (SPEC §48.7 task 18, `docs/security/effect-bypass-register.yaml`).
+The Linux backend is introduced in M4 (SPEC §48.7). First-party direct effect paths are release-blocking defects; the retired inherited-source tombstone grants no exception (ADR-0039).
 
 ## Rollback
 
