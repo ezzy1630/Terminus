@@ -27,9 +27,10 @@ turning a fixture, an unsigned report, or a declaration into product evidence.
    evaluation.
 3. Evaluation proceeds in order: static, source-failure, replay, focused
    holdout, broad holdout, then security/chaos. Receipts are bound to the
-   candidate identity, version, exact partition, feature/configuration identity,
-   and immutable artifact. Broad holdout evidence must transfer across at least
-   two cohorts and two model profiles.
+   candidate identity, version, exact partition, content-addressed
+   feature/configuration identity, resolved run manifest, and immutable
+   artifact. Broad holdout evidence must transfer across at least two cohorts
+   and two model profiles.
 4. A separate promotion signature binds the candidate and the ordered receipt
    set. Canary observations are candidate-bound. A violated prediction,
    regression floor, or hard guardrail automatically rolls the candidate back.
@@ -81,8 +82,9 @@ production effect authority.
 
 ## Evaluation plan
 
-- Unit tests for partition isolation, candidate invariants, ablation coverage,
-  ordered receipts, signature binding, automatic rollback, repair memory, and
+- Unit tests for partition isolation, candidate invariants, configuration and
+  run-manifest binding, ablation coverage, ordered receipts, signature binding,
+  automatic rollback, repair memory, and
   Pareto dominance.
 - Unit and CLI tests for exact commit/platform identity, expiry, failed
   evidence, contiguous levels, and independent-reproduction requirements.

@@ -29,6 +29,7 @@ from forge_evals.evolution_lab import (
 )
 
 COMMIT = "a" * 40
+CONFIGURATION = f"sha256:{'c' * 64}"
 
 
 def _candidate() -> EvolutionCandidate:
@@ -40,6 +41,7 @@ def _candidate() -> EvolutionCandidate:
         platform="linux-x86_64",
         baseline_version="git:base",
         candidate_version="git:candidate",
+        configuration_identity=CONFIGURATION,
         attribution=FailureAttribution(
             attribution_id="attribution-017",
             source_failure_ids=("failure-017",),
@@ -86,6 +88,8 @@ def _receipt(
         platform="linux-x86_64",
         evaluator_principal="isolated-evaluator",
         run_manifest_ref=f"artifact://sha256/{'f' * 64}",
+        configuration_identity=CONFIGURATION,
+        resolved_configuration_identity=CONFIGURATION,
         stage=stage,
         artifact_ref=f"artifact://sha256/{digest}",
         passed=passed,
@@ -109,6 +113,7 @@ def _signature(lifecycle: CandidateLifecycle) -> PromotionSignature:
 
 def _advance_to_security(lifecycle: CandidateLifecycle) -> None:
     lifecycle.record_receipt(_receipt(CandidateStage.STATIC), actor=EvaluationActor.EVALUATOR)
+    lifecycle.record_receipt(_receipt(CandidateStage.SOURCE_FAILURE), actor=EvaluationActor.EVALUATOR)
     lifecycle.record_receipt(_receipt(CandidateStage.REPLAY), actor=EvaluationActor.EVALUATOR)
     lifecycle.record_receipt(
         _receipt(
@@ -159,6 +164,8 @@ def test_candidate_must_be_trace_grounded_and_cannot_change_forbidden_components
         )
     with pytest.raises(ValueError, match="non-finite"):
         replace(_candidate(), predicted_improvements={"verified_completion": float("nan")})
+    with pytest.raises(ValueError, match="content-addressed"):
+        replace(_candidate(), configuration_identity="config-v1")
     with pytest.raises(ValueError, match="immutable trace"):
         replace(_candidate().attribution, trace_refs=("/tmp/trace.json",))
 
@@ -220,11 +227,14 @@ def test_validation_ladder_is_ordered_and_only_evaluator_records_receipts() -> N
         )
     with pytest.raises(ValueError, match="run manifest"):
         replace(_receipt(CandidateStage.STATIC), run_manifest_ref="run.json")
+    with pytest.raises(ValueError, match="does not match"):
+        replace(_receipt(CandidateStage.STATIC), resolved_configuration_identity=f"sha256:{'d' * 64}")
 
 
 def test_broad_holdout_requires_transfer_across_models_and_cohorts() -> None:
     lifecycle = CandidateLifecycle(_candidate())
     lifecycle.record_receipt(_receipt(CandidateStage.STATIC), actor=EvaluationActor.EVALUATOR)
+    lifecycle.record_receipt(_receipt(CandidateStage.SOURCE_FAILURE), actor=EvaluationActor.EVALUATOR)
     lifecycle.record_receipt(_receipt(CandidateStage.REPLAY), actor=EvaluationActor.EVALUATOR)
     lifecycle.record_receipt(
         _receipt(
@@ -280,6 +290,8 @@ def test_canary_prediction_violation_triggers_automatic_rollback() -> None:
             source_commit=COMMIT,
             platform="linux-x86_64",
             run_manifest_ref=f"artifact://sha256/{'f' * 64}",
+            configuration_identity=CONFIGURATION,
+            resolved_configuration_identity=CONFIGURATION,
             artifact_ref=f"artifact://sha256/{'c' * 64}",
             sample_size=100,
             metric_deltas={
@@ -312,6 +324,8 @@ def test_canary_waits_for_sample_then_promotes_when_predictions_hold() -> None:
         source_commit=COMMIT,
         platform="linux-x86_64",
         run_manifest_ref=f"artifact://sha256/{'f' * 64}",
+        configuration_identity=CONFIGURATION,
+        resolved_configuration_identity=CONFIGURATION,
         artifact_ref=f"artifact://sha256/{'d' * 64}",
         sample_size=10,
         metric_deltas={

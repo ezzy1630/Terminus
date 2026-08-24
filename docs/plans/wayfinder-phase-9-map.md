@@ -25,7 +25,7 @@ Canonical terms:
 - **OrganizationDirectory**: federated organization topology, departmental workspaces, process-local operator-agent and room projections, and deterministic capability resolution; restart persistence is not part of this local slice;
 - **AttentionCoordinator**: human attention firewall evaluating 7 materiality triggers (`interpretation_divergence`, `authority_expansion`, `irreversible_effect`, `external_effect`, `missing_grant`, `human_taste`, `confidence_collapse`) and consequence matrices;
 - **InterventionManager**: 14-verb structured intervention engine (`focus`, `ignore`, `elaborate`, `change_constraint`, `edit_plan`, `approve_exact_effect`, `deny_narrow`, `pause`, `resume`, `takeover`, `fork`, `rewind`, `terminate`, `request_independent_review`);
-- **CausalReplayEngine**: process-local step-lineage recording, deterministic replay of non-model steps, pinned-input model re-execution, context omission diagnostics, and counterfactual simulation; restart continuity remains unverified;
+- **CausalReplayEngine**: process-local step-lineage recording, context omission diagnostics, and counterfactual hypotheses. Deterministic non-model replay and pinned-input model re-execution are planned contracts, not implemented runtime capabilities; restart continuity remains unverified;
 - **DesktopCockpit**: local operator-cockpit component suite. The task workspace mounts overview, activity, changes, replay, usage, and evidence; the other view/modal components remain contract slices until a reachable route or command mounts them;
 - **AcpBridge**: Terminus custom JSON-RPC-over-stdio adapter. It is not ACP v1 compatible, and editor-host conformance remains unverified.
 
@@ -46,7 +46,8 @@ The Phase 9 Unified Clients and Operator Cockpit contract slice is present:
 - Structured Intervention Manager (`InterventionManager`) supporting all 14 canonical verbs with typed payloads and state machine transitions.
 - Causal Replay Engine (`CausalReplayEngine`) recording process-local lineage and
   supporting omission diagnostics only with trusted evaluator evidence;
-  counterfactual outputs remain hypotheses and restart lineage is not proven.
+  counterfactual outputs remain hypotheses. Deterministic replay and pinned-input
+  model re-execution are not implemented, and restart lineage is not proven.
 - Typed ARP v2 endpoint contracts in `@terminus/public-api`, decoded SDK methods
   in `@terminus/public-client`, and local HTTP/SSE handlers in
   `terminus-control`. Missing executors and trusted verifiers fail closed.

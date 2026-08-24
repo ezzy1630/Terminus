@@ -86,6 +86,7 @@ class CandidateStage(StrEnum):
 
     PROPOSED = "proposed"
     STATIC = "static"
+    SOURCE_FAILURE = "source_failure"
     REPLAY = "replay"
     FOCUSED_HOLDOUT = "focused_holdout"
     BROAD_HOLDOUT = "broad_holdout"
@@ -99,6 +100,7 @@ class CandidateStage(StrEnum):
 
 _VALIDATION_SEQUENCE = (
     CandidateStage.STATIC,
+    CandidateStage.SOURCE_FAILURE,
     CandidateStage.REPLAY,
     CandidateStage.FOCUSED_HOLDOUT,
     CandidateStage.BROAD_HOLDOUT,
@@ -219,6 +221,7 @@ class EvolutionCandidate:
     platform: str
     baseline_version: str
     candidate_version: str
+    configuration_identity: str
     attribution: FailureAttribution
     ablation_plan: CausalAblationPlan
     source_failure_ids: tuple[str, ...]
@@ -251,6 +254,7 @@ class EvolutionCandidate:
             "platform": self.platform,
             "baseline_version": self.baseline_version,
             "candidate_version": self.candidate_version,
+            "configuration_identity": self.configuration_identity,
             "root_cause": self.root_cause,
             "target_component": self.target_component,
             "security_effect": self.security_effect,
@@ -261,6 +265,8 @@ class EvolutionCandidate:
             raise ValueError(f"candidate fields must be non-empty: {', '.join(missing)}")
         if _COMMIT_HASH.fullmatch(self.source_commit) is None:
             raise ValueError("candidate source_commit must be an exact Git object hash")
+        if not _is_content_hash(self.configuration_identity):
+            raise ValueError("candidate configuration_identity must be content-addressed")
         if not self.source_failure_ids:
             raise ValueError("candidate requires at least one source failure")
         if not self.predicted_improvements:
@@ -294,6 +300,8 @@ class EvaluationReceipt:
     platform: str
     evaluator_principal: str
     run_manifest_ref: str
+    configuration_identity: str
+    resolved_configuration_identity: str
     stage: CandidateStage
     artifact_ref: str
     passed: bool
@@ -318,6 +326,8 @@ class EvaluationReceipt:
             self.experiment_id,
             self.platform,
             self.evaluator_principal,
+            self.configuration_identity,
+            self.resolved_configuration_identity,
         )
         if any(not value.strip() for value in required_identity):
             raise ValueError("evaluation receipt requires candidate, run, and evaluator identity")
@@ -327,6 +337,10 @@ class EvaluationReceipt:
             raise ValueError("evaluation receipt requires an immutable artifact reference")
         if not _is_artifact_ref(self.run_manifest_ref):
             raise ValueError("evaluation receipt requires an immutable run manifest")
+        if not _is_content_hash(self.configuration_identity):
+            raise ValueError("evaluation receipt requires a content-addressed configuration identity")
+        if self.resolved_configuration_identity != self.configuration_identity:
+            raise ValueError("evaluation receipt configuration identity does not match its resolved run manifest")
         expected_partition = {
             CandidateStage.FOCUSED_HOLDOUT: EvaluationPartition.FOCUSED_HOLDOUT,
             CandidateStage.BROAD_HOLDOUT: EvaluationPartition.BROAD_HOLDOUT,
@@ -379,6 +393,8 @@ class CanaryObservation:
     source_commit: str
     platform: str
     run_manifest_ref: str
+    configuration_identity: str
+    resolved_configuration_identity: str
     artifact_ref: str
     sample_size: int
     metric_deltas: Mapping[str, float]
@@ -397,6 +413,8 @@ class CanaryObservation:
             self.candidate_version,
             self.experiment_id,
             self.platform,
+            self.configuration_identity,
+            self.resolved_configuration_identity,
         )
         if any(not value.strip() for value in required_identity):
             raise ValueError("canary observation requires candidate and run identity")
@@ -404,6 +422,10 @@ class CanaryObservation:
             raise ValueError("canary observation requires an exact source commit")
         if not _is_artifact_ref(self.run_manifest_ref):
             raise ValueError("canary observation requires an immutable run manifest")
+        if not _is_content_hash(self.configuration_identity):
+            raise ValueError("canary observation requires a content-addressed configuration identity")
+        if self.resolved_configuration_identity != self.configuration_identity:
+            raise ValueError("canary configuration identity does not match its resolved run manifest")
         if self.sample_size <= 0:
             raise ValueError("sample_size must be positive")
 
@@ -445,6 +467,8 @@ class CandidateLifecycle:
             or receipt.experiment_id != self.candidate.experiment_id
             or receipt.source_commit != self.candidate.source_commit
             or receipt.platform != self.candidate.platform
+            or receipt.configuration_identity != self.candidate.configuration_identity
+            or receipt.resolved_configuration_identity != self.candidate.configuration_identity
         ):
             raise ValueError("evaluation receipt does not match the candidate")
         self.receipts.append(receipt)
@@ -509,6 +533,8 @@ class CandidateLifecycle:
             or observation.experiment_id != self.candidate.experiment_id
             or observation.source_commit != self.candidate.source_commit
             or observation.platform != self.candidate.platform
+            or observation.configuration_identity != self.candidate.configuration_identity
+            or observation.resolved_configuration_identity != self.candidate.configuration_identity
         ):
             raise ValueError("canary observation does not match the candidate")
 
