@@ -33,6 +33,7 @@ import {
   type GatewayModel,
 } from "@terminus/provider-zen";
 import type { CredentialBoundGatewayClient } from "@terminus/provider-zen";
+import { getOfflineCatalogSnapshotJson } from "@terminus/provider-core";
 
 const MODELS_DEV_HOST = "models.dev";
 const MODELS_DEV_URL = `https://${MODELS_DEV_HOST}/api.json`;
@@ -58,10 +59,16 @@ export interface ProviderModelsResult extends GatewayDiscoveryResult {
  * field is not a trade worth making.
  */
 const CACHE_TTL_MS = 5 * 60 * 1_000;
+const CATALOG_CACHE_TTL_MS = 15 * 60 * 1_000;
 
 let cache: {
   readonly deployment: GatewayDeployment;
   readonly result: ProviderModelsResult;
+  readonly expiresAt: number;
+} | null = null;
+
+let catalogCache: {
+  readonly catalog: ReturnType<typeof parseModelsDevCatalog>;
   readonly expiresAt: number;
 } | null = null;
 
@@ -82,6 +89,7 @@ export function rememberProviderModels(result: ProviderModelsResult, now: number
 /** Test seam: discovery caches process-wide and would leak between cases. */
 export function resetProviderModelsCache(): void {
   cache = null;
+  catalogCache = null;
 }
 
 /**
@@ -119,8 +127,9 @@ export async function fetchAvailableModels(input: {
   readonly client: CredentialBoundGatewayClient;
   readonly deployment: GatewayDeployment;
   readonly secretUri: string;
-  readonly signal?: AbortSignal | null;
+  readonly signal?: AbortSignal | null | undefined;
 }): Promise<readonly { readonly id: string; readonly ownedBy: string }[]> {
+
   const body = await readAll(
     input.client.stream({
       url: `${GATEWAY_BASE_URLS[input.deployment]}/models`,
@@ -136,31 +145,84 @@ export async function fetchAvailableModels(input: {
   return parseAvailableModels(JSON.parse(body) as unknown);
 }
 
-/**
- * Fetch the public Models.dev catalogue.
- *
- * No credential is attached — this is open data, and binding it to the
- * OpenCode connector would send that bearer to a third-party host. A kernel
- * destination decision is not an HTTP response, so this remains fail-closed
- * until a bounded public-fetch connector exists.
- */
-export async function fetchModelsDevCatalog(): Promise<ReturnType<typeof parseModelsDevCatalog>> {
-  throw new Error(
-    `Models.dev catalogue discovery is unavailable: ${MODELS_DEV_URL} requires a kernel-owned bounded public-fetch connector`,
-  );
+export interface FetchModelsDevCatalogOptions {
+  readonly signal?: AbortSignal | null | undefined;
+  readonly timeoutMs?: number | undefined;
+  readonly forceOffline?: boolean | undefined;
+  readonly fetchFn?: typeof fetch | undefined;
 }
 
-export async function discoverProviderModels(input: {
+/**
+ * Fetch the Models.dev catalogue.
+ *
+ * Checks in-memory cache, attempts network fetch with timeout, and falls back
+ * seamlessly to the committed offline snapshot from `@terminus/provider-core`
+ * when offline or on network failure.
+ */
+export async function fetchModelsDevCatalog(
+  options?: FetchModelsDevCatalogOptions,
+): Promise<ReturnType<typeof parseModelsDevCatalog>> {
+  const now = Date.now();
+  if (catalogCache !== null && catalogCache.expiresAt > now && !options?.forceOffline) {
+    return catalogCache.catalog;
+  }
+
+  if (options?.forceOffline === true) {
+    const offlineCatalog = parseModelsDevCatalog(getOfflineCatalogSnapshotJson());
+    catalogCache = { catalog: offlineCatalog, expiresAt: now + CATALOG_CACHE_TTL_MS };
+    return offlineCatalog;
+  }
+
+  const fetchImpl = options?.fetchFn ?? globalThis.fetch;
+  if (typeof fetchImpl === "function") {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), options?.timeoutMs ?? 3_000);
+      if (options?.signal) {
+        options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+      const response = await fetchImpl(MODELS_DEV_URL, {
+        headers: { accept: "application/json" },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (response.ok) {
+        const raw = await response.json();
+        const parsed = parseModelsDevCatalog(raw);
+        catalogCache = { catalog: parsed, expiresAt: now + CATALOG_CACHE_TTL_MS };
+        return parsed;
+      }
+    } catch {
+      // Fall back seamlessly to offline catalog snapshot
+    }
+  }
+
+  const offlineCatalog = parseModelsDevCatalog(getOfflineCatalogSnapshotJson());
+  catalogCache = { catalog: offlineCatalog, expiresAt: now + CATALOG_CACHE_TTL_MS };
+  return offlineCatalog;
+}
+
+export interface DiscoverProviderModelsInput {
   readonly client: CredentialBoundGatewayClient;
   readonly deployment: GatewayDeployment;
   readonly secretUri: string;
   readonly observedAt: string;
-  readonly signal?: AbortSignal | null;
-}): Promise<ProviderModelsResult> {
-  // Resolve the public catalogue first. It currently fails closed because no
-  // kernel-owned public-fetch connector is available. Do not start a
-  // credential-bound gateway request that will be discarded on that path.
-  const catalog = await fetchModelsDevCatalog();
+  readonly signal?: AbortSignal | null | undefined;
+  readonly timeoutMs?: number | undefined;
+  readonly forceOffline?: boolean | undefined;
+  readonly fetchFn?: typeof fetch | undefined;
+}
+
+export async function discoverProviderModels(
+  input: DiscoverProviderModelsInput,
+): Promise<ProviderModelsResult> {
+  const catalog = await fetchModelsDevCatalog({
+    signal: input.signal,
+    timeoutMs: input.timeoutMs,
+    forceOffline: input.forceOffline,
+    fetchFn: input.fetchFn,
+  });
+
   const available = await fetchAvailableModels(input);
   const discovered = discoverGatewayModels({
     deployment: input.deployment,
@@ -170,6 +232,7 @@ export async function discoverProviderModels(input: {
   });
   return { ...discovered, deployment: input.deployment, observedAt: input.observedAt };
 }
+
 
 /**
  * The renderer's provider-neutral wire shape.
