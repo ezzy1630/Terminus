@@ -113,7 +113,13 @@ async function seedFixtures(): Promise<FixtureSummary> {
   const admittedInputHash = `sha256:${admittedInputArtifact.slice("artifact://sha256/".length)}`;
 
   const latestPayload = object(JSON.parse(latestTaskEvent.payloadJson) as unknown, "latest task payload");
-  const latestSnapshot = object(latestPayload.snapshot, "latest task snapshot");
+  // New ARP v2 events carry the aggregate snapshot directly. Accept the
+  // retired wrapper here as well so this restart fixture can inspect databases
+  // created before the wire-shape migration.
+  const latestSnapshot = object(
+    "snapshot" in latestPayload ? latestPayload.snapshot : latestPayload,
+    "latest task snapshot",
+  );
   const latestVersion = integer(latestSnapshot.version, "latest task snapshot version");
   const latestStatus = latestSnapshot.status;
   if (typeof latestStatus !== "string" || latestStatus.length === 0) {
