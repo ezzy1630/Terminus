@@ -166,7 +166,7 @@ jobs:
           subject-path: |
             dist/${{ matrix.artifact }}
             dist/${{ matrix.control_artifact }}
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
@@ -434,7 +434,7 @@ jobs:
             apps/desktop/release/*.dmg
             apps/desktop/release/*.zip
             apps/desktop/release/terminus-desktop-evidence.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: terminus-desktop-macos
           path: |
@@ -514,7 +514,7 @@ jobs:
           TERMINUS_LINUX_EVIDENCE_SIGNATURE: ${{ runner.temp }}/terminus-linux-evidence.json.sig
           TERMINUS_LINUX_EVIDENCE_CERTIFICATE: ${{ runner.temp }}/terminus-linux-evidence.json.pem
         run: bash scripts/verify-release-evidence.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: linux-enforcement-evidence
@@ -596,7 +596,7 @@ jobs:
         run: |
           export TERMINUS_RELEASE_RUN_STARTED_AT="$(date -u +%s)"
           just release-check
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: release-validation-evidence
@@ -716,7 +716,7 @@ jobs:
           just platform-matrix
           bun run scripts/produce-release-decision.ts
           cp artifacts/release-gate/release-decision.yaml release-decision.yaml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release-decision
           path: |

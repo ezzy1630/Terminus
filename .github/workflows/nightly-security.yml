@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
       - run: just fuzz-smoke
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: fuzz-smoke-evidence
@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
       - run: just fault-injection
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: fault-injection-evidence
@@ -45,7 +45,7 @@ jobs:
         env:
           TERMINUS_SOAK_SECONDS: "30"
         run: just soak
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: soak-leak-evidence
@@ -80,7 +80,7 @@ jobs:
           TERMINUS_ENFORCEMENT_REPORT: ${{ runner.temp }}/terminus-enforcement-report.json
           TERMINUS_KERNEL_BINARY: ${{ github.workspace }}/mini-services/terminus-kernel/target/release/terminus-kernel-mini
         run: bash scripts/run-linux-enforcement-probe.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: linux-enforcement-report-nightly

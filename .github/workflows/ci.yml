@@ -204,7 +204,7 @@ jobs:
           export TERMINUS_RELEASE_VERSION="$(bun -e 'console.log(JSON.parse(await Bun.file("package.json").text()).version)')"
           export TERMINUS_RELEASE_RUN_STARTED_AT="$(date -u +%s)"
           just release-evidence-candidate
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: m12-release-gate-evidence
