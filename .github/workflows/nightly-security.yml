@@ -100,7 +100,27 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: Short fuzz each target
         working-directory: fuzz
+        # A crash MUST fail the step (the job stays continue-on-error, so it
+        # will not block CI, but the red X is what makes a finding visible).
+        # Previously `|| true` swallowed even crashes.
         run: |
+          status=0
           for t in command_ast path_symlink patch_anchors unified_diff protobuf_public mcp_tool_schemas provider_projection context_manifests policy redaction_parsers archive_notebook; do
-            cargo fuzz run "$t" -- -max_total_time=20 || true
+            cargo fuzz run "$t" -- -max_total_time=20 || status=1
           done
+          exit $status
+  kernel-mini-supply-chain:
+    name: cargo-deny (kernel mini workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
+        with:
+          toolchain: stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Scan advisories/licenses/bans/sources for the privileged mini-service
+        # The mini-service is its own Cargo workspace with its own lockfile;
+        # the root `cargo deny check` never sees its dependency graph.
+        working-directory: mini-services/terminus-kernel
+        run: cargo deny check

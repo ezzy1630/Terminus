@@ -28,23 +28,23 @@ panic = { level = "deny", priority = 1 }
 
 [dependencies]
 # Terminus kernel crates (path deps to the workspace crates).
-terminus-kernel = { path = "../../crates/terminus-kernel" }
-terminus-kernel-protocol = { path = "../../crates/terminus-kernel-protocol" }
-terminus-artifacts = { path = "../../crates/terminus-artifacts" }
-terminus-fs = { path = "../../crates/terminus-fs" }
-terminus-policy = { path = "../../crates/terminus-policy" }
-terminus-sandbox = { path = "../../crates/terminus-sandbox" }
-terminus-sandbox-linux = { path = "../../crates/terminus-sandbox-linux" }
-terminus-process = { path = "../../crates/terminus-process" }
-terminus-jobs = { path = "../../crates/terminus-jobs" }
-terminus-patch = { path = "../../crates/terminus-patch" }
-terminus-secrets = { path = "../../crates/terminus-secrets" }
-terminus-connector = { path = "../../crates/terminus-connector" }
-terminus-egress = { path = "../../crates/terminus-egress" }
-terminus-code-intel = { path = "../../crates/terminus-code-intel" }
-terminus-extension-runtime = { path = "../../crates/terminus-extension-runtime" }
-terminus-git = { path = "../../crates/terminus-git" }
-terminus-authz = { path = "../../crates/terminus-authz" }
+terminus-kernel = { path = "../../crates/terminus-kernel", version = "0.1.0" }
+terminus-kernel-protocol = { path = "../../crates/terminus-kernel-protocol", version = "0.1.0" }
+terminus-artifacts = { path = "../../crates/terminus-artifacts", version = "0.1.0" }
+terminus-fs = { path = "../../crates/terminus-fs", version = "0.1.0" }
+terminus-policy = { path = "../../crates/terminus-policy", version = "0.1.0" }
+terminus-sandbox = { path = "../../crates/terminus-sandbox", version = "0.1.0" }
+terminus-sandbox-linux = { path = "../../crates/terminus-sandbox-linux", version = "0.1.0" }
+terminus-process = { path = "../../crates/terminus-process", version = "0.1.0" }
+terminus-jobs = { path = "../../crates/terminus-jobs", version = "0.1.0" }
+terminus-patch = { path = "../../crates/terminus-patch", version = "0.1.0" }
+terminus-secrets = { path = "../../crates/terminus-secrets", version = "0.1.0" }
+terminus-connector = { path = "../../crates/terminus-connector", version = "0.1.0" }
+terminus-egress = { path = "../../crates/terminus-egress", version = "0.1.0" }
+terminus-code-intel = { path = "../../crates/terminus-code-intel", version = "0.1.0" }
+terminus-extension-runtime = { path = "../../crates/terminus-extension-runtime", version = "0.1.0" }
+terminus-git = { path = "../../crates/terminus-git", version = "0.1.0" }
+terminus-authz = { path = "../../crates/terminus-authz", version = "0.1.0" }
 
 # HTTP stack.
 axum = { version = "0.7", features = ["json", "http1", "tokio"] }
@@ -76,7 +76,7 @@ nix = { version = "0.29", features = ["process"] }
 tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 prost-types = "0.13"
-terminus-remote = { path = "../../crates/terminus-remote" }
+terminus-remote = { path = "../../crates/terminus-remote", version = "0.1.0" }
 
 [build-dependencies]
 tonic-build = "0.12"
