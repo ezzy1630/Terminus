@@ -159,6 +159,22 @@ function requireFlag(flags: Record<string, string | boolean>, name: string): str
   return v;
 }
 
+function requireJsonObjectFlag(flags: Record<string, string | boolean>, name: string): Record<string, unknown> {
+  const raw = requireFlag(flags, name);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    process.stderr.write(`error: --${name} must be valid JSON\n`);
+    process.exit(2);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    process.stderr.write(`error: --${name} must be a JSON object\n`);
+    process.exit(2);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 async function waitTask(
   taskId: string,
   timeoutSec: number,
@@ -285,7 +301,7 @@ Operator cockpit:
   directory | resolve-capability --capability <id> [--category <name>]
   assess-attention <task-id> | questions-material [--task <id>]
   resolve-question-material <id> --option <value>
-  intervene --task <id> --verb <verb> --rationale <text>
+  intervene --task <id> --verb <verb> --rationale <text> [--payload <json>]
   apply-intervention <id> | interventions [--task <id>]
   replay <task-id> | counterfactual --task <id> --type <type>
   mobile-supervise <task-id> | mobile-action --task <id> --action <action>
@@ -615,12 +631,14 @@ async function main(): Promise<void> {
         const verb = requireFlag(flags, "verb");
         const rationale = requireFlag(flags, "rationale");
         const target = typeof flags.target === "string" ? flags.target : null;
+        const payload = typeof flags.payload === "string"
+          ? requireJsonObjectFlag(flags, "payload")
+          : {};
         printJson(await apiMutate("/v2/interventions", {
           taskId,
-          actorPrincipal: "cli-user",
           verb,
           targetEntityId: target,
-          payload: {},
+          payload,
           rationale,
         }, mutationKey));
         break;

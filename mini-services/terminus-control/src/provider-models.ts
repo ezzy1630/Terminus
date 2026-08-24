@@ -19,9 +19,10 @@
  * 32k context for any model it has not discovered.
  *
  * Egress: the gateway call reuses the existing credential-bound connector (same
- * host, same secret, read-only path). Models.dev is public and takes no
- * credential, so it is fetched directly — but only after NetworkService.Decide
- * admits the destination, which is the kernel's gate for exactly this.
+ * host, same secret, read-only path). Models.dev is public, but a decision RPC
+ * is not an HTTP transport. Until the kernel exposes a bounded public-fetch
+ * connector, catalogue discovery fails closed instead of falling through to a
+ * TypeScript fetch.
  */
 import {
   discoverGatewayModels,
@@ -34,12 +35,8 @@ import {
 import type { CredentialBoundGatewayClient } from "@terminus/provider-zen";
 
 const MODELS_DEV_HOST = "models.dev";
-const MODELS_DEV_PORT = 443;
 const MODELS_DEV_URL = `https://${MODELS_DEV_HOST}/api.json`;
-/** The catalogue is a few hundred KB; anything far larger is not it. */
-const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
 const MAX_GATEWAY_LIST_BYTES = 1 * 1024 * 1024;
-const FETCH_TIMEOUT_MS = 10_000;
 
 const GATEWAY_BASE_URLS: Readonly<Record<GatewayDeployment, string>> = {
   zen: "https://opencode.ai/zen/v1",
@@ -105,14 +102,6 @@ export function describeConfiguredModel(
   return known?.models.find((model) => model.id === modelId) ?? null;
 }
 
-export interface EgressDecider {
-  Decide(input: {
-    context: unknown;
-    destination: string;
-    method: string;
-  }): Promise<{ allowed: boolean; reason: string }>;
-}
-
 async function readAll(stream: AsyncIterable<string | Uint8Array>, limit: number, what: string): Promise<string> {
   const decoder = new TextDecoder();
   let text = "";
@@ -154,41 +143,18 @@ export async function fetchAvailableModels(input: {
  * Fetch the public Models.dev catalogue.
  *
  * No credential is attached — this is open data, and binding it to the
- * OpenCode connector would send that bearer to a third-party host. The kernel
- * still decides whether the destination is permitted at all.
+ * OpenCode connector would send that bearer to a third-party host. A kernel
+ * destination decision is not an HTTP response, so this remains fail-closed
+ * until a bounded public-fetch connector exists.
  */
-export async function fetchModelsDevCatalog(input: {
-  readonly network: EgressDecider;
-  readonly context: unknown;
-  readonly signal?: AbortSignal | null;
-}): Promise<ReturnType<typeof parseModelsDevCatalog>> {
-  const decision = await input.network.Decide({
-    context: input.context,
-    destination: `${MODELS_DEV_HOST}:${MODELS_DEV_PORT}`,
-    method: "GET",
-  });
-  if (!decision.allowed) {
-    throw new Error(`egress to ${MODELS_DEV_HOST} was denied: ${decision.reason || "no reason given"}`);
-  }
-
-  const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS);
-  const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout;
-  const response = await fetch(MODELS_DEV_URL, {
-    method: "GET",
-    headers: { accept: "application/json" },
-    redirect: "error",
-    signal,
-  });
-  if (!response.ok) throw new Error(`Models.dev catalogue returned HTTP ${response.status}`);
-  const text = await response.text();
-  if (text.length > MAX_CATALOG_BYTES) throw new Error(`Models.dev catalogue exceeded ${MAX_CATALOG_BYTES} bytes`);
-  return parseModelsDevCatalog(JSON.parse(text) as unknown);
+export async function fetchModelsDevCatalog(): Promise<ReturnType<typeof parseModelsDevCatalog>> {
+  throw new Error(
+    `Models.dev catalogue discovery is unavailable: ${MODELS_DEV_URL} requires a kernel-owned bounded public-fetch connector`,
+  );
 }
 
 export async function discoverProviderModels(input: {
   readonly client: CredentialBoundGatewayClient;
-  readonly network: EgressDecider;
-  readonly context: unknown;
   readonly deployment: GatewayDeployment;
   readonly secretUri: string;
   readonly observedAt: string;
@@ -199,7 +165,7 @@ export async function discoverProviderModels(input: {
   // half-described catalogue.
   const [available, catalog] = await Promise.all([
     fetchAvailableModels(input),
-    fetchModelsDevCatalog(input),
+    fetchModelsDevCatalog(),
   ]);
   const discovered = discoverGatewayModels({
     deployment: input.deployment,

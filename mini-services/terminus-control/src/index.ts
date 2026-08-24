@@ -2046,7 +2046,10 @@ async function emitV2(params: {
     correlationId: params.correlationId ?? params.aggregateId,
     causationId: null,
     idempotencyKey: params.idempotencyKey ?? null,
-    payloadJson: JSON.stringify(jsonSafe({ snapshot: params.snapshot })),
+    // ARP v2 envelopes carry the aggregate post-state directly in payload.
+    // Keeping a second { snapshot } wrapper makes the wire contract disagree
+    // with the generated envelope schema and forces every consumer to guess.
+    payloadJson: JSON.stringify(jsonSafe(params.snapshot)),
     artifactRefsJson: JSON.stringify([]),
     traceId: null,
   };
@@ -2112,11 +2115,15 @@ async function replayArpV2(): Promise<void> {
       console.error(`[terminus-control] ignored ARP v2 event ${row.eventId}: invalid JSON (${detail})`);
       continue;
     }
-    if (payload === null || typeof payload !== "object" || Array.isArray(payload) || !("snapshot" in payload)) {
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
       console.error(`[terminus-control] ignored ARP v2 event ${row.eventId}: missing aggregate snapshot`);
       continue;
     }
-    const snapshot = (payload as { readonly snapshot: unknown }).snapshot;
+    // Accept the pre-contract wrapper during restart migration, but all new
+    // events are emitted with the direct payload shape above.
+    const snapshot = "snapshot" in payload
+      ? (payload as { readonly snapshot: unknown }).snapshot
+      : payload;
     const revived = schema.safeParse(snapshot);
     if (!revived.success) {
       const issues = revived.error.issues
@@ -5065,8 +5072,6 @@ const routes: Route[] = [
       const context = await kernelBrokerContext();
       const result = await discoverProviderModels({
         client: new KernelGatewayClient(requireKernelUds().connectors, context),
-        network: requireKernelUds().network,
-        context,
         deployment,
         secretUri: gatewaySecretUri(deployment),
         observedAt: now(),
@@ -5135,6 +5140,7 @@ const routes: Route[] = [
         toolsEnabled: input.tools_enabled,
         freeModel: input.free_model,
         workspaceAccess: input.workspace_access,
+        privacyTermsAdmitted: input.privacy_terms_admitted,
         updatedBy: SERVER_PRINCIPAL,
         updatedAt: now,
       };
@@ -6284,6 +6290,16 @@ const routes: Route[] = [
       { authorizationId: id, taskId: authz.taskId },
     );
   }),
+  route("GET", "/v2/claims", async (req, res) => {
+    const taskId = new URL(req.url ?? "", "http://terminus.local").searchParams.get("taskId");
+    if (taskId !== null && !arpV2.tasks.has(taskId)) {
+      return sendError(res, 404, "TASK_NOT_FOUND", `v2 task ${taskId} not found`, "not_found");
+    }
+    const claims = [...arpV2.claims.values()]
+      .filter((claim) => taskId === null || claim.taskId === taskId)
+      .map((claim) => jsonSafe(claim));
+    sendJson(res, 200, { claims });
+  }),
   route("POST", "/v2/claims", async (req, res) => {
     const parsed = z.object({
       taskId: z.string().min(1),
@@ -6328,6 +6344,21 @@ const routes: Route[] = [
     await emitV2({ eventType: "claim.waived", aggregateType: "claim", aggregateId: id, snapshot: updated, correlationId: claim.taskId });
     arpV2.claims.set(id, updated);
     sendJson(res, 200, jsonSafe(updated));
+  }),
+  route("GET", "/v2/evidence", async (req, res) => {
+    const taskId = new URL(req.url ?? "", "http://terminus.local").searchParams.get("taskId");
+    if (taskId !== null && !arpV2.tasks.has(taskId)) {
+      return sendError(res, 404, "TASK_NOT_FOUND", `v2 task ${taskId} not found`, "not_found");
+    }
+    const claimIds = taskId === null
+      ? null
+      : new Set([...arpV2.claims.values()]
+        .filter((claim) => claim.taskId === taskId)
+        .map((claim) => claim.id));
+    const evidence = [...arpV2.evidences.values()]
+      .filter((item) => claimIds === null || claimIds.has(item.claimId))
+      .map((item) => jsonSafe(item));
+    sendJson(res, 200, { evidence });
   }),
   route("POST", "/v2/evidence", async (req, res) => {
     const parsed = V2_ENDPOINTS.RecordEvidenceV2.request.safeParse(await jsonBody(req));
@@ -9204,6 +9235,7 @@ async function agentLoop(turnId: string): Promise<void> {
           gatewayModel,
           gatewayProviderConfiguration?.revision ?? 0,
           gatewayProviderConfiguration?.workspaceAccess ?? false,
+          gatewayProviderConfiguration?.privacyTermsAdmitted ?? false,
         );
     const selectedModel: ModelCapabilitySnapshot = gatewayModel === null
       ? localModel

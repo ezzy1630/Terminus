@@ -64,17 +64,25 @@ function main(): void {
     ) STRICT;
   `);
 
-  const applied = new Map<number, { checksum: string; name: string }>();
-  const rows = db
-    .query("SELECT version, name, checksum_sha256 FROM schema_migrations")
-    .all() as Array<{ version: number; name: string; checksum_sha256: string }>;
-  for (const r of rows) {
-    applied.set(r.version, { checksum: r.checksum_sha256, name: r.name });
-  }
-
   const files = readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+  const migrationFiles = new Map<number, string>();
+  for (const file of files) {
+    const match = /^(\d+)_(.+)\.sql$/.exec(file);
+    if (!match) throw new Error(`invalid migration filename: ${file}`);
+    const version = Number.parseInt(match[1] ?? "", 10);
+    if (migrationFiles.has(version)) throw new Error(`duplicate migration version ${version}`);
+    migrationFiles.set(version, file);
+  }
+  const appliedRows = db
+    .query("SELECT version FROM schema_migrations")
+    .all() as Array<{ version: number }>;
+  for (const row of appliedRows) {
+    if (!migrationFiles.has(row.version)) {
+      throw new Error(`schema_migrations contains orphaned applied version ${row.version}`);
+    }
+  }
 
   let appliedCount = 0;
   for (const file of files) {
@@ -88,11 +96,13 @@ function main(): void {
     const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
     const checksum = sha256(sql);
 
-    const existing = applied.get(version);
+    const existing = db
+      .query("SELECT name, checksum_sha256 FROM schema_migrations WHERE version = ?")
+      .get(version) as { checksum_sha256: string; name: string } | null;
     if (existing) {
-      if (existing.checksum !== checksum) {
+      if (existing.checksum_sha256 !== checksum || existing.name !== name) {
         console.error(
-          `checksum mismatch for migration ${version} (${name}): expected ${existing.checksum}, got ${checksum}`,
+          `checksum or name mismatch for migration ${version} (${name})`,
         );
         process.exit(1);
       }
@@ -104,6 +114,16 @@ function main(): void {
       const program = migrationSql(sql);
       const injectedFailure = faultAfterStatement(version);
       db.exec("BEGIN IMMEDIATE");
+      const committed = db
+        .query("SELECT name, checksum_sha256 FROM schema_migrations WHERE version = ?")
+        .get(version) as { checksum_sha256: string; name: string } | null;
+      if (committed) {
+        if (committed.checksum_sha256 !== checksum || committed.name !== name) {
+          throw new Error(`checksum or name mismatch for migration ${version} (${name})`);
+        }
+        db.exec("COMMIT");
+        continue;
+      }
       db.exec(program);
       if (injectedFailure !== null) {
         // The hook deliberately fails after SQLite has executed the migration
@@ -124,9 +144,8 @@ function main(): void {
     appliedCount++;
   }
 
-  console.log(
-    `migrations complete: ${appliedCount} applied, ${applied.size + appliedCount} total`,
-  );
+  const totalMigrations = (db.query("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number }).count;
+  console.log(`migrations complete: ${appliedCount} applied, ${totalMigrations} total`);
 
   const integrity = db.query("PRAGMA quick_check").all() as Array<{ quick_check: string }>;
   if (integrity[0]?.quick_check !== "ok") {

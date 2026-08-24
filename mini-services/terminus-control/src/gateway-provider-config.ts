@@ -13,7 +13,11 @@ const configurationSchema = z.object({
   tools_enabled: z.boolean(),
   free_model: z.boolean(),
   workspace_access: z.boolean(),
-}).strict();
+  privacy_terms_admitted: z.boolean().default(false),
+}).strict().refine(
+  (value) => !value.workspace_access || value.privacy_terms_admitted,
+  "workspace access requires explicit privacy terms admission",
+);
 
 export const gatewayProviderConfigurationUpdateSchema = configurationSchema.extend({
   credential: z.string().min(1).max(16 * 1_024).optional(),
@@ -49,6 +53,7 @@ interface GatewayProviderRow {
   readonly toolsEnabled: boolean;
   readonly freeModel: boolean;
   readonly workspaceAccess: boolean;
+  readonly privacyTermsAdmitted: boolean;
   readonly revision: number;
   readonly updatedBy: string;
   readonly createdAt: Date;
@@ -81,6 +86,7 @@ export function gatewayProviderConfigurationWire(
     tools_enabled: row.toolsEnabled,
     free_model: row.freeModel,
     workspace_access: row.workspaceAccess,
+    privacy_terms_admitted: row.privacyTermsAdmitted,
   });
   if (row.secretUri !== gatewaySecretUri(parsed.deployment)) {
     throw new Error("persisted gateway credential URI does not match deployment");
@@ -156,6 +162,7 @@ export function configuredGatewayProviderSnapshot(
   model: GatewayModel,
   revision: number,
   workspaceAccess: boolean,
+  privacyTermsAdmitted = false,
 ): ProviderCapabilitySnapshot {
   const digest = createHash("sha256")
     .update(JSON.stringify({ model, revision }), "utf8")
@@ -189,7 +196,7 @@ export function configuredGatewayProviderSnapshot(
     },
     reliability: { toolCallSuccess: 0, structuredOutputSuccess: 0, editCohortSuccess: 0, latencyPercentiles: { p50: 0, p99: 0 } },
     policy: {
-      allowedConfidentiality: workspaceAccess ? ["public", "workspace"] : ["public"],
+      allowedConfidentiality: workspaceAccess && privacyTermsAdmitted ? ["public", "workspace"] : ["public"],
       retentionMode: "provider_managed",
       region: null,
     },

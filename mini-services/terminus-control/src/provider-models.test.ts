@@ -21,12 +21,6 @@ function gatewayClient(body: string, capture?: (input: GatewayHttpRequest) => vo
   };
 }
 
-const allowEgress = {
-  async Decide(): Promise<{ allowed: boolean; reason: string }> {
-    return { allowed: true, reason: "" };
-  },
-};
-
 describe("provider model discovery", () => {
   test("asks the gateway for its model list over the credential-bound connector", async () => {
     let seen: GatewayHttpRequest | null = null;
@@ -48,15 +42,8 @@ describe("provider model discovery", () => {
     expect(seen!.url).toBe("https://opencode.ai/zen/v1/models");
   });
 
-  test("refuses to fetch the public catalogue when the kernel denies egress", async () => {
-    const denied = {
-      async Decide(): Promise<{ allowed: boolean; reason: string }> {
-        return { allowed: false, reason: "destination not permitted" };
-      },
-    };
-    await expect(
-      fetchModelsDevCatalog({ network: denied, context: {} }),
-    ).rejects.toThrow(/destination not permitted/);
+  test("fails closed until the kernel exposes a bounded public catalogue fetch", async () => {
+    await expect(fetchModelsDevCatalog()).rejects.toThrow(/kernel-owned bounded public-fetch connector/);
   });
 
   test("reports an empty inventory with its reason rather than failing the request", () => {
@@ -139,6 +126,7 @@ const configuredRow = {
   toolsEnabled: true,
   freeModel: false,
   workspaceAccess: false,
+  privacyTermsAdmitted: false,
   revision: 3,
   updatedBy: "control",
   createdAt: new Date("2026-08-24T00:00:00Z"),

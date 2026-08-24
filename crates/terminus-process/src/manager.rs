@@ -278,19 +278,21 @@ impl ProcessManager {
                         // both capture tasks reach EOF promptly; reap them
                         // instead of leaving them running detached and racing
                         // release_managed below.
-                        if let Some(t) = stdout_task {
-                            let _ = t.await;
-                        }
-                        if let Some(t) = stderr_task {
-                            let _ = t.await;
-                        }
+                        let stdout_artifact = match stdout_task {
+                            Some(t) => t.await.unwrap_or(None),
+                            None => None,
+                        };
+                        let stderr_artifact = match stderr_task {
+                            Some(t) => t.await.unwrap_or(None),
+                            None => None,
+                        };
                         let _ = tx_clone
                             .send(ProcessEvent::Exited(ProcessExited {
                                 exit_code: -1,
                                 signal: "TIMEOUT".to_string(),
                                 exited_at: now_rfc3339(),
-                                stdout_artifact: None,
-                                stderr_artifact: None,
+                                stdout_artifact,
+                                stderr_artifact,
                             }))
                             .await;
                         release_managed(&children, &pid, &managed_supervisor).await;
@@ -539,18 +541,35 @@ async fn capture_stream<R: tokio::io::AsyncRead + Unpin>(
 ) -> Option<ArtifactRef> {
     let mut buf = vec![0u8; 8192];
     let mut total: Vec<u8> = Vec::new();
+    let mut spill_path: Option<std::path::PathBuf> = None;
+    let mut spill_file: Option<tokio::fs::File> = None;
     let mut cursor: u64 = 0;
-    let mut spilled = false;
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => {
                 let chunk = &buf[..n];
-                if !spilled {
-                    if total.len() + chunk.len() > max_inline {
-                        spilled = true;
-                    } else {
-                        total.extend_from_slice(chunk);
+                if spill_file.is_none() && total.len().saturating_add(chunk.len()) <= max_inline {
+                    total.extend_from_slice(chunk);
+                } else {
+                    if spill_file.is_none() {
+                        let path = store.root().join("tmp").join(format!(
+                            "process-output-{}-{}",
+                            std::process::id(),
+                            terminus_kernel_protocol::new_id()
+                        ));
+                        let mut file = tokio::fs::File::create(&path).await.ok()?;
+                        if file.write_all(&total).await.is_err() {
+                            let _ = tokio::fs::remove_file(&path).await;
+                            return None;
+                        }
+                        spill_path = Some(path);
+                        spill_file = Some(file);
+                    }
+                    if let Some(file) = spill_file.as_mut() {
+                        if file.write_all(chunk).await.is_err() {
+                            return None;
+                        }
                     }
                 }
                 cursor += n as u64;
@@ -572,6 +591,14 @@ async fn capture_stream<R: tokio::io::AsyncRead + Unpin>(
             }
             Err(_) => break,
         }
+    }
+    if let Some(path) = spill_path {
+        if let Some(mut file) = spill_file {
+            let _ = file.flush().await;
+        }
+        let artifact = store.ingest_file(&path).ok().map(|(_, artifact)| artifact);
+        let _ = tokio::fs::remove_file(path).await;
+        return artifact;
     }
     if total.is_empty() {
         return None;
@@ -716,6 +743,31 @@ mod tests {
         assert!(got_exit);
         assert_eq!(exit_code, 0);
         let _ = outcome;
+    }
+
+    #[tokio::test]
+    async fn spill_capture_keeps_the_complete_output_artifact() {
+        let (_dir, store) = store();
+        let expected = "0123456789abcdef".repeat(128);
+        let mgr = ProcessManager::new(Arc::clone(&store)).with_max_inline_bytes(32);
+        let spawn = NormalizedSpawn {
+            program: "sh".into(),
+            args: vec!["-c".into(), format!("printf '%s' '{}'", expected)],
+            env: std::collections::BTreeMap::new(),
+            working_dir: None,
+            timeout_ms: 5_000,
+            shell: true,
+            allocate_pty: false,
+        };
+        let (_outcome, mut rx) = mgr.spawn(spawn).await.unwrap();
+        let mut artifact = None;
+        while let Some(event) = rx.recv().await {
+            if let ProcessEvent::Exited(exit) = event {
+                artifact = exit.stdout_artifact;
+            }
+        }
+        let artifact = artifact.expect("spilled stdout must produce an artifact reference");
+        assert_eq!(store.get(&artifact.sha256).unwrap(), expected.as_bytes());
     }
 
     #[tokio::test]

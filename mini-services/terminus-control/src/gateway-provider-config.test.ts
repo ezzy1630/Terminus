@@ -16,6 +16,7 @@ const row = {
   toolsEnabled: true,
   freeModel: true,
   workspaceAccess: false,
+  privacyTermsAdmitted: false,
   revision: 2,
   updatedBy: "control",
   createdAt: new Date("2026-08-24T00:00:00Z"),
@@ -39,8 +40,16 @@ describe("gateway provider configuration", () => {
     expect(model.protocol).toBe("chat_completions");
     expect(snapshot.providerId).toBe("open_code_zen");
     expect(snapshot.policy.allowedConfidentiality).toEqual(["public"]);
-    expect(configuredGatewayProviderSnapshot(model, row.revision, true).policy.allowedConfidentiality)
+    expect(configuredGatewayProviderSnapshot(model, row.revision, true, true).policy.allowedConfidentiality)
       .toEqual(["public", "workspace"]);
+  });
+
+  test("does not admit workspace content without recorded privacy terms", () => {
+    expect(() => parseGatewayProviderConfigurationUpdate({
+      deployment: "zen", protocol: "chat_completions", model: "gpt-5-nano",
+      tools_enabled: true, free_model: true, workspace_access: true,
+      expected_revision: 0,
+    })).toThrow("privacy terms admission");
   });
 
   test("rejects a credential URI that does not match the deployment", () => {

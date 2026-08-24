@@ -43,17 +43,27 @@ export function runControlMigrations(databaseUrl: string, migrationsDirectory: s
       ) STRICT;
     `);
 
-    const applied = new Map<number, { readonly checksum: string; readonly name: string }>();
-    const rows = database
-      .query("SELECT version, name, checksum_sha256 FROM schema_migrations")
-      .all() as Array<{ version: number; name: string; checksum_sha256: string }>;
-    for (const row of rows) {
-      applied.set(row.version, { checksum: row.checksum_sha256, name: row.name });
-    }
-
     const files = readdirSync(migrationsDirectory)
       .filter((file) => file.endsWith(".sql"))
       .sort((left, right) => left.localeCompare(right));
+    const migrationFiles = new Map<number, string>();
+    for (const file of files) {
+      const match = /^(\d+)_(.+)\.sql$/.exec(file);
+      if (!match) throw new Error(`invalid migration filename: ${file}`);
+      const version = Number.parseInt(match[1] ?? "", 10);
+      if (migrationFiles.has(version)) {
+        throw new Error(`duplicate migration version ${version}`);
+      }
+      migrationFiles.set(version, file);
+    }
+    const appliedRows = database
+      .query("SELECT version FROM schema_migrations")
+      .all() as Array<{ version: number }>;
+    for (const row of appliedRows) {
+      if (!migrationFiles.has(row.version)) {
+        throw new Error(`schema_migrations contains orphaned applied version ${row.version}`);
+      }
+    }
     let appliedCount = 0;
     for (const file of files) {
       const match = /^(\d+)_(.+)\.sql$/.exec(file);
@@ -62,15 +72,31 @@ export function runControlMigrations(databaseUrl: string, migrationsDirectory: s
       const name = match[2] ?? "";
       const sql = readFileSync(join(migrationsDirectory, file), "utf8");
       const checksum = sha256(sql);
-      const existing = applied.get(version);
+      const existing = database
+        .query("SELECT name, checksum_sha256 FROM schema_migrations WHERE version = ?")
+        .get(version) as { name: string; checksum_sha256: string } | null;
       if (existing) {
-        if (existing.checksum !== checksum || existing.name !== name) {
+        if (existing.checksum_sha256 !== checksum || existing.name !== name) {
           throw new Error(`checksum or name mismatch for migration ${version} (${name})`);
         }
         continue;
       }
       database.exec("BEGIN IMMEDIATE");
       try {
+        // Another runtime may have committed this version after the
+        // preflight read. Re-read while the write lock is held so the loser
+        // treats the migration as already applied instead of colliding with
+        // the ledger primary key.
+        const committed = database
+          .query("SELECT name, checksum_sha256 FROM schema_migrations WHERE version = ?")
+          .get(version) as { name: string; checksum_sha256: string } | null;
+        if (committed) {
+          if (committed.checksum_sha256 !== checksum || committed.name !== name) {
+            throw new Error(`checksum or name mismatch for migration ${version} (${name})`);
+          }
+          database.exec("COMMIT");
+          continue;
+        }
         database.exec(migrationProgram(sql));
         database.query(
           "INSERT INTO schema_migrations (version, name, checksum_sha256, applied_at) VALUES (?, ?, ?, ?)",
@@ -91,7 +117,10 @@ export function runControlMigrations(databaseUrl: string, migrationsDirectory: s
     if (integrity[0]?.quick_check !== "ok") {
       throw new Error(`SQLite integrity check failed: ${JSON.stringify(integrity)}`);
     }
-    return { applied: appliedCount, total: applied.size + appliedCount };
+    const total = database
+      .query("SELECT COUNT(*) AS count FROM schema_migrations")
+      .get() as { count: number };
+    return { applied: appliedCount, total: total.count };
   } finally {
     database.close();
   }

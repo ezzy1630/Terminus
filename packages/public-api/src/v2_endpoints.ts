@@ -367,6 +367,13 @@ export const ExecuteWorkflowNodeV2 = {
 };
 
 // /v2/claims & /v2/evidence
+export const ListClaimsV2 = {
+  method: "GET" as const,
+  path: "/v2/claims",
+  request: z.object({ taskId: z.string().min(1).optional() }).strict(),
+  response: z.object({ claims: z.array(ClaimSnapshot) }).strict(),
+};
+
 export const SubmitClaimV2 = {
   method: "POST" as const,
   path: "/v2/claims",
@@ -398,6 +405,13 @@ export const RecordEvidenceV2 = {
     receipt: TrustedReceiptReferenceWire,
   }).strict(),
   response: EvidenceSnapshot,
+};
+
+export const ListEvidenceV2 = {
+  method: "GET" as const,
+  path: "/v2/evidence",
+  request: z.object({ taskId: z.string().min(1).optional() }).strict(),
+  response: z.object({ evidence: z.array(EvidenceSnapshot) }).strict(),
 };
 
 // /v2/effects
@@ -1252,6 +1266,8 @@ export const V2_ENDPOINTS = {
   SubmitClaimV2,
   WaiveClaimV2,
   RecordEvidenceV2,
+  ListClaimsV2,
+  ListEvidenceV2,
   ProposeEffectV2,
   AuthorizeEffectV2,
   CommitEffectV2,

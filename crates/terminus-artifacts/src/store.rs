@@ -3,7 +3,7 @@ use crate::metadata::ArtifactMetadata;
 use crate::sqlite::SqliteMetadataStore;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Content-addressed artifact store.
@@ -280,8 +280,102 @@ impl ArtifactStore {
         &self,
         src: &Path,
     ) -> Result<(ArtifactMetadata, terminus_kernel_protocol::ArtifactRef), ArtifactError> {
-        let bytes = fs::read(src)?;
-        self.ingest(&bytes)
+        if !src.is_file() {
+            return Err(ArtifactError::InvalidPath);
+        }
+        let temp_path = self.root.join("tmp").join(format!(
+            "ingest-file-{}-{}",
+            std::process::id(),
+            terminus_kernel_protocol::new_id()
+        ));
+        let result = (|| {
+            let mut source = File::open(src)?;
+            let mut staged = File::create(&temp_path)?;
+            let mut hasher = Sha256::new();
+            let mut prefix = Vec::with_capacity(512);
+            let mut buffer = [0u8; 64 * 1024];
+            let mut size = 0u64;
+            loop {
+                let read = source.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                size = size
+                    .checked_add(read as u64)
+                    .ok_or(ArtifactError::TooLarge {
+                        max: self.max_bytes,
+                    })?;
+                if size > self.max_bytes {
+                    return Err(ArtifactError::TooLarge {
+                        max: self.max_bytes,
+                    });
+                }
+                let chunk = &buffer[..read];
+                hasher.update(chunk);
+                staged.write_all(chunk)?;
+                let remaining = 512usize.saturating_sub(prefix.len());
+                if remaining > 0 {
+                    prefix.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                }
+            }
+            staged.sync_all()?;
+            let digest = hasher.finalize();
+            let hash = format!("sha256:{}", hex::encode(digest));
+            let hex_hash = &hash["sha256:".len()..];
+            let cas_path = self.cas_path(hex_hash);
+            let metadata_path = self.metadata_path(hex_hash);
+
+            if let Some(existing) = self.sqlite.get(&hash)? {
+                let _ = fs::remove_file(&temp_path);
+                if !metadata_path.exists() {
+                    let _ = fs::write(&metadata_path, existing.to_json().unwrap_or_default());
+                }
+                let artifact_ref = terminus_kernel_protocol::ArtifactRef::new(
+                    existing.hash.clone(),
+                    existing.size_bytes,
+                    existing.media_type.clone(),
+                );
+                return Ok((existing, artifact_ref));
+            }
+
+            if !cas_path.exists() {
+                if let Some(parent) = cas_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                match fs::rename(&temp_path, &cas_path) {
+                    Ok(()) => {
+                        if let Some(parent) = cas_path.parent() {
+                            if let Ok(dir) = fs::File::open(parent) {
+                                let _ = dir.sync_all();
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        let _ = fs::remove_file(&temp_path);
+                    }
+                }
+            } else {
+                let _ = fs::remove_file(&temp_path);
+            }
+
+            let mut metadata = ArtifactMetadata::new(hash.clone(), size, infer_media_type(&prefix));
+            if !metadata_path.exists() {
+                fs::write(&metadata_path, metadata.to_json()?)?;
+            } else if let Ok(contents) = fs::read_to_string(&metadata_path) {
+                if let Ok(existing) = ArtifactMetadata::from_json(&contents) {
+                    metadata = existing;
+                }
+            }
+            let storage_path = cas_path.to_string_lossy().to_string();
+            self.sqlite.upsert(&metadata, &storage_path)?;
+            let artifact_ref =
+                terminus_kernel_protocol::ArtifactRef::new(hash, size, metadata.media_type.clone());
+            Ok((metadata, artifact_ref))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result
     }
 
     /// True if the artifact exists in the store.
@@ -506,6 +600,18 @@ mod tests {
         assert_eq!(fetched.hash, meta.hash);
         assert_eq!(fetched.size_bytes, bytes.len() as u64);
         assert_eq!(store.sqlite().count_artifacts().unwrap(), 1);
+    }
+
+    #[test]
+    fn ingest_file_preserves_large_content_without_loading_source_at_once() {
+        let (dir, store) = open_store();
+        let source = dir.path().join("large-output.txt");
+        let bytes = vec![b'x'; 2 * 1024 * 1024];
+        fs::write(&source, &bytes).unwrap();
+
+        let (metadata, artifact) = store.ingest_file(&source).unwrap();
+        assert_eq!(metadata.size_bytes, bytes.len() as u64);
+        assert_eq!(store.get(&artifact.sha256).unwrap(), bytes);
     }
 
     #[test]
