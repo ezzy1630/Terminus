@@ -201,7 +201,7 @@ function requireInterventionPayload(
     const detail = parsed.error.issues
       .map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`)
       .join("; ");
-    usageError(`--payload is invalid for --verb ${verb}: ${detail}`);
+    usageError(`invalid --verb ${verb} request: ${detail}`);
   }
   return payload;
 }

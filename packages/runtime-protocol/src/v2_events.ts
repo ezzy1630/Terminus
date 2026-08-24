@@ -21,9 +21,11 @@ import {
   actorKindSchema,
   effectStateSchema,
   claimStatusSchema,
+  taskV2Schema,
   taskStatusV2Schema,
   resourceHandleSchema,
 } from "@terminus/domain";
+import type { TaskV2 } from "@terminus/domain";
 
 // ────────────────────────── Envelope v2 schemas ──────────────────────────────
 
@@ -197,13 +199,11 @@ export const taskTransitionV2PayloadSchema = z.object({
 });
 export type TaskTransitionV2Payload = z.infer<typeof taskTransitionV2PayloadSchema>;
 
-export const taskConversationContextAttachedV2PayloadSchema = z.object({
-  taskId: z.string(),
-  sessionId: z.string(),
-  threadId: z.string(),
-  attachedAt: z.string(),
-});
-export type TaskConversationContextAttachedV2Payload = z.infer<typeof taskConversationContextAttachedV2PayloadSchema>;
+// Control-plane task events carry the aggregate post-state so replay can
+// rebuild the task map without consulting a second projection. The former
+// flat payload shape did not match that wire contract.
+export const taskConversationContextAttachedV2PayloadSchema = taskV2Schema;
+export type TaskConversationContextAttachedV2Payload = TaskV2;
 
 // Workflow Payloads
 export const workflowCreatedPayloadSchema = z.object({

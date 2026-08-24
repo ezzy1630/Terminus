@@ -225,7 +225,10 @@ export function setupDevMock(): void {
     taskId: task.id,
     statement: criterion.statement,
     requiredEvidenceKind: criterion.evidenceRequirement,
-    status: "SATISFIED",
+    // Offline fixtures must never look like trusted proof. The mock has no
+    // immutable artifact or verifier, so leave its claims and receipts
+    // explicitly unadmitted.
+    status: "PROPOSED",
     evidenceIds: [`evidence-${criterion.claimId}`],
     waivedRationale: null,
     createdAt: task.createdAt,
@@ -238,7 +241,7 @@ export function setupDevMock(): void {
     summary: "Mock verifier receipt: focused contract test passed.",
     sourceRevision: "fixture",
     environmentHash: "fixture-environment",
-    verifierResult: "PASS",
+    verifierResult: "unverified",
     artifactRef: null,
     metadata: { mock: true },
     observedAt: new Date().toISOString(),

@@ -24,6 +24,116 @@
       "minItems": 12,
       "maxItems": 12,
       "uniqueItems": true,
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "fuzz-smoke" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "fault-injection" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "property-tests" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "upgrade-rollback" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "soak-leak" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "preview-canary" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "ops-metrics" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "eval-release" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "sbom-verify" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "schema-freeze" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "platform-matrix" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["key"],
+            "properties": { "key": { "const": "system-card" } }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ],
       "items": {
         "type": "object",
         "additionalProperties": false,
