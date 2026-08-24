@@ -151,7 +151,7 @@ jobs:
           format: spdx-json
           output-file: dist/${{ matrix.control_artifact }}.sbom.spdx.json
       - name: Install cosign
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Sign kernel and control runtime artifacts
         shell: bash
         run: |
@@ -487,7 +487,7 @@ jobs:
           '
           sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent/job
           sudo rmdir /sys/fs/cgroup/terminus-ci/.terminus-control-parent
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Build kernel probe binary
         run: |
           cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml
@@ -552,7 +552,7 @@ jobs:
         with:
           name: terminus-desktop-macos
           path: ${{ runner.temp }}/desktop-release
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Verify packaged control runtimes and release signatures
         env:
           RELEASE_COMMIT: ${{ github.sha }}
@@ -618,7 +618,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - name: Require recorded release approvals
         env:
           RELEASE_OWNER_APPROVAL: ${{ vars.TERMINUS_RELEASE_OWNER_APPROVAL }}
