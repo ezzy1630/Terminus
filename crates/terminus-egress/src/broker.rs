@@ -241,7 +241,7 @@ where
 mod tests {
     use super::*;
     use crate::{DestinationPolicy, EgressPolicy, RateLimit};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
 
     fn localhost_policy(deny_private_ips: bool, port: u16) -> EgressPolicy {
