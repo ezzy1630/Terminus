@@ -1509,9 +1509,10 @@ mod sandbox_profile_tests {
 
     #[test]
     fn workspace_rules_are_materialized_under_the_registered_root() {
-        let workspace_root = std::path::Path::new("registered-workspace");
+        let workspace_root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("registered-workspace");
         let profile = resolve_sandbox_profile("secure-local-default")
-            .map(|profile| materialize_workspace_profile(profile, workspace_root));
+            .map(|profile| materialize_workspace_profile(profile, &workspace_root));
         let expected_root = workspace_root.display().to_string();
         let expected_git = workspace_root.join(".git").display().to_string();
         assert!(matches!(profile, Ok(profile) if

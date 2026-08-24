@@ -171,9 +171,10 @@ Implementation: `crates/terminus-patch` + `crates/terminus-fs`.
 ## Process and job ownership (SPEC §11.7, §34.11, §34.12)
 
 - Every subprocess is owned by a process-tree supervisor (`ManagedProcess`).
-- Unix process-tree kill reaps forked children across process groups. Non-Unix
-  builds use platform child-wait behavior and do not claim equivalent tree-kill
-  coverage until a platform backend proves it.
+- Unix process-group kill terminates the owned process group and reaps the
+  direct child. Descendants that create another process group are outside this
+  contract. Non-Unix builds use platform child-wait behavior and do not claim
+  equivalent tree-kill coverage until a platform backend proves it.
 - Structured stdio streaming keeps inline memory bounded and stores the full
   output in CAS when it spills; the artifact reference is the continuation.
 - Timeout and cancellation propagate cleanly without detached background tasks

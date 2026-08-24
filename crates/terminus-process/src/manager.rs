@@ -117,7 +117,7 @@ impl ProcessManager {
     /// sandbox argv INCLUDING the trailing `-- <program> <args...>` (as
     /// produced by `LinuxSandboxBackend::build_bwrap_argv`). The wrapper
     /// binary owns namespace isolation; `ProcessManager` still owns the
-    /// process group, timeout, output streaming, and tree-kill on cancel.
+    /// process group, timeout, output streaming, and owned-group kill on cancel.
     /// SPEC §13.4 / §34.11.
     pub async fn spawn_wrapped(
         &self,
@@ -461,7 +461,7 @@ impl ProcessManager {
     }
 
     /// Kill every owned process group and wait until each child supervisor
-    /// has reaped its child and released its registry entry. Kernel shutdown
+    /// has reaped its direct child and released its registry entry. Kernel shutdown
     /// calls this before its transport returns, so provider/tool descendants
     /// cannot outlive the effect authority that created them.
     pub async fn shutdown_all(&self) -> Result<(), ProcessError> {
@@ -544,6 +544,8 @@ async fn capture_stream<R: tokio::io::AsyncRead + Unpin>(
     let mut spill_path: Option<std::path::PathBuf> = None;
     let mut spill_file: Option<tokio::fs::File> = None;
     let mut cursor: u64 = 0;
+    let mut delivery_open = true;
+    let mut read_failed = false;
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
@@ -566,37 +568,67 @@ async fn capture_stream<R: tokio::io::AsyncRead + Unpin>(
                         spill_path = Some(path);
                         spill_file = Some(file);
                     }
-                    if let Some(file) = spill_file.as_mut() {
-                        if file.write_all(chunk).await.is_err() {
-                            return None;
+                    let write_failed = match spill_file.as_mut() {
+                        Some(file) => file.write_all(chunk).await.is_err(),
+                        None => false,
+                    };
+                    if write_failed {
+                        spill_file.take();
+                        if let Some(path) = spill_path.take() {
+                            let _ = tokio::fs::remove_file(path).await;
                         }
+                        return None;
                     }
                 }
                 cursor += n as u64;
-                let event = match kind {
-                    StreamKind::Stdout => ProcessEvent::Stdout(OutputChunk {
-                        cursor,
-                        bytes: chunk.to_vec(),
-                        redacted: false,
-                    }),
-                    StreamKind::Stderr => ProcessEvent::Stderr(OutputChunk {
-                        cursor,
-                        bytes: chunk.to_vec(),
-                        redacted: false,
-                    }),
-                };
-                if tx.send(event).await.is_err() {
-                    break;
+                if delivery_open {
+                    let event = match kind {
+                        StreamKind::Stdout => ProcessEvent::Stdout(OutputChunk {
+                            cursor,
+                            bytes: chunk.to_vec(),
+                            redacted: false,
+                        }),
+                        StreamKind::Stderr => ProcessEvent::Stderr(OutputChunk {
+                            cursor,
+                            bytes: chunk.to_vec(),
+                            redacted: false,
+                        }),
+                    };
+                    if tx.send(event).await.is_err() {
+                        // A closed observer is not permission to truncate the
+                        // authoritative artifact. Continue draining the pipe.
+                        delivery_open = false;
+                    }
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                read_failed = true;
+                break;
+            }
         }
+    }
+    if read_failed {
+        spill_file.take();
+        if let Some(path) = spill_path.take() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        return None;
     }
     if let Some(path) = spill_path {
         if let Some(mut file) = spill_file {
-            let _ = file.flush().await;
+            if file.flush().await.is_err() {
+                let _ = tokio::fs::remove_file(&path).await;
+                return None;
+            }
         }
-        let artifact = store.ingest_file(&path).ok().map(|(_, artifact)| artifact);
+        let artifact = tokio::task::spawn_blocking({
+            let store = store.clone();
+            let path = path.clone();
+            move || store.ingest_file(&path).ok().map(|(_, artifact)| artifact)
+        })
+        .await
+        .ok()
+        .flatten();
         let _ = tokio::fs::remove_file(path).await;
         return artifact;
     }
@@ -767,6 +799,20 @@ mod tests {
             }
         }
         let artifact = artifact.expect("spilled stdout must produce an artifact reference");
+        assert_eq!(store.get(&artifact.sha256).unwrap(), expected.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn closed_event_receiver_does_not_truncate_spilled_output() {
+        let (_dir, store) = store();
+        let expected = "0123456789abcdef".repeat(128);
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let mut reader = std::io::Cursor::new(expected.as_bytes().to_vec());
+
+        let artifact = capture_stream(&mut reader, &tx, &store, 32, StreamKind::Stdout)
+            .await
+            .expect("closed observers must still receive the complete artifact reference");
         assert_eq!(store.get(&artifact.sha256).unwrap(), expected.as_bytes());
     }
 
