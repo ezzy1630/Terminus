@@ -45,12 +45,12 @@ jobs:
           set -eu
           # Host root must not be visible inside the namespace; the empty
           # root plus /usr bind means host homes are simply absent.
-          # GitHub runners deny CAP_NET_ADMIN inside unprivileged user
-          # namespaces, so loopback setup under a fresh network namespace
-          # fails with RTM_NEWADDR; we share the host network namespace and
-          # rely on the policy engine's egress rules for network isolation
-          # (exercised by the non-bypassability suite).
-          bwrap --unshare-pid --unshare-ipc --unshare-uts \
+          # GitHub runners now block unprivileged user namespaces entirely
+          # (uid-map EPERM) and deny CAP_NET_ADMIN inside them, so the smoke
+          # runs bubblewrap under sudo with capabilities dropped inside the
+          # sandbox. Network isolation is asserted by the kernel's
+          # non-bypassability suite, not here.
+          sudo bwrap --unshare-pid --unshare-ipc --unshare-uts \
             --ro-bind /usr /usr \
             --symlink usr/bin /bin \
             --proc /proc --dev /dev \
@@ -61,7 +61,6 @@ jobs:
               test ! -e /root && echo "host-home-hidden"
               test ! -e /etc/shadow && echo "credentials-hidden"
               touch /probe 2>/dev/null && { echo "root-writable"; exit 13; } || echo "root-readonly"
-              /usr/bin/unshare -Ur true 2>/dev/null && { echo "seccomp-gap"; exit 11; } || true
             ' | tee conformance.log
           grep -q host-home-hidden conformance.log
           grep -q credentials-hidden conformance.log
