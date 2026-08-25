@@ -58,6 +58,12 @@ export const standaloneReadInputSchema = z.object({
   max_bytes: z.number().int().min(1).max(64 * 1_024).default(48 * 1_024),
   offset_line: z.number().int().min(1).default(1),
   max_lines: z.number().int().min(1).max(4_000).default(2_000),
+  /**
+   * "numbered" renders each line as `<line>→ <content>` so the model can
+   * cite stable locations. The patch tool strips the same gutter format
+   * before exact matching, so copied line numbers never break an edit.
+   */
+  render: z.enum(["numbered", "raw"]).default("numbered"),
   expected_sha256: sha256Schema.optional(),
 }).strict();
 
@@ -68,7 +74,13 @@ const standalonePatchEditSchema = z.object({
 
 export const standalonePatchInputSchema = z.object({
   path: pathSchema,
-  expected_sha256: sha256Schema,
+  /**
+   * Optional: when omitted, the control plane substitutes the file hash it
+   * last observed through a successful read in this turn (stale-write
+   * protection is preserved because the substituted hash is still the
+   * observed source version, and the kernel still rejects a mismatch).
+   */
+  expected_sha256: sha256Schema.optional(),
   expected_utf8: z.string().max(64 * 1_024).optional(),
   replacement_utf8: z.string().max(64 * 1_024).optional(),
   edits: z.array(standalonePatchEditSchema).min(1).max(32).optional(),
@@ -163,7 +175,7 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   {
     id: "read",
     version: "standalone-v1",
-    summary: "Read a bounded, line-paged UTF-8 projection of one task-scoped workspace file.",
+    summary: "Read a bounded, line-paged UTF-8 projection of one task-scoped workspace file. Returns the observed file hash (use it for patch) and total line count. Lines render as '<line>→ <content>'; patch strips this gutter automatically.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -173,6 +185,7 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
         max_bytes: { type: "integer", minimum: 1, maximum: 64 * 1_024, default: 48 * 1_024 },
         offset_line: { type: "integer", minimum: 1, default: 1 },
         max_lines: { type: "integer", minimum: 1, maximum: 4_000, default: 2_000 },
+        render: { enum: ["numbered", "raw"], default: "numbered" },
         expected_sha256: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
       },
     },
@@ -188,11 +201,11 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   {
     id: "patch",
     version: "standalone-v1",
-    summary: "Apply hash-anchored, unique exact-text replacements in the task write scope.",
+    summary: "Apply hash-anchored, unique exact-text replacements in the task write scope. expected_sha256 may be omitted: the last read-observed hash of the file is substituted. If your copied text carries '<line>→ ' gutters from a numbered read, they are stripped before matching.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["path", "expected_sha256"],
+      required: ["path"],
       properties: {
         path: { type: "string" },
         expected_sha256: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
@@ -447,7 +460,69 @@ export interface ExecuteStandaloneToolInput {
   readonly contractHash: string;
   readonly devMode: boolean;
   readonly shellModeEnabled: boolean;
+  /**
+   * Per-turn registry of file hashes actually observed through reads.
+   * Patch resolves an omitted expected_sha256 from this tracker; the
+   * substituted value is still an observed source version, so stale-write
+   * protection (safety rule §2) is preserved.
+   */
+  readonly observedSources?: ObservedSourceTracker;
 }
+
+/** Gutter used by numbered reads: `<line>→ <content>`. */
+const NUMBERED_GUTTER_PATTERN = /^(\d+)→ /;
+
+export function renderNumbered(text: string, startLine: number): string {
+  const normalized = text.endsWith("\n") ? text.slice(0, -1) : text;
+  if (normalized.length === 0) return text;
+  const lines = normalized.split("\n");
+  return lines.map((line, index) => `${startLine + index}→ ${line}`).join("\n") + "\n";
+}
+
+function isFullyNumbered(block: string): boolean {
+  const lines = block.split("\n");
+  const significant = lines.filter((line) => line.length > 0);
+  if (significant.length === 0) return false;
+  return lines.every((line) => line.length === 0 || NUMBERED_GUTTER_PATTERN.test(line));
+}
+
+/**
+ * Strip `<line>→ ` gutters from a copied block, but only when every
+ * non-empty line carries one. A partially guttered block is returned
+ * unchanged so exact-match semantics stay conservative: a wrong copy fails
+ * the patch instead of silently mutating content.
+ */
+export function stripNumberedGuttersIfFullyNumbered(block: string): { text: string; stripped: boolean } {
+  if (!isFullyNumbered(block)) return { text: block, stripped: false };
+  const text = block
+    .split("\n")
+    .map((line) => line.replace(NUMBERED_GUTTER_PATTERN, ""))
+    .join("\n");
+  return { text, stripped: true };
+}
+
+/**
+ * Tracks source hashes observed through successful reads, scoped per turn.
+ * Keys are `${workspaceId}:${path}`; values are whole-file sha256 labels as
+ * reported by the kernel read response.
+ */
+export class ObservedSourceTracker {
+  private readonly observed = new Map<string, string>();
+
+  record(workspaceId: string, path: string, sha256: string): void {
+    if (!/^sha256:[0-9a-f]{64}$/.test(sha256)) return;
+    this.observed.set(`${workspaceId}:${path}`, sha256);
+  }
+
+  resolve(workspaceId: string, path: string): string | null {
+    return this.observed.get(`${workspaceId}:${path}`) ?? null;
+  }
+
+  get size(): number {
+    return this.observed.size;
+  }
+}
+
 
 /** Slice decoded UTF-8 text into a 1-based inclusive line page. */
 export function pageLines(text: string, offsetLine: number, maxLines: number): {
@@ -494,13 +569,23 @@ export async function executeStandaloneTool(
         expectedSha256: input.call.arguments.expected_sha256 ?? "",
       });
       const fullProjection = new TextDecoder("utf-8", { fatal: true }).decode(response.modelProjectionUtf8);
+      const totalLines = fullProjection.length === 0 ? 0 : (fullProjection.endsWith("\n") ? fullProjection.slice(0, -1) : fullProjection).split("\n").length;
       const page = pageLines(fullProjection, input.call.arguments.offset_line, input.call.arguments.max_lines);
+      const sourceHash = response.sourceVersion?.sha256 ?? "";
+      if (sourceHash.length > 0 && input.observedSources !== undefined) {
+        input.observedSources.record(input.workspaceId, input.call.arguments.path, sourceHash);
+      }
+      const contentUtf8 = input.call.arguments.render === "numbered"
+        ? renderNumbered(page.text, page.startLine)
+        : page.text;
       const artifact = kernelArtifactDescriptor(response.fullContent);
       const elapsed = performance.now() - startedAt;
-      const sourceHash = response.sourceVersion?.sha256 ?? "";
       const result = okResult({
         path: input.call.arguments.path,
-        content_utf8: page.text,
+        content_utf8: contentUtf8,
+        file_sha256: sourceHash.length === 0 ? null : sourceHash,
+        total_lines: totalLines,
+        render: input.call.arguments.render,
         offset_line: page.startLine,
         end_line: page.endLine,
         rendered_mode: response.renderedMode,
@@ -509,7 +594,7 @@ export async function executeStandaloneTool(
       }, {
         toolCallId: input.internalToolCallId,
         traceId: input.traceId,
-        summary: `Read ${input.call.arguments.path} lines ${page.startLine}-${page.endLine}${page.hasMore ? " (continued)" : ""}`,
+        summary: `Read ${input.call.arguments.path} lines ${page.startLine}-${page.endLine} of ${totalLines}${page.hasMore ? " (continued)" : ""}`,
         sourceVersions: sourceHash.length === 0 ? {} : { [input.call.arguments.path]: sourceHash },
         artifacts: artifact === null ? [] : [artifact],
         sideEffects: [sideEffect(input.sideEffectId, "read", `Read ${input.call.arguments.path}`, true)],
@@ -543,39 +628,104 @@ export async function executeStandaloneTool(
     }
     case "patch": {
       const patchArguments = input.call.arguments;
-      const edits = patchArguments.edits ?? [{
+      let baselineSha256 = patchArguments.expected_sha256 ?? "";
+      let resolvedFromObservation = false;
+      if (baselineSha256.length === 0) {
+        const observed = input.observedSources?.resolve(input.workspaceId, patchArguments.path) ?? null;
+        if (observed === null) {
+          const elapsed = performance.now() - startedAt;
+          const base = okResult(null, {
+            toolCallId: input.internalToolCallId,
+            traceId: input.traceId,
+            summary: `No observed source version for ${patchArguments.path}; read the file before editing`,
+            timing: { executionMs: elapsed, totalMs: elapsed },
+          });
+          return {
+            ...base,
+            status: "denied",
+            policyDecisionId: input.policyDecisionId,
+            diagnostics: [{
+              severity: "error",
+              code: "PATCH_REQUIRES_OBSERVED_SOURCE",
+              message: `patch requires the observed source hash of ${patchArguments.path}. Read the file first (the read result carries file_sha256), then retry; or pass expected_sha256 explicitly.`,
+              path: patchArguments.path,
+              range: null,
+            }],
+          };
+        }
+        baselineSha256 = observed;
+        resolvedFromObservation = true;
+      }
+      const edits = (patchArguments.edits ?? [{
         expected_utf8: nonEmptyAsserted(patchArguments.expected_utf8, "expected_utf8"),
         replacement_utf8: patchArguments.replacement_utf8 ?? "",
-      }];
-      const response = await input.clients.patch.Apply({
-        context: nextRequestContext(input.context, "patch"),
-        intent: toolIntent(input.contractHash, "write_local"),
-        transactionId: input.context.idempotencyKey,
-        baseline: {
-          workspaceId: input.workspaceId,
-          repositoryRevision: "no-vcs",
-          dirtyDigest: "",
-          sources: [{
-            path: { workspaceId: input.workspaceId, relativePath: patchArguments.path },
-            sha256: patchArguments.expected_sha256,
-            repositoryRevision: "no-vcs",
-          }],
-        },
-        edits: edits.map((edit) => ({
-          replaceExactText: {
-            path: { workspaceId: input.workspaceId, relativePath: patchArguments.path },
-            expectedSha256: patchArguments.expected_sha256,
-            expectedUtf8: new TextEncoder().encode(edit.expected_utf8),
-            replacementUtf8: new TextEncoder().encode(edit.replacement_utf8),
-            requireUnique: true,
-          },
-        })),
-        validationProfileId: "task-default",
-        allowTransientInvalidState: false,
-        commitMode: patchArguments.commit_mode === "preview"
-          ? PatchCommitMode.PATCH_COMMIT_MODE_PREVIEW_ONLY
-          : PatchCommitMode.PATCH_COMMIT_MODE_APPLY_TO_WORKTREE,
+      }]).map((edit) => {
+        const expected = stripNumberedGuttersIfFullyNumbered(edit.expected_utf8);
+        const replacement = stripNumberedGuttersIfFullyNumbered(edit.replacement_utf8);
+        return { expected_utf8: expected.text, replacement_utf8: replacement.text, guttersStripped: expected.stripped || replacement.stripped };
       });
+      const anyGuttersStripped = edits.some((edit) => edit.guttersStripped);
+      let response: Awaited<ReturnType<KernelUdsClients["patch"]["Apply"]>>;
+      try {
+        response = await input.clients.patch.Apply({
+          context: nextRequestContext(input.context, "patch"),
+          intent: toolIntent(input.contractHash, "write_local"),
+          transactionId: input.context.idempotencyKey,
+          baseline: {
+            workspaceId: input.workspaceId,
+            repositoryRevision: "no-vcs",
+            dirtyDigest: "",
+            sources: [{
+              path: { workspaceId: input.workspaceId, relativePath: patchArguments.path },
+              sha256: baselineSha256,
+              repositoryRevision: "no-vcs",
+            }],
+          },
+          edits: edits.map((edit) => ({
+            replaceExactText: {
+              path: { workspaceId: input.workspaceId, relativePath: patchArguments.path },
+              expectedSha256: baselineSha256,
+              expectedUtf8: new TextEncoder().encode(edit.expected_utf8),
+              replacementUtf8: new TextEncoder().encode(edit.replacement_utf8),
+              requireUnique: true,
+            },
+          })),
+          validationProfileId: "task-default",
+          allowTransientInvalidState: false,
+          commitMode: patchArguments.commit_mode === "preview"
+            ? PatchCommitMode.PATCH_COMMIT_MODE_PREVIEW_ONLY
+            : PatchCommitMode.PATCH_COMMIT_MODE_APPLY_TO_WORKTREE,
+        });
+      } catch (error: unknown) {
+        // Deterministic transaction rejection (stale hash, anchor not found,
+        // non-unique anchor): no effects were committed, so report a clean,
+        // actionable tool error instead of surfacing ambiguous settlement.
+        const message = error instanceof Error ? error.message : String(error);
+        const stale = /sha256|source|stale|precondition/i.test(message);
+        const elapsed = performance.now() - startedAt;
+        const base = okResult(null, {
+          toolCallId: input.internalToolCallId,
+          traceId: input.traceId,
+          summary: stale
+            ? `Patch rejected: ${patchArguments.path} changed since the observed read; re-read and retry`
+            : `Patch rejected: ${message.slice(0, 512)}`,
+          timing: { executionMs: elapsed, totalMs: elapsed },
+        });
+        return {
+          ...base,
+          status: "error",
+          policyDecisionId: input.policyDecisionId,
+          diagnostics: [{
+            severity: "error",
+            code: stale ? "PATCH_STALE_SOURCE" : "PATCH_REJECTED",
+            message: stale
+              ? `The observed source version of ${patchArguments.path} no longer matches. Re-read the file (a fresh read returns file_sha256) and retry with current content.`
+              : message.slice(0, 2_048),
+            path: patchArguments.path,
+            range: null,
+          }],
+        };
+      }
       const elapsed = performance.now() - startedAt;
       const artifact = kernelArtifactDescriptor(response.completeDiff);
       const result = okResult({
@@ -595,10 +745,12 @@ export async function executeStandaloneTool(
           status: validation.status,
           summary: validation.summary,
         })),
+        resolved_from_observed_hash: resolvedFromObservation,
+        gutters_stripped: anyGuttersStripped,
       }, {
         toolCallId: input.internalToolCallId,
         traceId: input.traceId,
-        summary: `${patchArguments.commit_mode === "preview" ? "Previewed" : "Applied"} ${edits.length} exact edit${edits.length === 1 ? "" : "s"} to ${patchArguments.path}`,
+        summary: `${patchArguments.commit_mode === "preview" ? "Previewed" : "Applied"} ${edits.length} exact edit${edits.length === 1 ? "" : "s"} to ${patchArguments.path}${anyGuttersStripped ? " (line-number gutters stripped)" : ""}`,
         artifacts: artifact === null ? [] : [artifact],
         sideEffects: [sideEffect(input.sideEffectId, "workspace_write", `Patch ${patchArguments.path}`, patchArguments.commit_mode === "preview")],
         timing: { executionMs: elapsed, totalMs: elapsed },

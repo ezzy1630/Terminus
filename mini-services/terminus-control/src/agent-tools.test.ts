@@ -4,14 +4,17 @@ import {
   MAX_TOOL_CYCLES_CEILING,
   MIN_TOOL_CYCLES,
   STANDALONE_TOOL_SCHEMAS,
+  ObservedSourceTracker,
   executeStandaloneTool,
   normalizedToolOperationHash,
   pageLines,
   parseStandaloneToolCall,
   projectModelVisibleResult,
   providerToolCallTranscript,
+  renderNumbered,
   resolveMaxToolCycles,
   resolveShellModeEnabled,
+  stripNumberedGuttersIfFullyNumbered,
   toolEffectMetadata,
   type ParsedStandaloneToolCall,
 } from "./agent-tools.js";
@@ -138,6 +141,180 @@ describe("standalone provider tools", () => {
     expect(normalizedToolOperationHash({ taskId: "task", contractVersion: 3, call: first })).toBe(
       normalizedToolOperationHash({ taskId: "task", contractVersion: 3, call: second }),
     );
+  });
+
+  test("read defaults to numbered render; raw is explicit; patch hash is optional", () => {
+    const read = parseStandaloneToolCall({ toolCallId: "r1", toolName: "read", arguments: { path: "a.ts" } });
+    if (read.toolId !== "read") throw new Error("expected read");
+    expect(read.arguments.render).toBe("numbered");
+    const raw = parseStandaloneToolCall({ toolCallId: "r2", toolName: "read", arguments: { path: "a.ts", render: "raw" } });
+    if (raw.toolId !== "read") throw new Error("expected read");
+    expect(raw.arguments.render).toBe("raw");
+    const patch = parseStandaloneToolCall({
+      toolCallId: "p9",
+      toolName: "patch",
+      arguments: { path: "a.ts", expected_utf8: "old", replacement_utf8: "new" },
+    });
+    if (patch.toolId !== "patch") throw new Error("expected patch");
+    expect(patch.arguments.expected_sha256).toBeUndefined();
+  });
+});
+
+describe("R1 numbered rendering and gutter-safe patching", () => {
+  test("renderNumbered emits stable <line>→ gutters", () => {
+    expect(renderNumbered("alpha\nbeta\n", 7)).toBe("7→ alpha\n8→ beta\n");
+    expect(renderNumbered("", 1)).toBe("");
+  });
+
+  test("gutters are stripped only when every non-empty line carries one", () => {
+    const fully = stripNumberedGuttersIfFullyNumbered("1→ alpha\n2→ beta\n");
+    expect(fully).toEqual({ text: "alpha\nbeta\n", stripped: true });
+    const partial = stripNumberedGuttersIfFullyNumbered("1→ alpha\nbeta\n");
+    expect(partial).toEqual({ text: "1→ alpha\nbeta\n", stripped: false });
+    // Real code that merely starts with digits is untouched.
+    const code = stripNumberedGuttersIfFullyNumbered("12 days\nlater\n");
+    expect(code.stripped).toBe(false);
+  });
+
+  test("ObservedSourceTracker records valid hashes per workspace:path and ignores malformed ones", () => {
+    const tracker = new ObservedSourceTracker();
+    const good = `sha256:${"a".repeat(64)}`;
+    tracker.record("w1", "src/a.ts", good);
+    tracker.record("w1", "src/b.ts", "sha256:nothex");
+    tracker.record("w1", "src/c.ts", "");
+    expect(tracker.resolve("w1", "src/a.ts")).toBe(good);
+    expect(tracker.resolve("w1", "src/b.ts")).toBeNull();
+    expect(tracker.resolve("w2", "src/a.ts")).toBeNull();
+    expect(tracker.size).toBe(1);
+    tracker.record("w1", "src/a.ts", `sha256:${"b".repeat(64)}`);
+    expect(tracker.resolve("w1", "src/a.ts")).toBe(`sha256:${"b".repeat(64)}`);
+  });
+
+  test("read exposes file_sha256 + total_lines and registers the observation", async () => {
+    const sha = `sha256:${"c".repeat(64)}`;
+    let patchedWith: string | null = null;
+    const clients = {
+      files: {
+        Read: (_request: unknown) => ({
+          modelProjectionUtf8: new TextEncoder().encode("alpha\nbeta\n"),
+          sourceVersion: { sha256: sha, repositoryRevision: "no-vcs" },
+          renderedMode: "full",
+          continuationToken: "",
+          truncated: false,
+          fullContent: undefined,
+          diagnostics: [],
+        }),
+      },
+      patch: {
+        Apply: (request: { baseline: { sources: readonly { sha256: string }[] } }) => {
+          patchedWith = request.baseline.sources[0]?.sha256 ?? null;
+          return {
+            transactionId: "txn",
+            state: "APPLIED",
+            finalRepositoryRevision: "no-vcs",
+            finalDirtyDigest: "",
+            changedFiles: [],
+            validations: [],
+            completeDiff: undefined,
+          };
+        },
+      },
+    } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
+    const tracker = new ObservedSourceTracker();
+    const base = {
+      context: { idempotencyKey: "idem" } as never,
+      workspaceId: "ws-1",
+      internalToolCallId: "tc",
+      sideEffectId: "00000000-0000-7000-8000-000000000011" as never,
+      policyDecisionId: "pd",
+      traceId: "trace",
+      contractHash: "hash",
+      devMode: false,
+      shellModeEnabled: true,
+      observedSources: tracker,
+    } as const;
+    const readResult = await executeStandaloneTool({
+      ...base,
+      clients,
+      call: parseStandaloneToolCall({ toolCallId: "rr", toolName: "read", arguments: { path: "src/a.ts" } }) as Extract<ParsedStandaloneToolCall, { toolId: "read" }>,
+    });
+    expect(readResult.status).toBe("success");
+    const data = readResult.data as Record<string, unknown>;
+    expect(data.file_sha256).toBe(sha);
+    expect(data.total_lines).toBe(2);
+    expect(data.content_utf8).toBe("1→ alpha\n2→ beta\n");
+    expect(tracker.resolve("ws-1", "src/a.ts")).toBe(sha);
+    const patchResult = await executeStandaloneTool({
+      ...base,
+      clients,
+      call: parseStandaloneToolCall({
+        toolCallId: "pp",
+        toolName: "patch",
+        arguments: { path: "src/a.ts", expected_utf8: "1→ alpha\n", replacement_utf8: "1→ ALPHA\n" },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "patch" }>,
+    });
+    expect(patchResult.status).toBe("success");
+    expect(patchedWith).toBe(sha);
+    expect((patchResult.data as Record<string, unknown>).resolved_from_observed_hash).toBe(true);
+    expect((patchResult.data as Record<string, unknown>).gutters_stripped).toBe(true);
+  });
+
+  test("patch without any observed hash is denied with a read-first directive", async () => {
+    const clients = {} as Parameters<typeof executeStandaloneTool>[0]["clients"];
+    const result = await executeStandaloneTool({
+      clients,
+      context: { idempotencyKey: "idem" } as never,
+      workspaceId: "ws-1",
+      call: parseStandaloneToolCall({
+        toolCallId: "pz",
+        toolName: "patch",
+        arguments: { path: "src/never-read.ts", expected_utf8: "x", replacement_utf8: "y" },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "patch" }>,
+      internalToolCallId: "tc",
+      sideEffectId: "00000000-0000-7000-8000-000000000012" as never,
+      policyDecisionId: "pd",
+      traceId: "trace",
+      contractHash: "hash",
+      devMode: false,
+      shellModeEnabled: true,
+      observedSources: new ObservedSourceTracker(),
+    });
+    expect(result.status).toBe("denied");
+    expect(result.diagnostics[0]?.code).toBe("PATCH_REQUIRES_OBSERVED_SOURCE");
+    expect(result.summary).toMatch(/read the file before editing/i);
+  });
+
+  test("stale source rejection becomes an actionable error result, not an exception", async () => {
+    const clients = {
+      patch: {
+        Apply: () => {
+          throw new Error("expected_sha256 does not match source");
+        },
+      },
+    } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
+    const tracker = new ObservedSourceTracker();
+    tracker.record("ws-1", "stale.ts", `sha256:${"d".repeat(64)}`);
+    const result = await executeStandaloneTool({
+      clients,
+      context: { idempotencyKey: "idem" } as never,
+      workspaceId: "ws-1",
+      call: parseStandaloneToolCall({
+        toolCallId: "ps",
+        toolName: "patch",
+        arguments: { path: "stale.ts", expected_utf8: "x", replacement_utf8: "y" },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "patch" }>,
+      internalToolCallId: "tc",
+      sideEffectId: "00000000-0000-7000-8000-000000000013" as never,
+      policyDecisionId: "pd",
+      traceId: "trace",
+      contractHash: "hash",
+      devMode: false,
+      shellModeEnabled: true,
+      observedSources: tracker,
+    });
+    expect(result.status).toBe("error");
+    expect(result.diagnostics[0]?.code).toBe("PATCH_STALE_SOURCE");
+    expect(result.diagnostics[0]?.message).toMatch(/Re-read the file/);
   });
 });
 

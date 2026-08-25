@@ -84,7 +84,7 @@ components:
   - { id: public-api, kind: ts-package, path: packages/public-api, tier: preview,
       basis: "HTTP/SSE contracts include typed Phase 9/10 resources and receipt references; trusted computer-use/DLP backends remain absent and fail closed" }
   - { id: aci, kind: ts-package, path: packages/aci, tier: experimental,
-      basis: "Agent-Computer Interface tools; unproven at HEAD" }
+      basis: "Agent-Computer Interface tools; standalone surface carries the R1 read/patch source-hash contract (numbered reads, observed-hash patch resolution) with unit tests; live-model conformance unproven at HEAD" }
   - { id: adapter-sdk, kind: ts-package, path: packages/adapter-sdk, tier: experimental,
       basis: "Stdio JSON-RPC adapter SDK; maturity gate added in Phase 0; live probes never run" }
   - { id: artifact-client, kind: ts-package, path: packages/artifact-client, tier: experimental,

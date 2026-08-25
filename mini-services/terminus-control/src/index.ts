@@ -97,6 +97,7 @@ import { KernelGatewayClient } from "./gateway-kernel-client.js";
 import {
   MAX_TOOL_MODEL_RESULT_BYTES,
   STANDALONE_TOOL_SCHEMAS,
+  ObservedSourceTracker,
   executeStandaloneTool,
   normalizedToolOperationHash,
   parseStandaloneToolCall,
@@ -8892,6 +8893,7 @@ interface StandaloneToolSettlementInput {
   readonly contractVersion: number;
   readonly contractHash: string;
   readonly artifactClient: ArtifactClient;
+  readonly observedSources: ObservedSourceTracker;
 }
 
 async function settleStandaloneProviderTool(
@@ -9065,6 +9067,7 @@ async function settleStandaloneProviderTool(
       contractHash: input.contractHash,
       devMode: DEV_MODE,
       shellModeEnabled: SHELL_MODE_ENABLED,
+      observedSources: input.observedSources,
     });
   } catch (error: unknown) {
     if (call.toolId !== "read") {
@@ -9491,9 +9494,14 @@ async function agentLoop(turnId: string): Promise<void> {
         contractVersion: toolInput.contractVersion,
         contractHash: toolInput.contractHash,
         artifactClient: toolInput.artifactClient,
+        observedSources,
       }),
     });
     const toolEpisodeSession = toolEpisodeService.startTurn();
+    // R1 (harness critical path): per-turn registry of read-observed file
+    // hashes so patch can resolve an omitted expected_sha256 while keeping
+    // stale-write protection anchored to actually observed source versions.
+    const observedSources = new ObservedSourceTracker();
     // Rank 3: bounded verify–repair–admit policy for this completion proposal.
     const verificationRepairController = new VerificationRepairController({
       maxRepairAttempts:
