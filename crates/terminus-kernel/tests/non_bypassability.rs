@@ -599,7 +599,10 @@ async fn nb_secure_profile_proceeds_only_when_enforced() {
         args: vec!["--version".to_string()],
         cwd: WorkspacePath::new("ws-1", "."),
         public_env,
-        timeout_ms: 1_000,
+        // Generous ceiling: this probe asserts enforcement semantics, not
+        // pnpm's cold-start speed; a 1s budget made it load-flaky under
+        // parallel suites.
+        timeout_ms: 30_000,
         ..Default::default()
     };
     let status = kernel.sandboxes.enforcement_report().status;

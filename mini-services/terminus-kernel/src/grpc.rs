@@ -1416,7 +1416,11 @@ impl ConnectorServiceRpc for GrpcKernel {
     }
 
     type ExecuteStreamStream = std::pin::Pin<
-        Box<dyn tokio_stream::Stream<Item = Result<protocol::ConnectorChunk, Status>> + Send + 'static>,
+        Box<
+            dyn tokio_stream::Stream<Item = Result<protocol::ConnectorChunk, Status>>
+                + Send
+                + 'static,
+        >,
     >;
 
     async fn execute_stream(
@@ -1463,7 +1467,13 @@ impl ConnectorServiceRpc for GrpcKernel {
             fn on_chunk(
                 &mut self,
                 bytes: &[u8],
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), terminus_connector::ConnectorError>> + Send + '_>> {
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<(), terminus_connector::ConnectorError>>
+                        + Send
+                        + '_,
+                >,
+            > {
                 let payload = bytes.to_vec();
                 let tx = self.tx.clone();
                 Box::pin(async move {
@@ -2845,6 +2855,48 @@ pub async fn serve_grpc(
     Err("the kernel gRPC UDS transport is unsupported on this platform".into())
 }
 
+/// Server-stream adapter that keeps the pumping task observed: the join
+/// handle is polled to completion once the channel closes, so no spawned
+/// work escapes supervision.
+impl PumpStream {
+    fn poll_pump(
+        pump: &mut tokio::task::JoinHandle<()>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<<Self as tokio_stream::Stream>::Item>> {
+        use std::future::Future;
+        match std::pin::Pin::new(pump).poll(cx) {
+            std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(None),
+            std::task::Poll::Ready(Err(join_error)) => std::task::Poll::Ready(Some(Err(
+                Status::internal(format!("connector stream pump failed: {join_error}")),
+            ))),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+struct PumpStream {
+    rx: tokio::sync::mpsc::Receiver<Result<protocol::ConnectorChunk, Status>>,
+    pump: tokio::task::JoinHandle<()>,
+}
+
+impl tokio_stream::Stream for PumpStream {
+    type Item = Result<protocol::ConnectorChunk, Status>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some(item)) => std::task::Poll::Ready(Some(item)),
+            std::task::Poll::Ready(None) => {
+                // Channel closed: observe the pump's completion.
+                Self::poll_pump(&mut self.pump, cx)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
@@ -4054,47 +4106,5 @@ mod tests {
 
         server.abort();
         let _ = server.await;
-    }
-}
-
-/// Server-stream adapter that keeps the pumping task observed: the join
-/// handle is polled to completion once the channel closes, so no spawned
-/// work escapes supervision.
-impl PumpStream {
-    fn poll_pump(
-        pump: &mut tokio::task::JoinHandle<()>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<<Self as tokio_stream::Stream>::Item>> {
-        use std::future::Future;
-        match std::pin::Pin::new(pump).poll(cx) {
-            std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(None),
-            std::task::Poll::Ready(Err(join_error)) => std::task::Poll::Ready(Some(Err(
-                Status::internal(format!("connector stream pump failed: {join_error}")),
-            ))),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-}
-
-struct PumpStream {
-    rx: tokio::sync::mpsc::Receiver<Result<protocol::ConnectorChunk, Status>>,
-    pump: tokio::task::JoinHandle<()>,
-}
-
-impl tokio_stream::Stream for PumpStream {
-    type Item = Result<protocol::ConnectorChunk, Status>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        match self.rx.poll_recv(cx) {
-            std::task::Poll::Ready(Some(item)) => std::task::Poll::Ready(Some(item)),
-            std::task::Poll::Ready(None) => {
-                // Channel closed: observe the pump's completion.
-                Self::poll_pump(&mut self.pump, cx)
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
     }
 }
