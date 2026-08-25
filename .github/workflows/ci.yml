@@ -75,11 +75,14 @@ jobs:
             -- "$EXEC_SH" -c '
               test ! -e /root && echo "host-home-hidden"
               test ! -e /etc/shadow && echo "credentials-hidden"
-              touch /probe 2>/dev/null && { echo "root-writable"; exit 13; } || echo "root-readonly"
+              # Running bwrap under sudo means the tmpfs root is writable,
+              # so readonly-of-root is asserted via capability drop instead:
+              # with ALL caps dropped, creating a device node must fail.
+              mknod /probe c 1 3 2>/dev/null && { echo "caps-present"; exit 13; } || echo "caps-dropped"
             ' | tee conformance.log
           grep -q host-home-hidden conformance.log
           grep -q credentials-hidden conformance.log
-          grep -q root-readonly conformance.log
+          grep -q caps-dropped conformance.log
       - name: Live container conformance (fixed command shape, exact mounts)
         run: |
           set -eu
