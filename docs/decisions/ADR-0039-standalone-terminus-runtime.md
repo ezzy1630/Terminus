@@ -37,18 +37,34 @@ Terminus is a standalone coding-agent runtime.
    effect still cross the kernel RPC and are not part of this exception.
 10. The durable local-provider configuration is credential-free and
     revision-checked. Tool use is disabled by default and may expose only the
-    standalone `read`, exact-text `patch`, and bounded `exec` contracts. The
-    provider may emit at most one tool call per response and a turn may settle
-    at most four tool calls. Every call is validated, policy-recorded, and
-    dispatched through `terminus.kernel.v1`; no provider-selected shell,
-    environment, secret, network destination, or ambient path is accepted.
+    standalone tool contracts: `read` (paged), exact-text multi-edit `patch`,
+    bounded argv `exec`, policy-gated shell-mode `exec`, lexical `grep`, and
+    file-listing `glob`. The provider may emit at most one tool call per
+    response, and a turn settles at most `max_tool_cycles` calls — an
+    operator-configurable budget (environment variable
+    `TERMINUS_MAX_TOOL_CYCLES`) that defaults to 64 and is hard-bounded to
+    1..256. Every call is validated, policy-recorded, and dispatched through
+    `terminus.kernel.v1`; no provider-selected environment, secret, network
+    destination, or ambient path is accepted. Shell-mode `exec` additionally
+    requires the operator to enable it explicitly (`TERMINUS_SHELL_MODE=1`);
+    when enabled, the script travels as kernel-dispatched data through the
+    same sandbox profile and strictest-wins policy engine (including
+    shell-script content rules) as every other process effect. Shell mode
+    stays off by default, and argv-only exec remains available in every
+    profile.
 11. A settled tool call and its result are persisted as a complete,
-    model-visible episode pair before another provider attempt begins. The
-    next attempt recompiles an exact context manifest from the durable artifact
-    bytes and verifies their content hashes. Dispatched write/exec calls that
-    lose settlement certainty become `UNKNOWN`/`MANUAL_REVIEW` and are never
-    retried automatically. Tool-cycle or result-size exhaustion fails closed
-    with an explicit continuation or immutable artifact reference.
+    model-visible episode pair before another provider attempt begins. Each
+    pair carries two projections of the same settlement: the full envelope is
+    ingested once as an observability artifact, and the model-visible
+    transcript carries a minimal status/summary/data projection of that same
+    artifact so per-call token ceremony does not scale with envelope width.
+    Both projections derive from one settled `ToolResult`; neither fabricates
+    content the other lacks. The next attempt recompiles an exact context
+    manifest from the durable artifact bytes and verifies their content
+    hashes. Dispatched write/exec calls that lose settlement certainty become
+    `UNKNOWN`/`MANUAL_REVIEW` and are never retried automatically. Tool-cycle
+    or result-size exhaustion fails closed with an explicit continuation or
+    immutable artifact reference.
 
 ## Alternatives
 

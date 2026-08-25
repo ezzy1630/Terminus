@@ -4,6 +4,8 @@ Built with :mod:`argparse` (no Click/Typer dependency, keeping the install
 footprint small). Provides commands for the standard eval workflow:
 
 - ``terminus-eval run`` — run a single harness on a task.
+- ``terminus-eval bench-check`` — validate external benchmark suite manifests
+  through their adapters (offline; no harness or credentials required).
 - ``terminus-eval aggregate`` — aggregate JSONL run records into a summary.
 - ``terminus-eval dashboard`` — generate a cohort dashboard HTML.
 - ``terminus-eval promote`` — evaluate the promotion gate.
@@ -93,6 +95,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_tier_cmd(sub)
     _add_exit_gate_cmd(sub)
     _add_conformance_cmd(sub)
+    _add_bench_check_cmd(sub)
     return p
 
 
@@ -576,6 +579,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     """Dispatch to the right subcommand handler."""
     handlers = {
         "run": _cmd_run,
+        "bench-check": _cmd_bench_check,
         "aggregate": _cmd_aggregate,
         "dashboard": _cmd_dashboard,
         "promote": _cmd_promote,
@@ -590,6 +594,74 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(f"unknown command: {args.command}", file=sys.stderr)
         return 1
     return handler(args)
+
+
+def _add_bench_check_cmd(sub: argparse._SubParsersAction[Any]) -> None:
+    p = sub.add_parser(
+        "bench-check",
+        help="Validate external benchmark suite manifests through their adapters.",
+    )
+    p.add_argument(
+        "--suites-dir",
+        default="evals/suites",
+        help="Directory containing suite YAML manifests.",
+    )
+    p.add_argument(
+        "--suite",
+        action="append",
+        dest="suites",
+        help="Validate only these manifest files (repeatable; defaults to all).",
+    )
+
+
+def _cmd_bench_check(args: argparse.Namespace) -> int:
+    """Validate every declared external benchmark suite through its adapter.
+
+    Offline gate for the audit P0-5 requirement that benchmark manifests are
+    not merely declared but provably translatable at HEAD. A live run still
+    requires a kernel-brokered harness and credentials; this command proves
+    the manifests, pins, and task filters parse and agree.
+    """
+    from .runners.benchmark_adapters import (
+        BenchmarkManifestError,
+        load_benchmark_manifest,
+    )
+
+    suites_dir = Path(args.suites_dir)
+    if not suites_dir.is_dir():
+        print(f"error: suites directory does not exist: {suites_dir}", file=sys.stderr)
+        return 1
+    files = [Path(name) for name in args.suites] if args.suites else sorted(suites_dir.glob("*.yaml"))
+    if not files:
+        print(f"no suite manifests found in {suites_dir}", file=sys.stderr)
+        return 1
+
+    failures = 0
+    checked = 0
+    skipped = 0
+    for path in files:
+        full = path
+        if not full.is_absolute() and not full.exists():
+            full = suites_dir / path
+        try:
+            raw = __import__("yaml").safe_load(full.read_text(encoding="utf-8"))
+            suite_block = raw.get("suite") if isinstance(raw, dict) else None
+            has_adapter = isinstance(suite_block, dict) and isinstance(suite_block.get("adapter"), dict)
+            if not has_adapter:
+                print(f"[bench-check] skip {full.name}: no external benchmark adapter section")
+                skipped += 1
+                continue
+            manifest = load_benchmark_manifest(full)
+            checked += 1
+            print(
+                f"[bench-check] ok   {full.name}: {manifest.suite_id} kind={manifest.adapter_kind} "
+                f"tasks={manifest.task_count} harness_commit={manifest.harness_commit[:12]}"
+            )
+        except (BenchmarkManifestError, OSError, ValueError) as exc:
+            failures += 1
+            print(f"[bench-check] FAIL {full.name}: {exc}", file=sys.stderr)
+    print(f"[bench-check] {checked} validated, {skipped} skipped, {failures} failed")
+    return 1 if failures else 0
 
 
 def _load_runs(path: str) -> RunCatalog:

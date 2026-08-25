@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://terminus.dev/schemas/tools/grep.json",
+  "title": "grep",
+  "description": "Lexical regex search over the task workspace via kernel-dispatched ripgrep (standalone-v1; ADR-0039 \u00a710). Runs as a policy-classified process effect under the task sandbox profile with no shell, environment injection, network, or secrets. Returns bounded file:line:text matches and reports truncation with a continuation hint when the result set is capped.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pattern"],
+  "properties": {
+    "pattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Rust/ripgrep regular expression. Must not contain NUL."
+    },
+    "path": {
+      "type": "string",
+      "default": ".",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Workspace-relative search root. Defaults to the workspace root."
+    },
+    "glob": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Optional include glob (ripgrep -g) to restrict searched files."
+    },
+    "ignore_case": {
+      "type": "boolean",
+      "default": false,
+      "description": "Case-insensitive matching (ripgrep -i)."
+    },
+    "max_results": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500,
+      "default": 100,
+      "description": "Maximum matches returned in the model-visible projection. Excess matches are reported as truncated with total_found."
+    }
+  }
+}
