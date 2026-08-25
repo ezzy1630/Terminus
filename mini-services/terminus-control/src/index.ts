@@ -251,6 +251,7 @@ import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
 import { CodingTurnEngine } from "./agent/coding-turn-engine.js";
 import { CacheRatioMonitor } from "./agent/cache-telemetry.js";
+import { withProviderRetry } from "./providers/provider-retry.js";
 import {
   runCompaction,
   SUMMARY_SYSTEM_INSTRUCTIONS,
@@ -10357,7 +10358,10 @@ async function agentLoop(turnId: string): Promise<void> {
       },
       executeProvider: async ({ attemptId, compiled }) => {
         const directExecutor = buildDirectExecutor();
-        return providerSessionService.execute({
+        // R6: bounded retry/backoff for transient provider faults. The
+        // native runtime settles partials explicitly; this is the recovery
+        // layer it delegates to.
+        return withProviderRetry(() => providerSessionService.execute({
           rendered: compiled.rendered,
           command: localProviderCommand,
           gateway: gatewayModel === null
@@ -10367,9 +10371,10 @@ async function agentLoop(turnId: string): Promise<void> {
             ? null
             : { vendor: directConfiguration.vendor },
           ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
-          context: { ...await buildProviderTaskContext(), idempotencyKey: `provider:${attemptId}` },
-          workspaceId: workspace.id,
-        });
+            context: { ...await buildProviderTaskContext(), idempotencyKey: `provider:${attemptId}` },
+            workspaceId: workspace.id,
+          });
+        }, { maxAttempts: 3 });
       },
       settleResponse: async ({ attemptId, response }) => {
         const midTurn = await db.turn.findUnique({ where: { id: turnId }, select: { state: true } });

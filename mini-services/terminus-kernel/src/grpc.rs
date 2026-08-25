@@ -1415,6 +1415,113 @@ impl ConnectorServiceRpc for GrpcKernel {
         }))
     }
 
+    type ExecuteStreamStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<protocol::ConnectorChunk, Status>> + Send + 'static>,
+    >;
+
+    async fn execute_stream(
+        &self,
+        request: Request<protocol::ExecuteConnectorRequest>,
+    ) -> Result<Response<Self::ExecuteStreamStream>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let operation = request
+            .operation
+            .ok_or_else(|| Status::invalid_argument("operation is required"))?;
+        let port = u16::try_from(operation.port)
+            .map_err(|_| Status::invalid_argument("operation port exceeds 65535"))?;
+        let grant = self
+            .kernel
+            .connectors
+            .decode_grant(&request.encoded_grant)
+            .map_err(|_| Status::permission_denied("connector grant is invalid"))?;
+        let canonical = terminus_connector::CanonicalOperation {
+            method: operation.method,
+            scheme: operation.scheme,
+            host: operation.host,
+            port,
+            path: operation.path,
+            query: operation.query,
+            headers: operation
+                .headers
+                .into_iter()
+                .map(|header| (header.name, header.value))
+                .collect(),
+            body: operation.body,
+        };
+
+        // The dispatch runs in a supervised task whose JoinHandle is joined
+        // by the tail of the returned stream — no detached work, and errors
+        // surface as terminal stream items.
+        struct ReceiptSink {
+            tx: tokio::sync::mpsc::Sender<Result<protocol::ConnectorChunk, Status>>,
+        }
+        impl terminus_connector::ChunkSink for ReceiptSink {
+            fn on_chunk(
+                &mut self,
+                bytes: &[u8],
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), terminus_connector::ConnectorError>> + Send + '_>> {
+                let payload = bytes.to_vec();
+                let tx = self.tx.clone();
+                Box::pin(async move {
+                    tx.send(Ok(protocol::ConnectorChunk {
+                        payload: Some(protocol::connector_chunk::Payload::Bytes(payload)),
+                    }))
+                    .await
+                    .map_err(|_| {
+                        terminus_connector::ConnectorError::Protocol(
+                            "stream consumer dropped".into(),
+                        )
+                    })
+                })
+            }
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<protocol::ConnectorChunk, Status>>(64);
+        let connectors = self.kernel.connectors.clone();
+        let pump = tokio::spawn(async move {
+            let mut sink = ReceiptSink { tx: tx.clone() };
+            let result = connectors
+                .execute_streaming(&ctx, &canonical, &grant, &mut sink)
+                .await;
+            match result {
+                Ok(response) => {
+                    let receipt = response.receipt;
+                    let _ = tx
+                        .send(Ok(protocol::ConnectorChunk {
+                            payload: Some(protocol::connector_chunk::Payload::Receipt(
+                                protocol::ConnectorReceiptMessage {
+                                    grant_id: receipt.grant_id,
+                                    task_id: receipt.task_id,
+                                    effect_id: receipt.effect_id,
+                                    connector_id: receipt.connector_id,
+                                    method: receipt.method,
+                                    path: receipt.path,
+                                    destination: receipt.destination,
+                                    request_sha256: receipt.request_sha256,
+                                    status_code: receipt.status_code.map(u32::from),
+                                    response_sha256: receipt.response_sha256,
+                                    response_redactions: u64::try_from(receipt.response_redactions)
+                                        .unwrap_or(u64::MAX),
+                                    outcome: connector_outcome(receipt.outcome).to_string(),
+                                },
+                            )),
+                        }))
+                        .await;
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(status(error))).await;
+                }
+            }
+        });
+
+        let stream = PumpStream { rx, pump };
+        Ok(Response::new(Box::pin(stream) as Self::ExecuteStreamStream))
+    }
+
     async fn execute(
         &self,
         request: Request<protocol::ExecuteConnectorRequest>,
@@ -3947,5 +4054,47 @@ mod tests {
 
         server.abort();
         let _ = server.await;
+    }
+}
+
+/// Server-stream adapter that keeps the pumping task observed: the join
+/// handle is polled to completion once the channel closes, so no spawned
+/// work escapes supervision.
+impl PumpStream {
+    fn poll_pump(
+        pump: &mut tokio::task::JoinHandle<()>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<<Self as tokio_stream::Stream>::Item>> {
+        use std::future::Future;
+        match std::pin::Pin::new(pump).poll(cx) {
+            std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(None),
+            std::task::Poll::Ready(Err(join_error)) => std::task::Poll::Ready(Some(Err(
+                Status::internal(format!("connector stream pump failed: {join_error}")),
+            ))),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+struct PumpStream {
+    rx: tokio::sync::mpsc::Receiver<Result<protocol::ConnectorChunk, Status>>,
+    pump: tokio::task::JoinHandle<()>,
+}
+
+impl tokio_stream::Stream for PumpStream {
+    type Item = Result<protocol::ConnectorChunk, Status>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some(item)) => std::task::Poll::Ready(Some(item)),
+            std::task::Poll::Ready(None) => {
+                // Channel closed: observe the pump's completion.
+                Self::poll_pump(&mut self.pump, cx)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
     }
 }

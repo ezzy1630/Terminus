@@ -25,7 +25,9 @@ import type { Rfc3339Timestamp } from "@terminus/domain";
 import { AnthropicRenderer, decodeAnthropicMessagesStream } from "@terminus/provider-anthropic";
 import { OpenAiRenderer, decodeOpenAiStream, renderResponsesRequest } from "@terminus/provider-openai";
 import type {
+  ConnectorChunk,
   ConnectorService,
+  ExecuteConnectorRequest,
   RequestContext,
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import type { DirectProviderConfiguration } from "./direct-provider-config.js";
@@ -94,7 +96,7 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
       ttlSeconds: 60,
     });
     if (grant.encodedGrant.length === 0) throw new Error("kernel returned an empty connector grant");
-    const response = await this.connectors.Execute({
+    const request: ExecuteConnectorRequest = {
       context: nextContext(this.context, `direct-execute:${effectId}`),
       encodedGrant: grant.encodedGrant,
       operation: {
@@ -107,16 +109,107 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
         headers: Object.entries(input.headers).map(([name, value]) => ({ name, value })),
         body: new TextEncoder().encode(input.body),
       },
-    });
+    };
+    // R6: prefer the incremental stream so tokens reach the client as they
+    // arrive; fall back to the buffered unary Execute when talking to an
+    // older kernel that predates ExecuteStream.
+    let streamed = false;
+    try {
+      for await (const chunk of this.eachChunk(request)) {
+        streamed = true;
+        if (chunk.payload.case === "bytes") {
+          yield chunk.payload.bytes;
+        } else if (chunk.payload.case === "receipt") {
+          const status = chunk.payload.value.statusCode;
+          if (status === undefined || status < 200 || status > 299) {
+            throw new Error(
+              `direct provider returned HTTP ${status ?? 0}${chunk.payload.value.outcome.length > 0 ? ` (${chunk.payload.value.outcome})` : ""}`,
+            );
+          }
+        }
+      }
+    } catch (error) {
+      if (isUnimplemented(error)) {
+        // Legacy kernel: buffered dispatch below.
+      } else {
+        throw error;
+      }
+    }
+    if (streamed) return;
+    const response = await this.connectors.Execute(request);
     const status = response.receipt?.statusCode;
     if (status === undefined) {
       throw new Error(`direct provider dispatch did not settle: ${response.receipt?.outcome ?? "missing receipt"}`);
     }
     if (status < 200 || status > 299) {
+      // Connector receipts do not carry response headers yet; retry pacing
+      // falls back to exponential backoff with jitter in provider-retry.ts.
       throw new Error(`direct provider returned HTTP ${status}${providerErrorSuffix(response.body)}`);
     }
     yield* splitSseChunks(response.body);
   }
+
+  private eachChunk(request: ExecuteConnectorRequest): AsyncIterable<ConnectorChunk> {
+    return observableToAsyncIterable(this.connectors.ExecuteStream(request));
+  }
+}
+
+/** Minimal Observable→AsyncIterable bridge. */
+function observableToAsyncIterable<T>(source: import("rxjs").Observable<T>): AsyncIterable<T> {
+  return {
+    [Symbol.asyncIterator](): AsyncIterator<T> {
+      const queue: T[] = [];
+      let done = false;
+      let failure: unknown = null;
+      let wake: (() => void) | null = null;
+      const notify = (): void => {
+        if (wake !== null) {
+          const resolve = wake;
+          wake = null;
+          resolve();
+        }
+      };
+      const subscription = source.subscribe({
+        next: (value: T) => {
+          queue.push(value);
+          notify();
+        },
+        error: (err: unknown) => {
+          failure = err;
+          done = true;
+          notify();
+        },
+        complete: () => {
+          done = true;
+          notify();
+        },
+      });
+      return {
+        next: async (): Promise<IteratorResult<T>> => {
+          while (!done && queue.length === 0) {
+            await new Promise<void>((resolve) => {
+              wake = resolve;
+            });
+          }
+          if (failure !== null) throw failure;
+          if (queue.length > 0) return { value: queue.shift()!, done: false };
+          return { value: undefined as never, done: true };
+        },
+        return: async (): Promise<IteratorResult<T>> => {
+          subscription.unsubscribe();
+          done = true;
+          notify();
+          return { value: undefined as never, done: true };
+        },
+      };
+    },
+  };
+}
+
+/** grpc-js surfaces UNIMPLEMENTED as a details-bearing error string. */
+function isUnimplemented(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unimplemented/i.test(message);
 }
 
 function connectorIdForEndpoint(input: DirectHttpRequest): string {

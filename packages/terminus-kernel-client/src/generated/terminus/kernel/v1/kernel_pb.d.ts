@@ -2871,6 +2871,37 @@ export declare type ConnectorResponseMessage = Message<"terminus.kernel.v1.Conne
 export declare const ConnectorResponseMessageSchema: GenMessage<ConnectorResponseMessage>;
 
 /**
+ * Chunk of a streamed connector response. Exactly one terminal frame carries
+ * the receipt; every prior frame is a body chunk.
+ *
+ * @generated from message terminus.kernel.v1.ConnectorChunk
+ */
+export declare type ConnectorChunk = Message<"terminus.kernel.v1.ConnectorChunk"> & {
+  /**
+   * @generated from oneof terminus.kernel.v1.ConnectorChunk.payload
+   */
+  payload: {
+    /**
+     * @generated from field: bytes bytes = 1;
+     */
+    value: Uint8Array;
+    case: "bytes";
+  } | {
+    /**
+     * @generated from field: terminus.kernel.v1.ConnectorReceiptMessage receipt = 2;
+     */
+    value: ConnectorReceiptMessage;
+    case: "receipt";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ConnectorChunk.
+ * Use `create(ConnectorChunkSchema)` to create a new message.
+ */
+export declare const ConnectorChunkSchema: GenMessage<ConnectorChunk>;
+
+/**
  * @generated from message terminus.kernel.v1.CodeSearchRequest
  */
 export declare type CodeSearchRequest = Message<"terminus.kernel.v1.CodeSearchRequest"> & {
@@ -3779,6 +3810,19 @@ export declare const ConnectorService: GenService<{
     methodKind: "unary";
     input: typeof ExecuteConnectorRequestSchema;
     output: typeof ConnectorResponseMessageSchema;
+  },
+  /**
+   * R6: incremental dispatch. Streams response body chunks as they arrive
+   * and terminates with the same scrubbed receipt Execute returns. Grant
+   * consumption, egress authorization, and bounded-capture limits are
+   * identical to Execute; only the transport differs.
+   *
+   * @generated from rpc terminus.kernel.v1.ConnectorService.ExecuteStream
+   */
+  executeStream: {
+    methodKind: "server_streaming";
+    input: typeof ExecuteConnectorRequestSchema;
+    output: typeof ConnectorChunkSchema;
   },
 }>;
 

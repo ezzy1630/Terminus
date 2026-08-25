@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 use terminus_artifacts::ArtifactStore;
 use terminus_authz::{OperationClass, Scope, TokenIssuer, TokenRevoker};
 use terminus_code_intel::{CodeIntelService, FileSystemWorkspaceSource, WorkspaceSource};
-use terminus_connector::ConnectorBroker;
+use terminus_connector::{ChunkSink, ConnectorBroker};
 use terminus_egress::EgressProxy;
 use terminus_extension_runtime::WasiExtensionHost;
 use terminus_fs::PathResolver;
@@ -2934,6 +2934,55 @@ impl ConnectorService {
             status_code = ?response.receipt.status_code,
             response_redactions = response.receipt.response_redactions,
             "connector operation executed"
+        );
+        Ok(response)
+    }
+
+    /// Streaming variant of [`Self::execute`]: identical authorization,
+    /// one-time consumption, and bounded capture; response body chunks are
+    /// surfaced through `sink` as they arrive instead of only at completion.
+    pub async fn execute_streaming<S: ChunkSink>(
+        &self,
+        ctx: &RequestContext,
+        op: &terminus_connector::CanonicalOperation,
+        grant: &terminus_secrets::ConnectorGrant,
+        sink: &mut S,
+    ) -> KernelResult<terminus_connector::ConnectorResponse> {
+        let dest = format!("{}:{}", op.host, op.port);
+        let requested_scope = Scope {
+            workspace_paths: Vec::new(),
+            network_destinations: vec![dest],
+            secret_capabilities: Vec::new(),
+        };
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Network,
+            &requested_scope,
+        )?;
+        let response = self
+            .broker
+            .execute_streaming(op, grant, sink)
+            .await
+            .map_err(|e| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                    terminus_kernel_protocol::ErrorCategory::Permission,
+                    format!("{e}"),
+                    false,
+                )
+            })?;
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "connector.executed",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            actor_id = %ctx.actor_id,
+            grant_id = %response.receipt.grant_id,
+            outcome = ?response.receipt.outcome,
+            status_code = ?response.receipt.status_code,
+            response_redactions = response.receipt.response_redactions,
+            "connector operation executed (streamed)"
         );
         Ok(response)
     }

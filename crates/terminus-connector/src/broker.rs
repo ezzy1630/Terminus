@@ -36,6 +36,39 @@ pub enum AuthStyle {
     None,
 }
 
+/// Async-aware sink for incremental response bodies. Boxing keeps the
+/// object-safe signature simple; the hot path (no sink) never allocates.
+pub trait ChunkSink: Send {
+    fn on_chunk(
+        &mut self,
+        bytes: &[u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ConnectorError>> + Send + '_>>;
+}
+
+/// Concrete, lifetime-carrying sink wrapper used on the dispatch path so
+/// borrowed sinks flow through nested futures without trait-object lifetime
+/// propagation.
+pub struct DispatchSink<'a> {
+    inner: Option<&'a mut dyn ChunkSink>,
+}
+
+impl std::fmt::Debug for DispatchSink<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DispatchSink")
+            .field("streaming", &self.inner.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DispatchSink<'_> {
+    pub async fn send(&mut self, bytes: &[u8]) -> Result<(), ConnectorError> {
+        match self.inner.as_deref_mut() {
+            Some(sink) => sink.on_chunk(bytes).await,
+            None => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ConnectorDescriptor {
     auth: AuthStyle,
@@ -172,10 +205,34 @@ impl ConnectorBroker {
     }
 
     /// Execute one grant-bound operation end to end.
+    /// Buffered dispatch: identical semantics to `execute_streaming` with a
+    /// disabled sink. Prefer `execute` when the caller cannot consume
+    /// incrementally.
     pub async fn execute(
         &self,
         op: &CanonicalOperation,
         grant: &ConnectorGrant,
+    ) -> Result<ConnectorResponse, ConnectorError> {
+        self.execute_with_sink(op, grant, None::<&mut dyn ChunkSink>).await
+    }
+
+    /// Incremental dispatch: response body chunks reach the sink as they
+    /// arrive; authorization, one-time consumption, bounded capture, and the
+    /// returned receipt are identical to [`Self::execute`].
+    pub async fn execute_streaming<S: ChunkSink>(
+        &self,
+        op: &CanonicalOperation,
+        grant: &ConnectorGrant,
+        sink: &mut S,
+    ) -> Result<ConnectorResponse, ConnectorError> {
+        self.execute_with_sink(op, grant, Some(sink)).await
+    }
+
+    async fn execute_with_sink(
+        &self,
+        op: &CanonicalOperation,
+        grant: &ConnectorGrant,
+        sink: Option<&mut dyn ChunkSink>,
     ) -> Result<ConnectorResponse, ConnectorError> {
         let claims = &grant.claims;
         let binding = &claims.binding;
@@ -285,6 +342,7 @@ impl ConnectorBroker {
         )?;
 
         // -- 7. Dispatch the exact HTTP/1.1 request ------------------------
+        let dispatch_sink = DispatchSink { inner: sink };
         let dispatch = tokio::time::timeout(self.timeout, async {
             if op.scheme.eq_ignore_ascii_case("https") {
                 dispatch_https(
@@ -295,6 +353,7 @@ impl ConnectorBroker {
                     &self.egress,
                     self.max_response_bytes,
                     self.timeout,
+                    dispatch_sink,
                 )
                 .await
             } else {
@@ -305,6 +364,7 @@ impl ConnectorBroker {
                     addresses,
                     &self.egress,
                     self.max_response_bytes,
+                    dispatch_sink,
                 )
                 .await
                 .map(|(status, body)| (status, body, None))
@@ -428,6 +488,7 @@ async fn dispatch_https(
     egress: &EgressProxy,
     max_response_bytes: usize,
     timeout: Duration,
+    mut sink: DispatchSink<'_>,
 ) -> Result<(u16, Vec<u8>, Option<String>), ConnectorError> {
     let client = reqwest::Client::builder()
         .https_only(true)
@@ -485,6 +546,7 @@ async fn dispatch_https(
             });
         }
         reserve_exact(egress, chunk.len())?;
+        sink.send(&chunk).await?;
         body.extend_from_slice(&chunk);
     }
     Ok((status, body, content_type))
@@ -586,6 +648,7 @@ async fn dispatch_http(
     addresses: Vec<std::net::SocketAddr>,
     egress: &EgressProxy,
     max_response_bytes: usize,
+    mut sink: DispatchSink<'_>,
 ) -> Result<(u16, Vec<u8>), ConnectorError> {
     // Connect to a kernel-authorized numeric address only.
     let mut remote = None;
@@ -619,9 +682,13 @@ async fn dispatch_http(
     reserve_request_exact(egress, request.len())?;
     stream.write_all(&request).await?;
 
-    // Read the bounded response head + body.
+    // Read the bounded response head + body. Body bytes are emitted to the
+    // sink as they arrive once the head boundary is known; the head itself
+    // is buffered until then so the sink never sees wire framing.
     let mut raw = Vec::with_capacity(4096);
     let mut buf = [0u8; 8192];
+    let mut emitted = 0usize;
+    let mut body_started = false;
     loop {
         let n = stream.read(&mut buf).await?;
         if n == 0 {
@@ -629,6 +696,18 @@ async fn dispatch_http(
         }
         reserve_exact(egress, n)?;
         raw.extend_from_slice(&buf[..n]);
+        match find_double_crlf(&raw) {
+            Some(split) if !body_started => {
+                body_started = true;
+                sink.send(&raw[split + 4..]).await?;
+                emitted = raw.len();
+            }
+            _ if body_started => {
+                sink.send(&raw[emitted..]).await?;
+                emitted = raw.len();
+            }
+            _ => {}
+        }
         if raw.len() > max_response_bytes {
             return Err(ConnectorError::ResponseTooLarge {
                 limit: max_response_bytes,

@@ -783,6 +783,15 @@ export interface ConnectorResponseMessage {
   contentType?: string | undefined;
 }
 
+/**
+ * Chunk of a streamed connector response. Exactly one terminal frame carries
+ * the receipt; every prior frame is a body chunk.
+ */
+export interface ConnectorChunk {
+  bytes?: Uint8Array | undefined;
+  receipt?: ConnectorReceiptMessage | undefined;
+}
+
 export interface CodeSearchRequest {
   context: RequestContext | undefined;
   workspaceId: string;
@@ -8240,6 +8249,66 @@ export const ConnectorResponseMessage: MessageFns<ConnectorResponseMessage> = {
   },
 };
 
+function createBaseConnectorChunk(): ConnectorChunk {
+  return { bytes: undefined, receipt: undefined };
+}
+
+export const ConnectorChunk: MessageFns<ConnectorChunk> = {
+  encode(message: ConnectorChunk, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.bytes !== undefined) {
+      writer.uint32(10).bytes(message.bytes);
+    }
+    if (message.receipt !== undefined) {
+      ConnectorReceiptMessage.encode(message.receipt, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ConnectorChunk {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseConnectorChunk();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.bytes = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.receipt = ConnectorReceiptMessage.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ConnectorChunk>, I>>(base?: I): ConnectorChunk {
+    return ConnectorChunk.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ConnectorChunk>, I>>(object: I): ConnectorChunk {
+    const message = createBaseConnectorChunk();
+    message.bytes = object.bytes ?? undefined;
+    message.receipt = (object.receipt !== undefined && object.receipt !== null)
+      ? ConnectorReceiptMessage.fromPartial(object.receipt)
+      : undefined;
+    return message;
+  },
+};
+
 function createBaseCodeSearchRequest(): CodeSearchRequest {
   return { context: undefined, workspaceId: "", query: "", limit: 0 };
 }
@@ -9831,6 +9900,13 @@ export class NetworkServiceClientImpl implements NetworkService {
 export interface ConnectorService {
   MintGrant(request: MintConnectorGrantRequest): Promise<ConnectorGrantMessage>;
   Execute(request: ExecuteConnectorRequest): Promise<ConnectorResponseMessage>;
+  /**
+   * R6: incremental dispatch. Streams response body chunks as they arrive
+   * and terminates with the same scrubbed receipt Execute returns. Grant
+   * consumption, egress authorization, and bounded-capture limits are
+   * identical to Execute; only the transport differs.
+   */
+  ExecuteStream(request: ExecuteConnectorRequest): Observable<ConnectorChunk>;
 }
 
 export const ConnectorServiceServiceName = "terminus.kernel.v1.ConnectorService";
@@ -9842,6 +9918,7 @@ export class ConnectorServiceClientImpl implements ConnectorService {
     this.rpc = rpc;
     this.MintGrant = this.MintGrant.bind(this);
     this.Execute = this.Execute.bind(this);
+    this.ExecuteStream = this.ExecuteStream.bind(this);
   }
   MintGrant(request: MintConnectorGrantRequest): Promise<ConnectorGrantMessage> {
     const data = MintConnectorGrantRequest.encode(request).finish();
@@ -9853,6 +9930,12 @@ export class ConnectorServiceClientImpl implements ConnectorService {
     const data = ExecuteConnectorRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "Execute", data);
     return promise.then((data) => ConnectorResponseMessage.decode(new BinaryReader(data)));
+  }
+
+  ExecuteStream(request: ExecuteConnectorRequest): Observable<ConnectorChunk> {
+    const data = ExecuteConnectorRequest.encode(request).finish();
+    const result = this.rpc.serverStreamingRequest(this.service, "ExecuteStream", data);
+    return result.pipe(map((data) => ConnectorChunk.decode(new BinaryReader(data))));
   }
 }
 
