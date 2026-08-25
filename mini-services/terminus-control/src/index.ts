@@ -73,6 +73,19 @@ import {
   type GatewayProviderConfigurationUpdate,
 } from "./gateway-provider-config.js";
 import {
+  configuredDirectProviderSnapshot,
+  directModelKey,
+  directProviderId,
+  parseDirectProviderConfiguration,
+  DIRECT_PROVIDER_CONFIGURATION_ENV,
+} from "./direct-provider-config.js";
+import {
+  createDirectRenderer,
+  directNetworkDestinations,
+  executeDirectProviderRequest,
+  KernelDirectConnectorClient,
+} from "./direct-provider-transport.js";
+import {
   cachedProviderModels,
   describeConfiguredModel,
   discoverProviderModels,
@@ -82,14 +95,16 @@ import {
 } from "./provider-models.js";
 import { KernelGatewayClient } from "./gateway-kernel-client.js";
 import {
-  MAX_TOOL_CYCLES,
   MAX_TOOL_MODEL_RESULT_BYTES,
   STANDALONE_TOOL_SCHEMAS,
   executeStandaloneTool,
   normalizedToolOperationHash,
   parseStandaloneToolCall,
+  projectModelVisibleResult,
   providerToolCallTranscript,
   providerToolResultTranscript,
+  resolveMaxToolCycles,
+  resolveShellModeEnabled,
   toolEffectMetadata,
   type ParsedStandaloneToolCall,
 } from "./agent-tools.js";
@@ -357,6 +372,7 @@ const DESKTOP_PARENT_PID = (() => {
 // TERMINUS_DEV=1 is set, so a misconfigured production deployment cannot expose
 // the privileged kernel with a publicly-known token.
 const DEV_MODE = process.env.TERMINUS_DEV === "1";
+const SHELL_MODE_ENABLED = resolveShellModeEnabled(process.env.TERMINUS_SHELL_MODE);
 function requireToken(envVar: string, devValue: string, label: string): string {
   const v = process.env[envVar];
   if (v && v.length > 0) return v;
@@ -8986,6 +9002,7 @@ async function settleStandaloneProviderTool(
       traceId: input.turnId,
       contractHash: input.contractHash,
       devMode: DEV_MODE,
+      shellModeEnabled: SHELL_MODE_ENABLED,
     });
   } catch (error: unknown) {
     if (call.toolId !== "read") {
@@ -9077,29 +9094,23 @@ async function persistSettledToolResult(input: {
     { mediaType: "application/json", custom: { purpose: "tool-result", toolCallId: input.toolCallId } },
   );
   await input.input.artifactClient.link(fullResultArtifact.hash, "tool_call", input.toolCallId, "result");
-  const resultRecord = z.record(z.string(), z.unknown()).parse(JSON.parse(fullResultText) as unknown);
   const fullResultBytes = new TextEncoder().encode(fullResultText).byteLength;
+  // Dual-path projection (ADR-0039 §11): the model-visible transcript carries
+  // a minimal view of the same settled result; ceremony stays in the
+  // observability artifact ingested above.
+  const modelVisibleRecord = projectModelVisibleResult(input.result);
   const projectedResult = fullResultBytes <= MAX_TOOL_MODEL_RESULT_BYTES
-    ? resultRecord
-    : z.record(z.string(), z.unknown()).parse(JSON.parse(canonicalJson({
-        ...input.result,
+    ? modelVisibleRecord
+    : z.record(z.string(), z.unknown()).parse(canonicalJson({
+        ...modelVisibleRecord,
         data: null,
         summary: `${input.result.summary} Full result: ${fullResultArtifact.uri}`,
-        artifacts: [
-          ...input.result.artifacts,
-          {
-            uri: fullResultArtifact.uri,
-            mediaType: fullResultArtifact.mediaType,
-            bytes: Number(fullResultArtifact.bytes),
-            hash: fullResultArtifact.hash,
-          },
-        ],
         truncation: {
           occurred: true,
           reason: `tool result exceeded ${MAX_TOOL_MODEL_RESULT_BYTES} model bytes`,
           continuation: fullResultArtifact.uri,
         },
-      })) as unknown);
+      }));
   const resultTranscriptText = canonicalJson(providerToolResultTranscript(input.call, projectedResult));
   if (new TextEncoder().encode(resultTranscriptText).byteLength > MAX_TOOL_MODEL_RESULT_BYTES) {
     throw new Error("bounded tool result transcript still exceeds the model-result limit");
@@ -9297,7 +9308,13 @@ async function agentLoop(turnId: string): Promise<void> {
       snapshot: localProvider,
       observedAt: localProvider.observedAt,
     };
-    const gatewayModel = gatewayProviderConfiguration === null
+    // Transport precedence (ADR-0039 §10, audit P0-2): vendor-direct BYO-key
+    // configuration > OpenCode gateway > local NDJSON command. The direct
+    // configuration references a kernel secret capability URI only; key
+    // material never appears in configuration or logs.
+    const directConfiguration = parseDirectProviderConfiguration(process.env[DIRECT_PROVIDER_CONFIGURATION_ENV]);
+    const directObservedAt = now();
+    const gatewayModel = directConfiguration !== null || gatewayProviderConfiguration === null
       ? null
       : configuredGatewayModel(
           gatewayProviderConfiguration,
@@ -9310,29 +9327,42 @@ async function agentLoop(turnId: string): Promise<void> {
             gatewayProviderConfiguration.model,
           ),
         );
-    const selectedProvider = gatewayModel === null
-      ? localProvider
-      : configuredGatewayProviderSnapshot(
-          gatewayModel,
-          gatewayProviderConfiguration?.revision ?? 0,
-          gatewayProviderConfiguration?.workspaceAccess ?? false,
-          gatewayProviderConfiguration?.privacyTermsAdmitted ?? false,
-          gatewayProviderConfiguration?.privacyTermsVersion ?? null,
-        );
-    const selectedModel: ModelCapabilitySnapshot = gatewayModel === null
-      ? localModel
-      : {
-          modelKey: gatewayModelKey(gatewayModel),
-          providerId: selectedProvider.providerId,
+    const selectedProvider = directConfiguration !== null
+      ? configuredDirectProviderSnapshot(directConfiguration, directObservedAt)
+      : gatewayModel === null
+        ? localProvider
+        : configuredGatewayProviderSnapshot(
+            gatewayModel,
+            gatewayProviderConfiguration?.revision ?? 0,
+            gatewayProviderConfiguration?.workspaceAccess ?? false,
+            gatewayProviderConfiguration?.privacyTermsAdmitted ?? false,
+            gatewayProviderConfiguration?.privacyTermsVersion ?? null,
+          );
+    const selectedModel: ModelCapabilitySnapshot = directConfiguration !== null
+      ? {
+          modelKey: directModelKey(directConfiguration),
+          providerId: directProviderId(directConfiguration.vendor),
           snapshot: selectedProvider,
           observedAt: selectedProvider.observedAt,
-        };
-    const selectedRenderer = gatewayModel === null
-      ? new LocalRenderer()
-      : new GatewayRenderer([gatewayModel]);
-    const toolsEnabled = gatewayModel === null
-      ? (localProviderCommand?.toolsEnabled ?? false)
-      : gatewayModel.toolCalling;
+        }
+      : gatewayModel === null
+        ? localModel
+        : {
+            modelKey: gatewayModelKey(gatewayModel),
+            providerId: selectedProvider.providerId,
+            snapshot: selectedProvider,
+            observedAt: selectedProvider.observedAt,
+          };
+    const selectedRenderer = directConfiguration !== null
+      ? createDirectRenderer(directConfiguration)
+      : gatewayModel === null
+        ? new LocalRenderer()
+        : new GatewayRenderer([gatewayModel]);
+    const toolsEnabled = directConfiguration !== null
+      ? selectedProvider.context.toolCalling
+      : gatewayModel === null
+        ? (localProviderCommand?.toolsEnabled ?? false)
+        : gatewayModel.toolCalling;
     const contextBudget = makeContextBudget(selectedProvider, taskSnapshot.contract.budget);
     const threadSnapshot: ThreadSnapshot = {
       threadId: turn.threadId as ThreadSnapshot["threadId"],
@@ -9465,7 +9495,8 @@ async function agentLoop(turnId: string): Promise<void> {
 
     let finalText: string | null = null;
     let finalResponseArtifactUri: string | null = null;
-    for (let attemptNumber = 1; attemptNumber <= MAX_TOOL_CYCLES + 1; attemptNumber += 1) {
+    const maxToolCycles = resolveMaxToolCycles(process.env.TERMINUS_MAX_TOOL_CYCLES);
+    for (let attemptNumber = 1; attemptNumber <= maxToolCycles + 1; attemptNumber += 1) {
       if (attemptNumber > 1) {
         await mutateAgentState(() => emit({
           eventType: "turn.context_compiling",
@@ -9503,36 +9534,58 @@ async function agentLoop(turnId: string): Promise<void> {
           taskId: task.id,
           turnId,
           workspaceId: workspace.id,
-          operationClasses: gatewayModel === null
+          operationClasses: directConfiguration !== null || gatewayModel !== null
             ? [
-                CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
-                CapabilityOperationProto.CAPABILITY_OPERATION_JOB,
-                CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
-              ]
-            : [
                 CapabilityOperationProto.CAPABILITY_OPERATION_SECRET,
                 CapabilityOperationProto.CAPABILITY_OPERATION_NETWORK,
                 CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
+              ]
+            : [
+                CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
+                CapabilityOperationProto.CAPABILITY_OPERATION_JOB,
+                CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
               ],
-          workspacePaths: gatewayModel === null
+          workspacePaths: directConfiguration === null && gatewayModel === null
             ? leastWorkspaceScope([
                 ...contract.allowedScope.readPaths,
                 ...contract.allowedScope.writePaths,
               ])
             : [],
-          networkDestinations: gatewayModel === null ? [] : ["opencode.ai:443"],
-          secretCapabilities: gatewayModel === null
-            ? []
-            : [gatewaySecretUri(gatewayModel.deployment)],
+          networkDestinations: directConfiguration !== null
+            ? [...directNetworkDestinations()]
+            : gatewayModel === null
+              ? []
+              : ["opencode.ai:443"],
+          secretCapabilities: directConfiguration !== null
+            ? [directConfiguration.secretUri]
+            : gatewayModel === null
+              ? []
+              : [gatewaySecretUri(gatewayModel.deployment)],
         }),
         idempotencyKey: `provider:${attemptId}`,
       };
+      const directExecutor = directConfiguration === null
+        ? undefined
+        : (execInput: ProviderExecutionInput) => executeDirectProviderRequest(
+            {
+              rendered: execInput.rendered,
+              configuration: directConfiguration,
+              // Route OpenAI prompt caches by context epoch so tool-call turns
+              // hit the same cache entry instead of fragmenting across turns.
+              cacheKey: contextEpoch.epochId,
+            },
+            new KernelDirectConnectorClient(requireKernelUds().connectors, execInput.context),
+          );
       const providerResponse = await providerSessionService.execute({
         rendered: compiled.rendered,
         command: localProviderCommand,
         gateway: gatewayModel === null
           ? null
           : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
+        direct: directConfiguration === null
+          ? null
+          : { vendor: directConfiguration.vendor },
+        ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
         context: providerContext,
         workspaceId: workspace.id,
       });

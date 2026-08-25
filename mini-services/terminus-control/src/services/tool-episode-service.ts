@@ -1,7 +1,7 @@
 import type { ContentHash, Episode } from "@terminus/domain";
 import type { ArtifactClient } from "@terminus/artifact-client";
 import type { ProviderToolCallChunk } from "@terminus/provider-core";
-import { MAX_TOOL_CYCLES } from "../agent-tools.js";
+import { DEFAULT_MAX_TOOL_CYCLES } from "../agent-tools.js";
 
 export class ToolPolicyDeniedError extends Error {
   constructor(message: string) {
@@ -71,7 +71,7 @@ export class ToolEpisodeService {
   constructor(
     private readonly dependencies: ToolEpisodeDependencies,
   ) {
-    this.maxCycles = dependencies.maxCycles ?? MAX_TOOL_CYCLES;
+    this.maxCycles = dependencies.maxCycles ?? DEFAULT_MAX_TOOL_CYCLES;
   }
 
   startTurn(): ToolEpisodeSession {

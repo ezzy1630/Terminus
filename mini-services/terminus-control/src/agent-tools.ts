@@ -18,8 +18,34 @@ import {
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import type { KernelUdsClients } from "./kernel-uds.js";
 
-export const MAX_TOOL_CYCLES = 4;
+export const DEFAULT_MAX_TOOL_CYCLES = 64;
+export const MIN_TOOL_CYCLES = 1;
+export const MAX_TOOL_CYCLES_CEILING = 256;
 export const MAX_TOOL_MODEL_RESULT_BYTES = 32 * 1_024;
+
+/**
+ * Resolve the per-turn tool-call budget (ADR-0039 §10). Operators tune it
+ * through TERMINUS_MAX_TOOL_CYCLES; unparsable or out-of-range values fail
+ * closed to the default rather than widening the budget.
+ */
+export function resolveMaxToolCycles(raw: string | undefined | null): number {
+  if (raw === undefined || raw === null || raw.trim() === "") return DEFAULT_MAX_TOOL_CYCLES;
+  const parsed = Number.parseInt(raw.trim(), 10);
+  if (!Number.isInteger(parsed)) return DEFAULT_MAX_TOOL_CYCLES;
+  if (parsed < MIN_TOOL_CYCLES || parsed > MAX_TOOL_CYCLES_CEILING) {
+    throw new Error(`TERMINUS_MAX_TOOL_CYCLES must be an integer between ${MIN_TOOL_CYCLES} and ${MAX_TOOL_CYCLES_CEILING}`);
+  }
+  return parsed;
+}
+
+/**
+ * Shell-mode exec is off unless the operator explicitly enables it
+ * (ADR-0039 §10). When enabled, scripts still travel as kernel-dispatched
+ * data under the same sandbox profile and strictest-wins policy engine.
+ */
+export function resolveShellModeEnabled(raw: string | undefined | null): boolean {
+  return raw === "1" || raw === "true";
+}
 
 const pathSchema = z.string().min(1).max(4_096).refine(
   (path) => !path.includes("\0") && !path.includes("\r") && !path.includes("\n"),
@@ -29,37 +55,81 @@ const sha256Schema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 
 export const standaloneReadInputSchema = z.object({
   path: pathSchema,
-  max_bytes: z.number().int().min(1).max(24 * 1_024).default(24 * 1_024),
+  max_bytes: z.number().int().min(1).max(64 * 1_024).default(48 * 1_024),
+  offset_line: z.number().int().min(1).default(1),
+  max_lines: z.number().int().min(1).max(4_000).default(2_000),
   expected_sha256: sha256Schema.optional(),
+}).strict();
+
+const standalonePatchEditSchema = z.object({
+  expected_utf8: z.string().min(1).max(64 * 1_024),
+  replacement_utf8: z.string().max(64 * 1_024),
 }).strict();
 
 export const standalonePatchInputSchema = z.object({
   path: pathSchema,
   expected_sha256: sha256Schema,
-  expected_utf8: z.string().max(64 * 1_024),
-  replacement_utf8: z.string().max(64 * 1_024),
+  expected_utf8: z.string().max(64 * 1_024).optional(),
+  replacement_utf8: z.string().max(64 * 1_024).optional(),
+  edits: z.array(standalonePatchEditSchema).min(1).max(32).optional(),
   commit_mode: z.enum(["preview", "apply"]).default("apply"),
+}).strict().refine(
+  (value) => value.edits !== undefined || (value.expected_utf8 !== undefined && value.replacement_utf8 !== undefined),
+  "provide expected_utf8+replacement_utf8, or a non-empty edits array",
+);
+
+export const standaloneShellInputSchema = z.object({
+  dialect: z.enum(["bash", "sh"]),
+  script: z.string().min(1).max(64 * 1_024),
 }).strict();
 
 export const standaloneExecInputSchema = z.object({
-  program: z.string().min(1).max(4_096).refine(
+  program: z.string().max(4_096).refine(
     (program) => !/[\0\r\n]/.test(program) && !program.includes(";") && !program.includes("\\"),
     "program must be an executable path or name, not a shell expression",
-  ),
+  ).optional(),
   args: z.array(z.string().max(16_384)).max(128).default([]),
+  shell: standaloneShellInputSchema.optional(),
   cwd: pathSchema.default("."),
   timeout_ms: z.number().int().min(100).max(60_000).default(60_000),
   expected_exit_codes: z.array(z.number().int().min(0).max(255)).min(1).max(16).default([0]),
+}).strict().refine(
+  (value) => (value.program !== undefined) !== (value.shell !== undefined),
+  "provide either program+args (argv mode) or shell (shell mode), not both",
+);
+
+export const standaloneGrepInputSchema = z.object({
+  pattern: z.string().min(1).max(512).refine(
+    (pattern) => !pattern.includes("\0"),
+    "pattern may not contain NUL",
+  ),
+  path: pathSchema.default("."),
+  glob: z.string().min(1).max(256).optional(),
+  ignore_case: z.boolean().default(false),
+  max_results: z.number().int().min(1).max(500).default(100),
+}).strict();
+
+export const standaloneGlobInputSchema = z.object({
+  pattern: z.string().min(1).max(256).refine(
+    (pattern) => !pattern.includes("\0") && !/[\r\n]/.test(pattern),
+    "pattern may not contain control delimiters",
+  ),
+  path: pathSchema.default("."),
+  max_results: z.number().int().min(1).max(1_000).default(200),
 }).strict();
 
 export type StandaloneReadInput = z.infer<typeof standaloneReadInputSchema>;
 export type StandalonePatchInput = z.infer<typeof standalonePatchInputSchema>;
 export type StandaloneExecInput = z.infer<typeof standaloneExecInputSchema>;
+export type StandaloneGrepInput = z.infer<typeof standaloneGrepInputSchema>;
+export type StandaloneGlobInput = z.infer<typeof standaloneGlobInputSchema>;
 
 export type ParsedStandaloneToolCall =
   | { readonly providerCallId: string; readonly toolId: "read"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneReadInput }
   | { readonly providerCallId: string; readonly toolId: "patch"; readonly toolVersion: "standalone-v1"; readonly arguments: StandalonePatchInput }
-  | { readonly providerCallId: string; readonly toolId: "exec"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneExecInput };
+  | { readonly providerCallId: string; readonly toolId: "exec"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneExecInput }
+  | { readonly providerCallId: string; readonly toolId: "grep"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGrepInput }
+  | { readonly providerCallId: string; readonly toolId: "glob"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGlobInput };
 
 const resultSchema: Readonly<Record<string, unknown>> = {
   type: "object",
@@ -93,14 +163,16 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   {
     id: "read",
     version: "standalone-v1",
-    summary: "Read a bounded UTF-8 projection of one task-scoped workspace file.",
+    summary: "Read a bounded, line-paged UTF-8 projection of one task-scoped workspace file.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       required: ["path"],
       properties: {
         path: { type: "string" },
-        max_bytes: { type: "integer", minimum: 1, maximum: 24 * 1_024, default: 24 * 1_024 },
+        max_bytes: { type: "integer", minimum: 1, maximum: 64 * 1_024, default: 48 * 1_024 },
+        offset_line: { type: "integer", minimum: 1, default: 1 },
+        max_lines: { type: "integer", minimum: 1, maximum: 4_000, default: 2_000 },
         expected_sha256: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
       },
     },
@@ -116,16 +188,30 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   {
     id: "patch",
     version: "standalone-v1",
-    summary: "Apply one hash-anchored, unique exact-text replacement in the task write scope.",
+    summary: "Apply hash-anchored, unique exact-text replacements in the task write scope.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["path", "expected_sha256", "expected_utf8", "replacement_utf8"],
+      required: ["path", "expected_sha256"],
       properties: {
         path: { type: "string" },
         expected_sha256: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
         expected_utf8: { type: "string", maxLength: 64 * 1_024 },
         replacement_utf8: { type: "string", maxLength: 64 * 1_024 },
+        edits: {
+          type: "array",
+          minItems: 1,
+          maxItems: 32,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["expected_utf8", "replacement_utf8"],
+            properties: {
+              expected_utf8: { type: "string", minLength: 1, maxLength: 64 * 1_024 },
+              replacement_utf8: { type: "string", maxLength: 64 * 1_024 },
+            },
+          },
+        },
         commit_mode: { enum: ["preview", "apply"], default: "apply" },
       },
     },
@@ -141,14 +227,22 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   {
     id: "exec",
     version: "standalone-v1",
-    summary: "Run one bounded argv command without a shell, environment injection, network, or secrets.",
+    summary: "Run one bounded command without environment injection, network, or secrets. argv mode by default; shell mode requires operator enablement.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["program"],
       properties: {
         program: { type: "string" },
         args: { type: "array", maxItems: 128, items: { type: "string" }, default: [] },
+        shell: {
+          type: "object",
+          additionalProperties: false,
+          required: ["dialect", "script"],
+          properties: {
+            dialect: { enum: ["bash", "sh"] },
+            script: { type: "string", minLength: 1, maxLength: 64 * 1_024 },
+          },
+        },
         cwd: { type: "string", default: "." },
         timeout_ms: { type: "integer", minimum: 100, maximum: 60_000, default: 60_000 },
         expected_exit_codes: { type: "array", minItems: 1, maxItems: 16, items: { type: "integer", minimum: 0, maximum: 255 }, default: [0] },
@@ -163,6 +257,54 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
     defaultTimeoutMs: 60_000,
     policyTags: ["workspace", "process", "no-shell", "standalone"],
   },
+  {
+    id: "grep",
+    version: "standalone-v1",
+    summary: "Lexical regex search over the task workspace via kernel-dispatched ripgrep. Returns file:line:text matches, bounded.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pattern"],
+      properties: {
+        pattern: { type: "string", minLength: 1, maxLength: 512 },
+        path: { type: "string", default: "." },
+        glob: { type: "string", minLength: 1, maxLength: 256 },
+        ignore_case: { type: "boolean", default: false },
+        max_results: { type: "integer", minimum: 1, maximum: 500, default: 100 },
+      },
+    },
+    resultSchema,
+    sideEffectClass: "read",
+    requiredCapabilities: ["workspace.read", "process.exec"],
+    trustLevel: "builtin",
+    maximumModelResultBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+    maximumArtifactBytes: 16 * 1_024 * 1_024,
+    defaultTimeoutMs: 30_000,
+    policyTags: ["workspace", "read-only", "search", "standalone"],
+  },
+  {
+    id: "glob",
+    version: "standalone-v1",
+    summary: "List task-workspace file paths matching one glob via kernel-dispatched ripgrep --files. Bounded.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pattern"],
+      properties: {
+        pattern: { type: "string", minLength: 1, maxLength: 256 },
+        path: { type: "string", default: "." },
+        max_results: { type: "integer", minimum: 1, maximum: 1_000, default: 200 },
+      },
+    },
+    resultSchema,
+    sideEffectClass: "read",
+    requiredCapabilities: ["workspace.read", "process.exec"],
+    trustLevel: "builtin",
+    maximumModelResultBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+    maximumArtifactBytes: 16 * 1_024 * 1_024,
+    defaultTimeoutMs: 30_000,
+    policyTags: ["workspace", "read-only", "search", "standalone"],
+  },
 ] as const;
 
 export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStandaloneToolCall {
@@ -176,6 +318,10 @@ export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStan
       return { providerCallId: call.toolCallId, toolId: "patch", toolVersion: "standalone-v1", arguments: parseArguments("patch", standalonePatchInputSchema, call.arguments) };
     case "exec":
       return { providerCallId: call.toolCallId, toolId: "exec", toolVersion: "standalone-v1", arguments: parseArguments("exec", standaloneExecInputSchema, call.arguments) };
+    case "grep":
+      return { providerCallId: call.toolCallId, toolId: "grep", toolVersion: "standalone-v1", arguments: parseArguments("grep", standaloneGrepInputSchema, call.arguments) };
+    case "glob":
+      return { providerCallId: call.toolCallId, toolId: "glob", toolVersion: "standalone-v1", arguments: parseArguments("glob", standaloneGlobInputSchema, call.arguments) };
     default:
       throw new Error(`provider requested unknown standalone tool '${call.toolName}'`);
   }
@@ -228,6 +374,48 @@ export function providerToolResultTranscript(
   };
 }
 
+const MODEL_VISIBLE_RESULT_STATUSES = new Set(["success", "partial"]);
+
+/**
+ * Dual-path projection (ADR-0039 §11): the model sees a minimal
+ * status/summary/data view of a settled result; the full envelope stays in
+ * the observability artifact. Payload fields the provider must consume
+ * (file content, command output, match lists) are preserved verbatim;
+ * ceremony fields (timing, resource usage, trace ids, artifact catalogs)
+ * are dropped. `is_error` is set so renderers can mark failed tool results.
+ */
+export function projectModelVisibleResult(
+  result: ToolResult<unknown>,
+): Readonly<Record<string, unknown>> {
+  const ok = MODEL_VISIBLE_RESULT_STATUSES.has(result.status);
+  const data = ok ? projectModelVisibleData(result) : null;
+  const projection: Record<string, unknown> = {
+    status: result.status,
+    summary: result.summary,
+    ...(data !== null ? { data } : {}),
+    ...(!ok && result.diagnostics.length > 0
+      ? { error: result.diagnostics.map((diagnostic) => diagnostic.message).join("; ") }
+      : {}),
+    ...(result.truncation.occurred ? { truncation: result.truncation } : {}),
+    ...(ok ? {} : { is_error: true }),
+  };
+  return projection;
+}
+
+function projectModelVisibleData(result: ToolResult<unknown>): unknown {
+  const data = result.data;
+  if (data === null || data === undefined || typeof data !== "object") return data;
+  const record = data as Readonly<Record<string, unknown>>;
+  if (!Array.isArray(record.validations)) return data;
+  // patch: keep only failing validations in the model view.
+  return {
+    ...record,
+    validations: (record.validations as readonly { status?: string }[]).filter(
+      (validation) => validation.status !== "pass",
+    ),
+  };
+}
+
 export function toolEffectMetadata(call: ParsedStandaloneToolCall): {
   readonly effectType: "READ_LOCAL" | "WRITE_LOCAL" | "EXECUTE_LOCAL";
   readonly resourceUri: string;
@@ -240,6 +428,10 @@ export function toolEffectMetadata(call: ParsedStandaloneToolCall): {
       return { effectType: "WRITE_LOCAL", resourceUri: `workspace://${call.arguments.path}`, reversibility: "reversible" };
     case "exec":
       return { effectType: "EXECUTE_LOCAL", resourceUri: `workspace://${call.arguments.cwd}`, reversibility: "unknown" };
+    case "grep":
+      return { effectType: "READ_LOCAL", resourceUri: `workspace://${call.arguments.path}`, reversibility: "none" };
+    case "glob":
+      return { effectType: "READ_LOCAL", resourceUri: `workspace://${call.arguments.path}`, reversibility: "none" };
   }
 }
 
@@ -254,6 +446,35 @@ export interface ExecuteStandaloneToolInput {
   readonly traceId: string;
   readonly contractHash: string;
   readonly devMode: boolean;
+  readonly shellModeEnabled: boolean;
+}
+
+/** Slice decoded UTF-8 text into a 1-based inclusive line page. */
+export function pageLines(text: string, offsetLine: number, maxLines: number): {
+  readonly text: string;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly hasMore: boolean;
+} {
+  const normalized = text.endsWith("\n") ? text.slice(0, -1) : text;
+  const lines = normalized.length === 0 ? [] : normalized.split("\n");
+  if (offsetLine > lines.length) {
+    return {
+      text: "",
+      startLine: Math.max(offsetLine, 1),
+      endLine: offsetLine - 1,
+      hasMore: false,
+    };
+  }
+  const start = Math.max(1, Math.min(offsetLine, lines.length));
+  const slice = lines.slice(start - 1, start - 1 + maxLines);
+  const end = start + slice.length - 1;
+  return {
+    text: `${slice.join("\n")}\n`,
+    startLine: start,
+    endLine: end,
+    hasMore: end < lines.length,
+  };
 }
 
 export async function executeStandaloneTool(
@@ -272,19 +493,23 @@ export async function executeStandaloneTool(
         maxBytes: input.call.arguments.max_bytes,
         expectedSha256: input.call.arguments.expected_sha256 ?? "",
       });
-      const content = new TextDecoder("utf-8", { fatal: true }).decode(response.modelProjectionUtf8);
+      const fullProjection = new TextDecoder("utf-8", { fatal: true }).decode(response.modelProjectionUtf8);
+      const page = pageLines(fullProjection, input.call.arguments.offset_line, input.call.arguments.max_lines);
       const artifact = kernelArtifactDescriptor(response.fullContent);
       const elapsed = performance.now() - startedAt;
       const sourceHash = response.sourceVersion?.sha256 ?? "";
       const result = okResult({
         path: input.call.arguments.path,
-        content_utf8: content,
+        content_utf8: page.text,
+        offset_line: page.startLine,
+        end_line: page.endLine,
         rendered_mode: response.renderedMode,
         continuation_token: response.continuationToken || null,
+        next_offset_line: page.hasMore ? page.endLine + 1 : null,
       }, {
         toolCallId: input.internalToolCallId,
         traceId: input.traceId,
-        summary: `Read ${input.call.arguments.path}`,
+        summary: `Read ${input.call.arguments.path} lines ${page.startLine}-${page.endLine}${page.hasMore ? " (continued)" : ""}`,
         sourceVersions: sourceHash.length === 0 ? {} : { [input.call.arguments.path]: sourceHash },
         artifacts: artifact === null ? [] : [artifact],
         sideEffects: [sideEffect(input.sideEffectId, "read", `Read ${input.call.arguments.path}`, true)],
@@ -293,11 +518,15 @@ export async function executeStandaloneTool(
       return {
         ...result,
         policyDecisionId: input.policyDecisionId,
-        truncation: response.truncated
+        truncation: response.truncated || page.hasMore
           ? {
               occurred: true,
-              reason: "kernel read projection reached max_bytes",
-              continuation: response.continuationToken || artifact?.uri || null,
+              reason: page.hasMore
+                ? "line page continues beyond this read"
+                : "kernel read projection reached max_bytes",
+              continuation: page.hasMore
+                ? `read ${input.call.arguments.path} at offset_line ${page.endLine + 1}`
+                : response.continuationToken || artifact?.uri || null,
             }
           : result.truncation,
         diagnostics: response.diagnostics.map((diagnostic) => ({
@@ -313,6 +542,11 @@ export async function executeStandaloneTool(
       };
     }
     case "patch": {
+      const patchArguments = input.call.arguments;
+      const edits = patchArguments.edits ?? [{
+        expected_utf8: nonEmptyAsserted(patchArguments.expected_utf8, "expected_utf8"),
+        replacement_utf8: patchArguments.replacement_utf8 ?? "",
+      }];
       const response = await input.clients.patch.Apply({
         context: nextRequestContext(input.context, "patch"),
         intent: toolIntent(input.contractHash, "write_local"),
@@ -322,23 +556,23 @@ export async function executeStandaloneTool(
           repositoryRevision: "no-vcs",
           dirtyDigest: "",
           sources: [{
-            path: { workspaceId: input.workspaceId, relativePath: input.call.arguments.path },
-            sha256: input.call.arguments.expected_sha256,
+            path: { workspaceId: input.workspaceId, relativePath: patchArguments.path },
+            sha256: patchArguments.expected_sha256,
             repositoryRevision: "no-vcs",
           }],
         },
-        edits: [{
+        edits: edits.map((edit) => ({
           replaceExactText: {
-            path: { workspaceId: input.workspaceId, relativePath: input.call.arguments.path },
-            expectedSha256: input.call.arguments.expected_sha256,
-            expectedUtf8: new TextEncoder().encode(input.call.arguments.expected_utf8),
-            replacementUtf8: new TextEncoder().encode(input.call.arguments.replacement_utf8),
+            path: { workspaceId: input.workspaceId, relativePath: patchArguments.path },
+            expectedSha256: patchArguments.expected_sha256,
+            expectedUtf8: new TextEncoder().encode(edit.expected_utf8),
+            replacementUtf8: new TextEncoder().encode(edit.replacement_utf8),
             requireUnique: true,
           },
-        }],
+        })),
         validationProfileId: "task-default",
         allowTransientInvalidState: false,
-        commitMode: input.call.arguments.commit_mode === "preview"
+        commitMode: patchArguments.commit_mode === "preview"
           ? PatchCommitMode.PATCH_COMMIT_MODE_PREVIEW_ONLY
           : PatchCommitMode.PATCH_COMMIT_MODE_APPLY_TO_WORKTREE,
       });
@@ -349,6 +583,7 @@ export async function executeStandaloneTool(
         state: response.state,
         final_repository_revision: response.finalRepositoryRevision,
         final_dirty_digest: response.finalDirtyDigest,
+        applied_edits: edits.length,
         changed_files: response.changedFiles.map((file) => ({
           path: file.path?.relativePath ?? "",
           old_sha256: file.oldSha256,
@@ -363,37 +598,20 @@ export async function executeStandaloneTool(
       }, {
         toolCallId: input.internalToolCallId,
         traceId: input.traceId,
-        summary: `${input.call.arguments.commit_mode === "preview" ? "Previewed" : "Applied"} exact patch to ${input.call.arguments.path}`,
+        summary: `${patchArguments.commit_mode === "preview" ? "Previewed" : "Applied"} ${edits.length} exact edit${edits.length === 1 ? "" : "s"} to ${patchArguments.path}`,
         artifacts: artifact === null ? [] : [artifact],
-        sideEffects: [sideEffect(input.sideEffectId, "workspace_write", `Patch ${input.call.arguments.path}`, input.call.arguments.commit_mode === "preview")],
+        sideEffects: [sideEffect(input.sideEffectId, "workspace_write", `Patch ${patchArguments.path}`, patchArguments.commit_mode === "preview")],
         timing: { executionMs: elapsed, totalMs: elapsed },
       });
       return { ...result, policyDecisionId: input.policyDecisionId };
     }
     case "exec": {
-      const events = input.clients.process.Start({
-        context: nextRequestContext(input.context, "exec"),
-        intent: toolIntent(input.contractHash, "execute_local"),
-        command: {
-          program: input.call.arguments.program,
-          args: [...input.call.arguments.args],
-          cwd: { workspaceId: input.workspaceId, relativePath: input.call.arguments.cwd },
-          publicEnv: {},
-          secretCapabilityUris: [],
-          timeout: durationFromMilliseconds(input.call.arguments.timeout_ms),
-          allocatePty: false,
-          shell: undefined,
-        },
-        sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
-        outputPolicyId: "tool-result-bounded",
-      });
-      const outcome = await collectProcess(events);
-      const elapsed = performance.now() - startedAt;
-      if (outcome.kind === "denied") {
+      if (input.call.arguments.shell !== undefined && !input.shellModeEnabled) {
+        const elapsed = performance.now() - startedAt;
         const base = okResult(null, {
           toolCallId: input.internalToolCallId,
           traceId: input.traceId,
-          summary: outcome.policy.explanation || `Kernel policy ${outcome.policy.decision}`,
+          summary: "shell mode is disabled by operator policy; use argv exec",
           timing: { executionMs: elapsed, totalMs: elapsed },
         });
         return {
@@ -402,46 +620,175 @@ export async function executeStandaloneTool(
           policyDecisionId: input.policyDecisionId,
           diagnostics: [{
             severity: "error",
-            code: outcome.policy.decisionId || null,
-            message: outcome.policy.explanation || `kernel policy decision: ${outcome.policy.decision}`,
+            code: "SHELL_MODE_DISABLED",
+            message: "shell-mode exec requires the operator to enable TERMINUS_SHELL_MODE; use program+args instead",
             path: null,
             range: null,
           }],
         };
       }
-      const stdoutArtifact = kernelArtifactDescriptor(outcome.stdoutArtifact);
-      const stderrArtifact = kernelArtifactDescriptor(outcome.stderrArtifact);
-      const artifacts = [stdoutArtifact, stderrArtifact].filter((artifact): artifact is ArtifactDescriptor => artifact !== null);
-      const expected = input.call.arguments.expected_exit_codes.includes(outcome.exitCode);
-      const base = okResult({
-        exit_code: outcome.exitCode,
-        signal: outcome.signal || null,
-        stdout: outcome.stdout,
-        stderr: outcome.stderr,
-      }, {
-        toolCallId: input.internalToolCallId,
-        traceId: input.traceId,
-        summary: expected
-          ? `${input.call.arguments.program} exited ${outcome.exitCode}`
-          : `${input.call.arguments.program} exited ${outcome.exitCode}; expected ${input.call.arguments.expected_exit_codes.join(", ")}`,
-        artifacts,
-        sideEffects: [sideEffect(input.sideEffectId, "process", `Execute ${input.call.arguments.program}`, false)],
-        timing: { executionMs: elapsed, totalMs: elapsed },
+      const shell = input.call.arguments.shell;
+      const events = input.clients.process.Start({
+        context: nextRequestContext(input.context, "exec"),
+        intent: toolIntent(input.contractHash, "execute_local"),
+        command: {
+          program: shell !== undefined ? "" : assertProgram(input.call.arguments.program),
+          args: shell !== undefined ? [] : [...input.call.arguments.args],
+          cwd: { workspaceId: input.workspaceId, relativePath: input.call.arguments.cwd },
+          publicEnv: {},
+          secretCapabilityUris: [],
+          timeout: durationFromMilliseconds(input.call.arguments.timeout_ms),
+          allocatePty: false,
+          shell: shell === undefined ? undefined : { enabled: true, dialect: shell.dialect, script: shell.script },
+        },
+        sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
+        outputPolicyId: "tool-result-bounded",
       });
-      return {
-        ...base,
-        status: expected ? "success" : "error",
-        policyDecisionId: input.policyDecisionId,
-        truncation: outcome.truncated
-          ? {
-              occurred: true,
-              reason: "process output exceeded the model-result projection",
-              continuation: stdoutArtifact?.uri ?? stderrArtifact?.uri ?? null,
-            }
-          : base.truncation,
-      };
+      return settleProcessOutcome(input, events, startedAt);
+    }
+    case "grep":
+    case "glob": {
+      const argv = input.call.toolId === "grep"
+        ? grepArgv(input.call.arguments)
+        : globArgv(input.call.arguments);
+      const events = input.clients.process.Start({
+        context: nextRequestContext(input.context, input.call.toolId),
+        intent: toolIntent(input.contractHash, "execute_local"),
+        command: {
+          program: argv.program,
+          args: [...argv.args],
+          cwd: { workspaceId: input.workspaceId, relativePath: input.call.arguments.path },
+          publicEnv: {},
+          secretCapabilityUris: [],
+          timeout: durationFromMilliseconds(30_000),
+          allocatePty: false,
+          shell: undefined,
+        },
+        sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
+        outputPolicyId: "tool-result-bounded",
+      });
+      return settleProcessOutcome(input, events, startedAt);
     }
   }
+}
+
+function assertProgram(program: string | undefined): string {
+  if (program === undefined || program.length === 0) throw new Error("argv exec requires program");
+  return program;
+}
+
+function nonEmptyAsserted(value: string | undefined, field: string): string {
+  if (value === undefined || value.length === 0) throw new Error(`single-edit patch requires ${field}`);
+  return value;
+}
+
+function grepArgv(args: StandaloneGrepInput): { readonly program: string; readonly args: readonly string[] } {
+  const argv = ["--line-number", "--no-heading", "--color", "never", "--max-columns", "400"];
+  if (args.ignore_case) argv.push("--ignore-case");
+  if (args.glob !== undefined) argv.push("--glob", args.glob);
+  return { program: "rg", args: [...argv, "--", args.pattern, "."] };
+}
+
+function globArgv(args: StandaloneGlobInput): { readonly program: string; readonly args: readonly string[] } {
+  return { program: "rg", args: ["--files", "--color", "never", "--glob", args.pattern] };
+}
+
+async function settleProcessOutcome(
+  input: ExecuteStandaloneToolInput,
+  events: ReturnType<KernelUdsClients["process"]["Start"]>,
+  startedAt: number,
+): Promise<ToolResult<unknown>> {
+  const outcome = await collectProcess(events);
+  const elapsed = performance.now() - startedAt;
+  if (outcome.kind === "denied") {
+    const base = okResult(null, {
+      toolCallId: input.internalToolCallId,
+      traceId: input.traceId,
+      summary: outcome.policy.explanation || `Kernel policy ${outcome.policy.decision}`,
+      timing: { executionMs: elapsed, totalMs: elapsed },
+    });
+    return {
+      ...base,
+      status: "denied",
+      policyDecisionId: input.policyDecisionId,
+      diagnostics: [{
+        severity: "error",
+        code: outcome.policy.decisionId || null,
+        message: outcome.policy.explanation || `kernel policy decision: ${outcome.policy.decision}`,
+        path: null,
+        range: null,
+      }],
+    };
+  }
+  const stdoutArtifact = kernelArtifactDescriptor(outcome.stdoutArtifact);
+  const stderrArtifact = kernelArtifactDescriptor(outcome.stderrArtifact);
+  const artifacts = [stdoutArtifact, stderrArtifact].filter((artifact): artifact is ArtifactDescriptor => artifact !== null);
+  const expected = processExitExpected(input.call, outcome.exitCode);
+  let data: Record<string, unknown>;
+  let summary: string;
+  if (input.call.toolId === "grep" || input.call.toolId === "glob") {
+    const lines = outcome.stdout.length === 0 ? [] : outcome.stdout.replace(/\n$/, "").split("\n");
+    const limit = input.call.toolId === "grep" ? input.call.arguments.max_results : input.call.arguments.max_results;
+    const total = lines.length;
+    const bounded = lines.slice(0, limit);
+    data = input.call.toolId === "grep"
+      ? { matches: bounded, reported_matches: bounded.length, total_found: total, exit_code: outcome.exitCode }
+      : { paths: bounded, reported_paths: bounded.length, total_found: total, exit_code: outcome.exitCode };
+    summary = input.call.toolId === "grep"
+      ? `grep found ${total} match${total === 1 ? "" : "es"} for '${input.call.arguments.pattern}'${total > bounded.length ? `; showing first ${bounded.length}` : ""}`
+      : `glob matched ${total} path${total === 1 ? "" : "s"} for '${input.call.arguments.pattern}'${total > bounded.length ? `; showing first ${bounded.length}` : ""}`;
+  } else if (input.call.toolId === "exec") {
+    data = {
+      exit_code: outcome.exitCode,
+      signal: outcome.signal || null,
+      stdout: outcome.stdout,
+      stderr: outcome.stderr,
+    };
+    summary = expected
+      ? `${describeProcessCommand(input.call)} exited ${outcome.exitCode}`
+      : `${describeProcessCommand(input.call)} exited ${outcome.exitCode}; expected ${(input.call.toolId === "exec" ? input.call.arguments.expected_exit_codes : [0]).join(", ")}`;
+  } else {
+    throw new Error("settleProcessOutcome called for a non-process tool");
+  }
+  const base = okResult(data, {
+    toolCallId: input.internalToolCallId,
+    traceId: input.traceId,
+    summary,
+    artifacts,
+    sideEffects: [sideEffect(input.sideEffectId, input.call.toolId === "exec" ? "process" : "read", describeProcessCommand(input.call), false)],
+    timing: { executionMs: elapsed, totalMs: elapsed },
+  });
+  return {
+    ...base,
+    status: expected ? "success" : "error",
+    policyDecisionId: input.policyDecisionId,
+    truncation: outcome.truncated
+      ? {
+          occurred: true,
+          reason: "process output exceeded the model-result projection",
+          continuation: stdoutArtifact?.uri ?? stderrArtifact?.uri ?? null,
+        }
+      : base.truncation,
+  };
+}
+
+function describeProcessCommand(call: ParsedStandaloneToolCall): string {
+  if (call.toolId === "exec") {
+    return call.arguments.shell !== undefined
+      ? `${call.arguments.shell.dialect} script`
+      : assertProgram(call.arguments.program);
+  }
+  if (call.toolId === "grep") return "rg";
+  if (call.toolId === "glob") return "rg --files";
+  throw new Error("not a process tool");
+}
+
+function processExitExpected(call: ParsedStandaloneToolCall, exitCode: number): boolean {
+  if (call.toolId === "exec") return call.arguments.expected_exit_codes.includes(exitCode);
+  // rg exits 0 with matches/files and 1 when nothing matched; both are
+  // successful searches, not tool failures.
+  if (call.toolId === "grep" || call.toolId === "glob") return exitCode === 0 || exitCode === 1;
+  return exitCode === 0;
 }
 
 function nextRequestContext(context: RequestContext, suffix: string): RequestContext {

@@ -27,5 +27,5 @@
 | `inventory.md` | 1287 B |
 | `public-api.md` | 2876 B |
 | `sqlx.md` | 1088 B |
-| `tools.md` | 7296 B |
+| `tools.md` | 9277 B |
 

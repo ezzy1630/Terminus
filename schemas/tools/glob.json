@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://terminus.dev/schemas/tools/glob.json",
+  "title": "glob",
+  "description": "List task-workspace file paths matching one glob via kernel-dispatched ripgrep --files (standalone-v1; ADR-0039 \u00a710). Runs as a policy-classified process effect under the task sandbox profile with no shell, environment injection, network, or secrets. Returns bounded path lists and reports truncation with total_found when capped.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pattern"],
+  "properties": {
+    "pattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Glob pattern (ripgrep -g syntax), e.g. 'src/**/*.ts'. Must not contain control delimiters."
+    },
+    "path": {
+      "type": "string",
+      "default": ".",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Workspace-relative search root. Defaults to the workspace root."
+    },
+    "max_results": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 200,
+      "description": "Maximum paths returned in the model-visible projection. Excess paths are reported as truncated with total_found."
+    }
+  }
+}

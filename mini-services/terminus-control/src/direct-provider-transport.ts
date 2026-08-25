@@ -1,0 +1,259 @@
+/**
+ * Kernel-backed transports for direct Anthropic/OpenAI API access
+ * (audit P0-2, ADR-0039 §10).
+ *
+ * Every request mints a short-lived connector grant bound to exactly one
+ * documented endpoint and dispatches through `terminus.kernel.v1`
+ * ConnectorService. Credential material never enters this module: the kernel
+ * injects the secret capability's key at dispatch time (Bearer for OpenAI,
+ * x-api-key for Anthropic).
+ */
+import { randomUUID } from "node:crypto";
+import type {
+  CanonicalRenderInput,
+  CompatibilityResult,
+  ContinuationInput,
+  ContinuationDecision,
+  ProviderRenderer,
+  ProviderResponse,
+  ProviderResponseChunk,
+  RenderCompatibilityInput,
+  RenderedProviderRequest,
+  UsageRecord,
+} from "@terminus/provider-core";
+import type { Rfc3339Timestamp } from "@terminus/domain";
+import { AnthropicRenderer, decodeAnthropicMessagesStream } from "@terminus/provider-anthropic";
+import { OpenAiRenderer, decodeOpenAiStream, renderResponsesRequest } from "@terminus/provider-openai";
+import type {
+  ConnectorService,
+  RequestContext,
+} from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
+import type { DirectProviderConfiguration } from "./direct-provider-config.js";
+
+export const DIRECT_ENDPOINTS = {
+  anthropic: { host: "api.anthropic.com", port: 443, connectorId: "anthropic-messages", path: "/v1/messages" },
+  openai_responses: { host: "api.openai.com", port: 443, connectorId: "openai-responses", path: "/v1/responses" },
+  openai_chat: { host: "api.openai.com", port: 443, connectorId: "openai-chat", path: "/v1/chat/completions" },
+} as const;
+
+const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
+
+export function directEndpoint(configuration: DirectProviderConfiguration) {
+  switch (configuration.vendor) {
+    case "anthropic":
+      return DIRECT_ENDPOINTS.anthropic;
+    case "openai":
+      return configuration.protocol === "responses" ? DIRECT_ENDPOINTS.openai_responses : DIRECT_ENDPOINTS.openai_chat;
+  }
+}
+
+/** Network destinations a direct turn must be authorized for. */
+export function directNetworkDestinations(): readonly string[] {
+  return [...new Set(Object.values(DIRECT_ENDPOINTS).map((endpoint) => `${endpoint.host}:${endpoint.port}`))];
+}
+
+export interface DirectHttpRequest {
+  readonly method: "POST";
+  readonly host: string;
+  readonly port: number;
+  readonly path: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: string;
+  /** Opaque kernel secret capability URI; key material never passes here. */
+  readonly credentialBindingId: string;
+}
+
+/**
+ * Trusted higher layers implement this through the kernel connector. The
+ * credential binding is opaque; raw key material never enters this package.
+ */
+export interface DirectConnectorClient {
+  stream(input: DirectHttpRequest): AsyncIterable<Uint8Array>;
+}
+
+export class KernelDirectConnectorClient implements DirectConnectorClient {
+  constructor(
+    private readonly connectors: ConnectorService,
+    private readonly context: RequestContext,
+  ) {}
+
+  async *stream(input: DirectHttpRequest): AsyncIterable<Uint8Array> {
+    const effectId = randomUUID();
+    const grant = await this.connectors.MintGrant({
+      context: nextContext(this.context, `direct-grant:${effectId}`),
+      capabilityUri: input.credentialBindingId,
+      binding: {
+        connectorId: connectorIdForEndpoint(input),
+        destinationHost: input.host,
+        destinationPort: input.port,
+        scheme: "https",
+        method: input.method,
+        pathClass: input.path,
+        effectId,
+      },
+      ttlSeconds: 60,
+    });
+    if (grant.encodedGrant.length === 0) throw new Error("kernel returned an empty connector grant");
+    const response = await this.connectors.Execute({
+      context: nextContext(this.context, `direct-execute:${effectId}`),
+      encodedGrant: grant.encodedGrant,
+      operation: {
+        method: input.method,
+        scheme: "https",
+        host: input.host,
+        port: input.port,
+        path: input.path,
+        query: "",
+        headers: Object.entries(input.headers).map(([name, value]) => ({ name, value })),
+        body: new TextEncoder().encode(input.body),
+      },
+    });
+    const status = response.receipt?.statusCode;
+    if (status === undefined) {
+      throw new Error(`direct provider dispatch did not settle: ${response.receipt?.outcome ?? "missing receipt"}`);
+    }
+    if (status < 200 || status > 299) {
+      throw new Error(`direct provider returned HTTP ${status}${providerErrorSuffix(response.body)}`);
+    }
+    yield* splitSseChunks(response.body);
+  }
+}
+
+function connectorIdForEndpoint(input: DirectHttpRequest): string {
+  if (input.host === DIRECT_ENDPOINTS.anthropic.host && input.path === DIRECT_ENDPOINTS.anthropic.path) {
+    return DIRECT_ENDPOINTS.anthropic.connectorId;
+  }
+  if (input.host === DIRECT_ENDPOINTS.openai_responses.host && input.path === DIRECT_ENDPOINTS.openai_responses.path) {
+    return DIRECT_ENDPOINTS.openai_responses.connectorId;
+  }
+  if (input.host === DIRECT_ENDPOINTS.openai_chat.host && input.path === DIRECT_ENDPOINTS.openai_chat.path) {
+    return DIRECT_ENDPOINTS.openai_chat.connectorId;
+  }
+  throw new Error(`no registered connector admits https://${input.host}${input.path}`);
+}
+
+function nextContext(context: RequestContext, suffix: string): RequestContext {
+  return {
+    ...context,
+    requestId: randomUUID(),
+    idempotencyKey: `${context.idempotencyKey}:${suffix}`,
+  };
+}
+
+function providerErrorSuffix(body: Uint8Array): string {
+  if (body.byteLength === 0) return "";
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(body);
+    const parsed: unknown = JSON.parse(decoded);
+    if (!isRecord(parsed)) return "";
+    const error = isRecord(parsed.error) ? parsed.error : parsed;
+    if (typeof error.message !== "string" || error.message.length === 0) return "";
+    return `: ${error.message.slice(0, 1_024)}`;
+  } catch {
+    return "";
+  }
+}
+
+function* splitSseChunks(body: Uint8Array): Generator<Uint8Array> {
+  if (body.byteLength === 0) return;
+  const text = new TextDecoder().decode(body);
+  if (!text.includes("data:") && !text.includes("event:")) {
+    yield body;
+    return;
+  }
+  const parts = text.split(/(?<=\r?\n\r?\n)/);
+  const encoder = new TextEncoder();
+  for (const part of parts) {
+    if (part.length > 0) yield encoder.encode(part);
+  }
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export interface ExecuteDirectProviderInput {
+  readonly rendered: RenderedProviderRequest;
+  readonly configuration: DirectProviderConfiguration;
+  /** Stable cache-routing key (e.g. the context epoch id); Responses API only. */
+  readonly cacheKey?: string | undefined;
+}
+
+/**
+ * Dispatch one rendered provider request to the vendor's first-party API via
+ * the kernel connector and normalize the SSE stream into chunks.
+ */
+export async function executeDirectProviderRequest(
+  input: ExecuteDirectProviderInput,
+  client: DirectConnectorClient,
+): Promise<ProviderResponse> {
+  const { rendered, configuration } = input;
+  const endpoint = directEndpoint(configuration);
+  let bodyObject = rendered.body as Readonly<Record<string, unknown>>;
+  if (configuration.vendor === "openai" && configuration.protocol === "responses" && input.cacheKey !== undefined) {
+    bodyObject = { ...bodyObject, prompt_cache_key: input.cacheKey };
+  }
+  const serialized = JSON.stringify({ ...bodyObject, stream: true });
+  if (new TextEncoder().encode(serialized).byteLength > MAX_REQUEST_BYTES) {
+    throw new Error(`direct request exceeds ${MAX_REQUEST_BYTES} bytes`);
+  }
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "text/event-stream",
+    ...(configuration.vendor === "anthropic" ? { "anthropic-version": "2023-06-01" } : {}),
+  };
+  const chunks: ProviderResponseChunk[] = [];
+  const events = client.stream({
+    method: "POST",
+    host: endpoint.host,
+    port: endpoint.port,
+    path: endpoint.path,
+    headers,
+    body: serialized,
+    credentialBindingId: configuration.secretUri,
+  });
+  switch (configuration.vendor) {
+    case "anthropic":
+      for await (const chunk of decodeAnthropicMessagesStream(events, rendered.model)) chunks.push(chunk);
+      break;
+    case "openai":
+      for await (
+        const chunk of decodeOpenAiStream(
+          events,
+          configuration.protocol === "responses" ? "responses" : "chat_completions",
+          rendered.model,
+        )
+      ) chunks.push(chunk);
+      break;
+  }
+  const providerError = chunks.find((chunk) => chunk.kind === "error");
+  if (providerError?.kind === "error") {
+    throw new Error(`${providerError.errorCode ?? "PROVIDER_ERROR"}: ${providerError.errorMessage ?? "direct provider failed"}`);
+  }
+  return {
+    providerId: rendered.providerId,
+    model: rendered.model,
+    chunks,
+    observedAt: new Date().toISOString() as Rfc3339Timestamp,
+  };
+}
+
+/**
+ * Renderer for a configured direct provider. Anthropic Messages and OpenAI
+ * Chat Completions map straight onto the vendor renderer; the OpenAI
+ * Responses API reuses the chat rendering converted to Responses input items.
+ */
+export function createDirectRenderer(configuration: DirectProviderConfiguration): ProviderRenderer {
+  if (configuration.vendor === "anthropic") return new AnthropicRenderer();
+  if (configuration.protocol === "chat_completions") return new OpenAiRenderer();
+  const delegate = new OpenAiRenderer();
+  return {
+    providerId: delegate.providerId,
+    version: delegate.version,
+    compatibility: (input: RenderCompatibilityInput): CompatibilityResult => delegate.compatibility(input),
+    render: async (input: CanonicalRenderInput): Promise<RenderedProviderRequest> => renderResponsesRequest(input),
+    projectResponse: (response: ProviderResponse) => delegate.projectResponse(response),
+    extractUsage: (response: ProviderResponse): UsageRecord => delegate.extractUsage(response),
+    continuationPolicy: (input: ContinuationInput): ContinuationDecision => delegate.continuationPolicy(input),
+  };
+}

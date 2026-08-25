@@ -19,10 +19,22 @@ export interface ProviderGatewayConfig {
   readonly secretUri: string;
 }
 
+/** Vendor-direct dispatch target resolved by the caller (ADR-0039 §10). */
+export interface ProviderDirectConfig {
+  readonly vendor: "anthropic" | "openai";
+}
+
 export interface ProviderExecutionInput {
   readonly rendered: RenderedProviderRequest;
   readonly command: LocalProviderCommand | null;
   readonly gateway: ProviderGatewayConfig | null;
+  readonly direct?: ProviderDirectConfig | null;
+  /**
+   * Per-turn kernel-brokered executor for the direct transport. Bound by the
+   * caller so it can capture turn-scoped state (context epoch, workspace);
+   * required whenever `direct` is set.
+   */
+  readonly executeDirectRequest?: (input: ProviderExecutionInput) => Promise<ProviderResponse>;
   readonly context: RequestContext;
   readonly workspaceId: string;
 }
@@ -107,6 +119,14 @@ export class ProviderSessionService<TTransaction> {
   }
 
   async execute(input: ProviderExecutionInput): Promise<ProviderResponse> {
+    if (
+      input.direct !== undefined
+      && input.direct !== null
+      && input.executeDirectRequest !== undefined
+      && input.rendered.providerId === input.direct.vendor
+    ) {
+      return input.executeDirectRequest(input);
+    }
     if (input.gateway !== null && input.rendered.providerId === input.gateway.model.providerId) {
       return this.dependencies.executeGateway(input);
     }
