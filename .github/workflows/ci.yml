@@ -45,7 +45,12 @@ jobs:
           set -eu
           # Host root must not be visible inside the namespace; the empty
           # root plus /usr bind means host homes are simply absent.
-          bwrap --unshare-all \
+          # GitHub runners deny CAP_NET_ADMIN inside unprivileged user
+          # namespaces, so loopback setup under a fresh network namespace
+          # fails with RTM_NEWADDR; we share the host network namespace and
+          # rely on the policy engine's egress rules for network isolation
+          # (exercised by the non-bypassability suite).
+          bwrap --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-namespace \
             --ro-bind /usr /usr \
             --symlink usr/bin /bin \
             --proc /proc --dev /dev \
