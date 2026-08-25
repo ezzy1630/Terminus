@@ -49,6 +49,7 @@ import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-lo
 import { normalizeTaskStatus } from "../hooks/use-terminus";
 import type { ComposerSendMode } from "../types";
 import { FIXED_SHORTCUTS, matchesShortcut } from "../lib/shortcuts";
+import { sessionLatency } from "../lib/session-latency";
 import { Button } from "../ui/Button";
 import { ModelPicker } from "./ModelPicker";
 import { TurnSettings } from "./TurnSettings";
@@ -315,6 +316,9 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
         task_id: task.id,
         user_input: text,
       }, { idempotencyKey: `${operationKey}:turn` });
+      // R12: open a TTFT sample; the first streamed event for this task
+      // closes it (see lib/session-view SessionLatencyTracker).
+      sessionLatency.markTurnSubmitted(task.id);
       turnMutation.settle(operationKey);
       clearCurrentDraft();
       void refreshTasks(task.session_id);

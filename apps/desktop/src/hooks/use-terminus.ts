@@ -19,6 +19,7 @@ import { create } from "zustand";
 import { useMemo } from "react";
 import { api, TerminusApiError, subscribeEvents, type TerminusEventStream } from "../lib/api";
 import { mergePendingApprovals, pendingApprovalFromServerRow, derivePendingApprovals, type PendingApproval } from "../lib/task-surface";
+import { sessionLatency } from "../lib/session-latency";
 import type {
   TerminusSseEvent,
   HealthResponse,
@@ -1538,6 +1539,12 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
       });
       stream.addEventListener("message", (ev) => {
         if (generation !== streamGeneration) return;
+        // R12: close any pending time-to-first-event sample for this task.
+        try {
+          sessionLatency.observeStreamEvent(taskId, ev.event);
+        } catch {
+          // Instrumentation must never break streaming.
+        }
         if (ev.event === "cursor_expired") {
           let payload: unknown = null;
           try {

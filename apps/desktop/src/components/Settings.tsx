@@ -29,6 +29,7 @@
  * the existing useThemeStore so the preview is immediate.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { readGovernanceViewsEnabled, writeGovernanceViewsEnabled } from "../lib/session-view";
 import { useDialogFocus } from "../hooks/use-dialog-focus";
 import {
   Bell,
@@ -78,6 +79,7 @@ export type SettingCategoryId =
   | "performance"
   | "integrations"
   | "advanced"
+  | "governance"
   | "diagnostics";
 
 export type SettingControl =
@@ -492,6 +494,23 @@ function buildCatalog(): SettingCategory[] {
           description: "Use github.com or a GitHub Enterprise hostname.",
           control: { kind: "text", placeholder: "github.com" },
           defaultValue: "github.com",
+        },
+      ],
+    },
+    {
+      id: "governance",
+      label: "Governance views",
+      description: "Operator cockpit surfaces (ledger, effects, replay, budgets, evidence).",
+      icon: <Sliders size={14} />,
+      settings: [
+        {
+          id: "governance.views-enabled",
+          label: "Enable governance views",
+          description:
+            "Adds Overview / Activity / Replay / Usage / Evidence tabs to task workspaces. Off keeps the session-first default.",
+          control: { kind: "toggle" },
+          defaultValue: readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null),
+          apply: (v) => writeGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null, v === true || v === "true"),
         },
       ],
     },
