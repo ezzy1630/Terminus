@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -11,21 +12,21 @@ from forge_evals.run_record import Outcome
 from forge_evals.runners.harness_runner import HarnessResult, RunRequest
 from forge_evals.runners.live_runner import (
     LiveRunError,
+    _task_id_from_notes,
     build_swebench_evaluation_argv,
     invoke_external_evaluator,
     outcome_from_patch_and_state,
     run_live_task,
     write_patch_file,
-    _task_id_from_notes,
 )
 
 
 class _FakeHarness:
-    def __init__(self, notes: str, diff: dict) -> None:
+    def __init__(self, notes: str, diff: dict[str, Any]) -> None:
         self._notes = notes
         self._diff = diff
 
-    def run(self, request, recorder):  # noqa: ANN001 - protocol fakes
+    def run(self, request: RunRequest, recorder: Any) -> HarnessResult:
         return HarnessResult(
             outcome=Outcome.COMPLETED,
             final_revision="abc123",
@@ -36,7 +37,7 @@ class _FakeHarness:
             notes=self._notes,
         )
 
-    def fetch_patch(self, task_id: str) -> dict:
+    def fetch_patch(self, task_id: str) -> dict[str, Any]:
         assert task_id == "task-77"
         return self._diff
 

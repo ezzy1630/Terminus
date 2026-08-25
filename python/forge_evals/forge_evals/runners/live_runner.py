@@ -104,7 +104,7 @@ def build_swebench_evaluation_argv(
 
 def invoke_external_evaluator(argv: list[str], timeout_seconds: float = 3_600.0) -> dict[str, Any]:
     """Run the pinned evaluator binary and capture its bounded output."""
-    completed = subprocess.run(  # noqa: S603 - fixed argv from this module
+    completed = subprocess.run(
         argv,
         capture_output=True,
         text=True,

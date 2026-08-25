@@ -1097,6 +1097,23 @@ pub struct ConnectorResponseMessage {
     #[prost(string, optional, tag="3")]
     pub content_type: ::core::option::Option<::prost::alloc::string::String>,
 }
+/// Chunk of a streamed connector response. Exactly one terminal frame carries
+/// the receipt; every prior frame is a body chunk.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ConnectorChunk {
+    #[prost(oneof="connector_chunk::Payload", tags="1, 2")]
+    pub payload: ::core::option::Option<connector_chunk::Payload>,
+}
+/// Nested message and enum types in `ConnectorChunk`.
+pub mod connector_chunk {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(bytes, tag="1")]
+        Bytes(::prost::alloc::vec::Vec<u8>),
+        #[prost(message, tag="2")]
+        Receipt(super::ConnectorReceiptMessage),
+    }
+}
 // =============================================================================
 // Code intelligence service (SPEC §11.8, §31.1)
 // =============================================================================

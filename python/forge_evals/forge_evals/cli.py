@@ -19,9 +19,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import uuid
 import re
 import sys
+import uuid
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -267,6 +267,7 @@ def _add_run_cmd(sub: argparse._SubParsersAction[Any]) -> None:
 
 def _cmd_run_live(args: argparse.Namespace) -> int:
     """Execute one live evaluation through the Terminus control plane (R8)."""
+    from .runners import TrajectoryRecorder
     from .runners.live_runner import run_live_task
     from .runners.terminus_harness import TerminusControlError, TerminusHarness
 
@@ -290,8 +291,12 @@ def _cmd_run_live(args: argparse.Namespace) -> int:
             model_snapshot=ModelCapabilitySnapshot(
                 provider=args.provider,
                 model=args.model,
+                api_version=os.environ.get("TERMINUS_LIVE_API_VERSION", "2026-08"),
                 context_window=200_000,
                 max_output_tokens=8_192,
+                supports_tool_calls=True,
+                supports_streaming=True,
+                supports_cache=True,
             ),
             random_seed=seed,
         )
@@ -303,22 +308,38 @@ def _cmd_run_live(args: argparse.Namespace) -> int:
             patch_payload=patch_payload,
             seed=seed,
         )
-        write_run_records([record], output_dir=output_dir, fmt=args.format)
+        _write_record(record, output_dir, args.format)
         n += 1
     print(f"live runs completed: {n}")
     return 0
 
 
-def build_live_run_record(harness_result, request, patch_payload, seed):
+def build_live_run_record(
+    harness_result: HarnessResult,
+    request: RunRequest,
+    patch_payload: dict[str, Any],
+    seed: int,
+) -> RunRecord:
     """Compose one honest RunRecord from a live harness result.
 
-    Grader results are intentionally empty until an external grader or the
-    control plane's verification evidence is reconciled; completion alone is
-    never recorded as success.
+    Grader results stay empty until an external grader or the control plane's
+    verification evidence is reconciled; completion alone is never recorded as
+    success (anti-gaming rule).
     """
     notes = json.loads(harness_result.notes) if harness_result.notes else {}
     usage = notes.get("provider_usage") or {}
-    outcome = harness_result.outcome if isinstance(harness_result.outcome, Outcome) else Outcome(str(harness_result.outcome).split(".")[-1])
+    outcome = harness_result.outcome if isinstance(harness_result.outcome, Outcome) else Outcome(
+        str(harness_result.outcome).split(".")[-1]
+    )
+    artifacts = list(harness_result.artifacts)
+    if patch_payload.get("diff"):
+        artifacts.append(
+            {
+                "kind": "workspace_patch",
+                "diff_chars": len(patch_payload["diff"]),
+                "truncated": bool(patch_payload.get("truncated")),
+            }
+        )
     return RunRecord(
         run_id=f"live-{request.suite}-{request.task}-{seed}-{uuid.uuid4().hex[:8]}",
         suite=request.suite,
@@ -336,18 +357,7 @@ def build_live_run_record(harness_result, request, patch_payload, seed):
         outcome=outcome,
         grader_results=[],
         cost=None,
-        artifacts=list(harness_result.artifacts)
-        + (
-            [
-                {
-                    "kind": "workspace_patch",
-                    "diff_chars": len(patch_payload.get("diff", "")),
-                    "truncated": bool(patch_payload.get("truncated")),
-                }
-            ]
-            if patch_payload.get("diff")
-            else []
-        ),
+        artifacts=artifacts,
         context_manifests=list(getattr(harness_result, "context_manifests", []) or []),
         notes=json.dumps(
             {
@@ -356,9 +366,7 @@ def build_live_run_record(harness_result, request, patch_payload, seed):
                 "input_tokens": int(usage.get("input_tokens", 0)),
                 "output_tokens": int(usage.get("output_tokens", 0)),
                 "cached_tokens": int(usage.get("cached_tokens", 0)),
-                "evaluation": (
-                    "pending_grader" if patch_payload.get("diff") else "no_patch"
-                ),
+                "evaluation": ("pending_grader" if patch_payload.get("diff") else "no_patch"),
             },
             sort_keys=True,
         ),

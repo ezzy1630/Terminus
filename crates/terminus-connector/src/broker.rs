@@ -213,7 +213,8 @@ impl ConnectorBroker {
         op: &CanonicalOperation,
         grant: &ConnectorGrant,
     ) -> Result<ConnectorResponse, ConnectorError> {
-        self.execute_with_sink(op, grant, None::<&mut dyn ChunkSink>).await
+        self.execute_with_sink(op, grant, None::<&mut dyn ChunkSink>)
+            .await
     }
 
     /// Incremental dispatch: response body chunks reach the sink as they
@@ -344,30 +345,19 @@ impl ConnectorBroker {
         // -- 7. Dispatch the exact HTTP/1.1 request ------------------------
         let dispatch_sink = DispatchSink { inner: sink };
         let dispatch = tokio::time::timeout(self.timeout, async {
+            let ctx = DispatchContext {
+                op,
+                addresses,
+                egress: &self.egress,
+                max_response_bytes: self.max_response_bytes,
+                timeout: self.timeout,
+            };
             if op.scheme.eq_ignore_ascii_case("https") {
-                dispatch_https(
-                    op,
-                    &header_name,
-                    &header_value,
-                    addresses,
-                    &self.egress,
-                    self.max_response_bytes,
-                    self.timeout,
-                    dispatch_sink,
-                )
-                .await
+                dispatch_https(ctx, &header_name, &header_value, dispatch_sink).await
             } else {
-                dispatch_http(
-                    op,
-                    &header_name,
-                    &header_value,
-                    addresses,
-                    &self.egress,
-                    self.max_response_bytes,
-                    dispatch_sink,
-                )
-                .await
-                .map(|(status, body)| (status, body, None))
+                dispatch_http(ctx, &header_name, &header_value, dispatch_sink)
+                    .await
+                    .map(|(status, body)| (status, body, None))
             }
         })
         .await;
@@ -480,16 +470,28 @@ fn validate_headers(headers: &[(String, String)]) -> Result<(), ConnectorError> 
     Ok(())
 }
 
-async fn dispatch_https(
-    op: &CanonicalOperation,
-    credential_header_name: &str,
-    credential_header_value: &str,
+/// Parameters shared by the HTTP/HTTPS dispatch paths (clippy arg budget).
+struct DispatchContext<'a> {
+    op: &'a CanonicalOperation,
     addresses: Vec<std::net::SocketAddr>,
-    egress: &EgressProxy,
+    egress: &'a EgressProxy,
     max_response_bytes: usize,
     timeout: Duration,
+}
+
+async fn dispatch_https(
+    ctx: DispatchContext<'_>,
+    credential_header_name: &str,
+    credential_header_value: &str,
     mut sink: DispatchSink<'_>,
 ) -> Result<(u16, Vec<u8>, Option<String>), ConnectorError> {
+    let DispatchContext {
+        op,
+        addresses,
+        egress,
+        max_response_bytes,
+        timeout,
+    } = ctx;
     let client = reqwest::Client::builder()
         .https_only(true)
         .no_proxy()
@@ -642,14 +644,18 @@ pub(crate) fn hash_operation(op: &CanonicalOperation) -> String {
 }
 
 async fn dispatch_http(
-    op: &CanonicalOperation,
+    ctx: DispatchContext<'_>,
     header_name: &str,
     header_value: &str,
-    addresses: Vec<std::net::SocketAddr>,
-    egress: &EgressProxy,
-    max_response_bytes: usize,
     mut sink: DispatchSink<'_>,
 ) -> Result<(u16, Vec<u8>), ConnectorError> {
+    let DispatchContext {
+        op,
+        addresses,
+        egress,
+        max_response_bytes,
+        ..
+    } = ctx;
     // Connect to a kernel-authorized numeric address only.
     let mut remote = None;
     for address in addresses {

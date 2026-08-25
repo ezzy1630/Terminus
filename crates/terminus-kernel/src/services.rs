@@ -2817,16 +2817,25 @@ impl ConnectorService {
                 "{}:{}",
                 binding.destination_host, binding.destination_port
             )],
-            secret_capabilities: if anonymous { Vec::new() } else { vec![uri.to_string()] },
+            secret_capabilities: if anonymous {
+                Vec::new()
+            } else {
+                vec![uri.to_string()]
+            },
         };
         let _ = validate_capability_for_op(
             &self.token_issuer,
             ctx,
-            if anonymous { OperationClass::Network } else { OperationClass::Secret },
+            if anonymous {
+                OperationClass::Network
+            } else {
+                OperationClass::Secret
+            },
             &requested_scope,
         )?;
         if anonymous {
-            const ANONYMOUS_DIGEST: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            const ANONYMOUS_DIGEST: &str =
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
             let workload = WorkloadIdentity {
                 workload_id: ctx.actor_id.clone(),
                 principal: ctx.actor_id.clone(),
