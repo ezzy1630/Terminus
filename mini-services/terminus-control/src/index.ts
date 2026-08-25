@@ -259,6 +259,12 @@ import {
 } from "./agent/compaction-service.js";
 import { standaloneAuthorityDocuments } from "./agent/system-prompt.js";
 import {
+  ScoutUtilityLedger,
+  resolveScoutEnabled,
+  runScoutLoop,
+  type ScoutParsedResult,
+} from "./agent/scout-runner.js";
+import {
   ASSISTANT_EXCERPT_MAX_CHARS,
   USER_EXCERPT_MAX_CHARS,
   buildRecentHistorySection,
@@ -404,6 +410,9 @@ const DESKTOP_PARENT_PID = (() => {
 // token is configured. A well-known dev token is permitted ONLY when
 // TERMINUS_DEV=1 is set, so a misconfigured production deployment cannot expose
 // the privileged kernel with a publicly-known token.
+// R10: process-scoped scout utility ledger — scouts disable themselves for
+// the session after repeated zero-yield runs.
+const SCOUT_LEDGER = new ScoutUtilityLedger();
 const DEV_MODE = process.env.TERMINUS_DEV === "1";
 const SHELL_MODE_ENABLED = resolveShellModeEnabled(process.env.TERMINUS_SHELL_MODE);
 function requireToken(envVar: string, devValue: string, label: string): string {
@@ -9778,6 +9787,183 @@ async function agentLoop(turnId: string): Promise<void> {
         secret: [],
       },
     };
+    // R10: conditional read-only scout — fresh context, read/grep/glob only,
+    // bounded steps. Default ON with TERMINUS_ENABLE_SCOUT=0 kill-switch and
+    // a utility ledger that disables the scout after repeated zero-yield
+    // runs. Result becomes a bounded scout_brief world-state section.
+    const scoutEnabledForTurn = toolsEnabled && resolveScoutEnabled(process.env.TERMINUS_ENABLE_SCOUT) && SCOUT_LEDGER.shouldRun();
+    let scoutFiles: readonly { path: string; role: string }[] = [];
+    if (scoutEnabledForTurn) {
+      try {
+        const scoutResult = await (async (): Promise<ScoutParsedResult | { status: "skipped" }> => {
+          if (selectedProvider.context.toolCalling === false) return { status: "skipped" };
+          const instructionsHash = computeContentHash("terminus-scout-authority-v1");
+          const objectiveText = `Objective: ${contract.objective}\n\nRead paths in scope: ${contract.allowedScope.readPaths.slice(0, 64).join(", ") || "(entire workspace)"}`;
+          const scope = {
+            workspaceId: workspace.id as never,
+            sessionId: turn.thread.sessionId as never,
+            taskId: task.id as never,
+            pathPatterns: [],
+          };
+          const now = new Date().toISOString() as never;
+          const fragment = (fragmentId: string, kind: "authority" | "recent_episode", text: string, hash: string): ContextFragment => ({
+            id: fragmentId,
+            kind,
+            contentRef: {
+              hash: hash as never,
+              uri: `artifact://sha256/${hash.slice("sha256:".length)}` as never,
+              mediaType: "text/plain",
+              bytes: BigInt(new TextEncoder().encode(text).byteLength) as never,
+            },
+            textContent: text,
+            source: { uri: `turn://${turnId}/scout`, producer: "terminus-control", producerVersion: "v1", observedAt: now, observedBy: "control-plane", evidenceRefs: [] },
+            sourceVersion: null,
+            authority: kind === "authority" ? 90 : 45,
+            priority: kind === "authority" ? 90 : 45,
+            trust: "derived",
+            confidentiality: "workspace",
+            injectionRisk: "low",
+            exactness: "exact",
+            scope,
+            freshness: { observedAt: now, sourceVersion: null, stale: false, staleReason: null },
+            dependencies: [],
+            invalidation: [],
+            estimatedTokens: { [selectedModel.modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
+            selectionFeatures: { relevance: 1, novelty: 0, coverage: 1, uncertaintyReduction: 1, riskReduction: 1, modelCompatibility: 1, redundancyPenalty: 0, injectionPenalty: 0 },
+          });
+          const directExecutor = buildDirectExecutor();
+          const scoutKernelContext = await kernelTaskContext({
+            sessionId: turn.thread.sessionId,
+            taskId: task.id,
+            turnId,
+            workspaceId: workspace.id,
+            operationClasses: [
+              CapabilityOperationProto.CAPABILITY_OPERATION_READ,
+              CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
+              CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
+            ],
+            workspacePaths: leastWorkspaceScope(contract.allowedScope.readPaths),
+          });
+          const scoutTracker = new ObservedSourceTracker();
+          return await runScoutLoop({
+            maxSteps: 10,
+            callProvider: async (messages) => {
+              const fragments = messages.map((message, index) =>
+                fragment(`scout:${turnId}:${index}`, index === 0 ? "authority" : "recent_episode", message.text, computeContentHash(message.text)));
+              const rendered = await selectedRenderer.render({
+                provider: selectedProvider,
+                model: selectedModel,
+                manifestId: `scout:${turnId}`,
+                fragments,
+                toolSchemas: STANDALONE_TOOL_SCHEMAS.filter((tool) => tool.id === "read" || tool.id === "grep" || tool.id === "glob"),
+                cachePlan: { stablePrefixHash: instructionsHash, breakpoints: [] },
+                continuationId: null,
+                outputProfile: "terse",
+                reasoningReserveTokens: 4_096n as never,
+                outputReserveTokens: 2_048n as never,
+                hardInputLimit: 200_000n as never,
+                signal: null,
+              } as Parameters<typeof selectedRenderer.render>[0]);
+              const response = await providerSessionService.execute({
+                rendered,
+                command: localProviderCommand,
+                gateway: gatewayModel === null
+                  ? null
+                  : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
+                direct: directConfiguration === null
+                  ? null
+                  : { vendor: directConfiguration.vendor },
+                ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
+                context: { ...scoutKernelContext, idempotencyKey: `scout:${turnId}:${messages.length}` },
+                workspaceId: workspace.id,
+              });
+              const projectedScout = await selectedRenderer.projectResponse(response);
+              return {
+                renderedBody: {},
+                projectedText: projectedScout.text,
+                toolCalls: projectedScout.toolCalls.map((call) => ({
+                  toolName: call.toolName,
+                  argumentsJson: canonicalJson(call.arguments),
+                })),
+              };
+            },
+            executeTool: async ({ toolName, argumentsJson }) => {
+              let parsedArguments: unknown;
+              try {
+                parsedArguments = JSON.parse(argumentsJson);
+              } catch {
+                parsedArguments = {};
+              }
+              const call = parseStandaloneToolCall({
+                toolCallId: `scout-${Math.floor(Math.random() * 1e9).toString(36)}`,
+                toolName,
+                arguments: parsedArguments,
+              });
+              const result = await executeStandaloneTool({
+                clients: requireKernelUds(),
+                context: { ...scoutKernelContext, idempotencyKey: `scout-tool:${call.providerCallId}` },
+                workspaceId: workspace.id,
+                call,
+                internalToolCallId: uuid(),
+                sideEffectId: generateUuid7(),
+                policyDecisionId: uuid(),
+                traceId: turnId,
+                contractHash: contractRow.contentHash,
+                devMode: DEV_MODE,
+                shellModeEnabled: false,
+                observedSources: scoutTracker,
+              });
+              const visible = projectModelVisibleResult(result);
+              return { ok: result.status === "success" || result.status === "partial", resultText: JSON.stringify(visible) };
+            },
+          });
+        })();
+        if ("claims" in scoutResult && scoutResult.status === "completed") {
+          scoutFiles = scoutResult.files;
+          SCOUT_LEDGER.recordScout(task.id, scoutResult.claims.length + scoutResult.files.length);
+          scoutBriefSection = {
+            claims: scoutResult.claims,
+            files: scoutResult.files.slice(0, 32),
+            open_questions: scoutResult.openQuestions,
+          };
+          await mutateAgentState(() => emit({
+            eventType: "scout.completed",
+            aggregateType: "task",
+            aggregateId: task.id,
+            correlationId: task.id,
+            payload: {
+              claims: scoutResult.claims.length,
+              files: scoutResult.files.length,
+              open_questions: scoutResult.openQuestions.length,
+            },
+          }));
+        } else {
+          SCOUT_LEDGER.recordScout(task.id, 0);
+          await mutateAgentState(() => emit({
+            eventType: "scout.skipped",
+            aggregateType: "task",
+            aggregateId: task.id,
+            correlationId: task.id,
+            payload: { reason: scoutResult.status },
+          }));
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await mutateAgentState(() => emit({
+          eventType: "scout.failed",
+          aggregateType: "task",
+          aggregateId: task.id,
+          correlationId: task.id,
+          payload: { reason: message.slice(0, 512) },
+        }));
+      }
+    }
+    type ScoutBriefSection = {
+      claims: readonly string[];
+      files: readonly { path: string; role: string }[];
+      open_questions: readonly string[];
+    };
+    let scoutBriefSection: ScoutBriefSection | null = null;
     const compileProviderContext = async () => {
       let recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
       // R4: compaction pass — deterministic prune + structured summary before
@@ -9857,6 +10043,9 @@ async function agentLoop(turnId: string): Promise<void> {
         ...worldState,
         sections: { ...worldState.sections, ...contextState.worldStateSections },
       };
+      if (scoutBriefSection !== null) {
+        (effectiveWorldState.sections as Record<string, unknown>).scout_brief = scoutBriefSection;
+      }
       // R5: cross-turn continuity — when this turn has no episodes yet,
       // inject a bounded excerpt of the previous completed turn so the model
       // does not restart from amnesia. Deterministic; no extra LLM call.
@@ -10340,6 +10529,19 @@ async function agentLoop(turnId: string): Promise<void> {
 
     if (finalText === null || finalResponseArtifactUri === null) {
       throw new ToolCycleBudgetExhaustedError("Provider turn ended without a final response");
+    }
+
+    // R10: citation accounting — when the parent actually changed files the
+    // scout surfaced, count it so productive scouts stay enabled.
+    if (scoutFiles.length > 0 && latestChangedFiles.some((changedFile) => scoutFiles.some((scoutFile) => scoutFile.path === changedFile))) {
+      SCOUT_LEDGER.recordCitation(task.id);
+      await mutateAgentState(() => emit({
+        eventType: "scout.cited",
+        aggregateType: "task",
+        aggregateId: task.id,
+        correlationId: task.id,
+        payload: { cited_files: scoutFiles.length },
+      }));
     }
 
     // 5. FINALIZING
