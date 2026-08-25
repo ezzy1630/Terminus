@@ -57,7 +57,7 @@ jobs:
             --tmpfs /tmp --tmpfs /run \
             --clearenv --setenv PATH /usr/bin:/bin \
             --die-with-parent --new-session --cap-drop ALL \
-            -- /bin/sh -c '
+            -- /usr/bin/sh -c '
               test ! -e /root && echo "host-home-hidden"
               test ! -e /etc/shadow && echo "credentials-hidden"
               touch /probe 2>/dev/null && { echo "root-writable"; exit 13; } || echo "root-readonly"
