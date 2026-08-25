@@ -135,7 +135,7 @@ import type {
   Rfc3339Timestamp,
   TokenCount,
 } from "@terminus/domain";
-import { generateUuid7 } from "@terminus/domain";
+import { generateUuid7, type Uuid7 } from "@terminus/domain";
 import {
   authorizationInstanceSchema,
   artifactUriSchema,
@@ -247,6 +247,21 @@ import { GatewayRenderer, GatewayTransport, type GatewayModel } from "@terminus/
 import { ANTHROPIC_MODEL_PROFILES } from "@terminus/provider-anthropic";
 import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
 import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
+import { ContextStateBuilder } from "./agent/context-state-builder.js";
+import { CodingTurnEngine } from "./agent/coding-turn-engine.js";
+import {
+  hydrateSearchHit,
+  buildRepositoryMapFragment,
+  type SearchHit,
+  type WorkspaceFileReader,
+} from "./agent/retrieval-hydrator.js";
+import {
+  VerificationRepairController,
+  buildRepairContext,
+  normalizeFailure,
+  type RawVerificationFailure,
+} from "./agent/verification-repair-controller.js";
+import { HARD_MAX_STEPS, TurnBudget } from "./agent/turn-budget.js";
 import type { ArtifactClient } from "@terminus/artifact-client";
 import type {
   ModelCapabilitySnapshot,
@@ -254,6 +269,7 @@ import type {
   ProviderResponse,
   ProviderResponseChunk,
   ProviderToolCallChunk,
+  ProjectedResponse,
   RenderedProviderRequest,
   ConfidentialityPolicy,
 } from "@terminus/provider-core";
@@ -8627,6 +8643,41 @@ function kernelRetrievalPipeline(
   taskId: string,
   workspaceId: string,
 ): RetrievalPipeline {
+  const fileReader: WorkspaceFileReader = async ({ path, startLine, endLine }) => {
+    try {
+      const read = await clients.files.Read({
+        context: {
+          ...baseContext,
+          requestId: randomUUID(),
+          idempotencyKey: `code-hydrate:${randomUUID()}`,
+        },
+        intent: {
+          userIntentRef: "retrieval-hydration",
+          taskContractHash: "",
+          trustLabel: "derived",
+          confidentialityLabel: "workspace",
+          taintSources: [],
+          policyProfileId: "secure-local-default",
+          expectedEffectClass: "read_local",
+        },
+        path: { workspaceId, relativePath: path },
+        mode: "ranges",
+        ranges: [{ startLine, endLine }],
+        symbols: [],
+        maxBytes: 48 * 1_024,
+        expectedSha256: "",
+      });
+      return {
+        content: new TextDecoder("utf-8", { fatal: false }).decode(read.modelProjectionUtf8),
+        fileSha256: read.sourceVersion?.sha256 ?? null,
+        totalLines: null,
+      };
+    } catch {
+      // File unreadable (deleted/moved/unreadable since indexing): the
+      // caller falls back to the metadata-only representation.
+      return { content: null, fileSha256: null, totalLines: null };
+    }
+  };
   const retrieve = async (queries: readonly RetrievalQuery[]): Promise<readonly RetrievalResult[]> => {
     const results: RetrievalResult[] = [];
     const seen = new Set<string>();
@@ -8650,12 +8701,23 @@ function kernelRetrievalPipeline(
         const id = `kernel-code:${hit.path}:${hit.line}:${hit.symbol}`;
         if (seen.has(id)) continue;
         seen.add(id);
-        const text = [
+        // Hydrate the hit into an actual source span before labeling it as
+        // code context (deep-audit Rank 1 / PR3). Metadata-only fallback
+        // preserves navigation value when the file cannot be read.
+        const searchHit: SearchHit = {
+          path: hit.path,
+          line: hit.line,
+          symbol: typeof hit.symbol === "string" && hit.symbol.length > 0 ? hit.symbol : null,
+          method: hit.method,
+        };
+        const hydratedSpan = await hydrateSearchHit(searchHit, fileReader);
+        const text = hydratedSpan?.fragmentText ?? [
           `# Code intelligence result`,
           `path: ${hit.path}`,
           `line: ${hit.line}`,
           `symbol: ${hit.symbol}`,
           `index method: ${hit.method}`,
+          `(source span unavailable — request read for implementation)`,
         ].join("\n");
         const hash = computeContentHash(text);
         const fragment: ContextFragment = {
@@ -8709,7 +8771,7 @@ function kernelRetrievalPipeline(
           method: mapRetrievalMethod(hit.method),
           rawScore: 1,
           rerankedScore: 1,
-          sourceVersion: null,
+          sourceVersion: hydratedSpan?.fileSha256 ?? null,
           reason: query.reason,
         });
       }
@@ -9149,6 +9211,40 @@ async function persistSettledToolResult(input: {
 // ────────────────────────── Agent loop ─────────────────────────────────────
 
 /**
+ * Pair settled episodes into ordered `[toolName, resultJson]` observations
+ * for world-state derivation. A tool_result observation inherits the tool
+ * name of its immediately preceding tool_call episode.
+ */
+function buildEpisodeObservations(
+  episodes: readonly { readonly kind: string; readonly contentRef: ContentHash | null }[],
+  content: ReadonlyMap<ContentHash, string>,
+): { readonly toolName: string; readonly resultJson: string }[] {
+  const observations: { readonly toolName: string; readonly resultJson: string }[] = [];
+  let pendingToolName: string | null = null;
+  for (const episode of episodes) {
+    const body = episode.contentRef === null ? null : content.get(episode.contentRef);
+    if (body === undefined || body === null) continue;
+    if (episode.kind === "tool_call") {
+      try {
+        const parsed: unknown = JSON.parse(body);
+        if (
+          typeof parsed === "object" && parsed !== null &&
+          typeof (parsed as Record<string, unknown>).tool_name === "string"
+        ) {
+          pendingToolName = (parsed as { tool_name?: unknown }).tool_name as string;
+        }
+      } catch {
+        pendingToolName = null;
+      }
+    } else if (episode.kind === "tool_result" && pendingToolName !== null) {
+      observations.push({ toolName: pendingToolName, resultJson: body });
+      pendingToolName = null;
+    }
+  }
+  return observations;
+}
+
+/**
  * The agent loop: compile context → provider attempt → tool settlement →
  * verification → completion. Each step emits semantic events so the UI can
  * observe the full trajectory.
@@ -9398,6 +9494,12 @@ async function agentLoop(turnId: string): Promise<void> {
       }),
     });
     const toolEpisodeSession = toolEpisodeService.startTurn();
+    // Rank 3: bounded verify–repair–admit policy for this completion proposal.
+    const verificationRepairController = new VerificationRepairController({
+      maxRepairAttempts:
+        Number.parseInt(process.env.TERMINUS_MAX_REPAIR_ATTEMPTS ?? "", 10) || 2,
+    });
+    let latestChangedFiles: readonly string[] = [];
     const contextEpoch = await ensureContextEpoch({
       db,
       threadId: turn.threadId,
@@ -9420,13 +9522,53 @@ async function agentLoop(turnId: string): Promise<void> {
     };
     const compileProviderContext = async () => {
       const recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
+      // Prior-turn verification failures become first-class repair inputs.
+      const lastFailedPlan = await db.verificationPlan.findFirst({
+        where: { taskId: task.id },
+        orderBy: { createdAt: "desc" },
+        include: { results: { where: { status: { in: ["fail", "error"] } } } },
+      });
+      const priorVerificationFailures = (lastFailedPlan?.results ?? [])
+        .map((result) => `${result.nodeId}: ${result.reason ?? result.status}`);
+      // Rank 1 (PR2): derive authoritative working-set state from settled
+      // episodes instead of passing empty collections to the compiler.
+      const contextState = new ContextStateBuilder().build({
+        taskId: task.id as never,
+        contractVersion: contractRow.version,
+        contractContentHash: contractRow.contentHash as ContentHash,
+        phase: task.phase,
+        unknowns: safeParse<string[]>(contractRow.unknownsJson, []),
+        observedAt: worldState.observedAt,
+        workspace: {
+          workspaceId: workspace.id,
+          rootUri: workspace.rootUri,
+          trust: workspace.trust,
+        },
+        environment: {
+          sandboxProfileId: DEV_MODE ? "degraded-local" : "secure-local-default",
+          backendId: null,
+        },
+        episodeObservations: buildEpisodeObservations(recent.episodes, recent.content),
+        priorVerificationFailures,
+      });
+      latestChangedFiles = [...contextState.taskSnapshot.changedFiles];
+      const effectiveTaskSnapshot: TaskSnapshot = {
+        ...taskSnapshot,
+        changedFiles: contextState.taskSnapshot.changedFiles,
+        failingTests: contextState.taskSnapshot.failingTests,
+        diagnostics: contextState.taskSnapshot.diagnostics,
+      };
+      const effectiveWorldState: WorldStateSnapshot = {
+        ...worldState,
+        sections: { ...worldState.sections, ...contextState.worldStateSections },
+      };
       const compiled = await compileContext({
-        task: taskSnapshot,
+        task: effectiveTaskSnapshot,
         thread: threadSnapshot,
         provider: selectedProvider,
         model: selectedModel,
         epoch: contextEpoch,
-        worldState,
+        worldState: effectiveWorldState,
         recentEpisodes: recent.episodes,
         episodeContent: recent.content,
         checkpoint,
@@ -9495,187 +9637,239 @@ async function agentLoop(turnId: string): Promise<void> {
 
     let finalText: string | null = null;
     let finalResponseArtifactUri: string | null = null;
-    const maxToolCycles = resolveMaxToolCycles(process.env.TERMINUS_MAX_TOOL_CYCLES);
-    for (let attemptNumber = 1; attemptNumber <= maxToolCycles + 1; attemptNumber += 1) {
-      if (attemptNumber > 1) {
-        await mutateAgentState(() => emit({
-          eventType: "turn.context_compiling",
-          aggregateType: "turn",
-          aggregateId: turnId,
-          correlationId: task.id,
-          payload: { phase: "context_compiling", continuation_attempt: attemptNumber },
-        }, async (tx) => {
-          const update = await tx.turn.updateMany({
-            where: { id: turnId, state: "TOOL_SETTLEMENT" },
-            data: { state: "CONTEXT_COMPILING" },
-          });
-          if (update.count !== 1) throw new Error(`turn ${turnId} changed before tool continuation`);
-        }));
-      }
-
-      const { compiled, requestArtifact } = await compileProviderContext();
-      const attemptId = uuid();
-      const providerStarted = await providerSessionService.beginAttempt({
-        attemptId,
-        turnId,
-        taskId: task.id,
-        attemptNumber,
-        providerId: selectedProvider.providerId,
-        modelKey: selectedModel.modelKey,
-        capabilitySnapshotHash: compiled.manifest.providerCapabilityHash,
-        contextManifestId: compiled.manifest.id,
-        requestArtifact: requestArtifact.uri,
-      });
-      if (!providerStarted) return;
-
-      const providerContext: RequestContext = {
-        ...await kernelTaskContext({
-          sessionId: turn.thread.sessionId,
-          taskId: task.id,
+    // Rank 1/Rank 2: run the bounded coding loop through the extracted
+    // engine — adaptive budgets replace the fixed four-cycle ceiling, and
+    // multi-call responses are batched (reads parallel-safe, writes ordered).
+    const sideEffectClassOf = (toolName: string): string =>
+      STANDALONE_TOOL_SCHEMAS.find((tool) => tool.id === toolName)?.sideEffectClass ?? "external";
+    let lastResponseArtifactUri: string | null = null;
+    let currentProjected: ProjectedResponse | null = null;
+    const toolSettlementEnteredFor = new Set<string>();
+    const manifestIdByAttempt = new Map<string, Uuid7>();
+    // Merged knob precedence: an explicit TERMINUS_TURN_MAX_STEPS wins;
+    // otherwise TERMINUS_MAX_TOOL_CYCLES (validated, fail-closed, default 64)
+    // sizes the soft budget. The hard ceiling never cuts an explicit value.
+    const configuredMaxSteps =
+      Number.parseInt(process.env.TERMINUS_TURN_MAX_STEPS ?? "", 10) ||
+      resolveMaxToolCycles(process.env.TERMINUS_MAX_TOOL_CYCLES);
+    const engine = new CodingTurnEngine({
+      budget: {
+        maxSteps: configuredMaxSteps,
+        hardMaxSteps: Math.max(HARD_MAX_STEPS, configuredMaxSteps),
+      },
+      newId: uuid,
+      sideEffectClassOf,
+      compileContext: async () => {
+        const { compiled, requestArtifact } = await compileProviderContext();
+        return {
+          rendered: compiled.rendered,
+          requestArtifactUri: requestArtifact.uri,
+          contextManifestId: compiled.manifest.id as string,
+          providerCapabilityHash: compiled.manifest.providerCapabilityHash as string,
+        };
+      },
+      beginAttempt: async ({ attemptId, attemptNumber, compiled }) => {
+        manifestIdByAttempt.set(attemptId, compiled.contextManifestId as Uuid7);
+        return providerSessionService.beginAttempt({
+          attemptId,
           turnId,
-          workspaceId: workspace.id,
-          operationClasses: directConfiguration !== null || gatewayModel !== null
-            ? [
-                CapabilityOperationProto.CAPABILITY_OPERATION_SECRET,
-                CapabilityOperationProto.CAPABILITY_OPERATION_NETWORK,
-                CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
-              ]
-            : [
-                CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
-                CapabilityOperationProto.CAPABILITY_OPERATION_JOB,
-                CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
-              ],
-          workspacePaths: directConfiguration === null && gatewayModel === null
-            ? leastWorkspaceScope([
-                ...contract.allowedScope.readPaths,
-                ...contract.allowedScope.writePaths,
-              ])
-            : [],
-          networkDestinations: directConfiguration !== null
-            ? [...directNetworkDestinations()]
-            : gatewayModel === null
-              ? []
-              : ["opencode.ai:443"],
-          secretCapabilities: directConfiguration !== null
-            ? [directConfiguration.secretUri]
-            : gatewayModel === null
-              ? []
-              : [gatewaySecretUri(gatewayModel.deployment)],
-        }),
-        idempotencyKey: `provider:${attemptId}`,
-      };
-      const directExecutor = directConfiguration === null
-        ? undefined
-        : (execInput: ProviderExecutionInput) => executeDirectProviderRequest(
-            {
-              rendered: execInput.rendered,
-              configuration: directConfiguration,
-              // Route OpenAI prompt caches by context epoch so tool-call turns
-              // hit the same cache entry instead of fragmenting across turns.
-              cacheKey: contextEpoch.epochId,
-            },
-            new KernelDirectConnectorClient(requireKernelUds().connectors, execInput.context),
-          );
-      const providerResponse = await providerSessionService.execute({
-        rendered: compiled.rendered,
-        command: localProviderCommand,
-        gateway: gatewayModel === null
-          ? null
-          : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
-        direct: directConfiguration === null
-          ? null
-          : { vendor: directConfiguration.vendor },
-        ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
-        context: providerContext,
-        workspaceId: workspace.id,
-      });
-      const midTurn = await db.turn.findUnique({ where: { id: turnId }, select: { state: true } });
-      if (midTurn?.state === "INTERRUPTED") return;
-
-      const projected = await selectedRenderer.projectResponse(providerResponse);
-      const usage = selectedRenderer.extractUsage(providerResponse);
-      const responseArtifactMeta = await artifactClient.ingest(
-        new TextEncoder().encode(canonicalJson(providerResponse)),
-        {
-          mediaType: "application/json",
-          custom: { purpose: "provider-response", providerAttemptId: attemptId },
-        },
-      );
-      const messageArtifactMeta = projected.text.length === 0
-        ? null
-        : await artifactClient.ingest(
-            new TextEncoder().encode(projected.text),
-            {
-              mediaType: "text/plain",
-              custom: { purpose: "provider-message", providerAttemptId: attemptId },
-            },
-          );
-      await contextStore.recordObservation(compiled.manifest.id, {
-        responseArtifact: responseArtifactMeta.uri,
-        usage: jsonSafe(usage),
-        projectedFinishReason: projected.finishReason,
-      });
-      await providerSessionService.settleResponse({
-        attemptId,
-        turnId,
-        taskId: task.id,
-        responseArtifact: responseArtifactMeta.uri,
-        messageArtifact: messageArtifactMeta?.uri ?? null,
-        messageHash: messageArtifactMeta?.hash ?? null,
-        usage: jsonSafe(usage),
-        finishReason: projected.finishReason,
-        continuationId: projected.continuationId,
-      });
-
-      if (projected.toolCalls.length === 0) {
-        // Close the provider/tool phase for observers even when the provider
-        // returned a final response without requesting a tool. The turn stays
-        // in RESPONSE_VALIDATING; TOOL_SETTLEMENT is a real state only for a
-        // validated tool call and must not be used as a transit state here.
-        await mutateAgentState(() => emit({
-          eventType: "turn.tool_settlement",
-          aggregateType: "turn",
-          aggregateId: turnId,
-          correlationId: task.id,
-          payload: { provider_attempt_id: attemptId, tool_calls: 0 },
-        }));
-        finalText = projected.text;
-        finalResponseArtifactUri = responseArtifactMeta.uri;
-        break;
-      }
-      if (!toolsEnabled) {
-        throw new ToolPolicyDeniedError("Provider emitted a tool call while standalone tools were disabled");
-      }
-      if (projected.toolCalls.length !== 1) {
-        throw new ToolPolicyDeniedError("Standalone providers may emit exactly one tool call per response");
-      }
-      const [toolCall] = projected.toolCalls;
-      if (toolCall === undefined) throw new Error("provider tool call projection was empty");
-      await mutateAgentState(() => emit({
-        eventType: "turn.tool_settlement",
-        aggregateType: "turn",
-        aggregateId: turnId,
-        correlationId: task.id,
-        payload: { provider_attempt_id: attemptId, tool_calls: projected.toolCalls.length },
-      }, async (tx) => {
-        const update = await tx.turn.updateMany({
-          where: { id: turnId, state: "RESPONSE_VALIDATING" },
-          data: { state: "TOOL_SETTLEMENT" },
+          taskId: task.id,
+          attemptNumber,
+          providerId: selectedProvider.providerId,
+          modelKey: selectedModel.modelKey,
+          capabilitySnapshotHash: compiled.providerCapabilityHash,
+          contextManifestId: compiled.contextManifestId,
+          requestArtifact: compiled.requestArtifactUri,
         });
-        if (update.count !== 1) throw new Error(`turn ${turnId} changed before tool settlement`);
-      }));
-      await toolEpisodeSession.settle({
-        call: toolCall,
-        attemptNumber,
-        providerAttemptId: attemptId,
-        turnId,
-        taskId: task.id,
-        sessionId: turn.thread.sessionId,
-        workspaceId: workspace.id,
-        contractVersion: contractRow.version,
-        contractHash: contractRow.contentHash,
-        artifactClient,
-      });
+      },
+      executeProvider: async ({ attemptId, compiled }) => {
+        const providerContext: RequestContext = {
+          ...await kernelTaskContext({
+            sessionId: turn.thread.sessionId,
+            taskId: task.id,
+            turnId,
+            workspaceId: workspace.id,
+            operationClasses: directConfiguration !== null || gatewayModel !== null
+              ? [
+                  CapabilityOperationProto.CAPABILITY_OPERATION_SECRET,
+                  CapabilityOperationProto.CAPABILITY_OPERATION_NETWORK,
+                  CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
+                ]
+              : [
+                  CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
+                  CapabilityOperationProto.CAPABILITY_OPERATION_JOB,
+                  CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
+                ],
+            workspacePaths: directConfiguration === null && gatewayModel === null
+              ? leastWorkspaceScope([
+                  ...contract.allowedScope.readPaths,
+                  ...contract.allowedScope.writePaths,
+                ])
+              : [],
+            networkDestinations: directConfiguration !== null
+              ? [...directNetworkDestinations()]
+              : gatewayModel === null
+                ? []
+                : ["opencode.ai:443"],
+            secretCapabilities: directConfiguration !== null
+              ? [directConfiguration.secretUri]
+              : gatewayModel === null
+                ? []
+                : [gatewaySecretUri(gatewayModel.deployment)],
+          }),
+          idempotencyKey: `provider:${attemptId}`,
+        };
+        const directExecutor = directConfiguration === null
+          ? undefined
+          : (execInput: ProviderExecutionInput) => executeDirectProviderRequest(
+              {
+                rendered: execInput.rendered,
+                configuration: directConfiguration,
+                // Route OpenAI prompt caches by context epoch so tool-call turns
+                // hit the same cache entry instead of fragmenting across turns.
+                cacheKey: contextEpoch.epochId,
+              },
+              new KernelDirectConnectorClient(requireKernelUds().connectors, execInput.context),
+            );
+        return providerSessionService.execute({
+          rendered: compiled.rendered,
+          command: localProviderCommand,
+          gateway: gatewayModel === null
+            ? null
+            : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
+          direct: directConfiguration === null
+            ? null
+            : { vendor: directConfiguration.vendor },
+          ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
+          context: providerContext,
+          workspaceId: workspace.id,
+        });
+      },
+      settleResponse: async ({ attemptId, response }) => {
+        const midTurn = await db.turn.findUnique({ where: { id: turnId }, select: { state: true } });
+        if (midTurn?.state === "INTERRUPTED") {
+          return {
+            projected: {
+              text: "",
+              toolCalls: [],
+              reasoning: null,
+              continuationId: null,
+              finishReason: "cancelled",
+            } satisfies ProjectedResponse,
+            interrupted: true,
+          };
+        }
+        const projected = await selectedRenderer.projectResponse(response);
+        const usage = selectedRenderer.extractUsage(response);
+        const responseArtifactMeta = await artifactClient.ingest(
+          new TextEncoder().encode(canonicalJson(response)),
+          {
+            mediaType: "application/json",
+            custom: { purpose: "provider-response", providerAttemptId: attemptId },
+          },
+        );
+        const messageArtifactMeta = projected.text.length === 0
+          ? null
+          : await artifactClient.ingest(
+              new TextEncoder().encode(projected.text),
+              {
+                mediaType: "text/plain",
+                custom: { purpose: "provider-message", providerAttemptId: attemptId },
+              },
+            );
+        const observedManifestId = manifestIdByAttempt.get(attemptId);
+        if (observedManifestId === undefined) {
+          throw new Error(`provider attempt ${attemptId} has no context manifest`);
+        }
+        await contextStore.recordObservation(observedManifestId, {
+          responseArtifact: responseArtifactMeta.uri,
+          usage: jsonSafe(usage),
+          projectedFinishReason: projected.finishReason,
+        });
+        await providerSessionService.settleResponse({
+          attemptId,
+          turnId,
+          taskId: task.id,
+          responseArtifact: responseArtifactMeta.uri,
+          messageArtifact: messageArtifactMeta?.uri ?? null,
+          messageHash: messageArtifactMeta?.hash ?? null,
+          usage: jsonSafe(usage),
+          finishReason: projected.finishReason,
+          continuationId: projected.continuationId,
+        });
+        lastResponseArtifactUri = responseArtifactMeta.uri;
+        currentProjected = projected;
+        if (projected.toolCalls.length === 0) {
+          // Close the provider/tool phase for observers on a final response.
+          await mutateAgentState(() => emit({
+            eventType: "turn.tool_settlement",
+            aggregateType: "turn",
+            aggregateId: turnId,
+            correlationId: task.id,
+            payload: { provider_attempt_id: attemptId, tool_calls: 0 },
+          }));
+        }
+        return { projected, interrupted: false };
+      },
+      settleToolCall: async ({ call, attemptNumber, attemptId }) => {
+        if (!toolsEnabled) {
+          throw new ToolPolicyDeniedError("Provider emitted a tool call while standalone tools were disabled");
+        }
+        if (!toolSettlementEnteredFor.has(attemptId)) {
+          toolSettlementEnteredFor.add(attemptId);
+          const count = currentProjected?.toolCalls.length ?? 0;
+          await mutateAgentState(() => emit({
+            eventType: "turn.tool_settlement",
+            aggregateType: "turn",
+            aggregateId: turnId,
+            correlationId: task.id,
+            payload: { provider_attempt_id: attemptId, tool_calls: count },
+          }, async (tx) => {
+            const update = await tx.turn.updateMany({
+              where: { id: turnId, state: "RESPONSE_VALIDATING" },
+              data: { state: "TOOL_SETTLEMENT" },
+            });
+            if (update.count !== 1) throw new Error(`turn ${turnId} changed before tool settlement`);
+          }));
+        }
+        await toolEpisodeSession.settle({
+          call,
+          attemptNumber,
+          providerAttemptId: attemptId,
+          turnId,
+          taskId: task.id,
+          sessionId: turn.thread.sessionId,
+          workspaceId: workspace.id,
+          contractVersion: contractRow.version,
+          contractHash: contractRow.contentHash,
+          artifactClient,
+        });
+        // Stagnation tracking over normalized operations.
+        try {
+          const parsedCall = parseStandaloneToolCall(call);
+          engine.budget.recordOperation(
+            normalizedToolOperationHash({ taskId: task.id, contractVersion: contractRow.version, call: parsedCall }),
+            parsedCall.toolId !== "read",
+          );
+        } catch {
+          // Unparseable calls are refused by settlement itself.
+        }
+      },
+    });
+    const stop = await engine.run();
+    switch (stop.kind) {
+      case "interrupted":
+        return;
+      case "budget_exhausted":
+        throw new ToolCycleBudgetExhaustedError(`Adaptive turn budget stopped the loop: ${stop.reason}`);
+      case "policy_denied":
+        throw new ToolPolicyDeniedError(stop.message);
+      case "no_final_response":
+        throw new ToolCycleBudgetExhaustedError("Provider turn ended without a final response");
+      case "final":
+        finalText = stop.text;
+        finalResponseArtifactUri = lastResponseArtifactUri;
+        break;
     }
 
     if (finalText === null || finalResponseArtifactUri === null) {
@@ -9863,9 +10057,59 @@ async function agentLoop(turnId: string): Promise<void> {
         });
 
         if (!allPassed) {
+          // Rank 3: normalize failures into durable repair inputs and run
+          // the bounded repair decision instead of terminating at the first
+          // verification failure.
+          const failedResults = evaluation.results.filter(
+            (result) => result.status === "fail" || result.status === "error",
+          );
+          const nodeById = new Map(plan.nodes.map((node) => [node.id, node]));
+          const normalizedFailures = failedResults.map((result) =>
+            normalizeFailure({
+              nodeId: result.nodeId,
+              predicateType: nodeById.get(result.nodeId)?.kind ?? "command",
+              command: result.commandOrQuery,
+              exitCode: result.exitCode,
+              output: JSON.stringify(result.structuredObservations),
+              artifactRefs: result.artifacts
+                .map((artifact) => String(artifact?.uri ?? ""))
+                .filter((uri) => uri.length > 0),
+            }),
+          );
+          const repairDecision = verificationRepairController.decideAfterFailure({
+            failures: normalizedFailures,
+            workspaceChangedSinceLastAttempt: true,
+            actorReportedBlocker: false,
+            requiresUserAuthority: false,
+          });
+          if (repairDecision.action === "repair") {
+            const directive = buildRepairContext({
+              failures: normalizedFailures,
+              changedFiles: latestChangedFiles,
+              previousAttemptSummary:
+                repairDecision.attemptNumber > 1
+                  ? `Repair attempt ${repairDecision.attemptNumber - 1} changed the failure set; see verification results for plan ${plan.id}.`
+                  : null,
+            });
+            const directiveArtifact = await ingestJsonArtifact(
+              artifactClient,
+              { directive, failures: normalizedFailures, attempt: repairDecision.attemptNumber },
+              "verification-repair-directive",
+              { taskId: task.id, planId: plan.id, workspaceId: workspace.id },
+            );
+            await verificationCoordinator.scheduleRepair(task.id, {
+              attemptNumber: repairDecision.attemptNumber,
+              directiveArtifactUri: directiveArtifact.uri,
+              failedNodeIds: normalizedFailures.map((failure) => failure.nodeId),
+            });
+            return;
+          }
           await verificationCoordinator.fail(task.id, {
             reason: "required_predicates_failed",
             blocked: evaluation.blocked,
+            repair_stop_reason:
+              repairDecision.action === "stop" ? repairDecision.reason : undefined,
+            failure_signatures: normalizedFailures.map((failure) => failure.signatureHash),
           });
           return;
         }

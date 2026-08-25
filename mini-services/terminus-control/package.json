@@ -19,6 +19,8 @@
     "@terminus/provider-core": "workspace:*",
     "@terminus/provider-openai": "workspace:*",
     "@terminus/provider-anthropic": "workspace:*",
+    "@terminus/provider-cache": "workspace:*",
+    "@terminus/provider-economics": "workspace:*",
     "@terminus/provider-google": "workspace:*",
     "@terminus/provider-local": "workspace:*",
     "@terminus/provider-zen": "workspace:*",

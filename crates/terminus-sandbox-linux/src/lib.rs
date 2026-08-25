@@ -9,37 +9,110 @@
 //! production. The UI must display effective enforcement, never silently
 //! downgrade."):
 //!
-//! - When `bwrap` IS on `$PATH` and a real namespace probe succeeds, the
-//!   backend can report `Enforced` for the namespace-backed features. The
-//!   payload launcher adds the versioned seccomp filter and cgroup v2 lease.
+//! - When `bwrap` IS on `$PATH`, a real namespace probe succeeds, cgroup v2
+//!   is delegated, AND a minimal-root mount plan can be built, the backend
+//!   reports `Enforced` for exactly those features. Filesystem, git-protection,
+//!   and secret-isolation claims are DERIVED from the generated mount plan
+//!   ([`mounts::plan_proven_features`]) so the report cannot drift from the
+//!   argv.
+//! - The sandbox root is an empty directory plus explicitly mounted runtime
+//!   trees — never `--ro-bind / /`. Host home directories, credentials,
+//!   `.git`/`.terminus` state, and control sockets are invisible unless a
+//!   profile rule mounts them; Deny rules become tmpfs overlays that shadow
+//!   any parent bind.
 //! - When `bwrap` is NOT on `$PATH`, the backend reports `Degraded` with an
-//!   explicit note naming the missing binary. It does NOT silently downgrade
-//!   by claiming `Enforced` for features it cannot actually enforce. Profiles
-//!   that require namespace isolation (e.g. `network: Deny`) are rejected
-//!   with `SandboxError::Unsupported` so the caller can fall back to a
-//!   stronger backend (e.g. `terminus-sandbox-container`).
+//!   explicit note naming the missing binary. Profiles that require
+//!   namespace isolation (e.g. `network: Deny`) are rejected with
+//!   `SandboxError::Unsupported`.
 //!
 //! This module does not link `bubblewrap` directly; it invokes the binary
 //! on PATH through `std::process::Command` at construction time to verify
-//! availability, and constructs the bwrap argv from the sandbox profile
-//! when `spawn_in_sandbox` is called.
+//! availability, and constructs the bwrap argv from the mount plan when
+//! `spawn_in_sandbox` is called.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use terminus_kernel_protocol::CommandSpec;
-use terminus_sandbox::profile::{FilesystemAccess, NetworkAccess, SandboxProfile};
+use terminus_sandbox::profile::{NetworkAccess, SandboxProfile};
 use terminus_sandbox::report::{EnforcementFeature, EnforcementReport, EnforcementStatus};
 use terminus_sandbox::{SandboxBackend, SandboxError};
 
 mod enforcement;
+pub mod mounts;
 
 // The packaged kernel binary relaunches itself through these Linux-only
 // enforcement entrypoints. Keep the implementation private while exposing
 // the narrow binary boundary required by `mini-services/terminus-kernel`.
 pub use enforcement::{run_launcher, run_payload, run_probe, LAUNCHER_ARG, PAYLOAD_ARG};
+pub use mounts::{plan_mounts, plan_proven_features, HostLayout, MountPlan};
+
+/// Process-wide empty directory used as the minimal sandbox root. It
+/// contains nothing; every visible path must be mounted explicitly.
+static EMPTY_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+fn shared_empty_root() -> Option<&'static Path> {
+    if let Some(path) = EMPTY_ROOT.get() {
+        return Some(path.as_path());
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "terminus-sandbox-empty-root-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = EMPTY_ROOT.get_or_init(|| dir);
+    Some(path.as_path())
+}
+
+/// Reference materialization used for backend-wide feature claims. The
+/// enforcement report describes backend capability, so it plans against a
+/// real temporary workspace laid out like the kernel emits after
+/// `materialize_workspace_profile`: exact worktree bind plus `.git`,
+/// `.terminus`, and credentials Deny overlays. Claims stay derived from the
+/// resulting [`MountPlan`] rather than asserted.
+fn reference_plan(layout: &HostLayout) -> Option<MountPlan> {
+    static REF: OnceLock<PathBuf> = OnceLock::new();
+    let ws = REF.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("terminus-sandbox-ref-ws-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".git"));
+        let _ = std::fs::create_dir_all(dir.join(".terminus"));
+        let _ = std::fs::create_dir_all(dir.join("credentials"));
+        dir
+    });
+    use terminus_sandbox::profile::{FilesystemRule, SecretsAccess};
+    let profile = SandboxProfile {
+        id: "reference-restrictive".to_string(),
+        filesystem: vec![
+            FilesystemRule {
+                path: ws.display().to_string(),
+                access: terminus_sandbox::profile::FilesystemAccess::ReadWrite,
+            },
+            FilesystemRule {
+                path: ws.join(".git").display().to_string(),
+                access: terminus_sandbox::profile::FilesystemAccess::Deny,
+            },
+            FilesystemRule {
+                path: ws.join(".terminus").display().to_string(),
+                access: terminus_sandbox::profile::FilesystemAccess::Deny,
+            },
+            FilesystemRule {
+                path: ws.join("credentials").display().to_string(),
+                access: terminus_sandbox::profile::FilesystemAccess::Deny,
+            },
+        ],
+        network: NetworkAccess::Deny,
+        process: terminus_sandbox::profile::ProcessAccess::AllowWithLimits,
+        secrets: SecretsAccess::BrokeredCapabilities,
+        resources: terminus_sandbox::ResourceLimits::default(),
+        plugins_ambient_authority: false,
+    };
+    let _ = std::fs::create_dir_all(ws);
+    Some(plan_mounts(&profile, layout, shared_empty_root(), None))
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct LinuxSandboxBackend {
@@ -96,11 +169,9 @@ impl LinuxSandboxBackend {
 
     /// Construct a backend with a mocked bwrap availability. If `available`
     /// is `true`, the backend behaves as if `bwrap` was found on PATH
-    /// (reports `Enforced` for namespace features). If `false`, the backend
-    /// behaves as if `bwrap` was NOT found (reports `Degraded`). This
-    /// bypasses the filesystem existence check — useful for unit tests that
-    /// do not want to depend on the test environment having `bwrap`
-    /// installed.
+    /// (reports `Enforced` for namespace features once verified). If `false`,
+    /// the backend behaves as if `bwrap` was NOT found (reports `Degraded`).
+    /// This bypasses the filesystem existence check — useful for unit tests.
     pub fn with_mocked_bwrap(available: bool) -> Self {
         if available {
             Self {
@@ -117,38 +188,50 @@ impl LinuxSandboxBackend {
         self.bwrap_path.is_some()
     }
 
-    /// Build the `bwrap` argv for `command` under `profile`. This is a pure
-    /// function — it does not invoke `bwrap` or touch the filesystem. The
-    /// returned vector is suitable for passing to `std::process::Command::
-    /// args()`.
+    /// Build the `bwrap` argv for `command` under `profile`. Probes the host
+    /// layout and uses the shared minimal root. See
+    /// [`Self::build_bwrap_argv_with_layout`] for the pure variant.
     ///
     /// The argv encodes:
     /// - `--unshare-all` — user, pid, mount, ipc, uts namespaces.
-    /// - `--unshare-net` (only when `profile.network == Deny`) — network
-    ///   namespace.
-    /// - `--ro-bind / /` — read-only root filesystem.
+    /// - `--unshare-net` (only when `profile.network == Deny|ProxyRequired`).
+    /// - A MINIMAL ROOT built from an empty directory plus explicit runtime
+    ///   tree binds (`/usr`, `/sys`, merged-/usr symlinks) — the host root
+    ///   itself is never exposed.
+    /// - Exact workspace binds from materialized filesystem rules, with
+    ///   Deny-rule tmpfs overlays emitted after parent binds.
+    /// - `--clearenv` plus synthetic `HOME`/`TMPDIR`/`PATH` and the caller's
+    ///   public env.
     /// - `--proc /proc`, `--dev /dev` — mount /proc and /dev.
-    /// - Per-rule `--ro-bind` / `--bind` for filesystem rules whose path is
-    ///   an absolute host path. Workspace-URI rules
-    ///   (`workspace://...`) are skipped — they are logical and resolved
-    ///   by `terminus_fs::PathResolver`, not by bwrap.
-    /// - `--die-with-parent`, `--new-session` — lifecycle isolation.
-    /// - `--cap-drop ALL` — drop all Linux capabilities.
-    /// - `--chdir <cwd>` — set the working directory.
-    /// - `--` followed by the command program and its args.
+    /// - `--die-with-parent`, `--new-session`, `--cap-drop ALL`.
+    /// - `--chdir <cwd>` then `-- <program> <args...>`.
     pub fn build_bwrap_argv(command: &CommandSpec, profile: &SandboxProfile) -> Vec<String> {
-        Self::build_bwrap_argv_with_egress_broker(command, profile, None)
+        let layout = HostLayout::probe();
+        Self::build_bwrap_argv_with_layout(command, profile, &layout)
     }
 
-    /// Build bwrap argv with an optional private egress-broker mount. The
-    /// host broker parent is hidden by a tmpfs before the single lease
-    /// directory is mounted at a fixed guest path, preventing a payload from
-    /// enumerating or reusing another task's broker socket.
-    pub fn build_bwrap_argv_with_egress_broker(
+    /// Pure variant taking an explicit layout snapshot. The minimal root is
+    /// included when it is available (it always is on a functioning tmpfs).
+    pub fn build_bwrap_argv_with_layout(
         command: &CommandSpec,
         profile: &SandboxProfile,
-        broker_dir: Option<&std::path::Path>,
+        layout: &HostLayout,
     ) -> Vec<String> {
+        Self::build_bwrap_argv_full(command, profile, layout, shared_empty_root(), None)
+    }
+
+    /// Fully parameterized argv builder. `empty_root=None` produces a plan
+    /// without the minimal root (the enforcement report will then refuse to
+    /// claim FilesystemIsolation); production callers always supply it via
+    /// the shared root or an explicit path.
+    pub fn build_bwrap_argv_full(
+        command: &CommandSpec,
+        profile: &SandboxProfile,
+        layout: &HostLayout,
+        empty_root: Option<&Path>,
+        broker_dir: Option<&Path>,
+    ) -> Vec<String> {
+        let plan = plan_mounts(profile, layout, empty_root, broker_dir);
         let mut argv: Vec<String> = Vec::new();
 
         // Namespace isolation. --unshare-all covers user, pid, mount, ipc, uts.
@@ -160,57 +243,21 @@ impl LinuxSandboxBackend {
             argv.push("--unshare-net".to_string());
         }
 
-        // Read-only root filesystem.
-        argv.push("--ro-bind".to_string());
-        argv.push("/".to_string());
-        argv.push("/".to_string());
+        // Environment contract first: clear ambient env before any --setenv
+        // applies, so no host variable survives into the payload.
+        mounts::push_env_argv(&mut argv, &command.public_env);
 
-        // /proc and /dev so basic tools work.
+        // Mount plan: minimal root, runtime trees, exact workspace binds,
+        // deny overlays, optional broker lease.
+        for op in &plan.mounts {
+            op.push_argv(&mut argv);
+        }
+
+        // Pseudo-filesystems so basic tools work.
         argv.push("--proc".to_string());
         argv.push("/proc".to_string());
         argv.push("--dev".to_string());
         argv.push("/dev".to_string());
-
-        // Per-rule bind mounts. Skip workspace:// URIs — they are logical
-        // and resolved by terminus_fs::PathResolver, not by bwrap.
-        for rule in &profile.filesystem {
-            if !rule.path.starts_with('/') {
-                continue;
-            }
-            match rule.access {
-                FilesystemAccess::ReadOnly => {
-                    argv.push("--ro-bind".to_string());
-                    argv.push(rule.path.clone());
-                    argv.push(rule.path.clone());
-                }
-                FilesystemAccess::ReadWrite => {
-                    argv.push("--bind".to_string());
-                    argv.push(rule.path.clone());
-                    argv.push(rule.path.clone());
-                }
-                FilesystemAccess::Deny => {
-                    // Deny by NOT bind-mounting the path. Paths not
-                    // explicitly bound are not visible inside the sandbox.
-                }
-            }
-        }
-
-        if let Some(broker_dir) = broker_dir {
-            if let Some(broker_parent) = broker_dir.parent() {
-                // Hide the host lease parent inherited through `--ro-bind / /`.
-                argv.push("--tmpfs".to_string());
-                argv.push(broker_parent.display().to_string());
-                // Then create a guest-only runtime path and expose just this
-                // lease directory (which contains one 0600 Unix socket).
-                argv.push("--tmpfs".to_string());
-                argv.push("/run".to_string());
-                argv.push("--dir".to_string());
-                argv.push(Self::EGRESS_BROKER_GUEST_DIR.to_string());
-                argv.push("--ro-bind".to_string());
-                argv.push(broker_dir.display().to_string());
-                argv.push(Self::EGRESS_BROKER_GUEST_DIR.to_string());
-            }
-        }
 
         // Lifecycle isolation.
         argv.push("--die-with-parent".to_string());
@@ -259,18 +306,16 @@ impl LinuxSandboxBackend {
         if !self.bwrap_verified {
             return None;
         }
-        enforcement::payload_wrapper(
-            bwrap_path,
-            &Self::build_bwrap_argv_with_egress_broker(command, profile, broker_dir),
-            profile.resources,
-            profile.network,
-        )
+        let layout = HostLayout::probe();
+        let argv =
+            Self::build_bwrap_argv_full(command, profile, &layout, shared_empty_root(), broker_dir);
+        enforcement::payload_wrapper(bwrap_path, &argv, profile.resources, profile.network)
     }
 
     /// Spawn `command` inside a bwrap sandbox configured by `profile`.
     /// Returns the captured `std::process::Output` (stdout, stderr, exit
     /// code). Returns `SandboxError::Unsupported` if `bwrap` was not
-    /// available at construction time.
+    /// available at construction time or the minimal root is unavailable.
     pub fn spawn_in_sandbox(
         &self,
         command: &CommandSpec,
@@ -279,6 +324,11 @@ impl LinuxSandboxBackend {
         if self.bwrap_path.is_none() {
             return Err(SandboxError::Unsupported(
                 "bwrap not available on this host; cannot spawn in sandbox".to_string(),
+            ));
+        }
+        if shared_empty_root().is_none() {
+            return Err(SandboxError::Unsupported(
+                "minimal sandbox root unavailable; refusing to expose host root".to_string(),
             ));
         }
         let (launcher, argv) = self
@@ -290,13 +340,10 @@ impl LinuxSandboxBackend {
             })?;
         let mut cmd = Command::new(launcher);
         cmd.args(&argv);
-        // Clear the environment — bwrap does not propagate ambient env by
-        // default when --unshare-all is used, but we explicitly clear here
-        // to be safe. The caller-provided public_env is set explicitly.
+        // The bwrap argv carries --clearenv plus explicit --setenv entries;
+        // clearing here additionally keeps the trusted launcher's own env
+        // out of bubblewrap's process environment.
         cmd.env_clear();
-        for (k, v) in &command.public_env {
-            cmd.env(k, v);
-        }
         let _ = command.timeout_ms;
         cmd.output().map_err(SandboxError::Io)
     }
@@ -311,8 +358,7 @@ impl SandboxBackend for LinuxSandboxBackend {
     /// binary + full bwrap argv (including `-- <program> <args...>`) so
     /// `ProcessManager` can spawn the process inside the sandbox with
     /// streaming output. When bwrap is unavailable, return `None` (the
-    /// caller spawns directly; the enforcement report already says
-    /// Degraded).
+    /// caller fails closed; the enforcement report already says Degraded).
     fn spawn_wrapper(
         &self,
         command: &CommandSpec,
@@ -333,6 +379,9 @@ impl SandboxBackend for LinuxSandboxBackend {
         self.build_enforced_wrapper_with_egress_broker(command, profile, Some(broker_dir))
     }
 
+    /// Derive the report from what this construction actually produced:
+    /// the mount plan proves filesystem/git/secret features; verified
+    /// namespaces + delegated cgroup prove the rest.
     fn enforcement_report(&self) -> EnforcementReport {
         if let Some(path) = self.bwrap_path.as_ref().filter(|_| self.bwrap_verified) {
             if !enforcement::cgroup_v2_ready() {
@@ -349,27 +398,28 @@ impl SandboxBackend for LinuxSandboxBackend {
                     ],
                 };
             }
+            let layout = HostLayout::probe();
+            let mut enforced = reference_plan(&layout)
+                .map(|plan| plan_proven_features(&plan))
+                .unwrap_or_default();
+            enforced.extend([
+                EnforcementFeature::NetworkIsolation,
+                EnforcementFeature::NetworkNamespace,
+                EnforcementFeature::ProxyOnlyEgress,
+                EnforcementFeature::ProcessIsolation,
+                EnforcementFeature::ProcessTreeContainment,
+                EnforcementFeature::NoNewPrivs,
+                EnforcementFeature::PluginAmbientAuthorityDenial,
+                EnforcementFeature::PidNamespace,
+                EnforcementFeature::MountNamespace,
+                EnforcementFeature::UserNamespace,
+                EnforcementFeature::SeccompFilter,
+                EnforcementFeature::CgroupResourceLimits,
+            ]);
             return EnforcementReport {
                 backend_id: self.id().to_string(),
                 status: EnforcementStatus::Enforced,
-                enforced: vec![
-                    EnforcementFeature::FilesystemIsolation,
-                    EnforcementFeature::NetworkIsolation,
-                    EnforcementFeature::NetworkNamespace,
-                    EnforcementFeature::ProxyOnlyEgress,
-                    EnforcementFeature::ProtectedGit,
-                    EnforcementFeature::ProcessIsolation,
-                    EnforcementFeature::ProcessTreeContainment,
-                    EnforcementFeature::NoNewPrivs,
-                    EnforcementFeature::AmbientSecretDenial,
-                    EnforcementFeature::SecretIsolation,
-                    EnforcementFeature::PluginAmbientAuthorityDenial,
-                    EnforcementFeature::PidNamespace,
-                    EnforcementFeature::MountNamespace,
-                    EnforcementFeature::UserNamespace,
-                    EnforcementFeature::SeccompFilter,
-                    EnforcementFeature::CgroupResourceLimits,
-                ],
+                enforced,
                 degraded: vec![],
                 unsupported: vec![],
                 notes: vec![
@@ -381,9 +431,15 @@ impl SandboxBackend for LinuxSandboxBackend {
                     "cgroup v2 resource limits are applied by the payload launcher".to_string(),
                     "proxy-only egress enforced via network namespace + broker socket mount"
                         .to_string(),
-                    "protected .git via filesystem Deny rule + read-only root".to_string(),
+                    "minimal-root mount plan: host root never bound; runtime trees read-only; \
+                     workspace exact-bound; deny rules shadowed by tmpfs overlays"
+                        .to_string(),
+                    "protected .git/.terminus/credentials via tmpfs overlays over the \
+                     workspace bind"
+                        .to_string(),
                     "process tree containment via PID namespace + --die-with-parent".to_string(),
-                    "secret isolation via env-clear + brokered capabilities only".to_string(),
+                    "secret isolation via --clearenv + synthetic HOME + brokered capabilities "
+                        .to_string(),
                 ],
             };
         }
@@ -399,6 +455,8 @@ impl SandboxBackend for LinuxSandboxBackend {
             unsupported: vec![
                 EnforcementFeature::FilesystemIsolation,
                 EnforcementFeature::NetworkIsolation,
+                EnforcementFeature::ProtectedGit,
+                EnforcementFeature::SecretIsolation,
                 EnforcementFeature::SeccompFilter,
                 EnforcementFeature::NoNewPrivs,
                 EnforcementFeature::PidNamespace,
@@ -407,6 +465,8 @@ impl SandboxBackend for LinuxSandboxBackend {
             ],
             notes: vec![
                 "degraded: bubblewrap (bwrap) not found or not verified on PATH; namespace isolation unavailable"
+                    .to_string(),
+                "degraded builds never construct a mount plan: no minimal root, no workspace bind, no overlay protection"
                     .to_string(),
                 "cgroup-style resource limits via setrlimit where available (degraded — not wired in this build)"
                     .to_string(),
@@ -434,15 +494,20 @@ impl SandboxBackend for LinuxSandboxBackend {
                 "ambient plugin authority not permitted".into(),
             ));
         }
+        // Without a minimal root there is no honest way to enforce
+        // filesystem policy in the namespace at all: fail closed.
+        if shared_empty_root().is_none() {
+            return Err(SandboxError::Unsupported(
+                "minimal sandbox root unavailable; refusing to build a host-visible namespace"
+                    .into(),
+            ));
+        }
         // Profiles that require network isolation may only be selected after
         // the complete enforcement chain is verified. Merely finding a
         // `bwrap` binary is insufficient: a failed namespace probe or an
         // unavailable delegated cgroup would otherwise let a caller select
         // this backend while `spawn_wrapper()` returns `None`. Secure callers
         // must receive a typed refusal before any direct spawn is possible.
-        // Filesystem Deny rules can be partially enforced via terminus-fs path
-        // policy, so they remain reportable as degraded rather than rejected
-        // here.
         if matches!(
             profile.network,
             NetworkAccess::Deny | NetworkAccess::ProxyRequired
@@ -463,7 +528,7 @@ impl SandboxBackend for LinuxSandboxBackend {
 /// wrapper that returns a typed error when the libc call is unavailable.
 ///
 /// In this build we do not link libc directly; the function returns
-/// `Err(SandboxError::Degraded)` so callers can record the gap honestly.
+/// `Err(SandboxError::Unsupported)` so callers can record the gap honestly.
 pub fn apply_resource_limits(
     limits: &terminus_sandbox::ResourceLimits,
 ) -> Result<(), SandboxError> {
@@ -507,24 +572,62 @@ fn which_bwrap() -> Option<PathBuf> {
     probe_bwrap_path(&path).then_some(path)
 }
 
+/// Functional probe used before trusting a resolved `bwrap` path. Mirrors
+/// the shipped argv shape (minimal root, no host-root bind) so the probe
+/// exercises what production will run. Tries a merged-/usr layout first,
+/// then a classic layout.
 fn probe_bwrap_path(path: &std::path::Path) -> bool {
+    let base = [
+        "--unshare-all".to_string(),
+        "--proc".to_string(),
+        "/proc".to_string(),
+        "--dev".to_string(),
+        "/dev".to_string(),
+        "--die-with-parent".to_string(),
+        "--new-session".to_string(),
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
+    ];
+    let merged = [
+        "--ro-bind".to_string(),
+        "/usr".to_string(),
+        "/usr".to_string(),
+        "--symlink".to_string(),
+        "usr/bin".to_string(),
+        "/bin".to_string(),
+    ];
+    let classic = ["/bin", "/sbin", "/lib", "/lib64"]
+        .iter()
+        .flat_map(|dir| ["--ro-bind".to_string(), dir.to_string(), dir.to_string()])
+        .collect::<Vec<_>>();
+    let tail = [
+        "--clearenv".to_string(),
+        "--setenv".to_string(),
+        "PATH".to_string(),
+        "/usr/bin:/bin:/sbin".to_string(),
+        "--".to_string(),
+        "/bin/true".to_string(),
+    ];
+    let mut attempt = Vec::with_capacity(base.len() + merged.len() + tail.len());
+    attempt.extend_from_slice(&base);
+    attempt.extend_from_slice(&merged);
+    attempt.extend_from_slice(&tail);
+    let ok = Command::new(path)
+        .args(&attempt)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if ok {
+        return true;
+    }
+    let mut fallback = Vec::with_capacity(base.len() + classic.len() + tail.len());
+    fallback.extend_from_slice(&base);
+    fallback.extend(classic);
+    fallback.extend_from_slice(&tail);
     Command::new(path)
-        .args([
-            "--unshare-all",
-            "--ro-bind",
-            "/",
-            "/",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--die-with-parent",
-            "--new-session",
-            "--cap-drop",
-            "ALL",
-            "--",
-            "/bin/true",
-        ])
+        .args(&fallback)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -554,12 +657,6 @@ mod tests {
     fn profile_with_network_allow() -> SandboxProfile {
         let mut p = restrictive_profile();
         p.network = NetworkAccess::Allow;
-        p
-    }
-
-    fn profile_with_proxy_required() -> SandboxProfile {
-        let mut p = restrictive_profile();
-        p.network = NetworkAccess::ProxyRequired;
         p
     }
 
@@ -593,48 +690,10 @@ mod tests {
             .enforced
             .contains(&EnforcementFeature::MountNamespace));
         assert!(!report.enforced.contains(&EnforcementFeature::UserNamespace));
-    }
-
-    #[test]
-    fn with_bubblewrap_true_probes_path() {
-        // `with_bubblewrap(true)` MUST NOT silently claim `Enforced` — it
-        // probes PATH and reports based on what it actually finds. In the
-        // sandboxed test environment `bwrap` is unlikely to be installed.
-        let backend = LinuxSandboxBackend::with_bubblewrap(true);
-        let report = backend.enforcement_report();
-        // Whatever it reports, it MUST be consistent with `is_bubblewrap_available`.
-        if backend.is_bubblewrap_available() {
-            assert_eq!(report.status, EnforcementStatus::Enforced);
-            assert!(report
-                .enforced
-                .contains(&EnforcementFeature::FilesystemIsolation));
-        } else {
-            assert_eq!(report.status, EnforcementStatus::Degraded);
-            assert!(report
-                .notes
-                .iter()
-                .any(|n| n.contains("bubblewrap (bwrap) not found")));
-        }
-    }
-
-    #[test]
-    fn with_bwrap_path_rejects_nonexistent() {
-        let backend = LinuxSandboxBackend::with_bwrap_path(PathBuf::from("/nonexistent/bwrap-xyz"));
-        assert!(!backend.is_bubblewrap_available());
-        let report = backend.enforcement_report();
-        assert_eq!(report.status, EnforcementStatus::Degraded);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn with_bwrap_path_accepts_existing_bwrap_binary() {
-        // `/bin/sh` definitely exists on a unix test environment. Even
-        // though it's not really `bwrap`, this test verifies the
-        // existence-check logic of `with_bwrap_path`.
-        let backend = LinuxSandboxBackend::with_bwrap_path(PathBuf::from("/bin/sh"));
-        assert!(backend.is_bubblewrap_available());
-        let report = backend.enforcement_report();
-        assert_eq!(report.status, EnforcementStatus::Degraded);
+        assert!(!report
+            .enforced
+            .contains(&EnforcementFeature::SecretIsolation));
+        assert!(!report.enforced.contains(&EnforcementFeature::ProtectedGit));
     }
 
     #[test]
@@ -670,32 +729,6 @@ mod tests {
         assert!(report
             .degraded
             .contains(&EnforcementFeature::CgroupResourceLimits));
-    }
-
-    // ---------- new tests for the F9 improvements ----------
-
-    #[test]
-    fn enforcement_report_changes_with_bwrap_availability() {
-        // Mock the `which` check: with_mocked_bwrap(true/false) sets the
-        // bwrap_path WITHOUT touching the filesystem.
-        let without_bwrap = LinuxSandboxBackend::with_mocked_bwrap(false);
-        let report_without = without_bwrap.enforcement_report();
-        assert_eq!(report_without.status, EnforcementStatus::Degraded);
-        assert!(without_bwrap.bwrap_path.is_none());
-
-        let with_bwrap = LinuxSandboxBackend::with_mocked_bwrap(true);
-        let report_with = with_bwrap.enforcement_report();
-        assert_eq!(report_with.status, EnforcementStatus::Degraded);
-        assert!(with_bwrap.bwrap_path.is_some());
-
-        // A mocked path is intentionally not enough to claim enforcement.
-        // Only a verified executable plus writable cgroup v2 may move a
-        // profile to Enforced.
-        assert_eq!(report_with.status, EnforcementStatus::Degraded);
-        assert!(report_with
-            .notes
-            .iter()
-            .any(|note| note.contains("not found or not verified")));
     }
 
     #[test]
@@ -772,28 +805,136 @@ mod tests {
     }
 
     #[test]
-    fn build_bwrap_argv_includes_ro_bind_root() {
+    fn build_bwrap_argv_never_binds_host_root() {
+        // Release blocker 0: the historical `--ro-bind / /` exposed the whole
+        // host. No argv may bind "/" as either source or destination except
+        // the minimal-empty-root bind (source = empty dir, dest = "/").
         let cmd = simple_command("ls");
         let profile = restrictive_profile();
         let argv = LinuxSandboxBackend::build_bwrap_argv(&cmd, &profile);
-        let idx = argv
-            .iter()
-            .position(|a| a == "--ro-bind")
-            .expect("--ro-bind present");
-        // The first --ro-bind is for the root filesystem: --ro-bind / /
-        assert_eq!(argv.get(idx + 1), Some(&"/".to_string()));
-        assert_eq!(argv.get(idx + 2), Some(&"/".to_string()));
+        let mut i = 0;
+        while i < argv.len() {
+            if argv[i] == "--ro-bind" || argv[i] == "--bind" {
+                let src = &argv[i + 1];
+                let dst = &argv[i + 2];
+                assert_ne!(src, "/", "host root bound as source: {argv:?}");
+                if dst == "/" {
+                    // Only permitted for the empty minimal root.
+                    assert_ne!(src, "/");
+                    assert!(src.starts_with(std::env::temp_dir().to_str().unwrap_or("/tmp")));
+                }
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
     }
 
     #[test]
-    fn build_bwrap_argv_includes_proc_and_dev() {
+    fn build_bwrap_argv_builds_minimal_root_and_runtime_trees() {
         let cmd = simple_command("ls");
-        let profile = restrictive_profile();
-        let argv = LinuxSandboxBackend::build_bwrap_argv(&cmd, &profile);
+        let argv = LinuxSandboxBackend::build_bwrap_argv(&cmd, &restrictive_profile());
+        // Empty root bind present.
+        let has_root_bind = argv.windows(3).any(|w| w[0] == "--ro-bind" && w[2] == "/");
+        assert!(has_root_bind, "minimal empty root missing: {argv:?}");
+        // /usr read-only.
+        assert!(argv
+            .windows(3)
+            .any(|w| w[0] == "--ro-bind" && w[1] == "/usr" && w[2] == "/usr"));
+        // proc/dev/tmpfs scratch.
         assert!(argv.contains(&"--proc".to_string()));
         assert!(argv.contains(&"/proc".to_string()));
         assert!(argv.contains(&"--dev".to_string()));
         assert!(argv.contains(&"/dev".to_string()));
+        assert!(argv.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == "/tmp"));
+    }
+
+    #[test]
+    fn build_bwrap_argv_clears_env_and_sets_synthetic_home() {
+        let cmd = CommandSpec {
+            program: "env".to_string(),
+            args: vec![],
+            cwd: WorkspacePath::new("ws-1", "."),
+            public_env: [("ONLYVAR".to_string(), "1".to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let argv = LinuxSandboxBackend::build_bwrap_argv(&cmd, &restrictive_profile());
+        let clearenv = argv
+            .iter()
+            .position(|a| a == "--clearenv")
+            .expect("clearenv");
+        let home_idx = argv.iter().position(|a| a == "HOME").expect("HOME setenv");
+        assert!(
+            clearenv < home_idx,
+            "clearenv must precede setenv: {argv:?}"
+        );
+        let home_val = argv[home_idx + 1].clone();
+        assert_eq!(home_val, mounts::SYNTHETIC_HOME);
+        // public env applied after defaults.
+        let only = argv
+            .iter()
+            .position(|a| a == "ONLYVAR")
+            .expect("public env");
+        assert!(only > home_idx);
+        assert_eq!(argv.get(only + 1), Some(&"1".to_string()));
+        // The outer command no longer relies on inherited environment.
+        let path_idx = argv.iter().position(|a| a == "PATH").expect("PATH setenv");
+        assert_eq!(
+            argv.get(path_idx + 1),
+            Some(&mounts::DEFAULT_PATH.to_string())
+        );
+    }
+
+    #[test]
+    fn build_bwrap_argv_shadows_deny_rules_after_parent_bind() {
+        // Materialized profile like the kernel emits: absolute paths.
+        let ws = "/tmp/ws-under-test";
+        let profile = SandboxProfile {
+            id: "materialized".to_string(),
+            filesystem: vec![
+                FilesystemRule {
+                    path: ws.to_string(),
+                    access: FilesystemAccess::ReadWrite,
+                },
+                FilesystemRule {
+                    path: format!("{ws}/.git"),
+                    access: FilesystemAccess::Deny,
+                },
+                FilesystemRule {
+                    path: format!("{ws}/.terminus"),
+                    access: FilesystemAccess::Deny,
+                },
+            ],
+            network: NetworkAccess::Allow,
+            process: ProcessAccess::AllowWithLimits,
+            secrets: SecretsAccess::BrokeredCapabilities,
+            resources: ResourceLimits::default(),
+            plugins_ambient_authority: false,
+        };
+        let cmd = simple_command("ls");
+        let argv = LinuxSandboxBackend::build_bwrap_argv_with_layout(
+            &cmd,
+            &profile,
+            &HostLayout::merged_usr_reference(),
+        );
+        let bind_idx = argv
+            .windows(3)
+            .position(|w| w[0] == "--bind" && w[1] == ws && w[2] == ws)
+            .expect("workspace rw bind");
+        let git_overlay = argv
+            .windows(2)
+            .position(|w| w[0] == "--tmpfs" && w[1] == format!("{ws}/.git"))
+            .expect(".git tmpfs overlay");
+        let terminus_overlay = argv
+            .windows(2)
+            .position(|w| w[0] == "--tmpfs" && w[1] == format!("{ws}/.terminus"))
+            .expect(".terminus tmpfs overlay");
+        assert!(
+            bind_idx < git_overlay && bind_idx < terminus_overlay,
+            "deny overlays must follow the parent bind: {argv:?}"
+        );
     }
 
     #[test]
@@ -835,19 +976,6 @@ mod tests {
     }
 
     #[test]
-    fn build_bwrap_argv_omits_chdir_when_cwd_is_dot() {
-        let cmd = CommandSpec {
-            program: "ls".to_string(),
-            args: vec![],
-            cwd: WorkspacePath::new("ws-1", "."),
-            ..Default::default()
-        };
-        let profile = restrictive_profile();
-        let argv = LinuxSandboxBackend::build_bwrap_argv(&cmd, &profile);
-        assert!(!argv.contains(&"--chdir".to_string()));
-    }
-
-    #[test]
     fn build_bwrap_argv_appends_command_after_double_dash() {
         let cmd = CommandSpec {
             program: "echo".to_string(),
@@ -857,10 +985,8 @@ mod tests {
         };
         let profile = restrictive_profile();
         let argv = LinuxSandboxBackend::build_bwrap_argv(&cmd, &profile);
-        let dash_idx = argv
-            .iter()
-            .position(|a| a == "--")
-            .expect("-- separator present");
+        let dash_idx = argv.iter().rev().position(|a| a == "--").unwrap();
+        let dash_idx = argv.len() - 1 - dash_idx;
         // After --, we expect: echo hello world
         assert_eq!(argv.get(dash_idx + 1), Some(&"echo".to_string()));
         assert_eq!(argv.get(dash_idx + 2), Some(&"hello".to_string()));
@@ -871,13 +997,10 @@ mod tests {
 
     #[test]
     fn build_bwrap_argv_skips_workspace_uri_rules() {
-        // The default restrictive profile has workspace:// rules which are
-        // logical, not host paths. They MUST NOT appear as --bind/--ro-bind
-        // targets in the bwrap argv.
+        // Unmaterialized logical rules MUST NOT appear as --bind targets.
         let cmd = simple_command("ls");
         let profile = restrictive_profile();
         let argv = LinuxSandboxBackend::build_bwrap_argv(&cmd, &profile);
-        // No argv entry should start with "workspace://".
         assert!(
             !argv.iter().any(|a| a.starts_with("workspace://")),
             "workspace:// URIs must not be passed to bwrap; got {:?}",
@@ -892,65 +1015,57 @@ mod tests {
         let broker_dir = broker_root.join("lease-1");
         std::fs::create_dir_all(&broker_dir).unwrap();
         let command = simple_command("curl");
-        let argv = LinuxSandboxBackend::build_bwrap_argv_with_egress_broker(
+        let argv = LinuxSandboxBackend::build_bwrap_argv_full(
             &command,
             &profile_with_proxy_required(),
+            &HostLayout::merged_usr_reference(),
+            shared_empty_root(),
             Some(&broker_dir),
         );
         assert!(argv.contains(&"--unshare-net".to_string()));
-        assert!(argv.windows(2).any(|window| {
-            window[0] == "--tmpfs" && window[1] == broker_root.display().to_string()
-        }));
-        assert!(argv
-            .windows(2)
-            .any(|window| { window[0] == "--tmpfs" && window[1] == "/run" }));
         assert!(argv.windows(3).any(|window| {
             window[0] == "--ro-bind"
                 && window[1] == broker_dir.display().to_string()
                 && window[2] == LinuxSandboxBackend::EGRESS_BROKER_GUEST_DIR
         }));
+        // The host lease parent must NOT be mounted anywhere.
+        assert!(!argv
+            .windows(3)
+            .any(|w| (w[0] == "--ro-bind" || w[0] == "--bind")
+                && w[1] == broker_root.display().to_string()));
+        // /run stays a fresh tmpfs so other leases are invisible.
+        assert!(argv.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == "/run"));
+    }
+
+    fn profile_with_proxy_required() -> SandboxProfile {
+        let mut p = restrictive_profile();
+        p.network = NetworkAccess::ProxyRequired;
+        p
     }
 
     #[test]
-    fn build_bwrap_argv_includes_ro_bind_for_absolute_readonly_rules() {
-        let cmd = simple_command("ls");
+    fn readonly_rule_is_bound_read_only() {
         let profile = SandboxProfile {
             id: "test-abs-ro".to_string(),
-            filesystem: vec![
-                FilesystemRule {
-                    path: "/etc".to_string(),
-                    access: FilesystemAccess::ReadOnly,
-                },
-                FilesystemRule {
-                    path: "/var/log".to_string(),
-                    access: FilesystemAccess::ReadWrite,
-                },
-            ],
+            filesystem: vec![FilesystemRule {
+                path: "/etc/pki".to_string(),
+                access: FilesystemAccess::ReadOnly,
+            }],
             network: NetworkAccess::Allow,
-            process: ProcessAccess::Allow,
+            process: ProcessAccess::AllowWithLimits,
             secrets: SecretsAccess::BrokeredCapabilities,
             resources: ResourceLimits::default(),
             plugins_ambient_authority: false,
         };
-        let argv = LinuxSandboxBackend::build_bwrap_argv(&cmd, &profile);
-        // /etc should appear as --ro-bind /etc /etc
-        let ro_idx = argv
-            .windows(3)
-            .position(|w| w[0] == "--ro-bind" && w[1] == "/etc" && w[2] == "/etc");
-        assert!(
-            ro_idx.is_some(),
-            "expected --ro-bind /etc /etc in argv: {:?}",
-            argv
+        let cmd = simple_command("ls");
+        let argv = LinuxSandboxBackend::build_bwrap_argv_with_layout(
+            &cmd,
+            &profile,
+            &HostLayout::merged_usr_reference(),
         );
-        // /var/log should appear as --bind /var/log /var/log
-        let rw_idx = argv
+        assert!(argv
             .windows(3)
-            .position(|w| w[0] == "--bind" && w[1] == "/var/log" && w[2] == "/var/log");
-        assert!(
-            rw_idx.is_some(),
-            "expected --bind /var/log /var/log in argv: {:?}",
-            argv
-        );
+            .any(|w| w[0] == "--ro-bind" && w[1] == "/etc/pki" && w[2] == "/etc/pki"));
     }
 
     #[test]
@@ -962,5 +1077,38 @@ mod tests {
             .spawn_in_sandbox(&cmd, &profile)
             .expect_err("spawn must fail without bwrap");
         assert!(matches!(err, SandboxError::Unsupported(_)));
+    }
+
+    // ---------- mount-plan feature derivation ----------
+
+    #[test]
+    fn plan_features_track_the_actual_plan() {
+        use terminus_sandbox::report::EnforcementFeature;
+        let layout = HostLayout::merged_usr_reference();
+        let plan = plan_mounts(
+            &SandboxProfile::default_restrictive(),
+            &layout,
+            shared_empty_root(),
+            None,
+        );
+        let features = plan_proven_features(&plan);
+        // The default restrictive profile materializes to a workspace RW bind
+        // only when the kernel provides one; with logical rules unbound the
+        // plan has no workspace bind, so FilesystemIsolation must NOT be
+        // claimed from this static call site.
+        if plan.workspace_rw_binds.is_empty() {
+            assert!(!features.contains(&EnforcementFeature::FilesystemIsolation));
+        } else {
+            assert!(features.contains(&EnforcementFeature::FilesystemIsolation));
+        }
+        assert!(features.contains(&EnforcementFeature::SecretIsolation));
+        assert!(features.contains(&EnforcementFeature::AmbientSecretDenial));
+
+        // Without a minimal root nothing may be proven about filesystems.
+        let open_plan = plan_mounts(&SandboxProfile::default_restrictive(), &layout, None, None);
+        assert!(!open_plan.minimal_root);
+        assert!(
+            !plan_proven_features(&open_plan).contains(&EnforcementFeature::FilesystemIsolation)
+        );
     }
 }

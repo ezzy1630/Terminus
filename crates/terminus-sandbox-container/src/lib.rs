@@ -29,6 +29,11 @@ pub struct HardenedOptions {
     /// Passed verbatim as `--cpus` (e.g. "1.5").
     pub cpus: Option<String>,
     pub pids_limit: Option<u32>,
+    /// Explicit seccomp profile file passed as
+    /// `--security-opt=seccomp=<path>`. The runtime's implicit default
+    /// profile is NOT argv-provable, so the `SeccompFilter` feature is only
+    /// claimed when this is set.
+    pub seccomp_profile: Option<String>,
 }
 
 impl Default for HardenedOptions {
@@ -42,6 +47,7 @@ impl Default for HardenedOptions {
             memory_limit_bytes: Some(2 * 1024 * 1024 * 1024),
             cpus: Some("2".to_string()),
             pids_limit: Some(512),
+            seccomp_profile: None,
         }
     }
 }
@@ -76,6 +82,9 @@ impl HardenedOptions {
         if let Some(pids) = self.pids_limit {
             v.push(format!("--pids-limit={pids}"));
         }
+        if let Some(seccomp) = &self.seccomp_profile {
+            v.push(format!("--security-opt=seccomp={seccomp}"));
+        }
         if network_deny {
             v.push("--network=none".into());
         }
@@ -96,6 +105,9 @@ impl HardenedOptions {
         }
         if self.no_new_privileges {
             v.push(EnforcementFeature::NoNewPrivs);
+        }
+        if self.seccomp_profile.is_some() {
+            v.push(EnforcementFeature::SeccompFilter);
         }
         if self.memory_limit_bytes.is_some() || self.cpus.is_some() || self.pids_limit.is_some() {
             v.push(EnforcementFeature::CgroupResourceLimits);
@@ -122,7 +134,34 @@ impl HardenedOptions {
             memory_limit_bytes: None,
             cpus: None,
             pids_limit: None,
+            seccomp_profile: None,
         }
+    }
+
+    /// Exact docker bind-mount flags for materialized filesystem rules.
+    ///
+    /// Only absolute host paths are honored; each Read/RO rule becomes an
+    /// exact `src=dst` bind so the container sees precisely the worktree —
+    /// no host root, no home directories. Deny rules mount nothing (a
+    /// container has no ambient host filesystem to hide).
+    pub fn workspace_mount_flags(profile: &SandboxProfile) -> Vec<String> {
+        use terminus_sandbox::profile::{FilesystemAccess, FilesystemRule};
+        let mut v = Vec::new();
+        for FilesystemRule { path, access } in &profile.filesystem {
+            if !path.starts_with('/') || path == "/" {
+                continue;
+            }
+            match access {
+                FilesystemAccess::ReadOnly => {
+                    v.push(format!("--mount=type=bind,src={path},dst={path},readonly"))
+                }
+                FilesystemAccess::ReadWrite => {
+                    v.push(format!("--mount=type=bind,src={path},dst={path}"))
+                }
+                FilesystemAccess::Deny => {}
+            }
+        }
+        v
     }
 }
 
@@ -242,11 +281,18 @@ impl SandboxBackend for ContainerSandboxBackend {
             Some(hardened) => {
                 let flags = hardened.flags(network_deny);
                 let enforced = hardened.proven_features(network_deny);
+                // Seccomp is degraded only while no explicit profile is
+                // argv-proven.
+                let degraded = if hardened.seccomp_profile.is_some() {
+                    vec![]
+                } else {
+                    vec![EnforcementFeature::SeccompFilter]
+                };
                 EnforcementReport {
                     backend_id: self.id().to_string(),
                     status: EnforcementStatus::Enforced,
                     enforced: enforced.clone(),
-                    degraded: vec![EnforcementFeature::SeccompFilter],
+                    degraded,
                     unsupported: vec![EnforcementFeature::UserNamespace],
                     notes: vec![
                         format!(
@@ -256,19 +302,22 @@ impl SandboxBackend for ContainerSandboxBackend {
                                 .map(PinnedImage::reference)
                                 .unwrap_or_default()
                         ),
-                        format!("argv = run {} <digest-ref> -- cmd", flags.join(" ")),
+                        format!(
+                            "argv = run {} <digest-ref> <program> [args...]",
+                            flags.join(" ")
+                        ),
                         "every enforced feature cites a generated flag above".to_string(),
                         "ambient secrets: no -e/--env/--env-file flag is emitted and the \
                          container never inherits host environment"
                             .to_string(),
-                        "seccomp: degraded — the runtime's implicit default profile is not \
-                         argv-proven; pass an explicit seccomp JSON to promote"
+                        "seccomp: degraded unless HardenedOptions.seccomp_profile is set; the \
+                         runtime's implicit default profile is not argv-proven"
                             .to_string(),
                         "user namespaces: unsupported — userns-remap not enabled by this \
                          wrapper"
                             .to_string(),
-                        "no host paths are mounted by this wrapper; workspace material must \
-                         enter via artifact handles"
+                        "workspace material enters only through exact profile binds \
+                         (--mount type=bind src=dst) or artifact handles; no host root is mounted"
                             .to_string(),
                     ],
                 }
@@ -298,7 +347,8 @@ impl SandboxBackend for ContainerSandboxBackend {
                             .map(PinnedImage::reference)
                             .unwrap_or_default()
                     ),
-                    "argv = run --rm --init [--network=none] <digest-ref> -- cmd".to_string(),
+                    "argv = run --rm --init [--network=none] <digest-ref> <program> [args...]"
+                        .to_string(),
                     "network isolation applies only when the profile denies network \
                      (--network=none); it cannot be verified from static configuration"
                         .to_string(),
@@ -351,8 +401,21 @@ impl SandboxBackend for ContainerSandboxBackend {
                 "--network=none".to_string(),
             ],
         };
+        // Exact workspace binds from the materialized profile. The container
+        // sees only these host paths — never the host root or home dirs.
+        argv.extend(HardenedOptions::workspace_mount_flags(profile));
+        // Working directory: the kernel places the resolved absolute cwd in
+        // `cwd.relative_path`; exact binds keep guest paths equal to host
+        // paths so this is directly usable. A bare relative path falls back
+        // to the image default workdir.
+        let cwd = &command.cwd.relative_path;
+        if cwd.starts_with('/') {
+            argv.push(format!("--workdir={cwd}"));
+        }
+        // OCI contract: everything after the image reference IS the command.
+        // The historical `IMAGE -- PROGRAM` shape executed `--` as the
+        // program and failed on generic images; no separator belongs here.
         argv.push(image.reference());
-        argv.push("--".to_string());
         argv.push(command.program.clone());
         argv.extend(command.args.clone());
         Some((std::path::PathBuf::from(&self.runtime_bin), argv))
@@ -373,6 +436,111 @@ mod hardened_tests {
         ContainerSandboxBackend::configure("docker", digest_image(), 1)
             .unwrap()
             .with_hardened(HardenedOptions::default())
+    }
+
+    #[test]
+    fn argv_places_program_directly_after_image() {
+        // Deep-audit finding 3.2: `IMAGE -- PROGRAM` executes `--` as the
+        // container command. The OCI contract has no separator there.
+        let backend = hardened_backend();
+        let cmd = terminus_kernel_protocol::CommandSpec {
+            program: "echo".to_string(),
+            args: vec!["hi".to_string()],
+            cwd: terminus_kernel_protocol::WorkspacePath::new("ws", "."),
+            timeout_ms: 1000,
+            ..Default::default()
+        };
+        let (_, argv) = backend
+            .spawn_wrapper(&cmd, &SandboxProfile::default_restrictive())
+            .unwrap();
+        let image_idx = argv
+            .iter()
+            .position(|a| a.contains("@sha256:"))
+            .expect("image present");
+        assert_eq!(
+            argv.get(image_idx + 1),
+            Some(&"echo".to_string()),
+            "program must immediately follow the image: {argv:?}"
+        );
+        assert_eq!(argv.get(image_idx + 2), Some(&"hi".to_string()));
+        // No stray separator anywhere between the flags and the program.
+        assert!(!argv[..image_idx].iter().any(|a| a == "--"));
+    }
+
+    #[test]
+    fn workspace_mounts_and_workdir_are_exact() {
+        use terminus_sandbox::profile::{FilesystemAccess, FilesystemRule, SecretsAccess};
+        let ws = "/tmp/materialized-worktree";
+        let profile = SandboxProfile {
+            id: "materialized".to_string(),
+            filesystem: vec![
+                FilesystemRule {
+                    path: ws.to_string(),
+                    access: FilesystemAccess::ReadWrite,
+                },
+                FilesystemRule {
+                    path: format!("{ws}/.git"),
+                    access: FilesystemAccess::Deny,
+                },
+                FilesystemRule {
+                    path: "/etc/pki".to_string(),
+                    access: FilesystemAccess::ReadOnly,
+                },
+            ],
+            network: NetworkAccess::Deny,
+            process: terminus_sandbox::profile::ProcessAccess::AllowWithLimits,
+            secrets: SecretsAccess::BrokeredCapabilities,
+            resources: terminus_sandbox::ResourceLimits::default(),
+            plugins_ambient_authority: false,
+        };
+        let backend = hardened_backend();
+        let cmd = terminus_kernel_protocol::CommandSpec {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "pwd".to_string()],
+            cwd: terminus_kernel_protocol::WorkspacePath {
+                workspace_id: "ws".to_string(),
+                relative_path: format!("{ws}/src"),
+            },
+            timeout_ms: 1000,
+            ..Default::default()
+        };
+        let (_, argv) = backend.spawn_wrapper(&cmd, &profile).unwrap();
+        // Exact rw bind for the worktree; deny rule mounts nothing.
+        assert!(argv.contains(&format!("--mount=type=bind,src={ws},dst={ws}")));
+        assert!(argv
+            .iter()
+            .any(|a| a == "--mount=type=bind,src=/etc/pki,dst=/etc/pki,readonly"));
+        assert!(!argv
+            .iter()
+            .any(|a| a.contains(format!("{ws}/.git").as_str())));
+        // Workdir uses the resolved absolute host path (== guest path).
+        assert!(argv.contains(&format!("--workdir={ws}/src")));
+        let image_idx = argv.iter().position(|a| a.contains("@sha256:")).unwrap();
+        assert_eq!(argv[image_idx + 1], "sh");
+    }
+
+    #[test]
+    fn seccomp_claim_requires_explicit_profile() {
+        let without = hardened_backend();
+        assert!(without
+            .enforcement_report()
+            .degraded
+            .contains(&EnforcementFeature::SeccompFilter));
+        let with = ContainerSandboxBackend::configure("docker", digest_image(), 1)
+            .unwrap()
+            .with_hardened(HardenedOptions {
+                seccomp_profile: Some("/etc/terminus/seccomp.json".to_string()),
+                ..HardenedOptions::default()
+            });
+        let report = with.enforcement_report();
+        assert!(!report.degraded.contains(&EnforcementFeature::SeccompFilter));
+        assert!(report.enforced.contains(&EnforcementFeature::SeccompFilter));
+        assert!(with
+            .hardened_options()
+            .unwrap()
+            .flags(true)
+            .iter()
+            .any(|f| f == "--security-opt=seccomp=/etc/terminus/seccomp.json"));
     }
 
     #[test]

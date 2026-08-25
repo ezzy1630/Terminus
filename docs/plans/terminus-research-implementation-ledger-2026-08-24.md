@@ -2,6 +2,47 @@
 
 Date: 2026-08-24
 
+## Deep-audit remediation status (2026-08-24, branch `audit/2026-08-24-deep-research-remediation`)
+
+Remediation of `Terminus_Deep_Research_Audit_2026-08-24.md`, tracked against
+its ranked roadmap.
+
+### Done (implemented + locally verified)
+
+| Audit item | Implementation | Local proof |
+|---|---|---|
+| Blocker 0 / 3.1 Linux root bind | `crates/terminus-sandbox-linux/src/mounts.rs`: minimal empty root, exact runtime-tree binds, exact workspace binds, tmpfs deny overlays, synthetic HOME, `--clearenv`; features derived via `plan_proven_features`; probe extended with host-home/credential/synthetic-HOME canaries | 23 crate tests; CI `sandbox-conformance` live bwrap smoke |
+| Blocker 0 / 3.2 container command shape | `IMAGE PROGRAM` (no `--`), exact `--mount` workspace binds, `--workdir`; seccomp claim only when argv-proven | 8+1 crate tests incl. `live_conformance` (docker, digest-pinned) |
+| Blocker 0 / 3.3 microVM execution claims | Execution demoted to `Unsupported` until guest agent/vsock protocol + digest materialization + workspace transport exist; config generation preserved for research | 5 crate tests; maturity.yaml + generated docs updated |
+| Rank 1 / PR2 world state | `agent/context-state-builder.ts` + `agent/world-state.ts`: changedFiles/failingTests/diagnostics/last-command/verification state derived from settled episodes and prior plans | 12 bun tests |
+| Rank 1 / PR3 retrieval hydration | `agent/retrieval-hydrator.ts`; kernel pipeline now hydrates hits into line-numbered source spans via ranged reads (metadata fallback keeps navigation value); repo-map fragment builder | 6 bun tests |
+| Rank 2 / PR4 loop + batching | `agent/coding-turn-engine.ts` + `agent/turn-budget.ts`: adaptive budgets (hard max), stagnation detection, multi-call settlement — reads parallel-safe, writes ordered; fixed 4-cycle ceiling removed (`TERMINUS_TURN_MAX_STEPS`) | 10 bun tests |
+| Rank 3 / PR5 verify–repair–admit | `agent/verification-repair-controller.ts`; coordinator `scheduleRepair` (VERIFYING→ACTIVE) emits durable repair directive artifact; failures normalized with stable signatures; stop reasons recorded on terminal fail | 13 bun tests |
+| Rank 4 / PR6–PR7 native providers | `providers/native-provider-runtime.ts` (+ OpenAI/Anthropic runtimes): budget check before dispatch, cache read/write reconciliation, cost reconciliation, partial-stream settlement, continuation ids surfaced | 4 bun tests |
+| Rank 5 / PR8 eval adapter | `python .../runners/terminus_harness.py`: drives the real control-plane API per task; records manifests, usage, verification evidence | 2 pytest cases |
+| Rank 7 / PR10 conditional subagents | `agent/subagents.ts`: scout/reviewer behind explicit flags (default OFF), typed results that refuse mutation claims | 5 bun tests |
+
+Verification run at HEAD of this branch: TS suite 531 pass; Rust workspace
+lib tests pass; clippy/fmt clean; ruff/mypy clean; full python suite 248
+pass; deterministic E2E PASS (7 writer-fence/recovery scenarios + 6 turn
+spine scenarios); boundary-check and truth-check PASS; codegen re-run
+(pre-existing protobuf-ts comment drift in timestamp.ts exists on `main`
+and is unrelated to this work).
+
+### Deferred (explicitly not claimed)
+
+- **Rank 6 control-plane split**: extracting the ~10k-line `index.ts` into
+  http/auth/events/tasks/turns modules and replacing process-global write
+  serialization with per-aggregate locks requires the audit's own
+  observational-equivalence harness first; agent-loop mechanics are already
+  extracted under `src/agent/`.
+- **Ranks 8–10 defaults**: memory/compaction, browser computer use, and UX
+  remain conditional modules; enabling any default requires the targeted
+  evaluations described in the audit and cannot be manufactured locally.
+- **Live-provider canary CI**: scheduled runs need real provider credentials
+  and are therefore externally gated.
+
+
 This ledger binds the research folder and its GitHub issue set to code,
 focused tests, and the remaining evidence boundary. A local implementation is
 not silently promoted to a release or benchmark claim.

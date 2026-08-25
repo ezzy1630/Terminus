@@ -23,6 +23,51 @@ concurrency:
 # Flaky combinations are marked continue-on-error and fail-fast is disabled so
 # every platform reports independently.
 jobs:
+  # ---------- Supported-host sandbox conformance (deep-audit blocker 0) ----------
+  # Static unit tests prove argv shape; this job proves runtime containment
+  # with real commands and adversarial fixtures on a supported host.
+  sandbox-conformance:
+    name: Sandbox conformance (linux + docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/setup-terminus
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Linux sandbox unit tests (mount plan, minimal root, deny overlays)
+        run: cargo test -p terminus-sandbox-linux --locked
+      - name: Container backend unit tests (command shape)
+        run: cargo test -p terminus-sandbox-container --locked
+      - name: MicroVM fails closed without a guest protocol
+        run: cargo test -p terminus-sandbox-microvm --locked
+      - name: Live bwrap adversarial smoke (minimal root, no host-root bind)
+        run: |
+          set -eu
+          # Host root must not be visible inside the namespace; the empty
+          # root plus /usr bind means host homes are simply absent.
+          bwrap --unshare-all \
+            --ro-bind /usr /usr \
+            --symlink usr/bin /bin \
+            --proc /proc --dev /dev \
+            --tmpfs /tmp --tmpfs /run \
+            --clearenv --setenv PATH /usr/bin:/bin \
+            --die-with-parent --new-session --cap-drop ALL \
+            -- /bin/sh -c '
+              test ! -e /root && echo "host-home-hidden"
+              test ! -e /etc/shadow && echo "credentials-hidden"
+              touch /probe 2>/dev/null && { echo "root-writable"; exit 13; } || echo "root-readonly"
+              /usr/bin/unshare -Ur true 2>/dev/null && { echo "seccomp-gap"; exit 11; } || true
+            ' | tee conformance.log
+          grep -q host-home-hidden conformance.log
+          grep -q credentials-hidden conformance.log
+          grep -q root-readonly conformance.log
+      - name: Live container conformance (fixed command shape, exact mounts)
+        run: |
+          set -eu
+          IMAGE=$(docker pull alpine:latest >/dev/null 2>&1 && docker inspect --format '{{index .RepoDigests 0}}' alpine:latest)
+          export TERMINUS_CONTAINER_CONFORMANCE_IMAGE="$IMAGE"
+          cargo test -p terminus-sandbox-container --test live_conformance --locked
+
   # ---------- Architecture boundary checks (SPEC §42.5) ----------
   boundary-check:
     name: Architecture boundary checks
