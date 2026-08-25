@@ -68,6 +68,40 @@ export class VerificationCoordinator<TTransaction> {
     }, ["VERIFYING"]);
   }
 
+  /**
+   * Bounded verify–repair loop (deep-audit Rank 3): return an
+   * ACTIVE/EXECUTE task to the actor with a durable repair directive so a
+   * follow-up turn can attempt repair. Verification failures become
+   * structured, inspectable repair inputs instead of a terminal state; the
+   * task must still pass full required verification before any admission.
+   */
+  async scheduleRepair(
+    taskId: string,
+    input: {
+      readonly attemptNumber: number;
+      readonly directiveArtifactUri: string;
+      readonly failedNodeIds: readonly string[];
+      readonly stopReason?: string;
+    },
+  ): Promise<void> {
+    await this.transition({
+      taskId,
+      status: "ACTIVE",
+      phase: "EXECUTE",
+      completedAt: null,
+      terminalReasonJson: null,
+      eventType: "task.repair_scheduled",
+      payload: {
+        phase: "EXECUTE",
+        status: "ACTIVE",
+        repair_attempt: input.attemptNumber,
+        directive_artifact: input.directiveArtifactUri,
+        failed_nodes: [...input.failedNodeIds],
+        ...(input.stopReason !== undefined ? { stop_reason: input.stopReason } : {}),
+      },
+    }, ["VERIFYING"]);
+  }
+
   async complete(taskId: string, verificationPlanId: string): Promise<void> {
     await this.transition({
       taskId,

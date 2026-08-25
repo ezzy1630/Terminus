@@ -27,7 +27,7 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `adapter-openhands` | adapter | `adapters/openhands` | `stub` | adapter.yaml declaration only; runner not implemented |
 | `adapter-pi` | adapter | `adapters/pi` | `stub` | Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim |
 | `terminus-extension-runtime` | rust-crate | `crates/terminus-extension-runtime` | `stub` | WASI execution is unavailable without Wasmtime; invocation fails closed with an unavailable error |
-| `terminus-sandbox-microvm` | rust-crate | `crates/terminus-sandbox-microvm` | `stub` | Tier-3 backend selection skeleton: hypervisor detection + pinned rootfs + machine-config generation; fail-closed, EXPERIMENTAL per ADR-0027 |
+| `terminus-sandbox-microvm` | rust-crate | `crates/terminus-sandbox-microvm` | `stub` | Configuration generation ONLY, execution Unsupported (deep-audit 2026-08-24): no guest agent / vsock command protocol, no digest-based image materialization, no workspace transport; re-enablement requires those plus teardown and latency evidence |
 | `terminus-sandbox-windows` | rust-crate | `crates/terminus-sandbox-windows` | `stub` | Native AppContainer intentionally absent (unsafe FFI needs dedicated ADR); fail-closed WSL2/container fallback only (ADR-0035 §5) |
 | `app-cli` | app | `apps/cli` | `experimental` | Non-interactive task and Phase 9/10 operator commands; cross-client continuity unverified |
 | `app-desktop` | app | `apps/desktop` | `experimental` | Electron cockpit has ten lazy decoded-data views and explicit offline states; fresh offline render tested, populated live flow and latency unverified |

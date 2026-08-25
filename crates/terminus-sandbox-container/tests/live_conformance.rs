@@ -17,6 +17,7 @@ use terminus_sandbox::profile::{
     FilesystemAccess, FilesystemRule, NetworkAccess, ProcessAccess, ResourceLimits, SandboxProfile,
     SecretsAccess,
 };
+use terminus_sandbox::SandboxBackend as _;
 use terminus_sandbox_container::{ContainerSandboxBackend, HardenedOptions};
 
 fn conformance_image() -> Option<String> {

@@ -526,11 +526,12 @@ mod hardened_tests {
             .enforcement_report()
             .degraded
             .contains(&EnforcementFeature::SeccompFilter));
-        let mut options = HardenedOptions::default();
-        options.seccomp_profile = Some("/etc/terminus/seccomp.json".to_string());
         let with = ContainerSandboxBackend::configure("docker", digest_image(), 1)
             .unwrap()
-            .with_hardened(options);
+            .with_hardened(HardenedOptions {
+                seccomp_profile: Some("/etc/terminus/seccomp.json".to_string()),
+                ..HardenedOptions::default()
+            });
         let report = with.enforcement_report();
         assert!(!report.degraded.contains(&EnforcementFeature::SeccompFilter));
         assert!(report.enforced.contains(&EnforcementFeature::SeccompFilter));
