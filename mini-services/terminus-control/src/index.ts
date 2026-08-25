@@ -250,6 +250,7 @@ import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
 import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
 import { CodingTurnEngine } from "./agent/coding-turn-engine.js";
+import { CacheRatioMonitor } from "./agent/cache-telemetry.js";
 import { standaloneAuthorityDocuments } from "./agent/system-prompt.js";
 import {
   hydrateSearchHit,
@@ -9663,6 +9664,11 @@ async function agentLoop(turnId: string): Promise<void> {
     let lastResponseArtifactUri: string | null = null;
     let currentProjected: ProjectedResponse | null = null;
     const toolSettlementEnteredFor = new Set<string>();
+    // R7 (harness critical path): reconcile predicted vs actual prompt-cache
+    // reads per attempt; a systematic gap means the cache-stable prefix was
+    // mutated, which silently multiplies cost.
+    const cacheMonitor = new CacheRatioMonitor();
+    const predictedCacheByAttempt = new Map<string, bigint>();
     const manifestIdByAttempt = new Map<string, Uuid7>();
     // Merged knob precedence: an explicit TERMINUS_TURN_MAX_STEPS wins;
     // otherwise TERMINUS_MAX_TOOL_CYCLES (validated, fail-closed, default 64)
@@ -9688,6 +9694,7 @@ async function agentLoop(turnId: string): Promise<void> {
       },
       beginAttempt: async ({ attemptId, attemptNumber, compiled }) => {
         manifestIdByAttempt.set(attemptId, compiled.contextManifestId as Uuid7);
+        predictedCacheByAttempt.set(attemptId, compiled.rendered.predictedCachedTokens);
         return providerSessionService.beginAttempt({
           attemptId,
           turnId,
@@ -9779,6 +9786,39 @@ async function agentLoop(turnId: string): Promise<void> {
         }
         const projected = await selectedRenderer.projectResponse(response);
         const usage = selectedRenderer.extractUsage(response);
+        // R7: reconcile predicted vs actual cache reads for this attempt.
+        const predictedCached = predictedCacheByAttempt.get(attemptId) ?? 0n;
+        const cacheRecord = cacheMonitor.record(attemptId, predictedCached, usage.cachedInputTokens);
+        const cacheStatus = cacheMonitor.status();
+        const observedRatio = cacheRecord.ratio;
+        if (observedRatio !== null) {
+          await mutateAgentState(() => emit({
+            eventType: "context.cache_ratio_observed",
+            aggregateType: "context_manifest",
+            aggregateId: manifestIdByAttempt.get(attemptId) ?? turnId,
+            correlationId: task.id,
+            payload: {
+              provider_attempt_id: attemptId,
+              predicted_cached_tokens: cacheRecord.predictedCachedTokens.toString(),
+              actual_read_tokens: cacheRecord.actualReadTokens.toString(),
+              ratio: Number(observedRatio.toFixed(4)),
+              consecutive_low_misses: cacheStatus.consecutiveLowMisses,
+            },
+          }));
+        }
+        if (cacheStatus.warning !== null && cacheRecord.ratio !== null) {
+          await mutateAgentState(() => emit({
+            eventType: "context.cache_ratio_warning",
+            aggregateType: "context_manifest",
+            aggregateId: manifestIdByAttempt.get(attemptId) ?? turnId,
+            correlationId: task.id,
+            payload: {
+              provider_attempt_id: attemptId,
+              warning: cacheStatus.warning,
+              average_ratio: cacheStatus.averageRatio === null ? null : Number(cacheStatus.averageRatio.toFixed(4)),
+            },
+          }));
+        }
         const responseArtifactMeta = await artifactClient.ingest(
           new TextEncoder().encode(canonicalJson(response)),
           {

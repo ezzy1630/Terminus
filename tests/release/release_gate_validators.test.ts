@@ -1,5 +1,9 @@
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
+  checkCacheTelemetry,
   validateDecision,
   validateEvidencePayload,
   validateMatrix,
@@ -112,5 +116,48 @@ describe("release gate validators", () => {
     );
 
     expect(errors.filter((error) => error.includes("verified approval record"))).toHaveLength(4);
+  });
+});
+
+describe("R7 cache telemetry gate", () => {
+  function withTelemetry(value: unknown): string {
+    const dir = mkdtempSync(join(tmpdir(), "cache-telemetry-"));
+    const path = join(dir, "cache-telemetry.json");
+    writeFileSync(path, JSON.stringify(value), "utf8");
+    return path;
+  }
+
+  test("missing telemetry is pending, not failing", () => {
+    const check = checkCacheTelemetry({}, join(mkdtempSync(join(tmpdir(), "cache-telemetry-")), "absent.json"));
+    expect(check.status).toBe("missing");
+    expect(check.errors ?? []).toHaveLength(0);
+  });
+
+  test("no_data is explicit pending live telemetry and does not fail", () => {
+    const path = withTelemetry({ status: "no_data", threshold: 0.7, attemptsObserved: 0 });
+    const check = checkCacheTelemetry({}, path);
+    expect(check.status).toBe("pending_live_telemetry");
+    expect(check.errors ?? []).toHaveLength(0);
+  });
+
+  test("measured above threshold passes", () => {
+    const path = withTelemetry({ status: "measured", threshold: 0.7, averageRatio: 0.93, attemptsObserved: 12 });
+    const check = checkCacheTelemetry({}, path);
+    expect(check.status).toBe("present");
+    expect(check.detail).toMatch(/0\.93/);
+  });
+
+  test("measured below threshold fails closed", () => {
+    const path = withTelemetry({ status: "measured_below_threshold", threshold: 0.7, averageRatio: 0.41 });
+    const check = checkCacheTelemetry({}, path);
+    expect(check.status).toBe("invalid");
+    expect((check.errors ?? []).join("; ")).toMatch(/below threshold/);
+  });
+
+  test("unknown status is invalid", () => {
+    const path = withTelemetry({ status: "vibes" });
+    const check = checkCacheTelemetry({}, path);
+    expect(check.status).toBe("invalid");
+    rmSync(path, { force: true });
   });
 });

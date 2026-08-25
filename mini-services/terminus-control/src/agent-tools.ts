@@ -971,7 +971,6 @@ async function settleJobPoll(
     artifacts: [stdoutArtifact, stderrArtifact].filter((artifact): artifact is ArtifactDescriptor => artifact !== null),
     sideEffects: [],
     timing: { executionMs: elapsed, totalMs: elapsed },
-    resourceUsage: { cpuMs: 0, peakMemoryBytes: 0, bytesRead: stdoutTail.totalBytes + stderrTail.totalBytes, bytesWritten: 0, networkBytes: 0 },
   });
   return { ...result, policyDecisionId: input.policyDecisionId };
 }

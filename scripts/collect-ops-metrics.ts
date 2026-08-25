@@ -1,16 +1,22 @@
 #!/usr/bin/env bun
 /**
- * Collect placeholder ops metrics for the release gate (SPEC §26.6).
+ * Collect ops metrics for the release gate (SPEC §26.6).
  * Categories mirror docs/product/metrics.md: runtime, agent quality, security.
+ *
+ * Values are honest by construction: when a live evidence source exists
+ * (currently artifacts/release-gate/cache-telemetry.json from R7) its real
+ * measurements populate the corresponding fields and the status flips to
+ * "measured"; without live sources the artifact stays an explicit
+ * placeholder with zeros instead of fabricated numbers.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 type CounterMap = Record<string, number>;
 
 type OpsMetrics = {
   generatedAt: string;
-  status: "placeholder";
+  status: "placeholder" | "measured";
   runtime: CounterMap;
   agentQuality: CounterMap;
   security: CounterMap;
@@ -56,6 +62,24 @@ const metrics: OpsMetrics = {
   },
 };
 
+// Fold in measured cache telemetry when it exists (R7). Fixture runs never
+// produce telemetry, so absence keeps the placeholder status.
+const cacheTelemetryPath = join(OUT_DIR, "cache-telemetry.json");
+if (existsSync(cacheTelemetryPath)) {
+  try {
+    const telemetry = JSON.parse(readFileSync(cacheTelemetryPath, "utf8")) as Record<string, unknown>;
+    if (telemetry.status === "measured" && typeof telemetry.averageRatio === "number") {
+      metrics.status = "measured";
+      metrics.agentQuality.prompt_cache_hit_ratio = Number(telemetry.averageRatio.toFixed(4));
+      metrics.agentQuality.prompt_cache_attempts_observed =
+        typeof telemetry.attemptsObserved === "number" ? telemetry.attemptsObserved : 0;
+    }
+  } catch {
+    // An unparseable telemetry file must not fabricate a measured status.
+  }
+}
+
 mkdirSync(OUT_DIR, { recursive: true });
 writeFileSync(OUT_PATH, `${JSON.stringify(metrics, null, 2)}\n`, "utf8");
+
 console.log(`[ops-metrics] wrote ${OUT_PATH}`);
