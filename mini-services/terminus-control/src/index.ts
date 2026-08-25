@@ -9740,6 +9740,16 @@ async function agentLoop(turnId: string): Promise<void> {
         });
         lastResponseArtifactUri = responseArtifactMeta.uri;
         currentProjected = projected;
+        if (projected.toolCalls.length === 0) {
+          // Close the provider/tool phase for observers on a final response.
+          await mutateAgentState(() => emit({
+            eventType: "turn.tool_settlement",
+            aggregateType: "turn",
+            aggregateId: turnId,
+            correlationId: task.id,
+            payload: { provider_attempt_id: attemptId, tool_calls: 0 },
+          }));
+        }
         return { projected, interrupted: false };
       },
       settleToolCall: async ({ call, attemptNumber, attemptId }) => {
