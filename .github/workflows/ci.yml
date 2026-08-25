@@ -55,6 +55,9 @@ jobs:
           REAL_SH="$(readlink -f "$(command -v sh)")"
           SH_DIR="$(dirname "$REAL_SH")"
           SH_BASE="$(basename "$REAL_SH")"
+          # dash is dynamically linked: an empty root also needs the ELF
+          # loaders/libs or execvp fails with ENOENT. try-variants skip
+          # absent arch dirs (e.g. /lib64 on some images).
           if [[ "$SH_DIR" == "/usr/bin" || "$SH_DIR" == "/usr/bin/"* ]]; then
             BINDS=(--ro-bind /usr /usr --symlink usr/bin /bin)
             EXEC_SH="/usr/bin/${SH_BASE}"
@@ -62,6 +65,7 @@ jobs:
             BINDS=(--ro-bind /usr /usr --ro-bind /bin /bin)
             EXEC_SH="/bin/${SH_BASE}"
           fi
+          BINDS+=(--ro-bind-try /lib /lib --ro-bind-try /usr/lib /usr/lib --ro-bind-try /lib64 /lib64)
           sudo bwrap --unshare-pid --unshare-ipc --unshare-uts \
             "${BINDS[@]}" \
             --proc /proc --dev /dev \
