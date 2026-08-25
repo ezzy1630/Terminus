@@ -32,9 +32,11 @@ import {
   DEFAULT_VERIFIER_VERSION,
   isVerifierBindingEqual,
   readVerificationResultBinding,
+  verificationResultBindingState,
   stampVerificationResultBinding,
   type VerifierBinding,
   type VerifierIdentity,
+  type VerificationBindingState,
 } from "./run-binding.js";
 
 export {
@@ -70,10 +72,12 @@ export {
   createVerifierBinding,
   isVerifierBindingEqual,
   readVerificationResultBinding,
+  verificationResultBindingState,
   stampVerificationResultBinding,
   validateVerifierResultBinding,
   type VerifierBinding,
   type VerifierIdentity,
+  type VerificationBindingState,
 } from "./run-binding.js";
 export {
   acceptHumanAcceptanceObligation,
@@ -365,8 +369,9 @@ export class VerificationEngine {
           r.environmentImageDigest !== null &&
           r.environmentImageDigest !== environmentImageDigest;
         const existingBinding = readVerificationResultBinding(r);
-        const bindingMismatch = existingBinding !== null
-          && !isVerifierBindingEqual(existingBinding, verifierBinding);
+        const bindingState = verificationResultBindingState(r);
+        const bindingMismatch = bindingState === "invalid"
+          || (existingBinding !== null && !isVerifierBindingEqual(existingBinding, verifierBinding));
         const verifierVersionMismatch = r.verifierVersion !== verifierBinding.verifierVersion;
         const bindingError = sourceMismatch
           ? `verifier returned source revision '${r.sourceRevision}', expected '${workspaceRevision}'`
@@ -375,7 +380,9 @@ export class VerificationEngine {
             : verifierVersionMismatch
               ? `verifier returned version '${r.verifierVersion}', expected '${verifierBinding.verifierVersion}'`
               : bindingMismatch
-                ? "verifier returned a conflicting verifier binding"
+                ? bindingState === "invalid"
+                  ? "verifier returned a malformed verifier binding"
+                  : "verifier returned a conflicting verifier binding"
                 : null;
         const stamped = stampVerificationResultBinding({
           ...r,

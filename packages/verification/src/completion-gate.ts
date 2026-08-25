@@ -229,6 +229,21 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
     };
   }
 
+  const requiredEvidenceMissing = input.plan.nodes
+    .filter((node) => node.required)
+    .filter((node) => {
+      const result = resultMap.get(node.id);
+      return result?.status === "pass" && result.artifacts.length === 0;
+    });
+  if (requiredEvidenceMissing.length > 0) {
+    return {
+      allow: false,
+      reason: "evidence_missing",
+      detail: `passing required nodes lack immutable evidence: ${requiredEvidenceMissing.map((node) => node.id).join(", ")}`,
+      coverage,
+    };
+  }
+
   const graph = buildClaimEvidenceGraph({
     taskId: input.taskId,
     criteria: input.criteria,

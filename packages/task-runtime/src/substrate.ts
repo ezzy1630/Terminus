@@ -219,6 +219,7 @@ export class DurableTaskSubstrate {
         previousContractVersion: task.contract.version,
         newContractVersion: contract.version,
         version: nextVersion,
+        contract,
       },
     );
 

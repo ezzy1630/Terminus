@@ -2458,8 +2458,8 @@ impl JobService {
             // untracked process. Compensate through the same kernel control
             // path, then surface the original persistence error.
             let cancellation = self
-                .process
-                .cancel(ctx, &outcome.process_id, "job attach persistence failed")
+                .manager
+                .compensate_spawned(&outcome, "job attach persistence failed")
                 .await;
             if cancellation.is_ok() {
                 if let Err(remove_error) = self.manager.remove(&job_id).await {

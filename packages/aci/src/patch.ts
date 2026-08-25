@@ -315,10 +315,9 @@ export function applyPatchOp(
       for (let i = 0; i < expectedLineCount; i++) {
         const lineIdx = start - 1 + i;
         const lineContent = lines[lineIdx] ?? "";
-        const computedHash = computeLineHash(lineContent);
         const expectedHash = op.line_hashes[i]!;
-        if (expectedHash.length === 0 || expectedHash.toLowerCase() !== computedHash.toLowerCase()) {
-          throw new Error(`ANCHOR_STALE: Line hash mismatch in ${op.path} at line ${lineIdx + 1}: expected ${expectedHash}, got ${computedHash}`);
+        if (!lineHashMatches(expectedHash, lineContent)) {
+          throw new Error(`ANCHOR_STALE: Line hash mismatch in ${op.path} at line ${lineIdx + 1}: expected ${expectedHash}, got ${computeLineHash(lineContent)}`);
         }
       }
       const before = lines.slice(0, start - 1);
@@ -460,6 +459,17 @@ export function applyPatchOp(
       throw new ValidationError(`Unsupported patch operation: ${(op as PatchOperation).op}`);
     }
   }
+}
+
+function lineHashMatches(expected: string, line: string): boolean {
+  const normalized = expected.trim().toLowerCase().replace(/^sha256:/, "");
+  if (normalized.length === 8) {
+    return [line, line.endsWith("\r") ? line.slice(0, -1) : `${line}\r`]
+      .some((candidate) => computeLineHash(candidate).toLowerCase() === normalized);
+  }
+  if (normalized.length !== 64 || !/^[0-9a-f]+$/.test(normalized)) return false;
+  return [line, line.endsWith("\r") ? line.slice(0, -1) : `${line}\r`]
+    .some((candidate) => computeSha256(candidate).slice("sha256:".length).toLowerCase() === normalized);
 }
 
 // ────────────────────────── Patch Executor ───────────────────────────────────

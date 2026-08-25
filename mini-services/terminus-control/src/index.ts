@@ -1072,6 +1072,14 @@ class EventBus {
     return oldest?.eventId ?? null;
   }
 
+  async eventExists(eventId: string): Promise<boolean> {
+    const event = await db.semanticEvent.findUnique({
+      where: { eventId },
+      select: { eventId: true },
+    });
+    return event !== null;
+  }
+
   /**
    * Persist the last-sent event ID for a stream so the server can
    * reconstruct per-subscriber progress (SPEC §30.6, §45.5
@@ -1096,6 +1104,7 @@ const eventSubscriptionService = new EventSubscriptionService<StoredEvent>({
   subscribeLive: (filter, push) => bus.subscribe(filter, push),
   latestEventId: () => bus.latestEventId(),
   oldestEventId: () => bus.oldestEventId(),
+  eventExists: (eventId) => bus.eventExists(eventId),
   replay: (since, through, filter, push) => bus.replay(since, through, filter, push),
   persistCursor: (streamName, lastEventId, lastSequence) => bus.persistCursor(streamName, lastEventId, lastSequence),
 });
@@ -4238,6 +4247,7 @@ const routes: Route[] = [
     const sessionId = url.searchParams.get("session_id");
 
     const streamName = taskId ? `task:${taskId}` : sessionId ? `session:${sessionId}` : "global";
+    const disconnect = new AbortController();
 
     const filter = (ev: StoredEvent) => {
       if (ev.schemaVersion !== 1) return false;
@@ -4278,6 +4288,7 @@ const routes: Route[] = [
         });
         res.write(`id: ${oldestRetainedEventId}\nevent: cursor_expired\ndata: ${expiredPayload}\n\n`);
       },
+      signal: disconnect.signal,
     });
 
     // Heartbeat every 15s.
@@ -4287,6 +4298,7 @@ const routes: Route[] = [
 
     req.on("close", () => {
       clearInterval(heartbeat);
+      disconnect.abort();
       void subscription.close().catch((error: unknown) => {
         console.error("[terminus-control] failed to persist event stream cursor", error);
       });
@@ -7067,6 +7079,8 @@ const routes: Route[] = [
   route("POST", "/v2/orchestration/ev-schedule", async (req, res) => {
     const parsed = z.object({
       parentTaskId: z.string().min(1),
+      delegationId: z.string().min(1),
+      reservationId: z.string().min(1),
       candidateObjective: z.string().min(1),
       separability: z.number().min(0).max(1),
       likelyFileOverlap: z.number().min(0).max(1),
@@ -8218,7 +8232,13 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
   },
   transaction: (tx) => ({
     startAttempt: async (input: ProviderAttemptStartInput) => {
-      await tx.turn.update({ where: { id: input.turnId }, data: { state: "PROVIDER_RUNNING" } });
+      const turnUpdate = await tx.turn.updateMany({
+        where: { id: input.turnId, state: "CONTEXT_COMPILING" },
+        data: { state: "PROVIDER_RUNNING" },
+      });
+      if (turnUpdate.count !== 1) {
+        throw new Error(`turn ${input.turnId} changed before provider attempt start`);
+      }
       await tx.providerAttempt.create({
         data: {
           id: input.attemptId,
@@ -8238,7 +8258,13 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
       });
     },
     completeAttempt: async (input: ProviderAttemptResponseInput) => {
-      await tx.turn.update({ where: { id: input.turnId }, data: { state: "RESPONSE_VALIDATING" } });
+      const turnUpdate = await tx.turn.updateMany({
+        where: { id: input.turnId, state: "PROVIDER_RUNNING" },
+        data: { state: "RESPONSE_VALIDATING" },
+      });
+      if (turnUpdate.count !== 1) {
+        throw new Error(`turn ${input.turnId} changed before provider response settlement`);
+      }
       if (input.messageArtifact !== null && input.messageHash !== null) {
         const latestEpisode = await tx.episode.findFirst({
           where: { turnId: input.turnId },
@@ -9548,17 +9574,18 @@ async function agentLoop(turnId: string): Promise<void> {
         continuationId: projected.continuationId,
       });
 
-      await mutateAgentState(() => emit({
-        eventType: "turn.tool_settlement",
-        aggregateType: "turn",
-        aggregateId: turnId,
-        correlationId: task.id,
-        payload: { provider_attempt_id: attemptId, tool_calls: projected.toolCalls.length },
-      }, async (tx) => {
-        await tx.turn.update({ where: { id: turnId }, data: { state: "TOOL_SETTLEMENT" } });
-      }));
-
       if (projected.toolCalls.length === 0) {
+        // Close the provider/tool phase for observers even when the provider
+        // returned a final response without requesting a tool. The turn stays
+        // in RESPONSE_VALIDATING; TOOL_SETTLEMENT is a real state only for a
+        // validated tool call and must not be used as a transit state here.
+        await mutateAgentState(() => emit({
+          eventType: "turn.tool_settlement",
+          aggregateType: "turn",
+          aggregateId: turnId,
+          correlationId: task.id,
+          payload: { provider_attempt_id: attemptId, tool_calls: 0 },
+        }));
         finalText = projected.text;
         finalResponseArtifactUri = responseArtifactMeta.uri;
         break;
@@ -9571,6 +9598,19 @@ async function agentLoop(turnId: string): Promise<void> {
       }
       const [toolCall] = projected.toolCalls;
       if (toolCall === undefined) throw new Error("provider tool call projection was empty");
+      await mutateAgentState(() => emit({
+        eventType: "turn.tool_settlement",
+        aggregateType: "turn",
+        aggregateId: turnId,
+        correlationId: task.id,
+        payload: { provider_attempt_id: attemptId, tool_calls: projected.toolCalls.length },
+      }, async (tx) => {
+        const update = await tx.turn.updateMany({
+          where: { id: turnId, state: "RESPONSE_VALIDATING" },
+          data: { state: "TOOL_SETTLEMENT" },
+        });
+        if (update.count !== 1) throw new Error(`turn ${turnId} changed before tool settlement`);
+      }));
       await toolEpisodeSession.settle({
         call: toolCall,
         attemptNumber,
@@ -9596,7 +9636,11 @@ async function agentLoop(turnId: string): Promise<void> {
       correlationId: turn.taskId ?? undefined,
       payload: { phase: "finalizing" },
     }, async (tx) => {
-      await tx.turn.update({ where: { id: turnId }, data: { state: "FINALIZING" } });
+      const update = await tx.turn.updateMany({
+        where: { id: turnId, state: "RESPONSE_VALIDATING" },
+        data: { state: "FINALIZING" },
+      });
+      if (update.count !== 1) throw new Error(`turn ${turnId} changed before finalizing`);
     }));
 
     // 6. COMPLETED
@@ -9615,10 +9659,11 @@ async function agentLoop(turnId: string): Promise<void> {
       },
       artifactRefs: [finalResponseArtifactUri],
     }, async (tx) => {
-      await tx.turn.update({
-        where: { id: turnId },
+      const update = await tx.turn.updateMany({
+        where: { id: turnId, state: "FINALIZING" },
         data: { state: "COMPLETED", completedAt: new Date() },
       });
+      if (update.count !== 1) throw new Error(`turn ${turnId} changed before completion settlement`);
     }));
 
     // If the task has a status of ACTIVE, advance it through VERIFY → COMPLETE.

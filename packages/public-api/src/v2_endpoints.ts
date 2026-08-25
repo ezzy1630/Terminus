@@ -681,6 +681,8 @@ export const ScheduleEVWorkerV2 = {
   path: "/v2/orchestration/ev-schedule",
   request: z.object({
     parentTaskId: z.string().min(1),
+    delegationId: z.string().min(1),
+    reservationId: z.string().min(1),
     candidateObjective: z.string().min(1),
     separability: z.number().min(0).max(1),
     likelyFileOverlap: z.number().min(0).max(1),

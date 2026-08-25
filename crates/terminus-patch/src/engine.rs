@@ -498,9 +498,7 @@ impl PatchEngine {
             let line_content = lines[line_idx - 1];
             let computed_hash = compute_line_hash(line_content);
             let expected_hash = &edit.line_hashes[i];
-            if !expected_hash.eq_ignore_ascii_case(&computed_hash)
-                && !expected_hash.eq_ignore_ascii_case(&sha256_hex(line_content.as_bytes()))
-            {
+            if !line_hash_matches(expected_hash, line_content) {
                 return Err(PatchError::AnchorStale(format!(
                     "line hash mismatch at {}:{}: expected {}, got {}",
                     edit.path.relative_path, line_idx, expected_hash, computed_hash
@@ -1092,6 +1090,21 @@ fn edit_target_path(edit: &PatchEdit) -> Option<WorkspacePath> {
 pub fn compute_line_hash(line: &str) -> String {
     let full = sha256_hex(line.as_bytes());
     full[..8].to_string()
+}
+
+fn line_hash_matches(expected: &str, line: &str) -> bool {
+    let normalized = expected
+        .trim()
+        .strip_prefix("sha256:")
+        .unwrap_or(expected.trim())
+        .to_ascii_lowercase();
+    let candidates = [line.to_string(), format!("{line}\r")];
+    candidates.iter().any(|candidate| {
+        let short = compute_line_hash(candidate);
+        let full = sha256_hex(candidate.as_bytes());
+        (normalized.len() == 8 && normalized == short)
+            || (normalized.len() == 64 && normalized == full)
+    })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

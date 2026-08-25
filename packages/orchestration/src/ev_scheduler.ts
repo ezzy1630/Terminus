@@ -51,9 +51,9 @@ export interface EVSchedulerSignals {
   readonly parentTaskId: string;
   readonly allowedPaths?: readonly string[];
   readonly inputHandles?: readonly string[];
-  /** Stable identity supplied by the persistence layer when available. */
-  readonly delegationId?: string;
-  readonly reservationId?: string;
+  /** Stable identities issued by the persistence layer before scheduling. */
+  readonly delegationId: string;
+  readonly reservationId: string;
   readonly budgetMicros?: bigint;
   readonly budgetReservationAmount?: BudgetReservationRequest["amount"];
   /** Required for writer delegation; no implicit shared-checkout fallback. */
@@ -153,6 +153,19 @@ export class ExpectedValueScheduler {
       };
     }
 
+    if (signals.delegationId.trim().length === 0 || signals.reservationId.trim().length === 0) {
+      return {
+        spawn: false,
+        role: null,
+        expectedValue: ev,
+        breakdown,
+        reason: "delegation and budget reservation identities must be issued before spawning",
+        contract: null,
+        worktreePlan: null,
+        budgetReservation: null,
+      };
+    }
+
     // 4. Generate a deterministic delegation contract.
     const contract = this.buildContract(signals, candidateRole, ev);
 
@@ -182,7 +195,7 @@ export class ExpectedValueScheduler {
     }
 
     const budgetReservation = createDelegationBudgetReservationRequest({
-      reservationId: signals.reservationId ?? `reservation:${contract.id}`,
+      reservationId: signals.reservationId,
       parentTaskId: signals.parentTaskId,
       delegationId: contract.id,
       amount: signals.budgetReservationAmount ?? {
@@ -269,7 +282,7 @@ export class ExpectedValueScheduler {
     const budgetMicros = signals.budgetMicros ?? BigInt(Math.floor(Number(signals.budgetRemainingRatio * 500_000)));
     if (budgetMicros < 0n) throw new ValidationError("delegation budget must be non-negative");
     const contract: DelegationContractV2 = {
-      id: signals.delegationId ?? `delegation:${signals.parentTaskId}:${role}`,
+      id: signals.delegationId,
       parentTaskId: signals.parentTaskId,
       role,
       objective: signals.candidateObjective,

@@ -96,17 +96,23 @@ const IRREVERSIBLE_EFFECTS: ReadonlySet<TypedBrowserAction["effectClass"]> = new
 /** Stable identity for an approval/effect binding. */
 export function browserEffectBindingHash(
   action: TypedBrowserAction,
-  observation: Pick<UiObservation, "id" | "version">,
+  observation: Pick<UiObservation, "id" | "taskId" | "version">,
 ): string {
   return computeContentHash(JSON.stringify({
     actionId: action.actionId,
     taskId: action.taskId,
     observationId: observation.id,
+    observationTaskId: observation.taskId,
     observationVersion: observation.version,
     kind: action.kind,
-    target: action.target?.semanticHash ?? null,
+    target: action.target,
+    coordinate: action.coordinate,
+    text: action.text,
+    keys: action.keys,
+    scrollDelta: action.scrollDelta,
     effectClass: action.effectClass,
     intent: action.intent,
+    requiresSemanticVerification: action.requiresSemanticVerification,
   }));
 }
 
@@ -159,7 +165,11 @@ export class BrowserControlCoordinator {
         detail: "no API, MCP, DOM, accessibility, CDP, or grounded-vision adapter is available",
       };
     }
-    if (action.observationId !== observation.id || action.observationVersion !== observation.version) {
+    if (
+      action.taskId !== observation.taskId
+      || action.observationId !== observation.id
+      || action.observationVersion !== observation.version
+    ) {
       return {
         admitted: false,
         actionId: action.actionId,

@@ -45,6 +45,7 @@ import {
   riskSchema,
   sequencePolicyRuleSchema,
   taskAttemptSchema,
+  taskContractV2Schema,
   taskV2Schema,
   ValidationError,
   workerLeaseSchema,
@@ -287,6 +288,22 @@ function encodeJson(value: unknown): string {
     throw new ValidationError("task-runtime SQLite payload is not JSON serializable");
   }
   return encoded;
+}
+
+function authorizationImmutableFieldsMatch(
+  left: AuthorizationInstance,
+  right: AuthorizationInstance,
+): boolean {
+  return left.id === right.id
+    && left.principal === right.principal
+    && left.taskId === right.taskId
+    && left.taskVersion === right.taskVersion
+    && left.effectClass === right.effectClass
+    && left.maxScope.length === right.maxScope.length
+    && left.maxScope.every((scope, index) => scope === right.maxScope[index])
+    && left.expiry === right.expiry
+    && left.humanApprovalId === right.humanApprovalId
+    && left.approvalHash === right.approvalHash;
 }
 
 function decodeJson(payload: string): unknown {
@@ -989,16 +1006,36 @@ export class SqliteDurableTaskRepository
         requestedConsumedCount: authorization.consumedCount,
       });
     }
-    if (authorization.consumedCount > current.consumedCount + 1) {
+    const isNextConsumption = authorization.consumedCount === current.consumedCount + 1;
+    const isNewRevocation =
+      authorization.consumedCount === current.consumedCount
+      && authorization.useLimit < current.useLimit;
+    if (!isNextConsumption && !isNewRevocation) {
       throw new ConflictError("STALE_SOURCE_VERSION", "authorization consumption skipped a count", {
         id: authorization.id,
         currentConsumedCount: current.consumedCount,
         requestedConsumedCount: authorization.consumedCount,
       });
     }
+    const immutableFieldsMatch = authorizationImmutableFieldsMatch(authorization, current);
+    const onlyConsumptionChanged =
+      isNextConsumption
+      && authorization.useLimit === current.useLimit
+      && immutableFieldsMatch;
+    const onlyRevocationChanged =
+      isNewRevocation
+      && authorization.consumedCount === current.consumedCount
+      && immutableFieldsMatch;
+    if (!onlyConsumptionChanged && !onlyRevocationChanged) {
+      throw new ConflictError(
+        "STALE_SOURCE_VERSION",
+        "authorization update changed fields outside consumption or revocation",
+        { id: authorization.id },
+      );
+    }
     const result = database
       .query(
-        "UPDATE task_runtime_records SET scope_key = ?, payload_json = ?, cas_value = ? WHERE collection = 'authorization' AND record_id = ? AND cas_value = ?",
+        "UPDATE task_runtime_records SET scope_key = ?, payload_json = ?, cas_value = ? WHERE collection = 'authorization' AND record_id = ? AND cas_value = ? AND payload_json = ?",
       )
       .run(
         authorization.taskId,
@@ -1006,6 +1043,7 @@ export class SqliteDurableTaskRepository
         authorization.consumedCount,
         authorization.id,
         current.consumedCount,
+        encodeJson(current),
       );
     if (result.changes !== 1) {
       throw new ConflictError("STALE_SOURCE_VERSION", "authorization compare-and-swap failed", {
@@ -1059,7 +1097,27 @@ export class SqliteDurableTaskRepository
   }
 
   async createLease(lease: WorkerLease, outboxMessage?: OutboxMessage): Promise<WorkerLease> {
-    return this.createRecord("lease", lease.id, lease, lease.taskId, workerLeaseSchema, outboxMessage);
+    const normalized = validateInput<WorkerLease>(workerLeaseSchema, lease, "create lease");
+    const normalizedOutbox = outboxMessage === undefined
+      ? undefined
+      : validateInput<OutboxMessage>(outboxMessageSchema, outboxMessage, "outbox message");
+    return this.database.transaction((database) => {
+      const now = Date.now();
+      const active = this.listRecords<WorkerLease>(database, "lease", normalized.taskId, workerLeaseSchema)
+        .find((candidate) =>
+          (candidate.status === "ACQUIRED" || candidate.status === "RENEWED")
+          && new Date(candidate.expiresAt).getTime() > now,
+        );
+      if (active !== undefined) {
+        throw new ConflictError("ALREADY_EXISTS", `task ${normalized.taskId} already has an active lease`, {
+          taskId: normalized.taskId,
+          leaseId: active.id,
+        });
+      }
+      this.insertRecord(database, "lease", normalized.id, normalized, normalized.taskId, normalized.fencingToken, normalized.fencingToken);
+      if (normalizedOutbox !== undefined) this.insertOutbox(database, normalizedOutbox);
+      return cloneValue(normalized);
+    });
   }
 
   async getLease(id: string): Promise<WorkerLease | null> {
@@ -1174,7 +1232,18 @@ export class SqliteDurableTaskRepository
   }
 
   async createEffectRecord(effect: EffectRecord, outboxMessage?: OutboxMessage): Promise<EffectRecord> {
-    return this.createRecord("effect", effect.id, effect, effect.taskId, effectRecordSchema, outboxMessage);
+    const normalized = validateInput<EffectRecord>(effectRecordSchema, effect, "create effect");
+    const normalizedOutbox = outboxMessage === undefined
+      ? undefined
+      : validateInput<OutboxMessage>(outboxMessageSchema, outboxMessage, "outbox message");
+    return this.database.transaction((database) => {
+      const existing = this.listRecords<EffectRecord>(database, "effect", null, effectRecordSchema)
+        .find((candidate) => candidate.semanticIdempotencyKey === normalized.semanticIdempotencyKey);
+      if (existing !== undefined) return cloneValue(existing);
+      this.insertRecord(database, "effect", normalized.id, normalized, normalized.taskId, normalized.version, normalized.version);
+      if (normalizedOutbox !== undefined) this.insertOutbox(database, normalizedOutbox);
+      return cloneValue(normalized);
+    });
   }
 
   async getEffectRecord(id: string): Promise<EffectRecord | null> {
@@ -1200,13 +1269,19 @@ export class SqliteDurableTaskRepository
   }
 
   async createCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord> {
-    return this.createRecord(
-      "candidate_branch",
-      branch.branchId,
-      branch,
-      branch.taskId,
-      candidateBranchDecoder,
-    );
+    const normalized = validateInput<CandidateBranchRecord>(candidateBranchDecoder, branch, "create candidate branch");
+    return this.database.transaction((database) => {
+      this.insertRecord(
+        database,
+        "candidate_branch",
+        normalized.branchId,
+        normalized,
+        normalized.taskId,
+        null,
+        normalized.epoch,
+      );
+      return cloneValue(normalized);
+    });
   }
 
   async getCandidateBranch(branchId: string): Promise<CandidateBranchRecord | null> {
@@ -1227,15 +1302,53 @@ export class SqliteDurableTaskRepository
         "update candidate branch",
       );
       if (current === null) throw new NotFoundError("candidate branch", branch.branchId);
-      if (normalized.epoch < current.epoch) {
-        throw new ConflictError("STALE_SOURCE_VERSION", "candidate branch epoch moved backwards", {
+      if (normalized.epoch !== current.epoch + 1) {
+        throw new ConflictError("STALE_SOURCE_VERSION", "candidate branch epoch compare-and-swap failed", {
           branchId: branch.branchId,
           currentEpoch: current.epoch,
           requestedEpoch: normalized.epoch,
         });
       }
-      this.replaceRecordWithoutCas(database, "candidate_branch", branch.branchId, normalized, normalized.taskId);
+      const result = database
+        .query(
+          "UPDATE task_runtime_records SET scope_key = ?, payload_json = ?, cas_value = ? WHERE collection = 'candidate_branch' AND record_id = ? AND cas_value = ?",
+        )
+        .run(
+          normalized.taskId,
+          encodeJson(normalized),
+          normalized.epoch,
+          normalized.branchId,
+          current.epoch,
+        );
+      if (result.changes !== 1) {
+        throw new ConflictError("STALE_SOURCE_VERSION", "candidate branch update lost its compare-and-swap race", {
+          branchId: branch.branchId,
+        });
+      }
       return cloneValue(normalized);
+    });
+  }
+
+  async claimCandidateBranch(
+    branchId: string,
+    expectedEpoch: number,
+  ): Promise<CandidateBranchRecord | null> {
+    return this.database.transaction((database) => {
+      const current = this.readRecord<CandidateBranchRecord>(
+        database,
+        "candidate_branch",
+        branchId,
+        candidateBranchDecoder,
+      );
+      if (current === null || current.status !== "OPEN" || current.epoch !== expectedEpoch) return null;
+      const claimed: CandidateBranchRecord = { ...current, epoch: current.epoch + 1 };
+      const result = database
+        .query(
+          "UPDATE task_runtime_records SET payload_json = ?, cas_value = ? WHERE collection = 'candidate_branch' AND record_id = ? AND cas_value = ?",
+        )
+        .run(encodeJson(claimed), claimed.epoch, branchId, expectedEpoch);
+      if (result.changes !== 1) return null;
+      return cloneValue(claimed);
     });
   }
 
@@ -1555,6 +1668,29 @@ export class SqliteDurableTaskRepository
     }
 
     switch (event.eventType) {
+      case "task.contract_updated": {
+        const current = this.readRecord<TaskV2>(database, "task_v2", event.aggregateId, taskV2Schema);
+        const contract = payload.contract;
+        if (current === null) return;
+        if (contract === null || contract === undefined || !isRecord(contract)) {
+          throw new IntegrityError(`replay task.contract_updated is missing its authoritative contract`, {
+            eventId: event.eventId,
+            taskId: event.aggregateId,
+          });
+        }
+        const updated: TaskV2 = validateInput<TaskV2>(
+          taskV2Schema,
+          {
+            ...current,
+            contract: taskContractV2Schema.parse(contract),
+            version: eventNumber(payload, "version", current.version + 1),
+            updatedAt: event.occurredAt,
+          },
+          "replay task.contract_updated",
+        );
+        this.upsertRecord(database, "task_v2", updated.id, updated, null, updated.version, updated.version);
+        return;
+      }
       case "lease.acquired":
       case "lease.renewed": {
         const lease: WorkerLease = validateInput<WorkerLease>(
@@ -1604,6 +1740,7 @@ export class SqliteDurableTaskRepository
             taskId: eventString(payload, "taskId", ""),
             nodes,
             edges,
+            staticAnalysis: isRecord(payload.staticAnalysis) ? payload.staticAnalysis : undefined,
             createdAt: event.occurredAt,
           },
           "replay workflow.created",
@@ -1800,7 +1937,7 @@ export class SqliteDurableTaskRepository
             id: eventString(payload, "effectId", event.aggregateId),
             taskId: eventString(payload, "taskId", ""),
             attemptId: eventString(payload, "attemptId", ""),
-            principal: event.actor.id,
+            principal: eventString(payload, "principal", event.actor.id),
             connectorOrWorker: eventString(payload, "connectorOrWorker", "unknown"),
             intentType: eventString(payload, "intentType", "replayed-effect"),
             canonicalParameters: eventRecord(payload, "canonicalParameters"),

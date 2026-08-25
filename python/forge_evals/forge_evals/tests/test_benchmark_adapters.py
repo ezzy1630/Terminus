@@ -203,7 +203,21 @@ def test_live_boundary_records_translation_and_resolved_digest(tmp_path: Path) -
     assert result.artifacts[0]["type"] == "benchmark_adapter_manifest"
     assert result.artifacts[0]["evidence_status"] == "unverified"
     assert result.artifacts[0]["resolved_image_digests"] == [VALID_IMAGE_DIGEST]
+    assert result.environment_digest == VALID_IMAGE_DIGEST
     assert "release evidence requires independent verification" in result.notes
+
+
+def test_external_adapter_rejects_request_for_another_suite(tmp_path: Path) -> None:
+    adapter = adapter_for_suite(
+        SUITES_DIR / "terminal-bench.yaml",
+        live_harness=_StubLiveHarness(available=True),
+    )
+
+    with pytest.raises(BenchmarkAdapterError, match="does not match adapter manifest"):
+        adapter.run(
+            _request(tmp_path, suite="swe-bench-verified", task="wrong-suite"),
+            TrajectoryRecorder(run_id="test-run"),
+        )
 
 
 def test_existing_fixture_mode_remains_non_release() -> None:

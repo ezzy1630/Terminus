@@ -474,6 +474,58 @@ function criterionResult(
   };
 }
 
+function completionExpressionNodeIds(expression: string): readonly string[] {
+  const operators = new Set(["&&", "||", "!", "(", ")"]);
+  const ids = expression
+    .split(/\s+|&&|\|\||!|\(|\)/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0 && !operators.has(token));
+  return [...new Set(ids)];
+}
+
+function evaluateProofExpression(
+  expression: string,
+  statuses: ReadonlyMap<string, VerificationResult["status"]>,
+): boolean {
+  const tokens = expression.match(/&&|\|\||!|\(|\)|[^\s&|!()]+/g) ?? [];
+  if (tokens.length === 0) return true;
+  let index = 0;
+  const parseAtom = (): boolean => {
+    const token = tokens[index++];
+    if (token === "(") {
+      const value = parseOr();
+      if (tokens[index++] !== ")") throw new ValidationError("invalid proof completion expression");
+      return value;
+    }
+    if (token === "!") return !parseAtom();
+    if (token === undefined || token === "&&" || token === "||" || token === ")") {
+      throw new ValidationError("invalid proof completion expression");
+    }
+    return statuses.get(token) === "pass";
+  };
+  const parseAnd = (): boolean => {
+    let value = parseAtom();
+    while (tokens[index] === "&&") {
+      index++;
+      const right = parseAtom();
+      value = value && right;
+    }
+    return value;
+  };
+  function parseOr(): boolean {
+    let value = parseAnd();
+    while (tokens[index] === "||") {
+      index++;
+      const right = parseAnd();
+      value = value || right;
+    }
+    return value;
+  }
+  const value = parseOr();
+  if (index !== tokens.length) throw new ValidationError("invalid proof completion expression");
+  return value;
+}
+
 function validateReceipt(
   receipt: ProofBundleProviderReceipt | ProofBundleReceipt,
   failures: string[],
@@ -616,17 +668,31 @@ export function buildProofBundle(input: ProofBundleBuildInput): ProofBundle {
 
   const resultIds = new Set<string>();
   const resultByNode = new Map<string, VerificationResult>();
+  const planNodeIds = new Set(input.plan.nodes.map((node) => node.id));
   const resultFailures: string[] = [];
   for (const result of input.results) {
     if (resultIds.has(result.id)) resultFailures.push(`duplicate verification result '${result.id}'`);
     resultIds.add(result.id);
     if (resultByNode.has(result.nodeId)) resultFailures.push(`duplicate result for node '${result.nodeId}'`);
+    if (!planNodeIds.has(result.nodeId)) resultFailures.push(`result '${result.id}' references unknown plan node '${result.nodeId}'`);
     resultByNode.set(result.nodeId, result);
     resultFailures.push(...resultBindingFailures(result, input));
   }
   if (resultFailures.length > 0) {
     throw new ValidationError("proof bundle contains unbound verification results", {
       failures: resultFailures,
+    });
+  }
+
+  const requiredNodesWithoutResults = input.plan.nodes
+    .filter((node) => node.required && !resultByNode.has(node.id))
+    .map((node) => node.id);
+  const expressionNodesWithoutResults = completionExpressionNodeIds(input.plan.completionExpression)
+    .filter((nodeId) => !resultByNode.has(nodeId));
+  if (requiredNodesWithoutResults.length > 0 || expressionNodesWithoutResults.length > 0) {
+    throw new ValidationError("proof bundle does not contain executions for every required plan node", {
+      requiredNodesWithoutResults,
+      expressionNodesWithoutResults,
     });
   }
 
@@ -638,6 +704,22 @@ export function buildProofBundle(input: ProofBundleBuildInput): ProofBundle {
     }
     return criterionResult(criterion, binding, resultByNode, obligationsByCriterion);
   });
+  const artifactFailures = input.plan.nodes
+    .filter((node) => node.required)
+    .map((node) => resultByNode.get(node.id))
+    .filter((result): result is VerificationResult => result !== undefined && result.status === "pass")
+    .filter((result) => result.artifacts.length === 0)
+    .map((result) => `${result.nodeId}: passing verification result has no immutable evidence artifact`);
+  for (const criterion of criteriaResults) {
+    if (criterion.required && criterion.status === "satisfied" && criterion.evidence.length === 0) {
+      artifactFailures.push(`${criterion.id}: satisfied criterion has no immutable evidence artifact`);
+    }
+  }
+  if (artifactFailures.length > 0) {
+    throw new ValidationError("proof bundle contains passing verification without immutable evidence", {
+      failures: artifactFailures,
+    });
+  }
   const verificationExecutions = input.results.map((result) => executionFromResult(result, input.verifierBinding));
   const bundleBase = {
     schema: PROOF_BUNDLE_SCHEMA,
@@ -690,7 +772,7 @@ function expectedExecutionContent(
 }
 
 /** Verify canonical integrity and all supplied external bindings. */
-export function verifyProofBundle(
+function verifyProofBundleUnsafe(
   bundle: ProofBundle,
   expected: ProofBundleExpectations = {},
 ): ProofBundleVerification {
@@ -804,6 +886,22 @@ export function verifyProofBundle(
   };
 }
 
+/** Verify an untrusted decoded value without allowing malformed shape to throw. */
+export function verifyProofBundle(
+  bundle: ProofBundle,
+  expected: ProofBundleExpectations = {},
+): ProofBundleVerification {
+  try {
+    return verifyProofBundleUnsafe(bundle, expected);
+  } catch (error) {
+    return {
+      valid: false,
+      trusted: false,
+      failures: [error instanceof Error ? error.message : String(error)],
+    };
+  }
+}
+
 /** Evaluate completion admissibility from a verified proof bundle. */
 export function evaluateProofBundleAdmission(
   bundle: ProofBundle,
@@ -837,6 +935,22 @@ export function evaluateProofBundleAdmission(
       if (obligation?.status === "accepted") continue;
     }
     failures.push(`${criterion.id}: required criterion is ${criterion.status}`);
+  }
+  if (expected.plan !== undefined) {
+    const executionByNode = new Map(bundle.verificationExecutions.map((execution) => [execution.nodeId, execution] as const));
+    const missingRequired = expected.plan.nodes
+      .filter((node) => node.required)
+      .filter((node) => executionByNode.get(node.id)?.status !== "pass" || executionByNode.get(node.id)?.artifacts.length === 0)
+      .map((node) => node.id);
+    if (missingRequired.length > 0) {
+      failures.push(`required plan nodes lack passing immutable executions: ${missingRequired.join(", ")}`);
+    }
+    const expressionStatuses = new Map(
+      bundle.verificationExecutions.map((execution) => [execution.nodeId, execution.status] as const),
+    );
+    if (!evaluateProofExpression(expected.plan.completionExpression, expressionStatuses)) {
+      failures.push("proof bundle completion expression is not satisfied by its executions");
+    }
   }
   return {
     ...verification,

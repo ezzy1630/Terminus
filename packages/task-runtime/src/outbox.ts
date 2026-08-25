@@ -210,24 +210,19 @@ export class TransactionalInbox {
       processedAt: null,
       status: "PENDING",
     };
-    const claimInboxMessage = this.repo.claimInboxMessage;
-    if (claimInboxMessage) {
-      const claimed = await claimInboxMessage.call(this.repo, entry);
-      if (!claimed) {
-        const raced = await this.repo.getInboxMessage(idempotencyKey);
-        if (raced?.payloadHash !== payloadHash) {
-          throw new IdempotencyConflictError(idempotencyKey);
-        }
-        if (raced?.status === "PROCESSED" || raced?.status === "DUPLICATE") {
-          return { duplicate: true };
-        }
-        throw new ConflictError(
-          "IDEMPOTENCY_KEY_CONFLICT",
-          `Concurrent execution in progress for idempotency key: ${idempotencyKey}`,
-        );
+    const claimed = await this.repo.claimInboxMessage(entry);
+    if (!claimed) {
+      const raced = await this.repo.getInboxMessage(idempotencyKey);
+      if (raced?.payloadHash !== payloadHash) {
+        throw new IdempotencyConflictError(idempotencyKey);
       }
-    } else {
-      await this.repo.saveInboxMessage(entry);
+      if (raced?.status === "PROCESSED" || raced?.status === "DUPLICATE") {
+        return { duplicate: true };
+      }
+      throw new ConflictError(
+        "IDEMPOTENCY_KEY_CONFLICT",
+        `Concurrent execution in progress for idempotency key: ${idempotencyKey}`,
+      );
     }
 
     try {

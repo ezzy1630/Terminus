@@ -47,6 +47,12 @@ pub struct JobRecord {
     pub stdout_cursor: u64,
     #[serde(default)]
     pub stderr_cursor: u64,
+    /// Earliest cursor that remains resumable after bounded-output compaction.
+    /// A consumer below this boundary receives an explicit truncation error.
+    #[serde(default)]
+    pub stdout_truncated_before: u64,
+    #[serde(default)]
+    pub stderr_truncated_before: u64,
     #[serde(default)]
     pub termination_receipt: Option<String>,
     pub cleanup_policy: String,
@@ -86,6 +92,8 @@ impl JobRecord {
             output_cursor: 0,
             stdout_cursor: 0,
             stderr_cursor: 0,
+            stdout_truncated_before: 0,
+            stderr_truncated_before: 0,
             termination_receipt: None,
             cleanup_policy: "kill_tree".to_string(),
             state: JobState::Created,

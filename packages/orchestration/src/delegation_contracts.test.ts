@@ -52,6 +52,8 @@ function signals(overrides: Record<string, unknown> = {}) {
     activeWorkerCount: 0,
     candidateObjective: "inspect independent evidence",
     parentTaskId: "task-1",
+    delegationId: "delegation:task-1:scout",
+    reservationId: "reservation:task-1:scout",
     ...overrides,
   };
 }

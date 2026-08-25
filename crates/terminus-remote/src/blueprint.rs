@@ -40,6 +40,9 @@ pub struct DependencyPin {
     pub manager: String,
     pub name: String,
     pub version: String,
+    /// Digest of the resolved package artifact recorded by the lockfile.
+    #[serde(default)]
+    pub checksum: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +74,9 @@ pub struct EnvironmentBlueprint {
     pub base_image: String,
     /// Immutable content digest for the prepared/snapshotted environment.
     pub snapshot_digest: String,
+    /// Digest of the complete dependency lockfile used to prepare the image.
+    #[serde(default)]
+    pub lockfile_digest: String,
     pub backend: BlueprintBackend,
     #[serde(default)]
     pub network: NetworkPolicy,
@@ -112,6 +118,7 @@ impl EnvironmentBlueprint {
         require_name(&self.name, "blueprint name")?;
         let image = PinnedImage::parse(&self.base_image)?;
         validate_digest(&self.snapshot_digest, "snapshot_digest")?;
+        validate_digest(&self.lockfile_digest, "lockfile_digest")?;
         if self.toolchains.is_empty() {
             return Err(RemoteError::InvalidEnvironment(
                 "blueprint must pin at least one toolchain".into(),
@@ -133,6 +140,7 @@ impl EnvironmentBlueprint {
             require_name(&dependency.manager, "dependency manager")?;
             require_name(&dependency.name, "dependency name")?;
             require_exact_pin(&dependency.version, "dependency version")?;
+            validate_digest(&dependency.checksum, "dependency checksum")?;
             if !names.insert(format!("{}:{}", dependency.manager, dependency.name)) {
                 return Err(RemoteError::InvalidEnvironment(format!(
                     "duplicate dependency: {}:{}",
@@ -224,12 +232,33 @@ fn require_name(value: &str, field: &str) -> Result<(), RemoteError> {
 }
 
 fn require_exact_pin(value: &str, field: &str) -> Result<(), RemoteError> {
-    if value.trim().is_empty() || matches!(value, "latest" | "*" | "^" | "~") {
+    let normalized = value.trim().to_ascii_lowercase();
+    if value.trim().is_empty()
+        || matches!(
+            normalized.as_str(),
+            "latest"
+                | "stable"
+                | "main"
+                | "master"
+                | "dev"
+                | "development"
+                | "nightly"
+                | "edge"
+                | "head"
+        )
+        || !value.chars().any(|character| character.is_ascii_digit())
+    {
         return Err(RemoteError::InvalidEnvironment(format!(
             "{field} must be exact and pinned"
         )));
     }
-    if value.contains('*') || value.starts_with('^') || value.starts_with('~') {
+    if value
+        .chars()
+        .any(|character| matches!(character, '*' | '^' | '~' | '<' | '>' | '=' | '|' | ','))
+        || value.starts_with("git+")
+        || value.starts_with("http://")
+        || value.starts_with("https://")
+    {
         return Err(RemoteError::InvalidEnvironment(format!(
             "{field} must be exact and pinned"
         )));
@@ -264,6 +293,7 @@ schema_version: 1
 name: rust-workspace
 base_image: ghcr.io/terminus/rust@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 snapshot_digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+lockfile_digest: sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 backend: remote_microvm
 network: deny
 toolchains:
@@ -273,6 +303,7 @@ dependencies:
   - manager: cargo
     name: serde
     version: 1.0.219
+    checksum: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 services:
   - name: database
     image: ghcr.io/terminus/postgres@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc

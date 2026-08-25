@@ -41,6 +41,7 @@ describe("control-plane service boundaries", () => {
       },
       latestEventId: async () => events.at(-1)?.eventId ?? null,
       oldestEventId: async () => events[0]?.eventId ?? null,
+      eventExists: async (eventId) => events.some((event) => event.eventId === eventId),
       replay: async (since, through, filter, push) => {
         for (const event of events) {
           if (event.eventId > since && event.eventId <= through && filter(event)) push(event);

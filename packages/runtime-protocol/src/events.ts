@@ -16,10 +16,12 @@ import type {
   ActorKind,
   ModelKey,
   ContentHash,
+  TaskContract,
 } from "@terminus/domain";
 import {
   artifactRefSchema,
   actorKindSchema,
+  taskContractSchema,
 } from "@terminus/domain";
 
 // ────────────────────────── Envelope schemas ─────────────────────────────────
@@ -194,6 +196,7 @@ export const taskContractUpdatedPayloadSchema = z.object({
   taskId: z.string(),
   previousVersion: z.number().int().nonnegative(),
   newVersion: z.number().int().nonnegative(),
+  contract: taskContractSchema.transform((value) => value as unknown as TaskContract),
   changeSummary: z.string(),
 });
 export type TaskContractUpdatedPayload = z.infer<typeof taskContractUpdatedPayloadSchema>;

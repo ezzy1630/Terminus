@@ -29,4 +29,12 @@ pub enum JobError {
         expected: u64,
         actual: u64,
     },
+    #[error(
+        "output was compacted for job {job_id} stream {stream}; resume at cursor {available_from}"
+    )]
+    OutputTruncated {
+        job_id: String,
+        stream: String,
+        available_from: u64,
+    },
 }

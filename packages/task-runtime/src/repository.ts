@@ -134,6 +134,18 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
   }
 
   async createLease(lease: WorkerLease, outboxMessage?: OutboxMessage): Promise<WorkerLease> {
+    if (this.leases.has(lease.id)) {
+      throw new Error(`lease already exists: ${lease.id}`);
+    }
+    const now = Date.now();
+    const active = [...this.leases.values()].find((candidate) =>
+      candidate.taskId === lease.taskId
+      && (candidate.status === "ACQUIRED" || candidate.status === "RENEWED")
+      && new Date(candidate.expiresAt).getTime() > now,
+    );
+    if (active !== undefined) {
+      throw new Error(`task ${lease.taskId} is already leased by ${active.workerId}`);
+    }
     this.leases.set(lease.id, clone(lease));
     if (outboxMessage) {
       this.outbox.set(outboxMessage.id, clone(outboxMessage));
@@ -294,6 +306,12 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
 
   // Phase 3: Transactional Effect Ledger & Authorization
   async createEffectRecord(effect: EffectRecord, outboxMessage?: OutboxMessage): Promise<EffectRecord> {
+    for (const existing of this.effects.values()) {
+      if (existing.semanticIdempotencyKey === effect.semanticIdempotencyKey) return clone(existing);
+    }
+    if (this.effects.has(effect.id)) {
+      throw new Error(`effect already exists: ${effect.id}`);
+    }
     this.effects.set(effect.id, clone(effect));
     if (outboxMessage) {
       this.outbox.set(outboxMessage.id, clone(outboxMessage));
@@ -343,11 +361,28 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
   }
 
   async updateCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord> {
-    if (!this.candidateBranches.has(branch.branchId)) {
+    const current = this.candidateBranches.get(branch.branchId);
+    if (current === undefined) {
       throw new Error(`candidate branch not found: ${branch.branchId}`);
+    }
+    if (branch.epoch !== current.epoch + 1) {
+      throw new Error(`candidate branch epoch conflict: ${branch.branchId}`);
     }
     this.candidateBranches.set(branch.branchId, clone(branch));
     return clone(branch);
+  }
+
+  async claimCandidateBranch(
+    branchId: string,
+    expectedEpoch: number,
+  ): Promise<CandidateBranchRecord | null> {
+    const current = this.candidateBranches.get(branchId);
+    if (current === undefined || current.status !== "OPEN" || current.epoch !== expectedEpoch) {
+      return null;
+    }
+    const claimed = { ...current, epoch: current.epoch + 1 };
+    this.candidateBranches.set(branchId, clone(claimed));
+    return clone(claimed);
   }
 
   async listCandidateBranches(taskId: string): Promise<readonly CandidateBranchRecord[]> {
@@ -479,6 +514,20 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
     for (const ev of events) {
       const p = ev.payload as Record<string, unknown>;
       switch (ev.eventType) {
+        case "task.contract_updated": {
+          const current = this.tasks.get(ev.aggregateId);
+          if (current === undefined) break;
+          if (typeof p.contract !== "object" || p.contract === null || Array.isArray(p.contract)) {
+            throw new Error(`task.contract_updated is missing its authoritative contract: ${ev.eventId}`);
+          }
+          this.tasks.set(ev.aggregateId, {
+            ...current,
+            contract: p.contract as TaskV2["contract"],
+            version: (p.version as number) ?? current.version + 1,
+            updatedAt: ev.occurredAt,
+          });
+          break;
+        }
         case "task.created": {
           const task: TaskV2 = {
             id: ev.aggregateId,
@@ -563,8 +612,9 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
             id: ev.aggregateId,
             version: (p.version as number) ?? 1,
             taskId: (p.taskId as string) ?? "",
-            nodes: (p.nodes as readonly any[]) ?? [],
-            edges: (p.edges as readonly any[]) ?? [],
+            nodes: (Array.isArray(p.nodes) ? p.nodes : []) as Workflow["nodes"],
+            edges: (Array.isArray(p.edges) ? p.edges : []) as Workflow["edges"],
+            staticAnalysis: (p.staticAnalysis as Workflow["staticAnalysis"]) ?? undefined,
             createdAt: ev.occurredAt,
           };
           this.workflows.set(w.id, w);
@@ -738,7 +788,7 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
             id: (p.effectId as string) ?? ev.aggregateId,
             taskId: (p.taskId as string) ?? "",
             attemptId: (p.attemptId as string) ?? "",
-            principal: ev.actor.id,
+            principal: (p.principal as string) ?? ev.actor.id,
             connectorOrWorker: (p.connectorOrWorker as string) ?? "unknown",
             intentType: (p.intentType as string) ?? "",
             canonicalParameters: (p.canonicalParameters as Record<string, unknown>) ?? {},

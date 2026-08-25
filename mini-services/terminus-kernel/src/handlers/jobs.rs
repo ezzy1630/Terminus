@@ -11,7 +11,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use terminus_jobs::{JobRecord, JobState};
+use terminus_authz::TokenClaims;
+use terminus_jobs::{JobError, JobRecord, JobState};
 use terminus_kernel_protocol::CommandSpec;
 
 use crate::api::Envelope;
@@ -93,13 +94,31 @@ pub async fn start(
         .lease_token;
     state
         .spawn_background(async move {
-            while let Some(event) = receiver.recv().await {
-                if let Err(error) = manager
-                    .record_event_with_lease(&event_job_id, &lease_token, &event)
-                    .await
-                {
-                    tracing::error!(job_id = %event_job_id, %error, "durable job event persistence failed");
-                    break;
+            'events: while let Some(event) = receiver.recv().await {
+                loop {
+                    match manager
+                        .record_event_with_lease(&event_job_id, &lease_token, &event)
+                        .await
+                    {
+                        Ok(()) => break,
+                        Err(error) => {
+                            if matches!(error, JobError::Database(_)) {
+                                tracing::error!(
+                                    job_id = %event_job_id,
+                                    %error,
+                                    "durable job event persistence failed; retrying before draining the next event"
+                                );
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            } else {
+                                tracing::error!(
+                                    job_id = %event_job_id,
+                                    %error,
+                                    "durable job event could not be persisted; stopping the observer"
+                                );
+                                break 'events;
+                            }
+                        }
+                    }
                 }
             }
         })
@@ -124,9 +143,33 @@ pub struct JobStateResponse {
     pub record: Option<JobRecord>,
 }
 
+fn authorize_job_owner(
+    record: &JobRecord,
+    claims: &TokenClaims,
+    request_task_id: Option<&str>,
+    trace_id: &str,
+) -> Result<(), ApiError> {
+    if claims.binder.task_id != "*" && claims.binder.task_id != record.owner_task_id {
+        return Err(ApiError::permission_denied(
+            "job capability is bound to a different task",
+            trace_id,
+        ));
+    }
+    if let Some(task_id) = request_task_id.filter(|value| !value.is_empty()) {
+        if task_id != record.owner_task_id {
+            return Err(ApiError::permission_denied(
+                "job request task does not own the job",
+                trace_id,
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(claims): Extension<TokenClaims>,
 ) -> Result<Json<JobStateResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     let manager = state.kernel.jobs.manager().clone();
@@ -134,6 +177,7 @@ pub async fn get(
         .get(&id)
         .await
         .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
+    authorize_job_owner(&record, &claims, None, &trace_id.0)?;
     Ok(Json(JobStateResponse {
         job_id: id,
         state: record.state.as_str().to_string(),
@@ -149,16 +193,16 @@ pub async fn stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<JobStreamQuery>,
+    Extension(claims): Extension<TokenClaims>,
 ) -> Result<axum::response::Response, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     let manager = state.kernel.jobs.manager().clone();
     // Verify the job exists.
-    if manager.get(&id).await.is_none() {
-        return Err(ApiError::not_found(
-            format!("job {id} not found"),
-            &trace_id.0,
-        ));
-    }
+    let record = manager
+        .get(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
+    authorize_job_owner(&record, &claims, None, &trace_id.0)?;
     let stream_name = if query.stream.is_empty() {
         "stdout".to_string()
     } else {
@@ -177,18 +221,40 @@ pub async fn stream(
         loop {
             ticks += 1;
             let record = manager.get(&id).await;
-            if let Ok(chunks) = manager.output_since(&id, &stream_name, cursor).await {
-                for chunk in chunks {
-                    cursor = chunk.end_cursor;
+            match manager.output_since(&id, &stream_name, cursor).await {
+                Ok(chunks) => {
+                    for chunk in chunks {
+                        cursor = chunk.end_cursor;
+                        let payload = serde_json::json!({
+                            "job_id": id,
+                            "stream": chunk.stream,
+                            "start_cursor": chunk.start_cursor,
+                            "end_cursor": chunk.end_cursor,
+                            "bytes": chunk.bytes,
+                            "redacted": chunk.redacted,
+                        });
+                        yield Ok::<Event, Infallible>(Event::default().event("job_output").data(payload.to_string()));
+                    }
+                }
+                Err(JobError::OutputTruncated { available_from, .. }) => {
                     let payload = serde_json::json!({
                         "job_id": id,
-                        "stream": chunk.stream,
-                        "start_cursor": chunk.start_cursor,
-                        "end_cursor": chunk.end_cursor,
-                        "bytes": chunk.bytes,
-                        "redacted": chunk.redacted,
+                        "stream": stream_name,
+                        "requested_cursor": cursor,
+                        "available_from": available_from,
+                        "continuation_required": true,
                     });
-                    yield Ok::<Event, Infallible>(Event::default().event("job_output").data(payload.to_string()));
+                    yield Ok::<Event, Infallible>(Event::default().event("output_truncated").data(payload.to_string()));
+                    break;
+                }
+                Err(error) => {
+                    let payload = serde_json::json!({
+                        "job_id": id,
+                        "stream": stream_name,
+                        "error": error.to_string(),
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().event("job_error").data(payload.to_string()));
+                    break;
                 }
             }
             let payload = match &record {
@@ -243,18 +309,23 @@ pub struct JobInputRequest {
 pub async fn input(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(claims): Extension<TokenClaims>,
     body: axum::body::Bytes,
 ) -> Result<Json<JobStateResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     let req: JobInputRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
     let manager = state.kernel.jobs.manager().clone();
-    if manager.get(&id).await.is_none() {
-        return Err(ApiError::not_found(
-            format!("job {id} not found"),
-            &trace_id.0,
-        ));
-    }
+    let record = manager
+        .get(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
+    authorize_job_owner(
+        &record,
+        &claims,
+        Some(&req.envelope.request_context.task_id),
+        &trace_id.0,
+    )?;
     let state_now = if req.lease_token.is_empty() {
         manager.input(&id, req.input.as_bytes()).await
     } else {
@@ -284,12 +355,23 @@ pub struct JobSignalRequest {
 pub async fn signal(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(claims): Extension<TokenClaims>,
     body: axum::body::Bytes,
 ) -> Result<Json<JobStateResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     let req: JobSignalRequest =
         serde_json::from_slice(&body).map_err(|e| json_error(e, &trace_id.0))?;
     let manager = state.kernel.jobs.manager().clone();
+    let record = manager
+        .get(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
+    authorize_job_owner(
+        &record,
+        &claims,
+        Some(&req.envelope.request_context.task_id),
+        &trace_id.0,
+    )?;
     let state_now = if req.lease_token.is_empty() {
         manager.signal(&id, &req.signal).await
     } else {
@@ -319,6 +401,7 @@ pub struct JobStopRequest {
 pub async fn stop(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(claims): Extension<TokenClaims>,
     body: axum::body::Bytes,
 ) -> Result<Json<JobStateResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
@@ -330,6 +413,16 @@ pub async fn stop(
         &req.reason
     };
     let manager = state.kernel.jobs.manager().clone();
+    let record = manager
+        .get(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
+    authorize_job_owner(
+        &record,
+        &claims,
+        Some(&req.envelope.request_context.task_id),
+        &trace_id.0,
+    )?;
     let final_state = if req.lease_token.is_empty() {
         manager.stop(&id, reason).await
     } else {

@@ -122,6 +122,15 @@ interface RawVerificationBinding {
   readonly configurationHash: string;
 }
 
+export type VerificationBindingState = "absent" | "invalid" | "valid";
+
+/** Distinguish an omitted binding from a malformed binding at an untrusted boundary. */
+export function verificationResultBindingState(result: VerificationResult): VerificationBindingState {
+  const value = result.structuredObservations["verificationBinding"];
+  if (value === undefined) return "absent";
+  return rawBinding(value) === null ? "invalid" : "valid";
+}
+
 function rawBinding(value: unknown): RawVerificationBinding | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
@@ -161,7 +170,11 @@ export function validateVerifierResultBinding(
   }
   const actual = readVerificationResultBinding(result);
   if (actual === null) {
-    failures.push("result is missing verifier binding");
+    failures.push(
+      verificationResultBindingState(result) === "invalid"
+        ? "result contains a malformed verifier binding"
+        : "result is missing verifier binding",
+    );
     return failures;
   }
   if (actual.verifierId !== expected.verifierId) {

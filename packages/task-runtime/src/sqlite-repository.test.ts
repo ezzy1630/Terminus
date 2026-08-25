@@ -3,6 +3,8 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import type {
+  AuthorizationInstance,
+  Rfc3339Timestamp,
   TaskContractV2,
   TaskV2,
 } from "@terminus/domain";
@@ -156,6 +158,49 @@ describe("SqliteDurableTaskRepository", () => {
 
       await expect(repository.updateTaskV2({ ...created, version: 2 })).rejects.toThrow(ConflictError);
       expect((await repository.getTaskV2(created.id))?.version).toBe(2);
+    } finally {
+      driver.close();
+    }
+  });
+
+  it("limits authorization CAS updates to consumption or revocation fields", async () => {
+    const { driver, repository } = openRepository();
+    try {
+      const authorization: AuthorizationInstance = {
+        id: "authorization-sqlite-1",
+        principal: "principal-1",
+        taskId: "task-sqlite-1",
+        taskVersion: 1,
+        effectClass: "READ",
+        maxScope: ["workspace/**"],
+        useLimit: 2,
+        consumedCount: 0,
+        expiry: new Date(Date.now() + 60_000).toISOString() as Rfc3339Timestamp,
+        humanApprovalId: null,
+        approvalHash: null,
+      };
+      await repository.createAuthorization(authorization);
+
+      await expect(
+        repository.updateAuthorization({
+          ...authorization,
+          consumedCount: 1,
+          principal: "different-principal",
+        }),
+      ).rejects.toThrow(ConflictError);
+
+      const consumed = await repository.updateAuthorization({ ...authorization, consumedCount: 1 });
+      await expect(
+        repository.updateAuthorization({
+          ...consumed,
+          useLimit: 1,
+          effectClass: "WRITE",
+        }),
+      ).rejects.toThrow(ConflictError);
+
+      const revoked = await repository.updateAuthorization({ ...consumed, useLimit: 1 });
+      expect(revoked.useLimit).toBe(1);
+      expect(revoked.consumedCount).toBe(1);
     } finally {
       driver.close();
     }

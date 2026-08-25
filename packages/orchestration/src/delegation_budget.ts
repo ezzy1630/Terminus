@@ -155,6 +155,12 @@ export class BudgetReservationLedger implements BudgetReservationPort {
     if (request.cancellation.rootId !== request.childScope) {
       throw new ValidationError("cancellation root must equal reserved child scope");
     }
+    if (request.cancellation.parentId !== request.parentScope) {
+      throw new ValidationError("cancellation parent must equal reserved parent scope", {
+        expected: request.parentScope,
+        actual: request.cancellation.parentId,
+      });
+    }
     if (this.reservations.has(request.reservationId)) {
       throw new ValidationError("budget reservation already exists", {
         reservationId: request.reservationId,
@@ -225,6 +231,7 @@ export class BudgetReservationLedger implements BudgetReservationPort {
     const cancelled: BudgetReservation[] = [];
     for (const reservation of this.reservations.values()) {
       if (reservation.status !== "reserved") continue;
+      if (reservation.parentScope !== parentId) continue;
       const targetsParent = reservation.cancellation.parentId === parentId;
       const targetsDescendant = reservation.cancellation.descendantIds.includes(parentId);
       if (targetsParent || targetsDescendant || reservation.childScope === parentId) {

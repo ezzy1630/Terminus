@@ -111,10 +111,11 @@ impl ProcessManager {
             command.current_dir(cwd);
         }
         let resolved_executable = spawn.program.clone();
+        let process_identity = command_identity(&spawn.program, &spawn.args);
         self.spawn_command(
             command,
             resolved_executable,
-            spawn.program,
+            process_identity,
             spawn.working_dir,
             spawn.timeout_ms,
             None,
@@ -147,10 +148,11 @@ impl ProcessManager {
         }
         let resolved_executable =
             format!("{} (sandboxed via {})", spawn.program, wrapper.display());
+        let process_identity = command_identity(&wrapper.display().to_string(), &wrapper_argv);
         self.spawn_command(
             command,
             resolved_executable,
-            wrapper.display().to_string(),
+            process_identity,
             spawn.working_dir,
             spawn.timeout_ms,
             None,
@@ -176,10 +178,11 @@ impl ProcessManager {
         }
         let resolved_executable =
             format!("{} (sandboxed via {})", spawn.program, wrapper.display());
+        let process_identity = command_identity(&wrapper.display().to_string(), &wrapper_argv);
         self.spawn_command(
             command,
             resolved_executable,
-            wrapper.display().to_string(),
+            process_identity,
             spawn.working_dir,
             spawn.timeout_ms,
             Some(lease),
@@ -229,13 +232,10 @@ impl ProcessManager {
             },
             None => None,
         };
-        // A shell launcher may replace itself with the script's final
-        // executable (`sh -c 'sleep 30'` commonly becomes `sleep`). Persist
-        // the observed image so restart reconciliation and signal fencing
-        // compare the process that actually owns the PID.
-        let observed_process_executable = process_snapshot
-            .as_ref()
-            .map_or(process_executable, |snapshot| snapshot.executable.clone());
+        // A shell or sandbox launcher may replace itself with the final
+        // executable (`sh -c 'sleep 30'` commonly becomes `sleep`). Preserve
+        // the original command identity so the start-time fence accepts only
+        // an image named by the launch contract, even across that exec.
         let (tx, rx) = mpsc::channel(64);
         let started = ProcessStarted {
             process_id: process_id.clone(),
@@ -256,7 +256,7 @@ impl ProcessManager {
             process_start_time: process_snapshot
                 .as_ref()
                 .map(|snapshot| snapshot.start_time.clone()),
-            process_executable: observed_process_executable.clone(),
+            process_executable: process_executable.clone(),
             cancel_requested: false,
             termination_receipt: None,
             allocate_pty: false,
@@ -322,6 +322,8 @@ impl ProcessManager {
                             child_guard.termination_receipt = Some("TIMEOUT->SIGKILL".to_string());
                             drop(child_guard);
                             kill_process_group(pid);
+                            #[cfg(windows)]
+                            let _ = child.kill().await;
                             let _ = child.wait().await;
                         }
                         let mut child_guard = managed_supervisor.lock().await;
@@ -451,7 +453,7 @@ impl ProcessManager {
                 process_start_time: process_snapshot
                     .as_ref()
                     .map(|snapshot| snapshot.start_time.clone()),
-                process_executable: Some(observed_process_executable),
+                process_executable: Some(process_executable),
                 working_directory: working_directory.map(|path| path.display().to_string()),
             },
             rx,
@@ -504,7 +506,7 @@ impl ProcessManager {
             let mut guard = managed.lock().await;
             guard.termination_receipt = Some("SIGTERM".to_string());
         }
-        if send_process_signal(pid, signal_number("SIGTERM")?).is_err() {
+        if send_process_signal_for_cancellation(pid, signal_number("SIGTERM")?).is_err() {
             if !process_identity_matches(pid, &process_start_time, &process_executable)? {
                 let _ = wait_for_registry_release(
                     &self.children,
@@ -519,7 +521,7 @@ impl ProcessManager {
                 let mut guard = managed.lock().await;
                 guard.termination_receipt = Some("SIGTERM->SIGKILL".to_string());
             }
-            send_process_signal(pid, signal_number("SIGKILL")?)?;
+            send_process_signal_for_cancellation(pid, signal_number("SIGKILL")?)?;
         } else {
             let deadline = time::Instant::now() + std::time::Duration::from_millis(TERM_GRACE_MS);
             loop {
@@ -532,7 +534,7 @@ impl ProcessManager {
                         let mut guard = managed.lock().await;
                         guard.termination_receipt = Some("SIGTERM->SIGKILL".to_string());
                         drop(guard);
-                        send_process_signal(pid, signal_number("SIGKILL")?)?;
+                        send_process_signal_for_cancellation(pid, signal_number("SIGKILL")?)?;
                     }
                     break;
                 }
@@ -631,7 +633,7 @@ impl ProcessManager {
         if !process_identity_matches(pid, process_start_time, process_executable)? {
             return Ok("already-exited".to_string());
         }
-        send_process_signal(pid, signal_number("SIGTERM")?)?;
+        send_process_signal_for_cancellation(pid, signal_number("SIGTERM")?)?;
         if wait_for_process_identity_to_disappear(
             pid,
             process_start_time,
@@ -643,7 +645,7 @@ impl ProcessManager {
             return Ok("cancelled".to_string());
         }
         if process_identity_matches(pid, process_start_time, process_executable)? {
-            send_process_signal(pid, signal_number("SIGKILL")?)?;
+            send_process_signal_for_cancellation(pid, signal_number("SIGKILL")?)?;
         }
         if wait_for_process_identity_to_disappear(
             pid,
@@ -743,6 +745,13 @@ struct ProcessSnapshot {
     executable: String,
 }
 
+fn command_identity(program: &str, args: &[String]) -> String {
+    std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn process_identity_matches(
     pid: u32,
     expected_start_time: &str,
@@ -757,38 +766,80 @@ fn process_identity_matches(
 
 fn executable_matches(expected: &str, observed: &str) -> bool {
     let expected_first = expected.split_whitespace().next().unwrap_or(expected);
-    let expected_name = expected_first
-        .rsplit('/')
-        .next()
-        .map_or(expected_first, |value| value);
+    let expected_name = executable_name(expected_first);
     let observed_first = observed.split_whitespace().next().unwrap_or_default();
-    let observed_name = observed_first
-        .rsplit('/')
-        .next()
-        .map_or(observed_first, |value| value);
-    let observed_name = observed_name.trim_matches(['(', ')']);
+    let observed_name = executable_name(observed_first);
     !expected_name.is_empty()
         && !observed_name.is_empty()
         && (expected == observed_first
-            || expected_name == observed_name
+            || executable_names_match(expected_name, observed_name)
             // A shell may replace itself with the final command in `-c`
             // mode. The start-time identity remains the primary fence; the
             // observed image must also occur in the original command line.
             || (is_launcher(expected_name)
                 && expected.split_whitespace().any(|token| {
-                    token.rsplit('/').next().unwrap_or(token) == observed_name
+                    executable_names_match(executable_name(token), observed_name)
                 })))
 }
 
+#[cfg(windows)]
+fn executable_name(value: &str) -> &str {
+    value
+        .rsplit(['/', '\\'])
+        .next()
+        .map_or(value, |name| name.trim_matches(['(', ')']))
+}
+
+#[cfg(not(windows))]
+fn executable_name(value: &str) -> &str {
+    value
+        .rsplit('/')
+        .next()
+        .map_or(value, |name| name.trim_matches(['(', ')']))
+}
+
+fn executable_names_match(expected: &str, observed: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let expected = strip_exe_suffix(expected);
+        let observed = strip_exe_suffix(observed);
+        expected.eq_ignore_ascii_case(observed)
+    }
+    #[cfg(not(windows))]
+    {
+        expected == observed
+    }
+}
+
+#[cfg(windows)]
+fn strip_exe_suffix(name: &str) -> &str {
+    if name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    }
+}
+
 fn is_launcher(name: &str) -> bool {
-    is_shell_launcher(name) || matches!(name, "sandbox-exec" | "bwrap")
+    is_shell_launcher(name)
+        || executable_names_match(name, "sandbox-exec")
+        || executable_names_match(name, "bwrap")
 }
 
 fn is_shell_launcher(name: &str) -> bool {
-    matches!(
-        name,
-        "sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "pwsh" | "powershell" | "cmd.exe"
-    )
+    [
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "dash",
+        "ksh",
+        "pwsh",
+        "powershell",
+        "cmd.exe",
+    ]
+    .iter()
+    .any(|candidate| executable_names_match(name, candidate))
 }
 
 #[cfg(target_os = "linux")]
@@ -799,17 +850,25 @@ fn inspect_process(pid: u32) -> Result<Option<ProcessSnapshot>, ProcessError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(ProcessError::Io(error)),
     };
-    let Some((_, fields)) = stat.rsplit_once(") ") else {
+    let Some((prefix, fields)) = stat.rsplit_once(") ") else {
         return Err(ProcessError::IdentityUnavailable(format!(
             "malformed /proc/{pid}/stat"
         )));
     };
-    let Some((_, command_name)) = stat.split_once(" (") else {
+    let Some((_, command_name)) = prefix.split_once(" (") else {
         return Err(ProcessError::IdentityUnavailable(format!(
             "missing /proc/{pid} command name"
         )));
     };
     let command_name = command_name.trim_end_matches(')');
+    let Some(state) = fields.split_whitespace().next() else {
+        return Err(ProcessError::IdentityUnavailable(format!(
+            "missing /proc/{pid} state"
+        )));
+    };
+    if state == "Z" {
+        return Ok(None);
+    }
     let Some(start_time) = fields.split_whitespace().nth(19) else {
         return Err(ProcessError::IdentityUnavailable(format!(
             "missing /proc/{pid} start time"
@@ -905,7 +964,62 @@ fn inspect_process(pid: u32) -> Result<Option<ProcessSnapshot>, ProcessError> {
     }))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn inspect_process(pid: u32) -> Result<Option<ProcessSnapshot>, ProcessError> {
+    // Windows does not expose a portable std API for process start identity.
+    // PowerShell's Process API provides the same PID/start-time fence without
+    // introducing unauthorized Win32 FFI into the kernel.
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; \
+         try {{ \
+             $process = Get-Process -Id {pid} -ErrorAction Stop; \
+             $start = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); \
+             Write-Output $start; \
+             Write-Output $process.ProcessName; \
+         }} catch {{ \
+             if ($null -eq (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ exit 3 }}; \
+             exit 4; \
+         }}"
+    );
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return if output.status.code() == Some(3) {
+            Ok(None)
+        } else {
+            Err(ProcessError::IdentityUnavailable(format!(
+                "PowerShell could not inspect PID {pid}"
+            )))
+        };
+    }
+    let mut lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let Some(start_time) = lines.next() else {
+        return Err(ProcessError::IdentityUnavailable(format!(
+            "PowerShell returned no start time for PID {pid}"
+        )));
+    };
+    let Some(executable) = lines.next() else {
+        return Err(ProcessError::IdentityUnavailable(format!(
+            "PowerShell returned no executable for PID {pid}"
+        )));
+    };
+    Ok(Some(ProcessSnapshot {
+        start_time: start_time.to_string(),
+        executable: executable.to_string(),
+    }))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn inspect_process(_pid: u32) -> Result<Option<ProcessSnapshot>, ProcessError> {
     Err(ProcessError::IdentityUnavailable(
         "PID start-time and executable inspection is unsupported on this platform".to_string(),
@@ -936,7 +1050,9 @@ async fn wait_for_process_identity_to_disappear(
 ) -> Result<bool, ProcessError> {
     let deadline = time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
-        if !process_identity_matches(pid, process_start_time, process_executable)? {
+        if !process_identity_matches(pid, process_start_time, process_executable)?
+            && !process_group_exists(pid)?
+        {
             return Ok(true);
         }
         if time::Instant::now() >= deadline {
@@ -944,6 +1060,38 @@ async fn wait_for_process_identity_to_disappear(
         }
         time::sleep(std::time::Duration::from_millis(25)).await;
     }
+}
+
+#[cfg(unix)]
+fn process_group_exists(pid: u32) -> Result<bool, ProcessError> {
+    i32::try_from(pid).map_err(|_| {
+        ProcessError::IdentityUnavailable(format!(
+            "process id {pid} cannot be represented as a POSIX group id"
+        ))
+    })?;
+    match send_process_signal(pid, 0) {
+        Ok(()) => Ok(true),
+        Err(ProcessError::Io(error)) if error.raw_os_error() == Some(libc::ESRCH) => Ok(false),
+        Err(ProcessError::Io(error)) if error.raw_os_error() == Some(libc::EPERM) => {
+            // The original leader has already disappeared. If the numeric PGID
+            // was reused by a group we cannot inspect, it is not safe to retain
+            // the job lease or claim that group as ours.
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn process_group_exists(pid: u32) -> Result<bool, ProcessError> {
+    // taskkill /T is the tree operation on Windows. The leader identity is
+    // the only portable post-kill observation available without Win32 FFI.
+    inspect_process(pid).map(|snapshot| snapshot.is_some())
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn process_group_exists(_pid: u32) -> Result<bool, ProcessError> {
+    Ok(false)
 }
 
 #[cfg(unix)]
@@ -959,7 +1107,20 @@ fn signal_number(signal: &str) -> Result<i32, ProcessError> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn signal_number(signal: &str) -> Result<i32, ProcessError> {
+    match signal {
+        "SIGTERM" => Ok(15),
+        "SIGKILL" => Ok(9),
+        "SIGINT" => Ok(2),
+        "SIGHUP" => Ok(1),
+        _ => Err(ProcessError::InvalidSpec(format!(
+            "unsupported signal `{signal}`"
+        ))),
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn signal_number(_signal: &str) -> Result<i32, ProcessError> {
     Err(ProcessError::InvalidSpec(
         "signals are unsupported on this platform".to_string(),
@@ -1125,22 +1286,64 @@ fn send_process_signal(pid: u32, signal: i32) -> Result<(), ProcessError> {
         Ok(())
     } else {
         let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
-        } else {
-            Err(ProcessError::Io(error))
-        }
+        Err(ProcessError::Io(error))
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(unix)]
+fn send_process_signal_for_cancellation(pid: u32, signal: i32) -> Result<(), ProcessError> {
+    match send_process_signal(pid, signal) {
+        Err(ProcessError::Io(error)) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        result => result,
+    }
+}
+
+#[cfg(windows)]
+fn send_process_signal(pid: u32, _signal: i32) -> Result<(), ProcessError> {
+    let status = std::process::Command::new("taskkill.exe")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(ProcessError::Io(std::io::Error::other(format!(
+        "taskkill.exe failed for PID {pid}: {status}"
+    ))))
+}
+
+#[cfg(windows)]
+fn send_process_signal_for_cancellation(pid: u32, signal: i32) -> Result<(), ProcessError> {
+    match send_process_signal(pid, signal) {
+        Ok(()) => Ok(()),
+        Err(_error) if matches!(inspect_process(pid), Ok(None)) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn send_process_signal(_pid: u32, _signal: i32) -> Result<(), ProcessError> {
     Err(ProcessError::InvalidSpec(
         "signals are unsupported on this platform".to_string(),
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
+fn send_process_signal_for_cancellation(pid: u32, signal: i32) -> Result<(), ProcessError> {
+    send_process_signal(pid, signal)
+}
+
+#[cfg(windows)]
+fn kill_process_group(pid: u32) {
+    let _ = std::process::Command::new("taskkill.exe")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn kill_process_group(_pid: u32) {
     // No process groups on non-unix; child kill is handled by tokio.
 }
@@ -1219,11 +1422,22 @@ mod tests {
         ));
     }
 
-    #[cfg(not(unix))]
+    #[cfg(all(not(unix), not(windows)))]
     #[test]
     fn signal_number_rejects_unsupported_platforms() {
         assert!(matches!(
             signal_number("SIGTERM"),
+            Err(ProcessError::InvalidSpec(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn signal_number_allows_windows_termination_requests() {
+        assert!(signal_number("SIGTERM").is_ok());
+        assert!(signal_number("SIGKILL").is_ok());
+        assert!(matches!(
+            signal_number("SIGQUIT"),
             Err(ProcessError::InvalidSpec(_))
         ));
     }
@@ -1241,6 +1455,14 @@ mod tests {
             "/usr/bin/sandbox-exec -p policy -- /bin/cat",
             "/usr/bin/python"
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn identity_fence_normalizes_windows_executable_names() {
+        assert!(executable_matches("git", r"C:\Git\git.EXE"));
+        assert!(executable_matches(r"CMD.EXE /C C:\Git\git.exe", "git"));
+        assert!(!executable_matches("git", r"C:\Git\python.EXE"));
     }
 
     #[tokio::test]

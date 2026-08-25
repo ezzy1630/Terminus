@@ -24,6 +24,9 @@ import {
   taskV2Schema,
   taskStatusV2Schema,
   resourceHandleSchema,
+  workflowNodeSchema,
+  guardedEdgeSchema,
+  staticValidationReportSchema,
 } from "@terminus/domain";
 import type { TaskV2 } from "@terminus/domain";
 
@@ -211,6 +214,9 @@ export const workflowCreatedPayloadSchema = z.object({
   taskId: z.string(),
   version: z.number().int().positive(),
   nodeCount: z.number().int().nonnegative(),
+  nodes: z.array(workflowNodeSchema),
+  edges: z.array(guardedEdgeSchema),
+  staticAnalysis: staticValidationReportSchema.optional(),
 });
 export type WorkflowCreatedPayload = z.infer<typeof workflowCreatedPayloadSchema>;
 
@@ -273,8 +279,10 @@ export const effectProposedV2PayloadSchema = z.object({
   taskId: z.string(),
   attemptId: z.string(),
   principal: z.string(),
+  connectorOrWorker: z.string(),
   effectClass: z.string(),
   intentType: z.string(),
+  canonicalParameters: z.record(z.string(), z.unknown()),
   semanticIdempotencyKey: z.string(),
   resourceHandles: z.array(resourceHandleSchema).default([]),
 });

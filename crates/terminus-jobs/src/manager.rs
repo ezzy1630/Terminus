@@ -58,6 +58,27 @@ impl JobManager {
         Ok(())
     }
 
+    async fn persist_event_state(
+        &self,
+        record: &JobRecord,
+        appended_chunk: Option<&JobOutputChunk>,
+        removed_chunks: &[JobOutputChunk],
+    ) -> Result<(), JobError> {
+        let Some(path) = self.storage_path.clone() else {
+            return Ok(());
+        };
+        let record = record.clone();
+        let appended_chunk = appended_chunk.cloned();
+        let removed_chunks = removed_chunks.to_vec();
+        let _persistence_guard = self.persistence_lock.lock().await;
+        tokio::task::spawn_blocking(move || {
+            persist_event_sqlite(&path, &record, appended_chunk.as_ref(), &removed_chunks)
+        })
+        .await
+        .map_err(|error| JobError::Database(format!("sqlite writer task failed: {error}")))??;
+        Ok(())
+    }
+
     /// Load persisted job records from the SQLite job store into memory.
     pub async fn load_persisted(&self) -> Result<usize, JobError> {
         let Some(path) = self.storage_path.clone() else {
@@ -74,7 +95,10 @@ impl JobManager {
             for record in records {
                 normalized |= record.lease_token.is_empty()
                     || (record.process_executable.is_none()
-                        && !record.resolved_executable.is_empty());
+                        && !record.resolved_executable.is_empty())
+                    || (record.output_cursor > 0
+                        && record.stdout_cursor == 0
+                        && record.stderr_cursor == 0);
                 let normalized_record = normalize_record(record);
                 jobs.insert(normalized_record.id.clone(), normalized_record);
             }
@@ -121,7 +145,10 @@ impl JobManager {
             for record in records {
                 normalized |= record.lease_token.is_empty()
                     || (record.process_executable.is_none()
-                        && !record.resolved_executable.is_empty());
+                        && !record.resolved_executable.is_empty())
+                    || (record.output_cursor > 0
+                        && record.stdout_cursor == 0
+                        && record.stderr_cursor == 0);
                 let normalized_record = normalize_record(record);
                 jobs.insert(normalized_record.id.clone(), normalized_record);
             }
@@ -206,11 +233,16 @@ impl JobManager {
         };
         if let Err(error) = self.attach_started(job_id, &outcome).await {
             let compensation = self
-                .process_manager
-                .cancel(&outcome.process_id, "durable persist failed")
+                .compensate_spawned(&outcome, "durable persist failed")
                 .await;
             if compensation.is_ok() {
                 let _ = self.remove(job_id).await;
+            } else {
+                tracing::error!(
+                    job_id = %job_id,
+                    cancellation = ?compensation,
+                    "job attach persistence failed and process compensation failed"
+                );
             }
             return Err(error);
         }
@@ -225,6 +257,10 @@ impl JobManager {
         outcome: &SpawnOutcome,
     ) -> Result<(), JobError> {
         let mut jobs = self.jobs.lock().await;
+        let previous = jobs
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| JobError::NotFound(job_id.to_string()))?;
         let record = jobs
             .get_mut(job_id)
             .ok_or_else(|| JobError::NotFound(job_id.to_string()))?;
@@ -245,14 +281,48 @@ impl JobManager {
         if let Some(working_directory) = &outcome.working_directory {
             record.cwd = working_directory.clone();
         }
-        self.persist_state(&jobs).await?;
-        Ok(())
+        match self.persist_state(&jobs).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                jobs.insert(job_id.to_string(), previous);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn compensate_spawned(
+        &self,
+        outcome: &SpawnOutcome,
+        reason: &str,
+    ) -> Result<String, JobError> {
+        match self.process_manager.cancel(&outcome.process_id, reason).await {
+            Ok(receipt) => Ok(receipt),
+            Err(first_error) => match (
+                outcome.pid,
+                outcome.process_start_time.as_deref(),
+                outcome.process_executable.as_deref(),
+            ) {
+                (Some(pid), Some(start_time), Some(executable)) => self
+                    .process_manager
+                    .cancel_verified(pid, start_time, executable, reason)
+                    .await
+                    .map_err(|second_error| {
+                        JobError::Database(format!(
+                            "spawn compensation failed after process cancel error ({first_error}): {second_error}"
+                        ))
+                    }),
+                _ => Err(JobError::Process(first_error)),
+            },
+        }
     }
 
     pub async fn remove(&self, job_id: &str) -> Result<(), JobError> {
         let mut jobs = self.jobs.lock().await;
         jobs.remove(job_id);
-        self.output_chunks.lock().await.remove(job_id);
+        {
+            let mut output_chunks = self.output_chunks.lock().await;
+            output_chunks.remove(job_id);
+        }
         self.persist_state(&jobs).await
     }
 
@@ -282,6 +352,8 @@ impl JobManager {
         if current_lease.lease_token != lease_token {
             return Err(JobError::LeaseMismatch(job_id.to_string()));
         }
+        let mut persisted_chunk: Option<JobOutputChunk> = None;
+        let mut removed_chunks: Vec<JobOutputChunk> = Vec::new();
         match event {
             ProcessEvent::Stdout(chunk) | ProcessEvent::Stderr(chunk) => {
                 let stream = if matches!(event, ProcessEvent::Stdout(_)) {
@@ -308,42 +380,77 @@ impl JobManager {
                 };
                 let mut output_chunks = self.output_chunks.lock().await;
                 let chunks = output_chunks.entry(job_id.to_string()).or_default();
-                if let Some(existing) = chunks.iter().find(|existing| {
-                    existing.stream == entry.stream
-                        && existing.start_cursor == entry.start_cursor
-                        && existing.end_cursor == entry.end_cursor
-                }) {
+                let duplicate = chunks
+                    .iter()
+                    .find(|existing| {
+                        existing.stream == entry.stream
+                            && existing.start_cursor == entry.start_cursor
+                            && existing.end_cursor == entry.end_cursor
+                    })
+                    .cloned();
+                if let Some(existing) = duplicate {
                     if existing.bytes == entry.bytes && existing.redacted == entry.redacted {
-                        return Ok(());
+                        persisted_chunk = Some(existing);
+                    } else {
+                        return Err(JobError::OutputCursorConflict {
+                            job_id: job_id.to_string(),
+                            stream: stream.to_string(),
+                            expected: existing.end_cursor,
+                            actual: entry.end_cursor,
+                        });
                     }
-                    return Err(JobError::OutputCursorConflict {
-                        job_id: job_id.to_string(),
-                        stream: stream.to_string(),
-                        expected: existing.end_cursor,
-                        actual: entry.end_cursor,
-                    });
-                }
-                let expected_cursor = if stream == "stdout" {
-                    current_lease.stdout_cursor
                 } else {
-                    current_lease.stderr_cursor
-                };
-                if start_cursor != expected_cursor {
-                    return Err(JobError::OutputCursorConflict {
-                        job_id: job_id.to_string(),
-                        stream: stream.to_string(),
-                        expected: expected_cursor,
-                        actual: start_cursor,
-                    });
+                    let expected_cursor = if stream == "stdout" {
+                        current_lease.stdout_cursor
+                    } else {
+                        current_lease.stderr_cursor
+                    };
+                    if start_cursor != expected_cursor {
+                        return Err(JobError::OutputCursorConflict {
+                            job_id: job_id.to_string(),
+                            stream: stream.to_string(),
+                            expected: expected_cursor,
+                            actual: start_cursor,
+                        });
+                    }
+                    chunks.push(entry.clone());
+                    persisted_chunk = Some(entry.clone());
+                    let max_output =
+                        usize::try_from(current_lease.resource_limits.max_output_bytes)
+                            .unwrap_or(usize::MAX);
+                    let mut retained_bytes =
+                        chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>();
+                    while retained_bytes > max_output {
+                        let removed = chunks.remove(0);
+                        retained_bytes = retained_bytes.saturating_sub(removed.bytes.len());
+                        removed_chunks.push(removed.clone());
+                        let record = jobs
+                            .get_mut(job_id)
+                            .ok_or_else(|| JobError::NotFound(job_id.to_string()))?;
+                        if removed.stream == "stdout" {
+                            record.stdout_truncated_before =
+                                record.stdout_truncated_before.max(removed.end_cursor);
+                        } else {
+                            record.stderr_truncated_before =
+                                record.stderr_truncated_before.max(removed.end_cursor);
+                        }
+                    }
+                    if !chunks.iter().any(|chunk| {
+                        chunk.stream == entry.stream
+                            && chunk.start_cursor == entry.start_cursor
+                            && chunk.end_cursor == entry.end_cursor
+                    }) {
+                        persisted_chunk = None;
+                    }
                 }
-                chunks.push(entry);
+                drop(output_chunks);
                 let record = jobs
                     .get_mut(job_id)
                     .ok_or_else(|| JobError::NotFound(job_id.to_string()))?;
                 if stream == "stdout" {
-                    record.stdout_cursor = chunk.cursor;
+                    record.stdout_cursor = record.stdout_cursor.max(chunk.cursor);
                 } else {
-                    record.stderr_cursor = chunk.cursor;
+                    record.stderr_cursor = record.stderr_cursor.max(chunk.cursor);
                 }
                 record.output_cursor = record.stdout_cursor.max(record.stderr_cursor);
             }
@@ -377,7 +484,13 @@ impl JobManager {
             }
             ProcessEvent::Started(_) | ProcessEvent::Policy(_) => {}
         }
-        self.persist_state(&jobs).await
+        let record = jobs
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| JobError::NotFound(job_id.to_string()))?;
+        drop(jobs);
+        self.persist_event_state(&record, persisted_chunk.as_ref(), &removed_chunks)
+            .await
     }
 
     /// Return durable chunks whose end cursor is after `from_cursor`.
@@ -392,6 +505,22 @@ impl JobManager {
         }
         if self.get(job_id).await.is_none() {
             return Err(JobError::NotFound(job_id.to_string()));
+        }
+        let record = self
+            .get(job_id)
+            .await
+            .ok_or_else(|| JobError::NotFound(job_id.to_string()))?;
+        let truncated_before = if stream == "stdout" {
+            record.stdout_truncated_before
+        } else {
+            record.stderr_truncated_before
+        };
+        if from_cursor < truncated_before {
+            return Err(JobError::OutputTruncated {
+                job_id: job_id.to_string(),
+                stream: stream.to_string(),
+                available_from: truncated_before,
+            });
         }
         let chunks = self.output_chunks.lock().await;
         let mut result = Vec::new();
@@ -766,6 +895,7 @@ impl JobManager {
         for job_id in &removed {
             output_chunks.remove(job_id);
         }
+        drop(output_chunks);
         let _ = self.persist_state(&jobs).await;
         removed
     }
@@ -785,6 +915,20 @@ fn normalize_record(mut record: JobRecord) -> JobRecord {
     }
     if record.process_executable.is_none() && !record.resolved_executable.is_empty() {
         record.process_executable = Some(record.resolved_executable.clone());
+    }
+    if record.output_cursor > 0 && record.stdout_cursor == 0 && record.stderr_cursor == 0 {
+        // Legacy records exposed one combined cursor and did not identify
+        // which stream produced it. Preserve the durable record without
+        // replaying unknown historical bytes: both streams resume only from
+        // the legacy boundary and the reconciliation history records why.
+        record.stdout_cursor = record.output_cursor;
+        record.stderr_cursor = record.output_cursor;
+        record.stdout_truncated_before = record.output_cursor;
+        record.stderr_truncated_before = record.output_cursor;
+        record.reconciliation_history.push(format!(
+            "migrated:legacy-output-cursor:{}",
+            record.output_cursor
+        ));
     }
     record
 }
@@ -950,6 +1094,81 @@ fn persist_state_sqlite(
     transaction
         .commit()
         .map_err(|error| JobError::Database(format!("commit durable_jobs: {error}")))?;
+    Ok(())
+}
+
+fn persist_event_sqlite(
+    path: &PathBuf,
+    record: &JobRecord,
+    appended_chunk: Option<&JobOutputChunk>,
+    removed_chunks: &[JobOutputChunk],
+) -> Result<(), JobError> {
+    let mut connection = open_sqlite(path)?;
+    let transaction = connection.transaction().map_err(|error| {
+        JobError::Database(format!("begin durable job event transaction: {error}"))
+    })?;
+    let json = serde_json::to_string(record)?;
+    transaction
+        .execute(
+            "INSERT INTO durable_jobs
+             (id, record_json, pid, process_start_time, process_executable,
+              cwd, lease_token, state, output_cursor, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET
+               record_json = excluded.record_json,
+               pid = excluded.pid,
+               process_start_time = excluded.process_start_time,
+               process_executable = excluded.process_executable,
+               cwd = excluded.cwd,
+               lease_token = excluded.lease_token,
+               state = excluded.state,
+               output_cursor = excluded.output_cursor,
+               updated_at = excluded.updated_at",
+            rusqlite::params![
+                record.id,
+                json,
+                record.pid.map(i64::from),
+                record.process_start_time,
+                record.process_executable,
+                record.cwd,
+                record.lease_token,
+                record.state.as_str(),
+                i64::try_from(record.output_cursor).map_err(|_| {
+                    JobError::Database(format!("output cursor is too large for job {}", record.id))
+                })?,
+                now_rfc3339(),
+            ],
+        )
+        .map_err(|error| JobError::Database(format!("upsert job {}: {error}", record.id)))?;
+    for chunk in removed_chunks {
+        transaction
+            .execute(
+                "DELETE FROM durable_job_output_chunks
+                 WHERE job_id = ?1 AND stream = ?2 AND start_cursor = ?3",
+                rusqlite::params![chunk.job_id, chunk.stream, chunk.start_cursor],
+            )
+            .map_err(|error| JobError::Database(format!("delete compacted output: {error}")))?;
+    }
+    if let Some(chunk) = appended_chunk {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO durable_job_output_chunks
+                 (job_id, stream, start_cursor, end_cursor, bytes, redacted)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    chunk.job_id,
+                    chunk.stream,
+                    chunk.start_cursor,
+                    chunk.end_cursor,
+                    chunk.bytes,
+                    i64::from(chunk.redacted),
+                ],
+            )
+            .map_err(|error| JobError::Database(format!("append output chunk: {error}")))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| JobError::Database(format!("commit durable job event: {error}")))?;
     Ok(())
 }
 
@@ -1223,6 +1442,18 @@ mod tests {
         assert_eq!(resumed[0].start_cursor, 2);
         assert_eq!(resumed[0].end_cursor, 5);
         assert_eq!(resumed[0].bytes, b"llo");
+        mgr1.record_event_with_lease(
+            &id,
+            &lease,
+            &ProcessEvent::Stdout(terminus_kernel_protocol::OutputChunk {
+                cursor: 5,
+                bytes: b"hello".to_vec(),
+                redacted: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mgr1.get(&id).await.unwrap().stdout_cursor, 5);
         assert!(matches!(
             mgr1.record_event_with_lease(
                 &id,

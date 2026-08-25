@@ -483,6 +483,11 @@ class _ExternalBenchmarkAdapter(ABC):
         self._live_harness = live_harness
 
     def _translated_task_manifest(self, request: RunRequest) -> TranslatedTaskManifest:
+        if request.suite != self.manifest.suite_id:
+            raise BenchmarkAdapterError(
+                f"benchmark request suite {request.suite!r} does not match "
+                f"adapter manifest {self.manifest.suite_id!r}"
+            )
         if not request.task.strip():
             raise BenchmarkAdapterError("benchmark task id is required")
         return TranslatedTaskManifest(
@@ -527,7 +532,7 @@ class _ExternalBenchmarkAdapter(ABC):
             raise BenchmarkAdapterError(
                 "live benchmark harness returned no BenchmarkExecution boundary result"
             )
-        _validate_execution(execution, self.manifest)
+        environment_digest = _validate_execution(execution, self.manifest)
 
         evidence_artifact = {
             "type": "benchmark_adapter_manifest",
@@ -544,6 +549,7 @@ class _ExternalBenchmarkAdapter(ABC):
             execution.harness_result,
             artifacts=[evidence_artifact, *execution.harness_result.artifacts],
             notes=notes,
+            environment_digest=environment_digest,
         )
 
 
@@ -647,7 +653,7 @@ def adapter_for_suite(
 def _validate_execution(
     execution: BenchmarkExecution,
     manifest: BenchmarkManifest,
-) -> None:
+) -> str:
     digests = execution.resolved_image_digests
     if len(digests) != 1:
         raise BenchmarkAdapterError(
@@ -659,6 +665,7 @@ def _validate_execution(
         raise BenchmarkAdapterError(
             f"{manifest.suite_id}: live harness returned an invalid image digest"
         )
+    return digest
 
 
 def _mapping(value: object, field_name: str) -> Mapping[str, object]:

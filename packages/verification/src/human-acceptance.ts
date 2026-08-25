@@ -93,6 +93,11 @@ export function acceptHumanAcceptanceObligation(
   obligation: HumanAcceptanceObligation,
   input: AcceptHumanAcceptanceObligationInput,
 ): HumanAcceptanceObligation {
+  if (obligation.status !== "open") {
+    throw new ValidationError(
+      `human acceptance obligation '${obligation.id}' is already ${obligation.status}`,
+    );
+  }
   if (input.acceptedBy.trim().length === 0) {
     throw new ValidationError("human acceptance requires an accepting identity");
   }

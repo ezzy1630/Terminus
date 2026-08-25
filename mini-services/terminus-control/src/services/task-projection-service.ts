@@ -200,6 +200,32 @@ function numberOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function bigintOr(value: unknown, fallback: bigint): bigint {
+  if (typeof value === "bigint" && value >= 0n) return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) return BigInt(value);
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    return BigInt(value);
+  }
+  return fallback;
+}
+
+function normalizeRetainedContract(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const contract = value as Record<string, unknown>;
+  const constraints = contract.constraints;
+  if (constraints === null || typeof constraints !== "object" || Array.isArray(constraints)) {
+    return value;
+  }
+  const constraintRecord = constraints as Record<string, unknown>;
+  return {
+    ...contract,
+    constraints: {
+      ...constraintRecord,
+      costMicros: bigintOr(constraintRecord.costMicros, -1n),
+    },
+  };
+}
+
 /**
  * Projects committed v1 task rows into the durable v2 event stream and keeps
  * the in-process read model current.
@@ -289,9 +315,7 @@ export class TaskProjectionService<TTransaction> {
       })),
       constraints: {
         security: security.includes("NO_AMBIENT_SECRETS") ? security : [...security, "NO_AMBIENT_SECRETS"],
-        costMicros: BigInt(typeof rawBudget.model_micros === "string" && /^\d+$/.test(rawBudget.model_micros)
-          ? rawBudget.model_micros
-          : "5000000"),
+        costMicros: bigintOr(rawBudget.model_micros, 5_000_000n),
         timeoutSeconds: numberOr(rawBudget.wall_clock_seconds, 3_600),
       },
       authorityCeiling: authority.authorityCeiling,
@@ -299,7 +323,9 @@ export class TaskProjectionService<TTransaction> {
     };
     const retainedProjection = contract.v2ProjectionJson === null
       ? null
-      : taskContractV2Schema.safeParse(parseJson<unknown>(contract.v2ProjectionJson, null));
+      : taskContractV2Schema.safeParse(
+        normalizeRetainedContract(parseJson<unknown>(contract.v2ProjectionJson, null)),
+      );
     const projectedContract = retainedProjection?.success === true
       && retainedProjection.data.version === contract.version
       ? retainedProjection.data

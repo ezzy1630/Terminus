@@ -543,6 +543,7 @@ const PATCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
             enum: [
               "replace_symbol",
               "range",
+              "replace_hashline",
               "exact_text",
               "insert",
               "delete",
@@ -556,6 +557,7 @@ const PATCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
           observed_hash: { type: ["string", "null"] },
           symbol: { type: ["string", "null"] },
           range: { type: ["object", "null"] },
+          line_hashes: { type: ["array", "null"], items: { type: "string" } },
           old_text: { type: ["string", "null"] },
           new_text: { type: ["string", "null"] },
           destination: { type: ["string", "null"] },
@@ -566,7 +568,7 @@ const PATCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
     },
     dialect: {
       type: "string",
-      enum: ["canonical", "search_replace", "unified_diff", "ast"],
+      enum: ["canonical", "search_replace", "hashline", "unified_diff", "ast"],
     },
     validation_profile: {
       type: "string",

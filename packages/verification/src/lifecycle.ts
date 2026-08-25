@@ -82,7 +82,15 @@ export class VerificationLifecycle {
     await this.deps.store.saveNodes(plan.id, plan.nodes);
     await this.deps.store.saveEdges(plan.id, plan.edges);
     this.criteriaByPlan.set(plan.id, input.criteria);
-    this.criteriaHashByPlan.set(plan.id, computeAcceptanceCriteriaHash(input.criteria));
+    const criteriaHash = computeAcceptanceCriteriaHash(input.criteria);
+    this.criteriaHashByPlan.set(plan.id, criteriaHash);
+    await this.deps.store.saveLifecycleBinding({
+      planId: plan.id,
+      criteriaHash,
+      verifierBinding: null,
+      resultsHash: null,
+      invalidatedNodeIds: [],
+    });
     return plan;
   }
 
@@ -128,9 +136,13 @@ export class VerificationLifecycle {
         await this.deps.store.saveAttempt(attempt);
       },
     });
+    const resultsHash = computeVerificationResultsHash(result.results);
     this.verifierBindingByPlan.set(planId, result.verifierBinding);
-    this.resultsHashByPlan.set(planId, computeVerificationResultsHash(result.results));
-
+    this.resultsHashByPlan.set(planId, resultsHash);
+    const persistedBinding = await this.deps.store.getLifecycleBinding(planId);
+    if (persistedBinding === null) {
+      throw new ValidationError("verification lifecycle binding is missing from durable storage", { planId });
+    }
     const cleared = this.invalidated.get(planId) ?? new Set<string>();
     for (const r of result.results) {
       await this.deps.store.saveResult(r);
@@ -139,6 +151,12 @@ export class VerificationLifecycle {
     }
     if (cleared.size === 0) this.invalidated.delete(planId);
     else this.invalidated.set(planId, cleared);
+    await this.deps.store.saveLifecycleBinding({
+      ...persistedBinding,
+      verifierBinding: result.verifierBinding,
+      resultsHash,
+      invalidatedNodeIds: [...(this.invalidated.get(planId) ?? [])].sort(),
+    });
     const criteria = this.criteriaByPlan.get(planId);
     if (criteria !== undefined) {
       await this.deps.store.saveEvidenceGraph(planId, buildClaimEvidenceGraph({
@@ -175,6 +193,13 @@ export class VerificationLifecycle {
       const set = this.invalidated.get(planId) ?? new Set<string>();
       for (const id of nodeIds) set.add(id);
       this.invalidated.set(planId, set);
+      const persistedBinding = await this.deps.store.getLifecycleBinding(planId);
+      if (persistedBinding !== null) {
+        await this.deps.store.saveLifecycleBinding({
+          ...persistedBinding,
+          invalidatedNodeIds: [...set].sort(),
+        });
+      }
     }
     return nodeIds;
   }
@@ -206,10 +231,14 @@ export class VerificationLifecycle {
     if (plan === null) throw new ValidationError("verification plan not found", { planId: input.planId });
     const results = await this.deps.store.listResults(input.planId);
     const resultMap = new Map(results.map((r) => [r.nodeId, r] as const));
-    const invalidatedNodeIds = this.invalidated.get(input.planId) ?? new Set<string>();
-    const expectedCriteriaHash = this.criteriaHashByPlan.get(input.planId);
-    const verifierBinding = this.verifierBindingByPlan.get(input.planId);
-    const expectedResultsHash = this.resultsHashByPlan.get(input.planId);
+    const persistedBinding = await this.deps.store.getLifecycleBinding(input.planId);
+    const invalidatedNodeIds = this.invalidated.get(input.planId)
+      ?? new Set<string>(persistedBinding?.invalidatedNodeIds ?? []);
+    const expectedCriteriaHash = this.criteriaHashByPlan.get(input.planId) ?? persistedBinding?.criteriaHash;
+    const verifierBinding = this.verifierBindingByPlan.get(input.planId)
+      ?? persistedBinding?.verifierBinding
+      ?? undefined;
+    const expectedResultsHash = this.resultsHashByPlan.get(input.planId) ?? persistedBinding?.resultsHash;
     if (
       expectedCriteriaHash === undefined
       || verifierBinding === undefined
@@ -281,6 +310,12 @@ export class VerificationLifecycle {
     await this.deps.store.saveCompletionRecord(record);
     // Clear invalidation marks after successful completion.
     this.invalidated.delete(input.planId);
+    if (persistedBinding !== null) {
+      await this.deps.store.saveLifecycleBinding({
+        ...persistedBinding,
+        invalidatedNodeIds: [],
+      });
+    }
     return record;
   }
 }

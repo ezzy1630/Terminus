@@ -148,7 +148,9 @@ pub struct SpawnOutcome {
     /// `started_at`: on Linux it is the monotonic `/proc` start-time tick
     /// count, while supported BSD-family platforms use the `ps` start value.
     pub process_start_time: Option<String>,
-    /// Executable identity used with `process_start_time` for PID fencing.
+    /// Launch-command identity used with `process_start_time` for PID fencing.
+    /// Launcher arguments are retained so an authorized shell/sandbox `exec`
+    /// can be checked against the image named by the original command.
     pub process_executable: Option<String>,
     /// Host working directory at spawn time.
     pub working_directory: Option<String>,
