@@ -22,7 +22,7 @@ import type { ToolResult } from "@terminus/aci";
 
 describe("standalone provider tools", () => {
   test("exposes the bounded kernel tool surface", () => {
-    expect(STANDALONE_TOOL_SCHEMAS.map((tool) => tool.id)).toEqual(["read", "patch", "exec", "grep", "glob"]);
+    expect(STANDALONE_TOOL_SCHEMAS.map((tool) => tool.id)).toEqual(["read", "patch", "exec", "exec_poll", "grep", "glob"]);
     expect(DEFAULT_MAX_TOOL_CYCLES).toBe(64);
   });
 
@@ -36,8 +36,12 @@ describe("standalone provider tools", () => {
     expect(() => resolveMaxToolCycles("0")).toThrow(/between/);
     expect(() => resolveMaxToolCycles("-4")).toThrow(/between/);
     expect(resolveMaxToolCycles("not-a-number")).toBe(DEFAULT_MAX_TOOL_CYCLES);
-    expect(resolveShellModeEnabled(undefined)).toBe(false);
+    // R3: shell mode defaults on under the sandboxed policy; explicit opt-out only.
+    expect(resolveShellModeEnabled(undefined)).toBe(true);
+    expect(resolveShellModeEnabled("")).toBe(true);
     expect(resolveShellModeEnabled("0")).toBe(false);
+    expect(resolveShellModeEnabled("false")).toBe(false);
+    expect(resolveShellModeEnabled("FALSE")).toBe(false);
     expect(resolveShellModeEnabled("1")).toBe(true);
     expect(resolveShellModeEnabled("true")).toBe(true);
   });
@@ -63,6 +67,11 @@ describe("standalone provider tools", () => {
   test("exec requires exactly one of argv or shell mode", () => {
     const argv = parseStandaloneToolCall({ toolCallId: "a", toolName: "exec", arguments: { program: "rg", args: ["--files"] } });
     expect(toolEffectMetadata(argv).effectType).toBe("EXECUTE_LOCAL");
+    expect(argv.arguments).toMatchObject({ timeout_ms: 120_000, background: false });
+    const long = parseStandaloneToolCall({ toolCallId: "a2", toolName: "exec", arguments: { program: "rg", args: [], timeout_ms: 600_000 } });
+    if (long.toolId !== "exec") throw new Error("expected exec");
+    expect(long.arguments.timeout_ms).toBe(600_000);
+    expect(() => parseStandaloneToolCall({ toolCallId: "a3", toolName: "exec", arguments: { program: "rg", timeout_ms: 600_001 } })).toThrow(/invalid/);
     const shell = parseStandaloneToolCall({ toolCallId: "b", toolName: "exec", arguments: { shell: { dialect: "bash", script: "cargo test" } } });
     expect(shell.arguments).toMatchObject({ shell: { dialect: "bash", script: "cargo test" }, args: [] });
     expect(() =>
@@ -510,5 +519,129 @@ describe("shell-mode gating", () => {
     }).catch(() => undefined);
     await attempt;
     expect(started).toBe(true);
+  });
+});
+
+describe("R3 background exec and exec_poll", () => {
+  const baseInput = {
+    context: { idempotencyKey: "idem" } as never,
+    workspaceId: "ws-1",
+    internalToolCallId: "tc",
+    sideEffectId: "00000000-0000-7000-8000-000000000021" as never,
+    policyDecisionId: "pd",
+    traceId: "trace",
+    contractHash: "hash",
+    devMode: false,
+    shellModeEnabled: true,
+  } as const;
+
+  test("background exec returns a job id immediately without waiting for exit", async () => {
+    let processStarted = false;
+    let jobStarted = false;
+    const clients = {
+      process: {
+        Start: () => {
+          processStarted = true;
+          return { subscribe: () => ({ unsubscribe: () => {} }) };
+        },
+      },
+      jobs: {
+        Start: (request: { command: { program: string } }) => {
+          jobStarted = true;
+          expect(request.command.program).toBe("sleep");
+          return { jobId: "job-123", processId: "proc-9", startedAt: undefined };
+        },
+      },
+    } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
+    const result = await executeStandaloneTool({
+      ...baseInput,
+      clients,
+      call: parseStandaloneToolCall({
+        toolCallId: "bg1",
+        toolName: "exec",
+        arguments: { program: "sleep", args: ["600"], background: true, timeout_ms: 600_000 },
+      }) as Extract<ParsedStandaloneToolCall, { toolId: "exec" }>,
+      observedSources: new ObservedSourceTracker(),
+    });
+    expect(result.status).toBe("success");
+    expect(jobStarted).toBe(true);
+    expect(processStarted).toBe(false);
+    expect((result.data as Record<string, unknown>).background_id).toBe("job-123");
+    expect((result.data as Record<string, unknown>).poll_hint).toMatch(/exec_poll/);
+  });
+
+  test("exec_poll reports running jobs without artifacts", async () => {
+    const clients = {
+      jobs: {
+        Get: () => ({ jobId: "job-123", state: "running", exitCode: 0 }),
+      },
+    } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
+    const result = await executeStandaloneTool({
+      ...baseInput,
+      clients,
+      call: parseStandaloneToolCall({ toolCallId: "pl1", toolName: "exec_poll", arguments: { background_id: "job-123" } }) as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }>,
+      observedSources: new ObservedSourceTracker(),
+    });
+    expect(result.status).toBe("success");
+    expect((result.data as Record<string, unknown>).state).toBe("running");
+    expect(toolEffectMetadata(parseStandaloneToolCall({ toolCallId: "pl2", toolName: "exec_poll", arguments: { background_id: "j" } })).effectType).toBe("READ_LOCAL");
+  });
+
+  test("exec_poll fetches bounded tails from stdout/stderr artifacts once exited", async () => {
+    const bigStdout = new TextEncoder().encode("h".repeat(50_000) + "\nDONE\n");
+    const clients = {
+      jobs: {
+        Get: () => ({
+          jobId: "job-7",
+          state: "exited",
+          exitCode: 3,
+          stdoutArtifact: { sha256: `sha256:${"e".repeat(64)}`, sizeBytes: bigStdout.byteLength, mediaType: "text/plain" },
+          stderrArtifact: undefined,
+        }),
+      },
+      artifacts: {
+        Get: (_request: unknown) => ({ content: bigStdout, artifact: { sha256: `sha256:${"e".repeat(64)}` } }),
+      },
+    } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
+    const result = await executeStandaloneTool({
+      ...baseInput,
+      clients,
+      call: parseStandaloneToolCall({ toolCallId: "pl3", toolName: "exec_poll", arguments: { background_id: "job-7", tail_bytes: 8_192 } }) as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }>,
+      observedSources: new ObservedSourceTracker(),
+    });
+    expect(result.status).toBe("success");
+    const data = result.data as Record<string, unknown>;
+    expect(data.exit_code).toBe(3);
+    expect(data.stdout_total_bytes).toBe(bigStdout.byteLength);
+    expect(data.stdout_truncated_head).toBe(true);
+    expect(String(data.stdout_tail).endsWith("\nDONE\n")).toBe(true);
+    expect(data.stderr_tail).toBe("");
+    expect(result.artifacts.length).toBe(1);
+  });
+
+  test("artifact fetch failure degrades to an unavailable marker instead of failing the poll", async () => {
+    const clients = {
+      jobs: {
+        Get: () => ({
+          jobId: "job-8",
+          state: "exited",
+          exitCode: 0,
+          stdoutArtifact: { sha256: `sha256:${"f".repeat(64)}`, sizeBytes: 10, mediaType: "text/plain" },
+        }),
+      },
+      artifacts: {
+        Get: () => {
+          throw new Error("cas blob missing");
+        },
+      },
+    } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
+    const result = await executeStandaloneTool({
+      ...baseInput,
+      clients,
+      call: parseStandaloneToolCall({ toolCallId: "pl4", toolName: "exec_poll", arguments: { background_id: "job-8" } }) as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }>,
+      observedSources: new ObservedSourceTracker(),
+    });
+    expect(result.status).toBe("success");
+    expect(String((result.data as Record<string, unknown>).stdout_tail)).toContain("cas blob missing");
   });
 });

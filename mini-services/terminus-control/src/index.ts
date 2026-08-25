@@ -8993,8 +8993,14 @@ async function settleStandaloneProviderTool(
         ? CapabilityOperationProto.CAPABILITY_OPERATION_READ
         : call.toolId === "patch"
           ? CapabilityOperationProto.CAPABILITY_OPERATION_PATCH
-          : CapabilityOperationProto.CAPABILITY_OPERATION_EXEC],
-      [call.toolId === "exec" ? call.arguments.cwd : call.arguments.path],
+          : call.toolId === "exec_poll"
+            ? CapabilityOperationProto.CAPABILITY_OPERATION_JOB
+            : CapabilityOperationProto.CAPABILITY_OPERATION_EXEC],
+      [call.toolId === "exec"
+        ? call.arguments.cwd
+        : call.toolId === "read" || call.toolId === "patch" || call.toolId === "grep" || call.toolId === "glob"
+          ? call.arguments.path
+          : "."],
     );
   } catch (error: unknown) {
     const explanation = error instanceof Error ? error.message : String(error);

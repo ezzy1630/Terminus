@@ -39,12 +39,16 @@ export function resolveMaxToolCycles(raw: string | undefined | null): number {
 }
 
 /**
- * Shell-mode exec is off unless the operator explicitly enables it
- * (ADR-0039 §10). When enabled, scripts still travel as kernel-dispatched
- * data under the same sandbox profile and strictest-wins policy engine.
+ * Shell-mode exec runs under the same kernel sandbox profile and
+ * strictest-wins policy engine as argv mode (ADR-0039 §10, amended: the
+ * sandbox and policy engine — not shell syntax denial — are the enforcement
+ * layer; competitive harness parity requires pipes/redirections). Operators
+ * may still disable it explicitly with TERMINUS_SHELL_MODE=0|false.
  */
 export function resolveShellModeEnabled(raw: string | undefined | null): boolean {
-  return raw === "1" || raw === "true";
+  if (raw === undefined || raw === null || raw.trim() === "") return true;
+  const normalized = raw.trim().toLowerCase();
+  return !(normalized === "0" || normalized === "false");
 }
 
 const pathSchema = z.string().min(1).max(4_096).refine(
@@ -103,12 +107,26 @@ export const standaloneExecInputSchema = z.object({
   args: z.array(z.string().max(16_384)).max(128).default([]),
   shell: standaloneShellInputSchema.optional(),
   cwd: pathSchema.default("."),
-  timeout_ms: z.number().int().min(100).max(60_000).default(60_000),
+  timeout_ms: z.number().int().min(100).max(600_000).default(120_000),
   expected_exit_codes: z.array(z.number().int().min(0).max(255)).min(1).max(16).default([0]),
+  /**
+   * Run under the kernel job supervisor and return immediately with a
+   * background_id; await completion (and fetch output tails) via exec_poll.
+   */
+  background: z.boolean().default(false),
 }).strict().refine(
   (value) => (value.program !== undefined) !== (value.shell !== undefined),
   "provide either program+args (argv mode) or shell (shell mode), not both",
 );
+
+export const standaloneExecPollInputSchema = z.object({
+  background_id: z.string().min(1).max(256).refine(
+    (id) => !/[\0\r\n]/.test(id),
+    "background_id may not contain control delimiters",
+  ),
+  /** Bounded tail bytes fetched per stream once the job exits. */
+  tail_bytes: z.number().int().min(256).max(64 * 1_024).default(20 * 1_024),
+}).strict();
 
 export const standaloneGrepInputSchema = z.object({
   pattern: z.string().min(1).max(512).refine(
@@ -140,8 +158,11 @@ export type ParsedStandaloneToolCall =
   | { readonly providerCallId: string; readonly toolId: "read"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneReadInput }
   | { readonly providerCallId: string; readonly toolId: "patch"; readonly toolVersion: "standalone-v1"; readonly arguments: StandalonePatchInput }
   | { readonly providerCallId: string; readonly toolId: "exec"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneExecInput }
+  | { readonly providerCallId: string; readonly toolId: "exec_poll"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneExecPollInput }
   | { readonly providerCallId: string; readonly toolId: "grep"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGrepInput }
   | { readonly providerCallId: string; readonly toolId: "glob"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneGlobInput };
+
+export type StandaloneExecPollInput = z.infer<typeof standaloneExecPollInputSchema>;
 
 const resultSchema: Readonly<Record<string, unknown>> = {
   type: "object",
@@ -240,7 +261,7 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   {
     id: "exec",
     version: "standalone-v1",
-    summary: "Run one bounded command without environment injection, network, or secrets. argv mode by default; shell mode requires operator enablement.",
+    summary: "Run one bounded sandboxed command (no ambient env, no secrets). argv mode (program+args) or shell mode (dialect+script, pipes/redirections allowed). Default timeout 120s, max 600s. background:true returns a background_id immediately; await it with exec_poll.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -257,8 +278,9 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
           },
         },
         cwd: { type: "string", default: "." },
-        timeout_ms: { type: "integer", minimum: 100, maximum: 60_000, default: 60_000 },
+        timeout_ms: { type: "integer", minimum: 100, maximum: 600_000, default: 120_000 },
         expected_exit_codes: { type: "array", minItems: 1, maxItems: 16, items: { type: "integer", minimum: 0, maximum: 255 }, default: [0] },
+        background: { type: "boolean", default: false },
       },
     },
     resultSchema,
@@ -267,8 +289,30 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
     trustLevel: "builtin",
     maximumModelResultBytes: MAX_TOOL_MODEL_RESULT_BYTES,
     maximumArtifactBytes: 64 * 1_024 * 1_024,
-    defaultTimeoutMs: 60_000,
-    policyTags: ["workspace", "process", "no-shell", "standalone"],
+    defaultTimeoutMs: 600_000,
+    policyTags: ["workspace", "process", "sandboxed-shell", "standalone"],
+  },
+  {
+    id: "exec_poll",
+    version: "standalone-v1",
+    summary: "Poll a background exec started with background:true. Returns running state or, once exited, the exit code plus bounded stdout/stderr tails (full output in referenced artifacts).",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["background_id"],
+      properties: {
+        background_id: { type: "string", minLength: 1, maxLength: 256 },
+        tail_bytes: { type: "integer", minimum: 256, maximum: 64 * 1_024, default: 20 * 1_024 },
+      },
+    },
+    resultSchema,
+    sideEffectClass: "read",
+    requiredCapabilities: ["job.read"],
+    trustLevel: "builtin",
+    maximumModelResultBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+    maximumArtifactBytes: 64 * 1_024 * 1_024,
+    defaultTimeoutMs: 30_000,
+    policyTags: ["workspace", "job", "read-only", "standalone"],
   },
   {
     id: "grep",
@@ -331,6 +375,8 @@ export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStan
       return { providerCallId: call.toolCallId, toolId: "patch", toolVersion: "standalone-v1", arguments: parseArguments("patch", standalonePatchInputSchema, call.arguments) };
     case "exec":
       return { providerCallId: call.toolCallId, toolId: "exec", toolVersion: "standalone-v1", arguments: parseArguments("exec", standaloneExecInputSchema, call.arguments) };
+    case "exec_poll":
+      return { providerCallId: call.toolCallId, toolId: "exec_poll", toolVersion: "standalone-v1", arguments: parseArguments("exec_poll", standaloneExecPollInputSchema, call.arguments) };
     case "grep":
       return { providerCallId: call.toolCallId, toolId: "grep", toolVersion: "standalone-v1", arguments: parseArguments("grep", standaloneGrepInputSchema, call.arguments) };
     case "glob":
@@ -441,6 +487,8 @@ export function toolEffectMetadata(call: ParsedStandaloneToolCall): {
       return { effectType: "WRITE_LOCAL", resourceUri: `workspace://${call.arguments.path}`, reversibility: "reversible" };
     case "exec":
       return { effectType: "EXECUTE_LOCAL", resourceUri: `workspace://${call.arguments.cwd}`, reversibility: "unknown" };
+    case "exec_poll":
+      return { effectType: "READ_LOCAL", resourceUri: `job://${call.arguments.background_id}`, reversibility: "none" };
     case "grep":
       return { effectType: "READ_LOCAL", resourceUri: `workspace://${call.arguments.path}`, reversibility: "none" };
     case "glob":
@@ -780,6 +828,39 @@ export async function executeStandaloneTool(
         };
       }
       const shell = input.call.arguments.shell;
+      if (input.call.arguments.background) {
+        const start = await input.clients.jobs.Start({
+          context: nextRequestContext(input.context, "exec-background"),
+          intent: toolIntent(input.contractHash, "execute_local"),
+          command: {
+            program: shell !== undefined ? "" : assertProgram(input.call.arguments.program),
+            args: shell !== undefined ? [] : [...input.call.arguments.args],
+            cwd: { workspaceId: input.workspaceId, relativePath: input.call.arguments.cwd },
+            publicEnv: {},
+            secretCapabilityUris: [],
+            timeout: durationFromMilliseconds(input.call.arguments.timeout_ms),
+            allocatePty: false,
+            shell: shell === undefined ? undefined : { enabled: true, dialect: shell.dialect, script: shell.script },
+          },
+          sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
+          outputPolicyId: "tool-result-bounded",
+          durable: false,
+        });
+        const elapsed = performance.now() - startedAt;
+        const result = okResult({
+          background_id: start.jobId,
+          process_id: start.processId,
+          state: "running",
+          poll_hint: `call exec_poll with background_id '${start.jobId}'`,
+        }, {
+          toolCallId: input.internalToolCallId,
+          traceId: input.traceId,
+          summary: `Backgrounded ${describeProcessCommand(input.call)} as job ${start.jobId}`,
+          sideEffects: [sideEffect(input.sideEffectId, "process", describeProcessCommand(input.call), false)],
+          timing: { executionMs: elapsed, totalMs: elapsed },
+        });
+        return { ...result, policyDecisionId: input.policyDecisionId };
+      }
       const events = input.clients.process.Start({
         context: nextRequestContext(input.context, "exec"),
         intent: toolIntent(input.contractHash, "execute_local"),
@@ -821,6 +902,99 @@ export async function executeStandaloneTool(
       });
       return settleProcessOutcome(input, events, startedAt);
     }
+    case "exec_poll": {
+      return settleJobPoll(
+        { ...input, call: input.call as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }> },
+        startedAt,
+      );
+    }
+  }
+}
+
+/** Bounded tail of a byte buffer (last N bytes, UTF-8 lossy). */
+function tailOf(bytes: Uint8Array, tailBytes: number): { text: string; totalBytes: number; truncated: boolean } {
+  const totalBytes = bytes.byteLength;
+  if (totalBytes === 0) return { text: "", totalBytes, truncated: false };
+  const sliceStart = totalBytes > tailBytes ? totalBytes - tailBytes : 0;
+  const text = new TextDecoder("utf-8").decode(bytes.slice(sliceStart));
+  return {
+    text,
+    totalBytes,
+    truncated: sliceStart > 0,
+  };
+}
+
+async function settleJobPoll(
+  input: ExecuteStandaloneToolInput & { readonly call: Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }> },
+  startedAt: number,
+): Promise<ToolResult<unknown>> {
+  const state = await input.clients.jobs.Get({
+    context: nextRequestContext(input.context, "exec-poll"),
+    jobId: input.call.arguments.background_id,
+  });
+  const elapsed = performance.now() - startedAt;
+  if (state.state !== "exited") {
+    const result = okResult({
+      background_id: state.jobId || input.call.arguments.background_id,
+      state: state.state === "" ? "unknown" : state.state,
+      exit_code: null,
+    }, {
+      toolCallId: input.internalToolCallId,
+      traceId: input.traceId,
+      summary: `Job ${input.call.arguments.background_id} is ${state.state === "" ? "unknown" : state.state}`,
+      timing: { executionMs: elapsed, totalMs: elapsed },
+    });
+    return { ...result, policyDecisionId: input.policyDecisionId };
+  }
+  const tailBytes = input.call.arguments.tail_bytes;
+  const [stdoutTail, stderrTail] = await Promise.all([
+    fetchArtifactTail(input, state.stdoutArtifact, tailBytes),
+    fetchArtifactTail(input, state.stderrArtifact, tailBytes),
+  ]);
+  const stdoutArtifact = kernelArtifactDescriptor(state.stdoutArtifact);
+  const stderrArtifact = kernelArtifactDescriptor(state.stderrArtifact);
+  const result = okResult({
+    background_id: state.jobId || input.call.arguments.background_id,
+    state: "exited",
+    exit_code: state.exitCode,
+    signal: null,
+    stdout_tail: stdoutTail.text,
+    stdout_truncated_head: stdoutTail.truncated,
+    stdout_total_bytes: stdoutTail.totalBytes,
+    stderr_tail: stderrTail.text,
+    stderr_truncated_head: stderrTail.truncated,
+    stderr_total_bytes: stderrTail.totalBytes,
+  }, {
+    toolCallId: input.internalToolCallId,
+    traceId: input.traceId,
+    summary: `Job ${input.call.arguments.background_id} exited ${state.exitCode}`,
+    artifacts: [stdoutArtifact, stderrArtifact].filter((artifact): artifact is ArtifactDescriptor => artifact !== null),
+    sideEffects: [],
+    timing: { executionMs: elapsed, totalMs: elapsed },
+    resourceUsage: { cpuMs: 0, peakMemoryBytes: 0, bytesRead: stdoutTail.totalBytes + stderrTail.totalBytes, bytesWritten: 0, networkBytes: 0 },
+  });
+  return { ...result, policyDecisionId: input.policyDecisionId };
+}
+
+async function fetchArtifactTail(
+  input: ExecuteStandaloneToolInput,
+  artifactRef: KernelArtifactRef | undefined,
+  tailBytes: number,
+): Promise<{ text: string; totalBytes: number; truncated: boolean }> {
+  if (artifactRef === undefined || artifactRef.sha256.length === 0) {
+    return { text: "", totalBytes: 0, truncated: false };
+  }
+  try {
+    const response = await input.clients.artifacts.Get({
+      context: nextRequestContext(input.context, "exec-poll-artifact"),
+      sha256: artifactRef.sha256,
+    });
+    return tailOf(response.content, tailBytes);
+  } catch (error: unknown) {
+    // The job output exists but cannot be fetched; surface the reason rather
+    // than failing the poll — the exit code is still authoritative.
+    const message = error instanceof Error ? error.message : String(error);
+    return { text: `<artifact unavailable: ${message.slice(0, 256)}>`, totalBytes: artifactRef.sizeBytes, truncated: true };
   }
 }
 
