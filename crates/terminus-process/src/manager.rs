@@ -826,16 +826,16 @@ fn inspect_process(pid: u32) -> Result<Option<ProcessSnapshot>, ProcessError> {
         .filter(|value| !value.is_empty())
         .map_or_else(
             || match std::fs::read_link(format!("/proc/{pid}/exe")) {
-                Ok(path) => Ok(Some(path.display().to_string())),
+                Ok(path) => Ok(path.display().to_string()),
                 // A live process can temporarily expose an empty cmdline and
                 // no exe link while its image is being replaced. The stat
                 // command name is still tied to this PID/start-time fence.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    Ok(Some(command_name.to_string()))
+                    Ok(command_name.to_string())
                 }
                 Err(error) => Err(ProcessError::Io(error)),
             },
-            |value| Ok(Some(String::from_utf8_lossy(value).into_owned())),
+            |value| Ok(String::from_utf8_lossy(value).into_owned()),
         )?;
     Ok(Some(ProcessSnapshot {
         start_time: start_time.to_string(),
