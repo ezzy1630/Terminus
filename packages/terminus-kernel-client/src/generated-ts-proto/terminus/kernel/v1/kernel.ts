@@ -239,6 +239,7 @@ export interface PatchEdit {
   moveFile?: MoveFile | undefined;
   deleteFile?: DeleteFile | undefined;
   unifiedDiff?: UnifiedDiff | undefined;
+  replaceHashline?: ReplaceHashline | undefined;
 }
 
 export interface ReplaceSymbol {
@@ -254,6 +255,18 @@ export interface ReplaceRange {
   path: WorkspacePath | undefined;
   expectedSha256: string;
   range: LineRange | undefined;
+  replacementUtf8: Uint8Array;
+}
+
+export interface ReplaceHashline {
+  path: WorkspacePath | undefined;
+  expectedSha256: string;
+  /** short or full SHA-256 per line */
+  lineHashes: string[];
+  /** 1-based inclusive */
+  startLine: number;
+  /** 1-based inclusive */
+  endLine: number;
   replacementUtf8: Uint8Array;
 }
 
@@ -2362,6 +2375,7 @@ function createBasePatchEdit(): PatchEdit {
     moveFile: undefined,
     deleteFile: undefined,
     unifiedDiff: undefined,
+    replaceHashline: undefined,
   };
 }
 
@@ -2393,6 +2407,9 @@ export const PatchEdit: MessageFns<PatchEdit> = {
     }
     if (message.unifiedDiff !== undefined) {
       UnifiedDiff.encode(message.unifiedDiff, writer.uint32(146).fork()).join();
+    }
+    if (message.replaceHashline !== undefined) {
+      ReplaceHashline.encode(message.replaceHashline, writer.uint32(154).fork()).join();
     }
     return writer;
   },
@@ -2476,6 +2493,14 @@ export const PatchEdit: MessageFns<PatchEdit> = {
           message.unifiedDiff = UnifiedDiff.decode(reader, reader.uint32());
           continue;
         }
+        case 19: {
+          if (tag !== 154) {
+            break;
+          }
+
+          message.replaceHashline = ReplaceHashline.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2516,6 +2541,9 @@ export const PatchEdit: MessageFns<PatchEdit> = {
       : undefined;
     message.unifiedDiff = (object.unifiedDiff !== undefined && object.unifiedDiff !== null)
       ? UnifiedDiff.fromPartial(object.unifiedDiff)
+      : undefined;
+    message.replaceHashline = (object.replaceHashline !== undefined && object.replaceHashline !== null)
+      ? ReplaceHashline.fromPartial(object.replaceHashline)
       : undefined;
     return message;
   },
@@ -2704,6 +2732,121 @@ export const ReplaceRange: MessageFns<ReplaceRange> = {
     message.range = (object.range !== undefined && object.range !== null)
       ? LineRange.fromPartial(object.range)
       : undefined;
+    message.replacementUtf8 = object.replacementUtf8 ?? new Uint8Array(0);
+    return message;
+  },
+};
+
+function createBaseReplaceHashline(): ReplaceHashline {
+  return {
+    path: undefined,
+    expectedSha256: "",
+    lineHashes: [],
+    startLine: 0,
+    endLine: 0,
+    replacementUtf8: new Uint8Array(0),
+  };
+}
+
+export const ReplaceHashline: MessageFns<ReplaceHashline> = {
+  encode(message: ReplaceHashline, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.path !== undefined) {
+      WorkspacePath.encode(message.path, writer.uint32(10).fork()).join();
+    }
+    if (message.expectedSha256 !== "") {
+      writer.uint32(18).string(message.expectedSha256);
+    }
+    for (const v of message.lineHashes) {
+      writer.uint32(26).string(v!);
+    }
+    if (message.startLine !== 0) {
+      writer.uint32(32).uint32(message.startLine);
+    }
+    if (message.endLine !== 0) {
+      writer.uint32(40).uint32(message.endLine);
+    }
+    if (message.replacementUtf8.length !== 0) {
+      writer.uint32(50).bytes(message.replacementUtf8);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ReplaceHashline {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseReplaceHashline();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.path = WorkspacePath.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.expectedSha256 = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.lineHashes.push(reader.string());
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.startLine = reader.uint32();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.endLine = reader.uint32();
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.replacementUtf8 = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ReplaceHashline>, I>>(base?: I): ReplaceHashline {
+    return ReplaceHashline.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ReplaceHashline>, I>>(object: I): ReplaceHashline {
+    const message = createBaseReplaceHashline();
+    message.path = (object.path !== undefined && object.path !== null)
+      ? WorkspacePath.fromPartial(object.path)
+      : undefined;
+    message.expectedSha256 = object.expectedSha256 ?? "";
+    message.lineHashes = object.lineHashes?.map((e) => e) || [];
+    message.startLine = object.startLine ?? 0;
+    message.endLine = object.endLine ?? 0;
     message.replacementUtf8 = object.replacementUtf8 ?? new Uint8Array(0);
     return message;
   },

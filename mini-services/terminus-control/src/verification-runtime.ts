@@ -552,15 +552,28 @@ export function createPrismaCompletionAdmission(
       const row = await db.candidateBranch.findUnique({ where: { id: branchId } });
       return row === null ? null : candidateBranchFromRow(row);
     },
+    async claimCandidateBranch(branchId, expectedEpoch) {
+      return db.$transaction(async (tx) => {
+        const claimed = await tx.candidateBranch.updateMany({
+          where: { id: branchId, epoch: expectedEpoch, status: "OPEN" },
+          data: { epoch: { increment: 1 } },
+        });
+        if (claimed.count !== 1) return null;
+        const row = await tx.candidateBranch.findUnique({ where: { id: branchId } });
+        return row === null ? null : candidateBranchFromRow(row);
+      });
+    },
     async updateCandidateBranch(branch) {
-      await db.candidateBranch.update({
-        where: { id: branch.branchId },
+      const updated = await db.candidateBranch.updateMany({
+        where: { id: branch.branchId, epoch: branch.epoch - 1 },
         data: {
+          epoch: branch.epoch,
           headRevision: branch.headRevision,
           proofJson: branch.proof === null ? null : JSON.stringify(branch.proof),
           status: branch.status,
         },
       });
+      if (updated.count !== 1) throw new Error(`candidate branch ${branch.branchId} changed before durable admission update`);
       return branch;
     },
     async getEffectRecord() {

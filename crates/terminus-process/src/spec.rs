@@ -140,6 +140,20 @@ pub struct SpawnOutcome {
     pub process_id: String,
     pub job_id: String,
     pub resolved_executable: String,
+    /// OS process id captured at spawn time for durable-job fencing.
+    pub pid: Option<u32>,
+    /// Human-readable RFC3339 launch time.
+    pub started_at: String,
+    /// Platform process-start identity. This is intentionally separate from
+    /// `started_at`: on Linux it is the monotonic `/proc` start-time tick
+    /// count, while supported BSD-family platforms use the `ps` start value.
+    pub process_start_time: Option<String>,
+    /// Launch-command identity used with `process_start_time` for PID fencing.
+    /// Launcher arguments are retained so an authorized shell/sandbox `exec`
+    /// can be checked against the image named by the original command.
+    pub process_executable: Option<String>,
+    /// Host working directory at spawn time.
+    pub working_directory: Option<String>,
 }
 
 impl SpawnOutcome {
@@ -148,6 +162,11 @@ impl SpawnOutcome {
             process_id: process_id.into(),
             job_id: job_id.into(),
             resolved_executable: String::new(),
+            pid: None,
+            started_at: String::new(),
+            process_start_time: None,
+            process_executable: None,
+            working_directory: None,
         }
     }
 }

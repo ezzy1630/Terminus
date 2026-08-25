@@ -22,5 +22,5 @@ mod state;
 
 pub use error::JobError;
 pub use manager::JobManager;
-pub use record::{JobRecord, JobResourceLimits};
+pub use record::{JobOutputChunk, JobRecord, JobResourceLimits};
 pub use state::JobState;

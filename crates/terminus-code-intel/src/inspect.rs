@@ -312,11 +312,19 @@ impl CodeIntelService {
         let current_set = current_paths.iter().cloned().collect::<BTreeSet<_>>();
         for path in current_paths {
             let bytes = source.read_file(&path)?;
-            let content = std::str::from_utf8(&bytes).map_err(|_| {
-                CodeIntelError::LanguageNotIndexed(format!(
-                    "non-UTF8 source is not indexable: {path}"
-                ))
-            })?;
+            let content = match std::str::from_utf8(&bytes) {
+                Ok(content) => content,
+                Err(_) => {
+                    // A workspace can contain SQLite databases, images, and
+                    // other binary files. They are valid workspace inputs but
+                    // not semantic source. Remove any stale index entry and
+                    // continue indexing the remaining source files.
+                    if self.index.file_hash(&path)?.is_some() {
+                        self.index.remove_file(&path)?;
+                    }
+                    continue;
+                }
+            };
             let hash = format!("{:x}", Sha256::digest(&bytes));
             if self.index.file_hash(&path)?.as_deref() != Some(hash.as_str()) {
                 self.index.index_file(&path, content)?;
@@ -481,6 +489,20 @@ mod tests {
 
         let source = FileSystemWorkspaceSource::for_kernel_data_dir(workspace.path());
         assert_eq!(source.list_files().unwrap(), vec!["main.rs"]);
+    }
+
+    #[test]
+    fn binary_workspace_files_do_not_block_source_indexing() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("database.sqlite"), [0, 159, 146, 255]).unwrap();
+        fs::write(workspace.path().join("main.rs"), "fn indexed() {}\n").unwrap();
+
+        let index = Arc::new(InMemorySymbolIndex::new());
+        let source = Arc::new(FileSystemWorkspaceSource::new(workspace.path()));
+        let service = CodeIntelService::with_source(index, source);
+
+        let result = service.inspect_symbol("indexed").unwrap();
+        assert!(result.symbol.is_some());
     }
 
     #[test]

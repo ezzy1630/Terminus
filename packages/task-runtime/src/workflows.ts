@@ -85,6 +85,9 @@ export class WorkflowEngine {
         taskId,
         version: 1,
         nodeCount: nodes.length,
+        nodes,
+        edges,
+        staticAnalysis: report,
       },
     );
 

@@ -694,6 +694,12 @@ export declare type PatchEdit = Message<"terminus.kernel.v1.PatchEdit"> & {
      */
     value: UnifiedDiff;
     case: "unifiedDiff";
+  } | {
+    /**
+     * @generated from field: terminus.kernel.v1.ReplaceHashline replace_hashline = 19;
+     */
+    value: ReplaceHashline;
+    case: "replaceHashline";
   } | { case: undefined; value?: undefined };
 };
 
@@ -771,6 +777,53 @@ export declare type ReplaceRange = Message<"terminus.kernel.v1.ReplaceRange"> & 
  * Use `create(ReplaceRangeSchema)` to create a new message.
  */
 export declare const ReplaceRangeSchema: GenMessage<ReplaceRange>;
+
+/**
+ * @generated from message terminus.kernel.v1.ReplaceHashline
+ */
+export declare type ReplaceHashline = Message<"terminus.kernel.v1.ReplaceHashline"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.WorkspacePath path = 1;
+   */
+  path?: WorkspacePath | undefined;
+
+  /**
+   * @generated from field: string expected_sha256 = 2;
+   */
+  expectedSha256: string;
+
+  /**
+   * short or full SHA-256 per line
+   *
+   * @generated from field: repeated string line_hashes = 3;
+   */
+  lineHashes: string[];
+
+  /**
+   * 1-based inclusive
+   *
+   * @generated from field: uint32 start_line = 4;
+   */
+  startLine: number;
+
+  /**
+   * 1-based inclusive
+   *
+   * @generated from field: uint32 end_line = 5;
+   */
+  endLine: number;
+
+  /**
+   * @generated from field: bytes replacement_utf8 = 6;
+   */
+  replacementUtf8: Uint8Array;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ReplaceHashline.
+ * Use `create(ReplaceHashlineSchema)` to create a new message.
+ */
+export declare const ReplaceHashlineSchema: GenMessage<ReplaceHashline>;
 
 /**
  * @generated from message terminus.kernel.v1.ReplaceExactText

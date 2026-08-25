@@ -2,25 +2,41 @@ suite:
   id: terminal-bench
   version: 1
   description: |
-    Terminal-Bench 2.x cohort (SPEC §41.3). Tasks that exercise shell,
-    process, and job management — long-running builds, test watchers,
-    interactive CLIs. Used to test job lifecycle, cancellation, and
-    PTY input handling.
-  source: https://github.com/laude-institute/terminal-bench
+    Terminal-Bench 2.0, executed through the pinned Harbor registry snapshot.
+    The canonical benchmark contains 89 containerized terminal tasks.
+  source: https://github.com/laude-institute/terminal-bench-2
   license: MIT
-  task_count: 80
-  pinned_image_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  task_count: 89
   default_timeout_seconds: 600
   default_budget:
     model_micros: 2000000
     compute_seconds: 300
     wall_clock_seconds: 600
     human_approvals: 0
-  grader_version: terminal-bench-1.0
+  grader_version: terminal-bench-2.0
   metrics:
     primary: task_success
     secondary: [commands_issued, job_cancellations, pty_interactions, cost_usd]
   cohorts:
-    - shell-navigation
-    - long-builds
-    - interactive-cli
+    - terminal-bench-2.0
+  notes: |
+    This manifest pins the Harbor registry and Terminal-Bench task repository.
+    Terminal-Bench resolves container images per task, so no suite-wide image
+    digest is declared. A live run must return the resolved image digest for
+    the task before its result can be treated as benchmark evidence.
+  adapter:
+    kind: harbor
+    dataset: terminal-bench
+    dataset_version: "2.0"
+    task_count: 89
+    image_digest_policy: per_task_required
+    harness:
+      repository: https://github.com/harbor-framework/harbor.git
+      commit: 72f7dd0134162c5b7229f6a31286e05a49c0f8a4
+    registry:
+      repository: https://github.com/harbor-framework/harbor.git
+      commit: 72f7dd0134162c5b7229f6a31286e05a49c0f8a4
+      path: registry.json
+    task_source:
+      repository: https://github.com/laude-institute/terminal-bench-2.git
+      commit: 69671fbaac6d67a7ef0dfec016cc38a64ef7a77c

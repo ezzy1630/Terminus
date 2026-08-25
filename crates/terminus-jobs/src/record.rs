@@ -28,13 +28,39 @@ pub struct JobRecord {
     pub secret_capability_refs: Vec<String>,
     pub sandbox_id: String,
     pub process_identity: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub process_start_time: Option<String>,
+    #[serde(default)]
+    pub process_executable: Option<String>,
+    #[serde(default)]
+    pub lease_token: String,
     pub resource_limits: JobResourceLimits,
     pub output_artifact: Option<String>,
+    #[serde(default)]
+    pub stdout_artifact: Option<String>,
+    #[serde(default)]
+    pub stderr_artifact: Option<String>,
     pub output_cursor: u64,
+    #[serde(default)]
+    pub stdout_cursor: u64,
+    #[serde(default)]
+    pub stderr_cursor: u64,
+    /// Earliest cursor that remains resumable after bounded-output compaction.
+    /// A consumer below this boundary receives an explicit truncation error.
+    #[serde(default)]
+    pub stdout_truncated_before: u64,
+    #[serde(default)]
+    pub stderr_truncated_before: u64,
+    #[serde(default)]
+    pub termination_receipt: Option<String>,
     pub cleanup_policy: String,
     pub state: JobState,
     pub started_at: Option<String>,
     pub settled_at: Option<String>,
+    #[serde(default)]
+    pub reconciliation_history: Vec<String>,
 }
 
 impl JobRecord {
@@ -55,13 +81,36 @@ impl JobRecord {
             secret_capability_refs: Vec::new(),
             sandbox_id: String::new(),
             process_identity: None,
+            pid: None,
+            process_start_time: None,
+            process_executable: None,
+            lease_token: format!("lease-{}", terminus_kernel_protocol::new_id()),
             resource_limits: JobResourceLimits::default(),
             output_artifact: None,
+            stdout_artifact: None,
+            stderr_artifact: None,
             output_cursor: 0,
+            stdout_cursor: 0,
+            stderr_cursor: 0,
+            stdout_truncated_before: 0,
+            stderr_truncated_before: 0,
+            termination_receipt: None,
             cleanup_policy: "kill_tree".to_string(),
             state: JobState::Created,
             started_at: None,
             settled_at: None,
+            reconciliation_history: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobOutputChunk {
+    pub job_id: String,
+    pub stream: String,
+    pub start_cursor: u64,
+    pub end_cursor: u64,
+    pub bytes: Vec<u8>,
+    #[serde(default)]
+    pub redacted: bool,
 }

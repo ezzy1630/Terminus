@@ -195,6 +195,9 @@ class HarnessResult:
     context_manifests: list[dict[str, Any]]
     grader_outcomes: list[GraderOutcome]
     notes: str = ""
+    # External harnesses may replace the task-package fallback with a digest
+    # resolved from the actual image/environment they executed.
+    environment_digest: str | None = None
 
 
 class Harness(Protocol):
@@ -327,6 +330,8 @@ class HarnessRunner:
 
         # Populate the record with the harness result.
         record.outcome = outcome
+        if result.environment_digest is not None:
+            record.environment_digest = result.environment_digest
         record.end = utc_now()
         record.cost = result.cost
         record.artifacts = list(result.artifacts)

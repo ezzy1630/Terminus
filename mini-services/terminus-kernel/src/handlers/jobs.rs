@@ -6,12 +6,13 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use terminus_jobs::{JobRecord, JobState};
+use terminus_authz::TokenClaims;
+use terminus_jobs::{JobError, JobRecord, JobState};
 use terminus_kernel_protocol::CommandSpec;
 
 use crate::api::Envelope;
@@ -84,8 +85,43 @@ pub async fn start(
         .map_err(|e| ApiError::from_kernel(e, &trace_id.0))?;
     // Drain the bounded event stream so the child is not left backpressured;
     // reconnecting consumers read through the durable job record instead.
+    let manager = state.kernel.jobs.manager().clone();
+    let event_job_id = job_id.clone();
+    let lease_token = manager
+        .get(&job_id)
+        .await
+        .ok_or_else(|| ApiError::internal("job disappeared after start", &trace_id.0))?
+        .lease_token;
     state
-        .spawn_background(async move { while receiver.recv().await.is_some() {} })
+        .spawn_background(async move {
+            'events: while let Some(event) = receiver.recv().await {
+                loop {
+                    match manager
+                        .record_event_with_lease(&event_job_id, &lease_token, &event)
+                        .await
+                    {
+                        Ok(()) => break,
+                        Err(error) => {
+                            if matches!(error, JobError::Database(_)) {
+                                tracing::error!(
+                                    job_id = %event_job_id,
+                                    %error,
+                                    "durable job event persistence failed; retrying before draining the next event"
+                                );
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            } else {
+                                tracing::error!(
+                                    job_id = %event_job_id,
+                                    %error,
+                                    "durable job event could not be persisted; stopping the observer"
+                                );
+                                break 'events;
+                            }
+                        }
+                    }
+                }
+            }
+        })
         .await;
     let state_now = state
         .kernel
@@ -93,7 +129,7 @@ pub async fn start(
         .manager()
         .state(&job_id)
         .await
-        .unwrap_or(JobState::Running);
+        .ok_or_else(|| ApiError::internal("job disappeared after start", &trace_id.0))?;
     Ok(Json(StartJobResponse {
         job_id,
         state: state_now.as_str().to_string(),
@@ -107,9 +143,33 @@ pub struct JobStateResponse {
     pub record: Option<JobRecord>,
 }
 
+fn authorize_job_owner(
+    record: &JobRecord,
+    claims: &TokenClaims,
+    request_task_id: Option<&str>,
+    trace_id: &str,
+) -> Result<(), ApiError> {
+    if claims.binder.task_id != "*" && claims.binder.task_id != record.owner_task_id {
+        return Err(ApiError::permission_denied(
+            "job capability is bound to a different task",
+            trace_id,
+        ));
+    }
+    if let Some(task_id) = request_task_id.filter(|value| !value.is_empty()) {
+        if task_id != record.owner_task_id {
+            return Err(ApiError::permission_denied(
+                "job request task does not own the job",
+                trace_id,
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(claims): Extension<TokenClaims>,
 ) -> Result<Json<JobStateResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     let manager = state.kernel.jobs.manager().clone();
@@ -117,6 +177,7 @@ pub async fn get(
         .get(&id)
         .await
         .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
+    authorize_job_owner(&record, &claims, None, &trace_id.0)?;
     Ok(Json(JobStateResponse {
         job_id: id,
         state: record.state.as_str().to_string(),
@@ -131,22 +192,71 @@ pub async fn get(
 pub async fn stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<JobStreamQuery>,
+    Extension(claims): Extension<TokenClaims>,
 ) -> Result<axum::response::Response, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
     let manager = state.kernel.jobs.manager().clone();
     // Verify the job exists.
-    if manager.get(&id).await.is_none() {
-        return Err(ApiError::not_found(
-            format!("job {id} not found"),
+    let record = manager
+        .get(&id)
+        .await
+        .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
+    authorize_job_owner(&record, &claims, None, &trace_id.0)?;
+    let stream_name = if query.stream.is_empty() {
+        "stdout".to_string()
+    } else {
+        query.stream.clone()
+    };
+    if !matches!(stream_name.as_str(), "stdout" | "stderr") {
+        return Err(ApiError::internal(
+            "job stream must be stdout or stderr",
             &trace_id.0,
         ));
     }
 
     let stream = async_stream::stream! {
         let mut ticks = 0u32;
+        let mut cursor = query.cursor;
         loop {
             ticks += 1;
             let record = manager.get(&id).await;
+            match manager.output_since(&id, &stream_name, cursor).await {
+                Ok(chunks) => {
+                    for chunk in chunks {
+                        cursor = chunk.end_cursor;
+                        let payload = serde_json::json!({
+                            "job_id": id,
+                            "stream": chunk.stream,
+                            "start_cursor": chunk.start_cursor,
+                            "end_cursor": chunk.end_cursor,
+                            "bytes": chunk.bytes,
+                            "redacted": chunk.redacted,
+                        });
+                        yield Ok::<Event, Infallible>(Event::default().event("job_output").data(payload.to_string()));
+                    }
+                }
+                Err(JobError::OutputTruncated { available_from, .. }) => {
+                    let payload = serde_json::json!({
+                        "job_id": id,
+                        "stream": stream_name,
+                        "requested_cursor": cursor,
+                        "available_from": available_from,
+                        "continuation_required": true,
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().event("output_truncated").data(payload.to_string()));
+                    break;
+                }
+                Err(error) => {
+                    let payload = serde_json::json!({
+                        "job_id": id,
+                        "stream": stream_name,
+                        "error": error.to_string(),
+                    });
+                    yield Ok::<Event, Infallible>(Event::default().event("job_error").data(payload.to_string()));
+                    break;
+                }
+            }
             let payload = match &record {
                 Some(r) => serde_json::json!({
                     "job_id": id,
@@ -154,11 +264,14 @@ pub async fn stream(
                     "tick": ticks,
                     "started_at": r.started_at,
                     "settled_at": r.settled_at,
+                    "stdout_cursor": r.stdout_cursor,
+                    "stderr_cursor": r.stderr_cursor,
+                    "termination_receipt": r.termination_receipt,
                 }),
                 None => serde_json::json!({"job_id": id, "state": "unknown", "tick": ticks}),
             };
             yield Ok::<Event, Infallible>(Event::default().event("job_state").data(payload.to_string()));
-            if matches!(record.map(|r| r.state), Some(JobState::Exited) | Some(JobState::Lost)) {
+            if matches!(record.map(|r| r.state), Some(JobState::Exited | JobState::Lost)) {
                 yield Ok(Event::default().event("terminal").data("{\"final\":true}"));
                 break;
             }
@@ -175,17 +288,28 @@ pub async fn stream(
         .into_response())
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct JobStreamQuery {
+    #[serde(default)]
+    pub cursor: u64,
+    #[serde(default)]
+    pub stream: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct JobInputRequest {
     #[serde(flatten)]
     pub envelope: Envelope,
     #[serde(default)]
     pub input: String,
+    #[serde(default)]
+    pub lease_token: String,
 }
 
 pub async fn input(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(claims): Extension<TokenClaims>,
     body: axum::body::Bytes,
 ) -> Result<Json<JobStateResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
@@ -196,11 +320,25 @@ pub async fn input(
         .get(&id)
         .await
         .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
-    let _ = req.input; // The kernel does not yet pipe stdin to running jobs.
+    authorize_job_owner(
+        &record,
+        &claims,
+        Some(&req.envelope.request_context.task_id),
+        &trace_id.0,
+    )?;
+    let state_now = if req.lease_token.is_empty() {
+        manager.input(&id, req.input.as_bytes()).await
+    } else {
+        manager
+            .input_with_lease(&id, &req.lease_token, req.input.as_bytes())
+            .await
+    }
+    .map_err(|error| ApiError::internal(format!("job input: {error}"), &trace_id.0))?;
+    let record = manager.get(&id).await;
     Ok(Json(JobStateResponse {
         job_id: id,
-        state: record.state.as_str().to_string(),
-        record: Some(record),
+        state: state_now.as_str().to_string(),
+        record,
     }))
 }
 
@@ -210,11 +348,14 @@ pub struct JobSignalRequest {
     pub envelope: Envelope,
     #[serde(default)]
     pub signal: String,
+    #[serde(default)]
+    pub lease_token: String,
 }
 
 pub async fn signal(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(claims): Extension<TokenClaims>,
     body: axum::body::Bytes,
 ) -> Result<Json<JobStateResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
@@ -225,13 +366,25 @@ pub async fn signal(
         .get(&id)
         .await
         .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
-    // The kernel does not yet route arbitrary signals; we record the request
-    // and return the current state.
-    let _ = req.signal;
+    authorize_job_owner(
+        &record,
+        &claims,
+        Some(&req.envelope.request_context.task_id),
+        &trace_id.0,
+    )?;
+    let state_now = if req.lease_token.is_empty() {
+        manager.signal(&id, &req.signal).await
+    } else {
+        manager
+            .signal_with_lease(&id, &req.lease_token, &req.signal)
+            .await
+    }
+    .map_err(|error| ApiError::internal(format!("job signal: {error}"), &trace_id.0))?;
+    let record = manager.get(&id).await;
     Ok(Json(JobStateResponse {
         job_id: id,
-        state: record.state.as_str().to_string(),
-        record: Some(record),
+        state: state_now.as_str().to_string(),
+        record,
     }))
 }
 
@@ -241,11 +394,14 @@ pub struct JobStopRequest {
     pub envelope: Envelope,
     #[serde(default)]
     pub reason: String,
+    #[serde(default)]
+    pub lease_token: String,
 }
 
 pub async fn stop(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Extension(claims): Extension<TokenClaims>,
     body: axum::body::Bytes,
 ) -> Result<Json<JobStateResponse>, ApiError> {
     let trace_id = TraceId::new(uuid::Uuid::now_v7().to_string());
@@ -257,10 +413,22 @@ pub async fn stop(
         &req.reason
     };
     let manager = state.kernel.jobs.manager().clone();
-    let final_state = manager
-        .stop(&id, reason)
+    let record = manager
+        .get(&id)
         .await
-        .map_err(|e| ApiError::internal(format!("job stop: {e}"), &trace_id.0))?;
+        .ok_or_else(|| ApiError::not_found(format!("job {id} not found"), &trace_id.0))?;
+    authorize_job_owner(
+        &record,
+        &claims,
+        Some(&req.envelope.request_context.task_id),
+        &trace_id.0,
+    )?;
+    let final_state = if req.lease_token.is_empty() {
+        manager.stop(&id, reason).await
+    } else {
+        manager.stop_with_lease(&id, &req.lease_token, reason).await
+    }
+    .map_err(|e| ApiError::internal(format!("job stop: {e}"), &trace_id.0))?;
     let record = manager.get(&id).await;
     Ok(Json(JobStateResponse {
         job_id: id,

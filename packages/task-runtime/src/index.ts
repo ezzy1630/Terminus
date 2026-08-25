@@ -128,6 +128,7 @@ export class TaskService {
         taskId: saved.id,
         previousVersion,
         newVersion: newContract.version,
+        contract: newContract,
         changeSummary: `objective: ${newContract.objective}`,
       },
       {
@@ -357,6 +358,7 @@ export type { Task, TaskContract, AcceptanceCriterion, AllowedScope, ScopeLedger
 
 export * from "./types.js";
 export * from "./repository.js";
+export * from "./sqlite-repository.js";
 export * from "./outbox.js";
 export * from "./leases.js";
 export * from "./workflows.js";
@@ -370,4 +372,3 @@ export * from "./authorizations.js";
 export * from "./handles.js";
 export * from "./sequence-policy.js";
 export * from "./admission.js";
-

@@ -14,6 +14,8 @@ import type {
   SelectionFeatures,
 } from "@terminus/context-ir";
 import { computeContentHash } from "@terminus/context-ir";
+import type { ModelTokenizer } from "./tokenizer.js";
+import { resolveTokenizer } from "./tokenizer.js";
 
 export interface CompactionInvariant {
   readonly id: string;
@@ -35,6 +37,7 @@ export interface SemanticCompactionInput {
   readonly targetTokens: number;
   readonly invariants?: readonly CompactionInvariant[] | undefined;
   readonly observedAt: Rfc3339Timestamp;
+  readonly tokenizer?: ModelTokenizer | undefined;
 }
 
 export interface SemanticCompactionResult {
@@ -64,8 +67,12 @@ export function compactContext(
     .filter((invariant) => invariant.evidenceFragmentIds.every((id) => inputFragmentIds.has(id)))
     .map((invariant) => invariant.id);
   const optionalFragments = input.fragments.filter((fragment) => !protectedFragments.includes(fragment));
+  const tokenizer = input.tokenizer ?? resolveTokenizer("unknown", input.modelKey);
   const optionalTokens = optionalFragments.reduce(
-    (sum, fragment) => sum + (fragment.estimatedTokens[input.modelKey] ?? 0),
+    (sum, fragment) => sum + (
+      fragment.estimatedTokens[input.modelKey]
+      ?? tokenizer.estimateFragmentTokens(fragment).totalTokens
+    ),
     0,
   );
   if (optionalFragments.length < 2 || optionalTokens <= input.targetTokens) {
@@ -141,7 +148,7 @@ export function compactContext(
         `${rule.kind}:${rule.selector}`,
         rule,
       ]))).values()],
-      estimatedTokens: { [input.modelKey]: Math.max(1, estimateTokens(summary)) },
+      estimatedTokens: { [input.modelKey]: tokenizer.estimateTextTokens(summary) },
       selectionFeatures: mergeFeatures(group),
     };
     compacted.push(compactedFragment);
@@ -191,10 +198,6 @@ function uniqueArtifactRefs(refs: readonly ArtifactRef[]): readonly ArtifactRef[
   const byHash = new Map<string, ArtifactRef>();
   for (const ref of refs) byHash.set(ref.hash, ref);
   return [...byHash.values()];
-}
-
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 function mergeFeatures(fragments: readonly ContextFragment[]): SelectionFeatures {

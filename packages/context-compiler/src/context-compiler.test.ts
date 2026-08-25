@@ -292,6 +292,15 @@ describe("Context Compiler", () => {
     expect(compiled.manifest.fragments.some((fragment) => fragment.required)).toBe(true);
     expect(compiled.rendered.request.blocks.length).toBeGreaterThan(0);
     expect(compiled.rendered.request.cachePlan.stablePrefixHash).toMatch(/^sha256:/);
+    expect(compiled.manifest.compilerVersion).toContain("token-estimator=terminus.token-estimator.v1");
+    expect(compiled.manifest.decisionRecord?.tokenEstimator).toMatchObject({
+      status: "degraded",
+      source: "explicit_fallback",
+    });
+    expect(compiled.manifest.decisionRecord?.cacheEpochDebug).toMatchObject({
+      current: { stablePrefix: { hash: compiled.manifest.cachePlan.stablePrefixHash } },
+    });
+    expect(compiled.warnings.some((warning) => warning.startsWith("token calibration degraded:"))).toBe(true);
   });
 
   test("replays the exact selected manifest and records ablation drift", async () => {

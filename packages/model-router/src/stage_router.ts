@@ -87,6 +87,26 @@ export class StageRouter {
     const candidateScoresRecord: Record<string, number> = {};
 
     for (const profile of candidates) {
+      const expectedCostMicros = this.expectedCostMicros(profile);
+      const expectedLatencyMs = this.expectedLatencyMs(profile);
+
+      if (
+        input.budgetMaxMicros !== undefined &&
+        input.budgetMaxMicros !== null &&
+        expectedCostMicros > input.budgetMaxMicros
+      ) {
+        candidateScoresRecord[profile.id] = -999.0;
+        continue;
+      }
+      if (
+        input.maxLatencyMs !== undefined &&
+        input.maxLatencyMs !== null &&
+        expectedLatencyMs > input.maxLatencyMs
+      ) {
+        candidateScoresRecord[profile.id] = -999.0;
+        continue;
+      }
+
       // Check circuit breaker and rate limit
       const cbOpen = this.controls.circuitBreaker?.isOpen(profile.adapterRef) ?? false;
       const rateAvailable = this.controls.rateLimiter?.canAcquire(profile.adapterRef, 1) ?? true;
@@ -102,7 +122,12 @@ export class StageRouter {
       scoredCandidates.push({ profile, score });
     }
 
-    scoredCandidates.sort((a, b) => b.score - a.score);
+    scoredCandidates.sort((a, b) => {
+      const scoreOrder = b.score - a.score;
+      if (scoreOrder !== 0) return scoreOrder;
+      if (a.profile.id === b.profile.id) return 0;
+      return a.profile.id < b.profile.id ? -1 : 1;
+    });
 
     const chosen = scoredCandidates.length > 0 && scoredCandidates[0]!.score > -900.0
       ? scoredCandidates[0]!.profile
@@ -114,13 +139,11 @@ export class StageRouter {
       .map((c) => c.profile.id);
 
     const expectedCostMicros = chosen
-      ? (chosen.economics.inputMicrosPerMillion + chosen.economics.outputMicrosPerMillion) / 100n
+      ? this.expectedCostMicros(chosen)
       : 0n;
 
     const expectedLatencyMs = chosen
-      ? (this.posteriorTracker.getOrCreate(chosen.modelKey).sampleCount > 0
-          ? this.posteriorTracker.getExpectedMetrics(chosen.modelKey).expectedLatencyMs
-          : chosen.latencyModel.p50Ms)
+      ? this.expectedLatencyMs(chosen)
       : 0;
 
     const decision: RouteDecisionV2 = {
@@ -193,5 +216,16 @@ export class StageRouter {
     score += 0.1 * post.expectedCacheHitRate;
 
     return score;
+  }
+
+  private expectedCostMicros(profile: ModelProfile): bigint {
+    return (profile.economics.inputMicrosPerMillion + profile.economics.outputMicrosPerMillion) / 100n;
+  }
+
+  private expectedLatencyMs(profile: ModelProfile): number {
+    const posterior = this.posteriorTracker.getOrCreate(profile.modelKey);
+    return posterior.sampleCount > 0
+      ? this.posteriorTracker.getExpectedMetrics(profile.modelKey).expectedLatencyMs
+      : profile.latencyModel.p50Ms;
   }
 }

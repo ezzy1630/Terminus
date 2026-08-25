@@ -247,7 +247,7 @@ pub struct PatchRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PatchEdit {
-    #[prost(oneof="patch_edit::Edit", tags="10, 11, 12, 13, 14, 15, 16, 17, 18")]
+    #[prost(oneof="patch_edit::Edit", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19")]
     pub edit: ::core::option::Option<patch_edit::Edit>,
 }
 /// Nested message and enum types in `PatchEdit`.
@@ -272,6 +272,8 @@ pub mod patch_edit {
         DeleteFile(super::DeleteFile),
         #[prost(message, tag="18")]
         UnifiedDiff(super::UnifiedDiff),
+        #[prost(message, tag="19")]
+        ReplaceHashline(super::ReplaceHashline),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -297,6 +299,24 @@ pub struct ReplaceRange {
     #[prost(message, optional, tag="3")]
     pub range: ::core::option::Option<LineRange>,
     #[prost(bytes="vec", tag="4")]
+    pub replacement_utf8: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReplaceHashline {
+    #[prost(message, optional, tag="1")]
+    pub path: ::core::option::Option<WorkspacePath>,
+    #[prost(string, tag="2")]
+    pub expected_sha256: ::prost::alloc::string::String,
+    /// short or full SHA-256 per line
+    #[prost(string, repeated, tag="3")]
+    pub line_hashes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// 1-based inclusive
+    #[prost(uint32, tag="4")]
+    pub start_line: u32,
+    /// 1-based inclusive
+    #[prost(uint32, tag="5")]
+    pub end_line: u32,
+    #[prost(bytes="vec", tag="6")]
     pub replacement_utf8: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

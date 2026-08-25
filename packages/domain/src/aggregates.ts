@@ -2878,6 +2878,11 @@ export type ComputerUseActionKind =
   | "scroll"
   | "drag_and_drop"
   | "navigate"
+  | "fill"
+  | "select"
+  | "upload"
+  | "download"
+  | "submit"
   | "take_screenshot"
   | "extract_dom"
   | "focus_element"
@@ -2923,6 +2928,11 @@ export const computerUseActionSchema = z.object({
     "scroll",
     "drag_and_drop",
     "navigate",
+    "fill",
+    "select",
+    "upload",
+    "download",
+    "submit",
     "take_screenshot",
     "extract_dom",
     "focus_element",

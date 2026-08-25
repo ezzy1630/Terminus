@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
+from forge_evals.runners import (
+    SWE_BENCH_HARNESS_COMMIT,
+    SWE_BENCH_VERIFIED_REVISION,
+    TERMINAL_BENCH_HARBOR_COMMIT,
+    TERMINAL_BENCH_TASK_COMMIT,
+    load_benchmark_manifest,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SUITES_DIR = REPO_ROOT / "evals" / "suites"
-SHA256_DIGEST_REGEX = re.compile(r"^sha256:[0-9a-f]{64}$")
-ALL_ZERO_DIGEST = "sha256:" + "0" * 64
 
 
 def _find_suite_files() -> list[Path]:
@@ -46,7 +51,10 @@ def test_suite_manifest_schema(suite_file: Path) -> None:
     assert isinstance(suite.get("version"), int) and suite["version"] >= 1
     assert isinstance(suite.get("description"), str) and len(suite["description"].strip()) > 0
     assert isinstance(suite.get("task_count"), int) and suite["task_count"] > 0
-    assert isinstance(suite.get("default_timeout_seconds"), int) and suite["default_timeout_seconds"] > 0
+    assert (
+        isinstance(suite.get("default_timeout_seconds"), int)
+        and suite["default_timeout_seconds"] > 0
+    )
 
     budget = suite.get("default_budget")
     assert isinstance(budget, dict), f"{suite_file.name} default_budget must be a mapping"
@@ -59,8 +67,31 @@ def test_suite_manifest_schema(suite_file: Path) -> None:
     assert isinstance(suite.get("cohorts"), list) and len(suite["cohorts"]) > 0
 
 
-def test_swe_bench_verified_manifest_pin_and_scope() -> None:
-    """SWE-bench Verified must have pinned non-zero image digest and strictly Python cohorts."""
+def test_external_manifests_pin_exact_sources_and_scopes() -> None:
+    """External suites must use exact upstream pins and honest image policies."""
+    terminal = load_benchmark_manifest(SUITES_DIR / "terminal-bench.yaml")
+    assert terminal.adapter_kind == "harbor"
+    assert terminal.dataset == "terminal-bench"
+    assert terminal.dataset_version == "2.0"
+    assert terminal.task_count == 89
+    assert terminal.registry_commit == TERMINAL_BENCH_HARBOR_COMMIT
+    assert terminal.task_commit == TERMINAL_BENCH_TASK_COMMIT
+    assert terminal.image_digest_policy == "per_task_required"
+
+    swe = load_benchmark_manifest(SUITES_DIR / "swe-bench-verified.yaml")
+    assert swe.adapter_kind == "swebench"
+    assert swe.dataset == "SWE-bench/SWE-bench_Verified"
+    assert swe.dataset_revision == SWE_BENCH_VERIFIED_REVISION
+    assert swe.harness_commit == SWE_BENCH_HARNESS_COMMIT
+    assert swe.split == "test"
+    assert swe.language == "python"
+    assert swe.task_count == 500
+    assert swe.cohorts == ("python-repos",)
+    assert swe.image_digest_policy == "per_instance_required"
+
+
+def test_swe_bench_verified_manifest_has_no_suite_wide_image_pin() -> None:
+    """SWE-bench's per-instance images cannot be represented by one digest."""
     path = SUITES_DIR / "swe-bench-verified.yaml"
     content = path.read_text(encoding="utf-8")
     data = yaml.safe_load(content)
@@ -68,15 +99,6 @@ def test_swe_bench_verified_manifest_pin_and_scope() -> None:
 
     assert suite["id"] == "swe-bench-verified"
     assert suite["task_count"] == 500
-
-    # Pinned image digest must be a valid non-zero SHA-256
-    digest = suite.get("pinned_image_digest")
-    assert digest is not None, "swe-bench-verified must specify pinned_image_digest"
-    assert SHA256_DIGEST_REGEX.match(digest), f"invalid digest format: {digest}"
-    assert digest != ALL_ZERO_DIGEST, "pinned_image_digest must not be all-zeros placeholder"
-
-    # Cohorts must only be Python
-    cohorts = suite.get("cohorts", [])
-    assert cohorts == ["python-repos"], f"SWE-bench Verified cohorts must be ['python-repos'], got {cohorts}"
-    assert "js-ts-repos" not in cohorts
-    assert "go-repos" not in cohorts
+    assert "pinned_image_digest" not in suite
+    assert suite["adapter"]["image_digest_policy"] == "per_instance_required"
+    assert suite["adapter"]["language"] == "python"

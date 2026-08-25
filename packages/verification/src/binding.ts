@@ -14,6 +14,11 @@ import type {
 } from "@terminus/domain";
 import { ValidationError } from "@terminus/domain";
 import { parseNodeSpec, type PredicateType } from "./node-spec.js";
+import {
+  computeVerificationConfigHash,
+  validateVerifierResultBinding,
+  type VerifierBinding,
+} from "./run-binding.js";
 
 export type CriterionDisposition = "predicate" | "manual" | "unverifiable";
 
@@ -21,6 +26,8 @@ export interface CriterionBinding {
   readonly criterionId: string;
   readonly required: boolean;
   readonly disposition: CriterionDisposition;
+  /** A human decision is required even when an automated predicate is also bound. */
+  readonly requiresHumanAcceptance: boolean;
   readonly nodeIds: readonly string[];
   readonly predicateTypes: readonly PredicateType[];
 }
@@ -30,6 +37,7 @@ export interface PredicateBinding {
   readonly predicateType: PredicateType | null;
   readonly sourceRevision: string;
   readonly environmentImageDigest: string;
+  readonly verifierBinding?: VerifierBinding | undefined;
   /** RFC3339 expiry; null means no expiry. */
   readonly expiresAt: string | null;
 }
@@ -63,21 +71,21 @@ export function bindAcceptanceCriteria(
   for (const c of criteria) {
     const mapped = byCriterion.get(c.id) ?? [];
     const hint = (c.verificationHint ?? "").trim().toLowerCase();
-    let disposition: CriterionDisposition = "predicate";
-    if (mapped.length === 0) {
-      if (hint.startsWith("manual:")) disposition = "manual";
-      else if (hint.startsWith("unverifiable:")) disposition = "unverifiable";
-      else disposition = "predicate";
-    }
-
     const predicateTypes = mapped
       .map((n) => parseNodeSpec(n.specification).predicateType)
       .filter((t): t is PredicateType => t !== null);
+    const requiresHumanAcceptance = hint.startsWith("manual:")
+      || predicateTypes.includes("human_approval");
+    let disposition: CriterionDisposition = "predicate";
+    if (hint.startsWith("manual:")) disposition = "manual";
+    else if (hint.startsWith("unverifiable:")) disposition = "unverifiable";
+    else if (mapped.length === 0) disposition = "predicate";
 
     const binding: CriterionBinding = {
       criterionId: c.id,
       required: c.required,
       disposition,
+      requiresHumanAcceptance,
       nodeIds: mapped.map((n) => n.id),
       predicateTypes,
     };
@@ -118,15 +126,23 @@ export function bindPredicatesToEnvironment(
   plan: VerificationPlan,
   environmentImageDigest: string,
   expiresAt: string | null = null,
+  verifierBinding?: VerifierBinding,
 ): readonly PredicateBinding[] {
-  if (environmentImageDigest.length === 0) {
+  if (environmentImageDigest.trim().length === 0) {
     throw new ValidationError("environmentImageDigest is required for predicate binding");
+  }
+  if (
+    verifierBinding !== undefined
+    && verifierBinding.configurationHash !== computeVerificationConfigHash(plan)
+  ) {
+    throw new ValidationError("verifier binding does not match verification plan");
   }
   return plan.nodes.map((n) => ({
     nodeId: n.id,
     predicateType: parseNodeSpec(n.specification).predicateType,
     sourceRevision: plan.sourceRevision,
     environmentImageDigest,
+    ...(verifierBinding !== undefined ? { verifierBinding } : {}),
     expiresAt,
   }));
 }
@@ -135,7 +151,13 @@ export type ResultValidity =
   | { readonly ok: true }
   | {
       readonly ok: false;
-      readonly reason: "revision_mismatch" | "digest_mismatch" | "expired" | "invalidated" | "missing";
+      readonly reason:
+        | "revision_mismatch"
+        | "digest_mismatch"
+        | "verifier_mismatch"
+        | "expired"
+        | "invalidated"
+        | "missing";
       readonly detail: string;
     };
 
@@ -151,6 +173,7 @@ export function validateResultBinding(
     readonly now: string;
     readonly expiresAt: string | null;
     readonly invalidated: boolean;
+    readonly verifierBinding?: VerifierBinding | undefined;
   },
 ): ResultValidity {
   if (result === null || result === undefined) {
@@ -174,6 +197,16 @@ export function validateResultBinding(
       detail: `result digest '${digest ?? "null"}' != expected '${expected.environmentImageDigest}'`,
     };
   }
+  if (expected.verifierBinding !== undefined) {
+    const verifierFailures = validateVerifierResultBinding(result, expected.verifierBinding);
+    if (verifierFailures.length > 0) {
+      return {
+        ok: false,
+        reason: "verifier_mismatch",
+        detail: verifierFailures.join("; "),
+      };
+    }
+  }
   if (expected.expiresAt !== null && expected.now >= expected.expiresAt) {
     return {
       ok: false,
@@ -196,6 +229,7 @@ export function allRequiredBindingsValid(
     readonly now: string;
     readonly expiresAt: string | null;
     readonly invalidatedNodeIds: ReadonlySet<string>;
+    readonly verifierBinding?: VerifierBinding | undefined;
   },
 ): { readonly ok: boolean; readonly failures: readonly { nodeId: string; reason: string }[] } {
   const failures: { nodeId: string; reason: string }[] = [];
@@ -207,6 +241,7 @@ export function allRequiredBindingsValid(
       now: expected.now,
       expiresAt: expected.expiresAt,
       invalidated: expected.invalidatedNodeIds.has(node.id),
+      ...(expected.verifierBinding !== undefined ? { verifierBinding: expected.verifierBinding } : {}),
     });
     if (validity.ok === false) {
       failures.push({ nodeId: node.id, reason: validity.detail });

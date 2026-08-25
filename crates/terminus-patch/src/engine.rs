@@ -12,8 +12,8 @@ use std::sync::Mutex;
 use terminus_fs::{PathResolver, SafePath};
 use terminus_kernel_protocol::{
     ChangedFile, CreateFile, DeleteFile, DeleteRange, InsertContent, MoveFile, PatchCommitMode,
-    PatchEdit, PatchResponse, ReplaceExactText, ReplaceRange, ReplaceSymbol, UnifiedDiff,
-    WorkspaceBaseline, WorkspacePath,
+    PatchEdit, PatchResponse, ReplaceExactText, ReplaceHashline, ReplaceRange, ReplaceSymbol,
+    UnifiedDiff, WorkspaceBaseline, WorkspacePath,
 };
 
 /// A transaction in progress. Holds snapshots for rollback.
@@ -316,6 +316,9 @@ impl PatchEngine {
         match edit {
             PatchEdit::CreateFile(e) => self.apply_create_file(tx, e, changed_files),
             PatchEdit::ReplaceRange(e) => self.apply_replace_range(tx, baseline, e, changed_files),
+            PatchEdit::ReplaceHashline(e) => {
+                self.apply_replace_hashline(tx, baseline, e, changed_files)
+            }
             PatchEdit::ReplaceExactText(e) => {
                 self.apply_replace_exact_text(tx, baseline, e, changed_files)
             }
@@ -449,6 +452,80 @@ impl PatchEngine {
             old_sha256: format!("sha256:{original_hash}"),
             new_sha256: format!("sha256:{new_hash}"),
             operation: "replace_range".to_string(),
+        });
+        Ok(())
+    }
+
+    fn apply_replace_hashline(
+        &self,
+        tx: &mut Transaction,
+        baseline: &WorkspaceBaseline,
+        edit: &ReplaceHashline,
+        changed_files: &mut Vec<ChangedFile>,
+    ) -> Result<(), PatchError> {
+        let original_hash = self.snapshot_if_existing(tx, &edit.path.relative_path)?;
+        self.verify_hash(&edit.path, &edit.expected_sha256, &original_hash, baseline)?;
+        let safe = SafePath::new(&edit.path.relative_path)?;
+        let resolved = self.resolver.resolve_strict(&safe)?;
+        let original_bytes = std::fs::read(&resolved.host.host_path)?;
+        let text = String::from_utf8(original_bytes).map_err(|_| {
+            PatchError::InvalidEdit(format!("{} is not valid UTF-8", edit.path.relative_path))
+        })?;
+
+        let lines: Vec<&str> = text.lines().collect();
+        let start = edit.start_line as usize;
+        let end = edit.end_line as usize;
+        if start < 1 || start > lines.len() || end < start || end > lines.len() {
+            return Err(PatchError::AnchorStale(format!(
+                "range [{start}, {end}] out of bounds for {} ({} lines)",
+                edit.path.relative_path,
+                lines.len()
+            )));
+        }
+
+        let expected_line_count = end - start + 1;
+        if edit.line_hashes.len() != expected_line_count {
+            return Err(PatchError::AnchorStale(format!(
+                "line hash count {} does not match range length {} for {}",
+                edit.line_hashes.len(),
+                expected_line_count,
+                edit.path.relative_path,
+            )));
+        }
+
+        // Verify each line's hash
+        for (i, line_idx) in (start..=end).enumerate() {
+            let line_content = lines[line_idx - 1];
+            let computed_hash = compute_line_hash(line_content);
+            let expected_hash = &edit.line_hashes[i];
+            if !line_hash_matches(expected_hash, line_content) {
+                return Err(PatchError::AnchorStale(format!(
+                    "line hash mismatch at {}:{}: expected {}, got {}",
+                    edit.path.relative_path, line_idx, expected_hash, computed_hash
+                )));
+            }
+        }
+
+        let replacement = String::from_utf8(edit.replacement_utf8.clone()).map_err(|_| {
+            PatchError::InvalidEdit(format!(
+                "replacement for {} is not valid UTF-8",
+                edit.path.relative_path
+            ))
+        })?;
+        let new_text = replace_line_range(&text, start, end, Some(&replacement))?;
+        let new_bytes = new_text.as_bytes();
+        std::fs::write(&resolved.host.host_path, new_bytes)?;
+        let new_hash = sha256_hex(new_bytes);
+        tx.journal.push(JournalEntry::EditApplied {
+            relative_path: edit.path.relative_path.clone(),
+            edit: PatchEdit::ReplaceHashline(edit.clone()),
+            new_hash: new_hash.clone(),
+        });
+        changed_files.push(ChangedFile {
+            path: edit.path.clone(),
+            old_sha256: format!("sha256:{original_hash}"),
+            new_sha256: format!("sha256:{new_hash}"),
+            operation: "replace_hashline".to_string(),
         });
         Ok(())
     }
@@ -979,6 +1056,7 @@ fn edit_target_path(edit: &PatchEdit) -> Option<WorkspacePath> {
     match edit {
         PatchEdit::ReplaceSymbol(e) => Some(e.path.clone()),
         PatchEdit::ReplaceRange(e) => Some(e.path.clone()),
+        PatchEdit::ReplaceHashline(e) => Some(e.path.clone()),
         PatchEdit::ReplaceExactText(e) => Some(e.path.clone()),
         PatchEdit::Insert(e) => Some(e.path.clone()),
         PatchEdit::DeleteRange(e) => Some(e.path.clone()),
@@ -1007,6 +1085,26 @@ fn edit_target_path(edit: &PatchEdit) -> Option<WorkspacePath> {
             }
         }
     }
+}
+
+pub fn compute_line_hash(line: &str) -> String {
+    let full = sha256_hex(line.as_bytes());
+    full[..8].to_string()
+}
+
+fn line_hash_matches(expected: &str, line: &str) -> bool {
+    let normalized = expected
+        .trim()
+        .strip_prefix("sha256:")
+        .unwrap_or(expected.trim())
+        .to_ascii_lowercase();
+    let candidates = [line.to_string(), format!("{line}\r")];
+    candidates.iter().any(|candidate| {
+        let short = compute_line_hash(candidate);
+        let full = sha256_hex(candidate.as_bytes());
+        (normalized.len() == 8 && normalized == short)
+            || (normalized.len() == 64 && normalized == full)
+    })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

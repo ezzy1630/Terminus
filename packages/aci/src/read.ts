@@ -34,6 +34,7 @@ export const readModeSchema = z.enum([
   "outline",
   "range",
   "symbol",
+  "hashline",
   "dirty-region",
   "source-hash",
   "related-test",
@@ -146,6 +147,11 @@ export interface ReadProvider {
 
 export function computeSha256(content: string | Uint8Array): ContentHash {
   return computeContentHash(content);
+}
+
+export function computeLineHash(line: string): string {
+  const hash = computeContentHash(line);
+  return hash.slice("sha256:".length, "sha256:".length + 8);
 }
 
 interface ReadContinuation {
@@ -697,6 +703,11 @@ export class ProductionReadExecutor implements ToolExecutor<ReadResultData> {
           }
           contentOutput = extracted.join("\n\n");
         }
+        break;
+      }
+
+      case "hashline": {
+        contentOutput = lines.map((line, idx) => `${idx + 1}:${computeLineHash(line)}:${line}`).join("\n");
         break;
       }
 

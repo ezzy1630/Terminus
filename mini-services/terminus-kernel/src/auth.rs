@@ -146,7 +146,9 @@ fn required_operation_class(method: &axum::http::Method, path: &str) -> Option<O
     if matches!(path, "/v1/info" | "/v1/health") {
         return None;
     }
-    let op = if method == Method::GET && path.starts_with("/v1/artifacts/") {
+    let op = if path.starts_with("/v1/jobs") {
+        OperationClass::Job
+    } else if method == Method::GET && path.starts_with("/v1/artifacts/") {
         OperationClass::ArtifactIngest
     } else if method != Method::POST {
         return None;
@@ -158,8 +160,6 @@ fn required_operation_class(method: &axum::http::Method, path: &str) -> Option<O
         OperationClass::Patch
     } else if path.starts_with("/v1/process") {
         OperationClass::Exec
-    } else if path.starts_with("/v1/jobs") {
-        OperationClass::Job
     } else if path.starts_with("/v1/sandbox/select") {
         OperationClass::Sandbox
     } else if path.starts_with("/v1/policy") {

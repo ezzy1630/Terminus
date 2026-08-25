@@ -368,8 +368,8 @@
       "name": "computer-use-action",
       "title": "ComputerUseAction",
       "path": "schemas/generated/v2/computer-use-action.json",
-      "sha256": "sha256:42ae1372d79b86a7e3f47f18ddc8efc3aa5d46342860638c8bdf2df74abdedd6",
-      "bytes": 4866
+      "sha256": "sha256:d60d19b2c5a5fba44f640c24584d581fc31d08c806f62035f8ac749a8e290a84",
+      "bytes": 4956
     },
     {
       "name": "semantic-target-verification",

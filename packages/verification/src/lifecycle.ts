@@ -12,6 +12,7 @@ import type {
   Uuid7,
   Rfc3339Timestamp,
   ArtifactRef,
+  ContentHash,
   Micros,
 } from "@terminus/domain";
 import { ValidationError } from "@terminus/domain";
@@ -29,6 +30,13 @@ import {
 import type { VerificationAttemptRecord, VerificationStore } from "./store.js";
 import { serializeNodeSpec, type PredicateType } from "./node-spec.js";
 import { buildClaimEvidenceGraph } from "./evidence.js";
+import {
+  computeAcceptanceCriteriaHash,
+  computeVerificationResultsHash,
+  type ProofBundle,
+} from "./proof-bundle.js";
+import type { HumanAcceptanceObligation } from "./human-acceptance.js";
+import type { VerifierBinding } from "./run-binding.js";
 
 export interface LifecycleDeps {
   readonly store: VerificationStore;
@@ -51,6 +59,9 @@ export interface CreatePlanInput {
 export class VerificationLifecycle {
   private readonly invalidated = new Map<string, Set<string>>();
   private readonly criteriaByPlan = new Map<string, readonly AcceptanceCriterion[]>();
+  private readonly criteriaHashByPlan = new Map<string, ContentHash>();
+  private readonly verifierBindingByPlan = new Map<string, VerifierBinding>();
+  private readonly resultsHashByPlan = new Map<string, ContentHash>();
 
   constructor(private readonly deps: LifecycleDeps) {}
 
@@ -71,6 +82,15 @@ export class VerificationLifecycle {
     await this.deps.store.saveNodes(plan.id, plan.nodes);
     await this.deps.store.saveEdges(plan.id, plan.edges);
     this.criteriaByPlan.set(plan.id, input.criteria);
+    const criteriaHash = computeAcceptanceCriteriaHash(input.criteria);
+    this.criteriaHashByPlan.set(plan.id, criteriaHash);
+    await this.deps.store.saveLifecycleBinding({
+      planId: plan.id,
+      criteriaHash,
+      verifierBinding: null,
+      resultsHash: null,
+      invalidatedNodeIds: [],
+    });
     return plan;
   }
 
@@ -116,7 +136,13 @@ export class VerificationLifecycle {
         await this.deps.store.saveAttempt(attempt);
       },
     });
-
+    const resultsHash = computeVerificationResultsHash(result.results);
+    this.verifierBindingByPlan.set(planId, result.verifierBinding);
+    this.resultsHashByPlan.set(planId, resultsHash);
+    const persistedBinding = await this.deps.store.getLifecycleBinding(planId);
+    if (persistedBinding === null) {
+      throw new ValidationError("verification lifecycle binding is missing from durable storage", { planId });
+    }
     const cleared = this.invalidated.get(planId) ?? new Set<string>();
     for (const r of result.results) {
       await this.deps.store.saveResult(r);
@@ -125,6 +151,12 @@ export class VerificationLifecycle {
     }
     if (cleared.size === 0) this.invalidated.delete(planId);
     else this.invalidated.set(planId, cleared);
+    await this.deps.store.saveLifecycleBinding({
+      ...persistedBinding,
+      verifierBinding: result.verifierBinding,
+      resultsHash,
+      invalidatedNodeIds: [...(this.invalidated.get(planId) ?? [])].sort(),
+    });
     const criteria = this.criteriaByPlan.get(planId);
     if (criteria !== undefined) {
       await this.deps.store.saveEvidenceGraph(planId, buildClaimEvidenceGraph({
@@ -161,6 +193,13 @@ export class VerificationLifecycle {
       const set = this.invalidated.get(planId) ?? new Set<string>();
       for (const id of nodeIds) set.add(id);
       this.invalidated.set(planId, set);
+      const persistedBinding = await this.deps.store.getLifecycleBinding(planId);
+      if (persistedBinding !== null) {
+        await this.deps.store.saveLifecycleBinding({
+          ...persistedBinding,
+          invalidatedNodeIds: [...set].sort(),
+        });
+      }
     }
     return nodeIds;
   }
@@ -183,12 +222,35 @@ export class VerificationLifecycle {
     readonly costMicros: Micros;
     readonly durationSeconds: number;
     readonly finalCheckpoint: ArtifactRef;
+    readonly humanAcceptanceObligations?: readonly HumanAcceptanceObligation[] | undefined;
+    readonly proofBundle?: ProofBundle | undefined;
+    readonly proofBundleContentHash?: ContentHash | undefined;
+    readonly taskContractHash?: ContentHash | undefined;
   }): Promise<CompletionRecord> {
     const plan = await this.deps.store.getPlan(input.planId);
     if (plan === null) throw new ValidationError("verification plan not found", { planId: input.planId });
     const results = await this.deps.store.listResults(input.planId);
     const resultMap = new Map(results.map((r) => [r.nodeId, r] as const));
-    const invalidatedNodeIds = this.invalidated.get(input.planId) ?? new Set<string>();
+    const persistedBinding = await this.deps.store.getLifecycleBinding(input.planId);
+    const invalidatedNodeIds = this.invalidated.get(input.planId)
+      ?? new Set<string>(persistedBinding?.invalidatedNodeIds ?? []);
+    const expectedCriteriaHash = this.criteriaHashByPlan.get(input.planId) ?? persistedBinding?.criteriaHash;
+    const verifierBinding = this.verifierBindingByPlan.get(input.planId)
+      ?? persistedBinding?.verifierBinding
+      ?? undefined;
+    const expectedResultsHash = this.resultsHashByPlan.get(input.planId) ?? persistedBinding?.resultsHash;
+    if (
+      expectedCriteriaHash === undefined
+      || verifierBinding === undefined
+      || expectedResultsHash === undefined
+    ) {
+      throw new ValidationError(
+        "verification completion is missing its immutable run/evidence binding; manual acceptance cannot be inferred",
+      );
+    }
+    if (computeVerificationResultsHash(results) !== expectedResultsHash) {
+      throw new ValidationError("verification evidence changed after evaluation");
+    }
 
     const gateInput = {
       taskId: input.taskId,
@@ -212,6 +274,16 @@ export class VerificationLifecycle {
       costMicros: input.costMicros,
       durationSeconds: input.durationSeconds,
       finalCheckpoint: input.finalCheckpoint,
+      expectedCriteriaHash,
+      verifierBinding,
+      ...(input.humanAcceptanceObligations !== undefined
+        ? { humanAcceptanceObligations: input.humanAcceptanceObligations }
+        : {}),
+      ...(input.proofBundle !== undefined ? { proofBundle: input.proofBundle } : {}),
+      ...(input.proofBundleContentHash !== undefined
+        ? { proofBundleContentHash: input.proofBundleContentHash }
+        : {}),
+      ...(input.taskContractHash !== undefined ? { taskContractHash: input.taskContractHash } : {}),
     };
 
     const decision = evaluateCompletionGate(gateInput);
@@ -238,6 +310,12 @@ export class VerificationLifecycle {
     await this.deps.store.saveCompletionRecord(record);
     // Clear invalidation marks after successful completion.
     this.invalidated.delete(input.planId);
+    if (persistedBinding !== null) {
+      await this.deps.store.saveLifecycleBinding({
+        ...persistedBinding,
+        invalidatedNodeIds: [],
+      });
+    }
     return record;
   }
 }

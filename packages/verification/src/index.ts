@@ -7,7 +7,8 @@
  * parallel where safe, with retry policy. CompletionRecord builder that
  * requires all mandatory acceptance predicates pass. Changed-code invalidation
  * (§40.5). Predicate type constants and registry (§40.2). Flaky-test policy
- * (§40.9).
+ * (§40.9). Verifier bindings, human-acceptance obligations, and unsigned local
+ * proof bundles are explicit admission contracts.
  */
 import type {
   VerificationPlan,
@@ -25,6 +26,18 @@ import { ValidationError } from "@terminus/domain";
 import { parseNodeSpec } from "./node-spec.js";
 import type { NodeExecutor, NodeExecutorInput, PredicateExecutor } from "./registry.js";
 import { PredicateRegistry } from "./registry.js";
+import {
+  createVerifierBinding,
+  DEFAULT_VERIFIER_ID,
+  DEFAULT_VERIFIER_VERSION,
+  isVerifierBindingEqual,
+  readVerificationResultBinding,
+  verificationResultBindingState,
+  stampVerificationResultBinding,
+  type VerifierBinding,
+  type VerifierIdentity,
+  type VerificationBindingState,
+} from "./run-binding.js";
 
 export {
   PredicateType,
@@ -51,6 +64,53 @@ export {
   type ClaimEvidenceGraph,
   type EvidenceArtifactWriter,
 } from "./evidence.js";
+export {
+  DEFAULT_VERIFIER_ID,
+  DEFAULT_VERIFIER_VERSION,
+  canonicalVerificationPlan,
+  computeVerificationConfigHash,
+  createVerifierBinding,
+  isVerifierBindingEqual,
+  readVerificationResultBinding,
+  verificationResultBindingState,
+  stampVerificationResultBinding,
+  validateVerifierResultBinding,
+  type VerifierBinding,
+  type VerifierIdentity,
+  type VerificationBindingState,
+} from "./run-binding.js";
+export {
+  acceptHumanAcceptanceObligation,
+  createHumanAcceptanceObligations,
+  criterionRequiresHumanAcceptance,
+  validateHumanAcceptanceObligations,
+  type AcceptHumanAcceptanceObligationInput,
+  type CreateHumanAcceptanceObligationsInput,
+  type HumanAcceptanceObligation,
+  type HumanAcceptanceStatus,
+  type ValidateHumanAcceptanceObligationsInput,
+} from "./human-acceptance.js";
+export {
+  PROOF_BUNDLE_MEDIA_TYPE,
+  PROOF_BUNDLE_SCHEMA,
+  assertProofBundleAdmissible,
+  buildProofBundle,
+  canonicalizeProofBundle,
+  computeAcceptanceCriteriaHash,
+  computeProofBundleHash,
+  computeVerificationResultsHash,
+  evaluateProofBundleAdmission,
+  verifyProofBundle,
+  type ProofBundle,
+  type ProofBundleAdmission,
+  type ProofBundleBuildInput,
+  type ProofBundleCriterionResult,
+  type ProofBundleExecution,
+  type ProofBundleExpectations,
+  type ProofBundleProviderReceipt,
+  type ProofBundleReceipt,
+  type ProofBundleVerification,
+} from "./proof-bundle.js";
 
 // ────────────────────────── Plan builder ─────────────────────────────────────
 
@@ -127,6 +187,8 @@ export interface VerificationEngineDeps {
   executorFor(kind: VerificationNode["kind"]): NodeExecutor;
   idSource: () => Uuid7;
   clock: () => Rfc3339Timestamp;
+  /** Stable identity of the trusted verifier implementation. */
+  verifier?: VerifierIdentity | undefined;
 }
 
 export interface EvaluationOptions {
@@ -140,6 +202,8 @@ export interface EvaluationOptions {
   readonly environmentImageDigest?: string | null | undefined;
   /** Durable sink for every attempt, including failures before a later pass. */
   readonly onAttempt?: ((result: VerificationResult) => Promise<void> | void) | undefined;
+  /** Optional verifier binding; defaults to the engine identity + plan hash. */
+  readonly verifierBinding?: VerifierBinding | undefined;
 }
 
 export interface EvaluationResult {
@@ -147,10 +211,18 @@ export interface EvaluationResult {
   readonly allRequiredPassed: boolean;
   readonly completionExpressionSatisfied: boolean;
   readonly blocked: readonly string[];
+  readonly verifierBinding: VerifierBinding;
 }
 
 export class VerificationEngine {
-  constructor(private readonly deps: VerificationEngineDeps) {}
+  private readonly verifierIdentity: VerifierIdentity;
+
+  constructor(private readonly deps: VerificationEngineDeps) {
+    this.verifierIdentity = deps.verifier ?? {
+      verifierId: DEFAULT_VERIFIER_ID,
+      verifierVersion: DEFAULT_VERIFIER_VERSION,
+    };
+  }
 
   async evaluate(
     plan: VerificationPlan,
@@ -162,8 +234,19 @@ export class VerificationEngine {
     if (sorted === null) {
       throw new ValidationError("plan has cycle");
     }
+    if (workspaceRevision !== plan.sourceRevision) {
+      throw new ValidationError("verification must run against the plan's exact source revision", {
+        planRevision: plan.sourceRevision,
+        workspaceRevision,
+      });
+    }
     const parallelism = Math.max(1, options.parallelism ?? 4);
     const environmentImageDigest = options.environmentImageDigest ?? null;
+    const trustedVerifierBinding = createVerifierBinding(plan, this.verifierIdentity);
+    const verifierBinding = options.verifierBinding ?? trustedVerifierBinding;
+    if (!isVerifierBindingEqual(verifierBinding, trustedVerifierBinding)) {
+      throw new ValidationError("verification run binding does not match the trusted verifier");
+    }
     const results: VerificationResult[] = [];
     const blocked: string[] = [];
     const resultMap = new Map<string, VerificationResult>();
@@ -187,7 +270,16 @@ export class VerificationEngine {
       const batch = ready.slice(0, parallelism);
       const batchResults = await Promise.all(
         batch.map((node) =>
-          this.evaluateNode(node, plan, workspaceRevision, environmentImageDigest, signal, resultMap, options.onAttempt),
+          this.evaluateNode(
+            node,
+            plan,
+            workspaceRevision,
+            environmentImageDigest,
+            verifierBinding,
+            signal,
+            resultMap,
+            options.onAttempt,
+          ),
         ),
       );
       for (const r of batchResults) {
@@ -210,6 +302,7 @@ export class VerificationEngine {
       allRequiredPassed,
       completionExpressionSatisfied: completionSatisfied,
       blocked,
+      verifierBinding,
     };
   }
 
@@ -222,6 +315,7 @@ export class VerificationEngine {
     plan: VerificationPlan,
     workspaceRevision: string,
     environmentImageDigest: string | null,
+    verifierBinding: VerifierBinding,
     signal: AbortSignal | null,
     resultMap: ReadonlyMap<string, VerificationResult>,
     onAttempt: ((result: VerificationResult) => Promise<void> | void) | undefined,
@@ -243,10 +337,12 @@ export class VerificationEngine {
           environmentImageDigest,
           commandOrQuery: node.specification,
           exitCode: null,
-          structuredObservations: {},
+          structuredObservations: {
+            verificationBinding: verifierBinding,
+          },
           artifacts: [],
           toolCallId: null,
-          verifierVersion: "1.0.0",
+          verifierVersion: verifierBinding.verifierVersion,
           reasonIfSkipped: "dependency did not pass",
           attempts: 0,
         };
@@ -264,6 +360,7 @@ export class VerificationEngine {
           node,
           workspaceRevision,
           environmentImageDigest,
+          verifierBinding,
           signal,
         });
         // Stamp binding fields if the executor omitted them.
@@ -271,19 +368,36 @@ export class VerificationEngine {
         const environmentMismatch =
           r.environmentImageDigest !== null &&
           r.environmentImageDigest !== environmentImageDigest;
-        last = {
+        const existingBinding = readVerificationResultBinding(r);
+        const bindingState = verificationResultBindingState(r);
+        const bindingMismatch = bindingState === "invalid"
+          || (existingBinding !== null && !isVerifierBindingEqual(existingBinding, verifierBinding));
+        const verifierVersionMismatch = r.verifierVersion !== verifierBinding.verifierVersion;
+        const bindingError = sourceMismatch
+          ? `verifier returned source revision '${r.sourceRevision}', expected '${workspaceRevision}'`
+          : environmentMismatch
+            ? `verifier returned environment '${r.environmentImageDigest}', expected '${environmentImageDigest}'`
+            : verifierVersionMismatch
+              ? `verifier returned version '${r.verifierVersion}', expected '${verifierBinding.verifierVersion}'`
+              : bindingMismatch
+                ? bindingState === "invalid"
+                  ? "verifier returned a malformed verifier binding"
+                  : "verifier returned a conflicting verifier binding"
+                : null;
+        const stamped = stampVerificationResultBinding({
           ...r,
-          status: sourceMismatch || environmentMismatch ? "error" : r.status,
+          status: bindingError === null ? r.status : "error",
+        }, verifierBinding);
+        last = {
+          ...stamped,
           sourceRevision: r.sourceRevision || workspaceRevision,
           environmentImageDigest: r.environmentImageDigest ?? environmentImageDigest,
-          structuredObservations: sourceMismatch || environmentMismatch
-            ? {
-                ...r.structuredObservations,
-                bindingError: sourceMismatch
-                  ? `verifier returned source revision '${r.sourceRevision}', expected '${workspaceRevision}'`
-                  : `verifier returned environment '${r.environmentImageDigest}', expected '${environmentImageDigest}'`,
-              }
-            : r.structuredObservations,
+          structuredObservations: bindingError === null
+            ? stamped.structuredObservations
+            : {
+                ...stamped.structuredObservations,
+                bindingError,
+              },
           attempts: attempt,
         };
         await onAttempt?.(last);
@@ -304,10 +418,13 @@ export class VerificationEngine {
           environmentImageDigest,
           commandOrQuery: node.specification,
           exitCode: null,
-          structuredObservations: { error: err instanceof Error ? err.message : String(err) },
+          structuredObservations: {
+            error: err instanceof Error ? err.message : String(err),
+            verificationBinding: verifierBinding,
+          },
           artifacts: [],
           toolCallId: null,
-          verifierVersion: "1.0.0",
+          verifierVersion: verifierBinding.verifierVersion,
           reasonIfSkipped: null,
           attempts: attempt,
         };
@@ -328,10 +445,13 @@ export class VerificationEngine {
       environmentImageDigest,
       commandOrQuery: node.specification,
       exitCode: null,
-      structuredObservations: { error: "retries exhausted without result" },
+      structuredObservations: {
+        error: "retries exhausted without result",
+        verificationBinding: verifierBinding,
+      },
       artifacts: [],
       toolCallId: null,
-      verifierVersion: "1.0.0",
+      verifierVersion: verifierBinding.verifierVersion,
       reasonIfSkipped: null,
       attempts: attempt,
     };

@@ -13,9 +13,19 @@ import type {
   Uuid7,
   Rfc3339Timestamp,
   ArtifactRef,
+  ContentHash,
 } from "@terminus/domain";
 import { ValidationError } from "@terminus/domain";
 import type { ClaimEvidenceGraph } from "./evidence.js";
+import type { VerifierBinding } from "./run-binding.js";
+
+export interface VerificationLifecycleBinding {
+  readonly planId: Uuid7;
+  readonly criteriaHash: ContentHash;
+  readonly verifierBinding: VerifierBinding | null;
+  readonly resultsHash: ContentHash | null;
+  readonly invalidatedNodeIds: readonly string[];
+}
 
 /** One recorded attempt at evaluating a verification node. */
 export interface VerificationAttemptRecord {
@@ -41,6 +51,8 @@ export interface VerificationStore {
 
   saveNodes(planId: Uuid7, nodes: readonly VerificationNode[]): Promise<void>;
   saveEdges(planId: Uuid7, edges: readonly VerificationEdge[]): Promise<void>;
+  saveLifecycleBinding(binding: VerificationLifecycleBinding): Promise<void>;
+  getLifecycleBinding(planId: Uuid7): Promise<VerificationLifecycleBinding | null>;
 
   saveAttempt(attempt: VerificationAttemptRecord): Promise<VerificationAttemptRecord>;
   listAttempts(planId: Uuid7, nodeId?: string): Promise<readonly VerificationAttemptRecord[]>;
@@ -67,6 +79,7 @@ export class InMemoryVerificationStore implements VerificationStore {
   private readonly results = new Map<string, VerificationResult[]>();
   private readonly evidenceGraphs = new Map<string, ClaimEvidenceGraph>();
   private readonly completions = new Map<string, CompletionRecord>();
+  private readonly lifecycleBindings = new Map<string, VerificationLifecycleBinding>();
 
   async savePlan(plan: VerificationPlan): Promise<VerificationPlan> {
     this.plans.set(plan.id, plan);
@@ -99,6 +112,14 @@ export class InMemoryVerificationStore implements VerificationStore {
     const plan = this.plans.get(planId);
     if (!plan) throw new ValidationError("verification plan not found", { planId });
     this.plans.set(planId, { ...plan, edges: [...edges] });
+  }
+
+  async saveLifecycleBinding(binding: VerificationLifecycleBinding): Promise<void> {
+    this.lifecycleBindings.set(binding.planId, binding);
+  }
+
+  async getLifecycleBinding(planId: Uuid7): Promise<VerificationLifecycleBinding | null> {
+    return this.lifecycleBindings.get(planId) ?? null;
   }
 
   async saveAttempt(attempt: VerificationAttemptRecord): Promise<VerificationAttemptRecord> {

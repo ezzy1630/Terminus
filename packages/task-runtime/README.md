@@ -12,6 +12,9 @@ Prisma import). Persists semantic events via an `EventSink`.
 
 - `TaskService` class with methods listed above.
 - `TaskRepository` interface for persistence.
+- `SqliteDurableTaskRepository` with an injected `SqliteDatabasePort` for
+  durable SQLite state, atomic state-plus-outbox writes, inbox claims, CAS,
+  and persisted sequence/epoch counters.
 - `globMatch(pattern, path)` for scope-glob matching.
 - State machine helpers: `ALLOWED_TASK_TRANSITIONS`,
   `TASK_TERMINAL_STATES`, `isTaskTransitionAllowed`, `isTaskTerminal`.

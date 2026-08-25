@@ -264,11 +264,14 @@ const SQL_PATTERNS = [
 //  - migrations/ (SQL migrations source)
 //  - scripts/migrate.ts (the SQL migration runner; reads .sql files)
 //  - src/lib/db.ts (the Prisma client wrapper; runs PRAGMAs via $queryRaw)
+//  - packages/task-runtime/src/sqlite-repository.ts (the injected SQLite
+//    repository port; it has no ambient database/client authority)
 //  - any *.test.ts file (tests may construct SQL strings)
 //  - python venvs, node_modules, build outputs
 const SQL_ALLOWED_FILES = new Set([
   "scripts/migrate.ts",
   "src/lib/db.ts",
+  "packages/task-runtime/src/sqlite-repository.ts",
 ]);
 
 function isSqlAllowedPath(p: string): boolean {

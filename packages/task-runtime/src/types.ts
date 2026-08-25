@@ -96,6 +96,8 @@ export interface DurableTaskRepository {
   // Speculative candidate branches and their immutable admission proof.
   createCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord>;
   getCandidateBranch(branchId: string): Promise<CandidateBranchRecord | null>;
+  /** Atomically claim an OPEN branch by advancing its durable epoch. */
+  claimCandidateBranch(branchId: string, expectedEpoch: number): Promise<CandidateBranchRecord | null>;
   updateCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord>;
   listCandidateBranches(taskId: string): Promise<readonly CandidateBranchRecord[]>;
 
@@ -121,6 +123,8 @@ export interface DurableTaskRepository {
   markOutboxDelivered(id: string, publishedAt: Rfc3339Timestamp): Promise<void>;
 
   saveInboxMessage(message: InboxMessage): Promise<void>;
+  /** Every repository must claim inbox keys atomically before processing. */
+  claimInboxMessage(message: InboxMessage): Promise<boolean>;
   getInboxMessage(idempotencyKey: string): Promise<InboxMessage | null>;
   updateInboxMessage(message: InboxMessage): Promise<void>;
 

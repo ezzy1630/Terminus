@@ -188,6 +188,7 @@ export function okResult<T>(
     readonly sourceVersions?: Readonly<Record<string, string>> | undefined;
     readonly artifacts?: readonly ArtifactDescriptor[] | undefined;
     readonly sideEffects?: readonly SideEffectDescriptor[] | undefined;
+    readonly diagnostics?: readonly Diagnostic[] | undefined;
     readonly timing?: Partial<TimingInfo> | undefined;
     readonly confidentiality?: ConfidentialityLabel | undefined;
   },
@@ -199,7 +200,7 @@ export function okResult<T>(
     artifacts: opts.artifacts ?? [],
     sourceVersions: opts.sourceVersions ?? {},
     truncation: { occurred: false, reason: null, continuation: null },
-    diagnostics: [],
+    diagnostics: opts.diagnostics ?? [],
     sideEffects: opts.sideEffects ?? [],
     trust: "derived",
     confidentiality: opts.confidentiality ?? "workspace",
@@ -542,6 +543,7 @@ const PATCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
             enum: [
               "replace_symbol",
               "range",
+              "replace_hashline",
               "exact_text",
               "insert",
               "delete",
@@ -555,6 +557,7 @@ const PATCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
           observed_hash: { type: ["string", "null"] },
           symbol: { type: ["string", "null"] },
           range: { type: ["object", "null"] },
+          line_hashes: { type: ["array", "null"], items: { type: "string" } },
           old_text: { type: ["string", "null"] },
           new_text: { type: ["string", "null"] },
           destination: { type: ["string", "null"] },
@@ -565,7 +568,7 @@ const PATCH_INPUT: Readonly<Record<string, unknown>> = Object.freeze({
     },
     dialect: {
       type: "string",
-      enum: ["canonical", "search_replace", "unified_diff", "ast"],
+      enum: ["canonical", "search_replace", "hashline", "unified_diff", "ast"],
     },
     validation_profile: {
       type: "string",

@@ -62,8 +62,11 @@ import type {
   ProviderToolSchema,
 } from "@terminus/provider-core";
 import { filterByConfidentiality } from "@terminus/provider-core";
-import { resolveTokenizer, reconcileUsage } from "./tokenizer.js";
+import { resolveTokenizer } from "./tokenizer.js";
+import type { ModelTokenizer, TokenEstimator } from "./tokenizer.js";
 import { compactContext, type CompactionTransform } from "./compaction.js";
+import { buildCacheEpochDebugData } from "./cache-debug.js";
+import type { CacheEpochDebugSnapshot } from "./cache-debug.js";
 export {
   compactContext,
 } from "./compaction.js";
@@ -73,8 +76,65 @@ export type {
   SemanticCompactionInput,
   SemanticCompactionResult,
 } from "./compaction.js";
-export type { ModelTokenizer, ReconciledUsage, ModelTokenBreakdown } from "./tokenizer.js";
-export { resolveTokenizer, reconcileUsage };
+export type {
+  CalibrationStatus,
+  ModelTokenizer,
+  ModelTokenBreakdown,
+  ReconciledUsage,
+  ReconcileUsageOptions,
+  TokenCalibrationDiagnostics,
+  TokenCalibrationPolicy,
+  TokenCalibrationSeed,
+  TokenEstimate,
+  TokenEstimateSource,
+  TokenEstimator,
+  TokenizerBinding,
+  TokenizerOptions,
+} from "./tokenizer.js";
+export {
+  CalibratedModelTokenizer,
+  DEFAULT_CALIBRATION_POLICY,
+  TOKEN_CALIBRATION_VERSION,
+  TOKEN_ESTIMATOR_CONTRACT_VERSION,
+  reconcileUsage,
+  resolveTokenizer,
+} from "./tokenizer.js";
+
+export {
+  buildCacheEpochDebugData,
+  buildStablePrefixDebugData,
+  compareCacheEpochs,
+  snapshotCacheEpoch,
+} from "./cache-debug.js";
+export type {
+  CacheEpochDebugData,
+  CacheEpochDebugInput,
+  CacheEpochDebugSnapshot,
+  CacheEpochDiagnostic,
+  CacheEpochDiagnosticCode,
+  StablePrefixDebugData,
+  StablePrefixEntry,
+} from "./cache-debug.js";
+
+export {
+  buildHandoffBundle,
+  formatHandoffBundle,
+} from "./handoff.js";
+export type {
+  HandoffAcceptance,
+  HandoffAcceptanceStatus,
+  HandoffActionStatus,
+  HandoffBundle,
+  HandoffBundleInput,
+  HandoffChangedFile,
+  HandoffCheckStatus,
+  HandoffCompletedAction,
+  HandoffEvidenceHandle,
+  HandoffFileChange,
+  HandoffVerificationCheck,
+  HandoffVerificationState,
+  HandoffVerificationStatus,
+} from "./handoff.js";
 
 // World-state producer registry (SPEC §33.5)
 export {
@@ -225,8 +285,12 @@ export interface CompileInput {
   readonly confidentialityPolicy: ConfidentialityPolicy;
   /** Tool schemas are part of the exact provider-visible invocation. */
   readonly toolSchemas?: readonly ProviderToolSchema[] | undefined;
+  /** Optional verified provider binding or persisted calibration profile. */
+  readonly tokenEstimator?: TokenEstimator | undefined;
   /** Semantic compaction is opt-in and must preserve evidence links. */
   readonly compactionPolicy?: CompactionPolicy | undefined;
+  /** Optional prior snapshot used to explain cache mutations across turns. */
+  readonly previousCacheEpoch?: CacheEpochDebugSnapshot | null | undefined;
   readonly store: ContextStore;
   /**
    * Optional retrieval pipeline. When supplied, this is used in preference
@@ -422,6 +486,8 @@ export async function collectRequiredFragments(
 ): Promise<RequiredFragments> {
   const now = input.worldState.observedAt;
   const modelKey = input.model.modelKey;
+  const tokenizer = input.tokenEstimator
+    ?? resolveTokenizer(input.provider.providerId, modelKey);
   const scope: ContextScope = {
     workspaceId: null,
     sessionId: input.thread.sessionId,
@@ -458,7 +524,7 @@ export async function collectRequiredFragments(
     freshness: { observedAt: now, sourceVersion: "v1", stale: false, staleReason: null },
     dependencies: [],
     invalidation: [{ kind: "policy_changed", selector: "terminus://policy/secure-local-default" }],
-    estimatedTokens: { [modelKey]: estimateTokens(authorityText) } as Readonly<Record<string, number>>,
+    estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(authorityText) } as Readonly<Record<string, number>>,
     selectionFeatures: emptyFeatures,
   };
 
@@ -514,7 +580,7 @@ export async function collectRequiredFragments(
     freshness: { observedAt: now, sourceVersion: `v${contract.version}`, stale: false, staleReason: null },
     dependencies: [],
     invalidation: [{ kind: "policy_changed", selector: `task://${input.task.taskId}` }],
-    estimatedTokens: { [modelKey]: estimateTokens(contractText) } as Readonly<Record<string, number>>,
+    estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(contractText) } as Readonly<Record<string, number>>,
     selectionFeatures: emptyFeatures,
   };
 
@@ -537,7 +603,7 @@ export async function collectRequiredFragments(
     freshness: { observedAt: now, sourceVersion: "v1", stale: false, staleReason: null },
     dependencies: ["required:authority:secure-local-default"],
     invalidation: [{ kind: "policy_changed", selector: "terminus://policy/command" }],
-    estimatedTokens: { [modelKey]: estimateTokens(policyText) } as Readonly<Record<string, number>>,
+    estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(policyText) } as Readonly<Record<string, number>>,
     selectionFeatures: emptyFeatures,
   };
 
@@ -566,17 +632,12 @@ export async function collectRequiredFragments(
       freshness: { observedAt: now, sourceVersion: `v${contract.version}`, stale: false, staleReason: null },
       dependencies: [`required:task_contract:${input.task.taskId}`],
       invalidation: [{ kind: "policy_changed", selector: `task://${input.task.taskId}/criterion/${ac.id}` }],
-      estimatedTokens: { [modelKey]: estimateTokens(acText) } as Readonly<Record<string, number>>,
+      estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(acText) } as Readonly<Record<string, number>>,
       selectionFeatures: emptyFeatures,
     });
   }
 
   return { authority: [authority], taskContract: [taskContract], policy: [policy], acceptanceCriteria };
-}
-
-/** Rough token estimate: ~4 characters per token. */
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 /** Build an ArtifactRef with a stable, content-derived hash. */
@@ -615,6 +676,8 @@ function makeSource(uri: string, producer: string, observedAt: Rfc3339Timestamp)
  */
 function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[] {
   const modelKey = input.model.modelKey;
+  const tokenizer = input.tokenEstimator
+    ?? resolveTokenizer(input.provider.providerId, modelKey);
   const scope: ContextScope = {
     workspaceId: null,
     sessionId: input.thread.sessionId,
@@ -654,6 +717,7 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
       exactness: section === "request" ? "recoverable_by_reference" : "semantics_preserving",
       scope,
       modelKey,
+      tokenizer,
       features,
       observedAt: input.worldState.observedAt,
       evidenceRefs,
@@ -720,6 +784,7 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
       exactness: hydratedText === undefined ? "recoverable_by_reference" : "exact",
       scope,
       modelKey,
+      tokenizer,
       features,
       observedAt: episode.occurredAt,
       evidenceRefs: evidence,
@@ -772,6 +837,7 @@ function collectRuntimeFragments(input: CompileInput): readonly RetrievalResult[
       exactness: "semantics_preserving",
       scope,
       modelKey,
+      tokenizer,
       features,
       observedAt: input.checkpoint.createdAt,
       evidenceRefs: [artifactRefFromContentHash(input.checkpoint.artifactHash)],
@@ -803,6 +869,7 @@ interface RuntimeFragmentInput {
   readonly exactness: ContextFragment["exactness"];
   readonly scope: ContextScope;
   readonly modelKey: ModelKey;
+  readonly tokenizer: ModelTokenizer;
   readonly features: SelectionFeatures;
   readonly observedAt: Rfc3339Timestamp;
   readonly evidenceRefs?: readonly ArtifactRef[] | undefined;
@@ -836,7 +903,9 @@ function makeRuntimeFragment(input: RuntimeFragmentInput): ContextFragment {
     },
     dependencies: input.dependencies ?? [],
     invalidation: input.invalidation,
-    estimatedTokens: { [input.modelKey]: estimateTokens(input.text) },
+    estimatedTokens: {
+      [input.modelKey]: input.tokenizer.estimateTextTokens(input.text),
+    },
     selectionFeatures: input.features,
   };
 }
@@ -1038,7 +1107,10 @@ export function scoreCandidates(
   return candidates.map((result) => {
     const frag = result.fragment;
     const features = frag.selectionFeatures;
-    const tokenCost = Math.max(1, frag.estimatedTokens[modelKey] ?? 1);
+    const tokenCost = Math.max(
+      1,
+      tokenCostFor(frag, modelKey, input.provider.providerId, input.tokenEstimator),
+    );
     const numerator =
       weights.relevance * features.relevance *
       weights.authorityWeight * (frag.authority / 100) *
@@ -1080,12 +1152,13 @@ function tokenCostFor(
   frag: ContextFragment,
   modelKey: ModelKey,
   providerId?: string,
+  tokenizer?: ModelTokenizer,
 ): number {
   const recorded = (frag.estimatedTokens as Readonly<Record<string, number>>)[modelKey as string];
   if (recorded !== undefined && recorded > 0) return recorded;
 
-  const tokenizer = resolveTokenizer(providerId ?? "openai", modelKey);
-  return tokenizer.estimateFragmentTokens(frag).totalTokens;
+  const estimator = tokenizer ?? resolveTokenizer(providerId ?? "openai", modelKey);
+  return estimator.estimateFragmentTokens(frag).totalTokens;
 }
 
 function isToolCallFragment(fragment: ContextFragment): boolean {
@@ -1104,6 +1177,7 @@ export function allocateBudget(
   options: AllocationOptions,
   modelKey: ModelKey,
   providerId?: string,
+  tokenizer?: ModelTokenizer,
 ): AllocationResult {
   const selected: ScoredCandidate[] = [];
   const omitted: { result: RetrievalResult; reason: string }[] = [];
@@ -1118,7 +1192,7 @@ export function allocateBudget(
   for (const s of required) {
     selected.push(s);
     selectedIds.add(s.result.fragment.id);
-    remaining -= tokenCostFor(s.result.fragment, modelKey, providerId);
+    remaining -= tokenCostFor(s.result.fragment, modelKey, providerId, tokenizer);
   }
 
   const dependencyClosure = (
@@ -1175,7 +1249,7 @@ export function allocateBudget(
       .filter((candidate, index, all) => all.findIndex((item) => item.result.fragment.id === candidate.result.fragment.id) === index)
       .filter((candidate) => !selectedIds.has(candidate.result.fragment.id));
     const cost = bundle.reduce(
-      (sum, candidate) => sum + tokenCostFor(candidate.result.fragment, modelKey, providerId),
+      (sum, candidate) => sum + tokenCostFor(candidate.result.fragment, modelKey, providerId, tokenizer),
       0,
     );
     if (cost <= remaining) {
@@ -1189,7 +1263,7 @@ export function allocateBudget(
     }
   }
   const total = selected.reduce(
-    (sum, s) => sum + tokenCostFor(s.result.fragment, modelKey, providerId),
+    (sum, s) => sum + tokenCostFor(s.result.fragment, modelKey, providerId, tokenizer),
     0,
   );
   const hardLimit = Number(budget.hardInputLimit);
@@ -1218,7 +1292,7 @@ export function planCacheEpoch(
   const modelKey = input.model.modelKey;
   const providerId = input.provider.providerId;
   const predicted = stable.reduce(
-    (sum, s) => sum + tokenCostFor(s.result.fragment, modelKey, providerId),
+    (sum, s) => sum + tokenCostFor(s.result.fragment, modelKey, providerId, input.tokenEstimator),
     0,
   );
   return {
@@ -1243,7 +1317,8 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
   const runtimeResults = collectRuntimeFragments(input);
 
   // Track tokenizer choice for manifest recording.
-  const tokenizer = resolveTokenizer(input.provider.providerId, input.model.modelKey);
+  const tokenizer = input.tokenEstimator
+    ?? resolveTokenizer(input.provider.providerId, input.model.modelKey);
   // Combine required + retrieved as RetrievalResult.
   const requiredResults: RetrievalResult[] = [
     ...required.authority.map((f) => ({
@@ -1305,6 +1380,7 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
       modelKey: input.model.modelKey,
       targetTokens: Math.max(1, input.compactionPolicy.targetTokens),
       observedAt: input.worldState.observedAt,
+      tokenizer,
       invariants: [
         {
           id: "task-contract",
@@ -1337,7 +1413,7 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     preserveDependencies: true,
     preserveCompleteEpisodes: true,
     hardIncludeRequired: true,
-  }, input.model.modelKey, input.provider.providerId);
+  }, input.model.modelKey, input.provider.providerId, tokenizer);
   // 8. Cache plan.
   const cachePlan = planCacheEpoch(input, allocation.selected);
   // Confidentiality filter.
@@ -1366,6 +1442,22 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
   }
 
   const toolSchemas = input.toolSchemas ?? [];
+  const cacheEpochDebug = buildCacheEpochDebugData({
+    providerId: input.provider.providerId,
+    modelKey: input.model.modelKey,
+    epoch: input.epoch,
+    cachePlan,
+    selectedFragments,
+    toolSchemas,
+    cacheMode: input.provider.caching.mode,
+    exactPrefixRequired: input.provider.caching.exactPrefixRequired,
+  }, input.previousCacheEpoch ?? null);
+  if (tokenizer.calibration.status === "degraded") {
+    warnings.push(`token calibration degraded: ${tokenizer.calibration.reason}`);
+  }
+  for (const item of cacheEpochDebug.diagnostics) {
+    if (item.severity === "warning") warnings.push(`cache diagnostic: ${item.message}`);
+  }
   const decisionRecord: Readonly<Record<string, unknown>> = {
     retrievalQueries: queries.map((query) => ({
       text: query.text,
@@ -1396,6 +1488,8 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     confidentialityOmissions: confFiltered.omitted,
     transforms: compactionTransforms,
     toolSchemas: toolSchemas.map((schema) => ({ id: schema.id, version: schema.version })),
+    tokenEstimator: tokenizer.calibration,
+    cacheEpochDebug,
     memory: {
       enabled: false,
       reason: "durable memory remains disabled until its precision/harm gate passes",
@@ -1406,9 +1500,9 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
 
   // 9. Build + persist manifest BEFORE send (SPEC §8.6, §33.13, ADR-0010)
   // Record tokenizer choice in the manifest.
-  const tokenizerChoice = `${tokenizer.providerId}:${tokenizer.modelKey}`;
+  const tokenizerChoice = `${tokenizer.providerId}:${tokenizer.modelKey}:${tokenizer.calibration.status}`;
   const manifestInput = {
-    compilerVersion: `v1 (tokenizer=${tokenizerChoice})`,
+    compilerVersion: `v1 (token-estimator=${tokenizer.contractVersion}; profile=${tokenizerChoice})`,
     policyVersion: "v1",
     providerCapabilityHash: hashSnapshot(input.provider),
     model: input.model.modelKey,
@@ -1487,7 +1581,12 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
     warnings,
     omitted: manifestInput.omitted,
     totalEstimatedTokens: selectedFragments.reduce(
-      (sum, fragment) => sum + tokenCostFor(fragment, input.model.modelKey, input.provider.providerId),
+      (sum, fragment) => sum + tokenCostFor(
+        fragment,
+        input.model.modelKey,
+        input.provider.providerId,
+        tokenizer,
+      ),
       0,
     ),
     overHardLimit: allocation.overHardLimit,
@@ -1574,11 +1673,11 @@ function resolveRetrievalPipeline(input: CompileInput): RetrievalPipeline {
  */
 export class LexicalRetrieval implements RetrievalPipeline {
   private readonly index: SourceIndex;
-  private readonly tokenEstimate: (text: string) => number;
+  private readonly tokenEstimate: ((text: string) => number) | null;
 
   constructor(index: SourceIndex, tokenEstimate?: (text: string) => number) {
     this.index = index;
-    this.tokenEstimate = tokenEstimate ?? defaultTokenEstimate;
+    this.tokenEstimate = tokenEstimate ?? null;
   }
 
   async retrieve(
@@ -1600,7 +1699,15 @@ export class LexicalRetrieval implements RetrievalPipeline {
       // 1. Exact path/symbol lookup.
       const exact = docs.find((d) => d.path === q.text);
       if (exact !== undefined) {
-        const frag = this.makeFragment(exact, exact.content, "exact_path_symbol", now, modelKey, q);
+        const frag = this.makeFragment(
+          exact,
+          exact.content,
+          "exact_path_symbol",
+          now,
+          modelKey,
+          q,
+          input.tokenEstimator ?? resolveTokenizer(input.provider.providerId, modelKey),
+        );
         if (!seenFragmentIds.has(frag.id)) {
           seenFragmentIds.add(frag.id);
           results.push({
@@ -1640,7 +1747,15 @@ export class LexicalRetrieval implements RetrievalPipeline {
         .slice(0, 5);
       for (const { doc, score } of scored) {
         const snippet = extractSnippet(doc.content, qTokens, 240);
-        const frag = this.makeFragment(doc, snippet, "lexical_bm25", now, modelKey, q);
+        const frag = this.makeFragment(
+          doc,
+          snippet,
+          "lexical_bm25",
+          now,
+          modelKey,
+          q,
+          input.tokenEstimator ?? resolveTokenizer(input.provider.providerId, modelKey),
+        );
         if (seenFragmentIds.has(frag.id)) continue;
         seenFragmentIds.add(frag.id);
         results.push({
@@ -1676,6 +1791,7 @@ export class LexicalRetrieval implements RetrievalPipeline {
     now: Rfc3339Timestamp,
     modelKey: ModelKey,
     q: RetrievalQuery,
+    tokenizer: ModelTokenizer,
   ): ContextFragment {
     // The query `q` is referenced here so the rationale string flows into
     // the manifest later via the caller. We embed it in the fragment id so
@@ -1728,15 +1844,12 @@ export class LexicalRetrieval implements RetrievalPipeline {
       freshness: { observedAt: now, sourceVersion: doc.version, stale: false, staleReason: null },
       dependencies: [],
       invalidation: [{ kind: "file_changed", selector: doc.path }],
-      estimatedTokens: { [modelKey]: this.tokenEstimate(snippet) } as Readonly<Record<string, number>>,
+      estimatedTokens: {
+        [modelKey]: this.tokenEstimate?.(snippet) ?? tokenizer.estimateTextTokens(snippet),
+      } as Readonly<Record<string, number>>,
       selectionFeatures: features,
     };
   }
-}
-
-/** Default token estimator: ~4 chars per token. */
-function defaultTokenEstimate(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 /** Tokenize a string for BM25 scoring. */

@@ -31,6 +31,7 @@ export interface CandidateBranchMerger {
 export interface CandidateAdmissionRepository {
   createCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord>;
   getCandidateBranch(branchId: string): Promise<CandidateBranchRecord | null>;
+  claimCandidateBranch(branchId: string, expectedEpoch: number): Promise<CandidateBranchRecord | null>;
   updateCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord>;
   getEffectRecord(effectId: string): Promise<{
     readonly id: string;
@@ -146,7 +147,15 @@ export class AdmissionService {
       }
     }
 
-    const merge = await merger.merge(branch);
+    // Claim after all read-only validation and immediately before the merge.
+    // The repository advances the durable epoch with a compare-and-swap, so
+    // two reviewers cannot both merge the same OPEN branch.
+    const claimedBranch = await this.repo.claimCandidateBranch(branch.branchId, branch.epoch);
+    if (claimedBranch === null) {
+      throw new ValidationError(`candidate branch '${branch.branchId}' was claimed or changed concurrently`);
+    }
+
+    const merge = await merger.merge(claimedBranch);
     if (!merge.authoritativeRevision) {
       throw new ValidationError("authoritative merge returned no revision");
     }
@@ -158,7 +167,8 @@ export class AdmissionService {
         committedEffects.push(effect.id);
       }
       await this.repo.updateCandidateBranch({
-        ...branch,
+        ...claimedBranch,
+        epoch: claimedBranch.epoch + 1,
         status: "ADMITTED",
         headRevision: merge.authoritativeRevision,
       });
@@ -185,13 +195,17 @@ export class AdmissionService {
     if (branch.status !== "OPEN") {
       throw new ValidationError(`Candidate branch '${branchId}' is already ${branch.status}`);
     }
-    for (const effectId of branch.effectIds) {
+    const claimedBranch = await this.repo.claimCandidateBranch(branch.branchId, branch.epoch);
+    if (claimedBranch === null) {
+      throw new ValidationError(`candidate branch '${branchId}' was claimed or changed concurrently`);
+    }
+    for (const effectId of claimedBranch.effectIds) {
       const effect = await this.repo.getEffectRecord(effectId);
       if (effect !== null && effect.state !== "COMMITTED" && effect.state !== "CANCELLED" && effect.state !== "DENIED") {
         await this.ledger.cancelEffect(effectId, `Losing speculative branch rejected: ${reason}`);
       }
     }
-    await this.repo.updateCandidateBranch({ ...branch, status: "REJECTED" });
+    await this.repo.updateCandidateBranch({ ...claimedBranch, epoch: claimedBranch.epoch + 1, status: "REJECTED" });
   }
 }
 

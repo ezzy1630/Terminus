@@ -10,6 +10,7 @@ import type {
   ReviewFinding,
   Uuid7,
   ArtifactRef,
+  ContentHash,
   Micros,
   Rfc3339Timestamp,
 } from "@terminus/domain";
@@ -25,6 +26,19 @@ import {
   isImmutableArtifact,
   validateClaimEvidenceGraph,
 } from "./evidence.js";
+import {
+  computeAcceptanceCriteriaHash,
+  evaluateProofBundleAdmission,
+  type ProofBundle,
+} from "./proof-bundle.js";
+import {
+  validateHumanAcceptanceObligations,
+  type HumanAcceptanceObligation,
+} from "./human-acceptance.js";
+import {
+  computeVerificationConfigHash,
+  type VerifierBinding,
+} from "./run-binding.js";
 
 export interface CompletionGateInput {
   readonly taskId: Uuid7;
@@ -46,6 +60,14 @@ export interface CompletionGateInput {
   readonly costMicros: Micros;
   readonly durationSeconds: number;
   readonly finalCheckpoint: ArtifactRef;
+  /** Hash recorded at plan creation; prevents criteria deletion/substitution. */
+  readonly expectedCriteriaHash?: ContentHash | undefined;
+  readonly verifierBinding?: VerifierBinding | undefined;
+  readonly humanAcceptanceObligations?: readonly HumanAcceptanceObligation[] | undefined;
+  /** Optional bundle path. Unsigned bundles require an independently retained hash. */
+  readonly proofBundle?: ProofBundle | undefined;
+  readonly proofBundleContentHash?: ContentHash | undefined;
+  readonly taskContractHash?: ContentHash | undefined;
 }
 
 export type CompletionDenialReason =
@@ -56,7 +78,9 @@ export type CompletionDenialReason =
   | "completion_expression_unsatisfied"
   | "open_findings"
   | "revision_mismatch"
-  | "evidence_missing";
+  | "evidence_missing"
+  | "criteria_mismatch"
+  | "proof_bundle_invalid";
 
 export type CompletionGateDecision =
   | { readonly allow: true; readonly coverage: BindingCoverageReport }
@@ -68,6 +92,37 @@ export type CompletionGateDecision =
     };
 
 export function evaluateCompletionGate(input: CompletionGateInput): CompletionGateDecision {
+  const criterionIds = input.criteria.map((criterion) => criterion.id);
+  if (new Set(criterionIds).size !== criterionIds.length) {
+    return {
+      allow: false,
+      reason: "criteria_mismatch",
+      detail: "acceptance criteria contain duplicate identifiers",
+      coverage: bindAcceptanceCriteria(input.criteria, input.plan.nodes),
+    };
+  }
+  if (
+    input.expectedCriteriaHash !== undefined
+    && computeAcceptanceCriteriaHash(input.criteria) !== input.expectedCriteriaHash
+  ) {
+    return {
+      allow: false,
+      reason: "criteria_mismatch",
+      detail: "acceptance criteria changed after verification plan creation",
+      coverage: bindAcceptanceCriteria(input.criteria, input.plan.nodes),
+    };
+  }
+  if (
+    input.verifierBinding !== undefined
+    && input.verifierBinding.configurationHash !== computeVerificationConfigHash(input.plan)
+  ) {
+    return {
+      allow: false,
+      reason: "binding_invalid",
+      detail: "verifier binding does not match the verification plan configuration",
+      coverage: bindAcceptanceCriteria(input.criteria, input.plan.nodes),
+    };
+  }
   if (!input.criteria.some((criterion) => criterion.required)) {
     return {
       allow: false,
@@ -86,14 +141,42 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
     };
   }
 
-  const nonAutomatedRequired = coverage.bindings.filter(
-    (binding) => binding.required && binding.disposition !== "predicate",
+  const unverifiableRequired = coverage.bindings.filter(
+    (binding) => binding.required && binding.disposition === "unverifiable",
   );
-  if (nonAutomatedRequired.length > 0) {
+  if (unverifiableRequired.length > 0) {
     return {
       allow: false,
       reason: "manual_criterion",
-      detail: `required criteria have no independent predicate: ${nonAutomatedRequired.map((binding) => binding.criterionId).join(", ")}`,
+      detail: `required criteria are unverifiable: ${unverifiableRequired.map((binding) => binding.criterionId).join(", ")}`,
+      coverage,
+    };
+  }
+
+  const humanObligationFailures = validateHumanAcceptanceObligations({
+    criteria: input.criteria,
+    nodes: input.plan.nodes,
+    obligations: input.humanAcceptanceObligations ?? [],
+    sourceRevision: input.sourceRevision,
+    environmentImageDigest: input.environmentImageDigest,
+  });
+  const requiredHumanCriteria = coverage.bindings.filter(
+    (binding) => binding.required && (binding.disposition === "manual" || binding.requiresHumanAcceptance),
+  );
+  if (requiredHumanCriteria.length > 0 && humanObligationFailures.length > 0) {
+    return {
+      allow: false,
+      reason: "manual_criterion",
+      detail: humanObligationFailures.join("; "),
+      coverage,
+    };
+  }
+
+  if (input.verifierBinding === undefined) {
+    return {
+      allow: false,
+      reason: "binding_invalid",
+      detail: "completion requires an explicit verifier binding",
       coverage,
     };
   }
@@ -123,6 +206,7 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
     now: input.now,
     expiresAt: input.expiresAt,
     invalidatedNodeIds: input.invalidatedNodeIds,
+    verifierBinding: input.verifierBinding,
   });
   if (!binding.ok) {
     return {
@@ -141,6 +225,21 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
       allow: false,
       reason: "required_predicate_failed",
       detail: `required nodes not pass: ${requiredFailed.map((n) => n.id).join(", ")}`,
+      coverage,
+    };
+  }
+
+  const requiredEvidenceMissing = input.plan.nodes
+    .filter((node) => node.required)
+    .filter((node) => {
+      const result = resultMap.get(node.id);
+      return result?.status === "pass" && result.artifacts.length === 0;
+    });
+  if (requiredEvidenceMissing.length > 0) {
+    return {
+      allow: false,
+      reason: "evidence_missing",
+      detail: `passing required nodes lack immutable evidence: ${requiredEvidenceMissing.map((node) => node.id).join(", ")}`,
       coverage,
     };
   }
@@ -167,6 +266,39 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
       detail: evidenceFailures.join("; "),
       coverage,
     };
+  }
+
+  if (input.proofBundle !== undefined) {
+    if (input.proofBundleContentHash === undefined || input.taskContractHash === undefined) {
+      return {
+        allow: false,
+        reason: "proof_bundle_invalid",
+        detail: "proof bundle admission requires a trusted bundle hash and task contract hash",
+        coverage,
+      };
+    }
+    const proofAdmission = evaluateProofBundleAdmission(input.proofBundle, {
+      expectedContentHash: input.proofBundleContentHash,
+      taskContractHash: input.taskContractHash,
+      criteria: input.criteria,
+      plan: input.plan,
+      results: input.results,
+      sourceRevision: input.sourceRevision,
+      environmentBlueprintDigest: input.environmentImageDigest,
+      verifierBinding: input.verifierBinding,
+      ...(input.humanAcceptanceObligations !== undefined
+        ? { humanAcceptanceObligations: input.humanAcceptanceObligations }
+        : {}),
+      requireTrusted: true,
+    });
+    if (!proofAdmission.admissible) {
+      return {
+        allow: false,
+        reason: "proof_bundle_invalid",
+        detail: proofAdmission.failures.join("; "),
+        coverage,
+      };
+    }
   }
 
   if (!input.completionExpressionSatisfied) {

@@ -30,6 +30,8 @@ describe("ExpectedValueScheduler (SPEC §27.1, §27.2)", () => {
       activeWorkerCount: 1,
       candidateObjective: "Refactor core parser",
       parentTaskId: "task-root",
+      delegationId: "delegation:phase8:low-value",
+      reservationId: "reservation:phase8:low-value",
     });
 
     expect(decision.spawn).toBe(false);
@@ -55,6 +57,8 @@ describe("ExpectedValueScheduler (SPEC §27.1, §27.2)", () => {
       activeWorkerCount: 0,
       candidateObjective: "Explore dependency graph",
       parentTaskId: "task-root",
+      delegationId: "delegation:phase8:scout",
+      reservationId: "reservation:phase8:scout",
       allowedPaths: ["src/lib/"],
     });
 
@@ -83,6 +87,8 @@ describe("ExpectedValueScheduler (SPEC §27.1, §27.2)", () => {
       activeWorkerCount: 0,
       candidateObjective: "Rewrite authentication security kernel",
       parentTaskId: "task-root",
+      delegationId: "delegation:phase8:writer",
+      reservationId: "reservation:phase8:writer",
     });
 
     expect(decision.spawn).toBe(false);

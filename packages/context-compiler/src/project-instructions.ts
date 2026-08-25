@@ -14,8 +14,10 @@
  * assembled as project_rule context fragments.
  */
 
-import type { Rfc3339Timestamp, Uuid7, ContentHash, ArtifactUri, ByteCount } from "@terminus/domain";
+import type { Rfc3339Timestamp, Uuid7, ContentHash, ArtifactUri, ByteCount, ModelKey } from "@terminus/domain";
 import type { ContextFragment, ContextScope } from "@terminus/context-ir";
+import type { ModelTokenizer } from "./tokenizer.js";
+import { resolveTokenizer } from "./tokenizer.js";
 
 // ──────────────────────── Discovered instruction ─────────────────────────────
 
@@ -126,6 +128,7 @@ export interface InstructionFragmentInput {
   readonly sessionId: Uuid7 | null;
   readonly taskId: Uuid7 | null;
   readonly modelKey: string;
+  readonly tokenizer?: ModelTokenizer | undefined;
 }
 
 /**
@@ -140,6 +143,7 @@ export interface InstructionFragmentInput {
 export function instructionsToFragments(
   input: InstructionFragmentInput,
 ): readonly ContextFragment[] {
+  const tokenizer = input.tokenizer ?? resolveTokenizer("unknown", input.modelKey as ModelKey);
   const maxPrecedence = input.instructions.length > 0
     ? Math.max(...input.instructions.map((i) => i.precedence))
     : 0;
@@ -198,7 +202,7 @@ export function instructionsToFragments(
         { kind: "file_changed" as const, selector: inst.path },
       ],
       estimatedTokens: {
-        [input.modelKey]: Math.max(1, Math.ceil(inst.content.length / 4)),
+        [input.modelKey]: tokenizer.estimateTextTokens(inst.content),
       } as Readonly<Record<string, number>>,
       selectionFeatures: {
         relevance: authority / 100,

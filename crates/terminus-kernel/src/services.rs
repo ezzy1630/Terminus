@@ -127,7 +127,16 @@ impl KernelHandle {
     ) -> Result<Self, KernelAssemblyError> {
         let artifact_store = Arc::new(ArtifactStore::open(data_dir.join("artifacts"))?);
         let process_manager = Arc::new(ProcessManager::new(Arc::clone(&artifact_store)));
-        let job_manager = Arc::new(JobManager::new(Arc::clone(&process_manager)));
+        let job_manager = Arc::new(JobManager::with_storage(
+            Arc::clone(&process_manager),
+            data_dir.join("jobs.sqlite"),
+        ));
+        job_manager
+            .load_persisted_sync()
+            .map_err(|error| KernelAssemblyError::Jobs(error.to_string()))?;
+        job_manager
+            .reconcile_loaded_sync()
+            .map_err(|error| KernelAssemblyError::Jobs(error.to_string()))?;
         let policy_engine = Arc::new(PolicyEngine::new(terminus_policy::default_rule_set()));
         let info = KernelInfoService::new();
         // SPEC §13.4 / §36.5: select the platform-enforced backend first.
@@ -1420,6 +1429,7 @@ fn patch_workspace_paths(
         match edit {
             PatchEdit::ReplaceSymbol(edit) => paths.push(edit.path.clone()),
             PatchEdit::ReplaceRange(edit) => paths.push(edit.path.clone()),
+            PatchEdit::ReplaceHashline(edit) => paths.push(edit.path.clone()),
             PatchEdit::ReplaceExactText(edit) => paths.push(edit.path.clone()),
             PatchEdit::Insert(edit) => paths.push(edit.path.clone()),
             PatchEdit::DeleteRange(edit) => paths.push(edit.path.clone()),
@@ -2415,6 +2425,14 @@ impl JobService {
         let record =
             terminus_jobs::JobRecord::new(&job_id, &ctx.session_id, &ctx.task_id, command_text);
         self.manager.create(record).await.map_err(job_error)?;
+        if let Err(error) = self
+            .manager
+            .begin_start(&job_id, &command.program, None)
+            .await
+        {
+            let _ = self.manager.remove(&job_id).await;
+            return Err(job_error(error));
+        }
         let started = self
             .process
             .start_in_profile_with_outcome(ctx, intent, command, sandbox_profile_id)
@@ -2422,17 +2440,40 @@ impl JobService {
         let (outcome, receiver) = match started {
             Ok(value) => value,
             Err(error) => {
-                self.manager.remove(&job_id).await;
+                if let Err(persist_error) = self
+                    .manager
+                    .mark_start_failed(&job_id, &error.to_string())
+                    .await
+                {
+                    return Err(job_error(persist_error));
+                }
                 return Err(error);
             }
         };
         if !durable {
             tracing::debug!(job_id = %job_id, "job started in non-durable mode");
         }
-        self.manager
-            .attach_started(&job_id, &outcome)
-            .await
-            .map_err(job_error)?;
+        if let Err(error) = self.manager.attach_started(&job_id, &outcome).await {
+            // A durable write failure after spawn must not leave an
+            // untracked process. Compensate through the same kernel control
+            // path, then surface the original persistence error.
+            let cancellation = self
+                .manager
+                .compensate_spawned(&outcome, "job attach persistence failed")
+                .await;
+            if cancellation.is_ok() {
+                if let Err(remove_error) = self.manager.remove(&job_id).await {
+                    return Err(job_error(remove_error));
+                }
+            } else {
+                tracing::error!(
+                    job_id = %job_id,
+                    cancellation = ?cancellation,
+                    "job attach persistence failed and process compensation failed"
+                );
+            }
+            return Err(job_error(error));
+        }
         Ok((job_id, outcome, receiver))
     }
 

@@ -26,7 +26,7 @@ mod journal;
 mod unified_diff;
 mod validate;
 
-pub use engine::{PatchEngine, Transaction};
+pub use engine::{compute_line_hash, PatchEngine, Transaction};
 pub use error::PatchError;
 pub use journal::{JournalEntry, JournalRecord};
 pub use unified_diff::{parse_unified_diff, target_path, DiffHunk, HunkLine, ParsedUnifiedDiff};

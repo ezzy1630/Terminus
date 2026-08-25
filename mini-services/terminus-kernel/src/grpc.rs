@@ -1731,14 +1731,8 @@ impl JobServiceRpc for GrpcKernel {
             .context
             .map(context)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
-        authorize_job_control(&self.kernel, &ctx)?;
+        let _record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         let job_id = request.job_id;
-        self.kernel
-            .jobs
-            .manager()
-            .get(&job_id)
-            .await
-            .ok_or_else(|| Status::not_found("job not found"))?;
         let retained = self
             .job_streams
             .lock()
@@ -1792,7 +1786,7 @@ impl JobServiceRpc for GrpcKernel {
             .context
             .map(context)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
-        authorize_job_control(&self.kernel, &ctx)?;
+        let _record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         let state = self
             .kernel
             .jobs
@@ -1810,7 +1804,7 @@ impl JobServiceRpc for GrpcKernel {
             .context
             .map(context)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
-        authorize_job_control(&self.kernel, &ctx)?;
+        let _record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         let state = self
             .kernel
             .jobs
@@ -1828,7 +1822,7 @@ impl JobServiceRpc for GrpcKernel {
             .context
             .map(context)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
-        authorize_job_control(&self.kernel, &ctx)?;
+        let _record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         let state = self
             .kernel
             .jobs
@@ -1846,30 +1840,40 @@ impl JobServiceRpc for GrpcKernel {
             .context
             .map(context)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
-        authorize_job_control(&self.kernel, &ctx)?;
-        let record = self
-            .kernel
-            .jobs
-            .manager()
-            .get(&request.job_id)
-            .await
-            .ok_or_else(|| Status::not_found("job not found"))?;
+        let record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         Ok(Response::new(job_state(&request.job_id, record.state)))
     }
 }
 
-fn authorize_job_control(
+async fn authorize_job_control(
     kernel: &terminus_kernel::KernelHandle,
     ctx: &terminus_kernel_protocol::RequestContext,
-) -> Result<(), Status> {
-    terminus_kernel::validate_capability_for_op(
+    job_id: &str,
+) -> Result<terminus_jobs::JobRecord, Status> {
+    let token = terminus_kernel::validate_capability_for_op(
         &kernel.token_issuer,
         ctx,
-        terminus_authz::OperationClass::Exec,
+        terminus_authz::OperationClass::Job,
         &terminus_authz::Scope::default(),
     )
-    .map(|_| ())
-    .map_err(status)
+    .map_err(status)?;
+    let record = kernel
+        .jobs
+        .manager()
+        .get(job_id)
+        .await
+        .ok_or_else(|| Status::not_found("job not found"))?;
+    if ctx.task_id != "*" && record.owner_task_id != ctx.task_id {
+        return Err(Status::permission_denied(
+            "job is owned by a different task",
+        ));
+    }
+    if token.claims.binder.task_id != "*" && record.owner_task_id != token.claims.binder.task_id {
+        return Err(Status::permission_denied(
+            "job capability is owned by a different task",
+        ));
+    }
+    Ok(record)
 }
 
 fn job_state(job_id: &str, state: terminus_jobs::JobState) -> protocol::JobState {
@@ -2193,6 +2197,19 @@ fn patch_edit(value: protocol::PatchEdit) -> Result<terminus_kernel_protocol::Pa
                     .ok_or_else(|| Status::invalid_argument("replace range path is required"))?,
                 expected_sha256: value.expected_sha256,
                 range: line_range(value.range)?,
+                replacement_utf8: value.replacement_utf8,
+            },
+        )),
+        Edit::ReplaceHashline(value) => Ok(terminus_kernel_protocol::PatchEdit::ReplaceHashline(
+            terminus_kernel_protocol::ReplaceHashline {
+                path: value
+                    .path
+                    .map(path)
+                    .ok_or_else(|| Status::invalid_argument("replace hashline path is required"))?,
+                expected_sha256: value.expected_sha256,
+                line_hashes: value.line_hashes,
+                start_line: value.start_line,
+                end_line: value.end_line,
                 replacement_utf8: value.replacement_utf8,
             },
         )),

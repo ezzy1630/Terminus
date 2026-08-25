@@ -162,7 +162,9 @@ export class Router {
         : -Infinity;
       eligible.push({ model, score, meetsMinimum: meetsMin && confOk && allowedProvider && healthOk && controlsOk, reasons });
     }
-    const sorted = [...eligible].sort((a, b) => b.score - a.score);
+    const sorted = [...eligible].sort((a, b) =>
+      b.score - a.score || a.model.modelKey.localeCompare(b.model.modelKey),
+    );
     const chosen = sorted.length > 0 && sorted[0]!.meetsMinimum && sorted[0]!.score > -Infinity
       ? sorted[0]!.model
       : null;
@@ -831,3 +833,4 @@ export * from "./profile_registry.js";
 export * from "./posterior.js";
 export * from "./stage_router.js";
 export * from "./continuation.js";
+export * from "./role_router.js";

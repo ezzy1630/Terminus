@@ -177,6 +177,7 @@ message PatchEdit {
     MoveFile move_file = 16;
     DeleteFile delete_file = 17;
     UnifiedDiff unified_diff = 18;
+    ReplaceHashline replace_hashline = 19;
   }
 }
 
@@ -193,6 +194,15 @@ message ReplaceRange {
   string expected_sha256 = 2;
   LineRange range = 3;
   bytes replacement_utf8 = 4;
+}
+
+message ReplaceHashline {
+  WorkspacePath path = 1;
+  string expected_sha256 = 2;
+  repeated string line_hashes = 3;       // short or full SHA-256 per line
+  uint32 start_line = 4;                // 1-based inclusive
+  uint32 end_line = 5;                  // 1-based inclusive
+  bytes replacement_utf8 = 6;
 }
 
 message ReplaceExactText {
