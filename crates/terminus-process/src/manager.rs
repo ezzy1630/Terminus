@@ -999,7 +999,8 @@ fn inspect_process(pid: u32) -> Result<Option<ProcessSnapshot>, ProcessError> {
             )))
         };
     }
-    let mut lines = String::from_utf8_lossy(&output.stdout)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty());
