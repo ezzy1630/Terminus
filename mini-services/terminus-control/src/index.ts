@@ -259,6 +259,14 @@ import {
 } from "./agent/compaction-service.js";
 import { standaloneAuthorityDocuments } from "./agent/system-prompt.js";
 import {
+  ASSISTANT_EXCERPT_MAX_CHARS,
+  USER_EXCERPT_MAX_CHARS,
+  buildRecentHistorySection,
+  excerpt,
+  shouldInjectRecentHistory,
+  type RecentHistorySection,
+} from "./agent/turn-continuity.js";
+import {
   hydrateSearchHit,
   buildRepositoryMapFragment,
   type SearchHit,
@@ -7858,6 +7866,232 @@ async function commitCheckpointPublication(publication: CheckpointPublication): 
   });
 }
 
+/**
+ * R5: load bounded prior-turn history for a thread. Returns null when there
+ * is no previous COMPLETED turn. The assistant excerpt comes from the durable
+ * turn.completed event's response artifact; the user excerpt from the turn's
+ * initiating input artifact.
+ */
+async function loadPriorTurnHistory(
+  threadId: string,
+  currentSequence: number,
+): Promise<RecentHistorySection | null> {
+  if (currentSequence <= 1) return null;
+  const prior = await db.turn.findFirst({
+    where: { threadId, sequence: currentSequence - 1, state: "COMPLETED" },
+    orderBy: { sequence: "desc" },
+    select: { id: true, sequence: true, initiatingInputArtifact: true, completedAt: true },
+  });
+  if (prior === null) return null;
+  const decodeBounded = async (artifactUri: string | null | undefined, maxChars: number): Promise<string> => {
+    if (!artifactUri || !artifactUri.startsWith("artifact://sha256/")) return "";
+    try {
+      const bytes = await artifactClient.get(`sha256:${artifactUri.slice("artifact://sha256/".length)}` as ContentHash);
+      const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      return excerpt(text, maxChars);
+    } catch {
+      // History is best-effort context; an unreadable artifact degrades to "".
+      return "";
+    }
+  };
+  let assistantText = "";
+  try {
+    const completedEvent = await db.semanticEvent.findFirst({
+      where: { eventType: "turn.completed", aggregateType: "turn", aggregateId: prior.id },
+      orderBy: { occurredAt: "desc" },
+      select: { payloadJson: true },
+    });
+    if (completedEvent !== null) {
+      const payload = safeParse<Record<string, unknown>>(completedEvent.payloadJson, {});
+      const summary = typeof payload.summary === "string" ? payload.summary : "";
+      const continuation = typeof payload.continuation === "string" ? payload.continuation : null;
+      const fullText = continuation !== null
+        ? await decodeBounded(continuation, ASSISTANT_EXCERPT_MAX_CHARS)
+        : summary;
+      assistantText = fullText.length > 0 ? fullText : excerpt(summary, ASSISTANT_EXCERPT_MAX_CHARS);
+    }
+  } catch {
+    assistantText = "";
+  }
+  const userText = await decodeBounded(prior.initiatingInputArtifact, USER_EXCERPT_MAX_CHARS);
+  if (userText.length === 0 && assistantText.length === 0) return null;
+  return buildRecentHistorySection({
+    sequence: prior.sequence,
+    userText,
+    assistantText,
+    completedAt: prior.completedAt?.toISOString() ?? null,
+  });
+}
+
+/**
+ * R5: automatic end-of-turn checkpoint. Reuses the authoritative checkpoint
+ * schema so the existing latest-COMMITTED-checkpoint load path carries task
+ * decisions across turns without manual /checkpoints calls. Best-effort:
+ * failures emit context.auto_checkpoint_failed and never fail the turn.
+ */
+async function autoCommitTurnCheckpoint(input: {
+  readonly taskId: string;
+  readonly threadId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly turnSequence: number;
+  readonly objective: string;
+  readonly assumptions: readonly string[];
+  readonly unknowns: readonly string[];
+  readonly allowedScope: CheckpointContent["scope"];
+  readonly contractVersion: number;
+  readonly contractContentHash: ContentHash;
+  readonly criteriaRows: readonly { criterionId: string; statement: string; required: boolean; status: string }[];
+  readonly effectState: CheckpointContent["effectState"];
+  readonly terminalErrorJson: string | null;
+}): Promise<{ checkpointId: string } | { skipped: string }> {
+  try {
+    const requirementState = input.criteriaRows.map((criterion) => ({
+      criterion,
+      status: checkpointRequirementStatus(criterion.status),
+    }));
+    const satisfiedCount = requirementState.filter(({ status }) => status === "satisfied").length;
+    const contentResult = checkpointContentSchema.safeParse({
+      objective: input.objective,
+      completedSteps: requirementState
+        .filter(({ status }) => status === "satisfied")
+        .map(({ criterion }) => ({
+          description: criterion.statement,
+          evidenceArtifactHashes: [] as readonly ContentHash[],
+        })),
+      pendingSteps: requirementState
+        .filter(({ status }) => status !== "satisfied")
+        .map(({ criterion }) => criterion.statement),
+      requirements: requirementState.map(({ criterion, status }) => ({
+        id: criterion.criterionId,
+        statement: criterion.statement,
+        status,
+        evidence: [],
+      })),
+      assumptions: [...input.assumptions],
+      unknowns: [...input.unknowns],
+      decisions: [
+        {
+          decision: `turn ${input.turnSequence} completed with ${satisfiedCount}/${requirementState.length} acceptance criteria satisfied`,
+          rationale: "automatic end-of-turn checkpoint (R5)",
+          alternatives: [],
+        },
+      ],
+      failures: input.terminalErrorJson === null
+        ? []
+        : [{
+            description: excerpt(input.terminalErrorJson, 512),
+            artifactHash: null,
+            resolved: false,
+          }],
+      openQuestions: [...input.unknowns],
+      sourceVersions: {
+        [`task://${input.taskId}`]: input.contractContentHash,
+        [`turn://${input.turnId}`]: `${input.turnSequence}:COMPLETED`,
+      },
+      scope: input.allowedScope,
+      effectState: input.effectState,
+      approvalState: [],
+    });
+    if (!contentResult.success) {
+      return { skipped: `content not representable: ${contentResult.error.issues[0]?.message ?? "unknown"}` };
+    }
+    const content = contentResult.data;
+    const validation = validateCheckpoint(content, {
+      version: input.contractVersion,
+      objective: input.objective,
+      userOutcome: null,
+      nonGoals: [],
+      acceptanceCriteria: input.criteriaRows.map((c) => ({
+        id: c.criterionId,
+        statement: c.statement,
+        verificationHint: null,
+        required: c.required,
+      })),
+      constraints: [],
+      assumptions: [...input.assumptions],
+      unknowns: [...input.unknowns],
+    }, content.sourceVersions);
+    if (!validation.valid) {
+      return { skipped: `validation failed: ${validation.violations[0]?.description ?? "unknown"}` };
+    }
+    const checkpointContext = await kernelContextForTask(
+      input.taskId,
+      input.turnId,
+      [CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST],
+    );
+    const checkpointArtifacts = createKernelArtifactClient(requireKernelUds().artifacts, {
+      ...checkpointContext,
+      idempotencyKey: `auto-checkpoint:${input.turnId}`,
+    });
+    const artifact = await ingestJsonArtifact(
+      checkpointArtifacts,
+      content,
+      "task-checkpoint",
+      { sessionId: input.sessionId, taskId: input.taskId, turnId: input.turnId },
+    );
+    const id = uuid();
+    await writerTransaction((tx) => tx.checkpoint.create({
+      data: {
+        id,
+        sessionId: input.sessionId,
+        threadId: input.threadId,
+        taskId: input.taskId,
+        checkpointArtifact: artifact.uri,
+        schemaVersion: 1,
+        lastCommittedSequencesJson: canonicalJson(checkpointSequenceStateSchema.parse({
+          task: input.contractVersion,
+          turn: input.turnSequence,
+          sourceTurnId: input.turnId,
+          episodeRange: await (async () => {
+            const bounds = await db.episode.aggregate({
+              where: { turnId: input.turnId },
+              _min: { sequence: true },
+              _max: { sequence: true },
+            });
+            return {
+              from: bounds._min.sequence ?? 0,
+              to: bounds._max.sequence ?? 0,
+            };
+          })(),
+        })),
+        activeContextEpochId: null,
+        promotedInputCursor: null,
+        unsettledToolCallsJson: "[]",
+        activeJobsJson: "[]",
+        workspaceRevision: null,
+        dirtyStateDigest: null,
+        unsettledEffectsJson: canonicalJson(input.effectState),
+        artifactRefsJson: "[]",
+        continuationJson: null,
+        admissionState: "PREPARED",
+      },
+    }));
+    await checkpointArtifacts.link(artifact.hash, "checkpoint", id, "content");
+    await commitCheckpointPublication({
+      id,
+      threadId: input.threadId,
+      taskId: input.taskId,
+      artifactHash: artifact.hash,
+    });
+    return { checkpointId: id };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await emit({
+        eventType: "context.auto_checkpoint_failed",
+        aggregateType: "turn",
+        aggregateId: input.turnId,
+        correlationId: input.taskId,
+        payload: { reason: message.slice(0, 512) },
+      });
+    } catch {
+      // Never let telemetry failure break turn completion.
+    }
+    return { skipped: message.slice(0, 256) };
+  }
+}
+
 async function quarantinePreparedCheckpoint(id: string): Promise<void> {
   await writerTransaction((tx) => tx.checkpoint.updateMany({
     where: { id, admissionState: "PREPARED" },
@@ -9623,6 +9857,15 @@ async function agentLoop(turnId: string): Promise<void> {
         ...worldState,
         sections: { ...worldState.sections, ...contextState.worldStateSections },
       };
+      // R5: cross-turn continuity — when this turn has no episodes yet,
+      // inject a bounded excerpt of the previous completed turn so the model
+      // does not restart from amnesia. Deterministic; no extra LLM call.
+      if (shouldInjectRecentHistory(recent.episodes.length)) {
+        const priorSection = await loadPriorTurnHistory(turn.threadId, turn.sequence);
+        if (priorSection !== null) {
+          (effectiveWorldState.sections as Record<string, unknown>).recent_history = priorSection.previous_turn;
+        }
+      }
       const compiled = await compileContext({
         task: effectiveTaskSnapshot,
         thread: threadSnapshot,
@@ -10135,6 +10378,52 @@ async function agentLoop(turnId: string): Promise<void> {
       });
       if (update.count !== 1) throw new Error(`turn ${turnId} changed before completion settlement`);
     }));
+
+    // R5: automatic end-of-turn checkpoint so cross-turn continuity carries
+    // decisions and criteria state without manual /checkpoints calls.
+    if (turn.taskId !== null && turn.taskId !== undefined) {
+      const autoCheckpointCriteriaRows = await db.acceptanceCriterion.findMany({
+        where: { taskId: turn.taskId, contractVersion: contractRow.version },
+      });
+      const effectStateForCheckpoint: NonNullable<CheckpointContent["effectState"]> = [...arpV2.effects.values()]
+        .filter((effect) => effect.taskId === turn.taskId)
+        .sort((left, right) => left.id.localeCompare(right.id))
+        .map((effect) => ({
+          effectId: effect.id,
+          state: effect.state,
+          idempotencyKey: effect.semanticIdempotencyKey,
+        }));
+      const checkpointOutcome = await autoCommitTurnCheckpoint({
+        taskId: turn.taskId,
+        threadId: turn.threadId,
+        sessionId: turn.thread.sessionId,
+        turnId,
+        turnSequence: turn.sequence,
+        objective: contract.objective,
+        assumptions: contract.assumptions,
+        unknowns: contract.unknowns,
+        allowedScope: contract.allowedScope,
+        contractVersion: contractRow.version,
+        contractContentHash: contractRow.contentHash as ContentHash,
+        criteriaRows: autoCheckpointCriteriaRows.map((criterion) => ({
+          criterionId: criterion.criterionId,
+          statement: criterion.statement,
+          required: criterion.required,
+          status: criterion.status,
+        })),
+        effectState: effectStateForCheckpoint,
+        terminalErrorJson: null,
+      });
+      if ("checkpointId" in checkpointOutcome) {
+        await mutateAgentState(() => emit({
+          eventType: "context.auto_checkpoint_committed",
+          aggregateType: "turn",
+          aggregateId: turnId,
+          correlationId: turn.taskId ?? undefined,
+          payload: { checkpoint_id: checkpointOutcome.checkpointId },
+        }));
+      }
+    }
 
     // If the task has a status of ACTIVE, advance it through VERIFY → COMPLETE.
     if (turn.taskId) {
