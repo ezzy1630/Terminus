@@ -11,9 +11,13 @@ import {
  * Native Anthropic runtime (deep-audit Rank 4 / PR7).
  *
  * Renders through the Messages renderer with explicit cache_control
- * breakpoints and streams via the kernel-brokered transport. Cache reads and
- * writes reported in `message_start.usage` are reconciled against the
- * renderer's predicted breakpoints.
+ * breakpoints and streams via a caller-wired kernel-brokered transport.
+ * Cache reads and writes reported in `message_start.usage` are reconciled
+ * against the renderer's predicted breakpoints.
+ *
+ * The transport is a required argument: this module never opens sockets and
+ * refuses to guess an egress path. The production wiring passes
+ * `kernelConnectorPostSse` from `direct-provider-transport.ts`.
  */
 
 export const ANTHROPIC_NATIVE_CONFIG: NativeRuntimeConfig = {
@@ -23,30 +27,26 @@ export const ANTHROPIC_NATIVE_CONFIG: NativeRuntimeConfig = {
   endpointPath: "/messages",
 };
 
-export function anthropicTransportDeps(
-  overrides: Partial<Pick<NativeTransportDeps, "postSse" | "now">> = {},
-): NativeTransportDeps {
+export function anthropicTransportDeps(transport: NativeTransportDeps["postSse"], now?: () => number): NativeTransportDeps {
   return {
-    postSse:
-      overrides.postSse ??
-      (async () => {
-        throw new Error(
-          "no kernel-brokered egress transport is wired for native Anthropic dispatch; refusing to open a direct socket",
-        );
-      }),
+    postSse: transport,
     decode: (chunks) => decodeAnthropicStream(chunks),
-    now: overrides.now,
+    ...(now !== undefined ? { now } : {}),
   };
 }
 
 export async function dispatchAnthropic(
   input: Omit<NativeDispatchInput, "rendered"> & {
     readonly canonicalRenderInput: Parameters<typeof renderRequest>[0];
+    /** Required kernel-brokered SSE transport; there is no default. */
+    readonly postSse: NativeTransportDeps["postSse"];
+    readonly now?: () => number;
   },
 ): Promise<NativeStreamResult> {
-  const rendered = await renderRequest(input.canonicalRenderInput);
-  return dispatchNativeRequest(ANTHROPIC_NATIVE_CONFIG, anthropicTransportDeps(), {
-    ...input,
+  const { postSse, now, ...rest } = input;
+  const rendered = await renderRequest(rest.canonicalRenderInput);
+  return dispatchNativeRequest(ANTHROPIC_NATIVE_CONFIG, anthropicTransportDeps(postSse, now), {
+    ...rest,
     rendered,
   });
 }

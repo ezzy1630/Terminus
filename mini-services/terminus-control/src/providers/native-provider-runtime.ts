@@ -228,18 +228,16 @@ export async function dispatchNativeRequest(
     };
   }
 
+  // Stream completed without a usage frame: report what we observed with no
+  // cost reconciliation and an empty cache observation. This branch previously
+  // referenced the block-scoped `actualCost` from above (TDZ crash); it now
+  // returns explicitly.
   return {
     chunks,
-    usage: withLatency(usage, wallMs),
+    usage,
     continuationId,
-    cacheObservation: {
-      manifestId: input.manifestId,
-      predictedCachedTokens: rendered.predictedCachedTokens,
-      cacheReads: usage.cachedInputTokens,
-      cacheWrites: usage.cacheWriteTokens,
-      eventCount: recorder.eventCount,
-    },
-    costReconciliationMicros: actualCost,
+    cacheObservation: null,
+    costReconciliationMicros: null,
     budgetStateAfter: budget.snapshot(),
   };
 }

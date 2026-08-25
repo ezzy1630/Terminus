@@ -153,4 +153,52 @@ describe("dispatchNativeRequest", () => {
     expect(result.usage).toBeNull();
     delete process.env.OPENAI_API_KEY;
   });
+
+  test("a completed stream without a usage frame returns cleanly (no TDZ crash, no fabricated cost)", async () => {
+    process.env.OPENAI_API_KEY = "k";
+    const result = await dispatchNativeRequest(
+      { providerId: "openai", baseUrl: "https://x", apiKeyEnv: "OPENAI_API_KEY", endpointPath: "" },
+      depsWith([{ kind: "text", text: "no usage frame" }]),
+      { ...baseInput, rendered: renderedRequest() },
+    );
+    expect(result.usage).toBeNull();
+    expect(result.continuationId).toBeNull();
+    expect(result.cacheObservation).toBeNull();
+    expect(result.costReconciliationMicros).toBeNull();
+    expect(result.budgetStateAfter).not.toBeNull();
+    expect(result.budgetStateAfter?.requestSpent).toBe(0n);
+    delete process.env.OPENAI_API_KEY;
+  });
+
+  test("dispatchAnthropic requires an explicit transport and passes it through", async () => {
+    process.env.ANTHROPIC_API_KEY = "k";
+    let transportUsed = false;
+    const { dispatchAnthropic } = await import("./anthropic-runtime.js");
+    const result = await dispatchAnthropic({
+      manifestId: "manifest-2",
+      economics,
+      budgetLimits: baseInput.budgetLimits,
+      canonicalRenderInput: {
+        providerId: "anthropic",
+        model: "claude-test" as never,
+        manifestId: "manifest-2",
+        fragments: [],
+        toolSchemas: [],
+        continuationId: null,
+        cachePlan: { stablePrefixHash: `sha256:${"0".repeat(64)}` as never, breakpoints: [] },
+        outputProfile: "terse",
+      } as never,
+      postSse: async () => {
+        transportUsed = true;
+        const encoder = new TextEncoder();
+        async function* stream(): AsyncIterable<Uint8Array> {
+          yield encoder.encode("event: ping\n\n");
+        }
+        return stream();
+      },
+    });
+    expect(result.chunks.length).toBeGreaterThanOrEqual(0);
+    expect(transportUsed).toBe(true);
+    delete process.env.ANTHROPIC_API_KEY;
+  });
 });

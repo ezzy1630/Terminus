@@ -11,9 +11,12 @@ import {
  * Native OpenAI runtime (deep-audit Rank 4 / PR6).
  *
  * Renders the canonical context through the OpenAI renderer (Responses
- * protocol by default) and streams via the kernel-brokered transport.
- * Continuation ids from `response.completed` are surfaced to the caller so
- * they can be persisted as a durable turn primitive.
+ * protocol by default) and streams via a caller-wired kernel-brokered
+ * transport. Continuation ids from `response.completed` are surfaced to the
+ * caller so they can be persisted as a durable turn primitive.
+ *
+ * The transport is a required argument: this module never opens sockets and
+ * refuses to guess an egress path.
  */
 
 export const OPENAI_NATIVE_CONFIG: NativeRuntimeConfig = {
@@ -23,30 +26,26 @@ export const OPENAI_NATIVE_CONFIG: NativeRuntimeConfig = {
   endpointPath: "/responses",
 };
 
-export function openaiTransportDeps(
-  overrides: Partial<Pick<NativeTransportDeps, "postSse" | "now">> = {},
-): NativeTransportDeps {
+export function openaiTransportDeps(transport: NativeTransportDeps["postSse"], now?: () => number): NativeTransportDeps {
   return {
-    postSse:
-      overrides.postSse ??
-      (async () => {
-        throw new Error(
-          "no kernel-brokered egress transport is wired for native OpenAI dispatch; refusing to open a direct socket",
-        );
-      }),
+    postSse: transport,
     decode: (chunks) => decodeOpenAiStream(chunks, "responses"),
-    now: overrides.now,
+    ...(now !== undefined ? { now } : {}),
   };
 }
 
 export async function dispatchOpenAI(
   input: Omit<NativeDispatchInput, "rendered"> & {
     readonly canonicalRenderInput: Parameters<typeof renderRequest>[0];
+    /** Required kernel-brokered SSE transport; there is no default. */
+    readonly postSse: NativeTransportDeps["postSse"];
+    readonly now?: () => number;
   },
 ): Promise<NativeStreamResult> {
-  const rendered = await renderRequest(input.canonicalRenderInput);
-  return dispatchNativeRequest(OPENAI_NATIVE_CONFIG, openaiTransportDeps(), {
-    ...input,
+  const { postSse, now, ...rest } = input;
+  const rendered = await renderRequest(rest.canonicalRenderInput);
+  return dispatchNativeRequest(OPENAI_NATIVE_CONFIG, openaiTransportDeps(postSse, now), {
+    ...rest,
     rendered,
   });
 }
