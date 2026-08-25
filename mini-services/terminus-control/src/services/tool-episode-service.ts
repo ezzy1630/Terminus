@@ -52,7 +52,14 @@ export interface ToolEpisodeDependencies {
   readonly store: ToolEpisodeStore;
   readonly settleCall: (input: ToolEpisodeSettlementInput) => Promise<void>;
   readonly maxCycles?: number;
+  /**
+   * R4: byte budget for the model-visible episode window
+   * (bytes ≈ tokens × 4). Default ≈ 96k tokens.
+   */
+  readonly windowBytes?: number;
 }
+
+export const DEFAULT_EPISODE_WINDOW_BYTES = 96_000 * 4;
 
 export interface ToolEpisodeSession {
   readonly settle: (input: ToolEpisodeSettlementInput) => Promise<void>;
@@ -67,11 +74,13 @@ export interface ToolEpisodeSession {
  */
 export class ToolEpisodeService {
   private readonly maxCycles: number;
+  private readonly windowBytes: number;
 
   constructor(
     private readonly dependencies: ToolEpisodeDependencies,
   ) {
     this.maxCycles = dependencies.maxCycles ?? DEFAULT_MAX_TOOL_CYCLES;
+    this.windowBytes = dependencies.windowBytes ?? DEFAULT_EPISODE_WINDOW_BYTES;
   }
 
   startTurn(): ToolEpisodeSession {
@@ -91,27 +100,46 @@ export class ToolEpisodeService {
   }
 
   async loadModelVisibleEpisodes(turnId: string): Promise<ModelVisibleEpisodeSet> {
+    // R4: token-budgeted window replaces the fixed take(16). Scan the newest
+    // model-visible rows first and include oldest rows only while they fit
+    // the byte budget (bytes ≈ tokens × 4), so long turns degrade gracefully
+    // instead of truncating at an arbitrary count.
     const rows = await this.dependencies.store.listModelVisibleEpisodes(turnId);
     const decoder = new TextDecoder("utf-8", { fatal: true });
     const content = new Map<ContentHash, string>();
-    let totalBytes = 0;
-    const episodes: Episode[] = [];
-    for (const row of rows) {
+    const includedRows: typeof rows = [];
+    let budgetBytes = this.windowBytes;
+    // Walk newest→oldest; include while budget allows.
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index]!;
       const contentRef: ContentHash | null = row.contentArtifact?.startsWith("artifact://sha256/")
         ? `sha256:${row.contentArtifact.slice("artifact://sha256/".length)}` as ContentHash
         : null;
       if (contentRef !== null && !content.has(contentRef)) {
+        if (budgetBytes <= 0) break;
         const bytes = await this.dependencies.store.readArtifact(contentRef);
         if (bytes === null) throw new Error(`episode ${row.id} artifact ${contentRef} is unavailable`);
         if (bytes.byteLength > 128 * 1_024) {
           throw new Error(`episode ${row.id} exceeds the 131072-byte continuation limit`);
         }
-        totalBytes += bytes.byteLength;
-        if (totalBytes > 512 * 1_024) {
-          throw new Error("model-visible episodes exceed the 524288-byte continuation limit");
+        if (bytes.byteLength > budgetBytes) {
+          // A single oversized episode can exceed what fits; include it only
+          // when nothing else has been included yet so the window is never
+          // empty, otherwise stop here.
+          if (includedRows.length > 0) break;
+          budgetBytes = bytes.byteLength;
         }
+        budgetBytes -= bytes.byteLength;
         content.set(contentRef as ContentHash, decoder.decode(bytes));
       }
+      includedRows.push(row);
+    }
+    includedRows.reverse();
+    const episodes: Episode[] = [];
+    for (const row of includedRows) {
+      const contentRef: ContentHash | null = row.contentArtifact?.startsWith("artifact://sha256/")
+        ? `sha256:${row.contentArtifact.slice("artifact://sha256/".length)}` as ContentHash
+        : null;
       episodes.push({
         id: row.id as Episode["id"],
         turnId: row.turnId as Episode["turnId"],

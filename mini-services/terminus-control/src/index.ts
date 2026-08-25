@@ -251,6 +251,12 @@ import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
 import { CodingTurnEngine } from "./agent/coding-turn-engine.js";
 import { CacheRatioMonitor } from "./agent/cache-telemetry.js";
+import {
+  runCompaction,
+  SUMMARY_SYSTEM_INSTRUCTIONS,
+  type CompactionStore,
+  type Summarizer,
+} from "./agent/compaction-service.js";
 import { standaloneAuthorityDocuments } from "./agent/system-prompt.js";
 import {
   hydrateSearchHit,
@@ -9488,7 +9494,9 @@ async function agentLoop(turnId: string): Promise<void> {
         listModelVisibleEpisodes: async (episodeTurnId) => db.episode.findMany({
           where: { turnId: episodeTurnId, modelVisible: true },
           orderBy: { sequence: "asc" },
-          take: 16,
+          // R4: the byte-budgeted walk in ToolEpisodeService bounds what is
+          // actually included; this scan just needs enough candidates.
+          take: 64,
         }),
         readArtifact: (hash) => artifactClient.get(hash as ContentHash),
       },
@@ -9537,7 +9545,44 @@ async function agentLoop(turnId: string): Promise<void> {
       },
     };
     const compileProviderContext = async () => {
-      const recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
+      let recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
+      // R4: compaction pass — deterministic prune + structured summary before
+      // the compiler sees the window. Runs only when the loaded window
+      // exceeds the compact threshold; below it this is a cheap no-op.
+      const recentBytes = [...recent.content.values()].reduce(
+        (total, text) => total + new TextEncoder().encode(text).byteLength,
+        0,
+      );
+      const compactionReport = await runCompaction(
+        buildCompactionStore(),
+        {
+          turnId,
+          episodes: recent.episodes.map((episode) => ({
+            id: episode.id,
+            kind: episode.kind,
+            sequence: episode.sequence,
+            toolCallId: episode.toolCallId,
+            contentJson: episode.contentRef === null ? null : recent.content.get(episode.contentRef) ?? null,
+          })),
+          totalBytes: recentBytes,
+          summarizer: buildSummarizer(),
+        },
+      );
+      if (compactionReport.triggered) {
+        recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
+        await mutateAgentState(() => emit({
+          eventType: "context.compacted",
+          aggregateType: "turn",
+          aggregateId: turnId,
+          correlationId: task.id,
+          payload: {
+            pruned_count: compactionReport.prunedCount,
+            pruned_bytes: compactionReport.prunedBytes,
+            summary_chars: compactionReport.summaryChars,
+            mode: compactionReport.reason,
+          },
+        }));
+      }
       // Prior-turn verification failures become first-class repair inputs.
       const lastFailedPlan = await db.verificationPlan.findFirst({
         where: { taskId: task.id },
@@ -9661,6 +9706,173 @@ async function agentLoop(turnId: string): Promise<void> {
     // multi-call responses are batched (reads parallel-safe, writes ordered).
     const sideEffectClassOf = (toolName: string): string =>
       STANDALONE_TOOL_SCHEMAS.find((tool) => tool.id === toolName)?.sideEffectClass ?? "external";
+    // Shared kernel task context for every provider-plane call (main loop,
+    // R4 summary turns). Network/secret scopes follow the selected transport.
+    const buildProviderTaskContext = async (): Promise<RequestContext> => kernelTaskContext({
+      sessionId: turn.thread.sessionId,
+      taskId: task.id,
+      turnId,
+      workspaceId: workspace.id,
+      operationClasses: directConfiguration !== null || gatewayModel !== null
+        ? [
+            CapabilityOperationProto.CAPABILITY_OPERATION_SECRET,
+            CapabilityOperationProto.CAPABILITY_OPERATION_NETWORK,
+            CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
+          ]
+        : [
+            CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
+            CapabilityOperationProto.CAPABILITY_OPERATION_JOB,
+            CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
+          ],
+      workspacePaths: directConfiguration === null && gatewayModel === null
+        ? leastWorkspaceScope([
+            ...contract.allowedScope.readPaths,
+            ...contract.allowedScope.writePaths,
+          ])
+        : [],
+      networkDestinations: directConfiguration !== null
+        ? [...directNetworkDestinations()]
+        : gatewayModel === null
+          ? []
+          : ["opencode.ai:443"],
+      secretCapabilities: directConfiguration !== null
+        ? [directConfiguration.secretUri]
+        : gatewayModel === null
+          ? []
+          : [gatewaySecretUri(gatewayModel.deployment)],
+    });
+    const buildDirectExecutor = (): ProviderExecutionInput["executeDirectRequest"] => directConfiguration === null
+      ? undefined
+      : (execInput: ProviderExecutionInput) => executeDirectProviderRequest(
+          {
+            rendered: execInput.rendered,
+            configuration: directConfiguration,
+            // Route OpenAI prompt caches by context epoch so tool-call turns
+            // hit the same cache entry instead of fragmenting across turns.
+            cacheKey: contextEpoch.epochId,
+          },
+          new KernelDirectConnectorClient(requireKernelUds().connectors, execInput.context),
+        );
+    // R4: durable effects for compaction — hide pruned rows and append one
+    // model-visible summary episode backed by a CAS artifact.
+    const buildCompactionStore = (): CompactionStore => ({
+      hideEpisodes: async (ids) => {
+        if (ids.length === 0) return;
+        await db.episode.updateMany({
+          where: { id: { in: ids }, turnId },
+          data: { modelVisible: false },
+        });
+      },
+      latestSequence: async (episodeTurnId) => {
+        const row = await db.episode.findFirst({
+          where: { turnId: episodeTurnId },
+          orderBy: { sequence: "desc" },
+          select: { sequence: true },
+        });
+        return row?.sequence ?? null;
+      },
+      appendSummaryEpisode: async ({ turnId: summaryTurnId, sequence, summaryText }) => {
+        const artifact = await artifactClient.ingest(
+          new TextEncoder().encode(summaryText),
+          { mediaType: "text/markdown", custom: { purpose: "compaction-summary", turnId: summaryTurnId } },
+        );
+        await db.episode.create({
+          data: {
+            id: uuid(),
+            turnId: summaryTurnId,
+            sequence,
+            kind: "summary",
+            modelVisible: true,
+            contentArtifact: artifact.uri,
+            toolCallId: null,
+          },
+        });
+      },
+    });
+    // R4: one dedicated provider turn producing the structured handoff
+    // summary. Rendered WITHOUT cache breakpoints (one-off call) and with a
+    // synthetic manifest id scoped to this turn.
+    let summarizerMemo: Summarizer | null | undefined;
+    const buildSummarizer = (): Summarizer | null => {
+      if (summarizerMemo !== undefined) return summarizerMemo;
+      if (!toolsEnabled && directConfiguration === null && gatewayModel === null && localProviderCommand === null) {
+        summarizerMemo = null;
+        return summarizerMemo;
+      }
+      summarizerMemo = async ({ transcript }) => {
+        const instructionsHash = computeContentHash(SUMMARY_SYSTEM_INSTRUCTIONS);
+        const transcriptHash = computeContentHash(transcript);
+        const scope = {
+          workspaceId: workspace.id as never,
+          sessionId: turn.thread.sessionId as never,
+          taskId: task.id as never,
+          pathPatterns: [],
+        };
+        const now = new Date().toISOString() as never;
+        const makeFragment = (fragmentId: string, kind: "authority" | "recent_episode", text: string, hash: string): ContextFragment => ({
+          id: fragmentId,
+          kind,
+          contentRef: {
+            hash: hash as never,
+            uri: `artifact://sha256/${hash.slice("sha256:".length)}` as never,
+            mediaType: "text/plain",
+            bytes: BigInt(new TextEncoder().encode(text).byteLength) as never,
+          },
+          textContent: text,
+          source: { uri: `turn://${turnId}/compaction`, producer: "terminus-control", producerVersion: "v1", observedAt: now, observedBy: "control-plane", evidenceRefs: [] },
+          sourceVersion: null,
+          authority: kind === "authority" ? 90 : 45,
+          priority: kind === "authority" ? 90 : 45,
+          trust: "derived",
+          confidentiality: "workspace",
+          injectionRisk: "low",
+          exactness: "exact",
+          scope,
+          freshness: { observedAt: now, sourceVersion: null, stale: false, staleReason: null },
+          dependencies: [],
+          invalidation: [],
+          estimatedTokens: { [selectedModel.modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
+          selectionFeatures: { relevance: 1, novelty: 0, coverage: 1, uncertaintyReduction: 1, riskReduction: 1, modelCompatibility: 1, redundancyPenalty: 0, injectionPenalty: 0 },
+        });
+        const canonicalRenderInput = {
+          provider: selectedProvider,
+          model: selectedModel,
+          manifestId: `summary:${turnId}`,
+          fragments: [
+            makeFragment(`compaction:instructions:${turnId}`, "authority", SUMMARY_SYSTEM_INSTRUCTIONS, instructionsHash),
+            makeFragment(`compaction:transcript:${turnId}`, "recent_episode", transcript, transcriptHash),
+          ],
+          toolSchemas: [],
+          // No cache-control writes: summaries are one-off and must not
+          // pollute the stable prefix.
+          cachePlan: { stablePrefixHash: instructionsHash, breakpoints: [] },
+          continuationId: null,
+          outputProfile: "terse",
+          reasoningReserveTokens: selectedModel.context?.reasoningReserveTokens ?? (4_096n as never),
+          outputReserveTokens: 2_048n as never,
+          hardInputLimit: 400_000n as never,
+          signal: null,
+        } as Parameters<typeof selectedRenderer.render>[0];
+        const rendered = await selectedRenderer.render(canonicalRenderInput);
+        const directExecutor = buildDirectExecutor();
+        const response = await providerSessionService.execute({
+          rendered,
+          command: localProviderCommand,
+          gateway: gatewayModel === null
+            ? null
+            : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
+          direct: directConfiguration === null
+            ? null
+            : { vendor: directConfiguration.vendor },
+          ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
+          context: { ...await buildProviderTaskContext(), idempotencyKey: `compaction:${turnId}:${transcriptHash}` },
+          workspaceId: workspace.id,
+        });
+        const projectedSummary = await selectedRenderer.projectResponse(response);
+        return projectedSummary.text;
+      };
+      return summarizerMemo;
+    };
     let lastResponseArtifactUri: string | null = null;
     let currentProjected: ProjectedResponse | null = null;
     const toolSettlementEnteredFor = new Set<string>();
@@ -9708,54 +9920,7 @@ async function agentLoop(turnId: string): Promise<void> {
         });
       },
       executeProvider: async ({ attemptId, compiled }) => {
-        const providerContext: RequestContext = {
-          ...await kernelTaskContext({
-            sessionId: turn.thread.sessionId,
-            taskId: task.id,
-            turnId,
-            workspaceId: workspace.id,
-            operationClasses: directConfiguration !== null || gatewayModel !== null
-              ? [
-                  CapabilityOperationProto.CAPABILITY_OPERATION_SECRET,
-                  CapabilityOperationProto.CAPABILITY_OPERATION_NETWORK,
-                  CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
-                ]
-              : [
-                  CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
-                  CapabilityOperationProto.CAPABILITY_OPERATION_JOB,
-                  CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
-                ],
-            workspacePaths: directConfiguration === null && gatewayModel === null
-              ? leastWorkspaceScope([
-                  ...contract.allowedScope.readPaths,
-                  ...contract.allowedScope.writePaths,
-                ])
-              : [],
-            networkDestinations: directConfiguration !== null
-              ? [...directNetworkDestinations()]
-              : gatewayModel === null
-                ? []
-                : ["opencode.ai:443"],
-            secretCapabilities: directConfiguration !== null
-              ? [directConfiguration.secretUri]
-              : gatewayModel === null
-                ? []
-                : [gatewaySecretUri(gatewayModel.deployment)],
-          }),
-          idempotencyKey: `provider:${attemptId}`,
-        };
-        const directExecutor = directConfiguration === null
-          ? undefined
-          : (execInput: ProviderExecutionInput) => executeDirectProviderRequest(
-              {
-                rendered: execInput.rendered,
-                configuration: directConfiguration,
-                // Route OpenAI prompt caches by context epoch so tool-call turns
-                // hit the same cache entry instead of fragmenting across turns.
-                cacheKey: contextEpoch.epochId,
-              },
-              new KernelDirectConnectorClient(requireKernelUds().connectors, execInput.context),
-            );
+        const directExecutor = buildDirectExecutor();
         return providerSessionService.execute({
           rendered: compiled.rendered,
           command: localProviderCommand,
@@ -9766,7 +9931,7 @@ async function agentLoop(turnId: string): Promise<void> {
             ? null
             : { vendor: directConfiguration.vendor },
           ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
-          context: providerContext,
+          context: { ...await buildProviderTaskContext(), idempotencyKey: `provider:${attemptId}` },
           workspaceId: workspace.id,
         });
       },
