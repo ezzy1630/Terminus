@@ -969,15 +969,21 @@ fn inspect_process(pid: u32) -> Result<Option<ProcessSnapshot>, ProcessError> {
     // Windows does not expose a portable std API for process start identity.
     // PowerShell's Process API provides the same PID/start-time fence without
     // introducing unauthorized Win32 FFI into the kernel.
+    // Get-Process accepts Int32 process IDs. A value outside that range cannot
+    // identify a process through this API and must be treated as absent rather
+    // than turned into an inspection error during reconciliation.
+    let Some(power_shell_pid) = i32::try_from(pid).ok() else {
+        return Ok(None);
+    };
     let script = format!(
         "$ErrorActionPreference = 'Stop'; \
          try {{ \
-             $process = Get-Process -Id {pid} -ErrorAction Stop; \
+             $process = Get-Process -Id {power_shell_pid} -ErrorAction Stop; \
              $start = $process.StartTime.ToUniversalTime().ToFileTimeUtc(); \
              Write-Output $start; \
              Write-Output $process.ProcessName; \
          }} catch {{ \
-             if ($null -eq (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ exit 3 }}; \
+             if ($null -eq (Get-Process -Id {power_shell_pid} -ErrorAction SilentlyContinue)) {{ exit 3 }}; \
              exit 4; \
          }}"
     );
@@ -1441,6 +1447,12 @@ mod tests {
             signal_number("SIGQUIT"),
             Err(ProcessError::InvalidSpec(_))
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_inspection_treats_out_of_range_pid_as_missing() {
+        assert!(inspect_process(u32::MAX).unwrap().is_none());
     }
 
     #[test]
