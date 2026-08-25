@@ -273,6 +273,23 @@ class TerminusHarness:
         except TerminusControlError:
             return "unknown"
 
+    def fetch_patch(self, task_id: str) -> dict[str, Any]:
+        """Fetch the task workspace diff (R8 patch extraction).
+
+        Returns the control plane's diff payload: unified diff against HEAD,
+        untracked file list, and truncation flags. Raises
+        :class:`TerminusControlError` when the workspace has no usable diff.
+        """
+        payload = self._request("GET", f"/v1/tasks/{task_id}/diff")
+        if not isinstance(payload, Mapping):
+            raise TerminusControlError("task diff endpoint returned a non-object payload")
+        return {
+            "diff": str(payload.get("diff") or ""),
+            "untracked_files": list(payload.get("untracked_files") or []),
+            "truncated": bool(payload.get("diff_truncated")),
+            "git_available": bool(payload.get("git_available")),
+        }
+
     @staticmethod
     def _map_outcome(state: str) -> Outcome:
         return {

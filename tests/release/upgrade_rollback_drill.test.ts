@@ -16,6 +16,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
+import { recordDrillEvidence } from "./drill_evidence";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const EVIDENCE_PATH = join(ROOT, "artifacts", "release-gate", "upgrade-rollback.json");
@@ -96,6 +97,7 @@ describe("upgrade / rollback drill", () => {
         status: string;
       };
       expect(written.status).toBe("passed");
+      recordDrillEvidence("upgrade_rollback_drill", ["migrate", "backup", "restore", "re-upgrade"]);
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }

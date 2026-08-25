@@ -236,12 +236,11 @@ jobs:
       - name: Produce M12 evidence bundle
         env:
           TERMINUS_SOAK_SECONDS: "30"
-          # M12 is the documented local evidence subset. Stable release
-          # validation intentionally omits these overrides and rejects fixture
-          # eval evidence until a live release harness is available. This job
-          # produces the immutable candidate evidence only; it does not mint a
-          # release decision or invent owner approvals.
-          TERMINUS_RELEASE_ALLOW_FIXTURE_EVAL: "1"
+          # M12 is the documented local evidence subset (R9): fixture eval
+          # evidence and zero-valued ops metrics no longer masquerade as
+          # passing gate checks here — they surface as explicit
+          # pending_live_* states in the bundle. The signed release decision
+          # path still rejects both unconditionally.
           # These are explicit M12 local-subset fallbacks. Stable release
           # validation intentionally leaves both disabled.
           TERMINUS_RELEASE_ALLOW_PLACEHOLDER_METRICS: "1"
@@ -258,15 +257,70 @@ jobs:
           path: artifacts/release-gate/
 
   # ---------- Eval smoke (agent-behavior cohort) ----------
+  # R8/R9: fixture smoke runs on every PR so regressions in the eval lab
+  # itself are caught without requiring a label. It is explicitly fixture
+  # tier and never counts as release evidence (see live-eval below).
   eval-smoke:
-    name: Eval smoke
+    name: Eval smoke (fixture tier)
     runs-on: ubuntu-latest
-    needs: integration
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'agent-behavior') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
       - run: just eval-smoke
+
+  # ---------- Live evaluation (dispatch-only; R8) ----------
+  # Runs the real Terminus coding loop against a small internal cohort with
+  # a real provider key. Never triggered by pull_request events, so PR CI
+  # stays green without secrets; results land as workflow artifacts and feed
+  # the cache-telemetry release gate when run.
+  live-eval:
+    name: Live evaluation cohort
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == github.event.repository.full_name }}
+    concurrency:
+      group: live-eval-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/setup-terminus
+      - name: Start kernel + control plane
+        run: bash scripts/start-mini-services.sh &
+        env:
+          TERMINUS_CONTROL_TOKEN: terminus-live-eval-token
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Wait for control plane
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3050/healthz >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          echo "control plane did not become healthy" >&2
+          exit 1
+      - name: Run live cohort (forge-internal)
+        env:
+          TERMINUS_CONTROL_URL: http://127.0.0.1:3050
+          TERMINUS_CONTROL_TOKEN: terminus-live-eval-token
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cd python
+          uv run terminus-eval run \
+            --suite terminus-internal \
+            --task build-failure/build-001 \
+            --task-dir "forge_evals/evals/tasks/build-failure/build-001" \
+            --harness terminus-live \
+            --seeds 1 --output-dir evals/results/live
+      - name: Collect cache telemetry evidence
+        if: always()
+        env:
+          TERMINUS_CACHE_TELEMETRY_DB: ${{ github.workspace }}/.terminus-data/control.db
+        run: bun run scripts/collect-cache-telemetry.ts || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: live-eval-results
+          path: |
+            python/evals/results/live/
+            artifacts/release-gate/cache-telemetry.json
 
   # ---------- Standalone architecture ----------
   standalone-check:

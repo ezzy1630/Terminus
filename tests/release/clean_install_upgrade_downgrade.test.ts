@@ -9,6 +9,7 @@ import { copyFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
+import { recordDrillEvidence } from "./drill_evidence";
 
 const ROOT = join(import.meta.dir, "..", "..");
 
@@ -62,5 +63,6 @@ describe("clean install / upgrade / downgrade", () => {
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }
+  recordDrillEvidence("clean_install_upgrade_downgrade");
   });
 });

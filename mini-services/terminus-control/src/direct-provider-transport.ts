@@ -117,13 +117,14 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
     try {
       for await (const chunk of this.eachChunk(request)) {
         streamed = true;
-        if (chunk.payload.case === "bytes") {
-          yield chunk.payload.bytes;
-        } else if (chunk.payload.case === "receipt") {
-          const status = chunk.payload.value.statusCode;
+        if (chunk.bytes !== undefined) {
+          yield chunk.bytes;
+        } else if (chunk.receipt !== undefined) {
+          const status = chunk.receipt.statusCode;
+          const outcomeText = chunk.receipt.outcome ?? "";
           if (status === undefined || status < 200 || status > 299) {
             throw new Error(
-              `direct provider returned HTTP ${status ?? 0}${chunk.payload.value.outcome.length > 0 ? ` (${chunk.payload.value.outcome})` : ""}`,
+              `direct provider returned HTTP ${status ?? 0}${outcomeText.length > 0 ? ` (${outcomeText})` : ""}`,
             );
           }
         }

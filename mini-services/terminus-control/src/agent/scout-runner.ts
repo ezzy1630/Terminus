@@ -154,7 +154,7 @@ export async function runScoutLoop(deps: ScoutLoopDeps): Promise<ScoutParsedResu
 export interface ScoutLedgerEntry {
   readonly taskId: string;
   readonly findingsCount: number;
-  readonly citedCount: number;
+  citedCount: number;
 }
 
 /**

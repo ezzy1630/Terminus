@@ -38,7 +38,15 @@ import {
   validateReleaseSource,
 } from "./verify-release-source.ts";
 
-export type EvidenceStatus = "present" | "missing" | "invalid" | "requires_ci" | "verified" | "pending_live_telemetry";
+export type EvidenceStatus =
+  | "present"
+  | "missing"
+  | "invalid"
+  | "requires_ci"
+  | "verified"
+  | "pending_live_telemetry"
+  | "pending_live_eval"
+  | "pending_live_metrics";
 
 export type EvidenceCheck = {
   key: string;
@@ -344,6 +352,35 @@ function checkJsonFile(
           );
         }
       }
+    }
+    // R9: honest pending semantics. Fixture eval evidence and placeholder
+    // metrics are never release evidence, but when no live source exists yet
+    // they are recorded as explicit pending states rather than silent
+    // failures of the local evidence bundle; the signed release decision
+    // path still rejects them unconditionally.
+    if (
+      key === "eval-release"
+      && value.status === "fixture_pass"
+      && options.allowFixtureEvidence !== true
+    ) {
+      return {
+        key,
+        path,
+        status: "pending_live_eval",
+        detail: "fixture-tier eval evidence is not release evidence; run live-eval to produce it",
+      };
+    }
+    if (
+      key === "ops-metrics"
+      && value.status === "placeholder"
+      && options.allowPlaceholderMetrics !== true
+    ) {
+      return {
+        key,
+        path,
+        status: "pending_live_metrics",
+        detail: "ops metrics are explicit zeros pending a live measured source",
+      };
     }
     if (
       expectedStatus === "not_placeholder" &&

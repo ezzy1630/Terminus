@@ -127,6 +127,7 @@ import {
   resolveWorkspaceRevision,
 } from "./verification-runtime.js";
 import type {
+  TaskContract,
   AcceptanceCriterion,
   Checkpoint,
   ContentHash,
@@ -259,6 +260,19 @@ import {
   type Summarizer,
 } from "./agent/compaction-service.js";
 import { standaloneAuthorityDocuments } from "./agent/system-prompt.js";
+import type { ProcessEvent as ProcessEventProto } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
+
+/** Concatenate byte chunks for bounded process output collection. */
+function concatUint8(chunks: readonly Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
 import {
   ScoutUtilityLedger,
   resolveScoutEnabled,
@@ -3951,6 +3965,71 @@ const routes: Route[] = [
       contract: taskContractWire(t.contractVersions[0]),
     });
   }),
+  // R8: task workspace diff for benchmark patch extraction (git workspaces).
+  route("GET", "/v1/tasks/:id/diff", async (req, res, params) => {
+    const taskId = String(params.id);
+    try {
+      const taskRow = await db.task.findUnique({ where: { id: taskId } });
+      if (taskRow === null) return sendError(res, 404, "TASK_NOT_FOUND", "task not found", "not_found");
+      const sessionRow = await db.session.findUnique({ where: { id: taskRow.sessionId }, select: { workspaceId: true } });
+      const workspaceRow = sessionRow === null
+        ? null
+        : await db.workspace.findUnique({ where: { id: sessionRow.workspaceId } });
+      if (workspaceRow === null) return sendError(res, 404, "WORKSPACE_NOT_FOUND", "task has no workspace", "not_found");
+      const context = await kernelContextForTask(
+        taskId,
+        `task-diff:${taskId}`,
+        [CapabilityOperationProto.CAPABILITY_OPERATION_EXEC],
+        ["."],
+      );
+      const runCommand = async (args: readonly string[]): Promise<{ code: number; out: string }> => {
+        const events = requireKernelUds().process.Start({
+          context,
+          intent: kernelIntent(),
+          command: {
+            program: "git",
+            args: [...args],
+            cwd: { workspaceId: workspaceRow.id, relativePath: "." },
+            publicEnv: { GIT_CONFIG_NOSYSTEM: "1" },
+            secretCapabilityUris: [],
+            timeout: { seconds: 30, nanos: 0 },
+            allocatePty: false,
+            shell: undefined,
+          },
+          sandboxProfileId: DEV_MODE ? "degraded-local" : "secure-local-default",
+          outputPolicyId: "tool-result-bounded",
+        });
+        return await new Promise((resolve, reject) => {
+          const chunks: Uint8Array[] = [];
+          let exitCode = -1;
+          const sub = events.subscribe({
+            next: (event: ProcessEventProto) => {
+              if (event.stdout !== undefined) chunks.push(event.stdout.bytes);
+              if (event.exited !== undefined) exitCode = event.exited.exitCode;
+            },
+            error: (error: unknown) => reject(error instanceof Error ? error : new Error(String(error))),
+            complete: () => resolve({ code: exitCode, out: new TextDecoder().decode(concatUint8(chunks)) }),
+          });
+          void sub;
+        });
+      };
+      const diff = await runCommand(["--no-pager", "diff", "HEAD", "--binary"]);
+      const untracked = await runCommand(["ls-files", "--others", "--exclude-standard"]);
+      sendJson(res, 200, {
+        task_id: taskId,
+        workspace_id: workspaceRow.id,
+        git_available: diff.code !== -1 && !/fatal|not a git repository/i.test(diff.out) ? true : diff.out.length > 0,
+        diff: diff.out.slice(0, 2_000_000),
+        diff_truncated: diff.out.length > 2_000_000,
+        untracked_files: untracked.out.split("\n").filter((line) => line.length > 0).slice(0, 500),
+        exit_code: diff.code,
+      });
+    } catch (err) {
+      logInternalError("task diff failed", err);
+      sendError(res, 500, "DIFF_FAILED", "task diff failed", "internal");
+    }
+  }),
+
   /**
    * Artifact inventory for a task (SPEC §29.3): every CAS artifact
    * referenced by the task's provider attempts, episodes, verification
@@ -7885,6 +7964,7 @@ async function commitCheckpointPublication(publication: CheckpointPublication): 
 async function loadPriorTurnHistory(
   threadId: string,
   currentSequence: number,
+  artifacts: ArtifactClient,
 ): Promise<RecentHistorySection | null> {
   if (currentSequence <= 1) return null;
   const prior = await db.turn.findFirst({
@@ -7896,7 +7976,7 @@ async function loadPriorTurnHistory(
   const decodeBounded = async (artifactUri: string | null | undefined, maxChars: number): Promise<string> => {
     if (!artifactUri || !artifactUri.startsWith("artifact://sha256/")) return "";
     try {
-      const bytes = await artifactClient.get(`sha256:${artifactUri.slice("artifact://sha256/".length)}` as ContentHash);
+      const bytes = await artifacts.get(`sha256:${artifactUri.slice("artifact://sha256/".length)}` as ContentHash);
       const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
       return excerpt(text, maxChars);
     } catch {
@@ -7945,11 +8025,7 @@ async function autoCommitTurnCheckpoint(input: {
   readonly sessionId: string;
   readonly turnId: string;
   readonly turnSequence: number;
-  readonly objective: string;
-  readonly assumptions: readonly string[];
-  readonly unknowns: readonly string[];
-  readonly allowedScope: CheckpointContent["scope"];
-  readonly contractVersion: number;
+  readonly contract: TaskContract;
   readonly contractContentHash: ContentHash;
   readonly criteriaRows: readonly { criterionId: string; statement: string; required: boolean; status: string }[];
   readonly effectState: CheckpointContent["effectState"];
@@ -7962,7 +8038,7 @@ async function autoCommitTurnCheckpoint(input: {
     }));
     const satisfiedCount = requirementState.filter(({ status }) => status === "satisfied").length;
     const contentResult = checkpointContentSchema.safeParse({
-      objective: input.objective,
+      objective: input.contract.objective,
       completedSteps: requirementState
         .filter(({ status }) => status === "satisfied")
         .map(({ criterion }) => ({
@@ -7978,8 +8054,8 @@ async function autoCommitTurnCheckpoint(input: {
         status,
         evidence: [],
       })),
-      assumptions: [...input.assumptions],
-      unknowns: [...input.unknowns],
+      assumptions: [...input.contract.assumptions],
+      unknowns: [...input.contract.unknowns],
       decisions: [
         {
           decision: `turn ${input.turnSequence} completed with ${satisfiedCount}/${requirementState.length} acceptance criteria satisfied`,
@@ -7994,12 +8070,12 @@ async function autoCommitTurnCheckpoint(input: {
             artifactHash: null,
             resolved: false,
           }],
-      openQuestions: [...input.unknowns],
+      openQuestions: [...input.contract.unknowns],
       sourceVersions: {
         [`task://${input.taskId}`]: input.contractContentHash,
         [`turn://${input.turnId}`]: `${input.turnSequence}:COMPLETED`,
       },
-      scope: input.allowedScope,
+      scope: input.contract.allowedScope,
       effectState: input.effectState,
       approvalState: [],
     });
@@ -8007,21 +8083,7 @@ async function autoCommitTurnCheckpoint(input: {
       return { skipped: `content not representable: ${contentResult.error.issues[0]?.message ?? "unknown"}` };
     }
     const content = contentResult.data;
-    const validation = validateCheckpoint(content, {
-      version: input.contractVersion,
-      objective: input.objective,
-      userOutcome: null,
-      nonGoals: [],
-      acceptanceCriteria: input.criteriaRows.map((c) => ({
-        id: c.criterionId,
-        statement: c.statement,
-        verificationHint: null,
-        required: c.required,
-      })),
-      constraints: [],
-      assumptions: [...input.assumptions],
-      unknowns: [...input.unknowns],
-    }, content.sourceVersions);
+    const validation = validateCheckpoint(content, input.contract, content.sourceVersions);
     if (!validation.valid) {
       return { skipped: `validation failed: ${validation.violations[0]?.description ?? "unknown"}` };
     }
@@ -8041,6 +8103,15 @@ async function autoCommitTurnCheckpoint(input: {
       { sessionId: input.sessionId, taskId: input.taskId, turnId: input.turnId },
     );
     const id = uuid();
+    const bounds = await db.episode.aggregate({
+      where: { turnId: input.turnId },
+      _min: { sequence: true },
+      _max: { sequence: true },
+    });
+    const episodeRangeForTurn = {
+      from: bounds._min.sequence ?? 0,
+      to: bounds._max.sequence ?? 0,
+    };
     await writerTransaction((tx) => tx.checkpoint.create({
       data: {
         id,
@@ -8050,20 +8121,10 @@ async function autoCommitTurnCheckpoint(input: {
         checkpointArtifact: artifact.uri,
         schemaVersion: 1,
         lastCommittedSequencesJson: canonicalJson(checkpointSequenceStateSchema.parse({
-          task: input.contractVersion,
+          task: input.contract.version,
           turn: input.turnSequence,
           sourceTurnId: input.turnId,
-          episodeRange: await (async () => {
-            const bounds = await db.episode.aggregate({
-              where: { turnId: input.turnId },
-              _min: { sequence: true },
-              _max: { sequence: true },
-            });
-            return {
-              from: bounds._min.sequence ?? 0,
-              to: bounds._max.sequence ?? 0,
-            };
-          })(),
+          episodeRange: episodeRangeForTurn,
         })),
         activeContextEpochId: null,
         promotedInputCursor: null,
@@ -9792,183 +9853,6 @@ async function agentLoop(turnId: string): Promise<void> {
         secret: [],
       },
     };
-    // R10: conditional read-only scout — fresh context, read/grep/glob only,
-    // bounded steps. Default ON with TERMINUS_ENABLE_SCOUT=0 kill-switch and
-    // a utility ledger that disables the scout after repeated zero-yield
-    // runs. Result becomes a bounded scout_brief world-state section.
-    const scoutEnabledForTurn = toolsEnabled && resolveScoutEnabled(process.env.TERMINUS_ENABLE_SCOUT) && SCOUT_LEDGER.shouldRun();
-    let scoutFiles: readonly { path: string; role: string }[] = [];
-    if (scoutEnabledForTurn) {
-      try {
-        const scoutResult = await (async (): Promise<ScoutParsedResult | { status: "skipped" }> => {
-          if (selectedProvider.context.toolCalling === false) return { status: "skipped" };
-          const instructionsHash = computeContentHash("terminus-scout-authority-v1");
-          const objectiveText = `Objective: ${contract.objective}\n\nRead paths in scope: ${contract.allowedScope.readPaths.slice(0, 64).join(", ") || "(entire workspace)"}`;
-          const scope = {
-            workspaceId: workspace.id as never,
-            sessionId: turn.thread.sessionId as never,
-            taskId: task.id as never,
-            pathPatterns: [],
-          };
-          const now = new Date().toISOString() as never;
-          const fragment = (fragmentId: string, kind: "authority" | "recent_episode", text: string, hash: string): ContextFragment => ({
-            id: fragmentId,
-            kind,
-            contentRef: {
-              hash: hash as never,
-              uri: `artifact://sha256/${hash.slice("sha256:".length)}` as never,
-              mediaType: "text/plain",
-              bytes: BigInt(new TextEncoder().encode(text).byteLength) as never,
-            },
-            textContent: text,
-            source: { uri: `turn://${turnId}/scout`, producer: "terminus-control", producerVersion: "v1", observedAt: now, observedBy: "control-plane", evidenceRefs: [] },
-            sourceVersion: null,
-            authority: kind === "authority" ? 90 : 45,
-            priority: kind === "authority" ? 90 : 45,
-            trust: "derived",
-            confidentiality: "workspace",
-            injectionRisk: "low",
-            exactness: "exact",
-            scope,
-            freshness: { observedAt: now, sourceVersion: null, stale: false, staleReason: null },
-            dependencies: [],
-            invalidation: [],
-            estimatedTokens: { [selectedModel.modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
-            selectionFeatures: { relevance: 1, novelty: 0, coverage: 1, uncertaintyReduction: 1, riskReduction: 1, modelCompatibility: 1, redundancyPenalty: 0, injectionPenalty: 0 },
-          });
-          const directExecutor = buildDirectExecutor();
-          const scoutKernelContext = await kernelTaskContext({
-            sessionId: turn.thread.sessionId,
-            taskId: task.id,
-            turnId,
-            workspaceId: workspace.id,
-            operationClasses: [
-              CapabilityOperationProto.CAPABILITY_OPERATION_READ,
-              CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
-              CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
-            ],
-            workspacePaths: leastWorkspaceScope(contract.allowedScope.readPaths),
-          });
-          const scoutTracker = new ObservedSourceTracker();
-          return await runScoutLoop({
-            maxSteps: 10,
-            callProvider: async (messages) => {
-              const fragments = messages.map((message, index) =>
-                fragment(`scout:${turnId}:${index}`, index === 0 ? "authority" : "recent_episode", message.text, computeContentHash(message.text)));
-              const rendered = await selectedRenderer.render({
-                provider: selectedProvider,
-                model: selectedModel,
-                manifestId: `scout:${turnId}`,
-                fragments,
-                toolSchemas: STANDALONE_TOOL_SCHEMAS.filter((tool) => tool.id === "read" || tool.id === "grep" || tool.id === "glob"),
-                cachePlan: { stablePrefixHash: instructionsHash, breakpoints: [] },
-                continuationId: null,
-                outputProfile: "terse",
-                reasoningReserveTokens: 4_096n as never,
-                outputReserveTokens: 2_048n as never,
-                hardInputLimit: 200_000n as never,
-                signal: null,
-              } as Parameters<typeof selectedRenderer.render>[0]);
-              const response = await providerSessionService.execute({
-                rendered,
-                command: localProviderCommand,
-                gateway: gatewayModel === null
-                  ? null
-                  : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
-                direct: directConfiguration === null
-                  ? null
-                  : { vendor: directConfiguration.vendor },
-                ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
-                context: { ...scoutKernelContext, idempotencyKey: `scout:${turnId}:${messages.length}` },
-                workspaceId: workspace.id,
-              });
-              const projectedScout = await selectedRenderer.projectResponse(response);
-              return {
-                renderedBody: {},
-                projectedText: projectedScout.text,
-                toolCalls: projectedScout.toolCalls.map((call) => ({
-                  toolName: call.toolName,
-                  argumentsJson: canonicalJson(call.arguments),
-                })),
-              };
-            },
-            executeTool: async ({ toolName, argumentsJson }) => {
-              let parsedArguments: unknown;
-              try {
-                parsedArguments = JSON.parse(argumentsJson);
-              } catch {
-                parsedArguments = {};
-              }
-              const call = parseStandaloneToolCall({
-                toolCallId: `scout-${Math.floor(Math.random() * 1e9).toString(36)}`,
-                toolName,
-                arguments: parsedArguments,
-              });
-              const result = await executeStandaloneTool({
-                clients: requireKernelUds(),
-                context: { ...scoutKernelContext, idempotencyKey: `scout-tool:${call.providerCallId}` },
-                workspaceId: workspace.id,
-                call,
-                internalToolCallId: uuid(),
-                sideEffectId: generateUuid7(),
-                policyDecisionId: uuid(),
-                traceId: turnId,
-                contractHash: contractRow.contentHash,
-                devMode: DEV_MODE,
-                shellModeEnabled: false,
-                observedSources: scoutTracker,
-              });
-              const visible = projectModelVisibleResult(result);
-              return { ok: result.status === "success" || result.status === "partial", resultText: JSON.stringify(visible) };
-            },
-          });
-        })();
-        if ("claims" in scoutResult && scoutResult.status === "completed") {
-          scoutFiles = scoutResult.files;
-          SCOUT_LEDGER.recordScout(task.id, scoutResult.claims.length + scoutResult.files.length);
-          scoutBriefSection = {
-            claims: scoutResult.claims,
-            files: scoutResult.files.slice(0, 32),
-            open_questions: scoutResult.openQuestions,
-          };
-          await mutateAgentState(() => emit({
-            eventType: "scout.completed",
-            aggregateType: "task",
-            aggregateId: task.id,
-            correlationId: task.id,
-            payload: {
-              claims: scoutResult.claims.length,
-              files: scoutResult.files.length,
-              open_questions: scoutResult.openQuestions.length,
-            },
-          }));
-        } else {
-          SCOUT_LEDGER.recordScout(task.id, 0);
-          await mutateAgentState(() => emit({
-            eventType: "scout.skipped",
-            aggregateType: "task",
-            aggregateId: task.id,
-            correlationId: task.id,
-            payload: { reason: scoutResult.status },
-          }));
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await mutateAgentState(() => emit({
-          eventType: "scout.failed",
-          aggregateType: "task",
-          aggregateId: task.id,
-          correlationId: task.id,
-          payload: { reason: message.slice(0, 512) },
-        }));
-      }
-    }
-    type ScoutBriefSection = {
-      claims: readonly string[];
-      files: readonly { path: string; role: string }[];
-      open_questions: readonly string[];
-    };
-    let scoutBriefSection: ScoutBriefSection | null = null;
     const compileProviderContext = async () => {
       let recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
       // R4: compaction pass — deterministic prune + structured summary before
@@ -10055,7 +9939,7 @@ async function agentLoop(turnId: string): Promise<void> {
       // inject a bounded excerpt of the previous completed turn so the model
       // does not restart from amnesia. Deterministic; no extra LLM call.
       if (shouldInjectRecentHistory(recent.episodes.length)) {
-        const priorSection = await loadPriorTurnHistory(turn.threadId, turn.sequence);
+        const priorSection = await loadPriorTurnHistory(turn.threadId, turn.sequence, artifactClient);
         if (priorSection !== null) {
           (effectiveWorldState.sections as Record<string, unknown>).recent_history = priorSection.previous_turn;
         }
@@ -10196,7 +10080,7 @@ async function agentLoop(turnId: string): Promise<void> {
       hideEpisodes: async (ids) => {
         if (ids.length === 0) return;
         await db.episode.updateMany({
-          where: { id: { in: ids }, turnId },
+          where: { id: { in: [...ids] }, turnId },
           data: { modelVisible: false },
         });
       },
@@ -10256,7 +10140,7 @@ async function agentLoop(turnId: string): Promise<void> {
             bytes: BigInt(new TextEncoder().encode(text).byteLength) as never,
           },
           textContent: text,
-          source: { uri: `turn://${turnId}/compaction`, producer: "terminus-control", producerVersion: "v1", observedAt: now, observedBy: "control-plane", evidenceRefs: [] },
+          source: { uri: `turn://${turnId}/compaction`, producer: "terminus-control", producerVersion: "v1", observedAt: now, observedBy: "control", evidenceRefs: [] },
           sourceVersion: null,
           authority: kind === "authority" ? 90 : 45,
           priority: kind === "authority" ? 90 : 45,
@@ -10285,7 +10169,7 @@ async function agentLoop(turnId: string): Promise<void> {
           cachePlan: { stablePrefixHash: instructionsHash, breakpoints: [] },
           continuationId: null,
           outputProfile: "terse",
-          reasoningReserveTokens: selectedModel.context?.reasoningReserveTokens ?? (4_096n as never),
+          reasoningReserveTokens: 4_096n as never,
           outputReserveTokens: 2_048n as never,
           hardInputLimit: 400_000n as never,
           signal: null,
@@ -10325,6 +10209,183 @@ async function agentLoop(turnId: string): Promise<void> {
     const configuredMaxSteps =
       Number.parseInt(process.env.TERMINUS_TURN_MAX_STEPS ?? "", 10) ||
       resolveMaxToolCycles(process.env.TERMINUS_MAX_TOOL_CYCLES);
+    type ScoutBriefSection = {
+      claims: readonly string[];
+      files: readonly { path: string; role: string }[];
+      open_questions: readonly string[];
+    };
+    let scoutBriefSection: ScoutBriefSection | null = null;
+    // R10: conditional read-only scout — fresh context, read/grep/glob only,
+    // bounded steps. Default ON with TERMINUS_ENABLE_SCOUT=0 kill-switch and
+    // a utility ledger that disables the scout after repeated zero-yield
+    // runs. Result becomes a bounded scout_brief world-state section.
+    const scoutEnabledForTurn = toolsEnabled && resolveScoutEnabled(process.env.TERMINUS_ENABLE_SCOUT) && SCOUT_LEDGER.shouldRun();
+    let scoutFiles: readonly { path: string; role: string }[] = [];
+    if (scoutEnabledForTurn) {
+      try {
+        const scoutResult = await (async (): Promise<ScoutParsedResult | { status: "skipped" }> => {
+          if (selectedProvider.context.toolCalling === false) return { status: "skipped" };
+          const instructionsHash = computeContentHash("terminus-scout-authority-v1");
+          const objectiveText = `Objective: ${contract.objective}\n\nRead paths in scope: ${contract.allowedScope.readPaths.slice(0, 64).join(", ") || "(entire workspace)"}`;
+          const scope = {
+            workspaceId: workspace.id as never,
+            sessionId: turn.thread.sessionId as never,
+            taskId: task.id as never,
+            pathPatterns: [],
+          };
+          const now = new Date().toISOString() as never;
+          const fragment = (fragmentId: string, kind: "authority" | "recent_episode", text: string, hash: string): ContextFragment => ({
+            id: fragmentId,
+            kind,
+            contentRef: {
+              hash: hash as never,
+              uri: `artifact://sha256/${hash.slice("sha256:".length)}` as never,
+              mediaType: "text/plain",
+              bytes: BigInt(new TextEncoder().encode(text).byteLength) as never,
+            },
+            textContent: text,
+            source: { uri: `turn://${turnId}/scout`, producer: "terminus-control", producerVersion: "v1", observedAt: now, observedBy: "control", evidenceRefs: [] },
+            sourceVersion: null,
+            authority: kind === "authority" ? 90 : 45,
+            priority: kind === "authority" ? 90 : 45,
+            trust: "derived",
+            confidentiality: "workspace",
+            injectionRisk: "low",
+            exactness: "exact",
+            scope,
+            freshness: { observedAt: now, sourceVersion: null, stale: false, staleReason: null },
+            dependencies: [],
+            invalidation: [],
+            estimatedTokens: { [selectedModel.modelKey]: Math.max(1, Math.ceil(text.length / 4)) },
+            selectionFeatures: { relevance: 1, novelty: 0, coverage: 1, uncertaintyReduction: 1, riskReduction: 1, modelCompatibility: 1, redundancyPenalty: 0, injectionPenalty: 0 },
+          });
+          const directExecutor = buildDirectExecutor();
+          const scoutKernelContext = await kernelTaskContext({
+            sessionId: turn.thread.sessionId,
+            taskId: task.id,
+            turnId,
+            workspaceId: workspace.id,
+            operationClasses: [
+              CapabilityOperationProto.CAPABILITY_OPERATION_READ,
+              CapabilityOperationProto.CAPABILITY_OPERATION_EXEC,
+              CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
+            ],
+            workspacePaths: leastWorkspaceScope(contract.allowedScope.readPaths),
+          });
+          const scoutTracker = new ObservedSourceTracker();
+          return await runScoutLoop({
+            maxSteps: 10,
+            callProvider: async (messages) => {
+              const fragments = messages.map((message, index) =>
+                fragment(`scout:${turnId}:${index}`, index === 0 ? "authority" : "recent_episode", message.text, computeContentHash(message.text)));
+              const rendered = await selectedRenderer.render({
+                provider: selectedProvider,
+                model: selectedModel,
+                manifestId: `scout:${turnId}`,
+                fragments,
+                toolSchemas: STANDALONE_TOOL_SCHEMAS.filter((tool) => tool.id === "read" || tool.id === "grep" || tool.id === "glob"),
+                cachePlan: { stablePrefixHash: instructionsHash, breakpoints: [] },
+                continuationId: null,
+                outputProfile: "terse",
+                reasoningReserveTokens: 4_096n as never,
+                outputReserveTokens: 2_048n as never,
+                hardInputLimit: 200_000n as never,
+                signal: null,
+              } as Parameters<typeof selectedRenderer.render>[0]);
+              const response = await providerSessionService.execute({
+                rendered,
+                command: localProviderCommand,
+                gateway: gatewayModel === null
+                  ? null
+                  : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
+                direct: directConfiguration === null
+                  ? null
+                  : { vendor: directConfiguration.vendor },
+                ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
+                context: { ...scoutKernelContext, idempotencyKey: `scout:${turnId}:${messages.length}` },
+                workspaceId: workspace.id,
+              });
+              const projectedScout = await selectedRenderer.projectResponse(response);
+              return {
+                renderedBody: {},
+                projectedText: projectedScout.text,
+                toolCalls: projectedScout.toolCalls.map((call) => ({
+                  toolName: call.toolName,
+                  argumentsJson: canonicalJson(call.arguments),
+                })),
+              };
+            },
+            executeTool: async ({ toolName, argumentsJson }) => {
+              let parsedArguments: unknown;
+              try {
+                parsedArguments = JSON.parse(argumentsJson);
+              } catch {
+                parsedArguments = {};
+              }
+              const call = parseStandaloneToolCall({
+                toolCallId: `scout-${Math.floor(Math.random() * 1e9).toString(36)}`,
+                toolName,
+                arguments: parsedArguments as Record<string, unknown>,
+              });
+              const result = await executeStandaloneTool({
+                clients: requireKernelUds(),
+                context: { ...scoutKernelContext, idempotencyKey: `scout-tool:${call.providerCallId}` },
+                workspaceId: workspace.id,
+                call,
+                internalToolCallId: uuid(),
+                sideEffectId: generateUuid7(),
+                policyDecisionId: uuid(),
+                traceId: turnId,
+                contractHash: contractRow.contentHash,
+                devMode: DEV_MODE,
+                shellModeEnabled: false,
+                observedSources: scoutTracker,
+              });
+              const visible = projectModelVisibleResult(result);
+              return { ok: result.status === "success" || result.status === "partial", resultText: JSON.stringify(visible) };
+            },
+          });
+        })();
+        if ("claims" in scoutResult && scoutResult.status === "completed") {
+          scoutFiles = scoutResult.files;
+          SCOUT_LEDGER.recordScout(task.id, scoutResult.claims.length + scoutResult.files.length);
+          scoutBriefSection = {
+            claims: scoutResult.claims,
+            files: scoutResult.files.slice(0, 32),
+            open_questions: scoutResult.openQuestions,
+          };
+          await mutateAgentState(() => emit({
+            eventType: "scout.completed",
+            aggregateType: "task",
+            aggregateId: task.id,
+            correlationId: task.id,
+            payload: {
+              claims: scoutResult.claims.length,
+              files: scoutResult.files.length,
+              open_questions: scoutResult.openQuestions.length,
+            },
+          }));
+        } else {
+          SCOUT_LEDGER.recordScout(task.id, 0);
+          await mutateAgentState(() => emit({
+            eventType: "scout.skipped",
+            aggregateType: "task",
+            aggregateId: task.id,
+            correlationId: task.id,
+            payload: { reason: scoutResult.status },
+          }));
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await mutateAgentState(() => emit({
+          eventType: "scout.failed",
+          aggregateType: "task",
+          aggregateId: task.id,
+          correlationId: task.id,
+          payload: { reason: message.slice(0, 512) },
+        }));
+      }
+    }
     const engine = new CodingTurnEngine({
       budget: {
         maxSteps: configuredMaxSteps,
@@ -10361,20 +10422,23 @@ async function agentLoop(turnId: string): Promise<void> {
         // R6: bounded retry/backoff for transient provider faults. The
         // native runtime settles partials explicitly; this is the recovery
         // layer it delegates to.
-        return withProviderRetry(() => providerSessionService.execute({
-          rendered: compiled.rendered,
-          command: localProviderCommand,
-          gateway: gatewayModel === null
-            ? null
-            : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
-          direct: directConfiguration === null
-            ? null
-            : { vendor: directConfiguration.vendor },
-          ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
-            context: { ...await buildProviderTaskContext(), idempotencyKey: `provider:${attemptId}` },
-            workspaceId: workspace.id,
-          });
-        }, { maxAttempts: 3 });
+        return withProviderRetry(
+          async () =>
+            providerSessionService.execute({
+              rendered: compiled.rendered,
+              command: localProviderCommand,
+              gateway: gatewayModel === null
+                ? null
+                : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
+              direct: directConfiguration === null
+                ? null
+                : { vendor: directConfiguration.vendor },
+              ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
+              context: { ...await buildProviderTaskContext(), idempotencyKey: `provider:${attemptId}` },
+              workspaceId: workspace.id,
+            }),
+          { maxAttempts: 3 },
+        );
       },
       settleResponse: async ({ attemptId, response }) => {
         const midTurn = await db.turn.findUnique({ where: { id: turnId }, select: { state: true } });
@@ -10610,11 +10674,7 @@ async function agentLoop(turnId: string): Promise<void> {
         sessionId: turn.thread.sessionId,
         turnId,
         turnSequence: turn.sequence,
-        objective: contract.objective,
-        assumptions: contract.assumptions,
-        unknowns: contract.unknowns,
-        allowedScope: contract.allowedScope,
-        contractVersion: contractRow.version,
+        contract,
         contractContentHash: contractRow.contentHash as ContentHash,
         criteriaRows: autoCheckpointCriteriaRows.map((criterion) => ({
           criterionId: criterion.criterionId,

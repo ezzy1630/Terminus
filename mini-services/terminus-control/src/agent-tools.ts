@@ -986,7 +986,10 @@ export async function executeStandaloneTool(
       );
     }
     case "web_fetch": {
-      return executeWebFetch(input, startedAt);
+      return executeWebFetch(
+        { ...input, call: input.call as Extract<ParsedStandaloneToolCall, { toolId: "web_fetch" }> },
+        startedAt,
+      );
     }
   }
 }
@@ -1113,7 +1116,6 @@ async function executeWebFetch(
     artifacts: artifact === null ? [] : [artifact],
     sideEffects: [sideEffect(input.sideEffectId, "network", `GET https://${destination.host}${destination.pathWithQuery}`, false)],
     timing: { executionMs: elapsed, totalMs: elapsed },
-    resourceUsage: { cpuMs: 0, peakMemoryBytes: 0, bytesRead: boundedBody.byteLength, bytesWritten: 0, networkBytes: bodyBytes.byteLength as unknown as number },
   });
   return {
     ...result,

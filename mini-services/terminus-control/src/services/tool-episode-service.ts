@@ -107,7 +107,8 @@ export class ToolEpisodeService {
     const rows = await this.dependencies.store.listModelVisibleEpisodes(turnId);
     const decoder = new TextDecoder("utf-8", { fatal: true });
     const content = new Map<ContentHash, string>();
-    const includedRows: typeof rows = [];
+    type Row = (typeof rows)[number];
+    const includedRows: Row[] = [];
     let budgetBytes = this.windowBytes;
     // Walk newest→oldest; include while budget allows.
     for (let index = rows.length - 1; index >= 0; index -= 1) {

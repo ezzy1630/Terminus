@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import uuid
 import re
 import sys
 from collections.abc import Sequence
@@ -263,12 +265,118 @@ def _add_run_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     )
 
 
+def _cmd_run_live(args: argparse.Namespace) -> int:
+    """Execute one live evaluation through the Terminus control plane (R8)."""
+    from .runners.live_runner import run_live_task
+    from .runners.terminus_harness import TerminusControlError, TerminusHarness
+
+    try:
+        harness = TerminusHarness.from_env()
+    except TerminusControlError as error:
+        print(f"live run unavailable: {error}", file=sys.stderr)
+        return 2
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for i in range(args.seeds):
+        seed = args.seed + i
+        request = RunRequest(
+            suite=args.suite,
+            task=args.task,
+            task_dir=Path(args.task_dir),
+            harness_id="terminus-live",
+            harness_commit=args.harness_commit,
+            model_snapshot=ModelCapabilitySnapshot(
+                provider=args.provider,
+                model=args.model,
+                context_window=200_000,
+                max_output_tokens=8_192,
+            ),
+            random_seed=seed,
+        )
+        recorder = TrajectoryRecorder(run_id=f"{args.suite}-{args.task}-{seed}")
+        result, patch_payload = run_live_task(harness, request, recorder)
+        record = build_live_run_record(
+            harness_result=result,
+            request=request,
+            patch_payload=patch_payload,
+            seed=seed,
+        )
+        write_run_records([record], output_dir=output_dir, fmt=args.format)
+        n += 1
+    print(f"live runs completed: {n}")
+    return 0
+
+
+def build_live_run_record(harness_result, request, patch_payload, seed):
+    """Compose one honest RunRecord from a live harness result.
+
+    Grader results are intentionally empty until an external grader or the
+    control plane's verification evidence is reconciled; completion alone is
+    never recorded as success.
+    """
+    notes = json.loads(harness_result.notes) if harness_result.notes else {}
+    usage = notes.get("provider_usage") or {}
+    outcome = harness_result.outcome if isinstance(harness_result.outcome, Outcome) else Outcome(str(harness_result.outcome).split(".")[-1])
+    return RunRecord(
+        run_id=f"live-{request.suite}-{request.task}-{seed}-{uuid.uuid4().hex[:8]}",
+        suite=request.suite,
+        task=request.task,
+        harness=request.harness_id,
+        harness_commit=request.harness_commit,
+        model_capability_snapshot={
+            "provider": request.model_snapshot.provider,
+            "model": request.model_snapshot.model,
+        },
+        environment_digest=f"remote:{notes.get('workspace_id', 'unknown')}",
+        random_seed=seed,
+        budgets={},
+        experiment_assignments=[],
+        outcome=outcome,
+        grader_results=[],
+        cost=None,
+        artifacts=list(harness_result.artifacts)
+        + (
+            [
+                {
+                    "kind": "workspace_patch",
+                    "diff_chars": len(patch_payload.get("diff", "")),
+                    "truncated": bool(patch_payload.get("truncated")),
+                }
+            ]
+            if patch_payload.get("diff")
+            else []
+        ),
+        context_manifests=list(getattr(harness_result, "context_manifests", []) or []),
+        notes=json.dumps(
+            {
+                **notes,
+                "mode": "live",
+                "input_tokens": int(usage.get("input_tokens", 0)),
+                "output_tokens": int(usage.get("output_tokens", 0)),
+                "cached_tokens": int(usage.get("cached_tokens", 0)),
+                "evaluation": (
+                    "pending_grader" if patch_payload.get("diff") else "no_patch"
+                ),
+            },
+            sort_keys=True,
+        ),
+    )
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """Execute the ``run`` command."""
+    live_requested = args.harness in {"terminus-live", "terminus"} or (
+        os.environ.get("TERMINUS_CONTROL_URL") and not args.fixture_mode
+    )
+    if live_requested:
+        return _cmd_run_live(args)
+
     if not args.fixture_mode:
         print(
-            "run is blocked: no live harness adapter is configured; pass --fixture-mode "
-            "only for deterministic test data",
+            "run requires either --fixture-mode (deterministic test data) or a live "
+            "target: --harness terminus-live with TERMINUS_CONTROL_URL set",
             file=sys.stderr,
         )
         return 2
