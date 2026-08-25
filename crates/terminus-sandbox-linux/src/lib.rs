@@ -830,6 +830,10 @@ mod tests {
         }
     }
 
+    // bwrap argv construction binds host runtime trees (/usr, /proc, /dev);
+    // those paths do not exist on Windows where the argv builder skips
+    // missing sources, so the full minimal-root shape is unix-only.
+    #[cfg(unix)]
     #[test]
     fn build_bwrap_argv_builds_minimal_root_and_runtime_trees() {
         let cmd = simple_command("ls");
