@@ -50,7 +50,7 @@ jobs:
           # fails with RTM_NEWADDR; we share the host network namespace and
           # rely on the policy engine's egress rules for network isolation
           # (exercised by the non-bypassability suite).
-          bwrap --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-namespace \
+          bwrap --unshare-pid --unshare-ipc --unshare-uts \
             --ro-bind /usr /usr \
             --symlink usr/bin /bin \
             --proc /proc --dev /dev \
