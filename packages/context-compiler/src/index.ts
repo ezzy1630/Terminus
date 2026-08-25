@@ -289,6 +289,12 @@ export interface CompileInput {
   readonly tokenEstimator?: TokenEstimator | undefined;
   /** Semantic compaction is opt-in and must preserve evidence links. */
   readonly compactionPolicy?: CompactionPolicy | undefined;
+  /**
+   * Optional platform authority documents rendered as hard-required
+   * authority fragments (SPEC §8.4 step 2). When omitted, the compiler
+   * falls back to the built-in minimal policy baseline.
+   */
+  readonly authorityDocuments?: readonly AuthorityDocument[] | undefined;
   /** Optional prior snapshot used to explain cache mutations across turns. */
   readonly previousCacheEpoch?: CacheEpochDebugSnapshot | null | undefined;
   readonly store: ContextStore;
@@ -475,6 +481,17 @@ export interface RequiredFragments {
 }
 
 /**
+ * A caller-supplied platform authority document. Rendered verbatim as a
+ * hard-required authority fragment; `id` must be stable across turns so the
+ * cache-stable prefix is preserved.
+ */
+export interface AuthorityDocument {
+  readonly id: string;
+  readonly sourceUri: string;
+  readonly text: string;
+}
+
+/**
  * Builds the hard-required fragments per SPEC §8.4 step 2: "Hard-include
  * active authority, task/scope contract, policy, and unresolved acceptance
  * criteria." Each fragment carries the actual rendered text in
@@ -505,28 +522,41 @@ export async function collectRequiredFragments(
     injectionPenalty: 0,
   };
 
-  // 1. Authority fragment: the active security policy baseline.
-  const authorityText = `# Authority: secure-local-default policy\n\nThis task operates under the secure-local-default policy profile.\nTrusted workspace. Network egress is denied by default.`;
-  const authority: ContextFragment = {
-    id: "required:authority:secure-local-default",
-    kind: "authority",
-    contentRef: makeArtifactRef("authority", authorityText),
-    textContent: authorityText,
-    source: makeSource("terminus://policy/secure-local-default", "policy-coordinator", now),
-    sourceVersion: "v1",
-    authority: 100,
-    priority: 100,
-    trust: "trusted",
-    confidentiality: "workspace",
-    injectionRisk: "none",
-    exactness: "exact",
-    scope,
-    freshness: { observedAt: now, sourceVersion: "v1", stale: false, staleReason: null },
-    dependencies: [],
-    invalidation: [{ kind: "policy_changed", selector: "terminus://policy/secure-local-default" }],
-    estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(authorityText) } as Readonly<Record<string, number>>,
-    selectionFeatures: emptyFeatures,
-  };
+  // 1. Authority fragments: the active security policy baseline. Caller
+  // supplied documents (platform authority + safety rules + tool usage)
+  // take precedence; the minimal built-in baseline is the fallback.
+  const authorityDocuments: readonly AuthorityDocument[] = input.authorityDocuments?.length
+    ? input.authorityDocuments
+    : [{
+        id: "secure-local-default",
+        sourceUri: "terminus://policy/secure-local-default",
+        text: `# Authority: secure-local-default policy\n\nThis task operates under the secure-local-default policy profile.\nTrusted workspace. Network egress is denied by default.`,
+      }];
+  const authorityFragments: ContextFragment[] = authorityDocuments.map((document, documentIndex) => {
+    const fragmentId = `required:authority:${document.id}`;
+    return {
+      id: fragmentId,
+      kind: "authority" as const,
+      contentRef: makeArtifactRef(`authority:${document.id}`, document.text),
+      textContent: document.text,
+      source: makeSource(document.sourceUri, "policy-coordinator", now),
+      sourceVersion: "v1",
+      authority: 100,
+      priority: 100,
+      trust: "trusted" as const,
+      confidentiality: "workspace" as const,
+      injectionRisk: "none" as const,
+      exactness: "exact" as const,
+      scope,
+      freshness: { observedAt: now, sourceVersion: "v1", stale: false, staleReason: null },
+      dependencies: documentIndex === 0 ? [] : [`${"required:authority:"}${authorityDocuments[0]!.id}`],
+      invalidation: [{ kind: "policy_changed" as const, selector: document.sourceUri }],
+      estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(document.text) } as Readonly<Record<string, number>>,
+      selectionFeatures: emptyFeatures,
+    };
+  });
+  const primaryAuthorityId = authorityFragments[0]!.id;
+  const authority = authorityFragments[0]!;
 
   // 2. Task contract fragment: objective, non-goals, acceptance criteria.
   const contract = input.task.contract;
@@ -601,7 +631,7 @@ export async function collectRequiredFragments(
     exactness: "exact",
     scope,
     freshness: { observedAt: now, sourceVersion: "v1", stale: false, staleReason: null },
-    dependencies: ["required:authority:secure-local-default"],
+    dependencies: [primaryAuthorityId],
     invalidation: [{ kind: "policy_changed", selector: "terminus://policy/command" }],
     estimatedTokens: { [modelKey]: tokenizer.estimateTextTokens(policyText) } as Readonly<Record<string, number>>,
     selectionFeatures: emptyFeatures,
@@ -637,7 +667,7 @@ export async function collectRequiredFragments(
     });
   }
 
-  return { authority: [authority], taskContract: [taskContract], policy: [policy], acceptanceCriteria };
+  return { authority: authorityFragments, taskContract: [taskContract], policy: [policy], acceptanceCriteria };
 }
 
 /** Build an ArtifactRef with a stable, content-derived hash. */

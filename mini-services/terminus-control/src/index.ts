@@ -250,6 +250,7 @@ import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
 import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
 import { CodingTurnEngine } from "./agent/coding-turn-engine.js";
+import { standaloneAuthorityDocuments } from "./agent/system-prompt.js";
 import {
   hydrateSearchHit,
   buildRepositoryMapFragment,
@@ -9581,6 +9582,9 @@ async function agentLoop(turnId: string): Promise<void> {
         episodeContent: recent.content,
         checkpoint,
         userDirectives: [] as readonly ContextDirective[],
+        // R2 (harness critical path): real platform authority, safety rules,
+        // and the shipped tool contract replace the two-sentence stub.
+        authorityDocuments: standaloneAuthorityDocuments(),
         activeCapabilities: toolsEnabled
           ? STANDALONE_TOOL_SCHEMAS.map((tool) => ({ id: tool.id, version: tool.version }))
           : [],
