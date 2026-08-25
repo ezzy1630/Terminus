@@ -30,6 +30,10 @@ pub enum AuthStyle {
     Bearer,
     /// Custom key header, e.g. `X-Api-Key: <credential>`.
     NamedHeader(String),
+    /// No credential at all (public endpoints, e.g. the built-in
+    /// `web-fetch` connector). Grants still pin host/method/path and are
+    /// consumed once; only the credential step is skipped.
+    None,
 }
 
 #[derive(Debug, Clone)]
@@ -225,18 +229,29 @@ impl ConnectorBroker {
         validate_headers(&op.headers)?;
 
         // -- 3. Resolve credential inside the trusted boundary -----------
-        let handle = self
-            .secret_broker
-            .request(&claims.secret_uri, &claims.workload.workload_id)?;
-        if handle.digest() != claims.credential_digest {
-            return Err(terminus_secrets::SecretError::InvalidGrant(
-                "credential rotated since grant issuance; mint a fresh grant".into(),
-            )
-            .into());
-        }
-        let (header_name, header_value) = match &descriptor.auth {
-            AuthStyle::Bearer => handle.http_header_pair("Bearer")?,
-            AuthStyle::NamedHeader(name) => handle.named_header_pair(name)?,
+        // Anonymous connectors (`AuthStyle::None`) skip this step entirely;
+        // every other style resolves the secret and pins its digest.
+        let credential: Option<(String, String)> = if matches!(descriptor.auth, AuthStyle::None) {
+            None
+        } else {
+            let handle = self
+                .secret_broker
+                .request(&claims.secret_uri, &claims.workload.workload_id)?;
+            if handle.digest() != claims.credential_digest {
+                return Err(terminus_secrets::SecretError::InvalidGrant(
+                    "credential rotated since grant issuance; mint a fresh grant".into(),
+                )
+                .into());
+            }
+            match &descriptor.auth {
+                AuthStyle::Bearer => Some(handle.http_header_pair("Bearer")?),
+                AuthStyle::NamedHeader(name) => Some(handle.named_header_pair(name)?),
+                AuthStyle::None => None,
+            }
+        };
+        let (header_name, header_value) = match &credential {
+            Some(pair) => (pair.0.clone(), pair.1.clone()),
+            None => (String::new(), String::new()),
         };
 
         // -- 4. Bounded body ---------------------------------------------
@@ -299,9 +314,11 @@ impl ConnectorBroker {
 
         // Response scrubbing: echoed credential material never escapes.
         let mut redactor = Redactor::new();
-        redactor.add_literal("connector-credential", &header_value);
-        if let Some(bare) = header_value.strip_prefix("Bearer ") {
-            redactor.add_literal("connector-credential-bare", bare);
+        if !header_value.is_empty() {
+            redactor.add_literal("connector-credential", &header_value);
+            if let Some(bare) = header_value.strip_prefix("Bearer ") {
+                redactor.add_literal("connector-credential-bare", bare);
+            }
         }
 
         let (status_code, response_bytes, content_type, wire_error) = match dispatch {

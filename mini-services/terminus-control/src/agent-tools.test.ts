@@ -14,6 +14,7 @@ import {
   renderNumbered,
   resolveMaxToolCycles,
   resolveShellModeEnabled,
+  assertPublicHttpsUrl,
   stripNumberedGuttersIfFullyNumbered,
   toolEffectMetadata,
   type ParsedStandaloneToolCall,
@@ -22,7 +23,7 @@ import type { ToolResult } from "@terminus/aci";
 
 describe("standalone provider tools", () => {
   test("exposes the bounded kernel tool surface", () => {
-    expect(STANDALONE_TOOL_SCHEMAS.map((tool) => tool.id)).toEqual(["read", "patch", "exec", "exec_poll", "grep", "glob"]);
+    expect(STANDALONE_TOOL_SCHEMAS.map((tool) => tool.id)).toEqual(["read", "patch", "exec", "exec_poll", "web_fetch", "grep", "glob"]);
     expect(DEFAULT_MAX_TOOL_CYCLES).toBe(64);
   });
 
@@ -643,5 +644,94 @@ describe("R3 background exec and exec_poll", () => {
     });
     expect(result.status).toBe("success");
     expect(String((result.data as Record<string, unknown>).stdout_tail)).toContain("cas blob missing");
+  });
+});
+
+describe("R11 web_fetch URL guards", () => {
+  const base = {
+    context: { idempotencyKey: "idem" } as never,
+    workspaceId: "ws-1",
+    internalToolCallId: "tc",
+    sideEffectId: "00000000-0000-7000-8000-000000000031" as never,
+    policyDecisionId: "pd",
+    traceId: "trace",
+    contractHash: "hash",
+    devMode: false,
+    shellModeEnabled: true,
+    observedSources: new ObservedSourceTracker(),
+  } as const;
+
+  test("accepts public https URLs and rejects private/loopback/userinfo forms", () => {
+    expect(assertPublicHttpsUrl("https://example.com/docs?x=1")).toMatchObject({ host: "example.com", port: 443, pathWithQuery: "/docs?x=1" });
+    for (const bad of [
+      "http://example.com",
+      "https://user:pass@example.com",
+      "https://localhost/x",
+      "https://foo.localhost/x",
+      "https://10.0.0.9/x",
+      "https://127.0.0.1/x",
+      "https://169.254.169.254/latest/meta-data",
+      "https://192.168.1.4/x",
+      "https://[::1]/x",
+    ]) {
+      expect(() => assertPublicHttpsUrl(bad)).toThrow();
+    }
+  });
+
+  test("egress denial surfaces explicit allowlist guidance", async () => {
+    const clients = {
+      connectors: {
+        MintGrant: () => ({ encodedGrant: new Uint8Array([1]), grantId: "g", expiresAtUnix: 0n }),
+        Execute: () => {
+          throw new Error("egress policy denied destination");
+        },
+      },
+    } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
+    const result = await executeStandaloneTool({
+      ...base,
+      clients,
+      call: parseStandaloneToolCall({ toolCallId: "wf1", toolName: "web_fetch", arguments: { url: "https://example.com/" } }) as Extract<ParsedStandaloneToolCall, { toolId: "web_fetch" }>,
+    });
+    expect(result.status).toBe("denied");
+    expect(result.diagnostics[0]?.code).toBe("WEB_FETCH_EGRESS_DENIED");
+    expect(result.diagnostics[0]?.message).toMatch(/allowlist/);
+  });
+
+  test("successful fetch marks content untrusted, bounds the excerpt, spills to artifact", async () => {
+    const body = new TextEncoder().encode("hello world".repeat(2_000));
+    let ingestedBytes = 0;
+    const clients = {
+      connectors: {
+        MintGrant: (request: { binding: { connectorId: string; destinationHost: string; method: string } }) => {
+          expect(request.binding.connectorId).toBe("web-fetch");
+          expect(request.binding.destinationHost).toBe("example.com");
+          expect(request.binding.method).toBe("GET");
+          return { encodedGrant: new Uint8Array([1]), grantId: "g", expiresAtUnix: 0n };
+        },
+        Execute: () => ({
+          receipt: { statusCode: 200, outcome: "ACCEPTED" },
+          body,
+        }),
+      },
+      artifacts: {
+        Ingest: (request: { content: Uint8Array }) => {
+          ingestedBytes = request.content.byteLength;
+          return { artifact: { sha256: `sha256:${"a".repeat(64)}`, sizeBytes: BigInt(request.content.byteLength), mediaType: "application/octet-stream" }, already_present: false };
+        },
+      },
+    } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
+    const result = await executeStandaloneTool({
+      ...base,
+      clients,
+      call: parseStandaloneToolCall({ toolCallId: "wf2", toolName: "web_fetch", arguments: { url: "https://example.com/", max_bytes: 16_384 } }) as Extract<ParsedStandaloneToolCall, { toolId: "web_fetch" }>,
+    });
+    expect(result.status).toBe("success");
+    expect(result.trust).toBe("untrusted");
+    const data = result.data as Record<string, unknown>;
+    expect(data.untrusted_content_notice).toMatch(/untrusted/i);
+    expect(String(data.body_excerpt).length).toBeLessThanOrEqual(8_000);
+    expect(data.body_bytes_fetched).toBe(16_384);
+    expect(ingestedBytes).toBe(16_384);
+    expect(result.truncation.occurred).toBe(true);
   });
 });

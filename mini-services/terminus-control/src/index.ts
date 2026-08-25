@@ -9245,12 +9245,16 @@ async function settleStandaloneProviderTool(
           ? CapabilityOperationProto.CAPABILITY_OPERATION_PATCH
           : call.toolId === "exec_poll"
             ? CapabilityOperationProto.CAPABILITY_OPERATION_JOB
-            : CapabilityOperationProto.CAPABILITY_OPERATION_EXEC],
+            : call.toolId === "web_fetch"
+              ? CapabilityOperationProto.CAPABILITY_OPERATION_NETWORK
+              : CapabilityOperationProto.CAPABILITY_OPERATION_EXEC],
       [call.toolId === "exec"
         ? call.arguments.cwd
-        : call.toolId === "read" || call.toolId === "patch" || call.toolId === "grep" || call.toolId === "glob"
-          ? call.arguments.path
-          : "."],
+        : call.toolId === "web_fetch"
+          ? "."
+          : call.toolId === "read" || call.toolId === "patch" || call.toolId === "grep" || call.toolId === "glob"
+            ? call.arguments.path
+            : "."],
     );
   } catch (error: unknown) {
     const explanation = error instanceof Error ? error.message : String(error);
