@@ -195,14 +195,18 @@ class TerminusHarness:
         return session_id, thread_id
 
     def _objective(self, request: RunRequest) -> str:
-        statement_path = request.task_dir / "task.md"
-        return (
-            statement_path.read_text(encoding="utf-8") if statement_path.exists() else request.task
-        )
+        # Task packages ship prompt.md; older fixtures may use task.md.
+        for name in ("prompt.md", "task.md"):
+            candidate = request.task_dir / name
+            if candidate.exists():
+                return candidate.read_text(encoding="utf-8")
+        return request.task
 
     def _user_message(self, request: RunRequest) -> str:
-        prompt = request.task_dir / "prompt.txt"
-        return prompt.read_text(encoding="utf-8") if prompt.exists() else request.task
+        prompt = request.task_dir / "prompt.md"
+        if not prompt.exists():
+            prompt = request.task_dir / "prompt.txt"
+        return prompt.read_text(encoding="utf-8") if prompt.exists() else self._objective(request)
 
     def _create_task(
         self,
@@ -325,7 +329,6 @@ class TerminusHarness:
                     verification.append(artifact)
                 elif "context" in purpose or "manifest" in purpose:
                     manifests.append(artifact)
-            usage = {"artifact_count": len(items)}
         except TerminusControlError:
             pass
         return usage, manifests, verification

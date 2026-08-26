@@ -148,3 +148,13 @@ export class SessionLatencyTracker {
     return values[index]!;
   }
 }
+
+/** Custom event dispatched when the governance preference flips in-session. */
+export const GOVERNANCE_VIEWS_CHANGED_EVENT = "terminus:governance-views-changed";
+
+export function applyGovernanceViewsEnabled(storage: Storage | null, enabled: boolean): void {
+  writeGovernanceViewsEnabled(storage, enabled);
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(GOVERNANCE_VIEWS_CHANGED_EVENT, { detail: enabled }));
+  }
+}

@@ -29,7 +29,7 @@
  * the existing useThemeStore so the preview is immediate.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { readGovernanceViewsEnabled, writeGovernanceViewsEnabled } from "../lib/session-view";
+import { applyGovernanceViewsEnabled, readGovernanceViewsEnabled } from "../lib/session-view";
 import { useDialogFocus } from "../hooks/use-dialog-focus";
 import {
   Bell,
@@ -510,7 +510,7 @@ function buildCatalog(): SettingCategory[] {
             "Adds Overview / Activity / Replay / Usage / Evidence tabs to task workspaces. Off keeps the session-first default.",
           control: { kind: "toggle" },
           defaultValue: readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null),
-          apply: (v) => writeGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null, v === true || v === "true"),
+          apply: (v) => applyGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null, v === true || v === "true"),
         },
       ],
     },

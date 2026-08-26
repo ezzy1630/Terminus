@@ -166,11 +166,13 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
     readonly headers: Readonly<Record<string, string>>;
     readonly body: string;
     readonly context: RequestContext;
+    /** Opaque secret capability binding; required for vendor connectors. */
+    readonly credentialBindingId: string;
   }): AsyncIterable<Uint8Array> {
     const effectId = randomUUID();
     const grant = await this.connectors.MintGrant({
       context: nextContext(input.context, `native-grant:${effectId}`),
-      capabilityUri: "",
+      capabilityUri: input.credentialBindingId,
       binding: {
         connectorId: connectorIdForRawPath(input.host, input.path),
         destinationHost: input.host,

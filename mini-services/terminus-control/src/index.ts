@@ -263,6 +263,24 @@ import {
 import { standaloneAuthorityDocuments } from "./agent/system-prompt.js";
 import type { ProcessEvent as ProcessEventProto } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 
+async function kernelTaskContextForWorkspace(
+  workspaceId: string,
+  purpose: string,
+): Promise<RequestContext> {
+  const sessionRow = await db.session.findFirst({
+    where: { workspaceId },
+    select: { id: true },
+  });
+  if (sessionRow === null) throw new Error(`no session for workspace ${workspaceId}`);
+  return kernelTaskContext({
+    sessionId: sessionRow.id,
+    taskId: "*",
+    turnId: purpose,
+    workspaceId,
+    operationClasses: [CapabilityOperationProto.CAPABILITY_OPERATION_EXEC],
+  });
+}
+
 /** Concatenate byte chunks for bounded process output collection. */
 function concatUint8(chunks: readonly Uint8Array[]): Uint8Array {
   const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
@@ -3276,6 +3294,52 @@ const routes: Route[] = [
       created_at: ws.createdAt.toISOString(), last_opened_at: ws.lastOpenedAt.toISOString(),
     });
   }),
+  // R8/Cubic: authoritative workspace revision for benchmark harnesses.
+  route("GET", "/v1/workspaces/:id/revision", async (_req, res, params) => {
+    const workspaceId = String(params.id);
+    try {
+      const wsRow = await db.workspace.findUnique({ where: { id: workspaceId } });
+      if (wsRow === null) return sendError(res, 404, "WORKSPACE_NOT_FOUND", "workspace not found", "not_found");
+      const context = await kernelTaskContextForWorkspace(workspaceId, "workspace-revision");
+      const events = requireKernelUds().process.Start({
+        context,
+        intent: kernelIntent(),
+        command: {
+          program: "git",
+          args: ["rev-parse", "HEAD"],
+          cwd: { workspaceId, relativePath: "." },
+          publicEnv: { GIT_CONFIG_NOSYSTEM: "1" },
+          secretCapabilityUris: [],
+          timeout: { seconds: 15, nanos: 0 },
+          allocatePty: false,
+          shell: undefined,
+        },
+        sandboxProfileId: DEV_MODE ? "degraded-local" : "secure-local-default",
+        outputPolicyId: "tool-result-bounded",
+      });
+      const outcome = await new Promise<{ code: number; out: string }>((resolve, reject) => {
+        const chunks: Uint8Array[] = [];
+        let exitCode = -1;
+        events.subscribe({
+          next: (event: ProcessEventProto) => {
+            if (event.stdout !== undefined) chunks.push(event.stdout.bytes);
+            if (event.exited !== undefined) exitCode = event.exited.exitCode;
+          },
+          error: (error: unknown) => reject(error instanceof Error ? error : new Error(String(error))),
+          complete: () => resolve({ code: exitCode, out: new TextDecoder().decode(concatUint8(chunks)).trim() }),
+        });
+      });
+      sendJson(res, 200, {
+        workspace_id: workspaceId,
+        revision: outcome.code === 0 && /^[0-9a-f]{40}$/.test(outcome.out) ? outcome.out : null,
+        git_available: outcome.code === 0,
+      });
+    } catch (err) {
+      logInternalError("workspace revision failed", err);
+      sendError(res, 500, "REVISION_FAILED", "workspace revision failed", "internal");
+    }
+  }),
+
   route("GET", "/v1/workspaces/:id", async (_req, res, params) => {
     const ws = await db.workspace.findUnique({ where: { id: String(params.id) } });
     if (!ws) return sendError(res, 404, "WORKSPACE_NOT_FOUND", "workspace not found", "not_found");
@@ -10281,9 +10345,11 @@ async function agentLoop(turnId: string): Promise<void> {
     // Merged knob precedence: an explicit TERMINUS_TURN_MAX_STEPS wins;
     // otherwise TERMINUS_MAX_TOOL_CYCLES (validated, fail-closed, default 64)
     // sizes the soft budget. The hard ceiling never cuts an explicit value.
-    const configuredMaxSteps =
+    const configuredMaxSteps = Math.min(
       Number.parseInt(process.env.TERMINUS_TURN_MAX_STEPS ?? "", 10) ||
-      resolveMaxToolCycles(process.env.TERMINUS_MAX_TOOL_CYCLES);
+        resolveMaxToolCycles(process.env.TERMINUS_MAX_TOOL_CYCLES),
+      256,
+    );
     type ScoutBriefSection = {
       claims: readonly string[];
       files: readonly { path: string; role: string }[];

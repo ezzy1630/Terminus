@@ -147,6 +147,7 @@ function SelectedTaskReviewPane({
 }
 
 import {
+  GOVERNANCE_VIEWS_CHANGED_EVENT,
   parseTaskWorkspaceTab as parseTaskWorkspaceTabValue,
   readGovernanceViewsEnabled,
   taskWorkspaceTabs,
@@ -255,6 +256,13 @@ export function App(): JSX.Element {
   const [governanceViewsEnabled, setGovernanceViewsEnabled] = useState<boolean>(
     () => readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null),
   );
+  // R12/Cubic: settings toggles take effect without an app restart.
+  useEffect(() => {
+    const listener = (): void =>
+      setGovernanceViewsEnabled(readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null));
+    window.addEventListener(GOVERNANCE_VIEWS_CHANGED_EVENT, listener);
+    return () => window.removeEventListener(GOVERNANCE_VIEWS_CHANGED_EVENT, listener);
+  }, []);
   const [taskWorkspaceTab, setTaskWorkspaceTab] = useState<TaskWorkspaceTab>("session");
 
   const [changesOpen, setChangesOpen] = useState(false);

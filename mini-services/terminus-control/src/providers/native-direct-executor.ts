@@ -59,6 +59,7 @@ export function createNativeDirectExecutor(options: NativeDirectExecutorOptions)
         headers,
         body: JSON.stringify({ ...input.body, stream: true }),
         context,
+        credentialBindingId: options.configuration.secretUri,
       });
     };
 

@@ -162,15 +162,34 @@ impl HardenedOptions {
                     v.push(format!("--mount=type=bind,src={path},dst={path}"))
                 }
                 FilesystemAccess::Deny => {
-                    denies.push(format!(
-                        "--mount=type=tmpfs,dst={path},tmpfs-size=4k,readonly,tmpfs-mode=000"
+                    // tmpfs mounts require a directory destination. A deny
+                    // rule that targets a regular file (e.g. a linked
+                    // worktree's `.git` gitfile) gets an empty host directory
+                    // bind instead — contents still hidden.
+                    let empty = std::env::temp_dir().join(format!(
+                        "terminus-deny-{}",
+                        terminus_sandbox_container_deny_hash(path)
                     ));
+                    if std::fs::create_dir_all(&empty).is_ok() {
+                        denies.push(format!(
+                            "--mount=type=bind,src={},dst={path},readonly",
+                            empty.display()
+                        ));
+                    }
                 }
             }
         }
         v.extend(denies);
         v
     }
+}
+
+/// Stable short hash for deny-overlay scratch directory names.
+fn terminus_sandbox_container_deny_hash(path: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[derive(Debug)]
@@ -519,17 +538,20 @@ mod hardened_tests {
         assert!(argv
             .iter()
             .any(|a| a == "--mount=type=bind,src=/etc/pki,dst=/etc/pki,readonly"));
-        let deny_mount =
-            format!("--mount=type=tmpfs,dst={ws}/.git,tmpfs-size=4k,readonly,tmpfs-mode=000");
-        let deny_idx = argv.iter().position(|a| a == &deny_mount).unwrap();
-        let parent_idx = argv
+        let deny_idx = argv
             .iter()
-            .position(|a| a.contains(&format!("dst={ws}")))
-            .unwrap();
+            .position(|a| {
+                a.starts_with("--mount=type=bind,src=")
+                    && a.contains(&format!("dst={ws}/.git,readonly"))
+            })
+            .expect("nested deny must mount an overlay");
+        let parent_flag = format!("--mount=type=bind,src={ws},dst={ws}");
+        let parent_idx = argv.iter().position(|a| a == &parent_flag).unwrap();
         assert!(
             deny_idx > parent_idx,
             "deny mount must follow its parent bind"
         );
+        assert!(!argv.iter().any(|a| a.contains(&format!("src={ws}/.git"))));
         // Workdir uses the resolved absolute host path (== guest path).
         assert!(argv.contains(&format!("--workdir={ws}/src")));
         let image_idx = argv.iter().position(|a| a.contains("@sha256:")).unwrap();

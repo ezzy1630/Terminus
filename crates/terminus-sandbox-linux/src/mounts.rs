@@ -91,6 +91,14 @@ pub struct HostLayout {
     pub lib_is_symlink: bool,
     /// `/lib64` is a symlink into usr (merged-/usr layout).
     pub lib64_is_symlink: bool,
+    /// `/usr/lib` exists (symlink target for merged /lib).
+    pub usr_lib_exists: bool,
+    /// `/usr/lib64` exists (symlink target for merged /lib64).
+    pub usr_lib64_exists: bool,
+    /// `/bin` is a real directory (classic layout).
+    pub bin_real_dir: bool,
+    /// `/sbin` is a real directory (classic layout).
+    pub sbin_real_dir: bool,
     /// `/bin` is a symlink into usr (merged-/usr layout).
     pub bin_is_symlink: bool,
     /// `/sbin` is a symlink into usr (merged-/usr layout).
@@ -120,6 +128,10 @@ impl HostLayout {
             lib64_real_dir: dir_kind("/lib64"),
             lib_is_symlink: is_symlink("/lib"),
             lib64_is_symlink: is_symlink("/lib64"),
+            usr_lib_exists: dir_kind("/usr/lib"),
+            usr_lib64_exists: dir_kind("/usr/lib64"),
+            bin_real_dir: dir_kind("/bin"),
+            sbin_real_dir: dir_kind("/sbin"),
             bin_is_symlink: is_symlink("/bin"),
             sbin_is_symlink: is_symlink("/sbin"),
         }
@@ -137,6 +149,10 @@ impl HostLayout {
             lib64_real_dir: false,
             lib_is_symlink: true,
             lib64_is_symlink: true,
+            usr_lib_exists: true,
+            usr_lib64_exists: false,
+            bin_real_dir: false,
+            sbin_real_dir: false,
             bin_is_symlink: true,
             sbin_is_symlink: true,
         }
@@ -216,10 +232,21 @@ pub fn plan_mounts(
         plan.mounts
             .push(MountOp::Symlink("usr/lib".into(), "/lib".into()));
     }
+    if layout.lib_real_dir {
+        plan.mounts
+            .push(MountOp::RoBind("/lib".into(), "/lib".into()));
+    } else if layout.lib_is_symlink {
+        // Merged-/usr: guest compatibility symlink; only emitted when the
+        // resolved target exists so the guest never holds a dangling /lib.
+        if layout.usr_lib_exists {
+            plan.mounts
+                .push(MountOp::Symlink("usr/lib".into(), "/lib".into()));
+        }
+    }
     if layout.lib64_real_dir {
         plan.mounts
             .push(MountOp::RoBind("/lib64".into(), "/lib64".into()));
-    } else if layout.lib64_is_symlink {
+    } else if layout.lib64_is_symlink && layout.usr_lib64_exists {
         plan.mounts
             .push(MountOp::Symlink("usr/lib64".into(), "/lib64".into()));
     }

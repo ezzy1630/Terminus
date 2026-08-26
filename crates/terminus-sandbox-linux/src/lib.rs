@@ -398,6 +398,22 @@ impl SandboxBackend for LinuxSandboxBackend {
                     ],
                 };
             }
+            // An empty root that cannot be created means the minimal-root
+            // plan cannot materialize; report Degraded instead of Enforced
+            // (Cubic: supports_profile and the report must agree).
+            if shared_empty_root().is_none() {
+                return EnforcementReport {
+                    backend_id: self.id().to_string(),
+                    status: EnforcementStatus::Degraded,
+                    enforced: vec![],
+                    degraded: vec![
+                        EnforcementFeature::ProcessIsolation,
+                        EnforcementFeature::MountNamespace,
+                    ],
+                    unsupported: vec![EnforcementFeature::SeccompFilter],
+                    notes: vec!["empty sandbox root could not be created".to_string()],
+                };
+            }
             let layout = HostLayout::probe();
             let mut enforced = reference_plan(&layout)
                 .map(|plan| plan_proven_features(&plan))

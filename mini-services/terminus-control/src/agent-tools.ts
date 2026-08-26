@@ -726,9 +726,16 @@ export async function executeStandaloneTool(
       if (sourceHash.length > 0 && input.observedSources !== undefined) {
         input.observedSources.record(input.workspaceId, input.call.arguments.path, sourceHash);
       }
-      const contentUtf8 = input.call.arguments.render === "numbered"
+      let contentUtf8 = input.call.arguments.render === "numbered"
         ? renderNumbered(page.text, page.startLine)
         : page.text;
+      // Numbered rendering adds gutter bytes; trim whole lines until the
+      // inline payload provably fits the model-result cap (headroom for the
+      // envelope) instead of letting settlement strip it to an artifact ref.
+      const inlineBudget = MAX_TOOL_MODEL_RESULT_BYTES - 2 * 1_024;
+      while (new TextEncoder().encode(contentUtf8).byteLength > inlineBudget && contentUtf8.includes("\n")) {
+        contentUtf8 = contentUtf8.slice(0, contentUtf8.lastIndexOf("\n")) + "\n";
+      }
       const artifact = kernelArtifactDescriptor(response.fullContent);
       const elapsed = performance.now() - startedAt;
       const result = okResult({
@@ -748,7 +755,7 @@ export async function executeStandaloneTool(
       }, {
         toolCallId: input.internalToolCallId,
         traceId: input.traceId,
-        summary: `Read ${input.call.arguments.path} lines ${page.startLine}-${page.endLine}${deepPage ? "" : ` of ${totalLines}`}${page.hasMore ? " (continued)" : ""}`,
+        summary: `Read ${input.call.arguments.path} lines ${page.startLine}-${page.endLine}${deepPage ? "" : ` of ${totalLines}`}${page.hasMore && !response.truncated ? " (continued)" : ""}`,
         sourceVersions: sourceHash.length === 0 ? {} : { [input.call.arguments.path]: sourceHash },
         artifacts: artifact === null ? [] : [artifact],
         sideEffects: [sideEffect(input.sideEffectId, "read", `Read ${input.call.arguments.path}`, true)],
@@ -1219,7 +1226,11 @@ async function settleJobPoll(
       diagnostics: [{
         severity: "error",
         code: "EXEC_POLL_EXIT_UNEXPECTED",
-        message: `Background job exited ${state.exitCode}; expected ${input.call.arguments.expected_exit_codes.join(", ")}. Read the stdout/stderr tails before retrying.`,
+        message: [
+          `Background job exited ${state.exitCode}; expected ${input.call.arguments.expected_exit_codes.join(", ")}.`,
+          `stdout tail: ${stdoutTail.text.slice(0, 800) || "(empty)"}`,
+          `stderr tail: ${stderrTail.text.slice(0, 800) || "(empty)"}`,
+        ].join("\n"),
         path: null,
         range: null,
       }],

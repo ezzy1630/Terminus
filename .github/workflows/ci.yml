@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     # Phase 0 truth fix: every branch that can hold the default or a
     # protected branch MUST run CI. Branches are listed explicitly;
