@@ -183,5 +183,6 @@ describe("Truncation & Elision Boundary Tests", () => {
     expect(res.truncation.occurred).toBe(true);
     expect(res.artifacts.length).toBe(1);
     expect(res.artifacts[0]!.uri).toContain("artifact://spill-");
+    expect(res.truncation.continuation).toBe(res.artifacts[0]!.uri);
   });
 });
