@@ -21,6 +21,15 @@ This file records observed commands and artifacts. It does not turn source decla
 4. `CodingTurnEngine` has a `doom_loop` result, but the live `switch` handles neither `doom_loop` nor a structured no-progress settlement. It later produces a generic no-final error.
 5. `VerificationRepairController` is seeded from a durable event count, but `maxRepairAttempts` is calculated as configured maximum plus prior use, which can renew the task allowance on later turns.
 
+## Post-implementation identity
+
+| Field | Observed value |
+| --- | --- |
+| HEAD | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`) |
+| Branch | `main` |
+| Remote state | One commit ahead of `origin/main`; no push performed |
+| Worktree | Clean after commit and `just codegen-check` |
+
 ## Current implementation observations
 
 1. The live task path now emits `completion.proposed`, enters `VERIFYING`, persists verification artifacts, admits a candidate branch, atomically moves the task to `COMPLETED` and the turn to `VERIFIED`, then finalizes and publishes `turn.completed`.

@@ -5,7 +5,7 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 ## Current position
 
 - Exact checkout: `/Volumes/Neural/Terminus`.
-- Branch: `main`; the overhaul changes are currently uncommitted and must be reviewed and committed before the final handoff.
+- Branch and HEAD: `main` at `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`).
 - The worktree was clean before the ledger files and implementation changes were added. Other registered worktrees remain untouched.
 - Durable ledger files live in `docs/implementation/terminus-overhaul/`.
 - The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, cumulative repair, default-off scout behavior, CI/ruleset declarations, and evaluation-run contracts.
@@ -37,8 +37,6 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 
 ## Resume sequence
 
-1. Inspect `git diff --stat`, `git diff --check`, and all four ledger files.
-2. Stage only task-owned paths, commit the coherent implementation, and run `just codegen-check` against that commit.
-3. Run the focused tests and `just check` again if the diff changes.
-4. If the user authorizes remote branch-protection mutation, run `just github-ruleset-apply`, then `just github-ruleset-verify` and read back the exact remote settings.
-5. Extend the durable repair-attempt/recovery and DB fault-injection slices before claiming release readiness.
+1. Inspect `git status --short --branch`, the last commit, and all four ledger files.
+2. If the user authorizes remote branch-protection mutation, run `just github-ruleset-apply`, then `just github-ruleset-verify` and read back the exact remote settings.
+3. Extend the durable repair-attempt/recovery and DB fault-injection slices before claiming release readiness.
