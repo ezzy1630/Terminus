@@ -25,7 +25,8 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| HEAD | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`) |
+| Implementation commit | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`) |
+| HEAD | `3840e82` (`Document overhaul evidence and handoff`) |
 | Branch | `main` |
 | Remote state | One commit ahead of `origin/main`; no push performed |
 | Worktree | Clean after commit and `just codegen-check` |
@@ -48,6 +49,7 @@ This file records observed commands and artifacts. It does not turn source decla
 | 2026-08-26 | `rg -n` over control loop, compaction, provider, verification, and schema files | Passed. Live-path observations above confirmed. |
 | 2026-08-26 | `bun test mini-services/terminus-control/src/agent-tools.test.ts mini-services/terminus-control/src/agent/coding-turn-engine.test.ts mini-services/terminus-control/src/agent/compaction-service.test.ts mini-services/terminus-control/src/agent/verification-repair-controller.test.ts mini-services/terminus-control/src/agent/scout-runner.test.ts mini-services/terminus-control/src/agent/subagents.test.ts mini-services/terminus-control/src/direct-provider-transport.test.ts mini-services/terminus-control/src/services/services.test.ts packages/context-compiler/src/context-compiler.test.ts packages/context-compiler/src/property-tests.test.ts packages/domain/src/state_machine_properties.test.ts` | PASSED — 129 tests, 0 failures, 1,669 expect calls. |
 | 2026-08-26 | `just codegen` | PASSED — protobuf, public API, event, tool, config, v2 schema, SQLx, and generated docs completed. Expected generated docs/inventory changed with the source. |
+| 2026-08-26 | `just codegen-check` | PASSED — generated paths are clean against the committed implementation. |
 | 2026-08-26 | `just check` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
 | 2026-08-26 | `just standalone-check` | PASSED — no retired OpenCode runtime/build dependency; explicit runtime-protocol -> public-api -> public-client chain. |
 | 2026-08-26 | `just truth-check` | PASSED — CI triggers include the default branch and declarations agree with metadata. |
