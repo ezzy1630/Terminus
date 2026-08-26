@@ -22,6 +22,7 @@
 
 mod engine;
 mod error;
+mod fallback;
 mod journal;
 mod unified_diff;
 mod validate;
