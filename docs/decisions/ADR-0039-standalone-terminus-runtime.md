@@ -41,9 +41,11 @@ Terminus is a standalone coding-agent runtime.
     bounded argv `exec`, policy-gated shell-mode `exec`, lexical `grep`, and
     file-listing `glob`. The provider may emit at most one tool call per
     response, and a turn settles at most `max_tool_cycles` calls — an
-    operator-configurable budget (environment variable
-    `TERMINUS_MAX_TOOL_CYCLES`) that defaults to 64 and is hard-bounded to
-    1..256. Every call is validated, policy-recorded, and dispatched through
+    operator-configurable budget (environment variables:
+    `TERMINUS_TURN_MAX_STEPS` overrides explicitly; otherwise
+    `TERMINUS_MAX_TOOL_CYCLES`, default 64, hard-bounded to 1..256; the
+    engine's internal hard ceiling is never cut by an explicit value). The
+    loop additionally stops early on stagnation detection. Every call is validated, policy-recorded, and dispatched through
     `terminus.kernel.v1`; no provider-selected environment, secret, network
     destination, or ambient path is accepted. Shell-mode `exec` additionally
     requires the operator to enable it explicitly (`TERMINUS_SHELL_MODE=1`);

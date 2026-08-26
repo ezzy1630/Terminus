@@ -375,8 +375,17 @@ def build_live_run_record(
 
 def _cmd_run(args: argparse.Namespace) -> int:
     """Execute the ``run`` command."""
-    live_requested = args.harness in {"terminus-live", "terminus"} or (
-        os.environ.get("TERMINUS_CONTROL_URL") and not args.fixture_mode
+    # R8/Cubic: explicit harness selection wins; TERMINUS_CONTROL_URL alone
+    # only implies live mode when fixture mode was NOT requested.
+    if args.fixture_mode and args.harness in {"terminus-live", "terminus"}:
+        print(
+            "--fixture-mode cannot override --harness terminus-live; drop one",
+            file=sys.stderr,
+        )
+        return 2
+    live_requested = (
+        args.harness in {"terminus-live", "terminus"}
+        or (bool(os.environ.get("TERMINUS_CONTROL_URL")) and not args.fixture_mode)
     )
     if live_requested:
         return _cmd_run_live(args)

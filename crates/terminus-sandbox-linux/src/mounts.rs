@@ -87,6 +87,10 @@ pub struct HostLayout {
     pub lib_real_dir: bool,
     /// Real (non-symlink) `/lib64` directory.
     pub lib64_real_dir: bool,
+    /// `/lib` is a symlink into usr (merged-/usr layout).
+    pub lib_is_symlink: bool,
+    /// `/lib64` is a symlink into usr (merged-/usr layout).
+    pub lib64_is_symlink: bool,
     /// `/bin` is a symlink into usr (merged-/usr layout).
     pub bin_is_symlink: bool,
     /// `/sbin` is a symlink into usr (merged-/usr layout).
@@ -114,6 +118,8 @@ impl HostLayout {
             sys_real_dir: dir_kind("/sys"),
             lib_real_dir: dir_kind("/lib"),
             lib64_real_dir: dir_kind("/lib64"),
+            lib_is_symlink: is_symlink("/lib"),
+            lib64_is_symlink: is_symlink("/lib64"),
             bin_is_symlink: is_symlink("/bin"),
             sbin_is_symlink: is_symlink("/sbin"),
         }
@@ -128,7 +134,9 @@ impl HostLayout {
             nix_exists: false,
             sys_real_dir: true,
             lib_real_dir: false,
-            lib64_real_dir: true,
+            lib64_real_dir: false,
+            lib_is_symlink: true,
+            lib64_is_symlink: true,
             bin_is_symlink: true,
             sbin_is_symlink: true,
         }
@@ -202,10 +210,18 @@ pub fn plan_mounts(
     if layout.lib_real_dir {
         plan.mounts
             .push(MountOp::RoBind("/lib".into(), "/lib".into()));
+    } else if layout.lib_is_symlink {
+        // Merged-/usr: the guest needs its own compatibility symlink; the
+        // target tree arrives via the /usr bind.
+        plan.mounts
+            .push(MountOp::Symlink("usr/lib".into(), "/lib".into()));
     }
     if layout.lib64_real_dir {
         plan.mounts
             .push(MountOp::RoBind("/lib64".into(), "/lib64".into()));
+    } else if layout.lib64_is_symlink {
+        plan.mounts
+            .push(MountOp::Symlink("usr/lib64".into(), "/lib64".into()));
     }
     if layout.nix_exists {
         plan.mounts

@@ -4013,6 +4013,9 @@ const routes: Route[] = [
           void sub;
         });
       };
+      // Intent-to-add makes untracked files appear in `git diff HEAD`, so a
+      // task that only adds files still yields an applyable patch (Cubic R8).
+      await runCommand(["add", "--intent-to-add", "--all"]);
       const diff = await runCommand(["--no-pager", "diff", "HEAD", "--binary"]);
       const untracked = await runCommand(["ls-files", "--others", "--exclude-standard"]);
       sendJson(res, 200, {
@@ -9800,13 +9803,25 @@ async function agentLoop(turnId: string): Promise<void> {
     );
     const toolEpisodeService = new ToolEpisodeService({
       store: {
-        listModelVisibleEpisodes: async (episodeTurnId) => db.episode.findMany({
-          where: { turnId: episodeTurnId, modelVisible: true },
-          orderBy: { sequence: "asc" },
-          // R4: the byte-budgeted walk in ToolEpisodeService bounds what is
-          // actually included; this scan just needs enough candidates.
-          take: 64,
-        }),
+        // R4/Cubic: page newest-first so the byte-budgeted walk always sees
+        // the LATEST rows regardless of turn length.
+        listModelVisibleEpisodes: async (episodeTurnId) => {
+          const pageSize = 200;
+          const pages: { id: string; turnId: string; sequence: number; kind: string; contentArtifact: string | null; toolCallId: string | null; createdAt: Date }[] = [];
+          for (;;) {
+            const rows = await db.episode.findMany({
+              where: { turnId: episodeTurnId, modelVisible: true },
+              orderBy: [{ sequence: "desc" }],
+              take: pageSize,
+              ...(pages.length > 0
+                ? { skip: 1, cursor: { id: pages[pages.length - 1]!.id } }
+                : {}),
+            });
+            pages.push(...rows);
+            if (rows.length < pageSize) break;
+          }
+          return pages.reverse();
+        },
         readArtifact: (hash) => artifactClient.get(hash as ContentHash),
       },
       settleCall: async (toolInput) => settleStandaloneProviderTool({
@@ -9828,9 +9843,18 @@ async function agentLoop(turnId: string): Promise<void> {
     // stale-write protection anchored to actually observed source versions.
     const observedSources = new ObservedSourceTracker();
     // Rank 3: bounded verify–repair–admit policy for this completion proposal.
+    // Cumulative repair budget: durable count of prior repair schedules for
+    // this task seeds the per-turn controller so cross-turn loops stay bounded.
+    const priorRepairs = await db.semanticEvent.count({
+      where: { eventType: "task.repair_scheduled", aggregateType: "task", aggregateId: task.id },
+    });
+    const configuredMaxRepairs =
+      Number.parseInt(process.env.TERMINUS_MAX_REPAIR_ATTEMPTS ?? "", 10) || 2;
     const verificationRepairController = new VerificationRepairController({
-      maxRepairAttempts:
-        Number.parseInt(process.env.TERMINUS_MAX_REPAIR_ATTEMPTS ?? "", 10) || 2,
+      maxRepairAttempts: Math.max(configuredMaxRepairs, 1) + priorRepairs,
+      // This turn's own first evaluation does not consume the historical
+      // budget; only previously SCHEDULED repairs do.
+      priorAttemptsUsed: priorRepairs,
     });
     let latestChangedFiles: readonly string[] = [];
     const contextEpoch = await ensureContextEpoch({
@@ -10226,7 +10250,6 @@ async function agentLoop(turnId: string): Promise<void> {
         const scoutResult = await (async (): Promise<ScoutParsedResult | { status: "skipped" }> => {
           if (selectedProvider.context.toolCalling === false) return { status: "skipped" };
           const instructionsHash = computeContentHash("terminus-scout-authority-v1");
-          const objectiveText = `Objective: ${contract.objective}\n\nRead paths in scope: ${contract.allowedScope.readPaths.slice(0, 64).join(", ") || "(entire workspace)"}`;
           const scope = {
             workspaceId: workspace.id as never,
             sessionId: turn.thread.sessionId as never,
@@ -10275,6 +10298,7 @@ async function agentLoop(turnId: string): Promise<void> {
           const scoutTracker = new ObservedSourceTracker();
           return await runScoutLoop({
             maxSteps: 10,
+            objective: `Objective: ${contract.objective}\nRead paths in scope: ${contract.allowedScope.readPaths.slice(0, 64).join(", ") || "(entire workspace)"}`,
             callProvider: async (messages) => {
               const fragments = messages.map((message, index) =>
                 fragment(`scout:${turnId}:${index}`, index === 0 ? "authority" : "recent_episode", message.text, computeContentHash(message.text)));

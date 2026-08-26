@@ -23,7 +23,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from ..run_record import Outcome
 from .harness_runner import HarnessResult, RunRequest
 from .terminus_harness import TerminusControlError, TerminusHarness
 
@@ -44,8 +43,16 @@ def run_live_task(
     if task_id is not None:
         try:
             patch_payload = harness.fetch_patch(task_id)
-        except TerminusControlError:
-            patch_payload = None
+        except TerminusControlError as error:
+            # A completed task with an unreadable workspace is an explicit
+            # failure state, not a silent no-patch.
+            patch_payload = {
+                "diff": "",
+                "untracked_files": [],
+                "truncated": False,
+                "git_available": False,
+                "extraction_error": str(error),
+            }
     if patch_payload is not None:
         result.artifacts.append(
             {
@@ -72,6 +79,7 @@ def build_swebench_evaluation_argv(
     instance_id: str,
     predictions_dir: Path,
     suite_manifest: str,
+    dataset_name: str = "princeton-nlp/SWE-bench_Verified",
 ) -> list[str] | None:
     """Build the official-evaluator argv for one instance, or None.
 
@@ -93,8 +101,10 @@ def build_swebench_evaluation_argv(
         "evaluation",
         "--run_id",
         instance_id,
+        # The canonical dataset comes from the validated suite manifest via
+        # the caller — never hardcoded independently of it.
         "--dataset_name",
-        "princeton-nlp/SWE-bench_Verified",
+        dataset_name,
         "--predictions_path",
         str(predictions_path),
         "--suite",
@@ -127,16 +137,6 @@ def _task_id_from_notes(notes: str) -> str | None:
         return None
     value = parsed.get("task_id")
     return value if isinstance(value, str) else None
-
-
-def outcome_from_patch_and_state(result: HarnessResult, patch_diff: str) -> Outcome:
-    """Honest outcome mapping used until graders render their verdicts."""
-    if result.outcome != Outcome.COMPLETED:
-        return result.outcome
-    # Completion alone is not success; graders decide. Keep COMPLETED so the
-    # promotion gate can distinguish graded successes from non-completions.
-    _ = patch_diff
-    return result.outcome
 
 
 def ensure_temp_predictions_dir(prefix: str = "terminus-swebench-") -> Path:

@@ -59,7 +59,9 @@ const sha256Schema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
 
 export const standaloneReadInputSchema = z.object({
   path: pathSchema,
-  max_bytes: z.number().int().min(1).max(64 * 1_024).default(48 * 1_024),
+  // Fetch bound stays below the 32 KiB model-result projection cap so
+  // content_utf8 is never stripped into an opaque artifact reference.
+  max_bytes: z.number().int().min(1).max(30 * 1_024).default(28 * 1_024),
   offset_line: z.number().int().min(1).default(1),
   max_lines: z.number().int().min(1).max(4_000).default(2_000),
   /**
@@ -175,6 +177,11 @@ export const standaloneExecPollInputSchema = z.object({
   ),
   /** Bounded tail bytes fetched per stream once the job exits. */
   tail_bytes: z.number().int().min(256).max(64 * 1_024).default(20 * 1_024),
+  /**
+   * Exit codes considered successful, mirroring exec so the poll result —
+   * not just the raw exit code — reflects command success.
+   */
+  expected_exit_codes: z.array(z.number().int().min(0).max(255)).min(1).max(16).default([0]),
 }).strict();
 
 export const standaloneGrepInputSchema = z.object({
@@ -254,7 +261,7 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
       required: ["path"],
       properties: {
         path: { type: "string" },
-        max_bytes: { type: "integer", minimum: 1, maximum: 64 * 1_024, default: 48 * 1_024 },
+        max_bytes: { type: "integer", minimum: 1, maximum: 30 * 1_024, default: 28 * 1_024 },
         offset_line: { type: "integer", minimum: 1, default: 1 },
         max_lines: { type: "integer", minimum: 1, maximum: 4_000, default: 2_000 },
         render: { enum: ["numbered", "raw"], default: "numbered" },
@@ -354,6 +361,7 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
       properties: {
         background_id: { type: "string", minLength: 1, maxLength: 256 },
         tail_bytes: { type: "integer", minimum: 256, maximum: 64 * 1_024, default: 20 * 1_024 },
+        expected_exit_codes: { type: "array", minItems: 1, maxItems: 16, items: { type: "integer", minimum: 0, maximum: 255 }, default: [0] },
       },
     },
     resultSchema,
@@ -715,7 +723,8 @@ export async function executeStandaloneTool(
         end_line: page.endLine,
         rendered_mode: response.renderedMode,
         continuation_token: response.continuationToken || null,
-        next_offset_line: page.hasMore ? page.endLine + 1 : null,
+        // A byte-truncated projection cannot serve further line pages.
+        next_offset_line: page.hasMore && !response.truncated ? page.endLine + 1 : null,
       }, {
         toolCallId: input.internalToolCallId,
         traceId: input.traceId,
@@ -1173,11 +1182,35 @@ async function settleJobPoll(
   ]);
   const stdoutArtifact = kernelArtifactDescriptor(state.stdoutArtifact);
   const stderrArtifact = kernelArtifactDescriptor(state.stderrArtifact);
+  const exitExpected = input.call.arguments.expected_exit_codes.includes(state.exitCode);
+  if (!exitExpected) {
+    const elapsed2 = performance.now() - startedAt;
+    const failed = okResult(null, {
+      toolCallId: input.internalToolCallId,
+      traceId: input.traceId,
+      summary: `Job ${input.call.arguments.background_id} exited ${state.exitCode}; expected one of ${input.call.arguments.expected_exit_codes.join(", ")}`,
+      artifacts: [stdoutArtifact, stderrArtifact].filter((a): a is ArtifactDescriptor => a !== null),
+      timing: { executionMs: elapsed2, totalMs: elapsed2 },
+    });
+    return {
+      ...failed,
+      status: "error",
+      policyDecisionId: input.policyDecisionId,
+      diagnostics: [{
+        severity: "error",
+        code: "EXEC_POLL_EXIT_UNEXPECTED",
+        message: `Background job exited ${state.exitCode}; expected ${input.call.arguments.expected_exit_codes.join(", ")}. Read the stdout/stderr tails before retrying.`,
+        path: null,
+        range: null,
+      }],
+    };
+  }
   const result = okResult({
     background_id: state.jobId || input.call.arguments.background_id,
     state: "exited",
     exit_code: state.exitCode,
     signal: null,
+    expected_exit_codes: [...input.call.arguments.expected_exit_codes],
     stdout_tail: stdoutTail.text,
     stdout_truncated_head: stdoutTail.truncated,
     stdout_total_bytes: stdoutTail.totalBytes,

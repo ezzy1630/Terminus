@@ -96,6 +96,11 @@ export function parseScoutResult(text: string): ScoutParsedResult | null {
 }
 
 export interface ScoutLoopDeps {
+  /**
+   * The task objective the scout is locating code for. Delivered as its own
+   * user message so the system prompt stays a stable cache prefix.
+   */
+  readonly objective: string;
   /** Build one provider request for [system, messages] and execute it. */
   readonly callProvider: (messages: readonly { readonly role: "user" | "assistant"; readonly text: string }[]) => Promise<ScoutStepInput>;
   /** Dispatch one read-only tool through the kernel boundary. */
@@ -113,6 +118,7 @@ export async function runScoutLoop(deps: ScoutLoopDeps): Promise<ScoutParsedResu
   const maxSteps = deps.maxSteps ?? SCOUT_MAX_STEPS_DEFAULT;
   const transcript: { readonly role: "user" | "assistant"; readonly text: string }[] = [
     { role: "user", text: SCOUT_SYSTEM_PROMPT },
+    { role: "user", text: deps.objective },
   ];
   for (let step = 0; step < maxSteps; step += 1) {
     if (deps.signal?.aborted === true) break;

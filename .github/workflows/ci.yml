@@ -302,9 +302,15 @@ jobs:
     concurrency:
       group: live-eval-${{ github.ref }}
       cancel-in-progress: false
+    env:
+      # Shared by start-mini-services.sh and the telemetry collector so both
+      # address the same SQLite database.
+      DATABASE_URL: "file:${{ github.workspace }}/.terminus-data/terminus.db"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
+      - name: Build release kernel binary
+        run: cargo build --release -p terminus-kernel-mini
       - name: Start kernel + control plane
         run: bash scripts/start-mini-services.sh &
         env:
@@ -313,7 +319,7 @@ jobs:
       - name: Wait for control plane
         run: |
           for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:3050/healthz >/dev/null 2>&1; then exit 0; fi
+            if curl -fsS http://127.0.0.1:3050/v1/system/health >/dev/null 2>&1; then exit 0; fi
             sleep 1
           done
           echo "control plane did not become healthy" >&2
@@ -333,9 +339,7 @@ jobs:
             --seeds 1 --output-dir evals/results/live
       - name: Collect cache telemetry evidence
         if: always()
-        env:
-          TERMINUS_CACHE_TELEMETRY_DB: ${{ github.workspace }}/.terminus-data/control.db
-        run: bun run scripts/collect-cache-telemetry.ts || true
+        run: bun run scripts/collect-cache-telemetry.ts
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

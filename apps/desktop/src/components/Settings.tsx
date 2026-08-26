@@ -605,6 +605,17 @@ const CATALOG = buildCatalog().flatMap((category): SettingCategory[] => {
       settings: category.settings.map((descriptor) => ({ ...descriptor, readOnly: true })),
     }];
   }
+  // R12: governance views toggle has real renderer-local behavior (it gates
+  // the task-workspace tabs), so it is surfaced like appearance.
+  if (category.id === "governance") {
+    return [{
+      ...category,
+      settings: category.settings.map((descriptor) => ({
+        ...descriptor,
+        defaultValue: readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null),
+      })),
+    }];
+  }
   return [];
 });
 const CATEGORIES = CATALOG;

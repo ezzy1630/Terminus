@@ -121,16 +121,25 @@ export type StopReason =
 export interface RepairPolicyOptions {
   /** Maximum bounded repair turns per task completion proposal. */
   readonly maxRepairAttempts?: number;
+  /**
+   * Repairs already spent on this task in earlier turns (durable count).
+   * Without seeding this, a fresh controller per turn would reset the budget
+   * and allow unbounded repair loops across turns.
+   */
+  readonly priorAttemptsUsed?: number;
   readonly now?: () => number;
 }
 
 export class VerificationRepairController {
   private readonly detector = new ProgressDetector();
   private readonly maxRepairAttempts: number;
-  private repairAttemptsUsed = 0;
+  private repairAttemptsUsed: number;
 
   constructor(options: RepairPolicyOptions = {}) {
     this.maxRepairAttempts = options.maxRepairAttempts ?? 2;
+    const prior = options.priorAttemptsUsed ?? 0;
+    if (prior < 0) throw new Error("priorAttemptsUsed must be non-negative");
+    this.repairAttemptsUsed = prior;
   }
 
   /**

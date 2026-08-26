@@ -15,7 +15,6 @@ from forge_evals.runners.live_runner import (
     _task_id_from_notes,
     build_swebench_evaluation_argv,
     invoke_external_evaluator,
-    outcome_from_patch_and_state,
     run_live_task,
     write_patch_file,
 )
@@ -91,18 +90,6 @@ def test_swebench_argv_requires_patch_and_tool(tmp_path: Path, monkeypatch: pyte
 def test_write_patch_file_round_trip(tmp_path: Path) -> None:
     target = write_patch_file("PATCH", tmp_path / "p.patch")
     assert target.read_text() == "PATCH"
-
-
-def test_outcome_mapping_keeps_non_completion_honest() -> None:
-    result = HarnessResult(
-        outcome=Outcome.FAILED,
-        final_revision="r",
-        cost=None,
-        artifacts=[],
-        context_manifests=[],
-        grader_outcomes=[],
-    )
-    assert outcome_from_patch_and_state(result, "") == Outcome.FAILED
 
 
 def test_invoke_external_evaluator_reports_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

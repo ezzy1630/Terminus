@@ -41,6 +41,7 @@ describe("R10 scout loop", () => {
     const calls: string[][] = [];
     let step = 0;
     const result = await runScoutLoop({
+      objective: "Find the login guard",
       callProvider: async (transcript) => {
         calls.push(transcript.map((m) => m.role));
         if (step === 0) {
@@ -61,8 +62,9 @@ describe("R10 scout loop", () => {
     expect(result.status).toBe("completed");
     expect(result.claims).toEqual(["auth check lives in guard.ts:42"]);
     // First message is the scout system prompt as user role; results fed back after assistant.
-    expect(calls[0]?.[0]).toBe("user");
-    expect(calls[1]?.length).toBeGreaterThanOrEqual(3);
+    // First request carries the scout system prompt AND the objective.
+    expect(calls[0]).toEqual(["user", "user"]);
+    expect(calls[1]?.length).toBe(4); // + assistant transcript + tool results
   });
 
   test("write/exec tools are rejected by name inside the loop", async () => {
@@ -96,6 +98,7 @@ describe("R10 scout loop", () => {
 
   test("budget exhaustion returns the honest status", async () => {
     const result = await runScoutLoop({
+      objective: "obj",
       callProvider: async () => ({ renderedBody: {}, projectedText: "still searching", toolCalls: [] }),
       executeTool: async () => ({ ok: true, resultText: "" }),
       maxSteps: 2,

@@ -23,13 +23,22 @@ const ROOT = join(import.meta.dir, "..");
 const OUT_DIR = join(ROOT, "artifacts", "release-gate");
 const OUT_PATH = join(OUT_DIR, "cache-telemetry.json");
 
-const DATABASE_URL = process.env.TERMINUS_CACHE_TELEMETRY_DB ?? process.env.TERMINUS_CONTROL_DB ?? "";
-if (!DATABASE_URL) {
+const RAW_DB = process.env.TERMINUS_CACHE_TELEMETRY_DB ?? process.env.DATABASE_URL ?? "";
+if (!RAW_DB) {
   console.error(
-    "[collect-cache-telemetry] set TERMINUS_CACHE_TELEMETRY_DB (or TERMINUS_CONTROL_DB) to the control-plane SQLite path",
+    "[collect-cache-telemetry] set TERMINUS_CACHE_TELEMETRY_DB (or the control plane's DATABASE_URL) to the control-plane SQLite URL",
   );
   process.exit(2);
 }
+// Normalize like the control plane does: bare paths become file: URLs, and a
+// leading ~ expands to $HOME so workflow inputs can use either form.
+const DATABASE_URL = (() => {
+  if (RAW_DB.startsWith("file:")) return RAW_DB;
+  const expanded = RAW_DB.startsWith("~")
+    ? `${process.env.HOME ?? ""}${RAW_DB.slice(1)}`
+    : RAW_DB;
+  return `file:${expanded}`;
+})();
 
 const THRESHOLD = Number(process.env.TERMINUS_CACHE_RATIO_THRESHOLD ?? "0.7");
 

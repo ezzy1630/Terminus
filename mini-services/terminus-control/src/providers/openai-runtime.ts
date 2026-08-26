@@ -19,12 +19,19 @@ import {
  * refuses to guess an egress path.
  */
 
-export const OPENAI_NATIVE_CONFIG: NativeRuntimeConfig = {
-  providerId: "openai",
-  baseUrl: "https://api.openai.com/v1",
-  apiKeyEnv: "OPENAI_API_KEY",
-  endpointPath: "/responses",
-};
+export function openaiNativeConfig(protocol: "responses" | "chat_completions" = "responses"): NativeRuntimeConfig {
+  return {
+    providerId: "openai",
+    baseUrl: "https://api.openai.com/v1",
+    auth: { kind: "env-bearer", apiKeyEnv: "OPENAI_API_KEY" },
+    // The transport must match the wire protocol the renderer produced;
+    // posting Chat Completions bodies to /responses fails upstream.
+    endpointPath: protocol === "chat_completions" ? "/chat/completions" : "/responses",
+  };
+}
+
+/** Default config kept for existing call sites that use the Responses API. */
+export const OPENAI_NATIVE_CONFIG = openaiNativeConfig("responses");
 
 export function openaiTransportDeps(transport: NativeTransportDeps["postSse"], now?: () => number): NativeTransportDeps {
   return {

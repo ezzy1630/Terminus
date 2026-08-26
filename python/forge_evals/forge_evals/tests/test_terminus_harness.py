@@ -40,23 +40,45 @@ class _StubControlPlane(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_POST(self) -> None:
-        if self.path == "/v1/workspaces":
-            self._json(201, {"id": "ws-1"})
+        if self.path == "/v1/workspaces/open":
+            body = self._read_body()
+            assert body["root_uri"].startswith("file:")
+            self._json(201, {"id": "ws-1", "kind": body.get("kind", "local_directory")})
+        elif self.path == "/v1/sessions":
+            self._json(201, {"id": "sess-1", "active_thread_id": "thread-1"})
         elif self.path == "/v1/tasks":
             assert self.headers.get("authorization") == "Bearer test-token"
-            self._json(201, {"id": "task-1"})
+            body = self._read_body()
+            assert isinstance(body.get("session_id"), str)
+            assert isinstance(body.get("thread_id"), str)
+            assert isinstance(body.get("objective"), str) and body["objective"]
+            self._json(201, {"id": "task-1", "status": "DRAFT"})
+        elif self.path == "/v1/tasks/task-1/start":
+            self._json(200, {"id": "task-1", "status": "ACTIVE"})
         elif self.path == "/v1/turns":
-            self._json(201, {"id": "turn-1"})
+            body = self._read_body()
+            assert body["thread_id"] == "thread-1"
+            assert body["task_id"] == "task-1"
+            assert isinstance(body["user_input"], str) and body["user_input"]
+            self._json(201, {"id": "turn-1", "state": "PROVIDER_RUNNING"})
         else:
             self._json(404, {"error": "not found"})
+
+    def _read_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("content-length", "0"))
+        decoded: Any = json.loads(self.rfile.read(length).decode())
+        assert isinstance(decoded, dict)
+        return decoded
 
     def do_GET(self) -> None:
         if self.path == "/v1/turns/turn-1":
             self._json(200, {"state": "COMPLETED"})
-        elif self.path == "/v1/turns/turn-1/context-manifests":
-            self._json(200, {"manifests": [{"id": "m-1", "fragments": 7}]})
-        elif self.path == "/v1/tasks/task-1/verification/results":
-            self._json(200, {"results": [{"node_id": "n1", "status": "pass"}]})
+        elif self.path.startswith("/v1/tasks/task-1/artifacts"):
+            assert self.path.endswith("limit=100")
+            self._json(200, {"artifacts": [
+                {"purpose": "context-epoch-baseline", "hash": "sha256:" + "a" * 64},
+                {"purpose": "verification-repair-directive", "hash": "sha256:" + "b" * 64},
+            ]})
         elif self.path == "/v1/workspaces/ws-1/revision":
             self._json(200, {"revision": "abc123"})
         else:
@@ -108,8 +130,12 @@ def test_live_run_completes_with_evidence(control_url: Path, tmp_path: Path) -> 
     result = _harness(str(control_url)).run(request, recorder)
     assert result.outcome is Outcome.COMPLETED
     assert result.final_revision == "abc123"
-    assert result.context_manifests == [{"id": "m-1", "fragments": 7}]
-    assert any(a.get("node_id") == "n1" for a in result.artifacts)
+    assert result.context_manifests == [
+        {"purpose": "context-epoch-baseline", "hash": "sha256:" + "a" * 64},
+    ]
+    assert any(
+        a.get("purpose") == "verification-repair-directive" for a in result.artifacts
+    )
     notes = json.loads(result.notes)
     assert notes["harness"] == "terminus-live"
     assert notes["turn_id"] == "turn-1"

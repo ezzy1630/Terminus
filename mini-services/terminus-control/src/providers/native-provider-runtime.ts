@@ -126,11 +126,17 @@ export async function dispatchNativeRequest(
   });
 
   // Pre-flight: refuse before spending when the prediction exceeds budget.
+  // Preflight uses the FULL expected input (stable prefix + tail) plus the
+  // renderer's output/reasoning reserves, so a passing budget check cannot
+  // be exceeded by the actual generation (Cubic R7 follow-up).
+  const totalInput = rendered.predictedCachedTokens
+    + (rendered.request.outputReserveTokens ?? 0n as TokenCount)
+    + (rendered.request.reasoningReserveTokens ?? 0n as TokenCount);
   const estimated = estimateCostMicros(
     {
-      promptTokens: rendered.predictedCachedTokens,
-      predictedOutputTokens: 0n as TokenCount,
-      predictedReasoningTokens: 0n as TokenCount,
+      promptTokens: totalInput,
+      predictedOutputTokens: rendered.request.outputReserveTokens ?? 0n as TokenCount,
+      predictedReasoningTokens: rendered.request.reasoningReserveTokens ?? 0n as TokenCount,
       predictedCachedTokens: rendered.predictedCachedTokens,
     },
     economics,
@@ -140,12 +146,16 @@ export async function dispatchNativeRequest(
     throw new Error(`native dispatch refused by budget guard: ${budgetCheck.reason}`);
   }
 
-  const apiKey = process.env[config.apiKeyEnv] ?? "";
-  if (apiKey.length === 0) {
-    throw new Error(
-      `${config.apiKeyEnv} is not set; refusing to construct an unauthenticated native request`,
-    );
-  }
+  let credentialHeader: Record<string, string> = {};
+  if (config.auth.kind === "env-bearer") {
+    const apiKey = process.env[config.auth.apiKeyEnv] ?? "";
+    if (apiKey.length === 0) {
+      throw new Error(
+        `${config.auth.apiKeyEnv} is not set; refusing to construct an unauthenticated native request`,
+      );
+    }
+    credentialHeader = { authorization: `Bearer ${apiKey}` };
+  } // connector-injected: the kernel adds the credential header itself.
 
   const recorder = new CacheRecorder({
     manifestId: input.manifestId,
@@ -160,8 +170,9 @@ export async function dispatchNativeRequest(
     url: `${config.baseUrl}${config.endpointPath}`,
     headers: {
       "content-type": "application/json",
-      accept: "text/event-stream",
-      authorization: `Bearer ${apiKey}`,
+      "accept": "text/event-stream",
+      ...credentialHeader,
+      ...(config.extraHeaders ?? {}),
     },
     body: rendered.body,
     signal: input.signal ?? null,

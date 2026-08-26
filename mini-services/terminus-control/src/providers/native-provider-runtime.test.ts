@@ -82,7 +82,7 @@ describe("dispatchNativeRequest", () => {
       {
         providerId: "openai",
         baseUrl: "https://api.openai.test/v1",
-        apiKeyEnv: "OPENAI_API_KEY",
+        auth: { kind: "env-bearer", apiKeyEnv: "OPENAI_API_KEY" },
         endpointPath: "/responses",
       },
       depsWith(chunks),
@@ -109,7 +109,7 @@ describe("dispatchNativeRequest", () => {
         {
           providerId: "openai",
           baseUrl: "https://x/v1",
-          apiKeyEnv: "OPENAI_API_KEY",
+          auth: { kind: "env-bearer", apiKeyEnv: "OPENAI_API_KEY" },
           endpointPath: "",
         },
         deps,
@@ -132,7 +132,7 @@ describe("dispatchNativeRequest", () => {
     delete process.env.OPENAI_API_KEY;
     await expect(
       dispatchNativeRequest(
-        { providerId: "openai", baseUrl: "https://x", apiKeyEnv: "OPENAI_API_KEY", endpointPath: "" },
+        { providerId: "openai", baseUrl: "https://x", auth: { kind: "env-bearer", apiKeyEnv: "OPENAI_API_KEY" }, endpointPath: "" },
         depsWith([]),
         { ...baseInput, rendered: renderedRequest() },
       ),
@@ -142,7 +142,7 @@ describe("dispatchNativeRequest", () => {
   test("error chunks settle the partial stream explicitly", async () => {
     process.env.OPENAI_API_KEY = "k";
     const result = await dispatchNativeRequest(
-      { providerId: "openai", baseUrl: "https://x", apiKeyEnv: "OPENAI_API_KEY", endpointPath: "" },
+      { providerId: "openai", baseUrl: "https://x", auth: { kind: "env-bearer", apiKeyEnv: "OPENAI_API_KEY" }, endpointPath: "" },
       depsWith([
         { kind: "text", text: "partial" },
         { kind: "error", errorCode: "TRUNCATED_STREAM", errorMessage: "cut" },
@@ -157,7 +157,7 @@ describe("dispatchNativeRequest", () => {
   test("a completed stream without a usage frame returns cleanly (no TDZ crash, no fabricated cost)", async () => {
     process.env.OPENAI_API_KEY = "k";
     const result = await dispatchNativeRequest(
-      { providerId: "openai", baseUrl: "https://x", apiKeyEnv: "OPENAI_API_KEY", endpointPath: "" },
+      { providerId: "openai", baseUrl: "https://x", auth: { kind: "env-bearer", apiKeyEnv: "OPENAI_API_KEY" }, endpointPath: "" },
       depsWith([{ kind: "text", text: "no usage frame" }]),
       { ...baseInput, rendered: renderedRequest() },
     );

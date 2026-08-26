@@ -142,11 +142,14 @@ impl HardenedOptions {
     ///
     /// Only absolute host paths are honored; each Read/RO rule becomes an
     /// exact `src=dst` bind so the container sees precisely the worktree —
-    /// no host root, no home directories. Deny rules mount nothing (a
-    /// container has no ambient host filesystem to hide).
+    /// no host root, no home directories. Deny rules mount an empty,
+    /// read-only tmpfs over the destination so a deny path nested under a
+    /// bound parent (e.g. `.git` inside the worktree) hides host contents;
+    /// deny mounts are appended last so they shadow their parents.
     pub fn workspace_mount_flags(profile: &SandboxProfile) -> Vec<String> {
         use terminus_sandbox::profile::{FilesystemAccess, FilesystemRule};
         let mut v = Vec::new();
+        let mut denies = Vec::new();
         for FilesystemRule { path, access } in &profile.filesystem {
             if !path.starts_with('/') || path == "/" {
                 continue;
@@ -158,9 +161,14 @@ impl HardenedOptions {
                 FilesystemAccess::ReadWrite => {
                     v.push(format!("--mount=type=bind,src={path},dst={path}"))
                 }
-                FilesystemAccess::Deny => {}
+                FilesystemAccess::Deny => {
+                    denies.push(format!(
+                        "--mount=type=tmpfs,dst={path},tmpfs-size=4k,readonly,tmpfs-mode=000"
+                    ));
+                }
             }
         }
+        v.extend(denies);
         v
     }
 }
@@ -505,14 +513,23 @@ mod hardened_tests {
             ..Default::default()
         };
         let (_, argv) = backend.spawn_wrapper(&cmd, &profile).unwrap();
-        // Exact rw bind for the worktree; deny rule mounts nothing.
+        // Exact rw bind for the worktree; nested deny shadows it with an
+        // empty read-only tmpfs so host .git contents stay invisible.
         assert!(argv.contains(&format!("--mount=type=bind,src={ws},dst={ws}")));
         assert!(argv
             .iter()
             .any(|a| a == "--mount=type=bind,src=/etc/pki,dst=/etc/pki,readonly"));
-        assert!(!argv
+        let deny_mount =
+            format!("--mount=type=tmpfs,dst={ws}/.git,tmpfs-size=4k,readonly,tmpfs-mode=000");
+        let deny_idx = argv.iter().position(|a| a == &deny_mount).unwrap();
+        let parent_idx = argv
             .iter()
-            .any(|a| a.contains(format!("{ws}/.git").as_str())));
+            .position(|a| a.contains(&format!("dst={ws}")))
+            .unwrap();
+        assert!(
+            deny_idx > parent_idx,
+            "deny mount must follow its parent bind"
+        );
         // Workdir uses the resolved absolute host path (== guest path).
         assert!(argv.contains(&format!("--workdir={ws}/src")));
         let image_idx = argv.iter().position(|a| a.contains("@sha256:")).unwrap();

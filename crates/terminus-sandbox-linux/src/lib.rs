@@ -577,7 +577,15 @@ fn which_bwrap() -> Option<PathBuf> {
 /// exercises what production will run. Tries a merged-/usr layout first,
 /// then a classic layout.
 fn probe_bwrap_path(path: &std::path::Path) -> bool {
-    let base = [
+    // The probe must exercise the SAME mount plan production derives from
+    // the probed HostLayout — approving bwrap with an ad-hoc layout can
+    // pass here and then miss /lib64 at runtime (Cubic R-sandbox).
+    use crate::mounts::{plan_mounts, HostLayout};
+    let layout = HostLayout::probe();
+    let minimal_profile: terminus_sandbox::profile::SandboxProfile =
+        terminus_sandbox::profile::SandboxProfile::default_restrictive();
+    let plan = plan_mounts(&minimal_profile, &layout, None, None);
+    let mut attempt = vec![
         "--unshare-all".to_string(),
         "--proc".to_string(),
         "/proc".to_string(),
@@ -588,30 +596,17 @@ fn probe_bwrap_path(path: &std::path::Path) -> bool {
         "--cap-drop".to_string(),
         "ALL".to_string(),
     ];
-    let merged = [
-        "--ro-bind".to_string(),
-        "/usr".to_string(),
-        "/usr".to_string(),
-        "--symlink".to_string(),
-        "usr/bin".to_string(),
-        "/bin".to_string(),
-    ];
-    let classic = ["/bin", "/sbin", "/lib", "/lib64"]
-        .iter()
-        .flat_map(|dir| ["--ro-bind".to_string(), dir.to_string(), dir.to_string()])
-        .collect::<Vec<_>>();
-    let tail = [
+    for op in &plan.mounts {
+        op.push_argv(&mut attempt);
+    }
+    attempt.extend_from_slice(&[
         "--clearenv".to_string(),
         "--setenv".to_string(),
         "PATH".to_string(),
         "/usr/bin:/bin:/sbin".to_string(),
         "--".to_string(),
         "/bin/true".to_string(),
-    ];
-    let mut attempt = Vec::with_capacity(base.len() + merged.len() + tail.len());
-    attempt.extend_from_slice(&base);
-    attempt.extend_from_slice(&merged);
-    attempt.extend_from_slice(&tail);
+    ]);
     let ok = Command::new(path)
         .args(&attempt)
         .stdout(std::process::Stdio::null())
@@ -622,17 +617,10 @@ fn probe_bwrap_path(path: &std::path::Path) -> bool {
     if ok {
         return true;
     }
-    let mut fallback = Vec::with_capacity(base.len() + classic.len() + tail.len());
-    fallback.extend_from_slice(&base);
-    fallback.extend(classic);
-    fallback.extend_from_slice(&tail);
-    Command::new(path)
-        .args(&fallback)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    // No second, divergent layout: if the HostLayout-derived plan cannot
+    // run, the probe must fail rather than approve a shape production will
+    // never use.
+    false
 }
 
 #[cfg(test)]

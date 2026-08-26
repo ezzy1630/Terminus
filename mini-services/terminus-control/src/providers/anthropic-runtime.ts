@@ -23,8 +23,12 @@ import {
 export const ANTHROPIC_NATIVE_CONFIG: NativeRuntimeConfig = {
   providerId: "anthropic",
   baseUrl: "https://api.anthropic.com/v1",
-  apiKeyEnv: "ANTHROPIC_API_KEY",
+  // The kernel connector resolves the secret and injects `x-api-key`
+  // inside its trusted boundary; adding an Authorization header here would
+  // be rejected, and the Messages API requires a version header.
+  auth: { kind: "connector-injected" },
   endpointPath: "/messages",
+  extraHeaders: { "anthropic-version": "2023-06-01" },
 };
 
 export function anthropicTransportDeps(transport: NativeTransportDeps["postSse"], now?: () => number): NativeTransportDeps {

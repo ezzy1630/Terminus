@@ -32,7 +32,7 @@ describe("hydrateSearchHit", () => {
     const span = await hydrateSearchHit(hit, readerFor(files));
     expect(span).not.toBeNull();
     expect(span!.fragmentText).toContain("symbol: login");
-    expect(span!.fragmentText).toMatch(/21\| line 20/);
+    expect(span!.fragmentText).toMatch(/20→ line 20/);
     expect(span!.startLine).toBeLessThan(20);
     expect(span!.endLine).toBeGreaterThanOrEqual(20);
     expect(span!.fileSha256).toStartWith("sha256:");

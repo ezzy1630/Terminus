@@ -288,7 +288,7 @@ else
 fi;
 
 # 14. Host home hidden — /root and host user homes are not mounted
-if [ -e /root/.ssh ] || [ -e /root ] || [ -e "/home/$USER" ]; then
+if [ -e /root/.ssh ] || [ -e /root ] || { [ -n "${USER:-}" ] && [ -e "/home/$USER" ]; }; then
   echo "host_home_hidden=failed";
   exit 24;
 else

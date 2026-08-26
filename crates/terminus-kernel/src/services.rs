@@ -2957,6 +2957,23 @@ impl ConnectorService {
         grant: &terminus_secrets::ConnectorGrant,
         sink: &mut S,
     ) -> KernelResult<terminus_connector::ConnectorResponse> {
+        // Credential-echo redaction runs on the COMPLETE response only. A
+        // credentialed operation therefore must not stream raw body chunks
+        // past this boundary; it degrades to a single buffered chunk after
+        // scrubbing. Anonymous operations (empty secret URI, e.g.
+        // `web-fetch`) have no credential to echo and stream genuinely.
+        if !grant.claims.secret_uri.is_empty() {
+            let response = self.execute(ctx, op, grant).await?;
+            sink.on_chunk(&response.body).await.map_err(|e| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::Internal,
+                    terminus_kernel_protocol::ErrorCategory::Internal,
+                    format!("{e}"),
+                    false,
+                )
+            })?;
+            return Ok(response);
+        }
         let dest = format!("{}:{}", op.host, op.port);
         let requested_scope = Scope {
             workspace_paths: Vec::new(),

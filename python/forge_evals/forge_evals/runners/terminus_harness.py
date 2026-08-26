@@ -21,6 +21,7 @@ Configuration (all required unless a fake server supplies them in tests):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -94,10 +95,15 @@ class TerminusHarness:
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
         started = time.monotonic()
+        # Live API contract: open workspace → create session (yields the root
+        # thread) → create DRAFT task → start it → admit a turn.
         workspace_id = self._prepare_workspace(request)
-        task_id = self._create_task(request, workspace_id, recorder)
-        turn_id = self._create_turn(request, task_id, workspace_id, recorder)
-        state = self._await_terminal(turn_id)
+        session_id, thread_id = self._create_session(request, workspace_id, recorder)
+        task_id = self._create_task(request, session_id, thread_id, recorder)
+        self._start_task(task_id, recorder)
+        user_message = self._user_message(request)
+        turn_id = self._create_turn(request, thread_id, task_id, user_message, recorder)
+        state = self._await_terminal(turn_id, task_id=task_id)
 
         usage, context_manifests, verification = self._collect_evidence(task_id, turn_id)
         elapsed = time.monotonic() - started
@@ -158,9 +164,10 @@ class TerminusHarness:
     def _prepare_workspace(self, request: RunRequest) -> str:
         created = self._request(
             "POST",
-            "/v1/workspaces",
+            "/v1/workspaces/open",
             {
                 "root_uri": request.task_dir.resolve().as_uri(),
+                "kind": "local_git" if (request.task_dir / ".git").exists() else "local_directory",
                 "trust": (request.suite.startswith("malicious") and "untrusted") or "trusted",
             },
         )
@@ -169,24 +176,54 @@ class TerminusHarness:
             raise TerminusControlError("workspace creation returned no id")
         return workspace_id
 
-    def _create_task(
+    def _create_session(
         self,
         request: RunRequest,
         workspace_id: str,
         recorder: TrajectoryRecorder,
-    ) -> str:
+    ) -> tuple[str, str]:
+        created = self._request(
+            "POST",
+            "/v1/sessions",
+            {"workspace_id": workspace_id, "title": f"eval:{request.suite}/{request.task}"},
+        )
+        session_id = created.get("id")
+        thread_id = created.get("active_thread_id")
+        if not isinstance(session_id, str) or not isinstance(thread_id, str):
+            raise TerminusControlError("session creation returned no id/active_thread_id")
+        recorder.record("harness.session_created", {"session_id": session_id})
+        return session_id, thread_id
+
+    def _objective(self, request: RunRequest) -> str:
         statement_path = request.task_dir / "task.md"
-        statement = (
+        return (
             statement_path.read_text(encoding="utf-8") if statement_path.exists() else request.task
         )
+
+    def _user_message(self, request: RunRequest) -> str:
+        prompt = request.task_dir / "prompt.txt"
+        return prompt.read_text(encoding="utf-8") if prompt.exists() else request.task
+
+    def _create_task(
+        self,
+        request: RunRequest,
+        session_id: str,
+        thread_id: str,
+        recorder: TrajectoryRecorder,
+    ) -> str:
         created = self._request(
             "POST",
             "/v1/tasks",
             {
-                "session_id": None,
-                "workspace_id": workspace_id,
-                "statement": statement,
+                "session_id": session_id,
+                "thread_id": thread_id,
+                "objective": self._objective(request),
                 "acceptance_criteria": _criteria_from_task_dir(request.task_dir),
+                # Scope note (anti-gaming): the scope API has no negation,
+                # so `hidden/**` cannot be excluded here. Tamper-resistance is
+                # enforced downstream by end-state graders that re-derive the
+                # outcome from the workspace and by hidden tests re-applied at
+                # grade time from outside the workspace.
                 "allowed_scope": {"read_paths": ["**"], "write_paths": ["**"]},
             },
         )
@@ -199,26 +236,29 @@ class TerminusHarness:
         )
         return task_id
 
+    def _start_task(self, task_id: str, recorder: TrajectoryRecorder) -> None:
+        """A DRAFT task cannot admit turns; start it first."""
+        started = self._request("POST", f"/v1/tasks/{task_id}/start")
+        if started.get("status") is None and started.get("state") is None:
+            raise TerminusControlError(f"task {task_id} start returned no status")
+        recorder.record("harness.task_started", {"task_id": task_id})
+
     def _create_turn(
         self,
         request: RunRequest,
+        thread_id: str,
         task_id: str,
-        workspace_id: str,
+        user_message: str,
         recorder: TrajectoryRecorder,
     ) -> str:
-        del workspace_id
-        prompt = request.task_dir / "prompt.txt"
-        user_message = prompt.read_text(encoding="utf-8") if prompt.exists() else request.task
+        del request  # budgets/model snapshot are pinned control-plane-side
         created = self._request(
             "POST",
             "/v1/turns",
             {
+                "thread_id": thread_id,
                 "task_id": task_id,
-                "user_message": user_message,
-                "budgets": request.budgets.to_dict(),
-                "model_snapshot": request.model_snapshot.to_dict(),
-                "seed": request.random_seed,
-                "experiment_assignments": request.experiment_assignments,
+                "user_input": user_message,
             },
         )
         turn_id = created.get("id")
@@ -227,14 +267,27 @@ class TerminusHarness:
         recorder.record("harness.turn_created", {"turn_id": turn_id})
         return turn_id
 
-    def _await_terminal(self, turn_id: str) -> str:
+    def _await_terminal(self, turn_id: str, task_id: str | None = None) -> str:
         deadline = time.monotonic() + self._config.timeout_seconds
         while time.monotonic() < deadline:
             turn = self._request("GET", f"/v1/turns/{turn_id}")
             state = turn.get("state")
             if isinstance(state, str) and state in TERMINAL_TURN_STATES:
                 return state
+            # Task-level terminal states dominate: verification may fail the
+            # task after the turn settles COMPLETED.
+            if task_id is not None:
+                try:
+                    task = self._request("GET", f"/v1/tasks/{task_id}")
+                    task_status = task.get("status")
+                    if isinstance(task_status, str) and task_status in _TERMINAL_TASK_STATES:
+                        return task_status
+                except TerminusControlError:
+                    pass
             time.sleep(self._config.poll_interval_seconds)
+        # Timeout must not leave the remote turn running.
+        with contextlib.suppress(TerminusControlError):
+            self._request("POST", f"/v1/turns/{turn_id}/interrupt", {"reason": "harness-timeout"})
         return "TIMEOUT"
 
     def _collect_evidence(
@@ -245,22 +298,22 @@ class TerminusHarness:
         usage: dict[str, Any] | None = None
         manifests: list[dict[str, Any]] = []
         verification: list[dict[str, Any]] = []
+        # Real control-plane surfaces only. The artifact inventory endpoint
+        # is canonical; per-attempt usage rides the artifact metadata until a
+        # typed attempts view exists — fabricated URLs are worse than none.
+        del turn_id
         try:
-            attempts = self._request("GET", f"/v1/tasks/{task_id}/verification/results")
-            if isinstance(attempts.get("results"), list):
-                verification.extend(attempts["results"])
-        except TerminusControlError:
-            pass
-        try:
-            manifest_list = self._request("GET", f"/v1/turns/{turn_id}/context-manifests")
-            if isinstance(manifest_list.get("manifests"), list):
-                manifests.extend(manifest_list["manifests"])
-        except TerminusControlError:
-            pass
-        try:
-            attempt_rows = self._request("GET", f"/v1/turns/{turn_id}/provider-attempts")
-            if isinstance(attempt_rows.get("attempts"), list):
-                usage = {"attempts": attempt_rows["attempts"]}
+            page = self._request("GET", f"/v1/tasks/{task_id}/artifacts?limit=100")
+            raw_items = page.get("artifacts")
+            items: list[Any] = [a for a in raw_items if isinstance(a, dict)] if isinstance(raw_items, list) else []
+            for artifact in items:
+                # The inventory exposes ingest `purpose`, not a kind field.
+                purpose = str(artifact.get("purpose") or "")
+                if "verification" in purpose:
+                    verification.append(artifact)
+                elif "context" in purpose or "manifest" in purpose:
+                    manifests.append(artifact)
+            usage = {"artifact_count": len(items)}
         except TerminusControlError:
             pass
         return usage, manifests, verification

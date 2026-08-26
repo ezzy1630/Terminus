@@ -55,9 +55,10 @@ describe("standalone provider tools", () => {
     });
     expect(call.arguments).toMatchObject({
       path: "src/index.ts",
-      max_bytes: 48 * 1_024,
+      max_bytes: 28 * 1_024,
       offset_line: 1,
       max_lines: 2_000,
+      render: "numbered",
     });
     expect(toolEffectMetadata(call).effectType).toBe("READ_LOCAL");
     expect(providerToolCallTranscript(call).provider_call_id).toBe("provider-call-1");
@@ -607,7 +608,7 @@ describe("R3 background exec and exec_poll", () => {
     const result = await executeStandaloneTool({
       ...baseInput,
       clients,
-      call: parseStandaloneToolCall({ toolCallId: "pl3", toolName: "exec_poll", arguments: { background_id: "job-7", tail_bytes: 8_192 } }) as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }>,
+      call: parseStandaloneToolCall({ toolCallId: "pl3", toolName: "exec_poll", arguments: { background_id: "job-7", tail_bytes: 8_192, expected_exit_codes: [3] } }) as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }>,
       observedSources: new ObservedSourceTracker(),
     });
     expect(result.status).toBe("success");
@@ -733,5 +734,45 @@ describe("R11 web_fetch URL guards", () => {
     expect(data.body_bytes_fetched).toBe(16_384);
     expect(ingestedBytes).toBe(16_384);
     expect(result.truncation.occurred).toBe(true);
+  });
+});
+
+describe("R-cubic exec_poll exit-code contract", () => {
+  const base = {
+    context: { idempotencyKey: "idem" } as never,
+    workspaceId: "ws-1",
+    internalToolCallId: "tc",
+    sideEffectId: "00000000-0000-7000-8000-000000000041" as never,
+    policyDecisionId: "pd",
+    traceId: "trace",
+    contractHash: "hash",
+    devMode: false,
+    shellModeEnabled: true,
+    observedSources: new ObservedSourceTracker(),
+  } as const;
+
+  function clientsWithExit(code: number): Parameters<typeof executeStandaloneTool>[0]["clients"] {
+    return {
+      jobs: { Get: () => ({ jobId: "j", state: "exited", exitCode: code }) },
+    } as unknown as Parameters<typeof executeStandaloneTool>[0]["clients"];
+  }
+
+  test("unexpected exit codes settle the poll as an error", async () => {
+    const result = await executeStandaloneTool({
+      ...base,
+      clients: clientsWithExit(2),
+      call: parseStandaloneToolCall({ toolCallId: "px", toolName: "exec_poll", arguments: { background_id: "j" } }) as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }>,
+    });
+    expect(result.status).toBe("error");
+    expect(result.diagnostics[0]?.code).toBe("EXEC_POLL_EXIT_UNEXPECTED");
+  });
+
+  test("expected exit codes stay success", async () => {
+    const result = await executeStandaloneTool({
+      ...base,
+      clients: clientsWithExit(7),
+      call: parseStandaloneToolCall({ toolCallId: "py", toolName: "exec_poll", arguments: { background_id: "j", expected_exit_codes: [7] } }) as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }>,
+    });
+    expect(result.status).toBe("success");
   });
 });
