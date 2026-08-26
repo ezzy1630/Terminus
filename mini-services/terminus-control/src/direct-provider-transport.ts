@@ -153,6 +153,86 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
   private eachChunk(request: ExecuteConnectorRequest): AsyncIterable<ConnectorChunk> {
     return observableToAsyncIterable(this.connectors.ExecuteStream(request));
   }
+
+  /**
+   * Raw SSE streaming for the native provider runtimes: mints a grant for
+   * the given destination and yields response bytes as they arrive. The
+   * caller owns headers (minus credentials, which stay connector-side).
+   */
+  async *streamRaw(input: {
+    readonly host: string;
+    readonly port: number;
+    readonly path: string;
+    readonly headers: Readonly<Record<string, string>>;
+    readonly body: string;
+    readonly context: RequestContext;
+  }): AsyncIterable<Uint8Array> {
+    const effectId = randomUUID();
+    const grant = await this.connectors.MintGrant({
+      context: nextContext(input.context, `native-grant:${effectId}`),
+      capabilityUri: "",
+      binding: {
+        connectorId: connectorIdForRawPath(input.host, input.path),
+        destinationHost: input.host,
+        destinationPort: input.port,
+        scheme: "https",
+        method: "POST",
+        pathClass: input.path,
+        effectId,
+      },
+      ttlSeconds: 60,
+    });
+    if (grant.encodedGrant.length === 0) throw new Error("kernel returned an empty connector grant");
+    const request: ExecuteConnectorRequest = {
+      context: nextContext(input.context, `native-execute:${effectId}`),
+      encodedGrant: grant.encodedGrant,
+      operation: {
+        method: "POST",
+        scheme: "https",
+        host: input.host,
+        port: input.port,
+        path: input.path,
+        query: "",
+        headers: Object.entries(input.headers).map(([name, value]) => ({ name, value })),
+        body: new TextEncoder().encode(input.body),
+      },
+    };
+    let sawReceiptStatus: number | null = null;
+    let streamed = false;
+    try {
+      for await (const chunk of this.eachChunk(request)) {
+        if (chunk.bytes !== undefined) {
+          streamed = true;
+          yield chunk.bytes;
+        } else if (chunk.receipt !== undefined) {
+          sawReceiptStatus = chunk.receipt.statusCode ?? null;
+        }
+      }
+    } catch (error) {
+      if (!isUnimplemented(error)) throw error;
+    }
+    if (!streamed || sawReceiptStatus === null) {
+      // Legacy kernel or receipt-only stream: fall back to buffered unary.
+      const response = await this.connectors.Execute(request);
+      const status = response.receipt?.statusCode;
+      if (status === undefined || status < 200 || status > 299) {
+        throw new Error(`direct provider returned HTTP ${status ?? 0}${providerErrorSuffix(response.body)}`);
+      }
+      yield* splitSseChunks(response.body);
+      return;
+    }
+    if (sawReceiptStatus < 200 || sawReceiptStatus > 299) {
+      throw new Error(`direct provider returned HTTP ${sawReceiptStatus}`);
+    }
+  }
+}
+
+/** Map a raw vendor destination onto the registered anonymous connectors. */
+function connectorIdForRawPath(host: string, path: string): string {
+  for (const endpoint of Object.values(DIRECT_ENDPOINTS)) {
+    if (endpoint.host === host && endpoint.path === path) return endpoint.connectorId;
+  }
+  throw new Error(`no registered connector admits https://${host}${path}`);
 }
 
 /** Minimal Observable→AsyncIterable bridge. */

@@ -1958,7 +1958,7 @@ impl JobServiceRpc for GrpcKernel {
             .map(context)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
-        Ok(Response::new(job_state(&request.job_id, record.state)))
+        Ok(Response::new(job_state_from_record(&record)))
     }
 }
 
@@ -2002,6 +2002,50 @@ fn job_state(job_id: &str, state: terminus_jobs::JobState) -> protocol::JobState
         exited_at: None,
         stdout_artifact: None,
         stderr_artifact: None,
+    }
+}
+
+fn artifact_ref_opt(sha256: &Option<String>) -> Option<protocol::ArtifactRef> {
+    let sha = sha256.as_deref()?;
+    Some(protocol::ArtifactRef {
+        sha256: sha.to_string(),
+        size_bytes: 0,
+        media_type: String::new(),
+    })
+}
+
+/// Full projection of a durable job record (Cubic exec_poll finding): the
+/// settled exit code parsed from the termination receipt plus the CAS
+/// artifact refs the poll tool tails.
+fn job_state_from_record(record: &terminus_jobs::JobRecord) -> protocol::JobState {
+    let exit_code = record
+        .termination_receipt
+        .as_deref()
+        .and_then(|receipt| receipt.strip_prefix("exit:"))
+        .and_then(|code| code.parse::<i32>().ok())
+        .unwrap_or(-1);
+    protocol::JobState {
+        job_id: record.id.clone(),
+        state: record.state.as_str().to_ascii_lowercase(),
+        exit_code,
+        started_at: record.started_at.as_ref().and_then(|raw| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .ok()
+                .map(|ts| prost_types::Timestamp {
+                    seconds: ts.timestamp(),
+                    nanos: ts.timestamp_subsec_nanos() as i32,
+                })
+        }),
+        exited_at: record.settled_at.as_ref().and_then(|raw| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .ok()
+                .map(|ts| prost_types::Timestamp {
+                    seconds: ts.timestamp(),
+                    nanos: ts.timestamp_subsec_nanos() as i32,
+                })
+        }),
+        stdout_artifact: artifact_ref_opt(&record.stdout_artifact),
+        stderr_artifact: artifact_ref_opt(&record.stderr_artifact),
     }
 }
 

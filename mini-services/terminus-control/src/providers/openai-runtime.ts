@@ -43,16 +43,28 @@ export function openaiTransportDeps(transport: NativeTransportDeps["postSse"], n
 
 export async function dispatchOpenAI(
   input: Omit<NativeDispatchInput, "rendered"> & {
-    readonly canonicalRenderInput: Parameters<typeof renderRequest>[0];
+    readonly canonicalRenderInput?: Parameters<typeof renderRequest>[0];
+    readonly rendered?: import("@terminus/provider-core").RenderedProviderRequest;
+    readonly protocol?: "responses" | "chat_completions";
+    /** Stable per-epoch cache routing key appended to Responses bodies. */
+    readonly promptCacheKey?: string;
     /** Required kernel-brokered SSE transport; there is no default. */
     readonly postSse: NativeTransportDeps["postSse"];
     readonly now?: () => number;
   },
 ): Promise<NativeStreamResult> {
-  const { postSse, now, ...rest } = input;
-  const rendered = await renderRequest(rest.canonicalRenderInput);
-  return dispatchNativeRequest(OPENAI_NATIVE_CONFIG, openaiTransportDeps(postSse, now), {
+  const { postSse, now, canonicalRenderInput, rendered, protocol, promptCacheKey, ...rest } = input;
+  const baseRendered =
+    rendered ??
+    (await renderRequest(canonicalRenderInput as Parameters<typeof renderRequest>[0]));
+  const finalRendered = promptCacheKey === undefined
+    ? baseRendered
+    : {
+        ...baseRendered,
+        body: { ...baseRendered.body, prompt_cache_key: promptCacheKey },
+      };
+  return dispatchNativeRequest(openaiNativeConfig(protocol), openaiTransportDeps(postSse, now), {
     ...rest,
-    rendered,
+    rendered: finalRendered,
   });
 }

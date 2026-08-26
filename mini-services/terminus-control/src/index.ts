@@ -253,6 +253,7 @@ import { ContextStateBuilder } from "./agent/context-state-builder.js";
 import { CodingTurnEngine } from "./agent/coding-turn-engine.js";
 import { CacheRatioMonitor } from "./agent/cache-telemetry.js";
 import { withProviderRetry } from "./providers/provider-retry.js";
+import { createNativeDirectExecutor } from "./providers/native-direct-executor.js";
 import {
   runCompaction,
   SUMMARY_SYSTEM_INSTRUCTIONS,
@@ -9879,25 +9880,55 @@ async function agentLoop(turnId: string): Promise<void> {
     };
     const compileProviderContext = async () => {
       let recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
-      // R4: compaction pass — deterministic prune + structured summary before
-      // the compiler sees the window. Runs only when the loaded window
-      // exceeds the compact threshold; below it this is a cheap no-op.
-      const recentBytes = [...recent.content.values()].reduce(
-        (total, text) => total + new TextEncoder().encode(text).byteLength,
-        0,
-      );
+      // R4/Cubic round-2: the compaction decision must consider the FULL
+      // episode set, not the already window-capped view — otherwise a long
+      // turn never crosses the threshold. Byte sizes come from the CAS
+      // artifact metadata (no payload reads).
+      const fullEpisodeSizes = await db.episode.findMany({
+        where: { turnId, modelVisible: true },
+        orderBy: { sequence: "asc" },
+        select: { id: true, kind: true, sequence: true, toolCallId: true, contentArtifact: true },
+      });
+      const sizeByUri = new Map<string, number>();
+      for (const row of fullEpisodeSizes) {
+        if (row.contentArtifact === null) continue;
+        const hash = row.contentArtifact.startsWith("artifact://sha256/")
+          ? `sha256:${row.contentArtifact.slice("artifact://sha256/".length)}`
+          : null;
+        if (hash === null) continue;
+        try {
+          const meta = await requireKernelUds().artifacts.GetMetadata({
+            context: {
+              ...(await kernelTaskContext({
+                sessionId: turn.thread.sessionId,
+                taskId: task.id,
+                turnId,
+                workspaceId: workspace.id,
+                operationClasses: [CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST],
+              })),
+              idempotencyKey: `compaction-meta:${row.id}`,
+            } as never,
+            sha256: hash,
+          });
+          sizeByUri.set(row.contentArtifact, Number(meta.artifact?.sizeBytes ?? 0));
+        } catch {
+          sizeByUri.set(row.contentArtifact, 0);
+        }
+      }
+      const totalBytes = fullEpisodeSizes.reduce((sum, row) => sum + (row.contentArtifact !== null ? sizeByUri.get(row.contentArtifact) ?? 0 : 0), 0);
       const compactionReport = await runCompaction(
         buildCompactionStore(),
         {
           turnId,
-          episodes: recent.episodes.map((episode) => ({
-            id: episode.id,
-            kind: episode.kind,
-            sequence: episode.sequence,
-            toolCallId: episode.toolCallId,
-            contentJson: episode.contentRef === null ? null : recent.content.get(episode.contentRef) ?? null,
+          episodes: fullEpisodeSizes.map((row) => ({
+            id: row.id,
+            kind: row.kind,
+            sequence: row.sequence,
+            toolCallId: row.toolCallId,
+            contentJson: null,
+            byteSize: row.contentArtifact !== null ? sizeByUri.get(row.contentArtifact) ?? 0 : 0,
           })),
-          totalBytes: recentBytes,
+          totalBytes,
           summarizer: buildSummarizer(),
         },
       );
@@ -10086,18 +10117,38 @@ async function agentLoop(turnId: string): Promise<void> {
           ? []
           : [gatewaySecretUri(gatewayModel.deployment)],
     });
-    const buildDirectExecutor = (): ProviderExecutionInput["executeDirectRequest"] => directConfiguration === null
-      ? undefined
-      : (execInput: ProviderExecutionInput) => executeDirectProviderRequest(
-          {
-            rendered: execInput.rendered,
-            configuration: directConfiguration,
-            // Route OpenAI prompt caches by context epoch so tool-call turns
-            // hit the same cache entry instead of fragmenting across turns.
-            cacheKey: contextEpoch.epochId,
-          },
-          new KernelDirectConnectorClient(requireKernelUds().connectors, execInput.context),
-        );
+    const buildDirectExecutor = (): ProviderExecutionInput["executeDirectRequest"] => {
+      if (directConfiguration === null) return undefined;
+      // R6/Cubic: route through the vendor-native runtimes so live turns get
+      // cache reconciliation + budget preflight + partial settlement.
+      let budgetMicros = 5_000_000n;
+      try {
+        const parsedBudget = JSON.parse(task.budgetJson) as { model_micros?: number };
+        if (typeof parsedBudget.model_micros === "number" && parsedBudget.model_micros > 0) {
+          budgetMicros = BigInt(Math.min(parsedBudget.model_micros, Number.MAX_SAFE_INTEGER));
+        }
+      } catch {
+        // Default budget stands when the stored task budget is unreadable.
+      }
+      const nativeExecutor = createNativeDirectExecutor({
+        configuration: directConfiguration,
+        connectors: requireKernelUds().connectors,
+        requestBudgetMicros: budgetMicros,
+        economics: selectedProvider.economics,
+        promptCacheKey: contextEpoch.epochId,
+      });
+      return async (execInput) => {
+        // Adapt the native stream result back into the transport-level
+        // ProviderResponse the engine settles.
+        const nativeResult = await nativeExecutor(execInput as Parameters<typeof nativeExecutor>[0]);
+        return {
+          providerId: execInput.rendered.providerId,
+          model: execInput.rendered.model,
+          chunks: nativeResult.chunks,
+          observedAt: new Date().toISOString() as never,
+        };
+      };
+    };
     // R4: durable effects for compaction — hide pruned rows and append one
     // model-visible summary episode backed by a CAS artifact.
     const buildCompactionStore = (): CompactionStore => ({
@@ -10412,8 +10463,10 @@ async function agentLoop(turnId: string): Promise<void> {
     }
     const engine = new CodingTurnEngine({
       budget: {
+        // The explicit knob is clamped to the hard safety ceiling (ADR-0039):
+        // an operator may lower the budget but never raise the invariant.
         maxSteps: configuredMaxSteps,
-        hardMaxSteps: Math.max(HARD_MAX_STEPS, configuredMaxSteps),
+        hardMaxSteps: HARD_MAX_STEPS,
       },
       newId: uuid,
       sideEffectClassOf,

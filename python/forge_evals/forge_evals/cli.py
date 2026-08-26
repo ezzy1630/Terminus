@@ -302,12 +302,44 @@ def _cmd_run_live(args: argparse.Namespace) -> int:
         )
         recorder = TrajectoryRecorder(run_id=f"{args.suite}-{args.task}-{seed}")
         result, patch_payload = run_live_task(harness, request, recorder)
+
+        # R8/Cubic: actually bridge to the pinned evaluator when this suite is
+        # an external benchmark and a real patch exists. Results land beside
+        # the run records; absence of the tool records explicit "unavailable".
+        evaluation_report: dict[str, Any] | None = None
+        if args.suite.startswith("swe-bench") and patch_payload.get("diff"):
+            from .runners.live_runner import (
+                build_swebench_evaluation_argv,
+                ensure_temp_predictions_dir,
+                invoke_external_evaluator,
+            )
+
+            predictions_dir = ensure_temp_predictions_dir()
+            argv = build_swebench_evaluation_argv(
+                patch_diff=str(patch_payload["diff"]),
+                instance_id=args.task.replace("/", "__"),
+                predictions_dir=predictions_dir,
+                suite_manifest=f"suites/{args.suite}.yaml",
+            )
+            if argv is None:
+                evaluation_report = {"status": "evaluator_unavailable"}
+            else:
+                evaluation_report = {
+                    "status": "invoked",
+                    "argv": [*argv[:2], "..."],
+                    **invoke_external_evaluator(argv),
+                }
+
         record = build_live_run_record(
             harness_result=result,
             request=request,
             patch_payload=patch_payload,
             seed=seed,
         )
+        if evaluation_report is not None:
+            notes = json.loads(record.notes) if record.notes else {}
+            notes["evaluation"] = evaluation_report
+            object.__setattr__(record, "notes", json.dumps(notes, sort_keys=True))
         _write_record(record, output_dir, args.format)
         n += 1
     print(f"live runs completed: {n}")

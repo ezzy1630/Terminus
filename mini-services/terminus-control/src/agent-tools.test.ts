@@ -253,6 +253,7 @@ describe("R1 numbered rendering and gutter-safe patching", () => {
     const data = readResult.data as Record<string, unknown>;
     expect(data.file_sha256).toBe(sha);
     expect(data.total_lines).toBe(2);
+    expect(data.render).toBe("numbered");
     expect(data.content_utf8).toBe("1→ alpha\n2→ beta\n");
     expect(tracker.resolve("ws-1", "src/a.ts")).toBe(sha);
     const patchResult = await executeStandaloneTool({

@@ -39,12 +39,25 @@ import type {
  * - recovers partial streams explicitly instead of silently retrying.
  */
 
+export type NativeAuth =
+  | { readonly kind: "env-bearer"; readonly apiKeyEnv: string }
+  | {
+      /**
+       * The kernel connector injects the credential inside its trusted
+       * boundary; this layer must not add an Authorization header and must
+       * not require environment material.
+       */
+      readonly kind: "connector-injected";
+    };
+
 export interface NativeRuntimeConfig {
   readonly providerId: string;
   readonly baseUrl: string;
-  readonly apiKeyEnv: string;
+  readonly auth: NativeAuth;
   /** Path appended to baseUrl for the streaming request. */
   readonly endpointPath: string;
+  /** Provider-mandatory headers (e.g. `anthropic-version`). */
+  readonly extraHeaders?: Readonly<Record<string, string>> | undefined;
 }
 
 export interface NativeStreamResult {
@@ -129,14 +142,14 @@ export async function dispatchNativeRequest(
   // Preflight uses the FULL expected input (stable prefix + tail) plus the
   // renderer's output/reasoning reserves, so a passing budget check cannot
   // be exceeded by the actual generation (Cubic R7 follow-up).
-  const totalInput = rendered.predictedCachedTokens
-    + (rendered.request.outputReserveTokens ?? 0n as TokenCount)
-    + (rendered.request.reasoningReserveTokens ?? 0n as TokenCount);
+  const outputReserve = rendered.request.outputReserveTokens ?? (0n as TokenCount);
+  const reasoningReserve = rendered.request.reasoningReserveTokens ?? (0n as TokenCount);
+  const totalInput = (rendered.predictedCachedTokens + outputReserve + reasoningReserve) as TokenCount;
   const estimated = estimateCostMicros(
     {
       promptTokens: totalInput,
-      predictedOutputTokens: rendered.request.outputReserveTokens ?? 0n as TokenCount,
-      predictedReasoningTokens: rendered.request.reasoningReserveTokens ?? 0n as TokenCount,
+      predictedOutputTokens: outputReserve,
+      predictedReasoningTokens: reasoningReserve,
       predictedCachedTokens: rendered.predictedCachedTokens,
     },
     economics,

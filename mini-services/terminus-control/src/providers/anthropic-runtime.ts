@@ -41,16 +41,20 @@ export function anthropicTransportDeps(transport: NativeTransportDeps["postSse"]
 
 export async function dispatchAnthropic(
   input: Omit<NativeDispatchInput, "rendered"> & {
-    readonly canonicalRenderInput: Parameters<typeof renderRequest>[0];
+    /** Either a canonical render input or an already-rendered request. */
+    readonly canonicalRenderInput?: Parameters<typeof renderRequest>[0];
+    readonly rendered?: import("@terminus/provider-core").RenderedProviderRequest;
     /** Required kernel-brokered SSE transport; there is no default. */
     readonly postSse: NativeTransportDeps["postSse"];
     readonly now?: () => number;
   },
 ): Promise<NativeStreamResult> {
-  const { postSse, now, ...rest } = input;
-  const rendered = await renderRequest(rest.canonicalRenderInput);
+  const { postSse, now, canonicalRenderInput, rendered, ...rest } = input;
+  const finalRendered =
+    rendered ??
+    (await renderRequest(canonicalRenderInput as Parameters<typeof renderRequest>[0]));
   return dispatchNativeRequest(ANTHROPIC_NATIVE_CONFIG, anthropicTransportDeps(postSse, now), {
     ...rest,
-    rendered,
+    rendered: finalRendered,
   });
 }

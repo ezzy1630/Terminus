@@ -285,9 +285,21 @@ class TerminusHarness:
                 except TerminusControlError:
                     pass
             time.sleep(self._config.poll_interval_seconds)
-        # Timeout must not leave the remote turn running.
+        # Timeout must not leave the remote turn running: interrupt, then
+        # wait (bounded) for the terminal transition before returning so the
+        # workspace stops mutating under the diff/grade steps.
         with contextlib.suppress(TerminusControlError):
             self._request("POST", f"/v1/turns/{turn_id}/interrupt", {"reason": "harness-timeout"})
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            try:
+                turn = self._request("GET", f"/v1/turns/{turn_id}")
+                state = turn.get("state")
+                if isinstance(state, str) and state in TERMINAL_TURN_STATES:
+                    return state
+            except TerminusControlError:
+                break
+            time.sleep(self._config.poll_interval_seconds)
         return "TIMEOUT"
 
     def _collect_evidence(

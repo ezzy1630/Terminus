@@ -49,8 +49,13 @@ export interface EpisodeLike {
   readonly kind: string;
   readonly sequence: number;
   readonly toolCallId: string | null;
-  /** Serialized model-visible content, or null for reference-only rows. */
+  /**
+   * Serialized model-visible content, or null when only the durable size is
+   * known (metadata-driven planning); `byteSize` then carries the weight.
+   */
   readonly contentJson: string | null;
+  /** Authoritative CAS size used when contentJson is null. */
+  readonly byteSize?: number | undefined;
 }
 
 export interface PrunePlan {
@@ -61,6 +66,7 @@ export interface PrunePlan {
 }
 
 function episodeBytes(episode: EpisodeLike): number {
+  if (episode.byteSize !== undefined && episode.byteSize !== null) return episode.byteSize;
   return episode.contentJson === null ? 0 : new TextEncoder().encode(episode.contentJson).byteLength;
 }
 
@@ -118,9 +124,8 @@ export function planDeterministicPrune(
   let retainedBytes = 0;
   for (const episode of episodes) {
     const bytes = episodeBytes(episode);
-    if (episode.contentJson === null) {
-      // Reference-only rows carry nothing model-visible; keep them.
-      retainedBytes += 0;
+    if (episode.contentJson === null && episode.byteSize === undefined) {
+      // True reference-only rows carry nothing model-visible; keep them.
       continue;
     }
     if (keep.has(episode.id)) {

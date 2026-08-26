@@ -691,19 +691,37 @@ export async function executeStandaloneTool(
   const startedAt = performance.now();
   switch (input.call.toolId) {
     case "read": {
+      // Deep paging uses a real kernel line range so offset_line works even
+      // when earlier pages exceeded the byte cap (Cubic read-paging finding).
+      const deepPage = input.call.arguments.offset_line > 1;
       const response = await input.clients.files.Read({
         context: nextRequestContext(input.context, "read"),
         intent: toolIntent(input.contractHash, "read_local"),
         path: { workspaceId: input.workspaceId, relativePath: input.call.arguments.path },
-        mode: "full",
-        ranges: [],
+        mode: deepPage ? "ranges" : "full",
+        ranges: deepPage
+          ? [{
+              startLine: input.call.arguments.offset_line,
+              endLine: Math.min(
+                4_000_000,
+                input.call.arguments.offset_line + input.call.arguments.max_lines - 1,
+              ),
+            }]
+          : [],
         symbols: [],
         maxBytes: input.call.arguments.max_bytes,
         expectedSha256: input.call.arguments.expected_sha256 ?? "",
       });
       const fullProjection = new TextDecoder("utf-8", { fatal: true }).decode(response.modelProjectionUtf8);
-      const totalLines = fullProjection.length === 0 ? 0 : (fullProjection.endsWith("\n") ? fullProjection.slice(0, -1) : fullProjection).split("\n").length;
-      const page = pageLines(fullProjection, input.call.arguments.offset_line, input.call.arguments.max_lines);
+      const totalLines = deepPage ? null : (fullProjection.length === 0 ? 0 : (fullProjection.endsWith("\n") ? fullProjection.slice(0, -1) : fullProjection).split("\n").length);
+      const page = deepPage
+        ? {
+            text: fullProjection,
+            startLine: input.call.arguments.offset_line,
+            endLine: input.call.arguments.offset_line + Math.max(0, fullProjection.split("\n").length - (fullProjection.endsWith("\n") ? 1 : 0)) - 1,
+            hasMore: fullProjection.split("\n").length >= input.call.arguments.max_lines,
+          }
+        : pageLines(fullProjection, input.call.arguments.offset_line, input.call.arguments.max_lines);
       const sourceHash = response.sourceVersion?.sha256 ?? "";
       if (sourceHash.length > 0 && input.observedSources !== undefined) {
         input.observedSources.record(input.workspaceId, input.call.arguments.path, sourceHash);
@@ -717,6 +735,8 @@ export async function executeStandaloneTool(
         path: input.call.arguments.path,
         content_utf8: contentUtf8,
         file_sha256: sourceHash.length === 0 ? null : sourceHash,
+        // Deep pages cannot know the file length without a second probe;
+        // report null rather than the last page index (Cubic honesty rule).
         total_lines: totalLines,
         render: input.call.arguments.render,
         offset_line: page.startLine,
@@ -728,7 +748,7 @@ export async function executeStandaloneTool(
       }, {
         toolCallId: input.internalToolCallId,
         traceId: input.traceId,
-        summary: `Read ${input.call.arguments.path} lines ${page.startLine}-${page.endLine} of ${totalLines}${page.hasMore ? " (continued)" : ""}`,
+        summary: `Read ${input.call.arguments.path} lines ${page.startLine}-${page.endLine}${deepPage ? "" : ` of ${totalLines}`}${page.hasMore ? " (continued)" : ""}`,
         sourceVersions: sourceHash.length === 0 ? {} : { [input.call.arguments.path]: sourceHash },
         artifacts: artifact === null ? [] : [artifact],
         sideEffects: [sideEffect(input.sideEffectId, "read", `Read ${input.call.arguments.path}`, true)],
