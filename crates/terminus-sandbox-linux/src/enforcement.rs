@@ -158,21 +158,21 @@ pub fn run_probe() -> Result<i32, SandboxError> {
 
     // Probe script tests every SPEC §36.5 control from inside the sandbox.
     // Each check prints `key=value` to stdout. The script exits non-zero on
-    // any failure so the probe is fail-closed.
+    // any failure so the probe is fail-closed. The canaries exercise the
+    // ACTUAL shipped argv shape: a minimal root (host `/` never bound),
+    // exact runtime trees, synthetic HOME, cleared environment, and tmpfs
+    // overlays over deny rules. Host-path probes must fail because the
+    // paths are simply not mounted — the historical `--ro-bind / /`
+    // shape would make them succeed read-only.
     let probe_script = r#"set -eu;
 echo "=== SPEC §36.5 Linux enforcement probe ===";
 
-# 1. User namespace — uid_map should show a mapped UID, not the host UID
+# 1. User namespace — uid_map should exist and show mapping
 if [ -r /proc/self/uid_map ]; then
-  uid_map=$(cat /proc/self/uid_map);
-  host_uid=$(id -u);
-  if echo "$uid_map" | grep -q "0 [0-9]* [0-9]*"; then
-    echo "user_namespace=blocked";
-  else
-    echo "user_namespace=blocked";
-  fi;
-else
   echo "user_namespace=blocked";
+else
+  echo "user_namespace=failed";
+  exit 19;
 fi;
 
 # 2. PID namespace — PID should be low (1 or 2), not a host PID
@@ -184,19 +184,17 @@ else
   exit 20;
 fi;
 
-# 3. Mount namespace — /proc/self/mountinfo should show bwrap mounts
-if [ -r /proc/self/mountinfo ]; then
-  if grep -q "terminus" /proc/self/mountinfo 2>/dev/null || grep -q "ro," /proc/self/mountinfo 2>/dev/null; then
-    echo "mount_namespace=blocked";
-  else
-    echo "mount_namespace=blocked";
-  fi;
+# 3. Mount namespace — /proc/self/mountinfo must NOT contain a host-root
+#    overlay bind of / (the historical --ro-bind / / defect).
+if grep -q " / rw" /proc/self/mountinfo 2>/dev/null; then
+  echo "mount_namespace=failed";
+  exit 22;
 else
   echo "mount_namespace=blocked";
 fi;
 
 # 4. Network namespace — no host network interfaces
-if ip addr 2>/dev/null | grep -q "state UP" | head -1; then
+if ip addr 2>/dev/null | grep -q "state UP"; then
   echo "network_namespace=failed";
   exit 21;
 else
@@ -219,7 +217,7 @@ else
   echo "network=blocked";
 fi;
 
-# 7. Filesystem — write to root should fail (read-only root)
+# 7. Filesystem — write to root should fail (read-only empty root)
 if touch /terminus-sandbox-write-probe 2>/dev/null; then
   echo "filesystem=failed";
   exit 13;
@@ -227,7 +225,7 @@ else
   echo "filesystem=readonly";
 fi;
 
-# 8. Protected .git — write to .git should fail
+# 8. Protected .git — creating .git in the root must fail
 if mkdir -p .git 2>/dev/null && touch .git/HOOKS_PROBE 2>/dev/null; then
   echo "protected_git=failed";
   exit 14;
@@ -256,7 +254,7 @@ else
   echo "secret_isolation=blocked";
 fi;
 
-# 11. cgroup — cgroup v2 should be visible
+# 11. cgroup — cgroup v2 should be visible through the read-only sysfs bind
 if [ -r /sys/fs/cgroup/cgroup.controllers ]; then
   echo "cgroup=visible";
 else
@@ -280,6 +278,31 @@ if [ -r /proc/self/status ]; then
 else
   echo "no_new_privs=blocked";
 fi;
+
+# 13. Synthetic home — HOME must be the sandbox-only path, never a host path
+if [ "$HOME" = "/home/terminus-sandbox" ]; then
+  echo "synthetic_home=blocked";
+else
+  echo "synthetic_home=failed";
+  exit 23;
+fi;
+
+# 14. Host home hidden — /root and host user homes are not mounted
+if [ -e /root/.ssh ] || [ -e /root ] || { [ -n "${USER:-}" ] && [ -e "/home/$USER" ]; }; then
+  echo "host_home_hidden=failed";
+  exit 24;
+else
+  echo "host_home_hidden=blocked";
+fi;
+
+# 15. SSH/cloud credentials invisible by absolute path
+for p in /root/.ssh /root/.aws /root/.config/gcloud /root/.gnupg; do
+  if [ -e "$p" ]; then
+    echo "credential_paths_hidden=failed";
+    exit 25;
+  fi;
+done;
+echo "credential_paths_hidden=blocked";
 
 echo "=== probe complete ===";
 "#;
@@ -334,6 +357,9 @@ echo "=== probe complete ===";
         ("secret_isolation", "blocked"),
         ("cgroup", "visible"),
         ("no_new_privs", "blocked"),
+        ("synthetic_home", "blocked"),
+        ("host_home_hidden", "blocked"),
+        ("credential_paths_hidden", "blocked"),
     ];
     let checks_passed = output.status.success()
         && required.iter().all(|(key, expected)| {

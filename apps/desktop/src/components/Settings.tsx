@@ -29,6 +29,7 @@
  * the existing useThemeStore so the preview is immediate.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { applyGovernanceViewsEnabled, readGovernanceViewsEnabled } from "../lib/session-view";
 import { useDialogFocus } from "../hooks/use-dialog-focus";
 import {
   Bell,
@@ -78,6 +79,7 @@ export type SettingCategoryId =
   | "performance"
   | "integrations"
   | "advanced"
+  | "governance"
   | "diagnostics";
 
 export type SettingControl =
@@ -496,6 +498,23 @@ function buildCatalog(): SettingCategory[] {
       ],
     },
     {
+      id: "governance",
+      label: "Governance views",
+      description: "Operator cockpit surfaces (ledger, effects, replay, budgets, evidence).",
+      icon: <Sliders size={14} />,
+      settings: [
+        {
+          id: "governance.views-enabled",
+          label: "Enable governance views",
+          description:
+            "Adds Overview / Activity / Replay / Usage / Evidence tabs to task workspaces. Off keeps the session-first default.",
+          control: { kind: "toggle" },
+          defaultValue: readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null),
+          apply: (v) => applyGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null, v === true || v === "true"),
+        },
+      ],
+    },
+    {
       id: "advanced",
       label: "Advanced",
       description: "Low-level behavior. Change with care.",
@@ -584,6 +603,17 @@ const CATALOG = buildCatalog().flatMap((category): SettingCategory[] => {
       ...category,
       description: "Current fixed shortcuts. Custom bindings are not available yet.",
       settings: category.settings.map((descriptor) => ({ ...descriptor, readOnly: true })),
+    }];
+  }
+  // R12: governance views toggle has real renderer-local behavior (it gates
+  // the task-workspace tabs), so it is surfaced like appearance.
+  if (category.id === "governance") {
+    return [{
+      ...category,
+      settings: category.settings.map((descriptor) => ({
+        ...descriptor,
+        defaultValue: readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null),
+      })),
     }];
   }
   return [];

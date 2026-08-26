@@ -30,6 +30,43 @@ pub enum AuthStyle {
     Bearer,
     /// Custom key header, e.g. `X-Api-Key: <credential>`.
     NamedHeader(String),
+    /// No credential at all (public endpoints, e.g. the built-in
+    /// `web-fetch` connector). Grants still pin host/method/path and are
+    /// consumed once; only the credential step is skipped.
+    None,
+}
+
+/// Async-aware sink for incremental response bodies. Boxing keeps the
+/// object-safe signature simple; the hot path (no sink) never allocates.
+pub trait ChunkSink: Send {
+    fn on_chunk(
+        &mut self,
+        bytes: &[u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ConnectorError>> + Send + '_>>;
+}
+
+/// Concrete, lifetime-carrying sink wrapper used on the dispatch path so
+/// borrowed sinks flow through nested futures without trait-object lifetime
+/// propagation.
+pub struct DispatchSink<'a> {
+    inner: Option<&'a mut dyn ChunkSink>,
+}
+
+impl std::fmt::Debug for DispatchSink<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DispatchSink")
+            .field("streaming", &self.inner.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DispatchSink<'_> {
+    pub async fn send(&mut self, bytes: &[u8]) -> Result<(), ConnectorError> {
+        match self.inner.as_deref_mut() {
+            Some(sink) => sink.on_chunk(bytes).await,
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -168,10 +205,35 @@ impl ConnectorBroker {
     }
 
     /// Execute one grant-bound operation end to end.
+    /// Buffered dispatch: identical semantics to `execute_streaming` with a
+    /// disabled sink. Prefer `execute` when the caller cannot consume
+    /// incrementally.
     pub async fn execute(
         &self,
         op: &CanonicalOperation,
         grant: &ConnectorGrant,
+    ) -> Result<ConnectorResponse, ConnectorError> {
+        self.execute_with_sink(op, grant, None::<&mut dyn ChunkSink>)
+            .await
+    }
+
+    /// Incremental dispatch: response body chunks reach the sink as they
+    /// arrive; authorization, one-time consumption, bounded capture, and the
+    /// returned receipt are identical to [`Self::execute`].
+    pub async fn execute_streaming<S: ChunkSink>(
+        &self,
+        op: &CanonicalOperation,
+        grant: &ConnectorGrant,
+        sink: &mut S,
+    ) -> Result<ConnectorResponse, ConnectorError> {
+        self.execute_with_sink(op, grant, Some(sink)).await
+    }
+
+    async fn execute_with_sink(
+        &self,
+        op: &CanonicalOperation,
+        grant: &ConnectorGrant,
+        sink: Option<&mut dyn ChunkSink>,
     ) -> Result<ConnectorResponse, ConnectorError> {
         let claims = &grant.claims;
         let binding = &claims.binding;
@@ -225,18 +287,29 @@ impl ConnectorBroker {
         validate_headers(&op.headers)?;
 
         // -- 3. Resolve credential inside the trusted boundary -----------
-        let handle = self
-            .secret_broker
-            .request(&claims.secret_uri, &claims.workload.workload_id)?;
-        if handle.digest() != claims.credential_digest {
-            return Err(terminus_secrets::SecretError::InvalidGrant(
-                "credential rotated since grant issuance; mint a fresh grant".into(),
-            )
-            .into());
-        }
-        let (header_name, header_value) = match &descriptor.auth {
-            AuthStyle::Bearer => handle.http_header_pair("Bearer")?,
-            AuthStyle::NamedHeader(name) => handle.named_header_pair(name)?,
+        // Anonymous connectors (`AuthStyle::None`) skip this step entirely;
+        // every other style resolves the secret and pins its digest.
+        let credential: Option<(String, String)> = if matches!(descriptor.auth, AuthStyle::None) {
+            None
+        } else {
+            let handle = self
+                .secret_broker
+                .request(&claims.secret_uri, &claims.workload.workload_id)?;
+            if handle.digest() != claims.credential_digest {
+                return Err(terminus_secrets::SecretError::InvalidGrant(
+                    "credential rotated since grant issuance; mint a fresh grant".into(),
+                )
+                .into());
+            }
+            match &descriptor.auth {
+                AuthStyle::Bearer => Some(handle.http_header_pair("Bearer")?),
+                AuthStyle::NamedHeader(name) => Some(handle.named_header_pair(name)?),
+                AuthStyle::None => None,
+            }
+        };
+        let (header_name, header_value) = match &credential {
+            Some(pair) => (pair.0.clone(), pair.1.clone()),
+            None => (String::new(), String::new()),
         };
 
         // -- 4. Bounded body ---------------------------------------------
@@ -270,38 +343,32 @@ impl ConnectorBroker {
         )?;
 
         // -- 7. Dispatch the exact HTTP/1.1 request ------------------------
+        let dispatch_sink = DispatchSink { inner: sink };
         let dispatch = tokio::time::timeout(self.timeout, async {
+            let ctx = DispatchContext {
+                op,
+                addresses,
+                egress: &self.egress,
+                max_response_bytes: self.max_response_bytes,
+                timeout: self.timeout,
+            };
             if op.scheme.eq_ignore_ascii_case("https") {
-                dispatch_https(
-                    op,
-                    &header_name,
-                    &header_value,
-                    addresses,
-                    &self.egress,
-                    self.max_response_bytes,
-                    self.timeout,
-                )
-                .await
+                dispatch_https(ctx, &header_name, &header_value, dispatch_sink).await
             } else {
-                dispatch_http(
-                    op,
-                    &header_name,
-                    &header_value,
-                    addresses,
-                    &self.egress,
-                    self.max_response_bytes,
-                )
-                .await
-                .map(|(status, body)| (status, body, None))
+                dispatch_http(ctx, &header_name, &header_value, dispatch_sink)
+                    .await
+                    .map(|(status, body)| (status, body, None))
             }
         })
         .await;
 
         // Response scrubbing: echoed credential material never escapes.
         let mut redactor = Redactor::new();
-        redactor.add_literal("connector-credential", &header_value);
-        if let Some(bare) = header_value.strip_prefix("Bearer ") {
-            redactor.add_literal("connector-credential-bare", bare);
+        if !header_value.is_empty() {
+            redactor.add_literal("connector-credential", &header_value);
+            if let Some(bare) = header_value.strip_prefix("Bearer ") {
+                redactor.add_literal("connector-credential-bare", bare);
+            }
         }
 
         let (status_code, response_bytes, content_type, wire_error) = match dispatch {
@@ -403,15 +470,28 @@ fn validate_headers(headers: &[(String, String)]) -> Result<(), ConnectorError> 
     Ok(())
 }
 
-async fn dispatch_https(
-    op: &CanonicalOperation,
-    credential_header_name: &str,
-    credential_header_value: &str,
+/// Parameters shared by the HTTP/HTTPS dispatch paths (clippy arg budget).
+struct DispatchContext<'a> {
+    op: &'a CanonicalOperation,
     addresses: Vec<std::net::SocketAddr>,
-    egress: &EgressProxy,
+    egress: &'a EgressProxy,
     max_response_bytes: usize,
     timeout: Duration,
+}
+
+async fn dispatch_https(
+    ctx: DispatchContext<'_>,
+    credential_header_name: &str,
+    credential_header_value: &str,
+    mut sink: DispatchSink<'_>,
 ) -> Result<(u16, Vec<u8>, Option<String>), ConnectorError> {
+    let DispatchContext {
+        op,
+        addresses,
+        egress,
+        max_response_bytes,
+        timeout,
+    } = ctx;
     let client = reqwest::Client::builder()
         .https_only(true)
         .no_proxy()
@@ -468,6 +548,7 @@ async fn dispatch_https(
             });
         }
         reserve_exact(egress, chunk.len())?;
+        sink.send(&chunk).await?;
         body.extend_from_slice(&chunk);
     }
     Ok((status, body, content_type))
@@ -563,13 +644,18 @@ pub(crate) fn hash_operation(op: &CanonicalOperation) -> String {
 }
 
 async fn dispatch_http(
-    op: &CanonicalOperation,
+    ctx: DispatchContext<'_>,
     header_name: &str,
     header_value: &str,
-    addresses: Vec<std::net::SocketAddr>,
-    egress: &EgressProxy,
-    max_response_bytes: usize,
+    mut sink: DispatchSink<'_>,
 ) -> Result<(u16, Vec<u8>), ConnectorError> {
+    let DispatchContext {
+        op,
+        addresses,
+        egress,
+        max_response_bytes,
+        ..
+    } = ctx;
     // Connect to a kernel-authorized numeric address only.
     let mut remote = None;
     for address in addresses {
@@ -602,9 +688,13 @@ async fn dispatch_http(
     reserve_request_exact(egress, request.len())?;
     stream.write_all(&request).await?;
 
-    // Read the bounded response head + body.
+    // Read the bounded response head + body. Body bytes are emitted to the
+    // sink as they arrive once the head boundary is known; the head itself
+    // is buffered until then so the sink never sees wire framing.
     let mut raw = Vec::with_capacity(4096);
     let mut buf = [0u8; 8192];
+    let mut emitted = 0usize;
+    let mut body_started = false;
     loop {
         let n = stream.read(&mut buf).await?;
         if n == 0 {
@@ -612,6 +702,18 @@ async fn dispatch_http(
         }
         reserve_exact(egress, n)?;
         raw.extend_from_slice(&buf[..n]);
+        match find_double_crlf(&raw) {
+            Some(split) if !body_started => {
+                body_started = true;
+                sink.send(&raw[split + 4..]).await?;
+                emitted = raw.len();
+            }
+            _ if body_started => {
+                sink.send(&raw[emitted..]).await?;
+                emitted = raw.len();
+            }
+            _ => {}
+        }
         if raw.len() > max_response_bytes {
             return Err(ConnectorError::ResponseTooLarge {
                 limit: max_response_bytes,

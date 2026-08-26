@@ -185,34 +185,56 @@ impl SandboxBackend for MicroVmBackend {
     }
 
     fn enforcement_report(&self) -> EnforcementReport {
+        // Deep-audit finding 3.3: this backend is configuration GENERATION
+        // only. There is no guest agent, no vsock command protocol, no
+        // workspace transport, no artifact return path, and no boot/readiness
+        // lifecycle. A hypervisor process does not execute host command
+        // arguments inside a guest merely because they are appended to its
+        // CLI, so execution is Unsupported regardless of configuration until
+        // a real guest protocol exists.
+        let mut notes = vec![
+            "execution Unsupported: no guest agent / vsock command protocol exists yet \
+             (deep-audit release blocker 0)"
+                .to_string(),
+            "configuration generation remains available for research tooling; it does not \
+             constitute an executor"
+                .to_string(),
+            "re-enablement requires: vsock guest agent with command/cancel/stdio/artifact/exit \
+             protocols, digest-based image materialization (not digest-in-filename), exact \
+             workspace snapshot transport, teardown/residue proofs, and cold/warm boot latency \
+             measurements"
+                .to_string(),
+            "keep microVMs off the coding critical path until they provide security value that \
+             justifies latency"
+                .to_string(),
+        ];
         if !self.ready() {
-            return EnforcementReport {
-                backend_id: self.id().to_string(),
-                status: EnforcementStatus::Unsupported,
-                enforced: vec![],
-                degraded: vec![],
-                unsupported: vec![
-                    EnforcementFeature::FilesystemIsolation,
-                    EnforcementFeature::ProcessIsolation,
-                    EnforcementFeature::NetworkIsolation,
-                    EnforcementFeature::UserNamespace,
-                ],
-                notes: vec![
-                    format!(
-                        "hypervisor {} detected at {} but rootfs digest / guest kernel not \
-                         configured",
-                        self.hypervisor.binary_name(),
-                        self.binary.display()
-                    ),
-                    "fail closed until fully configured".to_string(),
-                ],
-            };
+            notes.insert(
+                0,
+                format!(
+                    "hypervisor {} detected at {} but rootfs digest / guest kernel not \
+                     configured",
+                    self.hypervisor.binary_name(),
+                    self.binary.display()
+                ),
+            );
+        } else {
+            notes.insert(
+                0,
+                format!(
+                    "hypervisor {} at {} with pinned rootfs + kernel detected; still not an \
+                     executor",
+                    self.hypervisor.binary_name(),
+                    self.binary.display()
+                ),
+            );
         }
         EnforcementReport {
             backend_id: self.id().to_string(),
-            status: EnforcementStatus::Enforced,
-            enforced: vec![
-                EnforcementFeature::AmbientSecretDenial,
+            status: EnforcementStatus::Unsupported,
+            enforced: vec![],
+            degraded: vec![],
+            unsupported: vec![
                 EnforcementFeature::FilesystemIsolation,
                 EnforcementFeature::ProcessIsolation,
                 EnforcementFeature::MountNamespace,
@@ -223,20 +245,7 @@ impl SandboxBackend for MicroVmBackend {
                 EnforcementFeature::CgroupResourceLimits,
                 EnforcementFeature::SeccompFilter,
             ],
-            degraded: vec![],
-            unsupported: vec![],
-            notes: vec![
-                "separate guest kernel: host processes cannot reach VM memory/syscalls".to_string(),
-                "read-only digest-pinned root drive; workspace material enters via \
-                 brokered handles only"
-                    .to_string(),
-                "network isolation is structural: VMs boot WITHOUT NICs unless an \
-                 interface is explicitly configured"
-                    .to_string(),
-                "EXPERIMENTAL per ADR-0027: production enablement needs escape + \
-                 performance evidence"
-                    .to_string(),
-            ],
+            notes,
         }
     }
 
@@ -254,47 +263,20 @@ impl SandboxBackend for MicroVmBackend {
                 "ambient plugin authority not permitted".into(),
             ));
         }
-        generate_machine_config(self, profile).map(|_| ())
+        Err(SandboxError::Unsupported(
+            "microVM execution is Unsupported until a guest command protocol exists; \
+             failing closed"
+                .into(),
+        ))
     }
 
     fn spawn_wrapper(
         &self,
-        command: &terminus_kernel_protocol::CommandSpec,
-        profile: &SandboxProfile,
+        _command: &terminus_kernel_protocol::CommandSpec,
+        _profile: &SandboxProfile,
     ) -> Option<(std::path::PathBuf, Vec<String>)> {
-        if !self.ready() {
-            return None;
-        }
-        let config = generate_machine_config(self, profile).ok()?;
-        let dir = std::env::temp_dir().join(format!("terminus-microvm-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok()?;
-        let config_path = dir.join(format!(
-            "vm-{}-{}.json",
-            command.cwd.workspace_id,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_nanos()
-        ));
-        std::fs::write(&config_path, serde_json::to_vec_pretty(&config).ok()?).ok()?;
-        let sock = dir.join(format!(
-            "api-{}.sock",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_nanos()
-        ));
-        let mut argv = vec![
-            "--api-sock".to_string(),
-            sock.display().to_string(),
-            "--config-file".to_string(),
-            config_path.display().to_string(),
-            "--".to_string(),
-            command.program.clone(),
-        ];
-        argv.extend(command.args.clone());
-        let _ = Path::new(""); // keep Path import honest across cfgs
-        Some((self.binary.clone(), argv))
+        // No guest protocol: never produce an execution argv.
+        None
     }
 }
 
@@ -350,39 +332,42 @@ mod tests {
     }
 
     #[test]
-    fn configured_reports_tier3_enforcement() {
+    fn configured_still_reports_unsupported_execution() {
+        // Deep-audit 3.3: even a fully configured microVM is not an executor
+        // until a guest agent protocol exists. Configuration generation MUST
+        // NOT be reported as tier-3 enforcement.
         let dir = tempfile::tempdir().unwrap();
         let kernel = dir.path().join("vmlinux");
         std::fs::write(&kernel, b"fake").unwrap();
         let b = configured(&kernel);
         let r = b.enforcement_report();
-        assert_eq!(r.status, EnforcementStatus::Enforced);
-        for f in [
-            EnforcementFeature::UserNamespace,
-            EnforcementFeature::PidNamespace,
-            EnforcementFeature::NetworkIsolation,
-            EnforcementFeature::FilesystemIsolation,
-        ] {
-            assert!(r.enforced.contains(&f), "missing {f:?}");
-        }
+        assert_eq!(r.status, EnforcementStatus::Unsupported);
+        assert!(r.enforced.is_empty());
+        assert!(r
+            .notes
+            .iter()
+            .any(|n| n.contains("guest agent / vsock command protocol")));
+        assert!(matches!(
+            b.supports_profile(&SandboxProfile::default_restrictive()),
+            Err(SandboxError::Unsupported(_))
+        ));
     }
 
     #[test]
-    fn secure_mode_tier3_accepts_microvm_rejects_hardened_container() {
+    fn secure_mode_tier3_fails_closed_without_a_real_microvm_executor() {
+        // Tier-3 requires a real executor. A configured-but-agentless microVM
+        // must not satisfy it, and neither does a hardened container.
         let dir = tempfile::tempdir().unwrap();
         let kernel = dir.path().join("vmlinux");
         std::fs::write(&kernel, b"fake").unwrap();
         let vm = Arc::new(configured(&kernel)) as Arc<dyn SandboxBackend>;
-        let sel = terminus_sandbox::select_secure(
+        assert!(terminus_sandbox::select_secure(
             &[vm],
             &SandboxProfile::default_restrictive(),
             terminus_sandbox::RiskTier::Tier3,
         )
-        .expect("tier3 satisfied by microvm");
-        assert_eq!(sel.backend.id(), "microvm-firecracker");
+        .is_err());
 
-        // A hardened container lacks UserNamespace/PidNamespace claims:
-        // tier3 must refuse it.
         use terminus_sandbox_container::{ContainerSandboxBackend, HardenedOptions};
         let container = Arc::new(
             ContainerSandboxBackend::configure(
@@ -402,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn machine_config_denies_network_by_omission() {
+    fn config_generation_remains_available_for_research_but_is_not_execution() {
         let dir = tempfile::tempdir().unwrap();
         let kernel = dir.path().join("vmlinux");
         std::fs::write(&kernel, b"fake").unwrap();
@@ -413,15 +398,11 @@ mod tests {
         let drive = &cfg["drives"][0];
         assert_eq!(drive["is_read_only"], serde_json::json!(true));
         let path_on_host = drive["path_on_host"].as_str().unwrap();
+        // The digest-in-filename placeholder documents that image
+        // MATERIALIZATION by content digest is still unimplemented — one of
+        // the re-enablement requirements in the enforcement report.
         assert!(path_on_host.contains("sha256:aaaa"));
-    }
-
-    #[test]
-    fn wrapper_argv_references_generated_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let kernel = dir.path().join("vmlinux");
-        std::fs::write(&kernel, b"fake").unwrap();
-        let b = configured(&kernel);
+        // And no execution wrapper is ever produced.
         let cmd = terminus_kernel_protocol::CommandSpec {
             program: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "true".to_string()],
@@ -429,13 +410,8 @@ mod tests {
             timeout_ms: 1000,
             ..Default::default()
         };
-        let (bin, argv) = b
+        assert!(b
             .spawn_wrapper(&cmd, &SandboxProfile::default_restrictive())
-            .expect("wrapper when ready");
-        assert_eq!(bin, PathBuf::from("/opt/firecracker"));
-        assert!(argv.contains(&"--config-file".to_string()));
-        let cfg_idx = argv.iter().position(|a| a == "--config-file").unwrap();
-        let cfg_text = std::fs::read_to_string(&argv[cfg_idx + 1]).unwrap();
-        assert!(cfg_text.contains("is_read_only"));
+            .is_none());
     }
 }

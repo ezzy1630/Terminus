@@ -146,24 +146,19 @@ function SelectedTaskReviewPane({
   );
 }
 
+import {
+  GOVERNANCE_VIEWS_CHANGED_EVENT,
+  parseTaskWorkspaceTab as parseTaskWorkspaceTabValue,
+  readGovernanceViewsEnabled,
+  taskWorkspaceTabs,
+  type TaskWorkspaceTab,
+} from "./lib/session-view";
+
 const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
 const INSPECTOR_VISIBILITY_KEY = "terminus-desktop.inspector-visible.";
 type AppOverlay = "palette" | "settings" | "onboarding" | "attention" | null;
-type TaskWorkspaceTab = "overview" | "activity" | "changes" | "replay" | "usage" | "evidence";
-
-function parseTaskWorkspaceTab(value: string): TaskWorkspaceTab | null {
-  switch (value) {
-    case "overview":
-    case "activity":
-    case "changes":
-    case "replay":
-    case "usage":
-    case "evidence":
-      return value;
-    default:
-      return null;
-  }
-}
+// R12: session-first tabs and governance gating live in lib/session-view.
+const parseTaskWorkspaceTab = parseTaskWorkspaceTabValue;
 
 function readInspectorVisibility(taskId: string): boolean {
   try { return window.localStorage.getItem(`${INSPECTOR_VISIBILITY_KEY}${taskId}`) === "true"; }
@@ -256,7 +251,19 @@ export function App(): JSX.Element {
   const [settingsCategory, setSettingsCategory] = useState<SettingCategoryId>("appearance");
   const [activeDestination, setActiveDestination] = useState<SidebarDestination>("new_task");
   const [selectedCanonicalTaskId, setSelectedCanonicalTaskId] = useState<string | null>(null);
-  const [taskWorkspaceTab, setTaskWorkspaceTab] = useState<TaskWorkspaceTab>("overview");
+  // R12: session is the default workspace surface; governance views are
+  // opt-in per browser via lib/session-view.
+  const [governanceViewsEnabled, setGovernanceViewsEnabled] = useState<boolean>(
+    () => readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null),
+  );
+  // R12/Cubic: settings toggles take effect without an app restart.
+  useEffect(() => {
+    const listener = (): void =>
+      setGovernanceViewsEnabled(readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null));
+    window.addEventListener(GOVERNANCE_VIEWS_CHANGED_EVENT, listener);
+    return () => window.removeEventListener(GOVERNANCE_VIEWS_CHANGED_EVENT, listener);
+  }, []);
+  const [taskWorkspaceTab, setTaskWorkspaceTab] = useState<TaskWorkspaceTab>("session");
 
   const [changesOpen, setChangesOpen] = useState(false);
   const [inspectorVisibilityByTask, setInspectorVisibilityByTask] = useState<Record<string, boolean>>({});
@@ -300,14 +307,15 @@ export function App(): JSX.Element {
   }, []);
 
   const openTaskWorkspace = useCallback((tab: TaskWorkspaceTab): void => {
-    setTaskWorkspaceTab(tab);
+    const allowed = taskWorkspaceTabs(governanceViewsEnabled).some((entry) => entry.value === tab);
+    setTaskWorkspaceTab(allowed ? tab : "session");
     setActiveDestination("task_details");
     setChangesOpen(false);
   }, []);
 
   const inspectCanonicalTask = useCallback((taskId: string): void => {
     setSelectedCanonicalTaskId(taskId);
-    setTaskWorkspaceTab("overview");
+    setTaskWorkspaceTab("session");
     setActiveDestination("task_details");
     setChangesOpen(false);
   }, []);
@@ -601,12 +609,30 @@ export function App(): JSX.Element {
                 }}
                 label="Task workspace views"
                 items={[
-                  { value: "overview", label: "Overview", content: <MissionLedgerView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
-                  { value: "activity", label: "Activity", content: <EffectQueueView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
-                  { value: "changes", label: "Changes", content: <ArtifactDiffInspectorView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
-                  { value: "replay", label: "Replay", content: <CausalReplayView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
-                  { value: "usage", label: "Usage", content: <FleetBudgetView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
-                  { value: "evidence", label: "Evidence", content: <ClaimEvidenceGraphView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} /> },
+                  ...taskWorkspaceTabs(governanceViewsEnabled).map((tab) => ({
+                    value: tab.value,
+                    label: tab.label,
+                    content: tab.value === "session"
+                      ? (
+                          <div className="flex h-full flex-col">
+                            <div className="min-h-0 flex-1">{conversation}</div>
+                            <div className="composer-dock px-5 pb-3 pt-2">
+                              <Composer />
+                            </div>
+                          </div>
+                        )
+                      : tab.value === "changes"
+                        ? <ArtifactDiffInspectorView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />
+                        : tab.value === "overview"
+                          ? <MissionLedgerView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />
+                          : tab.value === "activity"
+                            ? <EffectQueueView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />
+                            : tab.value === "replay"
+                              ? <CausalReplayView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />
+                              : tab.value === "usage"
+                                ? <FleetBudgetView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />
+                                : <ClaimEvidenceGraphView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />,
+                  })),
                 ]}
               />
             ) : showNavigationSurface ? (

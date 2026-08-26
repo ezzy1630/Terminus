@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 use terminus_artifacts::ArtifactStore;
 use terminus_authz::{OperationClass, Scope, TokenIssuer, TokenRevoker};
 use terminus_code_intel::{CodeIntelService, FileSystemWorkspaceSource, WorkspaceSource};
-use terminus_connector::ConnectorBroker;
+use terminus_connector::{ChunkSink, ConnectorBroker};
 use terminus_egress::EgressProxy;
 use terminus_extension_runtime::WasiExtensionHost;
 use terminus_fs::PathResolver;
@@ -285,6 +285,7 @@ impl KernelHandle {
                     "anthropic-messages",
                     terminus_connector::AuthStyle::NamedHeader("x-api-key".into()),
                 )
+                .connector("web-fetch", terminus_connector::AuthStyle::None)
                 .build();
                 ConnectorService::new(
                     Arc::new(broker),
@@ -2796,22 +2797,72 @@ impl ConnectorService {
         ttl_secs: u64,
         use_limit: u32,
     ) -> KernelResult<terminus_secrets::ConnectorGrant> {
-        // Secret-class capability is required to mint: a grant is one step
-        // from raw use.
+        // Anonymous fetches (`web-fetch`, empty secret URI) skip the secret
+        // step but still require the Network operation class scoped to the
+        // exact destination; the L4 egress proxy authorizes the host at
+        // dispatch time. Everything else requires Secret-class capability:
+        // a grant is one step from raw use.
+        let anonymous = uri.is_empty();
+        if anonymous && binding.connector_id != "web-fetch" {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                "anonymous connector grants are restricted to the web-fetch connector".to_string(),
+                false,
+            ));
+        }
         let requested_scope = Scope {
             workspace_paths: Vec::new(),
             network_destinations: vec![format!(
                 "{}:{}",
                 binding.destination_host, binding.destination_port
             )],
-            secret_capabilities: vec![uri.to_string()],
+            secret_capabilities: if anonymous {
+                Vec::new()
+            } else {
+                vec![uri.to_string()]
+            },
         };
         let _ = validate_capability_for_op(
             &self.token_issuer,
             ctx,
-            OperationClass::Secret,
+            if anonymous {
+                OperationClass::Network
+            } else {
+                OperationClass::Secret
+            },
             &requested_scope,
         )?;
+        if anonymous {
+            const ANONYMOUS_DIGEST: &str =
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            let workload = WorkloadIdentity {
+                workload_id: ctx.actor_id.clone(),
+                principal: ctx.actor_id.clone(),
+                task_id: ctx.task_id.clone(),
+            };
+            tracing::info!(
+                target: "terminus_kernel_audit",
+                event = "grant.minted",
+                request_id = %ctx.request_id,
+                task_id = %ctx.task_id,
+                actor_id = %ctx.actor_id,
+                secret_uri = "(anonymous web-fetch)",
+                effect_id = %binding.effect_id,
+                "anonymous connector grant minted"
+            );
+            return self
+                .issuer
+                .mint_for_digest(workload, "", ANONYMOUS_DIGEST, binding, ttl_secs, use_limit)
+                .map_err(|e| {
+                    KernelError::new(
+                        terminus_kernel_protocol::ErrorCode::InvalidRequest,
+                        terminus_kernel_protocol::ErrorCategory::Validation,
+                        format!("{e}"),
+                        false,
+                    )
+                });
+        }
         let handle = self
             .secret_broker
             .request(uri, &binding.task_id)
@@ -2892,6 +2943,72 @@ impl ConnectorService {
             status_code = ?response.receipt.status_code,
             response_redactions = response.receipt.response_redactions,
             "connector operation executed"
+        );
+        Ok(response)
+    }
+
+    /// Streaming variant of [`Self::execute`]: identical authorization,
+    /// one-time consumption, and bounded capture; response body chunks are
+    /// surfaced through `sink` as they arrive instead of only at completion.
+    pub async fn execute_streaming<S: ChunkSink>(
+        &self,
+        ctx: &RequestContext,
+        op: &terminus_connector::CanonicalOperation,
+        grant: &terminus_secrets::ConnectorGrant,
+        sink: &mut S,
+    ) -> KernelResult<terminus_connector::ConnectorResponse> {
+        // Credential-echo redaction runs on the COMPLETE response only. A
+        // credentialed operation therefore must not stream raw body chunks
+        // past this boundary; it degrades to a single buffered chunk after
+        // scrubbing. Anonymous operations (empty secret URI, e.g.
+        // `web-fetch`) have no credential to echo and stream genuinely.
+        if !grant.claims.secret_uri.is_empty() {
+            let response = self.execute(ctx, op, grant).await?;
+            sink.on_chunk(&response.body).await.map_err(|e| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::Internal,
+                    terminus_kernel_protocol::ErrorCategory::Internal,
+                    format!("{e}"),
+                    false,
+                )
+            })?;
+            return Ok(response);
+        }
+        let dest = format!("{}:{}", op.host, op.port);
+        let requested_scope = Scope {
+            workspace_paths: Vec::new(),
+            network_destinations: vec![dest],
+            secret_capabilities: Vec::new(),
+        };
+        let _ = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::Network,
+            &requested_scope,
+        )?;
+        let response = self
+            .broker
+            .execute_streaming(op, grant, sink)
+            .await
+            .map_err(|e| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                    terminus_kernel_protocol::ErrorCategory::Permission,
+                    format!("{e}"),
+                    false,
+                )
+            })?;
+        tracing::info!(
+            target: "terminus_kernel_audit",
+            event = "connector.executed",
+            request_id = %ctx.request_id,
+            task_id = %ctx.task_id,
+            actor_id = %ctx.actor_id,
+            grant_id = %response.receipt.grant_id,
+            outcome = ?response.receipt.outcome,
+            status_code = ?response.receipt.status_code,
+            response_redactions = response.receipt.response_redactions,
+            "connector operation executed (streamed)"
         );
         Ok(response)
     }

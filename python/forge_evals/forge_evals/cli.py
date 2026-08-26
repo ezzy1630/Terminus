@@ -4,6 +4,8 @@ Built with :mod:`argparse` (no Click/Typer dependency, keeping the install
 footprint small). Provides commands for the standard eval workflow:
 
 - ``terminus-eval run`` — run a single harness on a task.
+- ``terminus-eval bench-check`` — validate external benchmark suite manifests
+  through their adapters (offline; no harness or credentials required).
 - ``terminus-eval aggregate`` — aggregate JSONL run records into a summary.
 - ``terminus-eval dashboard`` — generate a cohort dashboard HTML.
 - ``terminus-eval promote`` — evaluate the promotion gate.
@@ -16,8 +18,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import uuid
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -93,6 +97,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_tier_cmd(sub)
     _add_exit_gate_cmd(sub)
     _add_conformance_cmd(sub)
+    _add_bench_check_cmd(sub)
     return p
 
 
@@ -260,12 +265,167 @@ def _add_run_cmd(sub: argparse._SubParsersAction[Any]) -> None:
     )
 
 
+def _cmd_run_live(args: argparse.Namespace) -> int:
+    """Execute one live evaluation through the Terminus control plane (R8)."""
+    from .runners import TrajectoryRecorder
+    from .runners.live_runner import run_live_task
+    from .runners.terminus_harness import TerminusControlError, TerminusHarness
+
+    try:
+        harness = TerminusHarness.from_env()
+    except TerminusControlError as error:
+        print(f"live run unavailable: {error}", file=sys.stderr)
+        return 2
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for i in range(args.seeds):
+        seed = args.seed + i
+        request = RunRequest(
+            suite=args.suite,
+            task=args.task,
+            task_dir=Path(args.task_dir),
+            harness_id="terminus-live",
+            harness_commit=args.harness_commit,
+            model_snapshot=ModelCapabilitySnapshot(
+                provider=args.provider,
+                model=args.model,
+                api_version=os.environ.get("TERMINUS_LIVE_API_VERSION", "2026-08"),
+                context_window=200_000,
+                max_output_tokens=8_192,
+                supports_tool_calls=True,
+                supports_streaming=True,
+                supports_cache=True,
+            ),
+            random_seed=seed,
+        )
+        recorder = TrajectoryRecorder(run_id=f"{args.suite}-{args.task}-{seed}")
+        result, patch_payload = run_live_task(harness, request, recorder)
+
+        # R8/Cubic: actually bridge to the pinned evaluator when this suite is
+        # an external benchmark and a real patch exists. Results land beside
+        # the run records; absence of the tool records explicit "unavailable".
+        evaluation_report: dict[str, Any] | None = None
+        if args.suite.startswith("swe-bench") and patch_payload.get("diff"):
+            from .runners.live_runner import (
+                build_swebench_evaluation_argv,
+                ensure_temp_predictions_dir,
+                invoke_external_evaluator,
+            )
+
+            predictions_dir = ensure_temp_predictions_dir()
+            argv = build_swebench_evaluation_argv(
+                patch_diff=str(patch_payload["diff"]),
+                instance_id=args.task.replace("/", "__"),
+                predictions_dir=predictions_dir,
+                suite_manifest=f"suites/{args.suite}.yaml",
+            )
+            if argv is None:
+                evaluation_report = {"status": "evaluator_unavailable"}
+            else:
+                evaluation_report = {
+                    "status": "invoked",
+                    "argv": [*argv[:2], "..."],
+                    **invoke_external_evaluator(argv),
+                }
+
+        record = build_live_run_record(
+            harness_result=result,
+            request=request,
+            patch_payload=patch_payload,
+            seed=seed,
+        )
+        if evaluation_report is not None:
+            notes = json.loads(record.notes) if record.notes else {}
+            notes["evaluation"] = evaluation_report
+            object.__setattr__(record, "notes", json.dumps(notes, sort_keys=True))
+        _write_record(record, output_dir, args.format)
+        n += 1
+    print(f"live runs completed: {n}")
+    return 0
+
+
+def build_live_run_record(
+    harness_result: HarnessResult,
+    request: RunRequest,
+    patch_payload: dict[str, Any],
+    seed: int,
+) -> RunRecord:
+    """Compose one honest RunRecord from a live harness result.
+
+    Grader results stay empty until an external grader or the control plane's
+    verification evidence is reconciled; completion alone is never recorded as
+    success (anti-gaming rule).
+    """
+    notes = json.loads(harness_result.notes) if harness_result.notes else {}
+    usage = notes.get("provider_usage") or {}
+    outcome = harness_result.outcome if isinstance(harness_result.outcome, Outcome) else Outcome(
+        str(harness_result.outcome).split(".")[-1]
+    )
+    artifacts = list(harness_result.artifacts)
+    if patch_payload.get("diff"):
+        artifacts.append(
+            {
+                "kind": "workspace_patch",
+                "diff_chars": len(patch_payload["diff"]),
+                "truncated": bool(patch_payload.get("truncated")),
+            }
+        )
+    return RunRecord(
+        run_id=f"live-{request.suite}-{request.task}-{seed}-{uuid.uuid4().hex[:8]}",
+        suite=request.suite,
+        task=request.task,
+        harness=request.harness_id,
+        harness_commit=request.harness_commit,
+        model_capability_snapshot={
+            "provider": request.model_snapshot.provider,
+            "model": request.model_snapshot.model,
+        },
+        environment_digest=f"remote:{notes.get('workspace_id', 'unknown')}",
+        random_seed=seed,
+        budgets={},
+        experiment_assignments=[],
+        outcome=outcome,
+        grader_results=[],
+        cost=None,
+        artifacts=artifacts,
+        context_manifests=list(getattr(harness_result, "context_manifests", []) or []),
+        notes=json.dumps(
+            {
+                **notes,
+                "mode": "live",
+                "input_tokens": int(usage.get("input_tokens", 0)),
+                "output_tokens": int(usage.get("output_tokens", 0)),
+                "cached_tokens": int(usage.get("cached_tokens", 0)),
+                "evaluation": ("pending_grader" if patch_payload.get("diff") else "no_patch"),
+            },
+            sort_keys=True,
+        ),
+    )
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """Execute the ``run`` command."""
+    # R8/Cubic: explicit harness selection wins; TERMINUS_CONTROL_URL alone
+    # only implies live mode when fixture mode was NOT requested.
+    if args.fixture_mode and args.harness in {"terminus-live", "terminus"}:
+        print(
+            "--fixture-mode cannot override --harness terminus-live; drop one",
+            file=sys.stderr,
+        )
+        return 2
+    live_requested = (
+        args.harness in {"terminus-live", "terminus"}
+        or (bool(os.environ.get("TERMINUS_CONTROL_URL")) and not args.fixture_mode)
+    )
+    if live_requested:
+        return _cmd_run_live(args)
+
     if not args.fixture_mode:
         print(
-            "run is blocked: no live harness adapter is configured; pass --fixture-mode "
-            "only for deterministic test data",
+            "run requires either --fixture-mode (deterministic test data) or a live "
+            "target: --harness terminus-live with TERMINUS_CONTROL_URL set",
             file=sys.stderr,
         )
         return 2
@@ -576,6 +736,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     """Dispatch to the right subcommand handler."""
     handlers = {
         "run": _cmd_run,
+        "bench-check": _cmd_bench_check,
         "aggregate": _cmd_aggregate,
         "dashboard": _cmd_dashboard,
         "promote": _cmd_promote,
@@ -590,6 +751,74 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(f"unknown command: {args.command}", file=sys.stderr)
         return 1
     return handler(args)
+
+
+def _add_bench_check_cmd(sub: argparse._SubParsersAction[Any]) -> None:
+    p = sub.add_parser(
+        "bench-check",
+        help="Validate external benchmark suite manifests through their adapters.",
+    )
+    p.add_argument(
+        "--suites-dir",
+        default="evals/suites",
+        help="Directory containing suite YAML manifests.",
+    )
+    p.add_argument(
+        "--suite",
+        action="append",
+        dest="suites",
+        help="Validate only these manifest files (repeatable; defaults to all).",
+    )
+
+
+def _cmd_bench_check(args: argparse.Namespace) -> int:
+    """Validate every declared external benchmark suite through its adapter.
+
+    Offline gate for the audit P0-5 requirement that benchmark manifests are
+    not merely declared but provably translatable at HEAD. A live run still
+    requires a kernel-brokered harness and credentials; this command proves
+    the manifests, pins, and task filters parse and agree.
+    """
+    from .runners.benchmark_adapters import (
+        BenchmarkManifestError,
+        load_benchmark_manifest,
+    )
+
+    suites_dir = Path(args.suites_dir)
+    if not suites_dir.is_dir():
+        print(f"error: suites directory does not exist: {suites_dir}", file=sys.stderr)
+        return 1
+    files = [Path(name) for name in args.suites] if args.suites else sorted(suites_dir.glob("*.yaml"))
+    if not files:
+        print(f"no suite manifests found in {suites_dir}", file=sys.stderr)
+        return 1
+
+    failures = 0
+    checked = 0
+    skipped = 0
+    for path in files:
+        full = path
+        if not full.is_absolute() and not full.exists():
+            full = suites_dir / path
+        try:
+            raw = __import__("yaml").safe_load(full.read_text(encoding="utf-8"))
+            suite_block = raw.get("suite") if isinstance(raw, dict) else None
+            has_adapter = isinstance(suite_block, dict) and isinstance(suite_block.get("adapter"), dict)
+            if not has_adapter:
+                print(f"[bench-check] skip {full.name}: no external benchmark adapter section")
+                skipped += 1
+                continue
+            manifest = load_benchmark_manifest(full)
+            checked += 1
+            print(
+                f"[bench-check] ok   {full.name}: {manifest.suite_id} kind={manifest.adapter_kind} "
+                f"tasks={manifest.task_count} harness_commit={manifest.harness_commit[:12]}"
+            )
+        except (BenchmarkManifestError, OSError, ValueError) as exc:
+            failures += 1
+            print(f"[bench-check] FAIL {full.name}: {exc}", file=sys.stderr)
+    print(f"[bench-check] {checked} validated, {skipped} skipped, {failures} failed")
+    return 1 if failures else 0
 
 
 def _load_runs(path: str) -> RunCatalog:

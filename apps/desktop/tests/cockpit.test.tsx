@@ -608,6 +608,9 @@ describe("truthful operator cockpit", () => {
     const refreshAll = vi.fn(async () => {});
     useTerminusStore.setState({ refreshAll });
     window.localStorage.setItem("terminus-desktop.onboarding.completed.v1", "true");
+    // R12: governance tabs (Overview/Activity/Replay/Usage/Evidence) are now
+    // opt-in; this routing test exercises them explicitly.
+    window.localStorage.setItem("terminus-desktop.governance-views.enabled", "true");
     vi.spyOn(arpV2, "listTasks").mockResolvedValue([CANONICAL_TASK]);
     vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
     vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue({

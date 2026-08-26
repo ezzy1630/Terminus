@@ -26,7 +26,7 @@ mod error;
 mod operation;
 mod receipt;
 
-pub use broker::{AuthStyle, ConnectorBroker, ConnectorBrokerBuilder};
+pub use broker::{AuthStyle, ChunkSink, ConnectorBroker, ConnectorBrokerBuilder, DispatchSink};
 pub use error::ConnectorError;
 pub use operation::{path_matches_class, CanonicalOperation};
 pub use receipt::{ConnectorReceipt, ConnectorResponse, Outcome};

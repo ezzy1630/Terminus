@@ -290,8 +290,9 @@ def test_exit_gate_cli_rejects_structurally_incomplete_evidence(
 
 
 def test_run_cli_requires_explicit_fixture_mode_and_fixture_output_never_passes_gate(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("TERMINUS_CONTROL_URL", raising=False)
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     (task_dir / "task.yaml").write_text("id: fixture-task\n", encoding="utf-8")
@@ -316,8 +317,12 @@ def test_run_cli_requires_explicit_fixture_mode_and_fixture_output_never_passes_
         str(output_dir),
     ]
 
+    # R8: without --fixture-mode or a live control plane, the CLI states both
+    # options instead of the old blanket block.
     assert eval_cli(args) == 2
-    assert "no live harness adapter" in capsys.readouterr().err
+    stderr_text = capsys.readouterr().err
+    assert "--fixture-mode" in stderr_text
+    assert "TERMINUS_CONTROL_URL" in stderr_text
 
     args.insert(1, "--fixture-mode")
     assert eval_cli(args) == 0

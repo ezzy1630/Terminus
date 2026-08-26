@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     # Phase 0 truth fix: every branch that can hold the default or a
     # protected branch MUST run CI. Branches are listed explicitly;
@@ -23,6 +24,73 @@ concurrency:
 # Flaky combinations are marked continue-on-error and fail-fast is disabled so
 # every platform reports independently.
 jobs:
+  # ---------- Supported-host sandbox conformance (deep-audit blocker 0) ----------
+  # Static unit tests prove argv shape; this job proves runtime containment
+  # with real commands and adversarial fixtures on a supported host.
+  sandbox-conformance:
+    name: Sandbox conformance (linux + docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/setup-terminus
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Linux sandbox unit tests (mount plan, minimal root, deny overlays)
+        run: cargo test -p terminus-sandbox-linux --locked
+      - name: Container backend unit tests (command shape)
+        run: cargo test -p terminus-sandbox-container --locked
+      - name: MicroVM fails closed without a guest protocol
+        run: cargo test -p terminus-sandbox-microvm --locked
+      - name: Live bwrap adversarial smoke (minimal root, no host-root bind)
+        run: |
+          set -eu
+          # Host root must not be visible inside the namespace; the empty
+          # root plus /usr bind means host homes are simply absent.
+          # GitHub runners now block unprivileged user namespaces entirely
+          # (uid-map EPERM) and deny CAP_NET_ADMIN inside them, so the smoke
+          # runs bubblewrap under sudo with capabilities dropped inside the
+          # sandbox. Network isolation is asserted by the kernel's
+          # non-bypassability suite, not here.
+          # Resolve the real (post-usmerge) shell location and bind exactly
+          # the tree that contains it.
+          REAL_SH="$(readlink -f "$(command -v sh)")"
+          SH_DIR="$(dirname "$REAL_SH")"
+          SH_BASE="$(basename "$REAL_SH")"
+          # dash is dynamically linked: an empty root also needs the ELF
+          # loaders/libs or execvp fails with ENOENT. try-variants skip
+          # absent arch dirs (e.g. /lib64 on some images).
+          if [[ "$SH_DIR" == "/usr/bin" || "$SH_DIR" == "/usr/bin/"* ]]; then
+            BINDS=(--ro-bind /usr /usr --symlink usr/bin /bin)
+            EXEC_SH="/usr/bin/${SH_BASE}"
+          else
+            BINDS=(--ro-bind /usr /usr --ro-bind /bin /bin)
+            EXEC_SH="/bin/${SH_BASE}"
+          fi
+          BINDS+=(--ro-bind-try /lib /lib --ro-bind-try /usr/lib /usr/lib --ro-bind-try /lib64 /lib64)
+          sudo bwrap --unshare-pid --unshare-ipc --unshare-uts \
+            "${BINDS[@]}" \
+            --proc /proc --dev /dev \
+            --tmpfs /tmp --tmpfs /run \
+            --clearenv --setenv PATH /usr/bin:/bin \
+            --die-with-parent --new-session --cap-drop ALL \
+            -- "$EXEC_SH" -c '
+              test ! -e /root && echo "host-home-hidden"
+              test ! -e /etc/shadow && echo "credentials-hidden"
+              # Running bwrap under sudo means the tmpfs root is writable,
+              # so readonly-of-root is asserted via capability drop instead:
+              # with ALL caps dropped, creating a device node must fail.
+              mknod /probe c 1 3 2>/dev/null && { echo "caps-present"; exit 13; } || echo "caps-dropped"
+            ' | tee conformance.log
+          grep -q host-home-hidden conformance.log
+          grep -q credentials-hidden conformance.log
+          grep -q caps-dropped conformance.log
+      - name: Live container conformance (fixed command shape, exact mounts)
+        run: |
+          set -eu
+          IMAGE=$(docker pull alpine:latest >/dev/null 2>&1 && docker inspect --format '{{index .RepoDigests 0}}' alpine:latest)
+          export TERMINUS_CONTAINER_CONFORMANCE_IMAGE="$IMAGE"
+          cargo test -p terminus-sandbox-container --test live_conformance --locked
+
   # ---------- Architecture boundary checks (SPEC §42.5) ----------
   boundary-check:
     name: Architecture boundary checks
@@ -191,12 +259,11 @@ jobs:
       - name: Produce M12 evidence bundle
         env:
           TERMINUS_SOAK_SECONDS: "30"
-          # M12 is the documented local evidence subset. Stable release
-          # validation intentionally omits these overrides and rejects fixture
-          # eval evidence until a live release harness is available. This job
-          # produces the immutable candidate evidence only; it does not mint a
-          # release decision or invent owner approvals.
-          TERMINUS_RELEASE_ALLOW_FIXTURE_EVAL: "1"
+          # M12 is the documented local evidence subset (R9): fixture eval
+          # evidence and zero-valued ops metrics no longer masquerade as
+          # passing gate checks here — they surface as explicit
+          # pending_live_* states in the bundle. The signed release decision
+          # path still rejects both unconditionally.
           # These are explicit M12 local-subset fallbacks. Stable release
           # validation intentionally leaves both disabled.
           TERMINUS_RELEASE_ALLOW_PLACEHOLDER_METRICS: "1"
@@ -213,15 +280,74 @@ jobs:
           path: artifacts/release-gate/
 
   # ---------- Eval smoke (agent-behavior cohort) ----------
+  # R8/R9: fixture smoke runs on every PR so regressions in the eval lab
+  # itself are caught without requiring a label. It is explicitly fixture
+  # tier and never counts as release evidence (see live-eval below).
   eval-smoke:
-    name: Eval smoke
+    name: Eval smoke (fixture tier)
     runs-on: ubuntu-latest
-    needs: integration
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'agent-behavior') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus
       - run: just eval-smoke
+
+  # ---------- Live evaluation (dispatch-only; R8) ----------
+  # Runs the real Terminus coding loop against a small internal cohort with
+  # a real provider key. Never triggered by pull_request events, so PR CI
+  # stays green without secrets; results land as workflow artifacts and feed
+  # the cache-telemetry release gate when run.
+  live-eval:
+    name: Live evaluation cohort
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == github.event.repository.full_name }}
+    concurrency:
+      group: live-eval-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      # Shared by start-mini-services.sh and the telemetry collector so both
+      # address the same SQLite database.
+      DATABASE_URL: "file:${{ github.workspace }}/.terminus-data/terminus.db"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/setup-terminus
+      - name: Build release kernel binary
+        run: cargo build --release -p terminus-kernel-mini
+      - name: Start kernel + control plane
+        run: bash scripts/start-mini-services.sh &
+        env:
+          TERMINUS_CONTROL_TOKEN: terminus-live-eval-token
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Wait for control plane
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3050/v1/system/health >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          echo "control plane did not become healthy" >&2
+          exit 1
+      - name: Run live cohort (forge-internal)
+        env:
+          TERMINUS_CONTROL_URL: http://127.0.0.1:3050
+          TERMINUS_CONTROL_TOKEN: terminus-live-eval-token
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cd python
+          uv run terminus-eval run \
+            --suite terminus-internal \
+            --task build-failure/build-001 \
+            --task-dir "forge_evals/evals/tasks/build-failure/build-001" \
+            --harness terminus-live \
+            --seeds 1 --output-dir evals/results/live
+      - name: Collect cache telemetry evidence
+        if: always()
+        run: bun run scripts/collect-cache-telemetry.ts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: live-eval-results
+          path: |
+            python/evals/results/live/
+            artifacts/release-gate/cache-telemetry.json
 
   # ---------- Standalone architecture ----------
   standalone-check:

@@ -38,7 +38,15 @@ import {
   validateReleaseSource,
 } from "./verify-release-source.ts";
 
-export type EvidenceStatus = "present" | "missing" | "invalid" | "requires_ci" | "verified";
+export type EvidenceStatus =
+  | "present"
+  | "missing"
+  | "invalid"
+  | "requires_ci"
+  | "verified"
+  | "pending_live_telemetry"
+  | "pending_live_eval"
+  | "pending_live_metrics";
 
 export type EvidenceCheck = {
   key: string;
@@ -345,6 +353,35 @@ function checkJsonFile(
         }
       }
     }
+    // R9: honest pending semantics. Fixture eval evidence and placeholder
+    // metrics are never release evidence, but when no live source exists yet
+    // they are recorded as explicit pending states rather than silent
+    // failures of the local evidence bundle; the signed release decision
+    // path still rejects them unconditionally.
+    if (
+      key === "eval-release"
+      && value.status === "fixture_pass"
+      && options.allowFixtureEvidence !== true
+    ) {
+      return {
+        key,
+        path,
+        status: "pending_live_eval",
+        detail: "fixture-tier eval evidence is not release evidence; run live-eval to produce it",
+      };
+    }
+    if (
+      key === "ops-metrics"
+      && value.status === "placeholder"
+      && options.allowPlaceholderMetrics !== true
+    ) {
+      return {
+        key,
+        path,
+        status: "pending_live_metrics",
+        detail: "ops metrics are explicit zeros pending a live measured source",
+      };
+    }
     if (
       expectedStatus === "not_placeholder" &&
       value.status === "placeholder" &&
@@ -403,8 +440,7 @@ function checkEvidenceManifestFile(options: ValidationOptions): EvidenceCheck {
   }
 }
 
-export function validateMatrix(value: JsonRecord, head: string): string[] {
-  const errors: string[] = [];
+export function validateMatrix(value: JsonRecord, head: string): string[] {  const errors: string[] = [];
   if (value.commit !== head) errors.push(`platform matrix commit ${String(value.commit)} does not match HEAD ${head}`);
   const platforms = value.platforms;
   const supported = value.supported_platforms;
@@ -653,6 +689,75 @@ function checkDecisionFile(key: string, file: string, head: string, options: Val
   }
 }
 
+/**
+ * Cache-integrity gate (R7). Reads artifacts/release-gate/cache-telemetry.json
+ * produced by scripts/collect-cache-telemetry.ts from the semantic event log.
+ *
+ * Gate semantics are honest by construction:
+ *  - "measured" with averageRatio >= threshold passes.
+ *  - "measured_below_threshold" FAILS: once live telemetry exists, a
+ *    systematically broken cache prefix blocks release.
+ *  - "no_data" (no live-model runs yet) is surfaced as pending, not an error —
+ *    fixture runs never produce cache observations and must not fake them.
+ */
+export function checkCacheTelemetry(
+  options: ValidationOptions = {},
+  telemetryPath: string = join(OUT_DIR, "cache-telemetry.json"),
+): EvidenceCheck {
+  const key = "cache-telemetry";
+  const path = telemetryPath;
+  if (!existsSync(path)) {
+    return {
+      key,
+      path,
+      status: "missing",
+      detail: "cache telemetry not collected yet — no live-model runs have produced cache observations",
+    };
+  }
+  try {
+    const value = readJson(path);
+    const status = stringField(value.status)?.toLowerCase();
+    const threshold = typeof value.threshold === "number" ? value.threshold : 0.7;
+    const averageRatio = typeof value.averageRatio === "number" ? value.averageRatio : null;
+    if (status === null) {
+      const detail = `${key}: status field is missing`;
+      return { key, path, status: "invalid", detail, errors: [detail] };
+    }
+    if (status === "no_data") {
+      return {
+        key,
+        path,
+        status: "pending_live_telemetry",
+        detail: "no live-model cache observations exist yet; fixture evidence is not cache evidence",
+      };
+    }
+    if (status === "measured_below_threshold" || (averageRatio !== null && averageRatio < threshold)) {
+      const detail = `${key}: average prompt-cache ratio ${String(averageRatio)} is below threshold ${String(threshold)} — inspect stable-prefix mutations`;
+      return { key, path, status: "invalid", detail, errors: [detail] };
+    }
+    if (status !== "measured") {
+      const detail = `${key}: unknown status ${status}`;
+      return { key, path, status: "invalid", detail, errors: [detail] };
+    }
+    if (options.freshSinceMs !== undefined) {
+      const generatedAt = timestampMs(value);
+      if (generatedAt === null || generatedAt < options.freshSinceMs) {
+        const detail = `${key}: cache telemetry is stale relative to this run`;
+        return { key, path, status: "invalid", detail, errors: [detail] };
+      }
+    }
+    return {
+      key,
+      path,
+      status: "present",
+      detail: `average cache ratio ${String(averageRatio)} at or above threshold ${String(threshold)}`,
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { key, path, status: "invalid", detail, errors: [detail] };
+  }
+}
+
 export function validateReleaseGateArtifacts(
   options: ValidationOptions = {},
 ): { checks: EvidenceCheck[]; errors: string[] } {
@@ -701,6 +806,7 @@ export function validateReleaseGateArtifacts(
           : checkDecisionFile(entry.key, entry.file, head, candidateOptions),
     ),
   ];
+  checks.push(checkCacheTelemetry(candidateOptions));
   checks.push(linuxEvidence(candidateOptions));
   const errors = checks.flatMap((check) => check.errors ?? []);
   if (version === "unknown") errors.push("release candidate version is unknown");

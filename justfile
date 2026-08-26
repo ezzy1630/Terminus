@@ -229,16 +229,9 @@ fault-injection:
 release-drills:
     #!/usr/bin/env bash
     set -eu
+    # R9: the drill tests themselves emit their evidence artifacts on success;
+    # the recipe no longer authors a self-declared pass JSON.
     bun test tests/release/
-    bun -e '
-      const { mkdirSync, writeFileSync } = require("node:fs");
-      mkdirSync("artifacts/release-gate", { recursive: true });
-      writeFileSync("artifacts/release-gate/upgrade-rollback.json", JSON.stringify({
-        status: "passed",
-        generatedAt: new Date().toISOString(),
-        suites: ["upgrade_rollback_drill", "backup_restore_drill", "clean_install_upgrade_downgrade"],
-      }, null, 2) + "\n");
-    '
 
 # Short soak/leak (set TERMINUS_SOAK_SECONDS=86400 for full 24h).
 soak:

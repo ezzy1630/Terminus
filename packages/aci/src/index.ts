@@ -26,6 +26,8 @@ export * from "./inspect.js";
 export * from "./patch.js";
 export * from "./exec_job.js";
 export * from "./capability.js";
+export * from "./output_parsers.js";
+
 
 // ────────────────────────── Tool definition contract (§34.3) ─────────────────
 

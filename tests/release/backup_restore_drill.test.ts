@@ -9,6 +9,7 @@ import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
+import { recordDrillEvidence } from "./drill_evidence";
 
 describe("backup / restore drill", () => {
   test("corrupt original then restore from backup passes quick_check", () => {
@@ -57,6 +58,7 @@ describe("backup / restore drill", () => {
         .get() as { val: string } | null;
       expect(row?.val).toBe("intact");
       restored.close();
+      recordDrillEvidence("backup_restore_drill");
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }

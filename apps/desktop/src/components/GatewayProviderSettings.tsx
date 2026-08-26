@@ -250,7 +250,6 @@ export function GatewayProviderSettings(): JSX.Element {
             label="Allow OpenCode models to receive workspace content"
           />
         </div>
-        </div>
         {error ? <p className="text-error text-xs" role="alert">{error}</p> : null}
         <div className="flex gap-2">
           <Button onClick={() => void save()} disabled={loading || saving} variant="secondary" size="sm">
