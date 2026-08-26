@@ -7,6 +7,7 @@ import {
   permissionPatternMatches,
   renderDenial,
   type PermissionConfig,
+  type PermissionDecisionInput,
   type PermissionRule,
 } from "./index.js";
 
@@ -20,7 +21,7 @@ function rule(
 }
 
 function config(rules: readonly PermissionRule[], defaultAction: PermissionConfig["default_action"] = "ask"): PermissionConfig {
-  return { rules, default_action: defaultAction };
+  return { rules: [...rules], default_action: defaultAction };
 }
 
 const base: PermissionDecisionInput = { tool: "exec", subject: "rm -rf /tmp/x" };

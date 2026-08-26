@@ -40,6 +40,10 @@
     "@terminus/public-api": "workspace:*",
     "@terminus/public-client": "workspace:*",
     "@terminus/workflow-compiler": "workspace:*",
+    "@terminus/permissions": "workspace:*",
+    "@terminus/rollout": "workspace:*",
+    "@terminus/cron": "workspace:*",
+    "@terminus/lsp": "workspace:*",
     "@prisma/client": "^6.11.1",
     "zod": "^4.0.2",
     "z-ai-web-dev-sdk": "^0.0.18"
