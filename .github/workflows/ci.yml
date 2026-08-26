@@ -21,8 +21,8 @@ concurrency:
 # Platform matrix (SPEC §46.13). Each platform builds and runs its relevant
 # tests in the same VM so compiled output stays available to the test steps.
 # Linux x86_64 runs the full platform slice; other platforms run curated tests.
-# Flaky combinations are marked continue-on-error and fail-fast is disabled so
-# every platform reports independently.
+# fail-fast is disabled so every platform reports independently; every matrix
+# entry remains a required signal for the aggregate workflow.
 jobs:
   # ---------- Supported-host sandbox conformance (deep-audit blocker 0) ----------
   # Static unit tests prove argv shape; this job proves runtime containment
@@ -145,7 +145,6 @@ jobs:
           - os: ubuntu-24.04-arm
             label: linux-arm64
             target: aarch64-unknown-linux-gnu
-            continue-on-error: true  # arm runners can be flaky
             run-rust-tests: true
             run-ts-tests: false
           - os: macos-latest
@@ -157,7 +156,6 @@ jobs:
           - os: macos-15-intel
             label: macos-x86_64
             target: x86_64-apple-darwin
-            continue-on-error: true  # Intel macOS runners are scarce
             run-rust-tests: false
             run-ts-tests: false
           - os: windows-latest
@@ -166,7 +164,6 @@ jobs:
             continue-on-error: false
             run-rust-tests: true
             run-ts-tests: true
-    continue-on-error: ${{ matrix.continue-on-error }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: ./.github/actions/setup-terminus

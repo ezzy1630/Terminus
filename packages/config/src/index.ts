@@ -233,7 +233,7 @@ export const policiesConfigSchema = z.object({
 export const orchestrationConfigSchema = z.object({
   default: z.enum(["single_agent", "parallel_writers"]).default("single_agent"),
   scouts: z.object({
-    enabled: z.boolean().default(true),
+    enabled: z.boolean().default(false),
     readOnly: z.boolean().default(true),
   }),
   writers: z.object({

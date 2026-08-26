@@ -191,7 +191,7 @@ model Turn {
   threadId                String    @map("thread_id")
   taskId                  String?   @map("task_id")
   sequence                Int
-  state                   String // PENDING|CONTEXT_COMPILING|PROVIDER_RUNNING|RESPONSE_VALIDATING|TOOL_SETTLEMENT|FINALIZING|COMPLETED|INTERRUPTED|FAILED|BUDGET_EXHAUSTED|POLICY_DENIED
+  state                   String // PENDING|CONTEXT_COMPILING|PROVIDER_RUNNING|RESPONSE_VALIDATING|TOOL_SETTLEMENT|VERIFYING|REPAIR_PENDING|REPAIRING|VERIFIED|FINALIZING|COMPLETED|INTERRUPTED|BLOCKED|USER_ACTION_REQUIRED|ABORTING|ABORTED|FAILED|BUDGET_EXHAUSTED|POLICY_DENIED
   initiatingActor         String    @map("initiating_actor")
   initiatingInputArtifact String?   @map("initiating_input_artifact")
   startedAt               DateTime? @map("started_at")

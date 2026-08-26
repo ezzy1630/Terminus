@@ -7,10 +7,9 @@
  * leading harnesses (Hermes' documented pipeline; Claude Code's
  * "lightest-touch first" guidance):
  *
- *  1. Deterministic prune — no LLM call. The oldest complete tool_call/
- *     result pairs beyond the keep-recent budget lose their model-visible
- *     payload; the durable artifact stays linked so detail remains
- *     recoverable by reference.
+ *  1. Deterministic prune planning — no LLM call. The oldest complete
+ *     tool_call/result pairs beyond the keep-recent budget become candidates;
+ *     no row is hidden until a recoverable summary is ready.
  *  2. Structured summary — one dedicated LLM turn over the pruned content,
  *     rendered WITHOUT cache-control writes (one-off summaries are never
  *     reused, so caching them only pollutes the stable prefix).
@@ -19,7 +18,7 @@
  *  - Episode pairing: a tool_call and its settled result are pruned or kept
  *    together, never split.
  *  - Pruned content stays recoverable: the summary lists each pruned
- *    artifact hash.
+ *    artifact reference before any source row is hidden.
  */
 
 /** Approximate UTF-8 bytes-per-token factor for window arithmetic. */
@@ -28,8 +27,11 @@ export const BYTES_PER_TOKEN_ESTIMATE = 4;
 export const DEFAULT_COMPACT_THRESHOLD_TOKENS = 96_000;
 export const DEFAULT_KEEP_RECENT_TOKENS = 24_000;
 
-/** Summary output cap; longer summaries are truncated server-side. */
-export const SUMMARY_MAX_CHARS = 12_000;
+/** Maximum source transcript accepted by the dedicated summarizer. */
+export const MAX_COMPACTION_TRANSCRIPT_CHARS = 400_000;
+
+/** Maximum model-visible size of a persisted compaction summary. */
+export const MAX_COMPACTION_SUMMARY_CHARS = 64_000;
 
 export const SUMMARY_SYSTEM_INSTRUCTIONS = [
   "You compress a coding-agent working transcript into a handoff summary for the next attempt.",
@@ -56,6 +58,8 @@ export interface EpisodeLike {
   readonly contentJson: string | null;
   /** Authoritative CAS size used when contentJson is null. */
   readonly byteSize?: number | undefined;
+  /** Immutable source reference, when the body is not materialized here. */
+  readonly contentArtifact?: string | null | undefined;
 }
 
 export interface PrunePlan {
@@ -150,6 +154,16 @@ export interface CompactionStore {
   /** Append the summary row as a model-visible episode. */
   readonly appendSummaryEpisode: (input: { readonly turnId: string; readonly sequence: number; readonly summaryText: string }) => Promise<void>;
   readonly latestSequence: (turnId: string) => Promise<number | null>;
+  /**
+   * Production stores should implement this as one DB transaction: create
+   * the summary row and hide its source rows together. The individual methods
+   * remain for small adapters and older test stores.
+   */
+  readonly commitCompaction?: (input: {
+    readonly turnId: string;
+    readonly summaryText: string;
+    readonly prunedEpisodeIds: readonly string[];
+  }) => Promise<void>;
 }
 
 export type Summarizer = (input: { readonly transcript: string; readonly signal?: AbortSignal | null }) => Promise<string>;
@@ -161,6 +175,8 @@ export interface CompactionInput {
   readonly compactThresholdTokens?: number;
   readonly keepRecentTokens?: number;
   readonly summarizer?: Summarizer | null;
+  /** Cancellation for the dedicated summarizer call. */
+  readonly signal?: AbortSignal | null;
 }
 
 export interface CompactionReport {
@@ -168,16 +184,29 @@ export interface CompactionReport {
   readonly prunedCount: number;
   readonly prunedBytes: number;
   readonly summaryChars: number;
-  readonly reason: "below_threshold" | "no_summarizer_deterministic_only" | "compacted";
+  readonly reason:
+    | "below_threshold"
+    | "insufficient_source"
+    | "source_too_large"
+    | "summary_too_large"
+    | "no_summarizer"
+    | "summary_failed"
+    | "compacted";
+  /** Stable failure category. Do not put provider or source text in telemetry. */
+  readonly failureCode?:
+    | "source_unavailable"
+    | "source_too_large"
+    | "summary_too_large"
+    | "summarizer_unavailable"
+    | "summarizer_failed";
 }
 
 /**
  * Run one compaction pass. Pure orchestration: all effects go through the
  * injected store and summarizer, so this is unit-testable without a kernel.
  *
- * When no summarizer is configured the deterministic prune still runs (it is
- * safe and cheap); the report states that no LLM summary was produced rather
- * than pretending one was.
+ * When no summarizer is configured, the pass is a no-op. Hiding source rows
+ * without a durable summary would make the next provider request lossy.
  */
 export async function runCompaction(
   store: CompactionStore,
@@ -191,36 +220,164 @@ export async function runCompaction(
   const keepRecentBytes = (input.keepRecentTokens ?? DEFAULT_KEEP_RECENT_TOKENS) * BYTES_PER_TOKEN_ESTIMATE;
   const plan = planDeterministicPrune(input.episodes, keepRecentBytes);
 
+  // Do not spend a source read or report a source failure when no summarizer
+  // exists. More importantly, never turn a no-summarizer state into pruning.
+  if (input.summarizer === undefined || input.summarizer === null) {
+    return {
+      triggered: false,
+      prunedCount: 0,
+      prunedBytes: 0,
+      summaryChars: 0,
+      reason: "no_summarizer",
+      failureCode: "summarizer_unavailable",
+    };
+  }
+
+  // A byte count is not a source record. The live control path may know the
+  // CAS size without having the body or a safe way to cite it in a summary.
+  // Keep every row visible until the caller supplies materialized content.
+  const prunedEpisodeIds = [...plan.prune];
+  const missingSourceForPrunedEpisode = input.episodes.some(
+    (episode) => plan.prune.has(episode.id)
+      && (episode.contentJson === null || episode.contentArtifact === undefined || episode.contentArtifact === null),
+  );
+  if (missingSourceForPrunedEpisode) {
+    return {
+      triggered: false,
+      prunedCount: 0,
+      prunedBytes: 0,
+      summaryChars: 0,
+      reason: "insufficient_source",
+      failureCode: "source_unavailable",
+    };
+  }
+
+  if (plan.prune.size === 0) {
+    const hasUnmaterializedRows = input.episodes.some(
+      (episode) => episode.contentJson === null
+        || episode.contentArtifact === undefined
+        || episode.contentArtifact === null,
+    );
+    return hasUnmaterializedRows
+      ? {
+          triggered: false,
+          prunedCount: 0,
+          prunedBytes: 0,
+          summaryChars: 0,
+          reason: "insufficient_source",
+          failureCode: "source_unavailable",
+        }
+      : {
+          triggered: false,
+          prunedCount: 0,
+          prunedBytes: 0,
+          summaryChars: 0,
+          reason: "below_threshold",
+        };
+  }
+
   let summaryChars = 0;
-  if (plan.prune.size > 0 && input.summarizer !== undefined && input.summarizer !== null) {
-    const prunedTranscript = input.episodes
-      .filter((episode) => plan.prune.has(episode.id))
-      .map((episode) => `--- episode ${episode.sequence} (${episode.kind}) ---\n${episode.contentJson ?? ""}`)
-      .join("\n\n");
-    const summary = await input.summarizer({ transcript: prunedTranscript.slice(0, 400_000) });
-    const boundedSummary = summary.length > SUMMARY_MAX_CHARS
-      ? `${summary.slice(0, SUMMARY_MAX_CHARS)}\n…(summary truncated server-side)`
-      : summary;
+  const prunedTranscript = input.episodes
+    .filter((episode) => plan.prune.has(episode.id))
+    .map((episode) => {
+      const source = episode.contentArtifact === undefined || episode.contentArtifact === null
+        ? ""
+        : `\nSOURCE_ARTIFACT: ${episode.contentArtifact}`;
+      return `--- episode ${episode.sequence} id=${episode.id} (${episode.kind}) ---${source}\n${episode.contentJson}`;
+    })
+    .join("\n\n");
+  if (prunedTranscript.length > MAX_COMPACTION_TRANSCRIPT_CHARS) {
+    return {
+      triggered: false,
+      prunedCount: 0,
+      prunedBytes: 0,
+      summaryChars: 0,
+      reason: "source_too_large",
+      failureCode: "source_too_large",
+    };
+  }
+  let summary: string;
+  try {
+    if (input.signal?.aborted === true) {
+      return {
+        triggered: false,
+        prunedCount: 0,
+        prunedBytes: 0,
+        summaryChars: 0,
+        reason: "summary_failed",
+        failureCode: "summarizer_failed",
+      };
+    }
+    summary = await input.summarizer({
+      transcript: prunedTranscript,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    });
+  } catch {
+    return {
+      triggered: false,
+      prunedCount: 0,
+      prunedBytes: 0,
+      summaryChars: 0,
+      reason: "summary_failed",
+      failureCode: "summarizer_failed",
+    };
+  }
+  if (summary.trim().length === 0) {
+    return {
+      triggered: false,
+      prunedCount: 0,
+      prunedBytes: 0,
+      summaryChars: 0,
+      reason: "summary_failed",
+      failureCode: "summarizer_failed",
+    };
+  }
+
+  const sourceIndex = input.episodes
+    .filter((episode) => plan.prune.has(episode.id))
+    .map((episode) => {
+      const artifact = episode.contentArtifact ?? "unavailable";
+      return `- episode_id=${episode.id} sequence=${episode.sequence} artifact=${artifact}`;
+    })
+    .join("\n");
+  const summaryText = [
+    summary,
+    `PRUNED_BYTES: ${plan.prunedBytes}`,
+    "SOURCE_INDEX:",
+    sourceIndex,
+  ].join("\n");
+  if (summaryText.length > MAX_COMPACTION_SUMMARY_CHARS) {
+    return {
+      triggered: false,
+      prunedCount: 0,
+      prunedBytes: 0,
+      summaryChars: 0,
+      reason: "summary_too_large",
+      failureCode: "summary_too_large",
+    };
+  }
+  if (store.commitCompaction !== undefined) {
+    await store.commitCompaction({
+      turnId: input.turnId,
+      summaryText,
+      prunedEpisodeIds,
+    });
+  } else {
     const latest = await store.latestSequence(input.turnId);
     await store.appendSummaryEpisode({
       turnId: input.turnId,
       sequence: (latest ?? 0) + 1,
-      summaryText: boundedSummary + (plan.prunedBytes > 0 ? `\nPRUNED_BYTES: ${plan.prunedBytes}` : ""),
+      summaryText,
     });
-    summaryChars = boundedSummary.length;
-  } else if (plan.prune.size === 0) {
-    return { triggered: false, prunedCount: 0, prunedBytes: 0, summaryChars: 0, reason: "below_threshold" };
+    await store.hideEpisodes(prunedEpisodeIds);
   }
-
-  if (plan.prune.size > 0) {
-    await store.hideEpisodes([...plan.prune]);
-  }
+  summaryChars = summaryText.length;
 
   return {
     triggered: true,
     prunedCount: plan.prune.size,
     prunedBytes: plan.prunedBytes,
     summaryChars,
-    reason: summaryChars > 0 ? "compacted" : "no_summarizer_deterministic_only",
+    reason: "compacted",
   };
 }

@@ -1,0 +1,151 @@
+# Terminus evaluation registry (A3 / SPEC §41).
+#
+# This is a catalog and run contract, not benchmark evidence. A result is
+# release-eligible only when its run manifest binds the exact Terminus commit,
+# task/environment revision, provider snapshot, feature flags, seed, and
+# durable verification evidence.
+schema_version: 1
+registry_id: terminus-evaluation
+updated: "2026-08-26"
+
+tiers:
+  tier0:
+    description: deterministic unit, contract, fixture, and plumbing checks
+    release_evidence: false
+  tier1:
+    description: deterministic repository E2E and fault-injection checks
+    release_evidence: false
+  tier2:
+    description: live-provider paired nightly evaluations
+    release_evidence: true
+  tier3:
+    description: private holdout and release benchmark cohort
+    release_evidence: true
+
+suites:
+  - id: terminus-internal
+    manifest: evals/suites/forge-internal.yaml
+    task_roots:
+      - evals/tasks
+      - python/forge_evals/evals/tasks
+    source: vendored
+    license: proprietary
+    default_tier: tier0
+    live_provider_required_for_promotion: true
+  - id: terminal-bench
+    manifest: evals/suites/terminal-bench.yaml
+    source: pinned_external
+    license: MIT
+    default_tier: tier3
+    live_provider_required_for_promotion: true
+  - id: swe-bench-verified
+    manifest: evals/suites/swe-bench-verified.yaml
+    source: pinned_external
+    license: MIT
+    default_tier: tier3
+    live_provider_required_for_promotion: true
+
+# Canonical IDs mirror forge_evals.cohort_tasks.COHORTS. The Python catalog
+# owns descriptions, sample tasks, and target population sizes; this registry
+# owns the evidence and promotion requirements.
+cohorts:
+  - {id: tiny_bugfix, class: coding, private_holdout_required: true}
+  - {id: cross_file_feature, class: coding, private_holdout_required: true}
+  - {id: refactor, class: coding, private_holdout_required: true}
+  - {id: test_generation, class: coding, private_holdout_required: true}
+  - {id: unfamiliar_repository, class: repository_understanding, private_holdout_required: true}
+  - {id: build_failure, class: coding, private_holdout_required: true}
+  - {id: dependency_upgrade, class: migration, private_holdout_required: true}
+  - {id: migration, class: migration, private_holdout_required: true}
+  - {id: security_sensitive, class: security, private_holdout_required: true}
+  - {id: large_context_migration, class: long_horizon, private_holdout_required: true}
+  - {id: web_document_research, class: research, private_holdout_required: true}
+  - {id: interruption_resume, class: reliability, private_holdout_required: true}
+  - {id: compaction_mid_implementation, class: reliability, private_holdout_required: true}
+  - {id: stale_snapshot_conflict, class: reliability, private_holdout_required: true}
+  - {id: malicious_repository_instructions, class: security, private_holdout_required: true}
+  - {id: poisoned_mcp_metadata, class: security, private_holdout_required: true}
+  - {id: distributed_multi_tool_poisoning, class: security, private_holdout_required: true}
+  - {id: parallelizable_task, class: orchestration, private_holdout_required: true}
+  - {id: task_where_multi_agent_should_lose, class: orchestration, private_holdout_required: true}
+
+required_run_manifest_fields:
+  - schema_version
+  - terminus_commit
+  - task_id
+  - task_revision
+  - environment_image_digest
+  - prompt_sha256
+  - tool_schema_sha256
+  - provider
+  - model_snapshot
+  - endpoint
+  - parameters
+  - random_seed
+  - feature_flags
+  - cache_layout
+  - started_at
+  - ended_at
+  - artifacts
+  - verification
+
+required_metrics:
+  quality:
+    - verified_success
+    - false_positive_completion
+    - acceptance_criterion_coverage
+    - hidden_test_result
+    - mutation_test_result
+  cost_and_latency:
+    - input_tokens
+    - uncached_input_tokens
+    - cache_read_tokens
+    - cache_write_tokens
+    - output_tokens
+    - reasoning_tokens
+    - tool_schema_tokens
+    - dollars_per_attempt
+    - dollars_per_verified_success
+    - time_to_first_useful_action_ms
+    - time_to_verified_completion_ms
+  reliability:
+    - provider_retries
+    - compactions
+    - repairs
+    - crash_recoveries
+    - duplicate_effects
+    - unknown_effects
+    - replay_determinism
+  safety_and_intervention:
+    - sandbox_policy_violations
+    - secret_leakage
+    - prompt_injection_compliance
+    - approval_errors
+    - human_interventions
+
+design:
+  paired_runs: true
+  identical_task_environment_seed_schedule: true
+  minimum_seeds_for_promotion: 3
+  invalid_task_policy: exclude_before_scoring_and_record_reason
+  contamination_policy: record_source_commit_and_private_holdout_membership
+  preserve_full_trajectories: true
+  promotion_requires_task_level_paired_delta: true
+
+reliability_scenarios:
+  - provider_disconnect
+  - process_crash
+  - database_contention
+  - stale_revision
+  - command_hang
+  - sandbox_unavailable
+
+security_scenarios:
+  - prompt_injection
+  - malicious_repository
+  - path_traversal
+  - symlink_escape
+  - ssrf
+  - secret_exfiltration
+  - poisoned_extension_or_skill
+  - approval_confusion

@@ -15,7 +15,7 @@
  */
 
 import type { Rfc3339Timestamp, Uuid7, ContentHash, ArtifactUri, ByteCount, ModelKey } from "@terminus/domain";
-import type { ContextFragment, ContextScope } from "@terminus/context-ir";
+import { computeContentHash, type ContextFragment, type ContextScope } from "@terminus/context-ir";
 import type { ModelTokenizer } from "./tokenizer.js";
 import { resolveTokenizer } from "./tokenizer.js";
 
@@ -176,24 +176,26 @@ export function instructionsToFragments(
       ? inst.precedence / maxPrecedence
       : 1;
 
-    // Authority: 50 base + up to 40 from normalized precedence.
-    const authority = Math.round(50 + normPrecedence * 40);
+    // Repository instructions are hard-required context, below platform
+    // authority but above optional retrieved content. Precedence still keeps
+    // closer scopes ahead of parent scopes when the budget is tight.
+    const authority = Math.round(80 + normPrecedence * 15);
 
     const scope: ContextScope = {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       taskId: input.taskId,
-      pathPatterns: [inst.path],
+      pathPatterns: [inst.directory === "/" ? "**" : `${inst.directory.replace(/^\//, "")}/**`],
     };
 
-    const hashHex = simpleHash(inst.content);
+    const contentHash = computeContentHash(inst.content);
 
     return {
       id: `project_rule:${inst.path}`,
       kind: "project_rule" as const,
       contentRef: {
-        hash: `sha256:${hashHex}` as ContentHash,
-        uri: `artifact://sha256/${hashHex}` as ArtifactUri,
+        hash: contentHash,
+        uri: `artifact://sha256/${contentHash.slice("sha256:".length)}` as ArtifactUri,
         mediaType: "text/markdown",
         bytes: BigInt(inst.content.length) as ByteCount,
       },
@@ -281,13 +283,4 @@ export function resolveInstructionPrecedence(
     conflicts,
     precedenceOrder: fragments.map((f) => f.id),
   };
-}
-
-/** Deterministic hash for instruction content. */
-function simpleHash(content: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < content.length; i++) {
-    h = Math.imul(h ^ content.charCodeAt(i), 0x01000193) >>> 0;
-  }
-  return h.toString(16).padStart(8, "0").repeat(8);
 }

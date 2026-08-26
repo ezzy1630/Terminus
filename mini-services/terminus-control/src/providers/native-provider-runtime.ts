@@ -108,10 +108,14 @@ export interface NativeTransportDeps {
 export async function collectChunks(
   stream: ByteStream,
   decode: NativeTransportDeps["decode"],
+  signal?: AbortSignal | null,
 ): Promise<{ readonly chunks: ProviderResponseChunk[]; readonly errorChunks: ProviderResponseChunk[] }> {
   const chunks: ProviderResponseChunk[] = [];
   const errorChunks: ProviderResponseChunk[] = [];
   for await (const chunk of decode(stream)) {
+    if (signal?.aborted === true) {
+      throw new Error("native provider request was aborted");
+    }
     if (chunk.kind === "error") errorChunks.push(chunk);
     else chunks.push(chunk);
   }
@@ -132,6 +136,9 @@ export async function dispatchNativeRequest(
   input: NativeDispatchInput,
 ): Promise<NativeStreamResult> {
   const { rendered, economics } = input;
+  if (input.signal?.aborted === true) {
+    throw new Error("native provider request was aborted before dispatch");
+  }
   const budget = new BudgetGuard(input.budgetLimits, input.budgetState ?? {
     requestSpent: 0n as Micros,
     taskSpent: 0n as Micros,
@@ -190,7 +197,7 @@ export async function dispatchNativeRequest(
     body: rendered.body,
     signal: input.signal ?? null,
   });
-  const { chunks, errorChunks } = await collectChunks(byteStream, deps.decode);
+  const { chunks, errorChunks } = await collectChunks(byteStream, deps.decode, input.signal);
   const wallMs = (deps.now?.() ?? Date.now()) - startedAt;
 
   // Explicit partial-stream settlement on error chunks.

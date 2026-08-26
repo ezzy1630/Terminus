@@ -63,6 +63,7 @@ export interface DirectHttpRequest {
   readonly body: string;
   /** Opaque kernel secret capability URI; key material never passes here. */
   readonly credentialBindingId: string;
+  readonly signal?: AbortSignal | null;
 }
 
 /**
@@ -81,20 +82,25 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
 
   async *stream(input: DirectHttpRequest): AsyncIterable<Uint8Array> {
     const effectId = randomUUID();
-    const grant = await this.connectors.MintGrant({
-      context: nextContext(this.context, `direct-grant:${effectId}`),
-      capabilityUri: input.credentialBindingId,
-      binding: {
-        connectorId: connectorIdForEndpoint(input),
-        destinationHost: input.host,
-        destinationPort: input.port,
-        scheme: "https",
-        method: input.method,
-        pathClass: input.path,
-        effectId,
-      },
-      ttlSeconds: 60,
-    });
+    assertNotAborted(input.signal, "direct provider request was aborted");
+    const grant = await withAbortSignal(
+      this.connectors.MintGrant({
+        context: nextContext(this.context, `direct-grant:${effectId}`),
+        capabilityUri: input.credentialBindingId,
+        binding: {
+          connectorId: connectorIdForEndpoint(input),
+          destinationHost: input.host,
+          destinationPort: input.port,
+          scheme: "https",
+          method: input.method,
+          pathClass: input.path,
+          effectId,
+        },
+        ttlSeconds: 60,
+      }),
+      input.signal,
+      "direct provider request was aborted",
+    );
     if (grant.encodedGrant.length === 0) throw new Error("kernel returned an empty connector grant");
     const request: ExecuteConnectorRequest = {
       context: nextContext(this.context, `direct-execute:${effectId}`),
@@ -113,9 +119,12 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
     // R6: prefer the incremental stream so tokens reach the client as they
     // arrive; fall back to the buffered unary Execute when talking to an
     // older kernel that predates ExecuteStream.
+    let fallbackToUnary = false;
+    let observedStream = false;
     let streamed = false;
     try {
-      for await (const chunk of this.eachChunk(request)) {
+      for await (const chunk of this.eachChunk(request, input.signal)) {
+        observedStream = true;
         streamed = true;
         if (chunk.bytes !== undefined) {
           yield chunk.bytes;
@@ -130,14 +139,26 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
         }
       }
     } catch (error) {
-      if (isUnimplemented(error)) {
+      if (isUnimplemented(error) && !observedStream) {
         // Legacy kernel: buffered dispatch below.
+        fallbackToUnary = true;
       } else {
         throw error;
       }
     }
-    if (streamed) return;
-    const response = await this.connectors.Execute(request);
+    // ExecuteStream already performed the request when it produced a receipt
+    // or body. Never issue a second provider request merely because an older
+    // kernel returned a receipt without body chunks.
+    if (observedStream && !fallbackToUnary) {
+      if (!streamed) throw new Error("direct provider stream settled without response bytes");
+      return;
+    }
+    if (!fallbackToUnary) throw new Error("direct provider stream ended without a response");
+    const response = await withAbortSignal(
+      this.connectors.Execute(request),
+      input.signal,
+      "direct provider request was aborted",
+    );
     const status = response.receipt?.statusCode;
     if (status === undefined) {
       throw new Error(`direct provider dispatch did not settle: ${response.receipt?.outcome ?? "missing receipt"}`);
@@ -150,8 +171,11 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
     yield* splitSseChunks(response.body);
   }
 
-  private eachChunk(request: ExecuteConnectorRequest): AsyncIterable<ConnectorChunk> {
-    return observableToAsyncIterable(this.connectors.ExecuteStream(request));
+  private eachChunk(request: ExecuteConnectorRequest, signal?: AbortSignal | null): AsyncIterable<ConnectorChunk> {
+    if (typeof this.connectors.ExecuteStream !== "function") {
+      throw new Error("UNIMPLEMENTED: ConnectorService.ExecuteStream is unavailable");
+    }
+    return observableToAsyncIterable(this.connectors.ExecuteStream(request), signal);
   }
 
   /**
@@ -168,22 +192,28 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
     readonly context: RequestContext;
     /** Opaque secret capability binding; required for vendor connectors. */
     readonly credentialBindingId: string;
+    readonly signal?: AbortSignal | null;
   }): AsyncIterable<Uint8Array> {
     const effectId = randomUUID();
-    const grant = await this.connectors.MintGrant({
-      context: nextContext(input.context, `native-grant:${effectId}`),
-      capabilityUri: input.credentialBindingId,
-      binding: {
-        connectorId: connectorIdForRawPath(input.host, input.path),
-        destinationHost: input.host,
-        destinationPort: input.port,
-        scheme: "https",
-        method: "POST",
-        pathClass: input.path,
-        effectId,
-      },
-      ttlSeconds: 60,
-    });
+    assertNotAborted(input.signal, "direct provider request was aborted");
+    const grant = await withAbortSignal(
+      this.connectors.MintGrant({
+        context: nextContext(input.context, `native-grant:${effectId}`),
+        capabilityUri: input.credentialBindingId,
+        binding: {
+          connectorId: connectorIdForRawPath(input.host, input.path),
+          destinationHost: input.host,
+          destinationPort: input.port,
+          scheme: "https",
+          method: "POST",
+          pathClass: input.path,
+          effectId,
+        },
+        ttlSeconds: 60,
+      }),
+      input.signal,
+      "direct provider request was aborted",
+    );
     if (grant.encodedGrant.length === 0) throw new Error("kernel returned an empty connector grant");
     const request: ExecuteConnectorRequest = {
       context: nextContext(input.context, `native-execute:${effectId}`),
@@ -200,9 +230,12 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
       },
     };
     let sawReceiptStatus: number | null = null;
+    let fallbackToUnary = false;
+    let observedStream = false;
     let streamed = false;
     try {
-      for await (const chunk of this.eachChunk(request)) {
+      for await (const chunk of this.eachChunk(request, input.signal)) {
+        observedStream = true;
         if (chunk.bytes !== undefined) {
           streamed = true;
           yield chunk.bytes;
@@ -211,11 +244,17 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
         }
       }
     } catch (error) {
-      if (!isUnimplemented(error)) throw error;
+      if (isUnimplemented(error) && !observedStream) fallbackToUnary = true;
+      else throw error;
     }
-    if (!streamed || sawReceiptStatus === null) {
-      // Legacy kernel or receipt-only stream: fall back to buffered unary.
-      const response = await this.connectors.Execute(request);
+    if (fallbackToUnary) {
+      // Legacy kernel: ExecuteStream was not implemented, so the request has
+      // not happened and the buffered unary call is safe.
+      const response = await withAbortSignal(
+        this.connectors.Execute(request),
+        input.signal,
+        "direct provider request was aborted",
+      );
       const status = response.receipt?.statusCode;
       if (status === undefined || status < 200 || status > 299) {
         throw new Error(`direct provider returned HTTP ${status ?? 0}${providerErrorSuffix(response.body)}`);
@@ -223,6 +262,9 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
       yield* splitSseChunks(response.body);
       return;
     }
+    if (!observedStream) throw new Error("direct provider stream ended without a response");
+    if (!streamed) throw new Error("direct provider stream settled without response bytes");
+    if (sawReceiptStatus === null) throw new Error("direct provider stream ended without a receipt");
     if (sawReceiptStatus < 200 || sawReceiptStatus > 299) {
       throw new Error(`direct provider returned HTTP ${sawReceiptStatus}`);
     }
@@ -237,14 +279,48 @@ function connectorIdForRawPath(host: string, path: string): string {
   throw new Error(`no registered connector admits https://${host}${path}`);
 }
 
+function assertNotAborted(signal: AbortSignal | null | undefined, message: string): void {
+  if (signal?.aborted === true) throw new Error(message);
+}
+
+function withAbortSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | null | undefined,
+  message: string,
+): Promise<T> {
+  if (signal?.aborted === true) return Promise.reject(new Error(message));
+  if (signal === null || signal === undefined) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error(message));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 /** Minimal Observable→AsyncIterable bridge. */
-function observableToAsyncIterable<T>(source: import("rxjs").Observable<T>): AsyncIterable<T> {
+function observableToAsyncIterable<T>(
+  source: import("rxjs").Observable<T>,
+  signal?: AbortSignal | null,
+): AsyncIterable<T> {
   return {
     [Symbol.asyncIterator](): AsyncIterator<T> {
       const queue: T[] = [];
       let done = false;
       let failure: unknown = null;
       let wake: (() => void) | null = null;
+      let subscription: import("rxjs").Subscription | null = null;
       const notify = (): void => {
         if (wake !== null) {
           const resolve = wake;
@@ -252,21 +328,40 @@ function observableToAsyncIterable<T>(source: import("rxjs").Observable<T>): Asy
           resolve();
         }
       };
-      const subscription = source.subscribe({
-        next: (value: T) => {
-          queue.push(value);
-          notify();
-        },
-        error: (err: unknown) => {
-          failure = err;
-          done = true;
-          notify();
-        },
-        complete: () => {
-          done = true;
-          notify();
-        },
-      });
+      const onAbort = (): void => {
+        if (done) return;
+        failure = new Error("direct provider request was aborted");
+        done = true;
+        queue.length = 0;
+        subscription?.unsubscribe();
+        notify();
+      };
+      if (signal?.aborted === true) {
+        onAbort();
+      } else {
+        subscription = source.subscribe({
+          next: (value: T) => {
+            queue.push(value);
+            notify();
+          },
+          error: (err: unknown) => {
+            if (done) return;
+            failure = err;
+            done = true;
+            signal?.removeEventListener("abort", onAbort);
+            notify();
+          },
+          complete: () => {
+            if (done) return;
+            done = true;
+            signal?.removeEventListener("abort", onAbort);
+            notify();
+          },
+        });
+        if (signal !== null && signal !== undefined && !done) {
+          signal.addEventListener("abort", onAbort, { once: true });
+        }
+      }
       return {
         next: async (): Promise<IteratorResult<T>> => {
           while (!done && queue.length === 0) {
@@ -274,13 +369,14 @@ function observableToAsyncIterable<T>(source: import("rxjs").Observable<T>): Asy
               wake = resolve;
             });
           }
-          if (failure !== null) throw failure;
           if (queue.length > 0) return { value: queue.shift()!, done: false };
+          if (failure !== null) throw failure;
           return { value: undefined as never, done: true };
         },
         return: async (): Promise<IteratorResult<T>> => {
-          subscription.unsubscribe();
+          subscription?.unsubscribe();
           done = true;
+          signal?.removeEventListener("abort", onAbort);
           notify();
           return { value: undefined as never, done: true };
         },
@@ -387,6 +483,7 @@ export async function executeDirectProviderRequest(
     headers,
     body: serialized,
     credentialBindingId: configuration.secretUri,
+    signal: rendered.request.signal,
   });
   switch (configuration.vendor) {
     case "anthropic":

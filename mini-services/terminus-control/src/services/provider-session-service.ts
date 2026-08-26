@@ -37,6 +37,8 @@ export interface ProviderExecutionInput {
   readonly executeDirectRequest?: (input: ProviderExecutionInput) => Promise<ProviderResponse>;
   readonly context: RequestContext;
   readonly workspaceId: string;
+  /** Caller-owned cancellation signal for the current turn/request. */
+  readonly signal?: AbortSignal | null;
 }
 
 export interface ProviderAttemptStartInput {
@@ -94,7 +96,16 @@ export class ProviderSessionService<TTransaction> {
   async beginAttempt(input: ProviderAttemptStartInput): Promise<boolean> {
     return this.dependencies.mutate(async () => {
       const state = await this.dependencies.readTurnState(input.turnId);
-      if (state === "INTERRUPTED") return false;
+      if (state !== null && [
+        "INTERRUPTED",
+        "ABORTED",
+        "FAILED",
+        "BLOCKED",
+        "USER_ACTION_REQUIRED",
+        "COMPLETED",
+        "BUDGET_EXHAUSTED",
+        "POLICY_DENIED",
+      ].includes(state)) return false;
       await this.dependencies.appendEvent(
         {
           eventType: "turn.provider_running",
@@ -119,6 +130,9 @@ export class ProviderSessionService<TTransaction> {
   }
 
   async execute(input: ProviderExecutionInput): Promise<ProviderResponse> {
+    if (input.signal?.aborted) {
+      throw new Error("provider execution was aborted before dispatch");
+    }
     if (
       input.direct !== undefined
       && input.direct !== null
@@ -138,6 +152,8 @@ export class ProviderSessionService<TTransaction> {
 
   async settleResponse(input: ProviderAttemptResponseInput): Promise<void> {
     await this.dependencies.mutate(async () => {
+      const state = await this.dependencies.readTurnState(input.turnId);
+      if (state === "INTERRUPTED" || state === "ABORTED") return;
       await this.dependencies.appendEvent(
         {
           eventType: "turn.response_validating",

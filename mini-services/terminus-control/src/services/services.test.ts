@@ -10,6 +10,7 @@ import {
   ToolEpisodeService,
   ToolPolicyDeniedError,
   TurnCoordinator,
+  TurnAdmissionError,
   VerificationCoordinator,
   type EffectSettlementInput,
   type EventCursorRecord,
@@ -66,6 +67,7 @@ describe("control-plane service boundaries", () => {
     type Transaction = { readonly name: "turn" };
     const task: TurnTaskSnapshot = { id: "task-1", threadId: "thread-1", status: "BLOCKED" };
     let admitted = false;
+    let aborted = false;
     let resumed = false;
     const events: string[] = [];
     const created: TurnAdmissionInput[] = [];
@@ -81,7 +83,7 @@ describe("control-plane service boundaries", () => {
     };
     const coordinator = new TurnCoordinator<Transaction>({
       readTask: async () => task,
-      readTurn: async () => admitted ? turn : null,
+      readTurn: async () => admitted ? { ...turn, state: aborted ? "ABORTED" : turn.state } : null,
       appendEvent: async (event, mutation) => {
         events.push(event.eventType);
         await mutation({ name: "turn" });
@@ -94,6 +96,7 @@ describe("control-plane service boundaries", () => {
         createTurn: async (input) => { created.push(input); admitted = true; },
         createUserEpisode: async () => undefined,
         interruptTurn: async () => undefined,
+        abortTurn: async () => { aborted = true; },
       }),
       mutate: async (operation) => operation(),
       projectTask: async () => undefined,
@@ -112,6 +115,80 @@ describe("control-plane service boundaries", () => {
     expect(events).toEqual(["turn.started"]);
     expect(resumed).toBe(true);
     expect(created).toHaveLength(1);
+
+    await coordinator.abortUnderMutationLock("turn-1", "user_cancelled");
+    expect(aborted).toBe(true);
+    expect(events).toEqual(["turn.started", "turn.aborted"]);
+  });
+
+  test("TurnCoordinator blocks user admission while a repair continuation is pending", async () => {
+    type Transaction = { readonly name: "repair" };
+    const task: TurnTaskSnapshot = { id: "task-1", threadId: "thread-1", status: "BLOCKED" };
+    const created: string[] = [];
+    let repairTurnAdmitted = false;
+    const coordinator = new TurnCoordinator<Transaction>({
+      readTask: async () => task,
+      readTurn: async (turnId) => repairTurnAdmitted && turnId === "repair-turn"
+        ? {
+            id: "repair-turn",
+            threadId: "thread-1",
+            taskId: "task-1",
+            sequence: 2,
+            state: "PENDING",
+            initiatingActor: "repair-controller",
+            startedAt: null,
+            completedAt: null,
+          }
+        : null,
+      appendEvent: async (_event, mutation) => mutation({ name: "repair" }),
+      transaction: () => ({
+        findTask: async () => task,
+        findActiveTurn: async (_taskId, states) => states.includes("REPAIR_PENDING")
+          ? {
+              id: "parent-turn",
+              threadId: "thread-1",
+              taskId: "task-1",
+              sequence: 1,
+              state: "REPAIR_PENDING",
+              initiatingActor: "test",
+              startedAt: null,
+              completedAt: null,
+            }
+          : null,
+        findLatestSequence: async () => 1,
+        resumeTask: async () => undefined,
+        createTurn: async (input) => {
+          created.push(input.initiatingActor);
+          repairTurnAdmitted = true;
+        },
+        createUserEpisode: async () => undefined,
+        interruptTurn: async () => undefined,
+      }),
+      mutate: async (operation) => operation(),
+      projectTask: async () => undefined,
+      activeTurnStates: ["PENDING", "PROVIDER_RUNNING"],
+    });
+
+    await expect(coordinator.admit({
+      turnId: "user-turn",
+      threadId: "thread-1",
+      taskId: "task-1",
+      sequence: 2,
+      inputArtifactUri: "artifact://sha256/input",
+      inputArtifactHash: "sha256:input",
+      initiatingActor: "user",
+    })).rejects.toBeInstanceOf(TurnAdmissionError);
+
+    await coordinator.admit({
+      turnId: "repair-turn",
+      threadId: "thread-1",
+      taskId: "task-1",
+      sequence: 2,
+      inputArtifactUri: "artifact://sha256/directive",
+      inputArtifactHash: "sha256:directive",
+      initiatingActor: "repair-controller",
+    });
+    expect(created).toEqual(["repair-controller"]);
   });
 
   test("ProviderSessionService records attempt lifecycle and fails closed without transport", async () => {
@@ -167,6 +244,17 @@ describe("control-plane service boundaries", () => {
       workspaceId: "workspace-1",
     });
     await expect(unavailable).rejects.toBeInstanceOf(ProviderExecutionUnavailableError);
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(service.execute({
+      rendered: { providerId: "local" } as unknown as ProviderExecutionInput["rendered"],
+      command: null,
+      gateway: null,
+      context: {} as ProviderExecutionInput["context"],
+      workspaceId: "workspace-1",
+      signal: controller.signal,
+    })).rejects.toThrow("aborted before dispatch");
   });
 
   test("EffectSettlementService keeps lifecycle events paired with transaction mutations", async () => {
@@ -182,6 +270,7 @@ describe("control-plane service boundaries", () => {
         authorize: async () => { operations.push("authorize"); },
         start: async () => { operations.push("start"); },
         markUnknown: async () => { operations.push("unknown"); },
+        cancel: async () => { operations.push("cancel"); },
         settle: async () => { operations.push("settle"); },
       }),
       mutate: async (operation) => operation(),
@@ -200,6 +289,12 @@ describe("control-plane service boundaries", () => {
     } as const;
     await service.authorize(authorization);
     await service.start(authorization);
+    await service.cancel({
+      taskId: "task-1",
+      toolCallId: "call-1",
+      sideEffectId: "effect-1",
+      reason: "user_cancelled",
+    });
     await service.markUnknown({ taskId: "task-1", toolCallId: "call-1", sideEffectId: "effect-1", error: "lost receipt" });
     const settlement: EffectSettlementInput = {
       taskId: "task-1",
@@ -220,8 +315,8 @@ describe("control-plane service boundaries", () => {
       truncation: null,
     };
     await service.settle(settlement);
-    expect(events).toEqual(["tool.authorized", "tool.started", "tool.settlement_unknown", "tool.settled"]);
-    expect(operations).toEqual(["authorize", "start", "unknown", "settle"]);
+    expect(events).toEqual(["tool.authorized", "tool.started", "tool.cancelled", "tool.settlement_unknown", "tool.settled"]);
+    expect(operations).toEqual(["authorize", "start", "cancel", "unknown", "settle"]);
   });
 
   test("ToolEpisodeService bounds per-turn calls and loads bounded model episodes", async () => {
@@ -303,6 +398,35 @@ describe("control-plane service boundaries", () => {
       "task.completed",
       "project:task.completed",
     ]);
+  });
+
+  test("VerificationCoordinator atomically admits the verified turn with task completion", async () => {
+    type Transaction = { readonly name: "atomic-verification" };
+    let taskState = "VERIFYING";
+    let turnState = "VERIFYING";
+    const events: string[] = [];
+    const service = new VerificationCoordinator<Transaction>({
+      readTask: async () => ({ status: taskState }),
+      appendEvent: async (event, mutation) => {
+        events.push(event.eventType);
+        await mutation({ name: "atomic-verification" });
+      },
+      updateTask: async () => undefined,
+      updateTaskAndTurn: async (_tx, input, expectedStatuses, turnId, expectedTurnState) => {
+        expect(turnId).toBe("turn-1");
+        expect(expectedStatuses).toEqual(["VERIFYING"]);
+        expect(expectedTurnState).toBe("VERIFYING");
+        taskState = input.status;
+        turnState = "VERIFIED";
+      },
+      mutate: async (operation) => operation(),
+      projectTask: async (_taskId, eventType) => { events.push(`project:${eventType}`); },
+    });
+
+    await service.complete("task-1", "plan-1", "turn-1");
+    expect(taskState).toBe("COMPLETED");
+    expect(turnState).toBe("VERIFIED");
+    expect(events).toEqual(["task.completed", "project:task.completed"]);
   });
 
   test("TaskProjectionService emits a durable v2 snapshot when v1 state changes", async () => {

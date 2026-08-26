@@ -42,11 +42,19 @@ export interface EffectUnknownInput {
   readonly error: string;
 }
 
+export interface EffectCancellationInput {
+  readonly taskId: string;
+  readonly toolCallId: string;
+  readonly sideEffectId: string;
+  readonly reason: string;
+}
+
 export interface EffectSettlementTransaction {
   readonly authorize: (input: EffectAuthorizationInput) => Promise<void>;
   readonly start: (input: EffectAuthorizationInput) => Promise<void>;
   readonly settle: (input: EffectSettlementInput) => Promise<void>;
   readonly markUnknown: (input: EffectUnknownInput) => Promise<void>;
+  readonly cancel?: (input: EffectCancellationInput) => Promise<void>;
 }
 
 export interface EffectSettlementDependencies<TTransaction> {
@@ -106,6 +114,23 @@ export class EffectSettlementService<TTransaction> {
       },
       (transaction) => this.dependencies.transaction(transaction).settle(input),
       [input.resultArtifactUri, input.resultTranscriptArtifactUri],
+    );
+  }
+
+  /** Cancel an admitted tool before dispatch when the turn signal wins. */
+  async cancel(input: EffectCancellationInput): Promise<void> {
+    await this.run(
+      "tool.cancelled",
+      input.taskId,
+      input.toolCallId,
+      { side_effect_id: input.sideEffectId, reason: input.reason },
+      (transaction) => {
+        const mutation = this.dependencies.transaction(transaction).cancel;
+        if (mutation === undefined) {
+          throw new Error("effect cancellation persistence is not configured");
+        }
+        return mutation(input);
+      },
     );
   }
 

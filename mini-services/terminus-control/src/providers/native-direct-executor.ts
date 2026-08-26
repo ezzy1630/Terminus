@@ -49,7 +49,6 @@ export function createNativeDirectExecutor(options: NativeDirectExecutorOptions)
       body: Readonly<Record<string, unknown>>;
       signal: AbortSignal | null;
     }): Promise<AsyncIterable<Uint8Array>> => {
-      void input.signal; // cancellation rides the grant TTL + stream close
       const headers = { ...input.headers };
       delete (headers as Record<string, string>).authorization;
       return scopedClient.streamRaw({
@@ -60,6 +59,7 @@ export function createNativeDirectExecutor(options: NativeDirectExecutorOptions)
         body: JSON.stringify({ ...input.body, stream: true }),
         context,
         credentialBindingId: options.configuration.secretUri,
+        signal: input.signal,
       });
     };
 
@@ -69,7 +69,7 @@ export function createNativeDirectExecutor(options: NativeDirectExecutorOptions)
         economics: options.economics,
         budgetLimits: limits,
         rendered: execInput.rendered,
-        signal: null,
+        signal: execInput.signal ?? execInput.rendered.request.signal,
         postSse,
       });
     }
@@ -79,7 +79,7 @@ export function createNativeDirectExecutor(options: NativeDirectExecutorOptions)
       budgetLimits: limits,
       rendered: execInput.rendered,
       protocol: options.configuration.protocol === "chat_completions" ? "chat_completions" : "responses",
-      signal: null,
+      signal: execInput.signal ?? execInput.rendered.request.signal,
       postSse,
     });
   };

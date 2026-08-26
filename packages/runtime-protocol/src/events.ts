@@ -85,7 +85,22 @@ export const EVENT_TYPES = [
   "turn.provider_running",
   "turn.tool_settled",
   "turn.completed",
+  "turn.response_validating",
+  "turn.tool_settlement",
+  "turn.verifying",
+  "turn.repair_pending",
+  "turn.repairing",
+  "turn.superseded",
+  "turn.finalizing",
+  "turn.failed",
+  "turn.policy_denied",
+  "turn.aborted",
+  "turn.recovery_interrupted",
+  "turn.recovery_reconciled",
+  "turn.recovery_failed",
+  "completion.proposed",
   "tool.proposed",
+  "tool.denied",
   "tool.authorized",
   "tool.started",
   "tool.settled",
@@ -100,12 +115,21 @@ export const EVENT_TYPES = [
   "context.epoch_started",
   "context.epoch_sealed",
   "context.manifest_persisted",
+  "context.compacted",
+  "context.auto_checkpoint_committed",
+  "context.auto_checkpoint_failed",
+  "context.cache_ratio_observed",
+  "context.cache_ratio_warning",
   "checkpoint.created",
   "agent.spawned",
   "agent.completed",
   "verification.node_passed",
   "verification.node_failed",
   "verification.plan_completed",
+  "verification.admitted",
+  "recovery.reconciled",
+  "task.repair_scheduled",
+  "task.blocked",
   "memory.claim_created",
   "memory.claim_invalidated",
   "capability.activated",
@@ -253,6 +277,14 @@ export const turnCompletedPayloadSchema = z.object({
   outputArtifactHash: z.string().nullable(),
 });
 export type TurnCompletedPayload = z.infer<typeof turnCompletedPayloadSchema>;
+
+/**
+ * Extension payloads are intentionally object-shaped but forward-compatible.
+ * The durable event catalog remains the source of required fields; older
+ * clients must preserve unknown fields when relaying these lifecycle events.
+ */
+export const runtimeLifecyclePayloadSchema = z.record(z.string(), z.unknown());
+export type RuntimeLifecyclePayload = z.infer<typeof runtimeLifecyclePayloadSchema>;
 
 export const toolProposedPayloadSchema = z.object({
   toolCallId: z.string(),
@@ -477,7 +509,22 @@ export interface EventPayloadMap {
   "turn.provider_running": TurnProviderRunningPayload;
   "turn.tool_settled": TurnToolSettledPayload;
   "turn.completed": TurnCompletedPayload;
+  "turn.response_validating": RuntimeLifecyclePayload;
+  "turn.tool_settlement": RuntimeLifecyclePayload;
+  "turn.verifying": RuntimeLifecyclePayload;
+  "turn.repair_pending": RuntimeLifecyclePayload;
+  "turn.repairing": RuntimeLifecyclePayload;
+  "turn.superseded": RuntimeLifecyclePayload;
+  "turn.finalizing": RuntimeLifecyclePayload;
+  "turn.failed": RuntimeLifecyclePayload;
+  "turn.policy_denied": RuntimeLifecyclePayload;
+  "turn.aborted": RuntimeLifecyclePayload;
+  "turn.recovery_interrupted": RuntimeLifecyclePayload;
+  "turn.recovery_reconciled": RuntimeLifecyclePayload;
+  "turn.recovery_failed": RuntimeLifecyclePayload;
+  "completion.proposed": RuntimeLifecyclePayload;
   "tool.proposed": ToolProposedPayload;
+  "tool.denied": RuntimeLifecyclePayload;
   "tool.authorized": ToolAuthorizedPayload;
   "tool.started": ToolStartedPayload;
   "tool.settled": ToolSettledPayload;
@@ -492,12 +539,21 @@ export interface EventPayloadMap {
   "context.epoch_started": ContextEpochStartedPayload;
   "context.epoch_sealed": ContextEpochSealedPayload;
   "context.manifest_persisted": ContextManifestPersistedPayload;
+  "context.compacted": RuntimeLifecyclePayload;
+  "context.auto_checkpoint_committed": RuntimeLifecyclePayload;
+  "context.auto_checkpoint_failed": RuntimeLifecyclePayload;
+  "context.cache_ratio_observed": RuntimeLifecyclePayload;
+  "context.cache_ratio_warning": RuntimeLifecyclePayload;
   "checkpoint.created": CheckpointCreatedPayload;
   "agent.spawned": AgentSpawnedPayload;
   "agent.completed": AgentCompletedPayload;
   "verification.node_passed": VerificationNodePassedPayload;
   "verification.node_failed": VerificationNodeFailedPayload;
   "verification.plan_completed": VerificationPlanCompletedPayload;
+  "verification.admitted": RuntimeLifecyclePayload;
+  "recovery.reconciled": RuntimeLifecyclePayload;
+  "task.repair_scheduled": RuntimeLifecyclePayload;
+  "task.blocked": RuntimeLifecyclePayload;
   "memory.claim_created": MemoryClaimCreatedPayload;
   "memory.claim_invalidated": MemoryClaimInvalidatedPayload;
   "capability.activated": CapabilityActivatedPayload;
@@ -515,6 +571,13 @@ export type AnyTypedEvent = {
 
 /** Maps an event type to its aggregate type. */
 export function aggregateForEventType(t: EventType): AggregateType {
+  const overrides: Partial<Record<EventType, AggregateType>> = {
+    "completion.proposed": "turn",
+    "recovery.reconciled": "turn",
+    "verification.admitted": "turn",
+  };
+  const override = overrides[t];
+  if (override !== undefined) return override;
   const head = t.split(".")[0] as AggregateType;
   return head;
 }
@@ -630,7 +693,22 @@ export function payloadSchemaFor(type: EventType): z.ZodType<Readonly<Record<str
     "turn.provider_running": turnProviderRunningPayloadSchema,
     "turn.tool_settled": turnToolSettledPayloadSchema,
     "turn.completed": turnCompletedPayloadSchema,
+    "turn.response_validating": runtimeLifecyclePayloadSchema,
+    "turn.tool_settlement": runtimeLifecyclePayloadSchema,
+    "turn.verifying": runtimeLifecyclePayloadSchema,
+    "turn.repair_pending": runtimeLifecyclePayloadSchema,
+    "turn.repairing": runtimeLifecyclePayloadSchema,
+    "turn.superseded": runtimeLifecyclePayloadSchema,
+    "turn.finalizing": runtimeLifecyclePayloadSchema,
+    "turn.failed": runtimeLifecyclePayloadSchema,
+    "turn.policy_denied": runtimeLifecyclePayloadSchema,
+    "turn.aborted": runtimeLifecyclePayloadSchema,
+    "turn.recovery_interrupted": runtimeLifecyclePayloadSchema,
+    "turn.recovery_reconciled": runtimeLifecyclePayloadSchema,
+    "turn.recovery_failed": runtimeLifecyclePayloadSchema,
+    "completion.proposed": runtimeLifecyclePayloadSchema,
     "tool.proposed": toolProposedPayloadSchema,
+    "tool.denied": runtimeLifecyclePayloadSchema,
     "tool.authorized": toolAuthorizedPayloadSchema,
     "tool.started": toolStartedPayloadSchema,
     "tool.settled": toolSettledPayloadSchema,
@@ -645,12 +723,21 @@ export function payloadSchemaFor(type: EventType): z.ZodType<Readonly<Record<str
     "context.epoch_started": contextEpochStartedPayloadSchema,
     "context.epoch_sealed": contextEpochSealedPayloadSchema,
     "context.manifest_persisted": contextManifestPersistedPayloadSchema,
+    "context.compacted": runtimeLifecyclePayloadSchema,
+    "context.auto_checkpoint_committed": runtimeLifecyclePayloadSchema,
+    "context.auto_checkpoint_failed": runtimeLifecyclePayloadSchema,
+    "context.cache_ratio_observed": runtimeLifecyclePayloadSchema,
+    "context.cache_ratio_warning": runtimeLifecyclePayloadSchema,
     "checkpoint.created": checkpointCreatedPayloadSchema,
     "agent.spawned": agentSpawnedPayloadSchema,
     "agent.completed": agentCompletedPayloadSchema,
     "verification.node_passed": verificationNodePassedPayloadSchema,
     "verification.node_failed": verificationNodeFailedPayloadSchema,
     "verification.plan_completed": verificationPlanCompletedPayloadSchema,
+    "verification.admitted": runtimeLifecyclePayloadSchema,
+    "recovery.reconciled": runtimeLifecyclePayloadSchema,
+    "task.repair_scheduled": runtimeLifecyclePayloadSchema,
+    "task.blocked": runtimeLifecyclePayloadSchema,
     "memory.claim_created": memoryClaimCreatedPayloadSchema,
     "memory.claim_invalidated": memoryClaimInvalidatedPayloadSchema,
     "capability.activated": capabilityActivatedPayloadSchema,

@@ -77,7 +77,7 @@ Total settings: **93**
 | `policies.approval.secretUse` | enum: "prompt_unless_pregranted" | "prompt" | "deny" | "prompt_unless_pregranted" |
 | `policies.approval.scopeExpansion` | enum: "prompt" | "deny" | "allow" | "prompt" |
 | `orchestration.default` | enum: "single_agent" | "parallel_writers" | "single_agent" |
-| `orchestration.scouts.enabled` | boolean | true |
+| `orchestration.scouts.enabled` | boolean | false |
 | `orchestration.scouts.readOnly` | boolean | true |
 | `orchestration.writers.enabled` | boolean | true |
 | `orchestration.writers.requirePositiveExpectedValue` | boolean | true |

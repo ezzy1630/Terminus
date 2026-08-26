@@ -204,9 +204,7 @@ export class ScoutUtilityLedger {
   }
 }
 
-/** Kill-switch resolution: default ON; explicit "0"/"false" disables. */
+/** Feature resolution: default OFF; only an explicit "1" enables the scout. */
 export function resolveScoutEnabled(raw: string | undefined | null): boolean {
-  if (raw === undefined || raw === null || raw.trim() === "") return true;
-  const normalized = raw.trim().toLowerCase();
-  return !(normalized === "0" || normalized === "false");
+  return raw?.trim() === "1";
 }

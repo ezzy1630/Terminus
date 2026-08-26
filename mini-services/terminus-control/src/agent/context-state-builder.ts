@@ -87,8 +87,9 @@ export class ContextStateBuilder {
   /**
    * Derive the full context state from durable observations.
    *
-   * `episodeObservations` must be bounded by the caller (the turn runtime's
-   * existing 16-episode model-visible window satisfies this).
+   * `episodeObservations` must be bounded by the caller's context budget. The
+   * working state is derived from settled evidence rather than from a fixed
+   * episode count or an unbounded transcript.
    */
   build(input: ContextStateInput): BuiltContextState {
     const signals =

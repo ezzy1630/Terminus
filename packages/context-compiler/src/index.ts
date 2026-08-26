@@ -206,6 +206,8 @@ export type {
 
 // Project instruction discovery with scoped precedence
 export {
+  DEFAULT_INSTRUCTION_FILENAMES,
+  DEFAULT_MAX_INSTRUCTION_BYTES,
   discoverInstructions,
   instructionsToFragments,
   resolveInstructionPrecedence,
@@ -278,6 +280,8 @@ export interface CompileInput {
   readonly episodeContent: ReadonlyMap<ContentHash, string>;
   readonly checkpoint: Checkpoint | null;
   readonly userDirectives: readonly ContextDirective[];
+  /** Repository-scoped instruction fragments loaded by the control plane. */
+  readonly projectInstructionFragments?: readonly ContextFragment[] | undefined;
   readonly activeCapabilities: readonly CapabilityDescriptorSnapshot[];
   readonly budget: ContextBudget;
   readonly experimentAssignments: readonly ExperimentAssignment[];
@@ -476,6 +480,8 @@ export interface RequiredFragments {
   readonly authority: readonly ContextFragment[];
   readonly taskContract: readonly ContextFragment[];
   readonly policy: readonly ContextFragment[];
+  /** Applicable repository instructions, ordered from closest to root. */
+  readonly projectRules: readonly ContextFragment[];
   /** One fragment per unresolved acceptance criterion (§8.4 step 2). */
   readonly acceptanceCriteria: readonly ContextFragment[];
 }
@@ -667,7 +673,13 @@ export async function collectRequiredFragments(
     });
   }
 
-  return { authority: authorityFragments, taskContract: [taskContract], policy: [policy], acceptanceCriteria };
+  return {
+    authority: authorityFragments,
+    taskContract: [taskContract],
+    policy: [policy],
+    projectRules: input.projectInstructionFragments ?? [],
+    acceptanceCriteria,
+  };
 }
 
 /** Build an ArtifactRef with a stable, content-derived hash. */
@@ -1374,6 +1386,14 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
       rerankedScore: 1.0,
       sourceVersion: f.sourceVersion,
       reason: "policy",
+    })),
+    ...required.projectRules.map((f) => ({
+      fragment: f,
+      method: "exact_path_symbol" as const,
+      rawScore: 1.0,
+      rerankedScore: 1.0,
+      sourceVersion: f.sourceVersion,
+      reason: "repository_instruction",
     })),
     ...required.acceptanceCriteria.map((f) => ({
       fragment: f,

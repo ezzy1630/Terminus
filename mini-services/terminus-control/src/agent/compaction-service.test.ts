@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   BYTES_PER_TOKEN_ESTIMATE,
   DEFAULT_COMPACT_THRESHOLD_TOKENS,
+  MAX_COMPACTION_TRANSCRIPT_CHARS,
   planDeterministicPrune,
   runCompaction,
   SUMMARY_SYSTEM_INSTRUCTIONS,
@@ -9,7 +10,16 @@ import {
 } from "./compaction-service.js";
 
 function episode(id: string, sequence: number, kind: string, contentJson: string | null, toolCallId: string | null = null): EpisodeLike {
-  return { id, kind, sequence, toolCallId, contentJson };
+  return {
+    id,
+    kind,
+    sequence,
+    toolCallId,
+    contentJson,
+    contentArtifact: contentJson === null
+      ? null
+      : `artifact://sha256/${id.replace(/[^a-f0-9]/gi, "").toLowerCase().padEnd(64, "0").slice(0, 64)}`,
+  };
 }
 
 describe("R4 deterministic prune planning", () => {
@@ -72,7 +82,7 @@ describe("R4 compaction service", () => {
           latestSequence += 1;
         },
         latestSequence: async () => latestSequence,
-        appendSummaryEpisode: async (input) => {
+        appendSummaryEpisode: async (input: { readonly turnId: string; readonly sequence: number; readonly summaryText: string }) => {
           appended.push(input);
           latestSequence = Math.max(latestSequence, input.sequence);
         },
@@ -116,10 +126,55 @@ describe("R4 compaction service", () => {
     expect(state.hidden.sort()).toEqual(["old-call", "old-result"]);
     expect(state.appended).toHaveLength(1);
     expect(state.appended[0]?.summaryText).toContain("GOAL: fix it");
+    expect(state.appended[0]?.summaryText).toContain("SOURCE_INDEX:");
+    expect(state.appended[0]?.summaryText).toContain("episode_id=old-call");
     expect(summarizedChars).toBeGreaterThan(1_500);
   });
 
-  test("deterministic-only mode still prunes and reports honestly when no summarizer exists", async () => {
+  test("does not silently truncate source before summarization", async () => {
+    const { store, state } = fakeStore();
+    const report = await runCompaction(store, {
+      turnId: "turn-1",
+      totalBytes: 1_700,
+      compactThresholdTokens: 100,
+      keepRecentTokens: 20,
+      episodes: [
+        episode("old-call", 1, "tool_call", "c".repeat(MAX_COMPACTION_TRANSCRIPT_CHARS), "tp"),
+        episode("old-result", 2, "tool_result", "r".repeat(100), "tp"),
+        episode("new", 3, "tool_result", "n", "tn"),
+      ],
+      summarizer: async () => "must not be called",
+    });
+    expect(report.triggered).toBe(false);
+    expect(report.reason).toBe("source_too_large");
+    expect(report.failureCode).toBe("source_too_large");
+    expect(state.hidden).toEqual([]);
+    expect(state.appended).toEqual([]);
+  });
+
+  test("does not prune content without immutable source provenance", async () => {
+    const { store, state } = fakeStore();
+    const report = await runCompaction(store, {
+      turnId: "turn-1",
+      totalBytes: 1_700,
+      compactThresholdTokens: 100,
+      keepRecentTokens: 20,
+      episodes: [
+        { ...episode("old-call", 1, "tool_call", "c".repeat(800), "tp"), contentArtifact: null },
+        episode("old-result", 2, "tool_result", "r".repeat(800), "tp"),
+        episode("new-call", 3, "tool_call", "nc", "tn"),
+        episode("new-result", 4, "tool_result", "nr", "tn"),
+      ],
+      summarizer: async () => "must not be called",
+    });
+    expect(report.triggered).toBe(false);
+    expect(report.reason).toBe("insufficient_source");
+    expect(report.failureCode).toBe("source_unavailable");
+    expect(state.hidden).toEqual([]);
+    expect(state.appended).toEqual([]);
+  });
+
+  test("does not prune when no summarizer exists", async () => {
     const { store, state } = fakeStore();
     const report = await runCompaction(store, {
       turnId: "turn-1",
@@ -132,10 +187,49 @@ describe("R4 compaction service", () => {
       ],
       summarizer: null,
     });
-    expect(report.triggered).toBe(true);
-    expect(report.reason).toBe("no_summarizer_deterministic_only");
+    expect(report.triggered).toBe(false);
+    expect(report.reason).toBe("no_summarizer");
     expect(report.summaryChars).toBe(0);
-    expect(state.hidden).toEqual(["old-a"]);
+    expect(state.hidden).toEqual([]);
+  });
+
+  test("does not prune metadata-only episodes even when byte sizes exceed the threshold", async () => {
+    const { store, state } = fakeStore();
+    const report = await runCompaction(store, {
+      turnId: "turn-1",
+      totalBytes: 950,
+      compactThresholdTokens: 50,
+      keepRecentTokens: 5,
+      episodes: [
+        episode("old-a", 1, "tool_result", null, "q"),
+        { ...episode("new-b", 2, "tool_result", null, "w"), byteSize: 10_000 },
+      ],
+      summarizer: async () => "This must not be called",
+    });
+    expect(report.triggered).toBe(false);
+    expect(report.reason).toBe("insufficient_source");
+    expect(report.failureCode).toBe("source_unavailable");
+    expect(state.hidden).toEqual([]);
+  });
+
+  test("retains source episodes when summarization fails", async () => {
+    const { store, state } = fakeStore();
+    const report = await runCompaction(store, {
+      turnId: "turn-1",
+      totalBytes: 1_700,
+      compactThresholdTokens: 100,
+      keepRecentTokens: 20,
+      episodes: [
+        episode("old-call", 1, "tool_call", "c".repeat(800), "tp"),
+        episode("old-result", 2, "tool_result", "r".repeat(800), "tp"),
+        episode("new-call", 3, "tool_call", "nc", "tn"),
+        episode("new-result", 4, "tool_result", "nr", "tn"),
+      ],
+      summarizer: async () => { throw new Error("provider unavailable"); },
+    });
+    expect(report.triggered).toBe(false);
+    expect(report.reason).toBe("summary_failed");
+    expect(state.hidden).toEqual([]);
   });
 
   test("threshold constants align with the documented defaults", () => {

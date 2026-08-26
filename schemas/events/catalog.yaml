@@ -116,6 +116,24 @@
   pii: none
   retention: audit
 
+- type: completion.proposed
+  version: 1
+  aggregate: turn
+  payload:
+    response_artifact: {type: artifact_ref, required: true}
+    status: {type: string, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.verifying
+  version: 1
+  aggregate: turn
+  payload:
+    phase: {type: string, required: true}
+    proposal_artifact: {type: artifact_ref, required: true}
+  pii: none
+  retention: audit
+
 - type: tool.proposed
   version: 1
   aggregate: tool_call
@@ -166,6 +184,77 @@
   pii: none
   retention: audit
 
+- type: turn.repair_pending
+  version: 1
+  aggregate: turn
+  payload:
+    phase: {type: string, required: true}
+    repair_attempt: {type: int, required: true}
+    directive_artifact: {type: artifact_ref, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.repairing
+  version: 1
+  aggregate: turn
+  payload:
+    phase: {type: string, required: true}
+    repair_attempt: {type: int, required: true}
+    directive_artifact: {type: artifact_ref, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.superseded
+  version: 1
+  aggregate: turn
+  payload:
+    previous_state: {type: string, required: true}
+    state: {type: string, required: true}
+    repair_turn_id: {type: uuid, required: true}
+    reason: {type: string, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.aborted
+  version: 1
+  aggregate: turn
+  payload:
+    reason: {type: string, required: true}
+    previous_state: {type: string, required: true}
+    phase: {type: string, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.recovery_interrupted
+  version: 1
+  aggregate: turn
+  payload:
+    previous_state: {type: string, required: true}
+    state: {type: string, required: true}
+    reason: {type: string, required: true}
+    reconciliation_required: {type: bool, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.recovery_reconciled
+  version: 1
+  aggregate: turn
+  payload:
+    previous_state: {type: string, required: true}
+    state: {type: string, required: true}
+    reason: {type: string, required: true}
+  pii: none
+  retention: audit
+
+- type: turn.recovery_failed
+  version: 1
+  aggregate: turn
+  payload:
+    reason: {type: string, required: true}
+    state: {type: string, required: true}
+  pii: low
+  retention: audit
+
 - type: turn.completed
   version: 1
   aggregate: turn
@@ -181,6 +270,34 @@
   payload:
     task_id: {type: uuid, required: true}
     plan_id: {type: uuid, required: true}
+  pii: none
+  retention: audit
+
+- type: task.repair_scheduled
+  version: 1
+  aggregate: task
+  payload:
+    repair_attempt: {type: int, required: true}
+    directive_artifact: {type: artifact_ref, required: true}
+    failed_nodes: {type: array, required: true}
+  pii: none
+  retention: audit
+
+- type: verification.admitted
+  version: 1
+  aggregate: turn
+  payload:
+    plan_id: {type: uuid, required: true}
+    phase: {type: string, required: true}
+  pii: none
+  retention: audit
+
+- type: recovery.reconciled
+  version: 1
+  aggregate: turn
+  payload:
+    repair_turn_id: {type: uuid, required: true}
+    reason: {type: string, required: true}
   pii: none
   retention: audit
 
@@ -376,4 +493,3 @@
     reason: {type: string, required: true}
   pii: low
   retention: audit
-

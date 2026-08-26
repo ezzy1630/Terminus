@@ -15,6 +15,8 @@ interface HarnessOptions {
   readonly responses: ReadonlyArray<{ text?: string; calls?: ReadonlyArray<ProviderResponseChunk> }>;
   readonly sideEffectClassOf?: (toolName: string) => string;
   readonly failOnCallIds?: readonly string[];
+  readonly afterToolsSettled?: () => Promise<void>;
+  readonly signal?: AbortSignal | null;
 }
 
 /**
@@ -37,6 +39,7 @@ async function runHarness(options: HarnessOptions) {
       return () => `attempt-${(n += 1)}`;
     })(),
     sideEffectClassOf: options.sideEffectClassOf ?? ((name) => (name === "read" ? "read" : "workspace_write")),
+    signal: options.signal,
     compileContext: async () => ({
       rendered: { providerId: "test", model: "test/model", request: {} as never, predictedCachedTokens: 0n as never, body: {} },
       requestArtifactUri: "artifact://sha256/request",
@@ -68,6 +71,7 @@ async function runHarness(options: HarnessOptions) {
       if (error !== undefined) throw error;
       trace.push(`settle:${call.toolName}:${call.toolCallId}`);
     },
+    afterToolsSettled: options.afterToolsSettled,
   });
   const stop = await engine.run();
   return { stop, trace, budget: engine.budget };
@@ -92,6 +96,38 @@ describe("CodingTurnEngine", () => {
     expect(trace.filter((t) => t.startsWith("settle:")).length).toBe(2);
     expect(trace).toContain("begin:2");
     expect(stop.kind).toBe("final");
+  });
+
+  test("notifies once after the complete tool response settles", async () => {
+    let callbacks = 0;
+    const { stop } = await runHarness({
+      responses: [
+        { calls: [toolCall("r1", "read"), toolCall("w1", "patch")] },
+        { text: "done" },
+      ],
+      afterToolsSettled: async () => { callbacks += 1; },
+    });
+    expect(callbacks).toBe(1);
+    expect(stop.kind).toBe("final");
+  });
+
+  test("stops before compiling another provider attempt after cancellation", async () => {
+    const controller = new AbortController();
+    let callbacks = 0;
+    const result = await runHarness({
+      signal: controller.signal,
+      responses: [
+        { calls: [toolCall("r1", "read")] },
+        { text: "must not be requested" },
+      ],
+      afterToolsSettled: async () => {
+        callbacks += 1;
+        controller.abort("user_cancelled");
+      },
+    });
+    expect(callbacks).toBe(1);
+    expect(result.stop).toEqual({ kind: "interrupted" });
+    expect(result.trace).not.toContain("begin:2");
   });
 
   test("writes serialize in provider order behind prior reads", async () => {

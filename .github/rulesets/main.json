@@ -1,0 +1,52 @@
+{
+  "name": "main-protection",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": true,
+        "require_last_push_approval": true,
+        "required_approving_review_count": 1,
+        "required_review_thread_resolution": true
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "do_not_enforce_on_create": false,
+        "strict_required_status_checks_policy": true,
+        "required_status_checks": [
+          { "context": "CI / Sandbox conformance (linux + docker)" },
+          { "context": "CI / Architecture boundary checks" },
+          { "context": "CI / Lint, typecheck, codegen drift" },
+          { "context": "CI / Platform (linux-x86_64)" },
+          { "context": "CI / Platform (linux-arm64)" },
+          { "context": "CI / Platform (macos-arm64)" },
+          { "context": "CI / Platform (macos-x86_64)" },
+          { "context": "CI / Platform (windows-x86_64)" },
+          { "context": "CI / Build (linux-container)" },
+          { "context": "CI / Unit tests (Python eval)" },
+          { "context": "CI / Integration tests" },
+          { "context": "CI / Security scans" },
+          { "context": "CI / End-to-end public path" },
+          { "context": "CI / M12 release-gate evidence" },
+          { "context": "CI / Eval smoke (fixture tier)" },
+          { "context": "CI / Standalone runtime ownership" },
+          { "context": "CI / Protobuf breaking-change check" }
+        ]
+      }
+    }
+  ],
+  "bypass_actors": []
+}

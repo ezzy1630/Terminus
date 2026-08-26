@@ -131,10 +131,10 @@ describe("R10 scout utility ledger and enablement", () => {
     expect(ledger.snapshot().consecutiveZeroYield).toBe(0);
   });
 
-  test("default-on enablement with explicit kill-switch", () => {
-    expect(resolveScoutEnabled(undefined)).toBe(true);
-    expect(resolveScoutEnabled(null)).toBe(true);
-    expect(resolveScoutEnabled("")).toBe(true);
+  test("default-off enablement with explicit opt-in", () => {
+    expect(resolveScoutEnabled(undefined)).toBe(false);
+    expect(resolveScoutEnabled(null)).toBe(false);
+    expect(resolveScoutEnabled("")).toBe(false);
     expect(resolveScoutEnabled("0")).toBe(false);
     expect(resolveScoutEnabled("false")).toBe(false);
     expect(resolveScoutEnabled("1")).toBe(true);

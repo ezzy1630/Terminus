@@ -77,7 +77,11 @@ export function createKernelPredicateRunner(
   };
 }
 
-export async function resolveKernelEnvironmentDigest(clients: KernelUdsClients): Promise<string> {
+export async function resolveKernelEnvironmentDigest(
+  clients: KernelUdsClients,
+  signal?: AbortSignal | null,
+): Promise<string> {
+  if (signal?.aborted) throw new Error("environment digest resolution aborted");
   const info = await clients.info.GetInfo({});
   const descriptor = JSON.stringify({
     protocolVersion: info.protocolVersion,
@@ -93,8 +97,9 @@ export async function resolveWorkspaceRevision(
   clients: KernelUdsClients,
   baseContext: RequestContext,
   workspaceId: string,
+  signal?: AbortSignal | null,
 ): Promise<string> {
-  const outcome = await runKernelCommand(clients, baseContext, workspaceId, "git", ["rev-parse", "HEAD"], null);
+  const outcome = await runKernelCommand(clients, baseContext, workspaceId, "git", ["rev-parse", "HEAD"], signal ?? null);
   const revision = outcome.stdout.trim();
   if (outcome.exitCode !== 0 || !/^[0-9a-f]{40,64}$/i.test(revision)) {
     throw new Error(`workspace revision could not be established from git: ${outcome.stderr.trim()}`);
@@ -194,6 +199,7 @@ async function runKernelCommand(
   args: readonly string[],
   signal: AbortSignal | null,
 ): Promise<KernelCommandOutcome> {
+  if (signal?.aborted) throw new Error("verification command aborted before kernel start");
   const context: RequestContext = {
     ...baseContext,
     requestId: randomUUID(),
@@ -239,13 +245,23 @@ async function runKernelCommand(
     const stdout: Uint8Array[] = [];
     const stderr: Uint8Array[] = [];
     let settled = false;
+    let subscription: { readonly unsubscribe: () => void } | null = null;
+    const onAbort = (): void => {
+      if (settled) return;
+      const currentProcessId = processId;
+      if (currentProcessId !== null) {
+        void clients.process.Cancel({ context, processId: currentProcessId, reason: "verification-aborted" }).catch(() => undefined);
+      }
+      finish(() => reject(new Error("verification command aborted")));
+    };
     const finish = (callback: () => void): void => {
       if (settled) return;
       settled = true;
-      subscription.unsubscribe();
+      subscription?.unsubscribe();
+      signal?.removeEventListener("abort", onAbort);
       callback();
     };
-    const subscription = events.subscribe({
+    subscription = events.subscribe({
       next: (event: ProcessEvent) => {
         if (event.started !== undefined) processId = event.started.processId;
         if (event.stdout !== undefined) stdout.push(event.stdout.bytes);
@@ -261,11 +277,7 @@ async function runKernelCommand(
       error: (error: unknown) => finish(() => reject(error instanceof Error ? error : new Error(String(error)))),
       complete: () => finish(() => reject(new Error("kernel process stream ended without an exit event"))),
     });
-    if (signal !== null) {
-      const onAbort = (): void => {
-        if (processId === null) return;
-        void clients.process.Cancel({ context, processId, reason: "verification-aborted" }).catch(() => undefined);
-      };
+    if (signal !== null && signal !== undefined && !settled) {
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
     }

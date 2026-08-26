@@ -67,13 +67,17 @@ export interface EngineDependencies {
     readonly attemptNumber: number;
     readonly attemptId: string;
   }) => Promise<void>;
+  /** Move the durable turn back to context compilation after all calls settle. */
+  readonly afterToolsSettled?: () => Promise<void>;
   /** Classify a tool name's side-effect class ("read" = parallel-safe). */
   readonly sideEffectClassOf: (toolName: string) => string;
   /** Generate an opaque unique id for attempts. */
   readonly newId: () => string;
   readonly budget?: TurnBudgetOptions;
+  /** Durable turn cancellation is represented by the caller's signal. */
+  readonly signal?: AbortSignal | null;
   /** Invoked when a tool call was refused by policy; aborts the loop. */
-  readonly onPolicyDenied?: (message: string) => void;
+  readonly onPolicyDenied?: (message: string) => void | Promise<void>;
 }
 
 export type EngineStop =
@@ -100,6 +104,9 @@ export class CodingTurnEngine {
   /** Run the bounded loop. Never throws budget/policy conditions — reports them. */
   async run(): Promise<EngineStop> {
     for (;;) {
+      if (this.dependencies.signal?.aborted) {
+        return { kind: "interrupted" };
+      }
       const decision = this.budget.canStartStep();
       if (!decision.allowed) {
         this.budget.recordStep();
@@ -112,6 +119,9 @@ export class CodingTurnEngine {
       this.budget.recordStep();
 
       const compiled = await this.dependencies.compileContext(attemptNumber);
+      if (this.dependencies.signal?.aborted) {
+        return { kind: "interrupted" };
+      }
       const attemptId = this.dependencies.newId();
       const started = await this.dependencies.beginAttempt({
         attemptId,
@@ -124,6 +134,9 @@ export class CodingTurnEngine {
         attemptId,
         compiled,
       });
+      if (this.dependencies.signal?.aborted) {
+        return { kind: "interrupted" };
+      }
       const settled = await this.dependencies.settleResponse({
         attemptId,
         response,
@@ -167,26 +180,37 @@ export class CodingTurnEngine {
       const batches = planToolBatches(toolCalls, isReadOnly);
       let operationIndex = 0;
       for (const batch of batches) {
+        if (this.dependencies.signal?.aborted) {
+          return { kind: "interrupted" };
+        }
         const allReadOnly = batch.every(isReadOnly);
-        if (allReadOnly && batch.length > 1) {
-          // Concurrent reads, deterministic result order.
-          await Promise.all(
-            batch.map((call) =>
-              this.dependencies.settleToolCall({
+        try {
+          if (allReadOnly && batch.length > 1) {
+            // Concurrent reads, deterministic result order.
+            await Promise.all(
+              batch.map((call) =>
+                this.dependencies.settleToolCall({
+                  call,
+                  attemptNumber,
+                  attemptId,
+                }),
+              ),
+            );
+          } else {
+            for (const call of batch) {
+              await this.dependencies.settleToolCall({
                 call,
                 attemptNumber,
                 attemptId,
-              }),
-            ),
-          );
-        } else {
-          for (const call of batch) {
-            await this.dependencies.settleToolCall({
-              call,
-              attemptNumber,
-              attemptId,
-            });
+              });
+            }
           }
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/\b(policy|denied)\b/i.test(message)) {
+            await this.dependencies.onPolicyDenied?.(message);
+          }
+          throw error;
         }
         operationIndex += batch.length;
       }
@@ -195,6 +219,12 @@ export class CodingTurnEngine {
           kind: "policy_denied",
           message: "tool batch planning lost calls",
         };
+      }
+      if (this.dependencies.signal?.aborted) {
+        return { kind: "interrupted" };
+      }
+      if (this.dependencies.afterToolsSettled !== undefined) {
+        await this.dependencies.afterToolsSettled();
       }
     }
   }

@@ -53,6 +53,8 @@ export interface TurnCoordinatorTransaction {
   readonly createTurn: (input: TurnAdmissionInput) => Promise<void>;
   readonly createUserEpisode: (input: TurnAdmissionInput) => Promise<void>;
   readonly interruptTurn: (turnId: string, reason: string) => Promise<void>;
+  /** Mark a turn cancelled after durable cancellation intent is recorded. */
+  readonly abortTurn?: (turnId: string, reason: string) => Promise<void>;
 }
 
 export interface TurnCoordinatorDependencies<TTransaction> {
@@ -126,7 +128,13 @@ export class TurnCoordinator<TTransaction> {
         if (!["ACTIVE", "NEEDS_USER_DECISION", "BLOCKED"].includes(current.status)) {
           throw new TurnAdmissionError("state_conflict", current.status);
         }
-        const activeTurn = await store.findActiveTurn(input.taskId, this.dependencies.activeTurnStates);
+        // A pending repair blocks ordinary user admission. The repair
+        // controller is the sole actor allowed to add the continuation turn
+        // while its parent remains in REPAIR_PENDING.
+        const activeStates = input.initiatingActor === "repair-controller"
+          ? this.dependencies.activeTurnStates
+          : [...this.dependencies.activeTurnStates, "REPAIR_PENDING"];
+        const activeTurn = await store.findActiveTurn(input.taskId, activeStates);
         if (activeTurn !== null) throw new TurnAdmissionError("turn_active", activeTurn.id);
         const previousSequence = await store.findLatestSequence(input.threadId);
         if ((previousSequence ?? 0) + 1 !== input.sequence) {
@@ -173,5 +181,48 @@ export class TurnCoordinator<TTransaction> {
     const interrupted = await this.dependencies.readTurn(turnId);
     if (interrupted === null) throw new Error(`interrupted turn ${turnId} could not be reloaded`);
     return interrupted;
+  }
+
+  /**
+   * Persist cancellation at the turn boundary before asking the in-process
+   * executor to stop. REPAIR_PENDING is included because it is nonterminal
+   * but intentionally excluded from the normal admission active-state set.
+   */
+  async abortUnderMutationLock(turnId: string, reason: string): Promise<TurnRow> {
+    const current = await this.dependencies.readTurn(turnId);
+    if (current === null) throw new TurnAdmissionError("task_not_found", turnId);
+    if (
+      !this.dependencies.activeTurnStates.includes(current.state)
+      && current.state !== "REPAIR_PENDING"
+    ) {
+      throw new TurnAdmissionError("state_conflict", current.state);
+    }
+
+    await this.dependencies.appendEvent(
+      {
+        eventType: "turn.aborted",
+        aggregateType: "turn",
+        aggregateId: turnId,
+        correlationId: current.taskId ?? turnId,
+        payload: {
+          reason,
+          previous_state: current.state,
+          phase: current.state,
+        },
+      },
+      async (transaction) => {
+        const store = this.dependencies.transaction(transaction);
+        if (store.abortTurn !== undefined) {
+          await store.abortTurn(turnId, reason);
+        } else {
+          // Compatibility for older test/adaptor stores. Production wiring
+          // supplies abortTurn and therefore records the ABORTED state.
+          await store.interruptTurn(turnId, reason);
+        }
+      },
+    );
+    const aborted = await this.dependencies.readTurn(turnId);
+    if (aborted === null) throw new Error(`aborted turn ${turnId} could not be reloaded`);
+    return aborted;
   }
 }

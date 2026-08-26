@@ -285,6 +285,17 @@ doctor:
 truth-check:
     bun run scripts/check-declaration-consistency.ts
 
+# Read-only plan for the checked-in protected-main ruleset. Applying it is a
+# remote repository mutation and requires TERMINUS_APPLY_GITHUB_RULESET=1.
+github-ruleset-plan:
+    bash scripts/apply-github-ruleset.sh
+
+github-ruleset-apply:
+    TERMINUS_APPLY_GITHUB_RULESET=1 bash scripts/apply-github-ruleset.sh
+
+github-ruleset-verify:
+    TERMINUS_VERIFY_GITHUB_RULESET=1 bash scripts/apply-github-ruleset.sh
+
 # First system card: maturity, platform support, limitations, missing infra.
 system-card: platform-matrix
     bun run scripts/produce-system-card.ts

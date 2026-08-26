@@ -114,6 +114,23 @@ describe("VerificationRepairController", () => {
     if (third.action === "stop") expect(third.reason).toBe("repair_budget_exhausted");
   });
 
+  test("restores durable usage and failure signatures across a new controller", () => {
+    const prior = normalizeFailure(rawFailure("n1", "same"));
+    const controller = new VerificationRepairController({
+      maxRepairAttempts: 2,
+      priorAttemptsUsed: 1,
+      priorFailureSignatures: [prior.signatureHash],
+    });
+    const decision = controller.decideAfterFailure({
+      failures: [prior],
+      workspaceChangedSinceLastAttempt: false,
+      actorReportedBlocker: false,
+      requiresUserAuthority: false,
+    });
+    expect(decision).toEqual({ action: "stop", reason: "no_progress_repeated_failure" });
+    expect(controller.attemptsUsed).toBe(1);
+  });
+
   test("user-authority requirements stop before any repair spend", () => {
     const controller = new VerificationRepairController();
     const decision = controller.decideAfterFailure({

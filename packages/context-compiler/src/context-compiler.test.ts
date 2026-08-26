@@ -27,6 +27,7 @@ import {
   compileContext,
   deduplicateAndValidate,
   deriveRetrievalQueries,
+  instructionsToFragments,
   replayContext,
   replayWithAblation,
   type CompileInput,
@@ -171,7 +172,11 @@ class FakeRenderer implements ProviderRenderer {
   }
 }
 
-function compileInput(store: ContextStore, renderer: ProviderRenderer = new FakeRenderer()): CompileInput {
+function compileInput(
+  store: ContextStore,
+  renderer: ProviderRenderer = new FakeRenderer(),
+  projectInstructionFragments: readonly ContextFragment[] = [],
+): CompileInput {
   const provider = providerSnapshot();
   const model: ModelCapabilitySnapshot = {
     modelKey: MODEL_KEY,
@@ -230,6 +235,7 @@ function compileInput(store: ContextStore, renderer: ProviderRenderer = new Fake
     episodeContent: new Map(),
     checkpoint: null,
     userDirectives: [],
+    projectInstructionFragments,
     activeCapabilities: [],
     budget: budget(),
     experimentAssignments: [],
@@ -301,6 +307,37 @@ describe("Context Compiler", () => {
       current: { stablePrefix: { hash: compiled.manifest.cachePlan.stablePrefixHash } },
     });
     expect(compiled.warnings.some((warning) => warning.startsWith("token calibration degraded:"))).toBe(true);
+  });
+
+  test("injects applicable repository instructions as required context", async () => {
+    const instruction = instructionsToFragments({
+      instructions: [{
+        directory: "/",
+        filename: "AGENTS.md",
+        path: "/workspace/AGENTS.md",
+        precedence: 100,
+        content: "Never skip the repository verification command.",
+        sourceVersion: "sha256:instruction-source",
+      }],
+      observedAt: NOW,
+      workspaceId: null,
+      sessionId: SESSION_ID,
+      taskId: TASK_ID,
+      modelKey: MODEL_KEY,
+    });
+    const store: ContextStore = {
+      async persistManifest(manifest) {
+        return { id: MANIFEST_ID, ...manifest };
+      },
+      async getManifest(id) {
+        return id === MANIFEST_ID ? null : null;
+      },
+      async recordObservation() {},
+    };
+    const compiled = await compileContext(compileInput(store, new FakeRenderer(), instruction));
+    const manifestFragment = compiled.manifest.fragments.find((fragment) => fragment.fragmentId === instruction[0]!.id);
+    expect(manifestFragment?.required).toBe(true);
+    expect(compiled.rendered.request.blocks.some((block) => block.content.includes("Never skip"))).toBe(true);
   });
 
   test("replays the exact selected manifest and records ablation drift", async () => {

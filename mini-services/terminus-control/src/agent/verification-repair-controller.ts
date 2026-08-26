@@ -78,6 +78,14 @@ export class ProgressDetector {
   private lastSignatures: ReadonlySet<string> = new Set();
   private readonly seenAcrossAttempts: ReadonlySet<string>[] = [];
 
+  /** Restore the last durable failure set before evaluating a new turn. */
+  seed(signatures: readonly string[]): void {
+    if (signatures.length === 0) return;
+    const seeded = new Set(signatures);
+    this.lastSignatures = seeded;
+    this.seenAcrossAttempts.push(seeded);
+  }
+
   /**
    * Record one attempt's normalized failures and whether the workspace
    * changed since the previous attempt. Returns progress analysis.
@@ -127,6 +135,8 @@ export interface RepairPolicyOptions {
    * and allow unbounded repair loops across turns.
    */
   readonly priorAttemptsUsed?: number;
+  /** Failure signatures persisted by the preceding repair evaluation. */
+  readonly priorFailureSignatures?: readonly string[];
   readonly now?: () => number;
 }
 
@@ -137,9 +147,13 @@ export class VerificationRepairController {
 
   constructor(options: RepairPolicyOptions = {}) {
     this.maxRepairAttempts = options.maxRepairAttempts ?? 2;
+    if (!Number.isInteger(this.maxRepairAttempts) || this.maxRepairAttempts < 0) {
+      throw new Error("maxRepairAttempts must be a non-negative integer");
+    }
     const prior = options.priorAttemptsUsed ?? 0;
     if (prior < 0) throw new Error("priorAttemptsUsed must be non-negative");
     this.repairAttemptsUsed = prior;
+    this.detector.seed(options.priorFailureSignatures ?? []);
   }
 
   /**
@@ -227,9 +241,12 @@ export function buildRepairContext(input: {
     sections.push(`## Files changed in this task\n${input.changedFiles.map((file) => `- ${file}`).join("\n")}`);
   }
   if (input.previousAttemptSummary !== null) {
+    const previousSummary = input.previousAttemptSummary.length > 2_000
+      ? `${input.previousAttemptSummary.slice(0, 2_000)}\n[earlier repair summary omitted; consult the prior verification artifact]`
+      : input.previousAttemptSummary;
     sections.push(
-      `## Previous repair attempt\n${input.previousAttemptSummary.slice(0, 2_000)}\nFixing the same way will fail identically; change the hypothesis.`,
+      `## Previous repair attempt\n${previousSummary}\nFixing the same way will fail identically; change the hypothesis.`,
     );
   }
-  return sections.join("\n\n").slice(0, 16_000);
+  return sections.join("\n\n");
 }

@@ -593,6 +593,8 @@ export interface ExecuteStandaloneToolInput {
   readonly contractHash: string;
   readonly devMode: boolean;
   readonly shellModeEnabled: boolean;
+  /** One turn-scoped cancellation signal, shared by every kernel effect. */
+  readonly signal?: AbortSignal | null;
   /**
    * Per-turn registry of file hashes actually observed through reads.
    * Patch resolves an omitted expected_sha256 from this tracker; the
@@ -600,6 +602,13 @@ export interface ExecuteStandaloneToolInput {
    * protection (safety rule §2) is preserved.
    */
   readonly observedSources?: ObservedSourceTracker;
+}
+
+export class ToolAbortedError extends Error {
+  constructor() {
+    super("tool execution was aborted");
+    this.name = "ToolAbortedError";
+  }
 }
 
 /** Gutter used by numbered reads: `<line>→ <content>`. */
@@ -688,13 +697,14 @@ export function pageLines(text: string, offsetLine: number, maxLines: number): {
 export async function executeStandaloneTool(
   input: ExecuteStandaloneToolInput,
 ): Promise<ToolResult<unknown>> {
+  assertNotAborted(input.signal);
   const startedAt = performance.now();
   switch (input.call.toolId) {
     case "read": {
       // Deep paging uses a real kernel line range so offset_line works even
       // when earlier pages exceeded the byte cap (Cubic read-paging finding).
       const deepPage = input.call.arguments.offset_line > 1;
-      const response = await input.clients.files.Read({
+      const response = await withAbortSignal(input.clients.files.Read({
         context: nextRequestContext(input.context, "read"),
         intent: toolIntent(input.contractHash, "read_local"),
         path: { workspaceId: input.workspaceId, relativePath: input.call.arguments.path },
@@ -711,7 +721,7 @@ export async function executeStandaloneTool(
         symbols: [],
         maxBytes: input.call.arguments.max_bytes,
         expectedSha256: input.call.arguments.expected_sha256 ?? "",
-      });
+      }), input.signal);
       const fullProjection = new TextDecoder("utf-8", { fatal: true }).decode(response.modelProjectionUtf8);
       const totalLines = deepPage ? null : (fullProjection.length === 0 ? 0 : (fullProjection.endsWith("\n") ? fullProjection.slice(0, -1) : fullProjection).split("\n").length);
       const page = deepPage
@@ -828,7 +838,7 @@ export async function executeStandaloneTool(
       const anyGuttersStripped = edits.some((edit) => edit.guttersStripped);
       let response: Awaited<ReturnType<KernelUdsClients["patch"]["Apply"]>>;
       try {
-        response = await input.clients.patch.Apply({
+        response = await withAbortSignal(input.clients.patch.Apply({
           context: nextRequestContext(input.context, "patch"),
           intent: toolIntent(input.contractHash, "write_local"),
           transactionId: input.context.idempotencyKey,
@@ -856,7 +866,7 @@ export async function executeStandaloneTool(
           commitMode: patchArguments.commit_mode === "preview"
             ? PatchCommitMode.PATCH_COMMIT_MODE_PREVIEW_ONLY
             : PatchCommitMode.PATCH_COMMIT_MODE_APPLY_TO_WORKTREE,
-        });
+        }), input.signal);
       } catch (error: unknown) {
         // Deterministic transaction rejection (stale hash, anchor not found,
         // non-unique anchor): no effects were committed, so report a clean,
@@ -942,7 +952,7 @@ export async function executeStandaloneTool(
       }
       const shell = input.call.arguments.shell;
       if (input.call.arguments.background) {
-        const start = await input.clients.jobs.Start({
+        const start = await withAbortSignal(input.clients.jobs.Start({
           context: nextRequestContext(input.context, "exec-background"),
           intent: toolIntent(input.contractHash, "execute_local"),
           command: {
@@ -958,7 +968,7 @@ export async function executeStandaloneTool(
           sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
           outputPolicyId: "tool-result-bounded",
           durable: false,
-        });
+        }), input.signal);
         const elapsed = performance.now() - startedAt;
         const result = okResult({
           background_id: start.jobId,
@@ -1064,7 +1074,7 @@ async function executeWebFetch(
   const effectId = randomUUID();
   let bodyBytes: Uint8Array;
   try {
-    const grant = await input.clients.connectors.MintGrant({
+    const grant = await withAbortSignal(input.clients.connectors.MintGrant({
       context: nextRequestContext(input.context, "web-fetch-grant"),
       capabilityUri: "",
       binding: {
@@ -1077,9 +1087,9 @@ async function executeWebFetch(
         effectId,
       },
       ttlSeconds: 60,
-    });
+    }), input.signal);
     if (grant.encodedGrant.length === 0) throw new Error("kernel returned an empty connector grant");
-    const response = await input.clients.connectors.Execute({
+    const response = await withAbortSignal(input.clients.connectors.Execute({
       context: nextRequestContext(input.context, "web-fetch-execute"),
       encodedGrant: grant.encodedGrant,
       operation: {
@@ -1092,7 +1102,7 @@ async function executeWebFetch(
         headers: [{ name: "accept", value: "text/*, application/json;q=0.9, */*;q=0.5" }],
         body: new Uint8Array(),
       },
-    });
+    }), input.signal);
     const status = response.receipt?.statusCode;
     if (status === undefined) throw new Error(`fetch did not settle: ${response.receipt?.outcome ?? "missing receipt"}`);
     if (status < 200 || status > 299) throw new Error(`destination returned HTTP ${status}`);
@@ -1127,11 +1137,11 @@ async function executeWebFetch(
   const boundedBody = bodyBytes.byteLength > input.call.arguments.max_bytes
     ? bodyBytes.slice(0, input.call.arguments.max_bytes)
     : bodyBytes;
-  const ingest = await input.clients.artifacts.Ingest({
+  const ingest = await withAbortSignal(input.clients.artifacts.Ingest({
     context: nextRequestContext(input.context, "web-fetch-artifact"),
     content: boundedBody,
     mediaType: "application/octet-stream",
-  });
+  }), input.signal);
   const artifact = kernelArtifactDescriptor(ingest.artifact);
   const excerptText = new TextDecoder("utf-8", { fatal: false }).decode(boundedBody).slice(0, WEB_FETCH_EXCERPT_CHARS);
   const elapsed = performance.now() - startedAt;
@@ -1184,10 +1194,10 @@ async function settleJobPoll(
   input: ExecuteStandaloneToolInput & { readonly call: Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }> },
   startedAt: number,
 ): Promise<ToolResult<unknown>> {
-  const state = await input.clients.jobs.Get({
+  const state = await withAbortSignal(input.clients.jobs.Get({
     context: nextRequestContext(input.context, "exec-poll"),
     jobId: input.call.arguments.background_id,
-  });
+  }), input.signal);
   const elapsed = performance.now() - startedAt;
   if (state.state !== "exited") {
     const result = okResult({
@@ -1256,7 +1266,17 @@ async function settleJobPoll(
     sideEffects: [],
     timing: { executionMs: elapsed, totalMs: elapsed },
   });
-  return { ...result, policyDecisionId: input.policyDecisionId };
+  return {
+    ...result,
+    policyDecisionId: input.policyDecisionId,
+    truncation: stdoutTail.truncated || stderrTail.truncated
+      ? {
+          occurred: true,
+          reason: "job output is projected as bounded tails",
+          continuation: stdoutArtifact?.uri ?? stderrArtifact?.uri ?? null,
+        }
+      : result.truncation,
+  };
 }
 
 async function fetchArtifactTail(
@@ -1268,10 +1288,10 @@ async function fetchArtifactTail(
     return { text: "", totalBytes: 0, truncated: false };
   }
   try {
-    const response = await input.clients.artifacts.Get({
+    const response = await withAbortSignal(input.clients.artifacts.Get({
       context: nextRequestContext(input.context, "exec-poll-artifact"),
       sha256: artifactRef.sha256,
-    });
+    }), input.signal);
     return tailOf(response.content, tailBytes);
   } catch (error: unknown) {
     // The job output exists but cannot be fetched; surface the reason rather
@@ -1307,7 +1327,17 @@ async function settleProcessOutcome(
   events: ReturnType<KernelUdsClients["process"]["Start"]>,
   startedAt: number,
 ): Promise<ToolResult<unknown>> {
-  const outcome = await collectProcess(events);
+  const outcome = await collectProcess(
+    events,
+    input.signal,
+    async (processId) => {
+      await input.clients.process.Cancel({
+        context: nextRequestContext(input.context, "process-cancel"),
+        processId,
+        reason: "turn-cancelled",
+      });
+    },
+  );
   const elapsed = performance.now() - startedAt;
   if (outcome.kind === "denied") {
     const base = okResult(null, {
@@ -1335,11 +1365,14 @@ async function settleProcessOutcome(
   const expected = processExitExpected(input.call, outcome.exitCode);
   let data: Record<string, unknown>;
   let summary: string;
+  let projectionTruncated = outcome.truncated;
+  const projectionContinuation = stdoutArtifact?.uri ?? stderrArtifact?.uri ?? null;
   if (input.call.toolId === "grep" || input.call.toolId === "glob") {
     const lines = outcome.stdout.length === 0 ? [] : outcome.stdout.replace(/\n$/, "").split("\n");
     const limit = input.call.toolId === "grep" ? input.call.arguments.max_results : input.call.arguments.max_results;
     const total = lines.length;
     const bounded = lines.slice(0, limit);
+    if (total > bounded.length) projectionTruncated = true;
     data = input.call.toolId === "grep"
       ? { matches: bounded, reported_matches: bounded.length, total_found: total, exit_code: outcome.exitCode }
       : { paths: bounded, reported_paths: bounded.length, total_found: total, exit_code: outcome.exitCode };
@@ -1371,11 +1404,13 @@ async function settleProcessOutcome(
     ...base,
     status: expected ? "success" : "error",
     policyDecisionId: input.policyDecisionId,
-    truncation: outcome.truncated
+    truncation: projectionTruncated
       ? {
           occurred: true,
-          reason: "process output exceeded the model-result projection",
-          continuation: stdoutArtifact?.uri ?? stderrArtifact?.uri ?? null,
+          reason: outcome.truncated
+            ? "process output exceeded the model-result projection"
+            : "search result exceeded max_results",
+          continuation: projectionContinuation,
         }
       : base.truncation,
   };
@@ -1459,11 +1494,15 @@ type ProcessOutcome =
       readonly truncated: boolean;
     };
 
-function collectProcess(events: { readonly subscribe: (observer: {
-  readonly next: (event: ProcessEvent) => void;
-  readonly error: (error: unknown) => void;
-  readonly complete: () => void;
-}) => { readonly unsubscribe: () => void } }): Promise<ProcessOutcome> {
+function collectProcess(
+  events: { readonly subscribe: (observer: {
+    readonly next: (event: ProcessEvent) => void;
+    readonly error: (error: unknown) => void;
+    readonly complete: () => void;
+  }) => { readonly unsubscribe: () => void } },
+  signal: AbortSignal | null | undefined,
+  cancelProcess: (processId: string) => Promise<void>,
+): Promise<ProcessOutcome> {
   const maximumProjectionBytes = 20 * 1_024;
   return new Promise((resolve, reject) => {
     const stdout: Uint8Array[] = [];
@@ -1472,10 +1511,13 @@ function collectProcess(events: { readonly subscribe: (observer: {
     let totalBytes = 0;
     let settled = false;
     let subscription: { readonly unsubscribe: () => void } | null = null;
+    let processId: string | null = null;
+    let cancelRequested = false;
     const finish = (callback: () => void): void => {
       if (settled) return;
       settled = true;
       subscription?.unsubscribe();
+      signal?.removeEventListener("abort", onAbort);
       callback();
     };
     const retain = (target: Uint8Array[], bytes: Uint8Array): void => {
@@ -1486,8 +1528,28 @@ function collectProcess(events: { readonly subscribe: (observer: {
       target.push(retained);
       projectedBytes += retained.byteLength;
     };
+    const onAbort = (): void => {
+      if (settled) return;
+      cancelRequested = true;
+      const id = processId;
+      subscription?.unsubscribe();
+      if (id !== null) void cancelProcess(id).catch(() => undefined);
+      finish(() => reject(new ToolAbortedError()));
+    };
+    if (signal?.aborted === true) {
+      onAbort();
+      return;
+    }
     subscription = events.subscribe({
       next: (event) => {
+        if (event.started !== undefined) {
+          processId = event.started.processId;
+          if (cancelRequested) void cancelProcess(processId).catch(() => undefined);
+        }
+        if (signal?.aborted === true) {
+          onAbort();
+          return;
+        }
         const policy = event.policy;
         if (policy !== undefined && policy.decision !== "allow") {
           finish(() => resolve({ kind: "denied", policy }));
@@ -1513,6 +1575,38 @@ function collectProcess(events: { readonly subscribe: (observer: {
       error: (error) => finish(() => reject(error instanceof Error ? error : new Error(String(error)))),
       complete: () => finish(() => reject(new Error("kernel process stream ended without settlement"))),
     });
+    if (signal !== null && signal !== undefined && !settled) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+}
+
+function assertNotAborted(signal: AbortSignal | null | undefined): void {
+  if (signal?.aborted === true) throw new ToolAbortedError();
+}
+
+function withAbortSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | null | undefined,
+): Promise<T> {
+  if (signal?.aborted === true) return Promise.reject(new ToolAbortedError());
+  if (signal === null || signal === undefined) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort);
+      reject(new ToolAbortedError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
   });
 }
 

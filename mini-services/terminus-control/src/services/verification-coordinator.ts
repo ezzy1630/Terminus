@@ -13,6 +13,12 @@ export interface VerificationTransitionInput {
   readonly verificationPlanId?: string | null;
   readonly eventType: string;
   readonly payload: Readonly<Record<string, unknown>>;
+  readonly repairBudget?: {
+    readonly maxAttempts: number;
+    readonly attemptNumber: number;
+    readonly failureSignatures: readonly string[];
+    readonly sourceRevision: string;
+  };
 }
 
 export interface VerificationCoordinatorDependencies<TTransaction> {
@@ -22,6 +28,14 @@ export interface VerificationCoordinatorDependencies<TTransaction> {
     transaction: TTransaction,
     input: VerificationTransitionInput,
     expectedStatuses: readonly string[],
+  ) => Promise<void>;
+  /** Atomically admit task completion and the corresponding verified turn. */
+  readonly updateTaskAndTurn?: (
+    transaction: TTransaction,
+    input: VerificationTransitionInput,
+    expectedStatuses: readonly string[],
+    turnId: string,
+    expectedTurnState: string,
   ) => Promise<void>;
   readonly mutate: MutationRunner;
   readonly projectTask: (taskId: string, eventType: string) => Promise<void>;
@@ -81,7 +95,11 @@ export class VerificationCoordinator<TTransaction> {
       readonly attemptNumber: number;
       readonly directiveArtifactUri: string;
       readonly failedNodeIds: readonly string[];
+      readonly failureSignatures?: readonly string[];
+      readonly remainingAttempts?: number;
       readonly stopReason?: string;
+      readonly maxAttempts?: number;
+      readonly sourceRevision?: string;
     },
   ): Promise<void> {
     await this.transition({
@@ -97,13 +115,26 @@ export class VerificationCoordinator<TTransaction> {
         repair_attempt: input.attemptNumber,
         directive_artifact: input.directiveArtifactUri,
         failed_nodes: [...input.failedNodeIds],
+        ...(input.failureSignatures === undefined ? {} : { failure_signatures: [...input.failureSignatures] }),
+        ...(input.sourceRevision === undefined ? {} : { source_revision: input.sourceRevision }),
+        ...(input.remainingAttempts === undefined ? {} : { remaining_attempts: input.remainingAttempts }),
         ...(input.stopReason !== undefined ? { stop_reason: input.stopReason } : {}),
       },
+      ...(input.maxAttempts === undefined || input.sourceRevision === undefined
+        ? {}
+        : {
+            repairBudget: {
+              maxAttempts: input.maxAttempts,
+              attemptNumber: input.attemptNumber,
+              failureSignatures: input.failureSignatures ?? [],
+              sourceRevision: input.sourceRevision,
+            },
+          }),
     }, ["VERIFYING"]);
   }
 
-  async complete(taskId: string, verificationPlanId: string): Promise<void> {
-    await this.transition({
+  async complete(taskId: string, verificationPlanId: string, turnId?: string): Promise<void> {
+    const input: VerificationTransitionInput = {
       taskId,
       status: "COMPLETED",
       phase: "COMPLETE",
@@ -111,8 +142,31 @@ export class VerificationCoordinator<TTransaction> {
       terminalReasonJson: null,
       verificationPlanId,
       eventType: "task.completed",
-      payload: { phase: "COMPLETE", status: "COMPLETED" },
-    }, ["VERIFYING"]);
+      payload: { phase: "COMPLETE", status: "COMPLETED", verification_plan_id: verificationPlanId },
+    };
+    if (turnId === undefined) {
+      await this.transition(input, ["VERIFYING"]);
+      return;
+    }
+    const updateTaskAndTurn = this.dependencies.updateTaskAndTurn;
+    if (updateTaskAndTurn === undefined) {
+      throw new Error("atomic task/turn completion admission is not configured");
+    }
+    await this.dependencies.mutate(async () => {
+      await this.dependencies.appendEvent(
+        {
+          eventType: input.eventType,
+          aggregateType: "task",
+          aggregateId: taskId,
+          correlationId: taskId,
+          payload: input.payload,
+        },
+        async (transaction) => {
+          await updateTaskAndTurn(transaction, input, ["VERIFYING"], turnId, "VERIFYING");
+        },
+      );
+    });
+    await this.dependencies.projectTask(taskId, input.eventType);
   }
 
   private async transition(

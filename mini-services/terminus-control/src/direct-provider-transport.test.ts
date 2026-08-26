@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test";
+import { Observable } from "rxjs";
 import type {
   CanonicalRenderInput,
   RenderedProviderRequest,
 } from "@terminus/provider-core";
+import type {
+  ConnectorChunk,
+  ConnectorService,
+  RequestContext,
+} from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import type { DirectHttpRequest } from "./direct-provider-transport.js";
 import {
+  KernelDirectConnectorClient,
   createDirectRenderer,
   directEndpoint,
   directNetworkDestinations,
@@ -170,6 +177,48 @@ describe("direct transport dispatch", () => {
       { stream() { throw new Error("must not be called"); } },
     )).rejects.toThrow(/exceeds/);
   });
+
+  test("does not duplicate a request when a streaming RPC emits bytes before failing", async () => {
+    let executeCalls = 0;
+    const connectors = makeConnectorService({
+      Execute: async () => {
+        executeCalls += 1;
+        return { receipt: makeReceipt(200), body: new Uint8Array() };
+      },
+      ExecuteStream: () => new Observable<ConnectorChunk>((subscriber) => {
+        subscriber.next({ bytes: new TextEncoder().encode("partial") });
+        subscriber.error(new Error("UNIMPLEMENTED: stream method unavailable"));
+      }),
+    });
+    const client = new KernelDirectConnectorClient(connectors, makeContext());
+    const received: Uint8Array[] = [];
+
+    await expect((async () => {
+      for await (const chunk of client.stream(makeDirectRequest())) received.push(chunk);
+    })()).rejects.toThrow(/UNIMPLEMENTED/);
+    expect(new TextDecoder().decode(received[0])).toBe("partial");
+    expect(executeCalls).toBe(0);
+  });
+
+  test("falls back to unary dispatch when ExecuteStream is absent", async () => {
+    let executeCalls = 0;
+    const connectors = makeConnectorService({
+      Execute: async () => {
+        executeCalls += 1;
+        return {
+          receipt: makeReceipt(200),
+          body: new TextEncoder().encode("data: {}\n\n"),
+        };
+      },
+      ExecuteStream: undefined,
+    });
+    const client = new KernelDirectConnectorClient(connectors, makeContext());
+    const received: Uint8Array[] = [];
+    for await (const chunk of client.stream(makeDirectRequest())) received.push(chunk);
+
+    expect(executeCalls).toBe(1);
+    expect(new TextDecoder().decode(received[0])).toBe("data: {}\n\n");
+  });
 });
 
 describe("renderer factory", () => {
@@ -226,5 +275,62 @@ function makeCanonicalInput(modelKey: string): CanonicalRenderInput {
     hardInputLimit: 200_000n as never,
     signal: null,
     manifestId: "manifest-test",
+  };
+}
+
+function makeContext(): RequestContext {
+  return {
+    requestId: "00000000-0000-7000-8000-000000000001",
+    idempotencyKey: "direct-test",
+    sessionId: "session-1",
+    taskId: "task-1",
+    turnId: "turn-1",
+    actorId: "test",
+    traceparent: "00-00000000000000000000000000000000-0000000000000000-01",
+    capabilityToken: "capability-token",
+    workspaceId: "workspace-1",
+    deadline: undefined,
+    resourceBudgets: undefined,
+    policyVersion: "test-policy",
+  };
+}
+
+function makeReceipt(statusCode: number) {
+  return {
+    grantId: "grant-1",
+    taskId: "task-1",
+    effectId: "effect-1",
+    connectorId: "anthropic-messages",
+    method: "POST",
+    path: "/v1/messages",
+    destination: "api.anthropic.com:443",
+    requestSha256: "sha256:request",
+    statusCode,
+    responseSha256: "sha256:response",
+    responseRedactions: 0,
+    outcome: "ok",
+  };
+}
+
+function makeConnectorService(overrides: {
+  readonly Execute: ConnectorService["Execute"];
+  readonly ExecuteStream: ConnectorService["ExecuteStream"] | undefined;
+}): ConnectorService {
+  return {
+    MintGrant: async () => ({ encodedGrant: "encoded-grant", grantId: "grant-1", expiresAtUnix: 1_800_000_000 }),
+    Execute: overrides.Execute,
+    ExecuteStream: overrides.ExecuteStream as ConnectorService["ExecuteStream"],
+  };
+}
+
+function makeDirectRequest(): DirectHttpRequest {
+  return {
+    method: "POST",
+    host: "api.anthropic.com",
+    port: 443,
+    path: "/v1/messages",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+    credentialBindingId: "secret://direct/anthropic",
   };
 }
