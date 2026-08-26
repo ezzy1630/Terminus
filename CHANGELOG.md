@@ -4,6 +4,19 @@ All notable changes to Terminus are documented here. The format follows [Keep a 
 
 ## Unreleased
 
+### Added
+
+- `@terminus/permissions` — declarative ask/allow/deny tool permission engine with glob pattern matching and remembered session approvals (ADR-0045).
+- `crates/terminus-patch` — tolerant anchor resolution fallback chain for exact-text file edits (ADR-0046).
+- `@terminus/rollout` — canonical session rollout trajectory projection, JSONL encoder, and `GET /v1/sessions/:id/rollout` endpoint (ADR-0047).
+- `@terminus/aci` — interactive `question` tool definition and executor for user decisions (ADR-0048).
+- `@terminus/cron` — deterministic UTC cron/interval scheduling engine with `/v1/cron` management routes (ADR-0049).
+- `@terminus/adapter-sdk` — lifecycle hooks contract, dispatcher, and 128KB payload size bounds (ADR-0050).
+- `@terminus/lsp` — Language Server Protocol client, server registry, and root discovery (ADR-0051).
+- `@terminus/context-compiler` — instruction discovery hardening with `AGENTS.override.md` precedence, fallback filenames, and explicit truncation markers.
+- `mini-services/terminus-control` — doom-loop guard in coding turn engine detecting repeated identical tool calls.
+- `@terminus/aci` — populated truncation continuation referencing immutable artifact URIs on stdout spills.
+
 ### Changed
 
 - Terminus now owns ARP, the public API, and the public client directly. ADR-0039 retires the OpenCode bridge, source pin, overlays, divergence tooling, and fork release gates.

@@ -9,7 +9,7 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 |---|---:|
 | `production` | 0 |
 | `preview` | 11 |
-| `experimental` | 46 |
+| `experimental` | 50 |
 | `stub` | 9 |
 | `fixture` | 5 |
 
@@ -54,11 +54,14 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `capability-registry` | ts-package | `packages/capability-registry` | `experimental` | Skills/MCP/plugins activation lifecycle |
 | `context-compiler` | ts-package | `packages/context-compiler` | `experimental` | 16-step assembly algorithm; manifest reproduction not proven end-to-end at HEAD |
 | `context-ir` | ts-package | `packages/context-ir` | `experimental` | Fragment/source-descriptor types |
+| `cron` | ts-package | `packages/cron` | `experimental` | Deterministic UTC-only cron schedule parsing, interval scheduling, and catchup protection (ADR-0049) |
 | `extension-host` | ts-package | `packages/extension-host` | `experimental` | WASI/process hosts, hook semantics |
+| `lsp` | ts-package | `packages/lsp` | `experimental` | JSON-RPC Language Server Protocol client, language server registry, and root discovery (ADR-0051) |
 | `memory` | ts-package | `packages/memory` | `experimental` | Extraction/consolidation/retrieval with unit tests; promotion gates unproven on cohorts |
 | `model-router` | ts-package | `packages/model-router` | `experimental` | Provider-neutral profile references, empirical posteriors, deterministic routing, rate limits, circuit breaker, and continuation; live-provider benefit unproven |
 | `observability` | ts-package | `packages/observability` | `experimental` | OTel spans/logging/metrics wrappers |
 | `orchestration` | ts-package | `packages/orchestration` | `experimental` | Phase 8 scheduling plus Phase 9/10 typed coordinators; governed browser, desktop, connector, and intervention executors are not integrated |
+| `permissions` | ts-package | `packages/permissions` | `experimental` | Declarative tool permission engine, glob pattern matching, and remembered approvals (ADR-0045) |
 | `policy-coordinator` | ts-package | `packages/policy-coordinator` | `experimental` | Bridges task contracts and kernel capability requests |
 | `provider-anthropic` | ts-package | `packages/provider-anthropic` | `experimental` | Provider renderer; golden/live conformance not recorded at HEAD |
 | `provider-cache` | ts-package | `packages/provider-cache` | `experimental` | Provider cache accounting |
@@ -70,6 +73,7 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `provider-zen` | ts-package | `packages/provider-zen` | `experimental` | Zen and Go renderers, catalog decoder, normalized transport, and kernel gateway wiring have focused tests; real-account inference conformance is not recorded at HEAD |
 | `public-client` | ts-package | `packages/public-client` | `experimental` | Typed HTTP/SSE client with bearer auth and idempotent mutation support; independent-runtime conformance unproven |
 | `remote` | ts-package | `packages/remote` | `experimental` | Remote execution types/clients |
+| `rollout` | ts-package | `packages/rollout` | `experimental` | Canonical session rollout trajectory projection, JSONL encoder, and resume/fork helpers (ADR-0047) |
 | `session-runtime` | ts-package | `packages/session-runtime` | `experimental` | Session/thread/turn services; context epoch lifecycle |
 | `task-runtime` | ts-package | `packages/task-runtime` | `experimental` | Task lifecycle/contract versioning/scope ledger |
 | `terminus-kernel-client` | ts-package | `packages/terminus-kernel-client` | `experimental` | Typed kernel RPC client |

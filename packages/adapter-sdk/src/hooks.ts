@@ -24,7 +24,7 @@ export type HookPoint = z.infer<typeof hookPointSchema>;
 export interface HookContext {
   readonly hookPoint: HookPoint;
   readonly timestamp: string;
-  readonly correlationId?: string;
+  readonly correlationId?: string | undefined;
 }
 
 export interface HookResult {

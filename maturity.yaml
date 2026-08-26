@@ -81,6 +81,8 @@ components:
       basis: "Semantic event types + SSE codec with tests" }
   - { id: config, kind: ts-package, path: packages/config, tier: preview,
       basis: "Layered typed configuration with JSON Schema codegen" }
+  - { id: cron, kind: ts-package, path: packages/cron, tier: experimental,
+      basis: "Deterministic UTC-only cron schedule parsing, interval scheduling, and catchup protection (ADR-0049)" }
   - { id: public-api, kind: ts-package, path: packages/public-api, tier: preview,
       basis: "HTTP/SSE contracts include typed Phase 9/10 resources and receipt references; trusted computer-use/DLP backends remain absent and fail closed" }
   - { id: aci, kind: ts-package, path: packages/aci, tier: experimental,
@@ -97,6 +99,8 @@ components:
       basis: "Fragment/source-descriptor types" }
   - { id: extension-host, kind: ts-package, path: packages/extension-host, tier: experimental,
       basis: "WASI/process hosts, hook semantics" }
+  - { id: lsp, kind: ts-package, path: packages/lsp, tier: experimental,
+      basis: "JSON-RPC Language Server Protocol client, language server registry, and root discovery (ADR-0051)" }
   - { id: memory, kind: ts-package, path: packages/memory, tier: experimental,
       basis: "Extraction/consolidation/retrieval with unit tests; promotion gates unproven on cohorts" }
   - { id: model-router, kind: ts-package, path: packages/model-router, tier: experimental,
@@ -105,6 +109,8 @@ components:
       basis: "OTel spans/logging/metrics wrappers" }
   - { id: orchestration, kind: ts-package, path: packages/orchestration, tier: experimental,
       basis: "Phase 8 scheduling plus Phase 9/10 typed coordinators; governed browser, desktop, connector, and intervention executors are not integrated" }
+  - { id: permissions, kind: ts-package, path: packages/permissions, tier: experimental,
+      basis: "Declarative tool permission engine, glob pattern matching, and remembered approvals (ADR-0045)" }
   - { id: policy-coordinator, kind: ts-package, path: packages/policy-coordinator, tier: experimental,
       basis: "Bridges task contracts and kernel capability requests" }
   - { id: provider-anthropic, kind: ts-package, path: packages/provider-anthropic, tier: experimental,
@@ -129,6 +135,8 @@ components:
       basis: "Typed HTTP/SSE client with bearer auth and idempotent mutation support; independent-runtime conformance unproven" }
   - { id: remote, kind: ts-package, path: packages/remote, tier: experimental,
       basis: "Remote execution types/clients" }
+  - { id: rollout, kind: ts-package, path: packages/rollout, tier: experimental,
+      basis: "Canonical session rollout trajectory projection, JSONL encoder, and resume/fork helpers (ADR-0047)" }
   - { id: session-runtime, kind: ts-package, path: packages/session-runtime, tier: experimental,
       basis: "Session/thread/turn services; context epoch lifecycle" }
   - { id: task-runtime, kind: ts-package, path: packages/task-runtime, tier: experimental,

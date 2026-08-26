@@ -59,7 +59,11 @@ fn split_lines(source: &str) -> Vec<Line> {
         if text.ends_with('\r') {
             text.pop();
         }
-        lines.push(Line { start: cursor, end, text });
+        lines.push(Line {
+            start: cursor,
+            end,
+            text,
+        });
         cursor = match newline {
             Some(rel) => cursor + rel + 1,
             None => bytes.len(),
@@ -87,7 +91,7 @@ fn significant_tail(lines: &[Line]) -> usize {
     end
 }
 
-fn windows_of<'a>(lines: &'a [Line], width: usize) -> impl Iterator<Item = &'a [Line]> {
+fn windows_of(lines: &[Line], width: usize) -> impl Iterator<Item = &[Line]> {
     lines.windows(width.max(1))
 }
 
@@ -158,18 +162,22 @@ fn resolve_block_anchor(original: &[Line], expected: &[Line]) -> Option<(usize, 
             continue;
         }
         let limit = usize::min(original.len(), i.saturating_add(horizon));
-        for j in (i + 2)..limit {
-            if trim_ends(&original[j].text) == last {
-                if found.is_some() {
-                    return None; // ambiguous
+        if i + 2 < limit {
+            for (j, candidate) in original.iter().enumerate().take(limit).skip(i + 2) {
+                if trim_ends(&candidate.text) == last {
+                    if found.is_some() {
+                        return None; // ambiguous
+                    }
+                    found = Some((i, j + 1));
+                    break;
                 }
-                found = Some((i, j + 1));
-                break;
             }
         }
     }
     found
 }
+
+type ResolverFn = fn(&[Line], &[Line]) -> Option<(usize, usize)>;
 
 /// Attempt tolerant resolvers in deterministic order and return the unique
 /// match from the first resolver that yields exactly one candidate.
@@ -177,9 +185,12 @@ pub fn resolve_fuzzy_anchor(original: &str, expected: &str) -> Option<FallbackMa
     let original_lines = split_lines(original);
     let expected_lines = split_lines(expected);
 
-    let attempts: [(FallbackStrategy, fn(&[Line], &[Line]) -> Option<(usize, usize)>); 3] = [
+    let attempts: [(FallbackStrategy, ResolverFn); 3] = [
         (FallbackStrategy::LineTrimmed, resolve_line_trimmed),
-        (FallbackStrategy::WhitespaceCollapsed, resolve_whitespace_collapsed),
+        (
+            FallbackStrategy::WhitespaceCollapsed,
+            resolve_whitespace_collapsed,
+        ),
         (FallbackStrategy::BlockAnchor, resolve_block_anchor),
     ];
 
@@ -189,7 +200,11 @@ pub fn resolve_fuzzy_anchor(original: &str, expected: &str) -> Option<FallbackMa
             let last = &original_lines[end_idx - 1];
             // Spans exclude the trailing terminator; `splice` preserves the
             // document's own separators.
-            return Some(FallbackMatch { start: first.start, end: last.end, strategy });
+            return Some(FallbackMatch {
+                start: first.start,
+                end: last.end,
+                strategy,
+            });
         }
     }
     None
@@ -207,7 +222,8 @@ pub fn dominant_eol(source: &str) -> &'static str {
 }
 
 /// Stable wire name for a strategy (used in audit/journal surfaces).
-pub fn strategy_name(strategy: FallbackStrategy) -> &'static str {
+#[must_use]
+pub const fn strategy_name(strategy: FallbackStrategy) -> &'static str {
     match strategy {
         FallbackStrategy::LineTrimmed => "line_trimmed",
         FallbackStrategy::WhitespaceCollapsed => "whitespace_collapsed",
@@ -251,7 +267,10 @@ mod tests {
         let expected = "fn main() {\n    let x = 1;\n    println!(x);\n}\n";
         let m = resolve_fuzzy_anchor(original, expected).unwrap();
         assert_eq!(m.strategy, FallbackStrategy::LineTrimmed);
-        assert_eq!(&original[m.start..m.end], "fn main() {\n    let x = 1;   \n    println!(x);\n}");
+        assert_eq!(
+            &original[m.start..m.end],
+            "fn main() {\n    let x = 1;   \n    println!(x);\n}"
+        );
     }
 
     #[test]
@@ -267,7 +286,10 @@ mod tests {
         let expected = "alpha = compute(x, yy);\nbeta\n";
         let m = resolve_fuzzy_anchor(original, expected).unwrap();
         assert_eq!(m.strategy, FallbackStrategy::WhitespaceCollapsed);
-        assert_eq!(&original[m.start..m.end], "alpha   = compute(x,   yy);\nbeta");
+        assert_eq!(
+            &original[m.start..m.end],
+            "alpha   = compute(x,   yy);\nbeta"
+        );
     }
 
     #[test]
@@ -276,7 +298,10 @@ mod tests {
         let expected = "start\nfresh\nend\nafter\n";
         let m = resolve_fuzzy_anchor(original, expected).unwrap();
         assert_eq!(m.strategy, FallbackStrategy::BlockAnchor);
-        assert_eq!(&original[m.start..m.end], "start\nstale one\nstale two\nend\nafter");
+        assert_eq!(
+            &original[m.start..m.end],
+            "start\nstale one\nstale two\nend\nafter"
+        );
     }
 
     #[test]

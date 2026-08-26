@@ -37,17 +37,22 @@ export interface QuestionHandler {
   ask(input: QuestionInput, ctx: ToolCallContext): Promise<QuestionResult>;
 }
 
-export class QuestionToolExecutor implements ToolExecutor<QuestionInput, QuestionResult> {
+export class QuestionToolExecutor implements ToolExecutor<QuestionResult> {
+  readonly toolId = "question" as const;
+
   constructor(private readonly handler?: QuestionHandler) {}
 
-  async execute(input: QuestionInput, ctx: ToolCallContext): Promise<ToolResult<QuestionResult>> {
-    const parsed = questionInputSchema.safeParse(input);
+  async execute(args: unknown, ctx: ToolCallContext): Promise<ToolResult<QuestionResult>> {
+    const parsed = questionInputSchema.safeParse(args);
     if (!parsed.success) {
       return errorResult(
         `Invalid question input: ${parsed.error.message}`,
-        ctx,
-        "INVALID_ARGUMENT",
-      ) as ToolResult<QuestionResult>;
+        {
+          toolCallId: ctx.toolCallId,
+          traceId: ctx.traceId,
+          status: "error",
+        },
+      );
     }
 
     if (this.handler) {
@@ -55,15 +60,21 @@ export class QuestionToolExecutor implements ToolExecutor<QuestionInput, Questio
         const result = await this.handler.ask(parsed.data, ctx);
         return okResult(
           result,
-          ctx,
-          `Question ${result.question_id} ${result.status}`,
+          {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+            summary: `Question ${result.question_id} ${result.status}`,
+          },
         );
       } catch (err) {
         return errorResult(
           `Question handler error: ${err instanceof Error ? err.message : String(err)}`,
-          ctx,
-          "INTERNAL_ERROR",
-        ) as ToolResult<QuestionResult>;
+          {
+            toolCallId: ctx.toolCallId,
+            traceId: ctx.traceId,
+            status: "error",
+          },
+        );
       }
     }
 
@@ -75,8 +86,11 @@ export class QuestionToolExecutor implements ToolExecutor<QuestionInput, Questio
     };
     return okResult(
       result,
-      ctx,
-      `Question submitted: ${parsed.data.question.slice(0, 80)}`,
+      {
+        toolCallId: ctx.toolCallId,
+        traceId: ctx.traceId,
+        summary: `Question submitted: ${parsed.data.question.slice(0, 80)}`,
+      },
     );
   }
 }
