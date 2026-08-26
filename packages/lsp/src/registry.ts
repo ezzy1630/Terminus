@@ -97,7 +97,10 @@ export function findWorkspaceRoot(
   rootMarkers: readonly string[],
   existsFn: (path: string) => boolean,
 ): string | null {
-  let current = startDir.replace(/\/+$/, "");
+  let current = startDir;
+  while (current.endsWith("/")) {
+    current = current.slice(0, -1);
+  }
   while (current.length > 0) {
     for (const marker of rootMarkers) {
       const candidate = `${current}/${marker}`;
