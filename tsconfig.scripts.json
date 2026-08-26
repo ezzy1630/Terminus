@@ -38,7 +38,11 @@
       "@terminus/public-api": ["./packages/public-api/src/index.ts"],
       "@terminus/public-client": ["./packages/public-client/src/index.ts"],
       "@terminus/aci": ["./packages/aci/src/index.ts"],
-      "@terminus/workflow-compiler": ["./packages/workflow-compiler/src/index.ts"]
+      "@terminus/workflow-compiler": ["./packages/workflow-compiler/src/index.ts"],
+      "@terminus/permissions": ["./packages/permissions/src/index.ts"],
+      "@terminus/rollout": ["./packages/rollout/src/index.ts"],
+      "@terminus/cron": ["./packages/cron/src/index.ts"],
+      "@terminus/lsp": ["./packages/lsp/src/index.ts"]
     },
     "types": ["bun-types", "node"]
   },

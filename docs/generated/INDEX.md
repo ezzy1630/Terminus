@@ -21,11 +21,11 @@
 
 | File | Size |
 |---|---:|
-| `component-maturity.md` | 12396 B |
+| `component-maturity.md` | 13051 B |
 | `config.md` | 6601 B |
 | `events.md` | 12806 B |
 | `inventory.md` | 1287 B |
 | `public-api.md` | 2876 B |
 | `sqlx.md` | 1088 B |
-| `tools.md` | 9277 B |
+| `tools.md` | 9908 B |
 

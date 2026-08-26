@@ -148,4 +148,20 @@ describe("CodingTurnEngine", () => {
     // response; it rejects out of run().
     await expect(result.then((r) => r.stop)).rejects.toThrow("settlement refused bad-call-id");
   });
+
+  test("aborts with doom_loop when identical tool calls repeat 3 times", async () => {
+    const { stop, trace } = await runHarness({
+      responses: [
+        { calls: [toolCall("c1", "read")] },
+        { calls: [toolCall("c2", "read")] },
+        { calls: [toolCall("c3", "read")] },
+        { text: "never reached" },
+      ],
+    });
+    expect(stop.kind).toBe("doom_loop");
+    if (stop.kind === "doom_loop") {
+      expect(stop.count).toBe(3);
+      expect(stop.signature).toContain("read:");
+    }
+  });
 });

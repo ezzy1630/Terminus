@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://terminus.dev/schemas/tools/question.json",
+  "title": "question",
+  "description": "Interactive question tool to solicit user decisions, confirmations, or input during execution (ADR-0048).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["question"],
+  "properties": {
+    "question": {
+      "type": "string",
+      "description": "The question to ask the user."
+    },
+    "options": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "Optional fixed set of selectable options."
+    },
+    "multiple": {
+      "type": ["boolean", "null"],
+      "description": "Whether multiple options can be selected."
+    },
+    "header": {
+      "type": ["string", "null"],
+      "description": "Short heading or topic for the question."
+    }
+  }
+}

@@ -648,6 +648,47 @@ describe("Project instruction discovery", () => {
     expect(discovered[1]!.path).toBe("/workspace/AGENTS.md");
   });
 
+  test("AGENTS.override.md takes precedence over AGENTS.md and CLAUDE.md", () => {
+    const readFile = (path: string): string | null => {
+      if (path === "/workspace/AGENTS.override.md") return "# Override rules";
+      if (path === "/workspace/AGENTS.md") return "# Standard rules";
+      if (path === "/workspace/CLAUDE.md") return "# Claude rules";
+      return null;
+    };
+
+    const discovered = discoverInstructions(
+      {
+        workspaceRoot: "/workspace",
+        workingDirectory: "/workspace",
+      },
+      readFile,
+    );
+
+    expect(discovered).toHaveLength(1);
+    expect(discovered[0]!.filename).toBe("AGENTS.override.md");
+    expect(discovered[0]!.content).toBe("# Override rules");
+  });
+
+  test("truncates oversized instruction files with explicit marker", () => {
+    const readFile = (path: string): string | null => {
+      if (path === "/workspace/AGENTS.md") return "A".repeat(100);
+      return null;
+    };
+
+    const discovered = discoverInstructions(
+      {
+        workspaceRoot: "/workspace",
+        workingDirectory: "/workspace",
+        filenames: ["AGENTS.md"],
+        maxBytes: 20,
+      },
+      readFile,
+    );
+
+    expect(discovered).toHaveLength(1);
+    expect(discovered[0]!.content).toContain("[TRUNCATION: Project instruction file exceeded 20 bytes; remaining content elided]");
+  });
+
   test("converts discovered instructions to fragments", () => {
     const discovered = [
       {

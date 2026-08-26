@@ -38,15 +38,26 @@ export interface DiscoveredInstruction {
 
 // ──────────────────────── Discovery config ───────────────────────────────────
 
+export const DEFAULT_INSTRUCTION_FILENAMES = [
+  "AGENTS.override.md",
+  "AGENTS.md",
+  "CLAUDE.md",
+  ".cursorrules",
+] as const;
+
+export const DEFAULT_MAX_INSTRUCTION_BYTES = 64 * 1024; // 64 KB
+
 export interface InstructionDiscoveryConfig {
   /** The workspace root directory. */
   readonly workspaceRoot: string;
   /** The working directory within the workspace. */
   readonly workingDirectory: string;
-  /** Filenames to search for. Default: ["AGENTS.md"]. */
+  /** Filenames to search for. Default: DEFAULT_INSTRUCTION_FILENAMES. */
   readonly filenames?: readonly string[] | undefined;
   /** Maximum depth to walk upward (0 = only working directory). */
   readonly maxDepth?: number | undefined;
+  /** Maximum bytes per instruction file before explicit truncation. */
+  readonly maxBytes?: number | undefined;
 }
 
 // ──────────────────────── Discovery function ─────────────────────────────────
@@ -66,8 +77,9 @@ export function discoverInstructions(
   readFile: (path: string) => string | null,
   _listDir?: ((path: string) => readonly string[]) | undefined,
 ): readonly DiscoveredInstruction[] {
-  const filenames = config.filenames ?? ["AGENTS.md"];
+  const filenames = config.filenames ?? DEFAULT_INSTRUCTION_FILENAMES;
   const maxDepth = config.maxDepth ?? 50;
+  const maxBytes = config.maxBytes ?? DEFAULT_MAX_INSTRUCTION_BYTES;
   const results: DiscoveredInstruction[] = [];
 
   // Normalize paths without a backtracking regular expression on caller input.
@@ -84,18 +96,29 @@ export function discoverInstructions(
   let depth = 0;
 
   while (current.startsWith(root) && depth <= maxDepth) {
-    for (const filename of filenames) {
+    for (let fileIndex = 0; fileIndex < filenames.length; fileIndex++) {
+      const filename = filenames[fileIndex]!;
       const fullPath = `${current}/${filename}`;
-      const content = readFile(fullPath);
-      if (content !== null) {
+      const rawContent = readFile(fullPath);
+      if (rawContent !== null) {
+        let content = rawContent;
+        if (Buffer.byteLength(content, "utf8") > maxBytes) {
+          content =
+            content.slice(0, maxBytes) +
+            `\n\n[TRUNCATION: Project instruction file exceeded ${maxBytes} bytes; remaining content elided]\n`;
+        }
         results.push({
           directory: current === root ? "/" : current.slice(root.length) || "/",
           filename,
           path: fullPath,
-          precedence: maxDepth - depth, // Closer to cwd = higher precedence.
+          precedence: (maxDepth - depth) * 100 + (filenames.length - fileIndex),
           content,
           sourceVersion: "current", // Caller should resolve true version.
         });
+        if (filename === "AGENTS.override.md") {
+          // AGENTS.override.md takes complete precedence at this level
+          break;
+        }
       }
     }
 

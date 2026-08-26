@@ -550,18 +550,36 @@ impl PatchEngine {
             PatchError::InvalidEdit(format!("{} is not valid UTF-8", edit.path.relative_path))
         })?;
         let occurrences = original.matches(expected).count();
-        if occurrences == 0 {
-            return Err(PatchError::AnchorNotFound(expected.to_string()));
-        }
-        if edit.require_unique && occurrences > 1 {
+        let replacement = std::str::from_utf8(&edit.replacement_utf8).map_err(|_| {
+            PatchError::InvalidEdit(format!(
+                "replacement for {} is not valid UTF-8",
+                edit.path.relative_path
+            ))
+        })?;
+        let (new_text, fallback_strategy) = if occurrences == 0 {
+            // Literal anchor failed. Try tolerant resolvers (ADR-0046)
+            // before failing the transaction on whitespace or indentation
+            // drift between the model's expectation and the real file.
+            match crate::fallback::resolve_fuzzy_anchor(&original, expected) {
+                Some(matched) => {
+                    let eol = crate::fallback::dominant_eol(&original);
+                    // Normalize the replacement to the document's dominant
+                    // line ending; span splicing preserves separators.
+                    let adjusted = replacement.replace("\r\n", eol);
+                    (
+                        crate::fallback::splice(&original, matched, &adjusted),
+                        Some(matched.strategy),
+                    )
+                }
+                None => return Err(PatchError::AnchorNotFound(expected.to_string())),
+            }
+        } else if edit.require_unique && occurrences > 1 {
             return Err(PatchError::AnchorNotUnique(format!(
                 "anchor found {occurrences} times"
             )));
-        }
-        let replacement = std::str::from_utf8(&edit.replacement_utf8).map_err(|_| {
-            PatchError::InvalidEdit("replacement_utf8 is not valid UTF-8".to_string())
-        })?;
-        let new_text = original.replacen(expected, replacement, 1);
+        } else {
+            (original.replacen(expected, replacement, 1), None)
+        };
         let new_bytes = new_text.as_bytes();
         std::fs::write(&resolved.host.host_path, new_bytes)?;
         let new_hash = sha256_hex(new_bytes);
@@ -570,11 +588,18 @@ impl PatchEngine {
             edit: PatchEdit::ReplaceExactText(edit.clone()),
             new_hash: new_hash.clone(),
         });
+        let operation = match fallback_strategy {
+            Some(strategy) => format!(
+                "replace_exact_fallback_{}",
+                crate::fallback::strategy_name(strategy)
+            ),
+            None => "replace_exact".to_string(),
+        };
         changed_files.push(ChangedFile {
             path: edit.path.clone(),
             old_sha256: format!("sha256:{original_hash}"),
             new_sha256: format!("sha256:{new_hash}"),
-            operation: "replace_exact".to_string(),
+            operation,
         });
         Ok(())
     }

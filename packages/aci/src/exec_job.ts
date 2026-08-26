@@ -232,7 +232,7 @@ export class ProductionExecExecutor implements ToolExecutor<ExecResultData> {
           truncation: {
             occurred: true,
             reason: "stdout_exceeded_maximum_model_bytes",
-            continuation: null,
+            continuation: artifactSpill.uri,
           },
         };
       }

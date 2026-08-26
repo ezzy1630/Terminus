@@ -27,6 +27,7 @@ export * from "./patch.js";
 export * from "./exec_job.js";
 export * from "./capability.js";
 export * from "./output_parsers.js";
+export * from "./question.js";
 
 
 // ────────────────────────── Tool definition contract (§34.3) ─────────────────
@@ -39,6 +40,7 @@ export type ToolId =
   | "job"
   | "inspect"
   | "capability"
+  | "question"
   | (string & {});
 
 export type SideEffectClass =

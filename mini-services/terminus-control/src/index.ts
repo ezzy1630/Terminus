@@ -126,18 +126,21 @@ import {
   resolveKernelEnvironmentDigest,
   resolveWorkspaceRevision,
 } from "./verification-runtime.js";
-import type {
-  TaskContract,
-  AcceptanceCriterion,
-  Checkpoint,
-  ContentHash,
-  Episode,
-  Micros,
-  ModelKey,
-  Rfc3339Timestamp,
-  TokenCount,
+import {
+  generateUuid7,
+  type Uuid7,
+  type TaskContract,
+  type AcceptanceCriterion,
+  type Checkpoint,
+  type ContentHash,
+  type Episode,
+  type Micros,
+  type ModelKey,
+  type Rfc3339Timestamp,
+  type TokenCount,
 } from "@terminus/domain";
-import { generateUuid7, type Uuid7 } from "@terminus/domain";
+import { projectStoredEvents, rolloutToJsonl } from "@terminus/rollout";
+import { scheduleSchema, computeNextRunAt, advanceJob, type CronJob } from "@terminus/cron";
 import {
   authorizationInstanceSchema,
   artifactUriSchema,
@@ -2156,6 +2159,8 @@ const arpV2: ArpV2State = {
   budgets: new Map(),
 };
 
+const cronJobs = new Map<string, CronJob>();
+
 function arpV2StoreFor(aggregateType: string): Map<string, unknown> | null {
   switch (aggregateType) {
     case "task": return arpV2.tasks as Map<string, unknown>;
@@ -3422,6 +3427,86 @@ const routes: Route[] = [
       default_permission_profile: s.defaultPermissionProfile,
       active_thread_id: s.activeThreadId,
       created_at: s.createdAt.toISOString(), updated_at: s.updatedAt.toISOString(),
+    });
+  }),
+  route("GET", "/v1/sessions/:id/rollout", async (req, res, params) => {
+    const s = await db.session.findUnique({ where: { id: String(params.id) } });
+    if (!s) return sendError(res, 404, "SESSION_NOT_FOUND", "session not found", "not_found");
+
+    const url = new URL(req.url ?? "/", "http://terminus.local");
+    const cursor = url.searchParams.get("cursor");
+    const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get("limit") ?? 100) || 100));
+
+    const threads = await db.thread.findMany({
+      where: { sessionId: s.id },
+      select: { id: true },
+    });
+    const threadIds = threads.map((t) => t.id);
+
+    const turns = threadIds.length > 0
+      ? await db.turn.findMany({
+          where: { threadId: { in: threadIds } },
+          select: { id: true },
+        })
+      : [];
+    const turnIds = turns.map((t) => t.id);
+
+    const tasks = await db.task.findMany({
+      where: { sessionId: s.id },
+      select: { id: true },
+    });
+    const taskIds = tasks.map((t) => t.id);
+
+    const aggregateConditions: Array<
+      | { aggregateType: string; aggregateId: string }
+      | { aggregateType: string; aggregateId: { in: string[] } }
+    > = [{ aggregateType: "session", aggregateId: s.id }];
+
+    if (threadIds.length > 0) {
+      aggregateConditions.push({ aggregateType: "thread", aggregateId: { in: threadIds } });
+    }
+    if (turnIds.length > 0) {
+      aggregateConditions.push({ aggregateType: "turn", aggregateId: { in: turnIds } });
+      aggregateConditions.push({ aggregateType: "tool_call", aggregateId: { in: turnIds } });
+    }
+    if (taskIds.length > 0) {
+      aggregateConditions.push({ aggregateType: "task", aggregateId: { in: taskIds } });
+    }
+
+    const rows = await db.semanticEvent.findMany({
+      where: { OR: aggregateConditions },
+      orderBy: [{ occurredAt: "asc" }, { aggregateSequence: "asc" }, { eventId: "asc" }],
+    });
+
+    const projected = projectStoredEvents(rows);
+    let lines = projected;
+    if (cursor !== null) {
+      const idx = projected.findIndex((l) => l.item.event_id === cursor);
+      if (idx >= 0) {
+        lines = projected.slice(idx + 1);
+      }
+    }
+
+    const pagedLines = lines.slice(0, limit);
+    const nextCursor = lines.length > limit ? (pagedLines.at(-1)?.item.event_id ?? null) : null;
+
+    const accept = req.headers.accept ?? "";
+    if (accept.includes("application/x-ndjson") || accept.includes("text/jsonl")) {
+      const jsonl = rolloutToJsonl(pagedLines);
+      const buf = Buffer.from(jsonl, "utf8");
+      res.writeHead(200, {
+        "content-type": "application/x-ndjson",
+        "content-length": String(buf.length),
+        "access-control-allow-origin": CONTROL_CORS_ORIGIN,
+        "vary": "origin",
+      });
+      res.end(buf);
+      return;
+    }
+
+    sendJson(res, 200, {
+      lines: pagedLines,
+      next_cursor: nextCursor,
     });
   }),
   route("GET", "/v1/sessions", async (req, res) => {
@@ -4925,6 +5010,77 @@ const routes: Route[] = [
       source_revision: p.sourceRevision, completion_expression: p.completionExpression,
       nodes: p.nodes.map((n) => ({ id: n.id, kind: n.kind, required: n.required })),
     });
+  }),
+
+  // ────────────────────────── /cron (ADR-0049) ───────────────────────────
+  route("POST", "/v1/cron", async (req, res) => {
+    const body = (await jsonBody(req)) as {
+      schedule: unknown;
+      payload?: Record<string, unknown>;
+      max_catchup_runs?: number;
+    };
+    const parsedSchedule = scheduleSchema.safeParse(body.schedule);
+    if (!parsedSchedule.success) {
+      return sendError(res, 400, "INVALID_SCHEDULE", `invalid schedule: ${parsedSchedule.error.message}`, "validation");
+    }
+    const now = new Date();
+    const nextRun = computeNextRunAt(parsedSchedule.data, now);
+    if (!nextRun) {
+      return sendError(res, 400, "UNSATISFIABLE_SCHEDULE", "schedule has no future execution time within horizon", "validation");
+    }
+    const id = uuid();
+    const job: CronJob = {
+      id,
+      schedule: parsedSchedule.data,
+      state: "active",
+      lastRunAt: null,
+      nextRunAt: nextRun.toISOString(),
+      consecutiveFailures: 0,
+      maxCatchupRuns: body.max_catchup_runs ?? 1,
+      payload: body.payload ?? {},
+    };
+    cronJobs.set(id, job);
+    await emit({
+      eventType: "cron.created",
+      aggregateType: "cron",
+      aggregateId: id,
+      payload: job,
+    });
+    sendJson(res, 201, job);
+  }),
+  route("GET", "/v1/cron", async (_req, res) => {
+    sendJson(res, 200, { jobs: Array.from(cronJobs.values()) });
+  }),
+  route("GET", "/v1/cron/:id", async (_req, res, params) => {
+    const job = cronJobs.get(String(params.id));
+    if (!job) return sendError(res, 404, "CRON_JOB_NOT_FOUND", "cron job not found", "not_found");
+    sendJson(res, 200, job);
+  }),
+  route("DELETE", "/v1/cron/:id", async (_req, res, params) => {
+    const job = cronJobs.get(String(params.id));
+    if (!job) return sendError(res, 404, "CRON_JOB_NOT_FOUND", "cron job not found", "not_found");
+    cronJobs.delete(job.id);
+    await emit({
+      eventType: "cron.deleted",
+      aggregateType: "cron",
+      aggregateId: job.id,
+      payload: { id: job.id },
+    });
+    sendJson(res, 200, { deleted: true, id: job.id });
+  }),
+  route("POST", "/v1/cron/:id/tick", async (_req, res, params) => {
+    const job = cronJobs.get(String(params.id));
+    if (!job) return sendError(res, 404, "CRON_JOB_NOT_FOUND", "cron job not found", "not_found");
+    const now = new Date();
+    const advanced = advanceJob(job, now);
+    cronJobs.set(job.id, advanced);
+    await emit({
+      eventType: "cron.ticked",
+      aggregateType: "cron",
+      aggregateId: job.id,
+      payload: { id: job.id, executed_at: now.toISOString() },
+    });
+    sendJson(res, 200, advanced);
   }),
 
   // ────────────────────────── /tools (SPEC §32.1 resource group) ────────
