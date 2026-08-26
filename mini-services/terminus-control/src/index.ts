@@ -138,6 +138,7 @@ import type {
   TokenCount,
 import { generateUuid7, type Uuid7 } from "@terminus/domain";
 import { projectStoredEvents, rolloutToJsonl } from "@terminus/rollout";
+import { scheduleSchema, computeNextRunAt, advanceJob, type CronJob } from "@terminus/cron";
 import {
   authorizationInstanceSchema,
   artifactUriSchema,
@@ -2155,6 +2156,8 @@ const arpV2: ArpV2State = {
   risks: new Map(),
   budgets: new Map(),
 };
+
+const cronJobs = new Map<string, CronJob>();
 
 function arpV2StoreFor(aggregateType: string): Map<string, unknown> | null {
   switch (aggregateType) {
@@ -4995,6 +4998,77 @@ const routes: Route[] = [
       source_revision: p.sourceRevision, completion_expression: p.completionExpression,
       nodes: p.nodes.map((n) => ({ id: n.id, kind: n.kind, required: n.required })),
     });
+  }),
+
+  // ────────────────────────── /cron (ADR-0049) ───────────────────────────
+  route("POST", "/v1/cron", async (req, res) => {
+    const body = (await jsonBody(req)) as {
+      schedule: unknown;
+      payload?: Record<string, unknown>;
+      max_catchup_runs?: number;
+    };
+    const parsedSchedule = scheduleSchema.safeParse(body.schedule);
+    if (!parsedSchedule.success) {
+      return sendError(res, 400, "INVALID_SCHEDULE", `invalid schedule: ${parsedSchedule.error.message}`, "validation");
+    }
+    const now = new Date();
+    const nextRun = computeNextRunAt(parsedSchedule.data, now);
+    if (!nextRun) {
+      return sendError(res, 400, "UNSATISFIABLE_SCHEDULE", "schedule has no future execution time within horizon", "validation");
+    }
+    const id = uuid();
+    const job: CronJob = {
+      id,
+      schedule: parsedSchedule.data,
+      state: "active",
+      lastRunAt: null,
+      nextRunAt: nextRun.toISOString(),
+      consecutiveFailures: 0,
+      maxCatchupRuns: body.max_catchup_runs ?? 1,
+      payload: body.payload ?? {},
+    };
+    cronJobs.set(id, job);
+    await emit({
+      eventType: "cron.created",
+      aggregateType: "cron",
+      aggregateId: id,
+      payload: job,
+    });
+    sendJson(res, 201, job);
+  }),
+  route("GET", "/v1/cron", async (_req, res) => {
+    sendJson(res, 200, { jobs: Array.from(cronJobs.values()) });
+  }),
+  route("GET", "/v1/cron/:id", async (_req, res, params) => {
+    const job = cronJobs.get(String(params.id));
+    if (!job) return sendError(res, 404, "CRON_JOB_NOT_FOUND", "cron job not found", "not_found");
+    sendJson(res, 200, job);
+  }),
+  route("DELETE", "/v1/cron/:id", async (_req, res, params) => {
+    const job = cronJobs.get(String(params.id));
+    if (!job) return sendError(res, 404, "CRON_JOB_NOT_FOUND", "cron job not found", "not_found");
+    cronJobs.delete(job.id);
+    await emit({
+      eventType: "cron.deleted",
+      aggregateType: "cron",
+      aggregateId: job.id,
+      payload: { id: job.id },
+    });
+    sendJson(res, 200, { deleted: true, id: job.id });
+  }),
+  route("POST", "/v1/cron/:id/tick", async (_req, res, params) => {
+    const job = cronJobs.get(String(params.id));
+    if (!job) return sendError(res, 404, "CRON_JOB_NOT_FOUND", "cron job not found", "not_found");
+    const now = new Date();
+    const advanced = advanceJob(job, now);
+    cronJobs.set(job.id, advanced);
+    await emit({
+      eventType: "cron.ticked",
+      aggregateType: "cron",
+      aggregateId: job.id,
+      payload: { id: job.id, executed_at: now.toISOString() },
+    });
+    sendJson(res, 200, advanced);
   }),
 
   // ────────────────────────── /tools (SPEC §32.1 resource group) ────────
