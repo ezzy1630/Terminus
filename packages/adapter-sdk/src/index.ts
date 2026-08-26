@@ -28,6 +28,7 @@ export * from "./mcp_adapter.js";
 export * from "./a2a_adapter.js";
 export * from "./agui_adapter.js";
 export * from "./atif_adapter.js";
+export * from "./hooks.js";
 
 
 export const adapterCapabilityProfileSchema = {
