@@ -603,7 +603,7 @@ export interface ExecuteStandaloneToolInput {
 }
 
 /** Gutter used by numbered reads: `<line>→ <content>`. */
-const NUMBERED_GUTTER_PATTERN = /^(\d+)→ /;
+const NUMBERED_GUTTER_PATTERN = /^\s*(\d+)→ /;
 
 export function renderNumbered(text: string, startLine: number): string {
   const normalized = text.endsWith("\n") ? text.slice(0, -1) : text;

@@ -58,13 +58,10 @@ function renderNumberedSource(
 ): string {
   // Same `<line>→ ` gutter the read tool renders (agent-tools.ts), so spans
   // copied from hydrated hits strip cleanly in patch and stay consistent
-  // across context sources. startLine is already 1-based.
-  const gutterWidth = String(startLine + lines.length).length;
+  // across context sources. startLine is already 1-based. No padding: the
+  // shared stripper anchors on a digit at column zero.
   return lines
-    .map(
-      (text, index) =>
-        `${String(startLine + index).padStart(gutterWidth, " ")}→ ${text}`,
-    )
+    .map((text, index) => `${startLine + index}→ ${text}`)
     .join("\n");
 }
 
