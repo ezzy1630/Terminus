@@ -125,18 +125,19 @@ import {
   createPrismaCompletionAdmission,
   resolveKernelEnvironmentDigest,
   resolveWorkspaceRevision,
-} from "./verification-runtime.js";
-import type {
-  TaskContract,
-  AcceptanceCriterion,
-  Checkpoint,
-  ContentHash,
-  Episode,
-  Micros,
-  ModelKey,
-  Rfc3339Timestamp,
-  TokenCount,
-import { generateUuid7, type Uuid7 } from "@terminus/domain";
+import {
+  generateUuid7,
+  type Uuid7,
+  type TaskContract,
+  type AcceptanceCriterion,
+  type Checkpoint,
+  type ContentHash,
+  type Episode,
+  type Micros,
+  type ModelKey,
+  type Rfc3339Timestamp,
+  type TokenCount,
+} from "@terminus/domain";
 import { projectStoredEvents, rolloutToJsonl } from "@terminus/rollout";
 import { scheduleSchema, computeNextRunAt, advanceJob, type CronJob } from "@terminus/cron";
 import {
