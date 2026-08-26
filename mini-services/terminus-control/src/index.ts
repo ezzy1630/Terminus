@@ -4162,6 +4162,7 @@ const routes: Route[] = [
           });
           void sub;
         });
+      };
       const diff = await runCommand(["--no-pager", "diff", "HEAD", "--binary"]);
       const untracked = await runCommand(["ls-files", "--others", "--exclude-standard"]);
       // Index writes (.git/index) are denied by protected-path policy, so
