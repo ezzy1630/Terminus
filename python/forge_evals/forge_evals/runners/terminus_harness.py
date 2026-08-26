@@ -12,6 +12,13 @@ It is deliberately transport-only: it owns NO grading logic. Grading stays
 with the runner's graders so evaluator and harness ownership remain
 separated (anti-gaming rule).
 
+Known contract limits (documented, not hidden): the v1 turns API pins
+model/budgets control-plane-side, so ``RunRequest.budgets`` /
+``model_snapshot`` / ``experiment_assignments`` ride the RunRecord for
+provenance but cannot steer the remote turn. Hidden grader inputs under
+``hidden/`` are excluded from grading trust by end-state graders, since the
+v1 scope grammar has no path negation.
+
 Configuration (all required unless a fake server supplies them in tests):
 
 - ``TERMINUS_CONTROL_URL``   base URL of a running terminus-control instance
