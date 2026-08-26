@@ -26,10 +26,11 @@ This file records observed commands and artifacts. It does not turn source decla
 | Field | Observed value |
 | --- | --- |
 | Implementation commit | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`) |
-| HEAD | `3840e82` (`Document overhaul evidence and handoff`) |
+| Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`) |
+| HEAD at last evidence capture | `f6c856d` (`Bind overhaul evidence to final handoff`) |
 | Branch | `main` |
-| Remote state | One commit ahead of `origin/main`; no push performed |
-| Worktree | Clean after commit and `just codegen-check` |
+| Remote state | Three commits ahead of `origin/main`; no push performed |
+| Worktree | Clean at last evidence capture |
 
 ## Current implementation observations
 
@@ -51,6 +52,7 @@ This file records observed commands and artifacts. It does not turn source decla
 | 2026-08-26 | `just codegen` | PASSED — protobuf, public API, event, tool, config, v2 schema, SQLx, and generated docs completed. Expected generated docs/inventory changed with the source. |
 | 2026-08-26 | `just codegen-check` | PASSED — generated paths are clean against the committed implementation. |
 | 2026-08-26 | `just check` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
+| 2026-08-26 | `just check-all` | PASSED — `just check`, standalone and integration suites, 582 TypeScript tests, 257 Python tests, Rust integration/security tests, platform probes, and `cargo deny check`; 1 live conformance test remained ignored by its explicit network-test annotation. |
 | 2026-08-26 | `just standalone-check` | PASSED — no retired OpenCode runtime/build dependency; explicit runtime-protocol -> public-api -> public-client chain. |
 | 2026-08-26 | `just truth-check` | PASSED — CI triggers include the default branch and declarations agree with metadata. |
 | 2026-08-26 | `bash -n scripts/apply-github-ruleset.sh && jq -e . .github/rulesets/main.json` | PASSED — local ruleset script syntax and JSON are valid. |

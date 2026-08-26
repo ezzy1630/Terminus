@@ -5,7 +5,7 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 ## Current position
 
 - Exact checkout: `/Volumes/Neural/Terminus`.
-- Branch and HEAD: `main` at `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`).
+- Branch: `main`. The implementation and evidence ledger were clean at `f6c856d` (`Bind overhaul evidence to final handoff`); a final ledger-only commit may be newer, so inspect `git log -3` before resuming.
 - The worktree was clean before the ledger files and implementation changes were added. Other registered worktrees remain untouched.
 - Durable ledger files live in `docs/implementation/terminus-overhaul/`.
 - The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, cumulative repair, default-off scout behavior, CI/ruleset declarations, and evaluation-run contracts.
@@ -30,6 +30,7 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - `bun test ...` focused overhaul set: 129 passed, 0 failed.
 - `just codegen`: passed.
 - `just check`: passed; existing clippy warnings and two generated-file ESLint warnings remain non-fatal.
+- `just check-all`: passed; full local TypeScript, Python, Rust integration/security, platform-probe, and dependency-policy gates passed.
 - `just standalone-check`: passed.
 - `just truth-check`: passed.
 - `just github-ruleset-plan`: passed read-only.
