@@ -125,6 +125,7 @@ import {
   createPrismaCompletionAdmission,
   resolveKernelEnvironmentDigest,
   resolveWorkspaceRevision,
+} from "./verification-runtime.js";
 import {
   generateUuid7,
   type Uuid7,
@@ -4161,18 +4162,27 @@ const routes: Route[] = [
           });
           void sub;
         });
-      };
-      // Intent-to-add makes untracked files appear in `git diff HEAD`, so a
-      // task that only adds files still yields an applyable patch (Cubic R8).
-      await runCommand(["add", "--intent-to-add", "--all"]);
       const diff = await runCommand(["--no-pager", "diff", "HEAD", "--binary"]);
       const untracked = await runCommand(["ls-files", "--others", "--exclude-standard"]);
+      // Index writes (.git/index) are denied by protected-path policy, so
+      // intent-to-add cannot work. Emit per-file no-index diffs for bounded
+      // untracked files instead — applyable without touching the index.
+      let untrackedDiff = "";
+      const untrackedFiles = untracked.out.split("\n").filter((line) => line.length > 0).slice(0, 50);
+      for (const file of untrackedFiles) {
+        if (file.includes("..") || file.startsWith("/")) continue;
+        const one = await runCommand(["--no-pager", "diff", "--no-index", "--binary", "/dev/null", file]);
+        // git diff --no-index exits 1 when differences exist — success here.
+        if (one.out.length > 0) {
+          untrackedDiff += one.out + "\n";
+        }
+      }
       sendJson(res, 200, {
         task_id: taskId,
         workspace_id: workspaceRow.id,
         git_available: diff.code !== -1 && !/fatal|not a git repository/i.test(diff.out) ? true : diff.out.length > 0,
-        diff: diff.out.slice(0, 2_000_000),
-        diff_truncated: diff.out.length > 2_000_000,
+        diff: (diff.out + "\n" + untrackedDiff).slice(0, 2_000_000),
+        diff_truncated: diff.out.length + untrackedDiff.length > 2_000_000,
         untracked_files: untracked.out.split("\n").filter((line) => line.length > 0).slice(0, 500),
         exit_code: diff.code,
       });
