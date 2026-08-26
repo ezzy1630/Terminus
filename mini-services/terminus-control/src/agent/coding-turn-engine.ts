@@ -81,11 +81,16 @@ export type EngineStop =
   | { readonly kind: "interrupted" }
   | { readonly kind: "budget_exhausted"; readonly reason: string }
   | { readonly kind: "policy_denied"; readonly message: string }
+  | { readonly kind: "doom_loop"; readonly signature: string; readonly count: number }
   | { readonly kind: "no_final_response" };
+
+export const DOOM_LOOP_THRESHOLD = 3;
 
 export class CodingTurnEngine {
   private readonly dependencies: EngineDependencies;
   readonly budget: TurnBudget;
+  private lastToolSignature: string | null = null;
+  private consecutiveIdenticalCalls = 0;
 
   constructor(dependencies: EngineDependencies) {
     this.dependencies = dependencies;
@@ -135,6 +140,26 @@ export class CodingTurnEngine {
           // artifacts directly.
           responseArtifactUri: null,
         };
+      }
+
+      // Doom-loop detection: repeated identical tool signatures across attempts
+      const toolSignature = toolCalls
+        .map((c) => `${c.toolName}:${JSON.stringify(c.arguments)}`)
+        .sort()
+        .join(";");
+
+      if (toolSignature === this.lastToolSignature) {
+        this.consecutiveIdenticalCalls += 1;
+        if (this.consecutiveIdenticalCalls >= DOOM_LOOP_THRESHOLD) {
+          return {
+            kind: "doom_loop",
+            signature: toolSignature,
+            count: this.consecutiveIdenticalCalls,
+          };
+        }
+      } else {
+        this.lastToolSignature = toolSignature;
+        this.consecutiveIdenticalCalls = 1;
       }
 
       const isReadOnly = (call: ProviderToolCallChunk): boolean =>
