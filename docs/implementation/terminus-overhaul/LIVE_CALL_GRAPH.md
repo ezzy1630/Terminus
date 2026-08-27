@@ -1,6 +1,6 @@
 # Terminus live call graph
 
-Revision: revisioned repository-map/native-recipe discovery commit `6850036`; ledger state is recorded in `HANDOFF.md`.
+Revision: complete bounded repository-map continuation commit `8a2923d`; ledger state is recorded in `HANDOFF.md`.
 
 ## Verified primary path
 
@@ -12,8 +12,9 @@ HTTP/RPC route in mini-services/terminus-control/src/index.ts
   -> context artifact load + provider selection
   -> ContextStateBuilder + Context Compiler
   -> task-scoped kernel FileService.Read for allow-listed repository metadata
-  -> task-scoped kernel CodeIntelligenceService.Map for a revisioned, path-scoped repository map page
-  -> validated repository signals and first-page map fragment with explicit continuation/unavailability
+  -> task-scoped kernel CodeIntelligenceService.Map for a revisioned, path-scoped repository map
+  -> complete bounded continuation read with revision/count/order/hash validation or explicit unavailable signal
+  -> at most 200 complete map entries projected into the model fragment with explicit omission/search guidance
   -> ContextStore persists manifest and rendered request
   -> canonical provider-attempt fingerprint + kernel idempotency key
   -> ProviderSessionService.beginAttempt / execute / settleResponse
@@ -56,8 +57,8 @@ compileProviderContext
   -> native recipe parser emits bounded canonical commands plus source paths and source versions
   -> `CodeIntelligenceService.Map` refreshes the source-only index and returns sorted paths, symbols, revision, total, and opaque continuation
   -> kernel applies workspace path scope before pagination and rejects stale continuations
-  -> control validates paths, hashes, symbols, counts, and truncation; malformed or partial responses become unavailable
-  -> `repository_signals` world-state section + source-attributed repository-map `ContextFragment`
+  -> control follows every bounded continuation and validates paths, hashes, symbols, counts, ordering, revision, and truncation; malformed or partial responses become unavailable
+  -> complete map observation is projected to a bounded source-attributed repository-map `ContextFragment`
   -> verification-plan derivation receives native commands, recipe provenance, and map provenance
 ```
 
@@ -81,7 +82,7 @@ task/turn cancel request
 | `runCompaction` | `compileProviderContext` | live, fail-closed | Source text/provenance, cited summary, signal, and atomic production commit path are required before hiding. |
 | Repository instructions | `loadRepositoryInstructionFragments` | live, kernel-read | Relevant scopes are read through the kernel and injected as hashed required fragments; full invalidation coverage remains. |
 | `Context Compiler` | `compileContext` in `packages/context-compiler` | live | Manifests, exact prefixes, project rules, and source hashes are retained; retrieval/cache ablation remains. |
-| Repository map/native recipes | `discoverRepositorySignals` in `mini-services/terminus-control/src/index.ts` | live, kernel-backed, bounded | Allow-listed metadata reads, scoped revisioned map paging, source hashes, native recipe provenance, explicit unavailable paths, and first-page hydration are wired; full continuation consumption, retrieval metrics/ablation, and monorepo-scale evidence remain. |
+| Repository map/native recipes | `discoverRepositorySignals` in `mini-services/terminus-control/src/index.ts` | live, kernel-backed, bounded | Allow-listed metadata reads, scoped revisioned map paging, complete continuation aggregation, source hashes, native recipe provenance, explicit unavailable paths, and a 200-entry model projection are wired; retrieval metrics/ablation, cache behavior, and monorepo-scale evidence remain. |
 | Provider retry/runtime | `agentLoop` and `providers/*` | live, partial | Attempt stages, canonical request fingerprint/idempotency key, native response metadata, no-duplicate in-flight recovery, direct-stream fallback guards, abort propagation, and one anonymous OpenCode Zen free-model completion through the kernel are proven; endpoint-level deduplication, trusted receipt reconciliation, paid-account, alternate-protocol, cache, and broader live conformance remain. |
 | Verification runtime | `agentLoop` | live, post-proposal | Owns completion admission; new plans derive typed predicates from contract and current task signals including repository-map/native-recipe provenance, exact `RESPONSE_VALIDATING`/`VERIFYING` resume uses persisted response/plan/result identity, durable `ADMITTING` fencing and conservative `MANUAL_REVIEW` recovery remain, and DB-backed proposal/cancellation/completion/branch/verification replay are proven. Trusted external merge receipt, governed UI predicates, full semantic plan coverage, and runtime proof of discovered recipe execution remain. |
 | `VerificationRepairController` | `agentLoop` | live, partial | Cumulative budget, signatures including normalized evidence references, directive, child re-entry, parent supersession, durable lease, DB-backed repair replay, task-level repair metrics, and exact provider-attempt cost-source separation are wired; trusted provider billing, aggregate export, and the remaining fault boundaries are open. |
