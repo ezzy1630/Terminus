@@ -6732,7 +6732,7 @@ const routes: Route[] = [
     // 4. reconcile jobs with OS process/cgroup/job-object state
     // 5. reconcile write journals and patch transactions
     // 6. reconcile external side effects in STARTED or UNKNOWN
-    // 7. mark provider attempts interrupted before a complete response
+    // 7. reconcile provider attempts with no complete response, without retrying
     // 8. restore active context epochs
     // 9. expose tasks as resumable, blocked, or requiring manual review
     // 10. emit a recovery report artifact
@@ -6754,9 +6754,7 @@ const routes: Route[] = [
     // same event/row transaction without attempting to acquire the lock a
     // second time.
     const effectRecovery = await reconcileUnsettledSideEffects(true);
-    // Mark provider attempts interrupted in the same transaction as the
-    // recovery report/event below.
-    const interruptedAttempts = await db.providerAttempt.count({ where: { status: "running" } });
+    const providerRecovery = await reconcileInFlightProviderAttempts(true);
 
     const checkpointLinks = await reconcileCheckpointArtifactLinks();
     const checkpointAdmissions = await reconcilePreparedCheckpointAdmissions();
@@ -6780,21 +6778,11 @@ const routes: Route[] = [
         reconciled_jobs: jobRecovery.scanned,
         lost_jobs: jobRecovery.lost,
         manual_review_effects: effectRecovery.manualReview.length,
-        interrupted_attempts: interruptedAttempts,
+        interrupted_attempts: providerRecovery.interrupted.length,
         recovered_active_turns: recoveredActiveTurns,
         recovered_pending_repairs: recoveredPendingRepairs,
       },
     }, async (tx) => {
-      if (interruptedAttempts > 0) {
-        await tx.providerAttempt.updateMany({
-          where: { status: "running" },
-          data: {
-            status: "interrupted",
-            completedAt: new Date(),
-            errorJson: JSON.stringify({ reason: "process restart" }),
-          },
-        });
-      }
       await tx.recoveryReport.create({
         data: {
           id: reportId,
@@ -6810,12 +6798,13 @@ const routes: Route[] = [
           manualReviewEffects: effectRecovery.manualReview.length,
           integrityOk: integrityOk
             && effectRecovery.failed.length === 0
+            && providerRecovery.failed.length === 0
             && checkpointLinks.failed.length === 0
             && checkpointLinks.quarantined.length === 0
             && checkpointAdmissions.failed.length === 0
             && checkpointAdmissions.quarantined.length === 0,
           detailsJson: JSON.stringify({
-            interruptedAttempts,
+            providerRecovery,
             jobRecovery,
             effectRecovery,
             checkpointLinks,
@@ -6836,12 +6825,13 @@ const routes: Route[] = [
       lost_jobs: report.lostJobs,
       manual_review_effects: report.manualReviewEffects,
       integrity_ok: report.integrityOk,
-      interrupted_attempts: interruptedAttempts,
+      interrupted_attempts: providerRecovery.interrupted.length,
       recovered_active_turns: recoveredActiveTurns,
       recovered_pending_repairs: recoveredPendingRepairs,
       checkpoint_links: checkpointLinks,
       checkpoint_admissions: checkpointAdmissions,
       effect_recovery: effectRecovery,
+      provider_recovery: providerRecovery,
     });
   }),
 
@@ -13230,6 +13220,163 @@ const RECOVERABLE_TOOL_CALL_STATES = new Set(["SETTLED", "FAILED", "TIMED_OUT", 
 const RECOVERABLE_EFFECT_STATES = new Set(["SETTLED", "FAILED"]);
 const IN_FLIGHT_PROVIDER_STATES = new Set(["running", "submitted", "streaming", "starting"]);
 
+interface ProviderAttemptRecoveryRecord {
+  readonly id: string;
+  readonly turnId: string;
+  readonly taskId: string | null;
+  readonly previousStatus: string;
+  readonly providerIdempotencyKey: string | null;
+  readonly requestFingerprint: string | null;
+}
+
+interface ProviderAttemptRecoveryResult {
+  readonly scanned: number;
+  readonly interrupted: readonly ProviderAttemptRecoveryRecord[];
+  readonly alreadyResolved: readonly string[];
+  readonly failed: readonly { id: string; error: string }[];
+}
+
+class ProviderAttemptAlreadyResolvedError extends Error {
+  constructor(readonly attemptId: string) {
+    super(`provider attempt ${attemptId} was already resolved before recovery`);
+    this.name = "ProviderAttemptAlreadyResolvedError";
+  }
+}
+
+/**
+ * Reconcile provider calls that crossed the kernel boundary without a durable
+ * response. They cannot be retried safely: the provider may have accepted the
+ * request even when control did not receive a response. Recovery therefore
+ * records an interrupted attempt, blocks its task, and leaves a deterministic
+ * evidence event for manual/provider-side reconciliation.
+ */
+async function reconcileInFlightProviderAttempts(
+  alreadyUnderMutationLock = false,
+): Promise<ProviderAttemptRecoveryResult> {
+  const attempts = await db.providerAttempt.findMany({
+    where: { status: { in: [...IN_FLIGHT_PROVIDER_STATES] } },
+    orderBy: [{ startedAt: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      turnId: true,
+      status: true,
+      providerIdempotencyKey: true,
+      requestFingerprint: true,
+      requestArtifact: true,
+      responseArtifact: true,
+      turn: { select: { state: true, taskId: true } },
+    },
+  });
+  const interrupted: ProviderAttemptRecoveryRecord[] = [];
+  const alreadyResolved: string[] = [];
+  const failed: Array<{ id: string; error: string }> = [];
+  for (const attempt of attempts) {
+    const recover = async (): Promise<void> => {
+      const interruptedAt = new Date();
+      await emit({
+        eventType: "turn.recovery_interrupted",
+        aggregateType: "turn",
+        aggregateId: attempt.turnId,
+        correlationId: attempt.turn.taskId ?? attempt.turnId,
+        idempotencyKey: `provider-recovery:${attempt.id}`,
+        payload: {
+          previous_state: attempt.turn.state,
+          state: "INTERRUPTED",
+          reason: "provider_attempt_in_flight_on_process_restart",
+          reconciliation_required: true,
+          provider_attempt_id: attempt.id,
+          provider_idempotency_key: attempt.providerIdempotencyKey,
+          request_fingerprint: attempt.requestFingerprint,
+        },
+        artifactRefs: [attempt.requestArtifact, ...(attempt.responseArtifact === null ? [] : [attempt.responseArtifact])],
+      }, async (tx) => {
+        const current = await tx.providerAttempt.findUnique({
+          where: { id: attempt.id },
+          select: { status: true },
+        });
+        if (current === null || !IN_FLIGHT_PROVIDER_STATES.has(current.status.toLowerCase())) {
+          throw new ProviderAttemptAlreadyResolvedError(attempt.id);
+        }
+        const attemptUpdate = await tx.providerAttempt.updateMany({
+          where: { id: attempt.id, status: { in: [...IN_FLIGHT_PROVIDER_STATES] } },
+          data: {
+            status: "interrupted",
+            completedAt: interruptedAt,
+            errorJson: JSON.stringify({
+              reason: "process_restart_before_provider_response",
+              reconciliation_required: true,
+              provider_idempotency_key: attempt.providerIdempotencyKey,
+            }),
+          },
+        });
+        if (attemptUpdate.count !== 1) {
+          throw new ProviderAttemptAlreadyResolvedError(attempt.id);
+        }
+
+        const turn = await tx.turn.findUnique({
+          where: { id: attempt.turnId },
+          select: { state: true, taskId: true },
+        });
+        if (turn !== null && V1_ACTIVE_TURN_STATES.includes(turn.state as (typeof V1_ACTIVE_TURN_STATES)[number])) {
+          const turnUpdate = await tx.turn.updateMany({
+            where: { id: attempt.turnId, state: turn.state },
+            data: {
+              state: "INTERRUPTED",
+              completedAt: interruptedAt,
+              terminalErrorJson: JSON.stringify({
+                reason: "provider_attempt_in_flight_on_process_restart",
+                provider_attempt_id: attempt.id,
+                reconciliation_required: true,
+              }),
+            },
+          });
+          if (turnUpdate.count !== 1) {
+            throw new Error(`turn ${attempt.turnId} changed during provider recovery`);
+          }
+        }
+        if (turn?.taskId !== null && turn?.taskId !== undefined) {
+          await tx.task.updateMany({
+            where: { id: turn.taskId, status: { in: ["ACTIVE", "VERIFYING"] } },
+            data: {
+              status: "BLOCKED",
+              phase: turn.state === "VERIFYING" ? "VERIFY" : "IMPLEMENT",
+              completedAt: null,
+              terminalReasonJson: JSON.stringify({
+                reason: "provider_recovery_required",
+                provider_attempt_id: attempt.id,
+                turn_id: attempt.turnId,
+                reconciliation_required: true,
+              }),
+            },
+          });
+        }
+      });
+    };
+    try {
+      if (alreadyUnderMutationLock) await recover();
+      else await mutateAgentState(recover);
+      interrupted.push({
+        id: attempt.id,
+        turnId: attempt.turnId,
+        taskId: attempt.turn.taskId,
+        previousStatus: attempt.status,
+        providerIdempotencyKey: attempt.providerIdempotencyKey,
+        requestFingerprint: attempt.requestFingerprint,
+      });
+    } catch (error: unknown) {
+      if (error instanceof ProviderAttemptAlreadyResolvedError) {
+        alreadyResolved.push(error.attemptId);
+      } else {
+        failed.push({
+          id: attempt.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+  return { scanned: attempts.length, interrupted, alreadyResolved, failed };
+}
+
 /**
  * A context boundary is safe to resume when no provider request or effect is
  * ambiguous. A tool-settlement boundary is also resumable once every tool
@@ -14181,6 +14328,7 @@ const reconciledIdempotencyReservations = await reconcilePendingIdempotencyReser
 await replayArpV2();
 const jobRecovery = await reconcileNonterminalJobs();
 const effectRecovery = await reconcileUnsettledSideEffects();
+const providerRecovery = await reconcileInFlightProviderAttempts();
 const repairedTaskProjections = await reconcileV1TaskProjections();
 const checkpointLinkRecovery = await reconcileCheckpointArtifactLinks();
 const checkpointAdmissionRecovery = await reconcilePreparedCheckpointAdmissions();
@@ -14190,6 +14338,8 @@ const recoveredDurableRepairAttempts = await recoverDurableRepairAttempts();
 const recoveredPendingRepairTurns = await recoverPendingRepairTurns();
 if (
   effectRecovery.failed.length > 0
+  ||
+  providerRecovery.failed.length > 0
   ||
   checkpointLinkRecovery.failed.length > 0
   || checkpointAdmissionRecovery.failed.length > 0
@@ -14215,6 +14365,11 @@ if (jobRecovery.scanned > 0) {
 if (effectRecovery.scanned > 0) {
   console.log(
     `[terminus-control] effect recovery: ${effectRecovery.manualReview.length} moved to manual review, ${effectRecovery.alreadyResolved.length} already resolved`,
+  );
+}
+if (providerRecovery.scanned > 0) {
+  console.log(
+    `[terminus-control] provider recovery: ${providerRecovery.interrupted.length} interrupted, ${providerRecovery.alreadyResolved.length} already resolved`,
   );
 }
 if (checkpointAdmissionRecovery.prepared > 0) {

@@ -33,6 +33,7 @@ const TEST_PATHS = [
   "tests/recovery/completion_admission_recovery.test.ts",
   "tests/recovery/effect_recovery.test.ts",
   "tests/recovery/provider_attempt_identity.test.ts",
+  "tests/recovery/provider_attempt_recovery.test.ts",
 ] as const;
 
 const DB_BACKED_SCENARIOS = [
@@ -75,6 +76,11 @@ const DB_BACKED_SCENARIOS = [
     scenario: "provider_attempt_identity_replay",
     boundary: "before_provider_send",
     assertions: ["canonical request identity publishes atomically and duplicate provider idempotency keys are rejected"],
+  },
+  {
+    scenario: "provider_attempt_recovery_replay",
+    boundary: "after_provider_send",
+    assertions: ["an in-flight provider attempt is interrupted and blocked atomically without a duplicate recovery event"],
   },
 ] as const;
 
