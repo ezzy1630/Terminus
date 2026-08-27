@@ -1,6 +1,6 @@
 # Terminus live call graph
 
-Revision: functional provider-recovery commit `4316ad1`; ledger state is recorded in `HANDOFF.md`.
+Revision: functional cancellation-recovery commit `a76eb86`; ledger state is recorded in `HANDOFF.md`.
 
 ## Verified primary path
 
@@ -47,9 +47,9 @@ Cancellation path:
 
 ```text
 task/turn cancel request
-  -> mutation-lock transaction emits `turn.aborted`
-  -> every active or REPAIR_PENDING turn is durably ABORTED
-  -> turn AbortController reaches compaction/provider/tools/process/verification
+  -> mutation-lock transaction emits one `turn.aborted` per active turn plus `task.aborted`
+  -> the same transaction CASes every active or REPAIR_PENDING turn and the task to durably ABORTED
+  -> after commit, turn AbortControllers reach compaction/provider/tools/process/verification
   -> dispatched ambiguous effects are atomically recorded as tool UNKNOWN + effect MANUAL_REVIEW with `tool.settlement_unknown`
 ```
 
@@ -64,7 +64,7 @@ task/turn cancel request
 | Repository instructions | `loadRepositoryInstructionFragments` | live, kernel-read | Relevant scopes are read through the kernel and injected as hashed required fragments; full invalidation coverage remains. |
 | `Context Compiler` | `compileContext` in `packages/context-compiler` | live | Manifests, exact prefixes, project rules, and source hashes are retained; retrieval/cache ablation remains. |
 | Provider retry/runtime | `agentLoop` and `providers/*` | live, partial | Attempt stages, canonical request fingerprint/idempotency key, native response metadata, no-duplicate in-flight recovery, direct-stream fallback guards, abort propagation, and one anonymous OpenCode Zen free-model completion through the kernel are proven; endpoint-level deduplication, trusted receipt reconciliation, paid-account, alternate-protocol, cache, and broader live conformance remain. |
-| Verification runtime | `agentLoop` | live, post-proposal | Owns completion admission; one live plan/result/branch-admission path and DB-backed completion replay are proven, while proposal/provider/effect fault coverage and semantic plan coverage remain. |
+| Verification runtime | `agentLoop` | live, post-proposal | Owns completion admission; one live plan/result/branch-admission path and DB-backed proposal/cancellation/completion replay are proven, while trusted branch receipt and semantic plan coverage remain. |
 | `VerificationRepairController` | `agentLoop` | live, partial | Cumulative budget, signatures, directive, child re-entry, parent supersession, durable lease, and DB-backed repair replay scenarios are wired; the remaining fault boundaries are open. |
 | Stagnation supervisor | `/v2/orchestration/stagnation/check` | endpoint/live helper | Reconcile with engine/catalog and structured stop state. |
 | Scout runner | `agentLoop` before main context | live only with explicit opt-in | `TERMINUS_ENABLE_SCOUT=1` is required; utility ledger and promotion evidence remain. |
@@ -75,6 +75,6 @@ task/turn cancel request
 
 ## Recovery boundary
 
-Startup recovery first enumerates `STARTED`/`UNKNOWN`/`RECONCILING` effects. Each ambiguous v1 effect is atomically recorded as tool `UNKNOWN`, effect `MANUAL_REVIEW`, and `tool.settlement_unknown` with a deterministic `effect-recovery:<id>` key; no effect is retried without a trusted receipt query. Provider attempts publish a canonical fingerprint and unique kernel idempotency key before dispatch, with native request and continuation IDs retained when returned. An in-flight provider attempt without a durable response is atomically marked `interrupted`, its turn is marked `INTERRUPTED`, its active task is blocked, and `turn.recovery_interrupted` records the reconciliation requirement; no provider request is replayed automatically. It then resumes PENDING/CONTEXT_COMPILING/REPAIRING and settled TOOL_SETTLEMENT work when provider/effect state is unambiguous. Prepared completion records are reconciled only when their candidate branch is `ADMITTED`; a matching VERIFYING task/turn is completed through the coordinator without provider replay, and unsafe intents are quarantined. A valid PREPARED checkpoint tied to a completed task and FINALIZING/VERIFIED source turn is deferred until terminal recovery can commit checkpoint and terminal rows/events together. Verified/finalizing turns require a completed task, a `COMMITTED` completion record, and proposal response artifact; otherwise recovery emits `turn.recovery_failed` and blocks the task. RESPONSE_VALIDATING and VERIFYING without an admitted completion intent are deliberately not replayed blindly and need a separate durable continuation slice.
+Startup recovery first enumerates `STARTED`/`UNKNOWN`/`RECONCILING` effects. Each ambiguous v1 effect is atomically recorded as tool `UNKNOWN`, effect `MANUAL_REVIEW`, and `tool.settlement_unknown` with a deterministic `effect-recovery:<id>` key; no effect is retried without a trusted receipt query. Provider attempts publish a canonical fingerprint and unique kernel idempotency key before dispatch, with native request and continuation IDs retained when returned. An in-flight provider attempt without a durable response is atomically marked `interrupted`, its turn is marked `INTERRUPTED`, its active task is blocked, and `turn.recovery_interrupted` records the reconciliation requirement; no provider request is replayed automatically. It then resumes PENDING/CONTEXT_COMPILING/REPAIRING and settled TOOL_SETTLEMENT work when provider/effect state is unambiguous. Prepared completion records are reconciled only when their candidate branch is `ADMITTED`; a matching VERIFYING task/turn is completed through the coordinator without provider replay, and unsafe intents are quarantined. A completion proposal by itself remains non-terminal, and unsafe RESPONSE_VALIDATING work is interrupted on recovery. Task cancellation is one atomic task/turn/event batch before in-process abort signaling. A valid PREPARED checkpoint tied to a completed task and FINALIZING/VERIFIED source turn is deferred until terminal recovery can commit checkpoint and terminal rows/events together. Verified/finalizing turns require a completed task, a `COMMITTED` completion record, and proposal response artifact; otherwise recovery emits `turn.recovery_failed` and blocks the task. RESPONSE_VALIDATING and VERIFYING without an admitted completion intent are deliberately not replayed blindly and need a separate durable continuation slice.
 
 The graph is a source-level map, not proof of runtime completion. Proof is in `EVIDENCE.md` and must be extended with live provider, crash/replay, cross-platform, client, and release observations.
