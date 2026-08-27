@@ -1,6 +1,6 @@
 # Terminus live call graph
 
-Revision: durable repair-metrics commit `c94f7fd`; ledger state is recorded in `HANDOFF.md`.
+Revision: exact provider cost-accounting commit `09b9d38`; ledger state is recorded in `HANDOFF.md`.
 
 ## Verified primary path
 

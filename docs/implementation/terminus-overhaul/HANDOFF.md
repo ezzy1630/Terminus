@@ -5,8 +5,8 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 ## Current position
 
 - Exact checkout: `/Volumes/Neural/Terminus`.
-- Branch: `main`. The current implementation head is `c94f7fd` (`Expose durable repair metrics`); no push was performed.
-- Task-owned functional paths are clean at `c94f7fd`; `SPEC.md` retains a pre-existing user edit. Other registered worktrees remain untouched.
+- Branch: `main`. The current implementation head is `09b9d38` (`Persist exact provider cost accounting`); no push was performed.
+- Task-owned functional paths are clean at `09b9d38`; `SPEC.md` retains a pre-existing user edit. Other registered worktrees remain untouched.
 - Durable ledger files live in `docs/implementation/terminus-overhaul/`.
 - The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, anonymous OpenCode Zen free-model inference through the kernel, durable provider-attempt identity and native response metadata, no-duplicate in-flight provider recovery, cumulative repair, durable repair attempts and fencing leases, durable completion admission recovery, candidate-branch admission fencing and manual-review recovery, exact verification resume from persisted response/plan/result identity, default-off scout behavior, CI/ruleset declarations, evaluation-run contracts, and the Prisma DateTime upgrade migration.
 - The latest slice also derives provider-neutral repair metrics from durable records, exposes them from `GET /v1/tasks/:id`, and makes normalized evidence references part of the no-progress signature.
@@ -58,11 +58,16 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - `just check`: passed after `c94f7fd`.
 - `just codegen-check`: passed after committing `c94f7fd`.
 - `just fault-injection`: passed after `c94f7fd`; 13 DB-backed scenarios, `completeForRelease: false`.
-- `just check-all` after `c94f7fd`: interrupted before terminal result and must be rerun.
+- `bun test packages/provider-core/src/cost.test.ts packages/provider-economics/src/economics.test.ts mini-services/terminus-control/src/services/services.test.ts`: passed — 15 tests, 0 failures, 54 expect calls.
+- `bun test tests/persistence/migration_integrity.test.ts`: passed — 5 tests, 0 failures, 34 expect calls, including migration `0017_provider_attempt_cost_accounting.sql`.
+- `bun run typecheck --pretty false`: passed after `09b9d38`.
+- `just codegen`: passed after migration `0017_provider_attempt_cost_accounting.sql`; inventory records 122 TypeScript test files, 952 declared TypeScript test blocks, and 17 SQLite migrations.
+- `just check-all` after `09b9d38`: passed; boundary, Rust, TypeScript, Python, integration, security, standalone/truth, generated-contract, and `cargo deny` checks completed. One explicitly ignored live conformance canary remains.
+- Fresh database migrated through `0017_provider_attempt_cost_accounting.sql` plus the ops collector: passed; the new cost columns were read and the empty aggregate remained explicit.
 
 ## Resume sequence
 
-1. Inspect `git status --short --branch`, the last commit, and all four ledger files. Reconcile this handoff, `EVIDENCE.md`, and `LIVE_CALL_GRAPH.md` to `c94f7fd` before adding new implementation evidence.
+1. Inspect `git status --short --branch`, the last commit, and all four ledger files. Reconcile this handoff, `EVIDENCE.md`, and `LIVE_CALL_GRAPH.md` to `09b9d38` before adding new implementation evidence.
 2. If the user authorizes remote branch-protection mutation, run `just github-ruleset-apply`, then `just github-ruleset-verify` and read back the exact remote settings.
 3. Rerun current-HEAD `just check-all` and record the terminal result. The exact provider-attempt accounting split and local repair-metric aggregation are now implemented; finish trusted provider billing receipts, live export, and restart/read-model proof without treating legacy zero-cost sentinels as measured spend.
 4. Add a trusted external merge-receipt query and later state recovery. The conservative branch-admission `ADMITTING` -> `MANUAL_REVIEW` replay path is covered, alongside effect recovery, proposal/cancellation, completion admission, coupled checkpoint/terminal publication, provider-attempt identity/recovery, repair continuation, and verification resume; trusted receipts and later-state recovery remain before release readiness.

@@ -1,6 +1,6 @@
 # Terminus overhaul status
 
-Updated: 2026-08-26
+Updated: 2026-08-27
 
 State vocabulary: `NOT_STARTED`, `IN_PROGRESS`, `BLOCKED`, `DONE`, `REMOVED_BY_DESIGN`.
 
