@@ -8,9 +8,8 @@
  *     optional semantic)
  *  4. deduplicate and validate freshness
  *  5. build evidence-coverage matrix; expand for gaps
- *  6. score candidates (utility = relevance × authority × freshness × novelty
- *     × coverage × uncertainty_reduction × risk_reduction ×
- *     model_compatibility / token_cost)
+ *  6. score candidates (independent weighted evidence minus penalties,
+ *     divided by token cost)
  *  7. allocate budget (reserves for output/reasoning/tool-results/recovery;
  *     greedy selection preserving dependency closure and complete-episode
  *     integrity)
@@ -67,6 +66,7 @@ import type { ModelTokenizer, TokenEstimator } from "./tokenizer.js";
 import { compactContext, type CompactionTransform } from "./compaction.js";
 import { buildCacheEpochDebugData } from "./cache-debug.js";
 import type { CacheEpochDebugSnapshot } from "./cache-debug.js";
+import { summarizeRetrievalSelection } from "./retrieval-metrics.js";
 export {
   compactContext,
 } from "./compaction.js";
@@ -115,6 +115,24 @@ export type {
   StablePrefixDebugData,
   StablePrefixEntry,
 } from "./cache-debug.js";
+
+export {
+  aggregateRetrievalMetrics,
+  evaluateRetrievalOutcome,
+  summarizeRetrievalSelection,
+  RETRIEVAL_METRICS_VERSION,
+} from "./retrieval-metrics.js";
+export type {
+  RetrievalAggregateMetrics,
+  RetrievalMetricCandidate,
+  RetrievalMetricSymbol,
+  RetrievalOracle,
+  RetrievalOutcomeInput,
+  RetrievalOutcomeMetrics,
+  RetrievalRunMetrics,
+  RetrievalSelectionMetricInput,
+  RetrievalSelectionMetrics,
+} from "./retrieval-metrics.js";
 
 export {
   buildHandoffBundle,
@@ -1127,6 +1145,21 @@ export interface ScoringWeights {
   readonly injectionPenalty: number;
 }
 
+export type ScoringWeightName = keyof ScoringWeights;
+
+const SCORING_WEIGHT_NAMES: readonly ScoringWeightName[] = [
+  "relevance",
+  "authorityWeight",
+  "freshnessWeight",
+  "noveltyWeight",
+  "requirementCoverage",
+  "uncertaintyReduction",
+  "riskReduction",
+  "modelCompatibility",
+  "redundancyPenalty",
+  "injectionPenalty",
+];
+
 export const DEFAULT_WEIGHTS: ScoringWeights = {
   relevance: 1.0,
   authorityWeight: 0.8,
@@ -1140,11 +1173,64 @@ export const DEFAULT_WEIGHTS: ScoringWeights = {
   injectionPenalty: 0.9,
 };
 
+export interface ScoringAblation {
+  readonly label: string;
+  readonly disabledWeights: readonly ScoringWeightName[];
+  readonly weights: ScoringWeights;
+}
+
+function validateScoringWeights(weights: ScoringWeights): void {
+  for (const name of SCORING_WEIGHT_NAMES) {
+    const value = weights[name];
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(`scoring weight ${name} must be a finite non-negative number`);
+    }
+  }
+}
+
+/** Return a deterministic offline policy with selected weights disabled. */
+export function ablateScoringWeights(
+  weights: ScoringWeights = DEFAULT_WEIGHTS,
+  disabledWeights: readonly ScoringWeightName[] = [],
+): ScoringWeights {
+  validateScoringWeights(weights);
+  const disabled = new Set(disabledWeights);
+  for (const name of disabled) {
+    if (!SCORING_WEIGHT_NAMES.includes(name)) {
+      throw new Error(`unknown scoring weight ${name}`);
+    }
+  }
+  return {
+    relevance: disabled.has("relevance") ? 0 : weights.relevance,
+    authorityWeight: disabled.has("authorityWeight") ? 0 : weights.authorityWeight,
+    freshnessWeight: disabled.has("freshnessWeight") ? 0 : weights.freshnessWeight,
+    noveltyWeight: disabled.has("noveltyWeight") ? 0 : weights.noveltyWeight,
+    requirementCoverage: disabled.has("requirementCoverage") ? 0 : weights.requirementCoverage,
+    uncertaintyReduction: disabled.has("uncertaintyReduction") ? 0 : weights.uncertaintyReduction,
+    riskReduction: disabled.has("riskReduction") ? 0 : weights.riskReduction,
+    modelCompatibility: disabled.has("modelCompatibility") ? 0 : weights.modelCompatibility,
+    redundancyPenalty: disabled.has("redundancyPenalty") ? 0 : weights.redundancyPenalty,
+    injectionPenalty: disabled.has("injectionPenalty") ? 0 : weights.injectionPenalty,
+  };
+}
+
+/** One-at-a-time weight ablations for offline comparison only. */
+export function standardScoringAblations(
+  weights: ScoringWeights = DEFAULT_WEIGHTS,
+): readonly ScoringAblation[] {
+  return SCORING_WEIGHT_NAMES.map((name) => ({
+    label: `without_${name}`,
+    disabledWeights: [name],
+    weights: ablateScoringWeights(weights, [name]),
+  }));
+}
+
 export function scoreCandidates(
   candidates: readonly RetrievalResult[],
   input: CompileInput,
   weights: ScoringWeights = DEFAULT_WEIGHTS,
 ): readonly ScoredCandidate[] {
+  validateScoringWeights(weights);
   const modelKey = input.model.modelKey;
   return candidates.map((result) => {
     const frag = result.fragment;
@@ -1153,19 +1239,26 @@ export function scoreCandidates(
       1,
       tokenCostFor(frag, modelKey, input.provider.providerId, input.tokenEstimator),
     );
-    const numerator =
-      weights.relevance * features.relevance *
-      weights.authorityWeight * (frag.authority / 100) *
-      weights.freshnessWeight * (frag.freshness.stale ? 0.2 : 1) *
-      weights.noveltyWeight * features.novelty *
-      weights.requirementCoverage * features.coverage *
-      weights.uncertaintyReduction * features.uncertaintyReduction *
-      weights.riskReduction * features.riskReduction *
-      weights.modelCompatibility * features.modelCompatibility;
+    // Positive evidence contributes independently. A missing or zero-valued
+    // feature must not erase otherwise useful evidence from the candidate.
+    const positiveTerms: readonly [number, number][] = [
+      [weights.relevance, features.relevance],
+      [weights.authorityWeight, frag.authority / 100],
+      [weights.freshnessWeight, frag.freshness.stale ? 0.2 : 1],
+      [weights.noveltyWeight, features.novelty],
+      [weights.requirementCoverage, features.coverage],
+      [weights.uncertaintyReduction, features.uncertaintyReduction],
+      [weights.riskReduction, features.riskReduction],
+      [weights.modelCompatibility, features.modelCompatibility],
+    ];
+    const positiveWeight = positiveTerms.reduce((sum, [weight]) => sum + weight, 0);
+    const positiveScore = positiveWeight === 0
+      ? 0
+      : positiveTerms.reduce((sum, [weight, value]) => sum + weight * value, 0) / positiveWeight;
     const penalty =
       weights.redundancyPenalty * features.redundancyPenalty +
       weights.injectionPenalty * features.injectionPenalty;
-    const utility = (numerator - penalty) / tokenCost;
+    const utility = (positiveScore - penalty) / tokenCost;
     const hardRequired = frag.authority >= 80;
     return { result, utility: hardRequired ? Number.POSITIVE_INFINITY : utility, hardRequired };
   });
@@ -1508,6 +1601,58 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
   for (const item of cacheEpochDebug.diagnostics) {
     if (item.severity === "warning") warnings.push(`cache diagnostic: ${item.message}`);
   }
+  const scoredById = new Map(
+    scored.map((candidate) => [candidate.result.fragment.id, candidate]),
+  );
+  const omissionReasonById = new Map<string, string>();
+  const recordOmissionReason = (fragmentId: string, reason: string): void => {
+    if (!omissionReasonById.has(fragmentId)) omissionReasonById.set(fragmentId, reason);
+  };
+  for (const omission of [...firstPass.omitted, ...secondPass.omitted]) {
+    recordOmissionReason(omission.fragmentId, omission.reason);
+  }
+  for (const omission of allocation.omitted) {
+    recordOmissionReason(omission.result.fragment.id, omission.reason);
+  }
+  for (const omission of confFiltered.omitted) {
+    recordOmissionReason(omission.fragmentId, omission.reason);
+  }
+  const retrievalMetricCandidates = all.map((result) => {
+    const candidate = scoredById.get(result.fragment.id);
+    if (candidate === undefined) {
+      throw new Error(`retrieval metric candidate is missing score: ${result.fragment.id}`);
+    }
+    const selected = admittedIds.has(result.fragment.id);
+    return {
+      fragmentId: result.fragment.id,
+      path: result.fragment.scope.pathPatterns.length === 1
+        ? result.fragment.scope.pathPatterns[0]!
+        : null,
+      symbols: [],
+      method: result.method,
+      estimatedTokens: tokenCostFor(
+        result.fragment,
+        input.model.modelKey,
+        input.provider.providerId,
+        input.tokenEstimator,
+      ),
+      finalScore: Number.isFinite(candidate.utility) ? candidate.utility : null,
+      hardRequired: candidate.hardRequired,
+      selected,
+      selectionReason: selected
+        ? candidate.hardRequired ? "hard-required" : "utility-ranked-within-budget"
+        : omissionReasonById.get(result.fragment.id) ?? "not-selected",
+    };
+  });
+  const retrievalMetricById = new Map(
+    retrievalMetricCandidates.map((candidate) => [candidate.fragmentId, candidate]),
+  );
+  const retrievalMetrics = summarizeRetrievalSelection({
+    queryCount: queries.length,
+    candidates: retrievalMetricCandidates,
+    stablePrefixTokens: Number(cachePlan.predictedCachedTokens),
+    predictedCachedTokens: Number(cachePlan.predictedCachedTokens),
+  });
   const decisionRecord: Readonly<Record<string, unknown>> = {
     retrievalQueries: queries.map((query) => ({
       text: query.text,
@@ -1522,12 +1667,24 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
       rerankedScore: result.rerankedScore,
       sourceVersion: result.sourceVersion,
       reason: result.reason,
-      estimatedTokens: result.fragment.estimatedTokens[input.model.modelKey] ?? 0,
+      estimatedTokens: tokenCostFor(
+        result.fragment,
+        input.model.modelKey,
+        input.provider.providerId,
+        input.tokenEstimator,
+      ),
       authority: result.fragment.authority,
       trust: result.fragment.trust,
       confidentiality: result.fragment.confidentiality,
       injectionRisk: result.fragment.injectionRisk,
+      selectionFeatures: result.fragment.selectionFeatures,
+      finalScore: retrievalMetricById.get(result.fragment.id)?.finalScore ?? null,
+      hardRequired: scoredById.get(result.fragment.id)?.hardRequired ?? false,
+      selected: admittedIds.has(result.fragment.id),
+      selectionReason: retrievalMetricById.get(result.fragment.id)?.selectionReason
+        ?? "not-selected",
     })),
+    retrievalMetrics,
     evidenceCoverage: coverage,
     selected: allocation.selected.map((candidate) => candidate.result.fragment.id),
     allocationOmissions: allocation.omitted.map((omission) => ({

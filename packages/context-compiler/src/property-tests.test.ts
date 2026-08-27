@@ -33,9 +33,11 @@ import type {
 } from "@terminus/domain";
 import type { ContextFragment as CtxFragment } from "@terminus/context-ir";
 import {
+  ablateScoringWeights,
   allocateBudget,
   deduplicateAndValidate,
   scoreCandidates,
+  standardScoringAblations,
   type RetrievalResult,
   type ScoredCandidate,
 } from "./index.js";
@@ -209,6 +211,22 @@ describe("Hard-required fragments", () => {
     const scored = scoreCandidates([makeResult(required)], mockInput);
     expect(scored[0]!.utility).toBe(Number.POSITIVE_INFINITY);
     expect(scored[0]!.hardRequired).toBe(true);
+  });
+
+  test("does not erase independent evidence when one feature is zero", () => {
+    const fragment = {
+      ...makeFragment("optional:zero-relevance", 40, 100),
+      selectionFeatures: { ...emptyFeatures(), relevance: 0 },
+    };
+    const mockInput = {
+      model: { modelKey: MODEL_KEY },
+      provider: { providerId: "test" },
+    } as unknown as Parameters<typeof scoreCandidates>[1];
+    const scored = scoreCandidates([makeResult(fragment)], mockInput);
+
+    expect(scored[0]!.utility).toBeGreaterThan(0);
+    expect(ablateScoringWeights(undefined, ["relevance"]).relevance).toBe(0);
+    expect(standardScoringAblations()).toHaveLength(10);
   });
 });
 

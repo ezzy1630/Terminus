@@ -30,6 +30,7 @@ import {
   instructionsToFragments,
   replayContext,
   replayWithAblation,
+  RETRIEVAL_METRICS_VERSION,
   type CompileInput,
   type ContextStore,
   type RetrievalResult,
@@ -305,6 +306,11 @@ describe("Context Compiler", () => {
     });
     expect(compiled.manifest.decisionRecord?.cacheEpochDebug).toMatchObject({
       current: { stablePrefix: { hash: compiled.manifest.cachePlan.stablePrefixHash } },
+    });
+    expect(compiled.manifest.decisionRecord?.retrievalMetrics).toMatchObject({
+      version: RETRIEVAL_METRICS_VERSION,
+      candidateCount: expect.any(Number),
+      selectedCount: expect.any(Number),
     });
     expect(compiled.warnings.some((warning) => warning.startsWith("token calibration degraded:"))).toBe(true);
   });

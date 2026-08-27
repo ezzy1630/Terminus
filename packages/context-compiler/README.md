@@ -19,7 +19,12 @@ provider.
   (explicit empty fallback for fixture-only callers).
 - Evidence: `EvidenceCoverageMatrix`, `EvidenceGap`, `buildEvidenceCoverage`.
 - Scoring: `ScoredCandidate`, `ScoringWeights`, `DEFAULT_WEIGHTS`,
-  `scoreCandidates`.
+  `scoreCandidates`, `ScoringAblation`, `ablateScoringWeights`,
+  `standardScoringAblations`.
+- Retrieval measurement: `RetrievalSelectionMetrics`,
+  `RetrievalOutcomeMetrics`, `RetrievalAggregateMetrics`,
+  `summarizeRetrievalSelection`, `evaluateRetrievalOutcome`,
+  `aggregateRetrievalMetrics`.
 - Budget: `AllocationOptions`, `AllocationResult`, `allocateBudget`.
 - Cache: `planCacheEpoch`.
 - Replay and compaction: `replayContext`, `replayWithAblation`,
@@ -36,6 +41,8 @@ provider.
 - The compiler MUST NOT silently pretend evidence coverage exists.
 - Every candidate, query, omission, transform, confidentiality decision, and
   memory decision is recorded in the manifest decision record.
+- Selection metrics are recorded with a versioned contract. Outcome metrics
+  remain null until an evaluator or verification path supplies ground truth.
 - Over-hard-limit context fails before provider rendering; no truncation is
   implicit.
 - No direct DB writes — accept a `ContextStore` interface.
