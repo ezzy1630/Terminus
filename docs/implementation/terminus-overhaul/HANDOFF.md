@@ -37,10 +37,10 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - `just truth-check`: passed.
 - `just github-ruleset-plan`: passed read-only.
 - `just github-ruleset-verify`: failed against the current weaker remote ruleset, as expected.
-- `just fault-injection`: passed — 17 recovery tests, including 3 DB-backed repair schedule/admission/fencing scenarios; the artifact explicitly remains `completeForRelease: false`.
+- `just fault-injection`: passed — 19 recovery tests, including 3 DB-backed repair scenarios and 2 DB-backed checkpoint publication tests; the artifact explicitly remains `completeForRelease: false`.
 
 ## Resume sequence
 
 1. Inspect `git status --short --branch`, the last commit, and all four ledger files.
 2. If the user authorizes remote branch-protection mutation, run `just github-ruleset-apply`, then `just github-ruleset-verify` and read back the exact remote settings.
-3. Extend DB fault-injection/replay to proposal, branch admission, completion record, checkpoint, provider/effect, and cancellation boundaries; then address later-state recovery before claiming release readiness.
+3. Extend DB fault-injection/replay to proposal, branch admission, completion record, provider/effect, and cancellation boundaries; checkpoint publication and repair continuation slices are covered, then later-state recovery remains before release readiness.

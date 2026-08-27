@@ -29,6 +29,7 @@ const BOUNDARIES = [
 const TEST_PATHS = [
   "tests/recovery/fault_injection_matrix.test.ts",
   "tests/recovery/repair_attempt_recovery.test.ts",
+  "tests/recovery/checkpoint_publication_recovery.test.ts",
 ] as const;
 
 const DB_BACKED_SCENARIOS = [
@@ -46,6 +47,11 @@ const DB_BACKED_SCENARIOS = [
     scenario: "repair_lease_fencing",
     boundary: "after_external_effect_starts",
     assertions: ["stale repair claim cannot settle after lease fencing"],
+  },
+  {
+    scenario: "checkpoint_publication_replay",
+    boundary: "during_checkpoint_replacement",
+    assertions: ["prepared checkpoint publication and artifact linking are idempotent"],
   },
 ] as const;
 

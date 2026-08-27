@@ -45,6 +45,7 @@ This file records observed commands and artifacts. It does not turn source decla
 9. Migration `0011_prisma_datetime_storage.sql` rebuilds the two Prisma-owned provider tables with strict integer epoch-millisecond timestamps. An upgrade fixture proved legacy ISO timestamps, including fractional seconds, preserve their exact millisecond values.
 10. Durable repair recovery now owns the crash windows between schedule, parent transition, child admission, and execution. A live lease blocks duplicate claims; an expired lease increments its fencing token; heartbeats abort a continuation after lease loss; and a restarted control process schedules a retry after a stale lease expires. A `VERIFYING` parent with an already-persisted repair attempt is left for this recovery path instead of being generically quarantined.
 11. A DB-backed recovery test now exercises three of those boundaries against a fresh database migrated through `0012_repair_attempts`: schedule intent and its event roll back together, parent/child admission replays without duplicate rows/events, and a stale repair claimant cannot settle after lease fencing. The release artifact labels the remaining in-memory matrix as fixture-only and records `completeForRelease: false`.
+12. A second DB-backed recovery test exercises checkpoint publication against the same fresh-migration discipline: a crash before publication commit leaves the checkpoint `PREPARED` with no event, duplicate artifact linking collapses through the uniqueness constraint, and repeated recovery leaves one `COMMITTED` row with one `checkpoint.created` event.
 
 ## Durable repair-attempt evidence
 
@@ -63,6 +64,10 @@ The DB-backed scenarios are in
 `tests/recovery/repair_attempt_recovery.test.ts`; the broader matrix in
 `tests/recovery/fault_injection_matrix.test.ts` remains an in-memory fixture
 suite and is labeled that way in `fault-injection.json`.
+Checkpoint publication coverage is in
+`tests/recovery/checkpoint_publication_recovery.test.ts` and covers the
+`PREPARED`/`COMMITTED` admission boundary, not terminal-turn/checkpoint
+co-transactionality.
 
 ## Live OpenCode free-model evidence
 
@@ -116,7 +121,9 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `just check-all` from committed `327444f` | PASSED — 583 TypeScript tests across 82 files, 257 Python tests, full local Rust integration/security, platform probes, standalone/truth checks, generated-contract check, and `cargo deny`; 1 live conformance test remained ignored by its explicit network-test annotation. |
 | 2026-08-26 | `bun test tests/recovery/repair_attempt_recovery.test.ts` | PASSED — 3 DB-backed SQLite recovery tests, 0 failures, 17 expect calls. |
 | 2026-08-26 | `bun test tests/recovery/fault_injection_matrix.test.ts tests/recovery/repair_attempt_recovery.test.ts` | PASSED — 17 tests, 0 failures, 97 expect calls; the 13-boundary in-memory matrix and the 3 DB-backed repair scenarios both executed. |
-| 2026-08-26 | `just fault-injection` | PASSED — `artifacts/release-gate/fault-injection.json` was regenerated from both recovery test files; it records 13 `fixture_only` boundaries, 3 DB-backed repair scenarios, and `completeForRelease: false`. |
+| 2026-08-26 | `bun test tests/recovery/checkpoint_publication_recovery.test.ts` | PASSED — 2 DB-backed SQLite checkpoint recovery tests, 0 failures, 7 expect calls. |
+| 2026-08-26 | `bun test tests/recovery/fault_injection_matrix.test.ts tests/recovery/repair_attempt_recovery.test.ts tests/recovery/checkpoint_publication_recovery.test.ts` | PASSED — 19 tests, 0 failures, 104 expect calls; the fixture matrix, repair replay, and checkpoint publication suites all executed. |
+| 2026-08-26 | `just fault-injection` | PASSED — `artifacts/release-gate/fault-injection.json` was regenerated from all three recovery test files; it records 13 `fixture_only` boundaries, 4 DB-backed scenarios, and `completeForRelease: false`. |
 
 ## Evidence policy
 
