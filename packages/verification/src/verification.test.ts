@@ -331,6 +331,52 @@ describe("VerificationEngine evidence binding", () => {
       verifierBinding: { configurationHash: expect.any(String) },
     });
   });
+
+  test("rejects duplicate, stale, and malformed resume results", async () => {
+    const plan = mkPlan([mkNode("settled", "command", { required: true })], "settled");
+    const source = new VerificationEngine({
+      executorFor: () => ({
+        async execute(input: NodeExecutorInput): Promise<VerificationResult> {
+          return {
+            ...passResult(plan.id, input.node.id),
+            environmentImageDigest: null,
+          };
+        },
+      }),
+      idSource: () => fakeUuid(100),
+      clock: fakeTs,
+    });
+    const initial = await source.evaluate(plan, "rev-1");
+    const settled = initial.results[0]!;
+    const resumed = new VerificationEngine({
+      executorFor: () => ({
+        async execute(input: NodeExecutorInput): Promise<VerificationResult> {
+          return {
+            ...passResult(plan.id, input.node.id),
+            environmentImageDigest: null,
+          };
+        },
+      }),
+      idSource: () => fakeUuid(101),
+      clock: fakeTs,
+    });
+
+    await expect(resumed.evaluate(plan, "rev-1", null, {
+      resumeResults: [settled, { ...settled, id: fakeUuid(102) }],
+    })).rejects.toThrow(/duplicate node results/i);
+    await expect(resumed.evaluate(plan, "rev-1", null, {
+      resumeResults: [{ ...settled, sourceRevision: "rev-stale" }],
+    })).rejects.toThrow(/stale source revision/i);
+    await expect(resumed.evaluate(plan, "rev-1", null, {
+      resumeResults: [{
+        ...settled,
+        structuredObservations: {
+          ...settled.structuredObservations,
+          verificationBinding: { verifierId: "attacker" },
+        },
+      }],
+    })).rejects.toThrow(/invalid verifier binding/i);
+  });
 });
 
 // ────────────────────────── Changed-code invalidation (§40.5) ────────────────

@@ -155,6 +155,12 @@ describe("verification recovery", () => {
         completedAt: row.completedAt === null ? null : new Date(Number(row.completedAt)),
       });
       expect(settled).not.toBeNull();
+      expect(verificationResultFromPrisma({
+        ...row,
+        commandOrQuery: null,
+        startedAt: new Date(Number(row.startedAt)),
+        completedAt: row.completedAt === null ? null : new Date(Number(row.completedAt)),
+      })).toBeNull();
 
       const executed: string[] = [];
       const engine = new VerificationEngine({
