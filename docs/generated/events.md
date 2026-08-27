@@ -15,7 +15,7 @@ Total events: **50**
 | `turn.started` | 1 | turn | none | audit | `turn_id`, `task_id` |
 | `turn.context_compiling` | 1 | turn | none | audit | `turn_id` |
 | `context.manifest_persisted` | 1 | context_epoch | none | audit | `epoch_id`, `manifest_artifact`, `fragment_count`, `estimated_tokens` |
-| `turn.provider_running` | 1 | turn | low | audit | `turn_id`, `provider_attempt_id`, `provider`, `model` |
+| `turn.provider_running` | 1 | turn | low | audit | `turn_id`, `provider_attempt_id`, `attempt_number`, `provider`, `model`, `context_manifest_id`, `request_fingerprint`, `provider_idempotency_key` |
 | `turn.response_validating` | 1 | turn | none | audit | `turn_id`, `response_artifact` |
 | `completion.proposed` | 1 | turn | none | audit | `response_artifact`, `status` |
 | `turn.verifying` | 1 | turn | none | audit | `phase`, `proposal_artifact` |
@@ -172,8 +172,12 @@ Total events: **50**
 |---|---|---|
 | `turn_id` | uuid | yes |
 | `provider_attempt_id` | uuid | yes |
+| `attempt_number` | int | yes |
 | `provider` | string | yes |
 | `model` | string | yes |
+| `context_manifest_id` | uuid | yes |
+| `request_fingerprint` | string | yes |
+| `provider_idempotency_key` | string | yes |
 
 ### `turn.response_validating`
 

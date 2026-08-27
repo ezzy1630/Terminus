@@ -30,6 +30,16 @@ export interface EngineCompiledAttempt {
   readonly contextManifestId: string;
   /** Provider capability snapshot hash recorded with the attempt. */
   readonly providerCapabilityHash: string;
+  /** Hash of the exact canonical request artifact. */
+  readonly requestArtifactHash: string;
+  /** Hash of the selected provider/model capability snapshot. */
+  readonly modelSnapshotHash: string;
+  /** Exact provider endpoint or kernel transport identity. */
+  readonly providerEndpoint: string;
+  /** Hash of the canonical tool schemas supplied to the renderer. */
+  readonly toolSchemaHash: string;
+  /** Immutable context epoch that produced the request. */
+  readonly contextEpochId: string;
 }
 
 export interface EngineDependencies {

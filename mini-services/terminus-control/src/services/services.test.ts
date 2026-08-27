@@ -194,6 +194,7 @@ describe("control-plane service boundaries", () => {
   test("ProviderSessionService records attempt lifecycle and fails closed without transport", async () => {
     type Transaction = { readonly name: "provider" };
     const events: string[] = [];
+    const eventIdempotencyKeys: Array<string | null | undefined> = [];
     const operations: string[] = [];
     const start: ProviderAttemptStartInput = {
       attemptId: "attempt-1",
@@ -205,11 +206,14 @@ describe("control-plane service boundaries", () => {
       capabilitySnapshotHash: "sha256:capability",
       contextManifestId: "manifest-1",
       requestArtifact: "artifact://sha256/request",
+      requestFingerprint: "sha256:fingerprint",
+      providerIdempotencyKey: "provider-attempt:attempt-1",
     };
     const service = new ProviderSessionService<Transaction>({
       readTurnState: async () => "PENDING",
       appendEvent: async (event, mutation) => {
         events.push(event.eventType);
+        eventIdempotencyKeys.push(event.idempotencyKey);
         await mutation({ name: "provider" });
       },
       transaction: () => ({
@@ -231,9 +235,11 @@ describe("control-plane service boundaries", () => {
       usage: { output: 1 },
       finishReason: "stop",
       continuationId: null,
+      providerRequestId: "provider-request-1",
     };
     await service.settleResponse(response);
     expect(events).toEqual(["turn.provider_running", "turn.response_validating"]);
+    expect(eventIdempotencyKeys).toEqual(["provider-attempt:attempt-1", undefined]);
     expect(operations).toEqual(["start", "complete"]);
 
     const unavailable = service.execute({

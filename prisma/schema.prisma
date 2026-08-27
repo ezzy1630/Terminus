@@ -238,6 +238,10 @@ model ProviderAttempt {
   capabilitySnapshotHash String    @map("capability_snapshot_hash")
   contextManifestId      String    @map("context_manifest_id")
   requestArtifact        String    @map("request_artifact")
+  requestFingerprint      String?   @map("request_fingerprint")
+  providerIdempotencyKey  String?   @map("provider_idempotency_key")
+  providerRequestId       String?   @map("provider_request_id")
+  continuationId          String?   @map("continuation_id")
   responseArtifact       String?   @map("response_artifact")
   nativeContinuationJson String?   @map("native_continuation_json")
   status                 String
@@ -252,6 +256,7 @@ model ProviderAttempt {
   toolCalls       ToolCall[]
 
   @@unique([turnId, attemptNumber])
+  @@unique([providerIdempotencyKey])
   @@map("provider_attempts")
 }
 

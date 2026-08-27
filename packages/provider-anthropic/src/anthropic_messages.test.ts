@@ -243,6 +243,7 @@ describe("Anthropic Messages Connector", () => {
     });
     expect(chunks[2]).toEqual({
       kind: "done",
+      providerRequestId: "msg_123",
       usage: {
         inputTokens: 150n as TokenCount,
         cachedInputTokens: 100n as TokenCount,

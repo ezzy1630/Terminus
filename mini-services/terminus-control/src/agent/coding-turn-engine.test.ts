@@ -43,8 +43,13 @@ async function runHarness(options: HarnessOptions) {
     compileContext: async () => ({
       rendered: { providerId: "test", model: "test/model", request: {} as never, predictedCachedTokens: 0n as never, body: {} },
       requestArtifactUri: "artifact://sha256/request",
+      requestArtifactHash: "sha256:request",
       contextManifestId: "manifest-1",
       providerCapabilityHash: "cap-1",
+      modelSnapshotHash: "sha256:model",
+      providerEndpoint: "kernel://test-provider",
+      toolSchemaHash: "sha256:tools",
+      contextEpochId: "epoch-1",
     }),
     beginAttempt: async ({ attemptNumber }) => {
       trace.push(`begin:${attemptNumber}`);
@@ -157,8 +162,13 @@ describe("CodingTurnEngine", () => {
       compileContext: async () => ({
         rendered: {} as never,
         requestArtifactUri: "",
+        requestArtifactHash: "",
         contextManifestId: "",
         providerCapabilityHash: "",
+        modelSnapshotHash: "",
+        providerEndpoint: "",
+        toolSchemaHash: "",
+        contextEpochId: "",
       }),
       beginAttempt: async () => true,
       executeProvider: async () => ({}) as never,

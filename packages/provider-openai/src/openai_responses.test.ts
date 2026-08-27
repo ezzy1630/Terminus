@@ -191,6 +191,7 @@ describe("OpenAI Responses Connector", () => {
     expect(chunks[4]).toEqual({
       kind: "done",
       continuationId: "resp_999",
+      providerRequestId: "resp_999",
       usage: {
         inputTokens: 100n as TokenCount,
         cachedInputTokens: 40n as TokenCount,
@@ -206,7 +207,7 @@ describe("OpenAI Responses Connector", () => {
 
   test("streams and decodes Chat Completions SSE frames", async () => {
     async function* chatSseGenerator(): AsyncIterable<string> {
-      yield "data: {\"choices\":[{\"delta\":{\"content\":\"Hi!\"}}]}\n\n";
+      yield "data: {\"id\":\"chat_123\",\"choices\":[{\"delta\":{\"content\":\"Hi!\"}}]}\n\n";
       yield "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"reasoning...\"}}]}\n\n";
       yield "data: {\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":20}}}\n\n";
       yield "data: [DONE]\n\n";
@@ -222,6 +223,7 @@ describe("OpenAI Responses Connector", () => {
     expect(chunks[1]).toEqual({ kind: "text", reasoning: "reasoning..." });
     expect(chunks[2]).toEqual({
       kind: "done",
+      providerRequestId: "chat_123",
       usage: {
         inputTokens: 50n as TokenCount,
         cachedInputTokens: 20n as TokenCount,

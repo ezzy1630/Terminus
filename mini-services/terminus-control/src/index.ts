@@ -82,6 +82,7 @@ import {
 } from "./direct-provider-config.js";
 import {
   createDirectRenderer,
+  directEndpoint,
   directNetworkDestinations,
   executeDirectProviderRequest,
   KernelDirectConnectorClient,
@@ -255,7 +256,7 @@ import {
   LOCAL_MODEL_PROFILES,
   LocalRenderer,
 } from "@terminus/provider-local";
-import { GatewayRenderer, GatewayTransport, type GatewayModel } from "@terminus/provider-zen";
+import { GatewayRenderer, GatewayTransport, gatewayEndpoint, type GatewayModel } from "@terminus/provider-zen";
 import { ANTHROPIC_MODEL_PROFILES } from "@terminus/provider-anthropic";
 import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
 import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
@@ -404,6 +405,10 @@ import {
   type VerificationTransitionInput,
   type RepairAttemptPersistenceInput,
 } from "./services/index.js";
+import {
+  deriveProviderAttemptIdentity,
+  providerAttemptIdempotencyKey,
+} from "./services/provider-attempt-identity.js";
 import {
   REPAIR_ATTEMPT_ACTIVE_STATES,
   decideRepairAttemptClaim,
@@ -3447,6 +3452,7 @@ const turnCoordinator = new TurnCoordinator<Prisma.TransactionClient>({
       aggregateType: event.aggregateType,
       aggregateId: event.aggregateId,
       correlationId: event.correlationId,
+      idempotencyKey: event.idempotencyKey,
       payload: event.payload,
       artifactRefs: event.artifactRefs === undefined ? undefined : [...event.artifactRefs],
     }, mutation);
@@ -9677,6 +9683,26 @@ async function executeGatewayProviderRequest(
   };
 }
 
+function providerAttemptEndpoint(
+  directConfiguration: ReturnType<typeof parseDirectProviderConfiguration>,
+  gatewayModel: GatewayModel | null,
+): string {
+  if (directConfiguration !== null) {
+    const endpoint = directEndpoint(directConfiguration);
+    return `https://${endpoint.host}:${endpoint.port}${endpoint.path}`;
+  }
+  if (gatewayModel !== null) return gatewayEndpoint(gatewayModel);
+  return "kernel://terminus.local-provider.v1";
+}
+
+function providerRequestIdFromChunks(chunks: readonly ProviderResponseChunk[]): string | null {
+  for (let index = chunks.length - 1; index >= 0; index -= 1) {
+    const value = chunks[index]?.providerRequestId;
+    if (value !== undefined && value.trim() !== "") return value;
+  }
+  return null;
+}
+
 const providerSessionService = new ProviderSessionService<Prisma.TransactionClient>({
   readTurnState: async (turnId) => (await db.turn.findUnique({ where: { id: turnId }, select: { state: true } }))?.state ?? null,
   appendEvent: async (event, mutation): Promise<void> => {
@@ -9685,6 +9711,7 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
       aggregateType: event.aggregateType,
       aggregateId: event.aggregateId,
       correlationId: event.correlationId,
+      idempotencyKey: event.idempotencyKey,
       payload: event.payload,
       artifactRefs: event.artifactRefs === undefined ? undefined : [...event.artifactRefs],
     }, mutation);
@@ -9708,6 +9735,8 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
           capabilitySnapshotHash: input.capabilitySnapshotHash,
           contextManifestId: input.contextManifestId,
           requestArtifact: input.requestArtifact,
+          requestFingerprint: input.requestFingerprint,
+          providerIdempotencyKey: input.providerIdempotencyKey,
           status: "running",
         },
       });
@@ -9747,6 +9776,8 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
         data: {
           status: "completed",
           responseArtifact: input.responseArtifact,
+          providerRequestId: input.providerRequestId,
+          continuationId: input.continuationId,
           completedAt: new Date(),
           usageJson: JSON.stringify(jsonSafe(input.usage)),
           costMicros: 0,
@@ -12030,16 +12061,35 @@ async function agentLoop(turnId: string): Promise<void> {
       },
       compileContext: async () => {
         const { compiled, requestArtifact } = await compileProviderContext();
+        const modelSnapshotHash = computeContentHash(canonicalJson({
+          model: selectedModel,
+          provider: selectedProvider,
+        }));
         return {
           rendered: compiled.rendered,
           requestArtifactUri: requestArtifact.uri,
+          requestArtifactHash: requestArtifact.hash,
           contextManifestId: compiled.manifest.id as string,
           providerCapabilityHash: compiled.manifest.providerCapabilityHash as string,
+          modelSnapshotHash,
+          providerEndpoint: providerAttemptEndpoint(directConfiguration, gatewayModel),
+          toolSchemaHash: computeContentHash(canonicalJson(compiled.rendered.request.toolSchemas)),
+          contextEpochId: contextEpoch.epochId,
         };
       },
       beginAttempt: async ({ attemptId, attemptNumber, compiled }) => {
         manifestIdByAttempt.set(attemptId, compiled.contextManifestId as Uuid7);
         predictedCacheByAttempt.set(attemptId, compiled.rendered.predictedCachedTokens);
+        const identity = deriveProviderAttemptIdentity({
+          attemptId,
+          providerId: selectedProvider.providerId,
+          modelKey: selectedModel.modelKey,
+          modelSnapshotHash: compiled.modelSnapshotHash,
+          requestArtifactHash: compiled.requestArtifactHash,
+          endpoint: compiled.providerEndpoint,
+          toolSchemaHash: compiled.toolSchemaHash,
+          contextEpochId: compiled.contextEpochId,
+        });
         return providerSessionService.beginAttempt({
           attemptId,
           turnId,
@@ -12050,6 +12100,8 @@ async function agentLoop(turnId: string): Promise<void> {
           capabilitySnapshotHash: compiled.providerCapabilityHash,
           contextManifestId: compiled.contextManifestId,
           requestArtifact: compiled.requestArtifactUri,
+          requestFingerprint: identity.requestFingerprint,
+          providerIdempotencyKey: identity.providerIdempotencyKey,
         });
       },
       executeProvider: async ({ attemptId, compiled }) => {
@@ -12069,7 +12121,10 @@ async function agentLoop(turnId: string): Promise<void> {
                 ? null
                 : { vendor: directConfiguration.vendor },
               ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
-              context: { ...await buildProviderTaskContext(), idempotencyKey: `provider:${attemptId}` },
+              context: {
+                ...await buildProviderTaskContext(),
+                idempotencyKey: providerAttemptIdempotencyKey(attemptId),
+              },
               workspaceId: workspace.id,
               signal: abortController.signal,
             }),
@@ -12160,6 +12215,7 @@ async function agentLoop(turnId: string): Promise<void> {
           usage: jsonSafe(usage),
           finishReason: projected.finishReason,
           continuationId: projected.continuationId,
+          providerRequestId: response.providerRequestId ?? providerRequestIdFromChunks(response.chunks),
         });
         lastResponseArtifactUri = responseArtifactMeta.uri;
         currentProjected = projected;

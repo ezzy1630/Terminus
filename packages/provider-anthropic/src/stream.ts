@@ -85,6 +85,7 @@ export async function* decodeAnthropicMessagesStream(
   let cacheWriteTokens = 0;
   let outputTokens = 0;
   let reasoningTokens = 0;
+  let providerRequestId: string | null = null;
   let done = false;
 
   for await (const event of events) {
@@ -98,6 +99,7 @@ export async function* decodeAnthropicMessagesStream(
 
     if (type === "message_start") {
       const message = optionalRecord(value.message);
+      if (typeof message.id === "string" && message.id.trim() !== "") providerRequestId = message.id;
       const usage = optionalRecord(message.usage);
       inputTokens = numberOrZero(usage.input_tokens);
       cacheReadTokens = numberOrZero(usage.cache_read_input_tokens);
@@ -150,6 +152,7 @@ export async function* decodeAnthropicMessagesStream(
       yield {
         kind: "done",
         usage: anthropicUsage(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens),
+        ...(providerRequestId === null ? {} : { providerRequestId }),
       };
       done = true;
     }

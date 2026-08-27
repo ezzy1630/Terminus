@@ -32,6 +32,7 @@ const TEST_PATHS = [
   "tests/recovery/checkpoint_publication_recovery.test.ts",
   "tests/recovery/completion_admission_recovery.test.ts",
   "tests/recovery/effect_recovery.test.ts",
+  "tests/recovery/provider_attempt_identity.test.ts",
 ] as const;
 
 const DB_BACKED_SCENARIOS = [
@@ -69,6 +70,11 @@ const DB_BACKED_SCENARIOS = [
     scenario: "effect_recovery_replay",
     boundary: "after_external_effect_starts",
     assertions: ["ambiguous effect recovery rolls back atomically and replays without duplicate evidence"],
+  },
+  {
+    scenario: "provider_attempt_identity_replay",
+    boundary: "before_provider_send",
+    assertions: ["canonical request identity publishes atomically and duplicate provider idempotency keys are rejected"],
   },
 ] as const;
 

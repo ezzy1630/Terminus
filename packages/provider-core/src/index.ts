@@ -168,6 +168,8 @@ export interface ProviderResponseChunk {
   readonly retryAfterMs?: number | undefined;
   readonly usage?: UsageRecord | undefined;
   readonly continuationId?: string | undefined;
+  /** Provider-native request/response identifier, when exposed by the stream. */
+  readonly providerRequestId?: string | undefined;
   readonly reasoning?: string | undefined;
 }
 
@@ -284,6 +286,8 @@ export interface ProviderResponse {
   readonly model: ModelKey;
   readonly chunks: readonly ProviderResponseChunk[];
   readonly observedAt: string;
+  /** Provider-native request/response identifier, when the endpoint returns one. */
+  readonly providerRequestId?: string | null | undefined;
 }
 
 export interface ProviderRenderer {

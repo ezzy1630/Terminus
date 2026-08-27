@@ -95,8 +95,12 @@
   payload:
     turn_id: {type: uuid, required: true}
     provider_attempt_id: {type: uuid, required: true}
+    attempt_number: {type: int, required: true}
     provider: {type: string, required: true}
     model: {type: string, required: true}
+    context_manifest_id: {type: uuid, required: true}
+    request_fingerprint: {type: string, required: true}
+    provider_idempotency_key: {type: string, required: true}
   pii: low
   retention: audit
 

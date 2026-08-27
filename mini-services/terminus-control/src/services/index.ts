@@ -1,6 +1,7 @@
 export * from "./effect-settlement-service.js";
 export * from "./event-subscription-service.js";
 export * from "./provider-session-service.js";
+export * from "./provider-attempt-identity.js";
 export * from "./service-types.js";
 export * from "./task-projection-service.js";
 export * from "./tool-episode-service.js";

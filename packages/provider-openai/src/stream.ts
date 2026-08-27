@@ -135,7 +135,10 @@ export async function* decodeOpenAiResponsesStream(
       const usage = optionalRecord(response.usage);
       yield {
         kind: "done",
-        ...(typeof response.id === "string" ? { continuationId: response.id } : {}),
+        ...(typeof response.id === "string" ? {
+          continuationId: response.id,
+          providerRequestId: response.id,
+        } : {}),
         ...(Object.keys(usage).length > 0 ? { usage: responsesUsage(usage) } : {}),
       };
       done = true;
@@ -153,15 +156,21 @@ export async function* decodeOpenAiChatStream(
   const events = decodeSse(chunks);
   const tools = new Map<number, ToolAccumulator>();
   let finalUsage: UsageRecord | undefined;
+  let providerRequestId: string | null = null;
   let done = false;
   for await (const event of events) {
     if (event.data === "[DONE]") {
       yield* flushTools(tools);
-      yield { kind: "done", ...(finalUsage ? { usage: finalUsage } : {}) };
+      yield {
+        kind: "done",
+        ...(finalUsage ? { usage: finalUsage } : {}),
+        ...(providerRequestId === null ? {} : { providerRequestId }),
+      };
       done = true;
       continue;
     }
     const value = jsonRecord(event.data);
+    if (typeof value.id === "string" && value.id.trim() !== "") providerRequestId = value.id;
     if (value.error !== undefined) {
       yield errorChunk(value.error);
       continue;

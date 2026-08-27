@@ -67,7 +67,7 @@ export class GatewayTransport implements ProviderTransport {
       throw new Error(`gateway request exceeds ${MAX_REQUEST_BYTES} bytes`);
     }
     const httpRequest: GatewayHttpRequest = {
-      url: `${model.baseUrl}${pathForProtocol(model.protocol, model.id)}`,
+      url: gatewayEndpoint(model),
       method: "POST",
       headers: {
         accept: "text/event-stream",
@@ -85,7 +85,12 @@ export class GatewayTransport implements ProviderTransport {
   }
 }
 
-function pathForProtocol(protocol: GatewayProtocol, _modelId: string): string {
+/** Exact HTTPS endpoint selected by the admitted gateway protocol. */
+export function gatewayEndpoint(model: Pick<GatewayModel, "baseUrl" | "protocol">): string {
+  return `${model.baseUrl}${pathForProtocol(model.protocol)}`;
+}
+
+function pathForProtocol(protocol: GatewayProtocol): string {
   switch (protocol) {
     case "chat_completions":
       return "/chat/completions";
@@ -179,15 +184,21 @@ async function* normalizeChatCompletions(
 ): AsyncIterable<ProviderResponseChunk> {
   const tools = new Map<number, ToolAccumulator>();
   let finalUsage: UsageRecord | undefined;
+  let providerRequestId: string | null = null;
   let done = false;
   for await (const event of events) {
     if (event.data === "[DONE]") {
       yield* flushTools(tools);
-      yield { kind: "done", ...(finalUsage ? { usage: finalUsage } : {}) };
+      yield {
+        kind: "done",
+        ...(finalUsage ? { usage: finalUsage } : {}),
+        ...(providerRequestId === null ? {} : { providerRequestId }),
+      };
       done = true;
       continue;
     }
     const value = jsonRecord(event.data);
+    if (typeof value.id === "string" && value.id.trim() !== "") providerRequestId = value.id;
     if (value.error !== undefined) {
       yield errorChunk(value.error);
       continue;
@@ -278,7 +289,10 @@ async function* normalizeResponses(
       const usage = optionalRecord(response.usage);
       yield {
         kind: "done",
-        ...(typeof response.id === "string" ? { continuationId: response.id } : {}),
+        ...(typeof response.id === "string" ? {
+          continuationId: response.id,
+          providerRequestId: response.id,
+        } : {}),
         ...(Object.keys(usage).length > 0 ? { usage: responsesUsage(usage) } : {}),
       };
       done = true;
@@ -296,6 +310,7 @@ async function* normalizeMessages(
   const tools = new Map<number, ToolAccumulator>();
   let inputTokens = 0;
   let outputTokens = 0;
+  let providerRequestId: string | null = null;
   let done = false;
   for await (const event of events) {
     const value = jsonRecord(event.data);
@@ -306,6 +321,7 @@ async function* normalizeMessages(
     }
     if (type === "message_start") {
       const message = optionalRecord(value.message);
+      if (typeof message.id === "string" && message.id.trim() !== "") providerRequestId = message.id;
       inputTokens = numberOrZero(optionalRecord(message.usage).input_tokens);
       continue;
     }
@@ -344,7 +360,11 @@ async function* normalizeMessages(
     }
     if (type === "message_stop") {
       yield* flushTools(tools);
-      yield { kind: "done", usage: usage(inputTokens, outputTokens) };
+      yield {
+        kind: "done",
+        usage: usage(inputTokens, outputTokens),
+        ...(providerRequestId === null ? {} : { providerRequestId }),
+      };
       done = true;
     }
   }

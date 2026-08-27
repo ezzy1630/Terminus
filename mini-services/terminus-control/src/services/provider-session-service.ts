@@ -51,6 +51,8 @@ export interface ProviderAttemptStartInput {
   readonly capabilitySnapshotHash: string;
   readonly contextManifestId: string;
   readonly requestArtifact: string;
+  readonly requestFingerprint: string;
+  readonly providerIdempotencyKey: string;
 }
 
 export interface ProviderAttemptResponseInput {
@@ -63,6 +65,7 @@ export interface ProviderAttemptResponseInput {
   readonly usage: unknown;
   readonly finishReason: string | null;
   readonly continuationId: string | null;
+  readonly providerRequestId: string | null;
 }
 
 export interface ProviderSessionTransaction {
@@ -112,12 +115,15 @@ export class ProviderSessionService<TTransaction> {
           aggregateType: "turn",
           aggregateId: input.turnId,
           correlationId: input.taskId,
+          idempotencyKey: input.providerIdempotencyKey,
           payload: {
             provider_attempt_id: input.attemptId,
             attempt_number: input.attemptNumber,
             provider: input.providerId,
             model: input.modelKey,
             context_manifest_id: input.contextManifestId,
+            request_fingerprint: input.requestFingerprint,
+            provider_idempotency_key: input.providerIdempotencyKey,
           },
           artifactRefs: [input.requestArtifact],
         },

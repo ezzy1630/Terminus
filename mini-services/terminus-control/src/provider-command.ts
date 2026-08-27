@@ -62,6 +62,7 @@ const responseChunkWireSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("done"),
     continuation_id: z.string().min(1).optional(),
+    provider_request_id: z.string().min(1).optional(),
     usage: usageWireSchema.optional(),
   }).strict(),
 ]);
@@ -321,6 +322,7 @@ export function decodeProviderChunks(stdout: string): readonly ProviderResponseC
       case "done": return {
         kind: "done" as const,
         ...(chunk.continuation_id === undefined ? {} : { continuationId: chunk.continuation_id }),
+        ...(chunk.provider_request_id === undefined ? {} : { providerRequestId: chunk.provider_request_id }),
         ...(chunk.usage === undefined ? {} : { usage: toUsage(chunk.usage) }),
       };
     }
