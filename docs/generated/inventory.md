@@ -21,7 +21,7 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 | Declared Python tests | 268 | `def test_*` in python/** |
 | ADRs | 51 | docs/decisions/ADR-*.md |
 | Runbooks | 15 | docs/runbooks/*.md |
-| SQLite migrations | 17 | migrations/sqlite/*.sql |
+| SQLite migrations | 18 | migrations/sqlite/*.sql |
 
 Maturity classification of every component: see the
 [component maturity registry](component-maturity.md) (`maturity.yaml`).

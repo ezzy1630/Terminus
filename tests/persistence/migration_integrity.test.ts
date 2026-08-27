@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
+import { PrismaClient } from "@prisma/client";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const SQLITE_MIGRATIONS_DIR = join(ROOT, "migrations", "sqlite");
@@ -112,7 +113,7 @@ describe("Database Migration Integrity & Corruption Detection", () => {
     }
   });
 
-  test("DateTime migration converts legacy provider timestamps to strict epoch milliseconds", async () => {
+  test("DateTime migration converts provider timestamps to Prisma-compatible epoch milliseconds", async () => {
     const testDir = join(tmpdir(), `terminus-mig-datetime-${Date.now()}`);
     mkdirSync(testDir, { recursive: true });
     const dbPath = join(testDir, "test.db");
@@ -139,7 +140,7 @@ describe("Database Migration Integrity & Corruption Detection", () => {
         "SELECT typeof(created_at) AS created_type, typeof(updated_at) AS updated_type, created_at, updated_at FROM gateway_provider_configurations WHERE id = ?",
       ).get("legacy-gateway") as { created_type: string; updated_type: string; created_at: number; updated_at: number };
       const providerColumns = upgraded.query("PRAGMA table_info(provider_configurations)").all() as Array<{ name: string; type: string }>;
-      expect(providerColumns.find((column) => column.name === "created_at")?.type).toBe("INTEGER");
+      expect(providerColumns.find((column) => column.name === "created_at")?.type).toBe("BIGINT");
       expect(provider.created_type).toBe("integer");
       expect(provider.updated_type).toBe("integer");
       expect(provider.created_at).toBe(Date.parse(createdAt));
@@ -149,6 +150,53 @@ describe("Database Migration Integrity & Corruption Detection", () => {
       expect(gateway.created_at).toBe(Date.parse(createdAt));
       expect(gateway.updated_at).toBe(Date.parse(updatedAt));
       upgraded.close();
+
+      const prisma = new PrismaClient({
+        datasources: { db: { url: `file:${dbPath}` } },
+      });
+      try {
+        const prismaCreatedAt = new Date("2026-08-27T12:00:00.123Z");
+        const prismaUpdatedAt = new Date("2026-08-27T12:01:00.456Z");
+        const persistedProvider = await prisma.providerConfiguration.create({
+          data: {
+            id: "prisma-local",
+            program: "opencode",
+            argsJson: "[]",
+            model: "hy3-free",
+            timeoutSeconds: 120,
+            toolsEnabled: false,
+            revision: 1,
+            updatedBy: "migration-test",
+            createdAt: prismaCreatedAt,
+            updatedAt: prismaUpdatedAt,
+          },
+        });
+        const persistedGateway = await prisma.gatewayProviderConfiguration.create({
+          data: {
+            id: "prisma-gateway",
+            deployment: "zen",
+            protocol: "chat_completions",
+            model: "hy3-free",
+            secretUri: "secret://opencode/zen",
+            credentialConfigured: false,
+            toolsEnabled: false,
+            freeModel: true,
+            workspaceAccess: true,
+            privacyTermsAdmitted: true,
+            privacyTermsVersion: "opencode-zen-privacy-v1",
+            revision: 1,
+            updatedBy: "migration-test",
+            createdAt: prismaCreatedAt,
+            updatedAt: prismaUpdatedAt,
+          },
+        });
+        expect(persistedProvider.createdAt.getTime()).toBe(prismaCreatedAt.getTime());
+        expect(persistedProvider.updatedAt.getTime()).toBe(prismaUpdatedAt.getTime());
+        expect(persistedGateway.createdAt.getTime()).toBe(prismaCreatedAt.getTime());
+        expect(persistedGateway.updatedAt.getTime()).toBe(prismaUpdatedAt.getTime());
+      } finally {
+        await prisma.$disconnect();
+      }
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }
