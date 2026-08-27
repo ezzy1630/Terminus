@@ -25,18 +25,18 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`), `8983439` (`Persist provider attempt identity and response metadata`), `4316ad1` (`Fail closed on in-flight provider recovery`), `a76eb86` (`Make task cancellation atomic and replay-safe`), `a1c794c` (`Fence candidate branch admission across recovery`) |
+| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`), `8983439` (`Persist provider attempt identity and response metadata`), `4316ad1` (`Fail closed on in-flight provider recovery`), `a76eb86` (`Make task cancellation atomic and replay-safe`), `a1c794c` (`Fence candidate branch admission across recovery`), `d3760b1` (`Resume verification safely after control-plane restart`), `ea7f34a` (`Keep verification recovery provider-free`), `c04ff58` (`Test verification resume rejection paths`) |
 | Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`), `0c3a98a` (`Persist completion admission across recovery`), `e0a9fda` (`Bind completion recovery evidence to current tree`), `91c377f` (`Finalize current-tree evidence identity`) |
-| HEAD at last implementation evidence capture | `a1c794c` (`Fence candidate branch admission across recovery`) |
+| HEAD at last implementation evidence capture | `c04ff58` (`Test verification resume rejection paths`) |
 | Branch | `main` |
-| Remote state at last implementation evidence capture | Twenty-six commits ahead of `origin/main`; no push performed |
-| Functional worktree | Clean at the `a1c794c` functional checkpoint; the ledger update is committed separately |
+| Remote state at last implementation evidence capture | Thirty commits ahead of `origin/main`; no push performed |
+| Functional worktree | Clean at the `c04ff58` functional checkpoint; the ledger update is committed separately |
 
 ## Current implementation observations
 
 1. The live task path now emits `completion.proposed`, enters `VERIFYING`, persists verification artifacts, admits a candidate branch, atomically moves the task to `COMPLETED` and the turn to `VERIFIED`, then finalizes and publishes `turn.completed`.
 2. A failed verification can enter `REPAIR_PENDING`, persist a cited repair directive and cumulative budget state, admit a repair-controller child turn, supersede the parent, and re-enter the same `agentLoop`; migration `0012_repair_attempts` now makes the attempt identity, parent/child association, provenance, budget, and fencing lease durable.
-3. Recovery resumes only unambiguous pre-provider/context and settled-tool boundaries. Terminal-adjacent turns without a completion proposal artifact are quarantined as `FAILED`/`BLOCKED`; `RESPONSE_VALIDATING` and `VERIFYING` are not blindly replayed.
+3. Recovery resumes only unambiguous pre-provider/context, settled-tool, and verification boundaries. Terminal-adjacent turns without a completion proposal artifact are quarantined as `FAILED`/`BLOCKED`; `RESPONSE_VALIDATING` and `VERIFYING` now reuse a durable response artifact and exact persisted verification identity, while stale or legacy state fails closed.
 4. Compaction now refuses to hide a row unless body text and immutable artifact provenance are available, preserves source rows on summary failure/cancellation, and provides an atomic production commit callback.
 5. Repository instructions are loaded through the kernel READ capability, converted to source-hashed required context fragments, and injected with scoped precedence. Scout execution is default-off and requires `TERMINUS_ENABLE_SCOUT=1`.
 6. The live GitHub ruleset is active but weaker than the checked-in target: the current remote has zero required approvals, no code-owner requirement, and a repository-role bypass. The apply script remains dry-run by default.
@@ -53,6 +53,7 @@ This file records observed commands and artifacts. It does not turn source decla
 17. Startup and explicit recovery now enumerate in-flight provider attempts before active-turn recovery. An attempt without a durable response is atomically marked `interrupted`, its active turn is marked `INTERRUPTED`, its active task is `BLOCKED`, and `turn.recovery_interrupted` carries the request identity and reconciliation requirement. A failed transaction leaves all rows and the event unchanged; replay after commit finds no in-flight attempt and emits no second recovery event. No provider request is retried automatically.
 18. Task cancellation now reads active and `REPAIR_PENDING` turns under the mutation lock, emits one idempotent `turn.aborted` event per turn plus `task.aborted`, CASes every turn and the task to terminal `ABORTED` state in the same transaction, and only then signals in-process abort controllers. A fresh-migration DB test proves rollback leaves every row and event unchanged, while committed cancellation replays without duplicate abort events.
 19. Candidate-branch admission now advances `OPEN` to durable `ADMITTING` before the external merge boundary. Startup and explicit recovery never turn that state back into `OPEN`; without a trusted merge receipt they atomically emit `candidate_branch.recovery_manual_review`, move the branch to `MANUAL_REVIEW`, and block the active task. A fresh-migration DB test proves rollback, one-event replay, stable idempotency, and that an already `ADMITTED` branch is not rescanned. Trusted external merge-receipt reconciliation remains open.
+20. Verification recovery now persists the environment binding on the plan and the complete immutable result identity on each result: command/query, exit code, structured observations, artifacts, and verifier version. On restart from `RESPONSE_VALIDATING` or `VERIFYING`, the live loop requires the current source/environment bindings, reconstructs and validates the persisted DAG, reuses only the latest complete result for each node, and executes only missing nodes. It reuses the durable provider response artifact, disables provider-calling scout/compaction auxiliaries, and does not replay provider inference or duplicate proposal/plan-completed events. Fresh migration coverage proves the columns, binding reconstruction, and missing-node-only execution; engine tests reject duplicate, stale, and malformed bindings, while legacy rows are rejected rather than treated as completion evidence.
 
 ## Durable repair-attempt evidence
 
@@ -149,6 +150,22 @@ creates exactly one manual-review event and is replay-safe; and a durably
 `after_external_merge_before_receipt` boundary. This is DB-backed local
 evidence, not proof of a real remote merge receipt or release completeness.
 
+## Verification recovery evidence
+
+Migration `0016_verification_recovery_identity.sql` adds the environment digest
+to verification plans and preserves the full result identity required to
+resume a verifier after a control-plane restart. Legacy rows with missing
+identity fields remain non-resumable and therefore cannot silently satisfy a
+completion gate.
+
+`tests/recovery/verification_recovery.test.ts` applies a fresh migration set,
+reads a persisted two-node plan and one complete result through the same
+Prisma-row adapters used by the control plane, validates the verifier binding,
+and runs the engine with `resumeResults`. The executor is called only for the
+missing node; the settled node is not re-executed and both nodes satisfy the
+completion expression. The package tests also cover duplicate, stale, and
+malformed resume inputs.
+
 ## Live OpenCode free-model evidence
 
 This closes the live-provider proof for one supported anonymous public Zen path. It does not close paid-account, alternate-protocol, cache, retrieval, cross-platform, hosted-CI, or release gates.
@@ -241,6 +258,11 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `just check-all` after `a1c794c` | PASSED — 583 TypeScript tests, 257 Python tests, 281 integration tests, 5 grader-integration tests, Rust libraries/integration/security tests, platform probes, standalone/truth checks, and `cargo deny`; one explicitly ignored live conformance canary remains. |
 | 2026-08-26 | `git diff --check` | PASSED — no whitespace errors in the pending evidence-ledger update. |
 | 2026-08-26 | `just fault-injection` from committed `a1c794c` | PASSED — the artifact records 13 `fixture_only` boundaries, 12 DB-backed scenarios, 37 passing recovery tests, and `completeForRelease: false`; `branch_admission_recovery_replay` covers the external-merge/receipt boundary. |
+| 2026-08-26 | `bun test tests/recovery/verification_recovery.test.ts` | PASSED — 1 fresh-migration DB-backed test, 0 failures, 7 expect calls; persisted verification identity was reconstructed and only the missing node executed. |
+| 2026-08-26 | `bun test tests/recovery/verification_recovery.test.ts packages/verification/src/verification.test.ts packages/verification/src/exit-gate.test.ts` | PASSED — 36 tests, 0 failures, 95 expect calls; resume validation, lifecycle binding restoration, completion gating, and DB-backed recovery all passed. |
+| 2026-08-26 | `bun run typecheck --pretty false` | PASSED — root TypeScript typecheck completed with no diagnostics after the verification recovery implementation. |
+| 2026-08-26 | `just fault-injection` from committed `d3760b1` | PASSED — the artifact records 13 `fixture_only` boundaries, 13 DB-backed scenarios, 38 passing recovery tests, and `completeForRelease: false`; `verification_recovery_replay` covers the post-verification-start boundary. |
+| 2026-08-26 | `just codegen-check` after committing `d3760b1` | PASSED — generated protobuf, API, event, tool, config, schema, SQLx, and documentation outputs are stable with migration `0016_verification_recovery_identity`. |
 
 ## Evidence policy
 
