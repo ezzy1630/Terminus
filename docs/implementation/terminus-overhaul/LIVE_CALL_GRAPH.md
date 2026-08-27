@@ -1,6 +1,6 @@
 # Terminus live call graph
 
-Revision: functional verification-recovery commit `c04ff58`; ledger state is recorded in `HANDOFF.md`.
+Revision: functional plan-derivation commit `a42acc5`; ledger state is recorded in `HANDOFF.md`.
 
 ## Verified primary path
 
@@ -20,7 +20,7 @@ HTTP/RPC route in mini-services/terminus-control/src/index.ts
   -> final provider projection
   -> `completion.proposed` artifact/event
   -> turn RESPONSE_VALIDATING -> VERIFYING
-  -> VerificationCoordinator -> VerificationRuntime -> kernel predicates
+  -> VerificationCoordinator -> VerificationRuntime -> signal-derived VerificationPlan -> kernel predicates
   -> verification plan/results/evidence persisted
   -> completion record persisted as `PREPARED`
   -> candidate branch registered
@@ -66,7 +66,7 @@ task/turn cancel request
 | Repository instructions | `loadRepositoryInstructionFragments` | live, kernel-read | Relevant scopes are read through the kernel and injected as hashed required fragments; full invalidation coverage remains. |
 | `Context Compiler` | `compileContext` in `packages/context-compiler` | live | Manifests, exact prefixes, project rules, and source hashes are retained; retrieval/cache ablation remains. |
 | Provider retry/runtime | `agentLoop` and `providers/*` | live, partial | Attempt stages, canonical request fingerprint/idempotency key, native response metadata, no-duplicate in-flight recovery, direct-stream fallback guards, abort propagation, and one anonymous OpenCode Zen free-model completion through the kernel are proven; endpoint-level deduplication, trusted receipt reconciliation, paid-account, alternate-protocol, cache, and broader live conformance remain. |
-| Verification runtime | `agentLoop` | live, post-proposal | Owns completion admission; one live plan/result/branch-admission path, exact `RESPONSE_VALIDATING`/`VERIFYING` resume from persisted response/plan/result identity, durable `ADMITTING` fencing, conservative `MANUAL_REVIEW` recovery, and DB-backed proposal/cancellation/completion/branch/verification replay are proven, while trusted external merge receipt and semantic plan coverage remain. |
+| Verification runtime | `agentLoop` | live, post-proposal | Owns completion admission; new plans derive typed predicates from contract and current task signals, exact `RESPONSE_VALIDATING`/`VERIFYING` resume uses persisted response/plan/result identity, durable `ADMITTING` fencing and conservative `MANUAL_REVIEW` recovery remain, and DB-backed proposal/cancellation/completion/branch/verification replay are proven. Trusted external merge receipt, repository-map/native-recipe discovery, governed UI predicates, and full semantic plan coverage remain. |
 | `VerificationRepairController` | `agentLoop` | live, partial | Cumulative budget, signatures, directive, child re-entry, parent supersession, durable lease, and DB-backed repair replay scenarios are wired; the remaining fault boundaries are open. |
 | Stagnation supervisor | `/v2/orchestration/stagnation/check` | endpoint/live helper | Reconcile with engine/catalog and structured stop state. |
 | Scout runner | `agentLoop` before main context | live only with explicit opt-in | `TERMINUS_ENABLE_SCOUT=1` is required; utility ledger and promotion evidence remain. |

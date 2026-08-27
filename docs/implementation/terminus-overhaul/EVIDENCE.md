@@ -25,12 +25,12 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`), `8983439` (`Persist provider attempt identity and response metadata`), `4316ad1` (`Fail closed on in-flight provider recovery`), `a76eb86` (`Make task cancellation atomic and replay-safe`), `a1c794c` (`Fence candidate branch admission across recovery`), `d3760b1` (`Resume verification safely after control-plane restart`), `ea7f34a` (`Keep verification recovery provider-free`), `c04ff58` (`Test verification resume rejection paths`) |
+| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`), `8983439` (`Persist provider attempt identity and response metadata`), `4316ad1` (`Fail closed on in-flight provider recovery`), `a76eb86` (`Make task cancellation atomic and replay-safe`), `a1c794c` (`Fence candidate branch admission across recovery`), `d3760b1` (`Resume verification safely after control-plane restart`), `ea7f34a` (`Keep verification recovery provider-free`), `c04ff58` (`Test verification resume rejection paths`), `a42acc5` (`Derive verification plans from task signals`) |
 | Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`), `0c3a98a` (`Persist completion admission across recovery`), `e0a9fda` (`Bind completion recovery evidence to current tree`), `91c377f` (`Finalize current-tree evidence identity`) |
-| HEAD at last implementation evidence capture | `c04ff58` (`Test verification resume rejection paths`) |
+| HEAD at last implementation evidence capture | `a42acc5` (`Derive verification plans from task signals`) |
 | Branch | `main` |
-| Remote state at last implementation evidence capture | Thirty commits ahead of `origin/main`; no push performed |
-| Functional worktree | Clean at the `c04ff58` functional checkpoint; the ledger update is committed separately |
+| Remote state at last implementation evidence capture | Thirty-two commits ahead of `origin/main`; no push performed |
+| Functional worktree | Functional paths are clean at `a42acc5`; `SPEC.md` retains a pre-existing user edit |
 
 ## Current implementation observations
 
@@ -54,6 +54,7 @@ This file records observed commands and artifacts. It does not turn source decla
 18. Task cancellation now reads active and `REPAIR_PENDING` turns under the mutation lock, emits one idempotent `turn.aborted` event per turn plus `task.aborted`, CASes every turn and the task to terminal `ABORTED` state in the same transaction, and only then signals in-process abort controllers. A fresh-migration DB test proves rollback leaves every row and event unchanged, while committed cancellation replays without duplicate abort events.
 19. Candidate-branch admission now advances `OPEN` to durable `ADMITTING` before the external merge boundary. Startup and explicit recovery never turn that state back into `OPEN`; without a trusted merge receipt they atomically emit `candidate_branch.recovery_manual_review`, move the branch to `MANUAL_REVIEW`, and block the active task. A fresh-migration DB test proves rollback, one-event replay, stable idempotency, and that an already `ADMITTED` branch is not rescanned. Trusted external merge-receipt reconciliation remains open.
 20. Verification recovery now persists the environment binding on the plan and the complete immutable result identity on each result: command/query, exit code, structured observations, artifacts, and verifier version. On restart from `RESPONSE_VALIDATING` or `VERIFYING`, the live loop requires the current source/environment bindings, reconstructs and validates the persisted DAG, reuses only the latest complete result for each node, and executes only missing nodes. It reuses the durable provider response artifact, disables provider-calling scout/compaction auxiliaries, and does not replay provider inference or duplicate proposal/plan-completed events. Fresh migration coverage proves the columns, binding reconstruction, and missing-node-only execution; engine tests reject duplicate, stale, and malformed bindings, while legacy rows are rejected rather than treated as completion evidence.
+21. Verification plan derivation now selects typed predicates from the task contract, changed and scoped paths, risk class, repository instruction hashes, current failure/diagnostic signals, generated paths, and supplied native test commands. Admission mode makes selected auxiliary checks required; incremental mode keeps them optional and prevents them from blocking required criteria. Each node records the derivation version, signal counts, and selection rationale. The live `agentLoop` passes the current task signals into new plans, while governed UI execution remains explicitly unavailable in this runtime. Focused derivation, runtime, recovery, binding, and exit-gate tests pass; automatic repository-map/native-recipe discovery and governed UI proof remain open.
 
 ## Durable repair-attempt evidence
 
@@ -165,6 +166,14 @@ and runs the engine with `resumeResults`. The executor is called only for the
 missing node; the settled node is not re-executed and both nodes satisfy the
 completion expression. The package tests also cover duplicate, stale, and
 malformed resume inputs.
+
+Plan derivation coverage is in
+`packages/verification/src/plan-derivation.test.ts`. It proves that the
+deriver selects parse, formatting, diagnostics, native tests, migration,
+schema, security, UI, and criterion-specific predicates from representative
+signals. It also proves that incremental auxiliary nodes are optional and do
+not become dependencies of the required criterion. The control-plane adapter
+uses the same deriver for newly created admission plans.
 
 ## Live OpenCode free-model evidence
 

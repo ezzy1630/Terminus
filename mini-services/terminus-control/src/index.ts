@@ -11536,7 +11536,9 @@ async function agentLoop(turnId: string): Promise<void> {
       });
       latestChangedFiles = [...contextState.taskSnapshot.changedFiles];
       latestFailureSelectors = [...contextState.taskSnapshot.failingTests];
-      latestDiagnostics = [...contextState.taskSnapshot.diagnostics];
+      latestDiagnostics = contextState.taskSnapshot.diagnostics.map(
+        (diagnostic) => `${diagnostic.path}: ${diagnostic.message}`,
+      );
       const effectiveTaskSnapshot: TaskSnapshot = {
         ...taskSnapshot,
         changedFiles: contextState.taskSnapshot.changedFiles,
