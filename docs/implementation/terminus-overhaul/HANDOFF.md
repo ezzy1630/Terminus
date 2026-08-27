@@ -5,17 +5,17 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 ## Current position
 
 - Exact checkout: `/Volumes/Neural/Terminus`.
-- Branch: `main`. Functional cancellation-recovery commit `a76eb86` is complete; the evidence ledger records this slice and no push was performed.
+- Branch: `main`. Functional candidate-branch recovery commit `a1c794c` is complete; the evidence ledger records this slice and no push was performed.
 - The worktree was clean before the ledger files and implementation changes were added. Other registered worktrees remain untouched.
 - Durable ledger files live in `docs/implementation/terminus-overhaul/`.
-- The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, anonymous OpenCode Zen free-model inference through the kernel, durable provider-attempt identity and native response metadata, no-duplicate in-flight provider recovery, cumulative repair, durable repair attempts and fencing leases, durable completion admission recovery, default-off scout behavior, CI/ruleset declarations, evaluation-run contracts, and the Prisma DateTime upgrade migration.
+- The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, anonymous OpenCode Zen free-model inference through the kernel, durable provider-attempt identity and native response metadata, no-duplicate in-flight provider recovery, cumulative repair, durable repair attempts and fencing leases, durable completion admission recovery, candidate-branch admission fencing and manual-review recovery, default-off scout behavior, CI/ruleset declarations, evaluation-run contracts, and the Prisma DateTime upgrade migration.
 
 ## Remaining blockers
 
 1. The live `main-protection` ruleset (id `21228252`) is weaker than the checked-in target. Applying it is a remote mutation and was not authorized.
 2. Hosted CI/bootstrap, paid-account and alternate-provider live conformance, cross-platform sandbox enforcement, signed release artifacts, and private holdout evaluations are not proven locally. The anonymous OpenCode Zen free-model path is now proven; see `EVIDENCE.md`.
 3. Recovery still quarantines rather than resumes `RESPONSE_VALIDATING`/`VERIFYING`; those states need a separate no-duplicate-provider policy and fault-injection proof. Durable repair attempts now have a parent/child record, task-level budget/provenance, and a fenced lease; verification node IDs are plan-scoped so a repair plan cannot collide with its parent in Prisma.
-4. Successful automatic checkpoint publication is atomic with terminal publication, and coupled restart recovery is tested. Ambiguous v1 effects now recover atomically into tool `UNKNOWN`/effect `MANUAL_REVIEW` with one replay-safe event; in-flight provider attempts now become interrupted with blocked tasks and one replay-safe recovery event. Provider-attempt identity and native response/continuation IDs are durable and DB replay-tested. Proposal publication remains non-terminal and unsafe response-validation work is quarantined; cancellation now commits all active-turn/task abort rows and events atomically before signaling in-process work. Checkpoint preparation failure remains explicit/best-effort; trusted receipt and branch-admission fault boundaries still need production-equivalent replay coverage.
+4. Successful automatic checkpoint publication is atomic with terminal publication, and coupled restart recovery is tested. Ambiguous v1 effects now recover atomically into tool `UNKNOWN`/effect `MANUAL_REVIEW` with one replay-safe event; in-flight provider attempts now become interrupted with blocked tasks and one replay-safe recovery event. Provider-attempt identity and native response/continuation IDs are durable and DB replay-tested. Proposal publication remains non-terminal and unsafe response-validation work is quarantined; cancellation now commits all active-turn/task abort rows and events atomically before signaling in-process work. Candidate branches now fence `OPEN` -> `ADMITTING` and recover conservatively to `MANUAL_REVIEW` with a replay-safe event and blocked task when no trusted merge receipt exists. Checkpoint preparation failure remains explicit/best-effort; trusted external merge-receipt reconciliation and later-state recovery remain open.
 
 ## Safe working rules
 
@@ -39,9 +39,14 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - `just github-ruleset-plan`: passed read-only.
 - `just github-ruleset-verify`: failed against the current weaker remote ruleset, as expected.
 - `just fault-injection`: passed — 35 recovery tests, including DB-backed effect, repair, proposal/cancellation, checkpoint-publication, completion-admission, provider-attempt-identity, and provider-attempt-recovery scenarios; the artifact has 13 fixture-only boundaries, 11 DB-backed scenarios, and explicitly remains `completeForRelease: false`.
+- `bun test packages/runtime-protocol/src/v2_protocol.test.ts`: 6 passed, 0 failed.
+- `bun test packages/task-runtime/src/effects.test.ts tests/recovery/branch_admission_recovery.test.ts tests/recovery/proposal_cancellation_recovery.test.ts`: 29 passed, 0 failed, 90 expect calls.
+- `bun test tests/persistence/migration_integrity.test.ts`: 5 passed, 0 failed, including migration `0015_candidate_branch_admission_recovery.sql`.
+- `bun run typecheck`: passed with no diagnostics after the branch-admission state/event additions.
+- `just fault-injection`: passed — 37 recovery tests, 13 fixture-only boundaries, 12 DB-backed scenarios, and `completeForRelease: false`; the artifact includes `branch_admission_recovery_replay`.
 
 ## Resume sequence
 
 1. Inspect `git status --short --branch`, the last commit, and all four ledger files.
 2. If the user authorizes remote branch-protection mutation, run `just github-ruleset-apply`, then `just github-ruleset-verify` and read back the exact remote settings.
-3. Extend DB fault-injection/replay to the remaining branch-admission/trusted-receipt boundary; effect recovery, proposal/cancellation, completion admission, coupled checkpoint/terminal publication, provider-attempt identity/recovery, and repair continuation slices are covered, then later-state recovery remains before release readiness.
+3. Add a trusted external merge-receipt query and later state recovery. The conservative branch-admission `ADMITTING` -> `MANUAL_REVIEW` replay path is covered, alongside effect recovery, proposal/cancellation, completion admission, coupled checkpoint/terminal publication, provider-attempt identity/recovery, and repair continuation slices; later-state recovery remains before release readiness.

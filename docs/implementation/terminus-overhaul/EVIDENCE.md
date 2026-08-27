@@ -25,12 +25,12 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`), `8983439` (`Persist provider attempt identity and response metadata`), `4316ad1` (`Fail closed on in-flight provider recovery`), `a76eb86` (`Make task cancellation atomic and replay-safe`) |
+| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`), `8983439` (`Persist provider attempt identity and response metadata`), `4316ad1` (`Fail closed on in-flight provider recovery`), `a76eb86` (`Make task cancellation atomic and replay-safe`), `a1c794c` (`Fence candidate branch admission across recovery`) |
 | Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`), `0c3a98a` (`Persist completion admission across recovery`), `e0a9fda` (`Bind completion recovery evidence to current tree`), `91c377f` (`Finalize current-tree evidence identity`) |
-| HEAD at last implementation evidence capture | `a76eb86` (`Make task cancellation atomic and replay-safe`) |
+| HEAD at last implementation evidence capture | `a1c794c` (`Fence candidate branch admission across recovery`) |
 | Branch | `main` |
-| Remote state at last implementation evidence capture | Twenty-four commits ahead of `origin/main`; no push performed |
-| Functional worktree | Clean at last implementation evidence capture; the ledger update was committed separately |
+| Remote state at last implementation evidence capture | Twenty-six commits ahead of `origin/main`; no push performed |
+| Functional worktree | Clean at the `a1c794c` functional checkpoint; the ledger update is committed separately |
 
 ## Current implementation observations
 
@@ -52,6 +52,7 @@ This file records observed commands and artifacts. It does not turn source decla
 16. Provider-attempt identity is now durable beyond attempt number: the control plane derives a fingerprint from the exact request artifact hash, provider/model snapshot hash, admitted endpoint, tool-schema hash, immutable context epoch, and attempt ID. The same identity is written to the provider-running event and `provider_attempts` row with a unique kernel idempotency key; provider-native request IDs and continuation IDs are stored in typed columns when the stream exposes them. A fresh-migration DB test proves atomic publication rollback and duplicate-key rejection. This does not claim provider-level deduplication for endpoints that do not support it.
 17. Startup and explicit recovery now enumerate in-flight provider attempts before active-turn recovery. An attempt without a durable response is atomically marked `interrupted`, its active turn is marked `INTERRUPTED`, its active task is `BLOCKED`, and `turn.recovery_interrupted` carries the request identity and reconciliation requirement. A failed transaction leaves all rows and the event unchanged; replay after commit finds no in-flight attempt and emits no second recovery event. No provider request is retried automatically.
 18. Task cancellation now reads active and `REPAIR_PENDING` turns under the mutation lock, emits one idempotent `turn.aborted` event per turn plus `task.aborted`, CASes every turn and the task to terminal `ABORTED` state in the same transaction, and only then signals in-process abort controllers. A fresh-migration DB test proves rollback leaves every row and event unchanged, while committed cancellation replays without duplicate abort events.
+19. Candidate-branch admission now advances `OPEN` to durable `ADMITTING` before the external merge boundary. Startup and explicit recovery never turn that state back into `OPEN`; without a trusted merge receipt they atomically emit `candidate_branch.recovery_manual_review`, move the branch to `MANUAL_REVIEW`, and block the active task. A fresh-migration DB test proves rollback, one-event replay, stable idempotency, and that an already `ADMITTED` branch is not rescanned. Trusted external merge-receipt reconciliation remains open.
 
 ## Durable repair-attempt evidence
 
@@ -127,6 +128,26 @@ turns, the task row, and three abort events; injected failure rolls back all of
 them, while committed cancellation is idempotent and replay emits no second
 set of events. These tests model the production writer transaction and do not
 claim provider inference or external branch-merge proof.
+
+## Candidate-branch admission recovery evidence
+
+Migration `0015_candidate_branch_admission_recovery.sql` adds the durable
+`ADMITTING` and `MANUAL_REVIEW` candidate-branch states while preserving
+existing rows and the task/status index. The runtime protocol and event
+catalog define the replay-safe `candidate_branch.recovery_manual_review`
+event. The live Prisma, SQLite, and in-memory adapters mark a successful
+claim as `ADMITTING`; recovery then uses an epoch compare-and-swap to move it
+to `MANUAL_REVIEW` and block an active or verifying task in the same writer
+transaction. No merge is retried because the current adapter has no trusted
+external merge-receipt query.
+
+`tests/recovery/branch_admission_recovery.test.ts` proves the injected
+rollback leaves the branch, task, and event unchanged; committed recovery
+creates exactly one manual-review event and is replay-safe; and a durably
+`ADMITTED` branch is untouched. The fault-injection artifact records this as
+`branch_admission_recovery_replay` at the
+`after_external_merge_before_receipt` boundary. This is DB-backed local
+evidence, not proof of a real remote merge receipt or release completeness.
 
 ## Live OpenCode free-model evidence
 
@@ -211,6 +232,15 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `bun test mini-services/terminus-control/src/services/services.test.ts tests/recovery/repair_attempt_recovery.test.ts tests/recovery/checkpoint_publication_recovery.test.ts tests/recovery/completion_admission_recovery.test.ts tests/persistence/migration_integrity.test.ts` | PASSED — 25 tests, 0 failures, 123 expect calls; includes repair, completion-admission, coupled checkpoint/terminal publication rollback/replay, and migration coverage. |
 | 2026-08-26 | `just fault-injection` | PASSED — the artifact records 13 `fixture_only` boundaries, 6 DB-backed scenarios, 24 passing recovery tests, and `completeForRelease: false`; the new scenario covers coupled checkpoint and terminal publication. |
 | 2026-08-26 | `just check` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
+| 2026-08-26 | `bun test packages/runtime-protocol/src/v2_protocol.test.ts` | PASSED — 6 tests, 0 failures, 19 expect calls. |
+| 2026-08-26 | `bun test packages/task-runtime/src/effects.test.ts tests/recovery/branch_admission_recovery.test.ts tests/recovery/proposal_cancellation_recovery.test.ts` | PASSED — 29 tests, 0 failures, 90 expect calls; admission receives `ADMITTING`, branch recovery rolls back/replays, and proposal/cancellation recovery remains green. |
+| 2026-08-26 | `bun test tests/persistence/migration_integrity.test.ts` | PASSED — 5 tests, 0 failures, 33 expect calls; all migrations including `0015_candidate_branch_admission_recovery.sql` apply and integrity checks pass. |
+| 2026-08-26 | `bun run typecheck` | PASSED — root TypeScript typecheck completed with no diagnostics after the branch-admission state/event additions. |
+| 2026-08-26 | `just codegen-check` after `a1c794c` | PASSED — generated protobuf, API, event, tool, config, schema, SQLx, and documentation outputs are stable with the 51-event catalog and 15-migration inventory. |
+| 2026-08-26 | `just check` after `a1c794c` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
+| 2026-08-26 | `just check-all` after `a1c794c` | PASSED — 583 TypeScript tests, 257 Python tests, 281 integration tests, 5 grader-integration tests, Rust libraries/integration/security tests, platform probes, standalone/truth checks, and `cargo deny`; one explicitly ignored live conformance canary remains. |
+| 2026-08-26 | `git diff --check` | PASSED — no whitespace errors in the pending evidence-ledger update. |
+| 2026-08-26 | `just fault-injection` from committed `a1c794c` | PASSED — the artifact records 13 `fixture_only` boundaries, 12 DB-backed scenarios, 37 passing recovery tests, and `completeForRelease: false`; `branch_admission_recovery_replay` covers the external-merge/receipt boundary. |
 
 ## Evidence policy
 

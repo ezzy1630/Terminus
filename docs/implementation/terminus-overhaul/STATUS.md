@@ -11,7 +11,7 @@ State vocabulary: `NOT_STARTED`, `IN_PROGRESS`, `BLOCKED`, `DONE`, `REMOVED_BY_D
 | Gate | State | Note |
 | --- | --- | --- |
 | A, evidence and baseline | IN_PROGRESS | Local checks, required platform matrix entries, a declarative ruleset, and an eval registry are present. Hosted bootstrap evidence and remote ruleset enforcement remain open. |
-| B, runtime correctness | IN_PROGRESS | The live loop now records proposal, verification, repair, finalization, and cancellation phases. Durable repair continuation, completion admission recovery, coupled checkpoint/terminal publication recovery, atomic ambiguous-effect quarantine, provider-attempt identity/recovery, and atomic task cancellation are wired; full crash-resume coverage and state-owner extraction remain open. |
+| B, runtime correctness | IN_PROGRESS | The live loop now records proposal, verification, repair, finalization, and cancellation phases. Durable repair continuation, completion admission recovery, coupled checkpoint/terminal publication recovery, atomic ambiguous-effect quarantine, provider-attempt identity/recovery, atomic task cancellation, and conservative candidate-branch admission recovery are wired; full crash-resume coverage and state-owner extraction remain open. |
 | C, context/provider | IN_PROGRESS | Safe cited compaction, full-window sizing, instruction loading, provider abort propagation, stream retry guards, durable provider-attempt identity, native response metadata, and one live anonymous Zen free-model path are proven. Retrieval, cache, paid-account, alternate-protocol, and broader conformance evidence remain open. |
 | D, verification | IN_PROGRESS | Completion is proposal-first and admission is verification-gated; one live task completed through verification and branch admission, and completion admission now has a durable PREPARED/COMMITTED recovery boundary. Durable repair attempts and fenced leases are wired; semantic plan derivation and repair metrics remain open. |
 | E, efficiency | IN_PROGRESS | Catalog-derived read classification and default-off scout behavior are wired. Marginal-value telemetry and optimization evidence remain open. |
@@ -58,7 +58,7 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 | ID range | State | Notes |
 | --- | --- | --- |
 | B1-01..B1-11 | IN_PROGRESS | Explicit lifecycle events, verification-gated terminal publication, durable repair-attempt identity/lease association, atomic completion-record admission, and atomic successful checkpoint/terminal publication are wired; single transition-owner extraction remains open. |
-| B2-01..B2-11 | IN_PROGRESS | Provider/effect recovery classification, atomic `UNKNOWN`/`MANUAL_REVIEW` effect quarantine, no-duplicate in-flight provider recovery, safe boundary resume, fenced repair continuation recovery, proposal quarantine, completion admission replay, coupled checkpoint/terminal replay, atomic cancellation, and durable provider-attempt identity are wired; DB-backed effect/repair/proposal/cancellation/completion/checkpoint/provider scenarios pass, while trusted receipt reconciliation and complete fault-injection/replay proof remain open. |
+| B2-01..B2-11 | IN_PROGRESS | Provider/effect recovery classification, atomic `UNKNOWN`/`MANUAL_REVIEW` effect quarantine, no-duplicate in-flight provider recovery, safe boundary resume, fenced repair continuation recovery, proposal quarantine, completion admission replay, coupled checkpoint/terminal replay, atomic cancellation, durable provider-attempt identity, and candidate-branch `ADMITTING` -> `MANUAL_REVIEW` recovery are wired; DB-backed effect/repair/proposal/cancellation/completion/checkpoint/provider/branch scenarios pass, while trusted receipt reconciliation and complete fault-injection/replay proof remain open. |
 | B3-01..B3-13 | IN_PROGRESS | Atomic task/turn cancellation and signal propagation, catalog effect classes, operation normalization, semantic progress, policy denial, and doom-loop stops are wired; durable restart accounting remains open. |
 | B4-01..B4-09 | IN_PROGRESS | Service extraction exists, but `index.ts` remains the composition and business-logic root. |
 
@@ -77,7 +77,7 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 
 | ID range | State | Notes |
 | --- | --- | --- |
-| D1-01..D1-08 | IN_PROGRESS | Completion proposal, PREPARED completion intent, verification plan/results/evidence, branch admission, atomic task/turn/record admission, post-admission terminal ordering, and atomic successful checkpoint/terminal publication are wired; full live runtime/fault proof remains open. |
+| D1-01..D1-08 | IN_PROGRESS | Completion proposal, PREPARED completion intent, verification plan/results/evidence, fenced branch admission, atomic task/turn/record admission, post-admission terminal ordering, and atomic successful checkpoint/terminal publication are wired; full live runtime/fault proof remains open. |
 | D2-01..D2-10 | NOT_STARTED | Current default plan is criteria-driven but not fully semantic. |
 | D3-01..D3-08, D3-M01 | IN_PROGRESS | One task-level budget, durable signatures, typed directive, durable attempt/lease identity, automatic child re-entry, parent supersession, re-verification, and DB-backed fencing replay are wired; repair metrics remain open. |
 | D4-01..D4-04 | IN_PROGRESS | Clean-review helper exists and must stay experimental until paired evidence. |
@@ -101,9 +101,9 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 
 | ID range | State | Notes |
 | --- | --- | --- |
-| X-DB-01..X-DB-08 | IN_PROGRESS | Existing SQLite migrations are monotonic; migrations `0012_repair_attempts`, `0013_completion_admission`, and `0014_provider_attempt_identity` persist repair, completion-admission, and provider-attempt identity, while the existing effect ledger records atomic recovery evidence without a new migration. DB-backed effect, repair, proposal/cancellation, completion, coupled checkpoint/terminal, and provider-identity rollback/replay/fencing coverage passes; journal completeness and other boundary coverage remain open. |
+| X-DB-01..X-DB-08 | IN_PROGRESS | Existing SQLite migrations are monotonic; migrations `0012_repair_attempts`, `0013_completion_admission`, `0014_provider_attempt_identity`, and `0015_candidate_branch_admission_recovery` persist repair, completion-admission, provider-attempt identity, and branch recovery state, while the existing effect ledger records atomic recovery evidence without a new migration. DB-backed effect, repair, proposal/cancellation, completion, coupled checkpoint/terminal, provider-identity, and candidate-branch rollback/replay/fencing coverage passes; journal completeness and other boundary coverage remain open. |
 | X-OBS-01..X-OBS-08 | IN_PROGRESS | Semantic events and provider telemetry exist; correlation and artifact bounds need audit. |
-| X-TEST-01..X-TEST-07 | IN_PROGRESS | Focused context/provider/lifecycle/security-adjacent tests, an exact live anonymous Zen completion pass, and DB-backed effect/repair/proposal/cancellation/completion/coupled checkpoint-terminal/provider identity/recovery replay tests pass; trusted receipt/branch-admission fault boundaries, alternate live paths, cross-platform, and client tests remain. |
+| X-TEST-01..X-TEST-07 | IN_PROGRESS | Focused context/provider/lifecycle/security-adjacent tests, an exact live anonymous Zen completion pass, and DB-backed effect/repair/proposal/cancellation/completion/coupled checkpoint-terminal/provider identity/provider-recovery/candidate-branch replay tests pass; trusted receipt reconciliation, alternate live paths, cross-platform, and client tests remain. |
 | X-PROM-01..X-PROM-07 | NOT_STARTED | No new advanced default is promoted by this ledger without evidence. |
 | X-DOC-01..X-DOC-15 | IN_PROGRESS | This ledger is the first durable documentation slice. |
 | X-FINAL-01..X-FINAL-27 | IN_PROGRESS | Local implementation and evidence ledgers are updated; external release, runtime, holdout, and client gates remain open. |
@@ -111,6 +111,6 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 ## Current next actions
 
 1. Obtain approval before applying the checked-in ruleset, then run `just github-ruleset-verify` against the exact repository.
-2. Add DB-backed fault-injection/replay coverage for the remaining branch-admission/trusted-receipt boundary; proposal and cancellation are now covered alongside effect recovery, repair schedule/admission/fencing, completion admission, coupled checkpoint/terminal publication, and provider-attempt identity/recovery.
+2. Add a trusted external merge-receipt query and test the later state transition; the conservative DB-backed `ADMITTING` -> `MANUAL_REVIEW` branch recovery and no-duplicate replay path are now covered.
 3. Decide and test a durable recovery policy for `RESPONSE_VALIDATING` and `VERIFYING` without duplicate provider effects; current behavior remains conservative quarantine.
 4. Run tiered paired multi-seed evaluations with live and private-holdout evidence before promoting routing, scout, reviewer, browser, or optimization features.
