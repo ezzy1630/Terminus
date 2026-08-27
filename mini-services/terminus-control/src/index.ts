@@ -4564,39 +4564,76 @@ const routes: Route[] = [
   route("POST", "/v1/tasks/:id/cancel", async (req, res, params) => {
     const body = await jsonBody(req) as { reason?: string | null };
     const taskId = String(params.id);
+    const reason = body.reason ?? "user_cancelled";
     const current = await db.task.findUnique({ where: { id: taskId } });
     if (!current) return sendError(res, 404, "TASK_NOT_FOUND", "task not found", "not_found");
     if (!isMutableV1TaskStatus(current.status)) {
       return sendError(res, 409, "TASK_ALREADY_TERMINAL", `task is already terminal (${current.status})`, "conflict");
     }
-    const activeTurns = await db.turn.findMany({
-      where: { taskId, state: { in: [...V1_ACTIVE_TURN_STATES, "REPAIR_PENDING"] } },
-      orderBy: { sequence: "asc" },
-    });
     try {
       await mutateAgentState(async () => {
-        for (const activeTurn of activeTurns) {
-          await turnCoordinator.abortUnderMutationLock(
-            activeTurn.id,
-            body.reason ?? "user_cancelled",
-          );
-          abortActiveTurn(activeTurn.id, body.reason ?? "user_cancelled");
-        }
-        await emit({
-          eventType: "task.aborted",
-          aggregateType: "task", aggregateId: taskId,
-          payload: { reason: body.reason ?? "user_cancelled", turn_ids: activeTurns.map((turn) => turn.id) },
-        }, async (tx) => {
+        // Cancellation is one logical state transition. Keeping each turn
+        // abort in its own event transaction leaves a crash window where a
+        // turn is terminal but its task is still mutable. Read the turns
+        // under the mutation lock, then publish every turn/task event and
+        // CAS every authoritative row in one database transaction.
+        const activeTurns = await db.turn.findMany({
+          where: { taskId, state: { in: [...V1_ACTIVE_TURN_STATES, "REPAIR_PENDING"] } },
+          orderBy: { sequence: "asc" },
+        });
+        const cancellationEvents: EmitInput[] = [
+          ...activeTurns.map((activeTurn) => ({
+            eventType: "turn.aborted" as const,
+            aggregateType: "turn" as const,
+            aggregateId: activeTurn.id,
+            correlationId: taskId,
+            idempotencyKey: `task-cancel:${taskId}:turn:${activeTurn.id}`,
+            payload: {
+              reason,
+              previous_state: activeTurn.state,
+              phase: activeTurn.state,
+            },
+          })),
+          {
+            eventType: "task.aborted" as const,
+            aggregateType: "task" as const,
+            aggregateId: taskId,
+            correlationId: taskId,
+            idempotencyKey: `task-cancel:${taskId}`,
+            payload: { reason, turn_ids: activeTurns.map((turn) => turn.id) },
+          },
+        ];
+        await emitAtomicBatch(cancellationEvents, async (tx) => {
+          for (const activeTurn of activeTurns) {
+            const turnUpdate = await tx.turn.updateMany({
+              where: {
+                id: activeTurn.id,
+                taskId,
+                state: { in: [...V1_ACTIVE_TURN_STATES, "REPAIR_PENDING"] },
+              },
+              data: {
+                state: "ABORTED",
+                completedAt: new Date(),
+                terminalErrorJson: JSON.stringify({ reason, cancellation: true }),
+              },
+            });
+            if (turnUpdate.count !== 1) {
+              throw new TurnAdmissionError("state_changed", activeTurn.state);
+            }
+          }
           const update = await tx.task.updateMany({
             where: { id: taskId, status: { in: [...V1_MUTABLE_TASK_STATUSES] } },
             data: {
               status: "ABORTED",
               completedAt: new Date(),
-              terminalReasonJson: JSON.stringify({ reason: body.reason ?? "user_cancelled" }),
+              terminalReasonJson: JSON.stringify({ reason }),
             },
           });
           if (update.count !== 1) throw new Error(`task ${taskId} changed before atomic cancellation`);
         });
+        for (const activeTurn of activeTurns) {
+          abortActiveTurn(activeTurn.id, reason);
+        }
       });
     } catch (error: unknown) {
       if (error instanceof TurnAdmissionError) {

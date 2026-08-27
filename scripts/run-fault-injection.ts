@@ -34,6 +34,7 @@ const TEST_PATHS = [
   "tests/recovery/effect_recovery.test.ts",
   "tests/recovery/provider_attempt_identity.test.ts",
   "tests/recovery/provider_attempt_recovery.test.ts",
+  "tests/recovery/proposal_cancellation_recovery.test.ts",
 ] as const;
 
 const DB_BACKED_SCENARIOS = [
@@ -81,6 +82,16 @@ const DB_BACKED_SCENARIOS = [
     scenario: "provider_attempt_recovery_replay",
     boundary: "after_provider_send",
     assertions: ["an in-flight provider attempt is interrupted and blocked atomically without a duplicate recovery event"],
+  },
+  {
+    scenario: "proposal_recovery_replay",
+    boundary: "after_event_commit",
+    assertions: ["a completion proposal never claims completion and unsafe terminal-adjacent work is quarantined on recovery"],
+  },
+  {
+    scenario: "task_cancellation_replay",
+    boundary: "before_event_commit",
+    assertions: ["all active turns, the task, and cancellation events commit or roll back together without duplicate abort events"],
   },
 ] as const;
 
