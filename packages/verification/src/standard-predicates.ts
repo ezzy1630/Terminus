@@ -65,6 +65,8 @@ function defaultCommand(predicateType: PredicateTypeName, paths: readonly string
       return `terminus-predicate property_test ${pathArgs}`;
     case "fuzz_test":
       return `terminus-predicate fuzz_test ${pathArgs}`;
+    case "ui_e2e":
+      return `terminus-predicate ui_e2e ${pathArgs}`;
     case "security_scanner":
       return `terminus-predicate security_scanner ${pathArgs}`;
     case "performance_threshold":
@@ -100,6 +102,21 @@ function makeExecutor(
       }
       const spec = parseNodeSpec(input.node.specification);
       const command = spec.command ?? defaultCommand(predicateType, spec.paths);
+      if (predicateType === PredicateType.UI_E2E && spec.observations["uiComputerUseAvailable"] !== true) {
+        return makeVerificationResult(input, deps, predicateType, command, spec.paths, {
+          status: "blocked",
+          exitCode: null,
+          stdout: "",
+          stderr: "",
+          observations: {
+            ...spec.observations,
+            capability: "governed_ui",
+            availability: "unavailable",
+          },
+          reasonIfSkipped: "governed UI verification is unavailable; no trusted browser or desktop backend is configured",
+          attempts: 0,
+        });
+      }
       const outcome = await deps.runner.run({
         predicateType,
         command,
@@ -109,50 +126,81 @@ function makeExecutor(
         signal: input.signal,
         observations: spec.observations,
       });
-      const pass = outcome.exitCode === 0;
-      const evidencePayload = new TextEncoder().encode(JSON.stringify({
-        predicateType,
-        command,
-        paths: spec.paths,
-        workspaceRevision: input.workspaceRevision,
-        environmentImageDigest: input.environmentImageDigest,
+      return makeVerificationResult(input, deps, predicateType, command, spec.paths, {
+        status: outcome.exitCode === 0 ? "pass" : "fail",
         exitCode: outcome.exitCode,
         stdout: outcome.stdout,
         stderr: outcome.stderr,
         observations: outcome.observations ?? {},
-      }));
-      const artifacts = outcome.artifacts !== undefined
-        ? outcome.artifacts
-        : deps.artifactWriter
-          ? [await deps.artifactWriter.write({
-              bytes: evidencePayload,
-              mediaType: "application/json",
-              metadata: { purpose: "verification-result", predicateType, nodeId: input.node.id },
-            })]
-          : [];
-      return {
-        id: deps.idSource(),
-        planId: deps.planId(),
-        nodeId: input.node.id,
-        status: pass ? "pass" : "fail",
-        startedAt: deps.clock(),
-        completedAt: deps.clock(),
-        sourceRevision: input.workspaceRevision,
-        environmentImageDigest: input.environmentImageDigest,
-        commandOrQuery: command,
-        exitCode: outcome.exitCode,
-        structuredObservations: {
-          stdout: outcome.stdout,
-          stderr: outcome.stderr,
-          ...(outcome.observations ?? {}),
-        },
-        artifacts,
-        toolCallId: null,
-        verifierVersion: "1.0.0",
+        artifacts: outcome.artifacts,
         reasonIfSkipped: null,
         attempts: 1,
-      };
+      });
     },
+  };
+}
+
+interface VerificationResultData {
+  readonly status: VerificationResult["status"];
+  readonly exitCode: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly observations: Readonly<Record<string, unknown>>;
+  readonly artifacts?: readonly ArtifactRef[] | undefined;
+  readonly reasonIfSkipped: string | null;
+  readonly attempts: number;
+}
+
+async function makeVerificationResult(
+  input: NodeExecutorInput,
+  deps: StandardPredicateDeps,
+  predicateType: PredicateTypeName,
+  command: string,
+  paths: readonly string[],
+  data: VerificationResultData,
+): Promise<VerificationResult> {
+  const evidencePayload = new TextEncoder().encode(JSON.stringify({
+    predicateType,
+    command,
+    paths,
+    workspaceRevision: input.workspaceRevision,
+    environmentImageDigest: input.environmentImageDigest,
+    status: data.status,
+    exitCode: data.exitCode,
+    stdout: data.stdout,
+    stderr: data.stderr,
+    observations: data.observations,
+  }));
+  const artifacts = data.artifacts !== undefined
+    ? data.artifacts
+    : deps.artifactWriter
+      ? [await deps.artifactWriter.write({
+          bytes: evidencePayload,
+          mediaType: "application/json",
+          metadata: { purpose: "verification-result", predicateType, nodeId: input.node.id },
+        })]
+      : [];
+  return {
+    id: deps.idSource(),
+    planId: deps.planId(),
+    nodeId: input.node.id,
+    status: data.status,
+    startedAt: deps.clock(),
+    completedAt: deps.clock(),
+    sourceRevision: input.workspaceRevision,
+    environmentImageDigest: input.environmentImageDigest,
+    commandOrQuery: command,
+    exitCode: data.exitCode,
+    structuredObservations: {
+      stdout: data.stdout,
+      stderr: data.stderr,
+      ...data.observations,
+    },
+    artifacts,
+    toolCallId: null,
+    verifierVersion: "1.0.0",
+    reasonIfSkipped: data.reasonIfSkipped,
+    attempts: data.attempts,
   };
 }
 

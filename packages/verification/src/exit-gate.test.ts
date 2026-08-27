@@ -104,6 +104,41 @@ describe("M8 verification exit gate", () => {
     if (!decision.allow) expect(decision.detail).toMatch(/required acceptance criterion/i);
   });
 
+  test("unavailable governed UI verification is blocked and cannot satisfy completion", async () => {
+    const calls: string[] = [];
+    const runtime = makeRuntime({
+      async run(request) {
+        calls.push(request.predicateType);
+        return { exitCode: 0, stdout: "unexpected", stderr: "" };
+      },
+    });
+    const criteria: AcceptanceCriterion[] = [
+      { id: "ui", statement: "the settings screen renders", verificationHint: null, required: true },
+    ];
+    const rawNode = criterionNode({
+      id: "ui",
+      criterionId: "ui",
+      predicateType: "ui_e2e",
+      paths: ["apps/web/Settings.tsx"],
+      required: true,
+    });
+    const spec = JSON.parse(rawNode.specification) as Record<string, unknown>;
+    spec["observations"] = { uiComputerUseAvailable: false };
+    const plan = await runtime.lifecycle.createPlan({
+      taskContractId: fakeUuid(21),
+      taskContractVersion: 1,
+      sourceRevision: "rev-ui",
+      criteria,
+      nodes: [{ ...rawNode, specification: JSON.stringify(spec) }],
+      completionExpression: "ui",
+    });
+    const evaluation = await runtime.lifecycle.evaluate(plan.id, "rev-ui", "env:ui");
+    expect(evaluation.results[0]?.status).toBe("blocked");
+    expect(evaluation.results[0]?.reasonIfSkipped).toMatch(/governed UI verification is unavailable/i);
+    expect(evaluation.completionExpressionSatisfied).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
   test("required acceptance criteria must bind to predicates", () => {
     const criteria: AcceptanceCriterion[] = [
       { id: "ac1", statement: "tests pass", verificationHint: null, required: true },

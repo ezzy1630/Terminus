@@ -75,7 +75,7 @@ describe("verification plan derivation", () => {
       "static_diagnostics",
       "unit_test",
       "integration_test",
-      "e2e_test",
+      "ui_e2e",
       "security_scanner",
       "schema_compatibility",
       "migration_dry_run",
@@ -115,6 +115,36 @@ describe("verification plan derivation", () => {
       },
     });
     expect(derivation.rationale.get(apiNode?.id ?? "")).toContain("criterion selected an explicit predicate");
+  });
+
+  test("derives a required governed UI predicate when the UI backend is unavailable", () => {
+    const derivation = deriveVerificationNodes({
+      criteria: [{
+        id: "ui",
+        statement: "The settings screen shows the new provider state",
+        verificationHint: null,
+        required: true,
+      }],
+      objective: "Verify the rendered settings screen",
+      riskClass: "normal",
+      mode: "admission",
+      signals: {
+        changedFiles: ["apps/web/Settings.tsx"],
+        uiComputerUseAvailable: false,
+      },
+      idSource: idSource(),
+    });
+
+    const uiNode = derivation.nodes.find((node) => node.acceptanceCriterionId === "ui");
+    expect(uiNode).toBeDefined();
+    if (uiNode === undefined) throw new Error("expected a UI criterion node");
+    const uiSpec = parseNodeSpec(uiNode.specification);
+    expect(uiSpec.predicateType).toBe("ui_e2e");
+    expect(uiSpec.observations).toMatchObject({
+      uiComputerUseAvailable: false,
+      uiComputerUseRequired: true,
+    });
+    expect(derivation.rationale.get(uiNode.id)).toContain("UI paths and rendered behavior require governed computer use");
   });
 
   test("keeps incremental auxiliary checks optional and out of the required criterion path", () => {

@@ -15,6 +15,7 @@ export const PredicateType = {
   E2E_TEST: "e2e_test",
   PROPERTY_TEST: "property_test",
   FUZZ_TEST: "fuzz_test",
+  UI_E2E: "ui_e2e",
   SECURITY_SCANNER: "security_scanner",
   PERFORMANCE_THRESHOLD: "performance_threshold",
   SCHEMA_COMPATIBILITY: "schema_compatibility",
@@ -36,6 +37,7 @@ export const ALL_PREDICATE_TYPES: readonly PredicateType[] = Object.freeze([
   "e2e_test",
   "property_test",
   "fuzz_test",
+  "ui_e2e",
   "security_scanner",
   "performance_threshold",
   "schema_compatibility",
@@ -57,6 +59,7 @@ export function predicateTypeToNodeKind(t: PredicateType): VerificationNode["kin
     case "e2e_test":
     case "property_test":
     case "fuzz_test":
+    case "ui_e2e":
     case "security_scanner":
     case "performance_threshold":
     case "schema_compatibility":

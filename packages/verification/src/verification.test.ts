@@ -562,7 +562,7 @@ describe("evaluateFlaky", () => {
 // ────────────────────────── Predicate registry (§40.2) ───────────────────────
 
 describe("PredicateRegistry", () => {
-  test("all 17 predicate types map to a node kind", () => {
+  test("all 18 predicate types map to a node kind", () => {
     for (const pt of Object.values(PredicateType)) {
       const kind = predicateTypeToNodeKind(pt);
       expect(["command", "diagnostic", "diff_rule", "human", "external_query"]).toContain(kind);

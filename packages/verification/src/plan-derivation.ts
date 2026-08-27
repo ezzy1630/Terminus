@@ -133,7 +133,7 @@ function firstPaths(signals: VerificationDerivationSignals): readonly string[] {
   return paths.length > 0 ? paths : ["."];
 }
 
-function predicateFromHint(hint: string): {
+function predicateFromHint(hint: string, hasUiPaths: boolean): {
   readonly predicateType: PredicateTypeName;
   readonly command: string | undefined;
   readonly reason: string;
@@ -162,7 +162,7 @@ function predicateFromHint(hint: string): {
     return { predicateType: PredicateType.STATIC_DIAGNOSTICS, command: undefined, reason: "criterion mentions static correctness" };
   }
   if (/\b(e2e|browser|visual|interaction|ui)\b/.test(normalized)) {
-    return { predicateType: PredicateType.E2E_TEST, command: undefined, reason: "criterion mentions UI or end-to-end behavior" };
+    return { predicateType: PredicateType.UI_E2E, command: undefined, reason: "criterion mentions UI and requires governed computer use" };
   }
   if (/\bintegration\b/.test(normalized)) {
     return { predicateType: PredicateType.INTEGRATION_TEST, command: undefined, reason: "criterion mentions integration behavior" };
@@ -179,6 +179,9 @@ function predicateFromHint(hint: string): {
   if (/\b(property|invariant|generat)/.test(normalized)) {
     return { predicateType: PredicateType.PROPERTY_TEST, command: undefined, reason: "criterion mentions an invariant or generated case" };
   }
+  if (hasUiPaths && /\b(screen|render|display|visual|interaction|frontend|desktop)\b/.test(normalized)) {
+    return { predicateType: PredicateType.UI_E2E, command: undefined, reason: "UI paths and rendered behavior require governed computer use" };
+  }
   return { predicateType: PredicateType.UNIT_TEST, command: undefined, reason: "criterion received the default native test predicate" };
 }
 
@@ -187,6 +190,7 @@ function timeoutFor(predicateType: PredicateTypeName): number {
     case PredicateType.SECURITY_SCANNER:
     case PredicateType.INTEGRATION_TEST:
     case PredicateType.E2E_TEST:
+    case PredicateType.UI_E2E:
     case PredicateType.FUZZ_TEST:
       return 180_000;
     default:
@@ -204,6 +208,8 @@ function makeNode(
     derivationVersion: "terminus.verification.plan.v1",
     mode: input.mode,
     objectivePresent: input.objective.trim().length > 0,
+    uiComputerUseAvailable: input.signals.uiComputerUseAvailable === true,
+    uiComputerUseRequired: draft.predicateType === PredicateType.UI_E2E,
     signalSummary: {
       changedFileCount: uniqueSorted(input.signals.changedFiles).length,
       projectFileCount: uniqueSorted(input.signals.projectFiles ?? []).length,
@@ -221,6 +227,7 @@ function makeNode(
         && input.signals.repositoryMap?.continuationToken !== undefined,
       generatedPathCount: uniqueSorted(input.signals.generatedPaths ?? []).length,
       uiComputerUseAvailable: input.signals.uiComputerUseAvailable === true,
+      uiComputerUseRequired: draft.predicateType === PredicateType.UI_E2E,
     },
     selectionReasons: [...draft.reasons],
   };
@@ -368,15 +375,19 @@ function auxiliaryDrafts(
       ],
     });
   }
-  if (signals.hasUi && input.signals.uiComputerUseAvailable === true) {
+  if (signals.hasUi) {
     drafts.push({
       label: "ui_e2e",
-      predicateType: PredicateType.E2E_TEST,
+      predicateType: PredicateType.UI_E2E,
       criterionId: null,
       paths,
       required,
       dependsOn: [],
-      reasons: ["UI paths changed and governed computer use is available"],
+      reasons: [
+        input.signals.uiComputerUseAvailable === true
+          ? "UI paths changed and governed computer use is available"
+          : "UI paths changed but governed computer use is unavailable; keep the verification node blocked",
+      ],
     });
   }
   return drafts;
@@ -413,7 +424,7 @@ export function deriveVerificationNodes(
   const drafts: NodeDraft[] = [...auxiliary];
   for (const [index, criterion] of input.criteria.entries()) {
     const selectionText = criterion.verificationHint?.trim() || criterion.statement;
-    const selected = predicateFromHint(selectionText);
+    const selected = predicateFromHint(selectionText, hasUi);
     const reasons = [
       selected.reason,
       ...(input.signals.failingTests?.length ? ["current failure selectors were available"] : []),

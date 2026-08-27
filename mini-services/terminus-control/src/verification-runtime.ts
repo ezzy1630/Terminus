@@ -150,6 +150,9 @@ function normalizePredicateCommand(
   if (program !== "terminus-predicate") {
     return { program, args };
   }
+  if (predicateType === "ui_e2e") {
+    throw new Error("governed UI verification requires a configured computer-use verifier; no kernel command is defined");
+  }
   const recipeByPredicate: Readonly<Record<string, string>> = {
     file_parses: "check",
     formatter_check: "check",
