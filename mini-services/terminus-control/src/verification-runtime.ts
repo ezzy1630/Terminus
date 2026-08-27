@@ -14,13 +14,19 @@ import {
 } from "@terminus/task-runtime";
 import type {
   AcceptanceCriterion,
+  ArtifactRef,
   Rfc3339Timestamp,
+  VerificationNode,
+  VerificationPlan,
+  VerificationResult,
   Uuid7,
 } from "@terminus/domain";
+import { artifactRefSchema } from "@terminus/domain";
 import {
   InMemoryVerificationStore,
   VerificationEngine,
   VerificationLifecycle,
+  buildVerificationPlan,
   createStandardPredicateRegistry,
   criterionNode,
   type PredicateCommandRunner,
@@ -41,6 +47,19 @@ function uuid(): Uuid7 {
 
 function nowIso(): Rfc3339Timestamp {
   return new Date().toISOString() as Rfc3339Timestamp;
+}
+
+function jsonSafe(value: unknown): unknown {
+  if (typeof value === "bigint") return value.toString();
+  if (Array.isArray(value)) return value.map(jsonSafe);
+  if (value !== null && typeof value === "object") {
+    const output: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      output[key] = jsonSafe(item);
+    }
+    return output;
+  }
+  return value;
 }
 
 /** Dev/test runner: treats commands containing "fail" as failure. */
@@ -333,12 +352,13 @@ export function createVerificationRuntime(
         currentPlanId = plan.id;
         return plan;
       },
-      evaluate: (planId, rev, digest, signal) => {
+      evaluate: (planId, rev, digest, signal, options) => {
         currentPlanId = planId;
-        return lifecycle.evaluate(planId, rev, digest, signal);
+        return lifecycle.evaluate(planId, rev, digest, signal, options);
       },
       invalidateForChangedPaths: (planId, paths) =>
         lifecycle.invalidateForChangedPaths(planId, paths),
+      restorePlan: (input) => lifecycle.restorePlan(input),
       complete: (input) => lifecycle.complete(input),
     } as VerificationLifecycle,
   };
@@ -351,6 +371,7 @@ export async function persistPlanToPrisma(
     readonly taskId: string;
     readonly contractVersion: number;
     readonly sourceRevision: string;
+    readonly environmentDigest: string | null;
     readonly completionExpression: string;
     readonly planArtifact: string;
     readonly nodes: readonly {
@@ -376,6 +397,7 @@ export async function persistPlanToPrisma(
       taskId: plan.taskId,
       contractVersion: plan.contractVersion,
       sourceRevision: plan.sourceRevision,
+      environmentDigest: plan.environmentDigest,
       completionExpression: plan.completionExpression,
       planArtifact: plan.planArtifact,
     },
@@ -407,6 +429,239 @@ export async function persistPlanToPrisma(
   }
 }
 
+interface PersistedVerificationPlanRow {
+  readonly id: string;
+  readonly taskId: string;
+  readonly contractVersion: number;
+  readonly sourceRevision: string;
+  readonly environmentDigest: string | null;
+  readonly completionExpression: string;
+  readonly createdAt: Date;
+  readonly nodes: readonly {
+    readonly id: string;
+    readonly kind: string;
+    readonly required: boolean;
+    readonly specificationJson: string;
+    readonly timeoutMs: number | null;
+    readonly retryPolicyJson: string;
+    readonly acceptanceCriterionId: string | null;
+    readonly dependsOnJson: string;
+  }[];
+  readonly edges: readonly {
+    readonly fromNodeId: string;
+    readonly toNodeId: string;
+    readonly kind: string;
+  }[];
+}
+
+const VERIFICATION_NODE_KINDS = new Set<VerificationNode["kind"]>([
+  "command",
+  "diagnostic",
+  "diff_rule",
+  "human",
+  "external_query",
+]);
+
+function parseRetryPolicy(value: unknown): VerificationNode["retryPolicy"] | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const maxAttempts = record.maxAttempts;
+  const backoffMs = record.backoffMs;
+  const flakeIdentity = record.flakeIdentity;
+  if (
+    typeof maxAttempts !== "number"
+    || !Number.isInteger(maxAttempts)
+    || maxAttempts < 1
+    || typeof backoffMs !== "number"
+    || !Number.isInteger(backoffMs)
+    || backoffMs < 0
+    || (flakeIdentity !== null && typeof flakeIdentity !== "string")
+  ) return null;
+  return {
+    maxAttempts,
+    backoffMs,
+    flakeIdentity: flakeIdentity as string | null,
+  };
+}
+
+function parseStringArray(value: unknown): readonly string[] | null {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value as string[]
+    : null;
+}
+
+function parseVerificationEdges(
+  edges: readonly PersistedVerificationPlanRow["edges"][number][],
+  nodes: readonly VerificationNode[],
+): readonly VerificationPlan["edges"][number][] | null {
+  const nodeById = new Map(nodes.map((node) => [node.id, node] as const));
+  const seen = new Set<string>();
+  const parsed: VerificationPlan["edges"][number][] = [];
+  for (const edge of edges) {
+    const kind = edge.kind === "depends"
+      ? "depends" as const
+      : edge.kind === "invalidates"
+        ? "invalidates" as const
+        : null;
+    const from = nodeById.get(edge.fromNodeId);
+    const to = nodeById.get(edge.toNodeId);
+    if (kind === null || from === undefined || to === undefined) return null;
+    const key = `${edge.fromNodeId}\u0000${edge.toNodeId}\u0000${kind}`;
+    if (seen.has(key)) return null;
+    seen.add(key);
+    if (kind === "depends" && !to.dependsOn.includes(from.id)) return null;
+    parsed.push({ from: from.id, to: to.id, kind });
+  }
+  for (const node of nodes) {
+    for (const dependency of node.dependsOn) {
+      if (!seen.has(`${dependency}\u0000${node.id}\u0000depends`)) return null;
+    }
+  }
+  return parsed;
+}
+
+/** Rebuild a persisted plan while revalidating its DAG and expression. */
+export function verificationPlanFromPrisma(
+  row: PersistedVerificationPlanRow,
+): VerificationPlan | null {
+  const nodes: VerificationNode[] = [];
+  for (const rowNode of row.nodes) {
+    if (!VERIFICATION_NODE_KINDS.has(rowNode.kind as VerificationNode["kind"])) return null;
+    const dependsOn = parseStringArray(safeJsonParse(rowNode.dependsOnJson));
+    const retryPolicy = parseRetryPolicy(safeJsonParse(rowNode.retryPolicyJson));
+    if (dependsOn === null || retryPolicy === null) return null;
+    nodes.push({
+      id: rowNode.id,
+      kind: rowNode.kind as VerificationNode["kind"],
+      required: rowNode.required,
+      dependsOn,
+      specification: rowNode.specificationJson,
+      timeout: rowNode.timeoutMs ?? 30_000,
+      retryPolicy,
+      acceptanceCriterionId: rowNode.acceptanceCriterionId,
+    });
+  }
+  const edges = parseVerificationEdges(row.edges, nodes);
+  if (edges === null) return null;
+  try {
+    const validated = buildVerificationPlan({
+      id: row.id as Uuid7,
+      taskContractId: row.taskId as Uuid7,
+      taskContractVersion: row.contractVersion,
+      sourceRevision: row.sourceRevision,
+      nodes,
+      completionExpression: row.completionExpression,
+    });
+    return {
+      ...validated,
+      edges,
+      createdAt: row.createdAt.toISOString() as Rfc3339Timestamp,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function safeJsonParse(text: string): unknown {
+  try { return JSON.parse(text) as unknown; } catch { return null; }
+}
+
+function parseObject(text: string): Readonly<Record<string, unknown>> | null {
+  const value = safeJsonParse(text);
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Readonly<Record<string, unknown>>
+    : null;
+}
+
+function encodeArtifactRefs(artifacts: readonly ArtifactRef[]): string {
+  return JSON.stringify(artifacts.map((artifact) => ({
+    hash: artifact.hash,
+    uri: artifact.uri,
+    mediaType: artifact.mediaType,
+    bytes: artifact.bytes.toString(),
+  })));
+}
+
+function parseArtifactRefs(text: string): readonly ArtifactRef[] | null {
+  const value = safeJsonParse(text);
+  if (!Array.isArray(value)) return null;
+  const artifacts: ArtifactRef[] = [];
+  for (const item of value) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return null;
+    const record = item as Record<string, unknown>;
+    if (typeof record.bytes !== "string" || !/^\d+$/.test(record.bytes)) return null;
+    let bytes: bigint;
+    try { bytes = BigInt(record.bytes); } catch { return null; }
+    const parsed = artifactRefSchema.safeParse({ ...record, bytes });
+    if (!parsed.success) return null;
+    artifacts.push(parsed.data);
+  }
+  return artifacts;
+}
+
+interface PersistedVerificationResultRow {
+  readonly id: string;
+  readonly planId: string;
+  readonly nodeId: string;
+  readonly attempt: number;
+  readonly status: string;
+  readonly sourceRevision: string;
+  readonly environmentDigest: string;
+  readonly exitCode: number | null;
+  readonly commandOrQuery: string | null;
+  readonly structuredObservationsJson: string | null;
+  readonly artifactsJson: string | null;
+  readonly verifierVersion: string | null;
+  readonly evidenceArtifact: string | null;
+  readonly toolCallId: string | null;
+  readonly startedAt: Date;
+  readonly completedAt: Date | null;
+  readonly reason: string | null;
+}
+
+const VERIFICATION_RESULT_STATUSES = new Set<VerificationResult["status"]>([
+  "pass",
+  "fail",
+  "error",
+  "skipped",
+  "blocked",
+]);
+
+/** Return null for legacy/thin rows that cannot safely satisfy a completion gate. */
+export function verificationResultFromPrisma(
+  row: PersistedVerificationResultRow,
+): VerificationResult | null {
+  if (
+    row.commandOrQuery === null
+    || row.structuredObservationsJson === null
+    || row.artifactsJson === null
+    || row.verifierVersion === null
+    || row.environmentDigest === "unknown"
+    || !VERIFICATION_RESULT_STATUSES.has(row.status as VerificationResult["status"])
+  ) return null;
+  const observations = parseObject(row.structuredObservationsJson);
+  const artifacts = parseArtifactRefs(row.artifactsJson);
+  if (observations === null || artifacts === null) return null;
+  return {
+    id: row.id as Uuid7,
+    planId: row.planId as Uuid7,
+    nodeId: row.nodeId,
+    status: row.status as VerificationResult["status"],
+    startedAt: row.startedAt.toISOString() as Rfc3339Timestamp,
+    completedAt: row.completedAt?.toISOString() as Rfc3339Timestamp | null ?? null,
+    sourceRevision: row.sourceRevision,
+    environmentImageDigest: row.environmentDigest,
+    commandOrQuery: row.commandOrQuery,
+    exitCode: row.exitCode,
+    structuredObservations: observations,
+    artifacts,
+    toolCallId: row.toolCallId as Uuid7 | null,
+    verifierVersion: row.verifierVersion,
+    reasonIfSkipped: row.reason,
+    attempts: Math.max(1, row.attempt),
+  };
+}
+
 export async function persistResultsToPrisma(
   db: PrismaClient | Prisma.TransactionClient,
   results: readonly {
@@ -417,7 +672,11 @@ export async function persistResultsToPrisma(
     readonly status: string;
     readonly sourceRevision: string;
     readonly environmentImageDigest: string | null;
-    readonly artifacts: readonly { readonly uri: string }[];
+    readonly artifacts: readonly ArtifactRef[];
+    readonly commandOrQuery: string;
+    readonly exitCode: number | null;
+    readonly structuredObservations: Readonly<Record<string, unknown>>;
+    readonly verifierVersion: string;
     readonly reasonIfSkipped: string | null;
     readonly startedAt?: string | undefined;
     readonly completedAt?: string | null | undefined;
@@ -434,6 +693,10 @@ export async function persistResultsToPrisma(
         sourceRevision: attempt.sourceRevision,
         environmentImageDigest: attempt.environmentImageDigest,
         artifacts: attempt.evidence,
+        commandOrQuery: attempt.commandOrQuery,
+        exitCode: attempt.exitCode,
+        structuredObservations: attempt.observations,
+        verifierVersion: attempt.verifierVersion,
         reasonIfSkipped: attempt.reason,
         startedAt: attempt.startedAt,
         completedAt: attempt.completedAt,
@@ -448,6 +711,11 @@ export async function persistResultsToPrisma(
       status: r.status,
       sourceRevision: r.sourceRevision,
       environmentDigest: r.environmentImageDigest ?? "unknown",
+      exitCode: r.exitCode,
+      commandOrQuery: r.commandOrQuery,
+      structuredObservationsJson: JSON.stringify(jsonSafe(r.structuredObservations)),
+      artifactsJson: encodeArtifactRefs(r.artifacts),
+      verifierVersion: r.verifierVersion,
       evidenceArtifact: r.artifacts[0]?.uri ?? null,
       ...(r.startedAt === undefined ? {} : { startedAt: new Date(r.startedAt) }),
       ...(r.completedAt === undefined || r.completedAt === null ? {} : { completedAt: new Date(r.completedAt) }),

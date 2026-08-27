@@ -25,18 +25,24 @@ import {
   VerificationEngine,
   type ChangedCodeInvalidationInput,
   type EvaluationResult,
+  type EvaluationOptions,
   type NodeExecutor,
 } from "./index.js";
 import type { VerificationAttemptRecord, VerificationStore } from "./store.js";
 import { serializeNodeSpec, type PredicateType } from "./node-spec.js";
 import { buildClaimEvidenceGraph } from "./evidence.js";
+import type { ClaimEvidenceGraph } from "./evidence.js";
 import {
   computeAcceptanceCriteriaHash,
   computeVerificationResultsHash,
   type ProofBundle,
 } from "./proof-bundle.js";
 import type { HumanAcceptanceObligation } from "./human-acceptance.js";
-import type { VerifierBinding } from "./run-binding.js";
+import {
+  createVerifierBinding,
+  validateVerifierResultBinding,
+  type VerifierBinding,
+} from "./run-binding.js";
 
 export interface LifecycleDeps {
   readonly store: VerificationStore;
@@ -54,6 +60,14 @@ export interface CreatePlanInput {
   readonly criteria: readonly AcceptanceCriterion[];
   readonly nodes: readonly VerificationNode[];
   readonly completionExpression: string;
+}
+
+export interface RestorePlanInput {
+  readonly plan: VerificationPlan;
+  readonly criteria: readonly AcceptanceCriterion[];
+  readonly results?: readonly VerificationResult[];
+  readonly attempts?: readonly VerificationAttemptRecord[];
+  readonly evidenceGraph?: ClaimEvidenceGraph | null;
 }
 
 export class VerificationLifecycle {
@@ -95,6 +109,56 @@ export class VerificationLifecycle {
   }
 
   /**
+   * Rehydrate a plan and its immutable evidence before crash recovery. The
+   * caller can pass the returned results to evaluate as resumeResults.
+   */
+  async restorePlan(input: RestorePlanInput): Promise<void> {
+    requireCriterionCoverage(input.criteria, input.plan.nodes);
+    const binding = createVerifierBinding(input.plan);
+    const results = input.results ?? [];
+    for (const result of results) {
+      const failures = validateVerifierResultBinding(result, binding);
+      if (failures.length > 0) {
+        throw new ValidationError("persisted verification result has an invalid run binding", {
+          resultId: result.id,
+          failures,
+        });
+      }
+      if (
+        result.planId !== input.plan.id
+        || result.sourceRevision !== input.plan.sourceRevision
+      ) {
+        throw new ValidationError("persisted verification result does not belong to the restored plan", {
+          resultId: result.id,
+          planId: input.plan.id,
+        });
+      }
+    }
+    await this.deps.store.savePlan(input.plan);
+    await this.deps.store.saveNodes(input.plan.id, input.plan.nodes);
+    await this.deps.store.saveEdges(input.plan.id, input.plan.edges);
+    const criteriaHash = computeAcceptanceCriteriaHash(input.criteria);
+    const resultsHash = computeVerificationResultsHash(results);
+    this.criteriaByPlan.set(input.plan.id, input.criteria);
+    this.criteriaHashByPlan.set(input.plan.id, criteriaHash);
+    this.verifierBindingByPlan.set(input.plan.id, binding);
+    this.resultsHashByPlan.set(input.plan.id, resultsHash);
+    await this.deps.store.saveLifecycleBinding({
+      planId: input.plan.id,
+      criteriaHash,
+      verifierBinding: binding,
+      resultsHash,
+      invalidatedNodeIds: [],
+    });
+    for (const result of results) await this.deps.store.saveResult(result);
+    for (const attempt of input.attempts ?? []) await this.deps.store.saveAttempt(attempt);
+    if (input.evidenceGraph !== undefined) {
+      if (input.evidenceGraph === null) await this.deps.store.deleteEvidenceGraph(input.plan.id);
+      else await this.deps.store.saveEvidenceGraph(input.plan.id, input.evidenceGraph);
+    }
+  }
+
+  /**
    * Evaluate the plan, persist every attempt + final result, stamp digest.
    */
   async evaluate(
@@ -102,6 +166,7 @@ export class VerificationLifecycle {
     workspaceRevision: string,
     environmentImageDigest: string,
     signal: AbortSignal | null = null,
+    options: EvaluationOptions = {},
   ): Promise<EvaluationResult> {
     const plan = await this.deps.store.getPlan(planId);
     if (plan === null) throw new ValidationError("verification plan not found", { planId });
@@ -116,6 +181,7 @@ export class VerificationLifecycle {
     }
 
     const result = await this.deps.engine.evaluate(plan, workspaceRevision, signal, {
+      ...options,
       environmentImageDigest,
       onAttempt: async (attemptResult) => {
         const attempt: VerificationAttemptRecord = {
@@ -132,6 +198,9 @@ export class VerificationLifecycle {
           completedAt: attemptResult.completedAt,
           reason: attemptResult.reasonIfSkipped,
           observations: attemptResult.structuredObservations,
+          commandOrQuery: attemptResult.commandOrQuery,
+          exitCode: attemptResult.exitCode,
+          verifierVersion: attemptResult.verifierVersion,
         };
         await this.deps.store.saveAttempt(attempt);
       },

@@ -125,6 +125,8 @@ import {
   persistPlanToPrisma,
   persistResultsToPrisma,
   persistClaimEvidenceGraphToPrisma,
+  verificationPlanFromPrisma,
+  verificationResultFromPrisma,
   createPrismaCompletionAdmission,
   resolveKernelEnvironmentDigest,
   resolveWorkspaceRevision,
@@ -141,6 +143,7 @@ import {
   type ModelKey,
   type Rfc3339Timestamp,
   type TokenCount,
+  type VerificationPlan,
 } from "@terminus/domain";
 import { projectStoredEvents, rolloutToJsonl } from "@terminus/rollout";
 import { scheduleSchema, computeNextRunAt, advanceJob, type CronJob } from "@terminus/cron";
@@ -11051,6 +11054,7 @@ async function agentLoop(turnId: string): Promise<void> {
     },
   });
   if (!turn) return;
+  const resumeVerificationFromState = turn.state === "RESPONSE_VALIDATING" || turn.state === "VERIFYING";
   const existingController = activeTurnAbortControllers.get(turnId);
   const abortController = existingController ?? new AbortController();
   activeTurnAbortControllers.set(turnId, abortController);
@@ -11059,7 +11063,11 @@ async function agentLoop(turnId: string): Promise<void> {
     // pre-provider boundary; continuing from there is idempotent.
     const enteredContextCompilation = await mutateAgentState(async () => {
       const current = await db.turn.findUnique({ where: { id: turnId }, select: { state: true } });
-      if (current?.state === "CONTEXT_COMPILING") return true;
+      if (
+        current?.state === "CONTEXT_COMPILING"
+        || current?.state === "RESPONSE_VALIDATING"
+        || current?.state === "VERIFYING"
+      ) return true;
       if (current?.state !== "PENDING" && current?.state !== "REPAIRING") return false;
       await emit({
         eventType: "turn.context_compiling",
@@ -12324,24 +12332,57 @@ async function agentLoop(turnId: string): Promise<void> {
         }));
       },
     });
-    const stop = await engine.run();
-    switch (stop.kind) {
-      case "interrupted":
-        return;
-      case "budget_exhausted":
-        throw new ToolCycleBudgetExhaustedError(`Adaptive turn budget stopped the loop: ${stop.reason}`);
-      case "policy_denied":
-        throw new ToolPolicyDeniedError(stop.message);
-      case "no_final_response":
-        throw new ToolCycleBudgetExhaustedError("Provider turn ended without a final response");
-      case "doom_loop":
-        throw new ToolCycleBudgetExhaustedError(
-          `Provider repeated identical tool calls ${stop.count} times; loop stopped for safety`,
-        );
-      case "final":
-        finalText = stop.text;
-        finalResponseArtifactUri = lastResponseArtifactUri;
-        break;
+    if (resumeVerificationFromState) {
+      // A completed provider response is already durably identified by the
+      // proposal event or provider-attempt row. Recovery must never re-enter
+      // the provider engine from RESPONSE_VALIDATING/VERIFYING.
+      const [proposal, completedAttempt] = await Promise.all([
+        db.semanticEvent.findFirst({
+          where: { eventType: "completion.proposed", aggregateType: "turn", aggregateId: turnId },
+          orderBy: { occurredAt: "desc" },
+          select: { payloadJson: true, artifactRefsJson: true },
+        }),
+        db.providerAttempt.findFirst({
+          where: { turnId, status: "completed", responseArtifact: { not: null } },
+          orderBy: { completedAt: "desc" },
+          select: { responseArtifact: true },
+        }),
+      ]);
+      const proposalPayload = proposal === null
+        ? null
+        : safeParse<Record<string, unknown>>(proposal.payloadJson, {});
+      const proposalRefs = proposal === null ? [] : safeParse<string[]>(proposal.artifactRefsJson, []);
+      const responseArtifact = typeof proposalPayload?.response_artifact === "string"
+        ? proposalPayload.response_artifact
+        : proposalRefs[0] ?? completedAttempt?.responseArtifact ?? null;
+      const parsedResponseArtifact = responseArtifact === null
+        ? null
+        : artifactUriSchema.safeParse(responseArtifact);
+      if (parsedResponseArtifact === null || !parsedResponseArtifact.success) {
+        throw new Error("verification recovery has no valid completed provider response artifact");
+      }
+      finalText = "";
+      finalResponseArtifactUri = parsedResponseArtifact.data;
+    } else {
+      const stop = await engine.run();
+      switch (stop.kind) {
+        case "interrupted":
+          return;
+        case "budget_exhausted":
+          throw new ToolCycleBudgetExhaustedError(`Adaptive turn budget stopped the loop: ${stop.reason}`);
+        case "policy_denied":
+          throw new ToolPolicyDeniedError(stop.message);
+        case "no_final_response":
+          throw new ToolCycleBudgetExhaustedError("Provider turn ended without a final response");
+        case "doom_loop":
+          throw new ToolCycleBudgetExhaustedError(
+            `Provider repeated identical tool calls ${stop.count} times; loop stopped for safety`,
+          );
+        case "final":
+          finalText = stop.text;
+          finalResponseArtifactUri = lastResponseArtifactUri;
+          break;
+      }
     }
 
     if (finalText === null || finalResponseArtifactUri === null) {
@@ -12364,17 +12405,27 @@ async function agentLoop(turnId: string): Promise<void> {
     // A model final response is a proposal artifact, not completion. The
     // terminal transition and success checkpoint are defined below and only
     // called after verification admission succeeds.
-    await mutateAgentState(() => emit({
-      eventType: "completion.proposed",
-      aggregateType: "turn",
-      aggregateId: turnId,
-      correlationId: turn.taskId ?? undefined,
-      payload: {
-        status: "PROPOSED",
-        response_artifact: finalResponseArtifactUri,
+    const existingCompletionProposal = await db.semanticEvent.findFirst({
+      where: {
+        eventType: "completion.proposed",
+        aggregateType: "turn",
+        aggregateId: turnId,
       },
-      artifactRefs: [finalResponseArtifactUri],
-    }));
+      select: { eventId: true },
+    });
+    if (existingCompletionProposal === null) {
+      await mutateAgentState(() => emit({
+        eventType: "completion.proposed",
+        aggregateType: "turn",
+        aggregateId: turnId,
+        correlationId: turn.taskId ?? undefined,
+        payload: {
+          status: "PROPOSED",
+          response_artifact: finalResponseArtifactUri,
+        },
+        artifactRefs: [finalResponseArtifactUri],
+      }));
+    }
 
     const finalizeTurn = async (expectedState: "RESPONSE_VALIDATING" | "VERIFIED"): Promise<void> => {
       await mutateAgentState(() => emit({
@@ -12484,25 +12535,31 @@ async function agentLoop(turnId: string): Promise<void> {
     };
 
     // If the task has a status of ACTIVE, advance it through VERIFY → COMPLETE.
+    // A restart may re-enter here with the task already VERIFYING; in that
+    // case the durable plan below is resumed without another provider call.
     if (turn.taskId) {
       const task = await db.task.findUnique({ where: { id: turn.taskId } });
-      if (task && task.status === "ACTIVE") {
-        await mutateAgentState(() => emit({
-          eventType: "turn.verifying",
-          aggregateType: "turn",
-          aggregateId: turnId,
-          correlationId: task.id,
-          payload: { phase: "VERIFY", proposal_artifact: finalResponseArtifactUri },
-          artifactRefs: [finalResponseArtifactUri],
-        }, async (tx) => {
-          const update = await tx.turn.updateMany({
-            where: { id: turnId, state: "RESPONSE_VALIDATING" },
-            data: { state: "VERIFYING" },
-          });
-          if (update.count !== 1) throw new Error(`turn ${turnId} changed before verification`);
-        }));
-        const enteredVerification = await verificationCoordinator.begin(task.id);
-        if (!enteredVerification) throw new Error(`task ${task.id} changed before verification`);
+      const enteringVerification = task?.status === "ACTIVE";
+      const continuingVerification = task?.status === "VERIFYING" && resumeVerificationFromState;
+      if (task && (enteringVerification || continuingVerification)) {
+        if (enteringVerification) {
+          await mutateAgentState(() => emit({
+            eventType: "turn.verifying",
+            aggregateType: "turn",
+            aggregateId: turnId,
+            correlationId: task.id,
+            payload: { phase: "VERIFY", proposal_artifact: finalResponseArtifactUri },
+            artifactRefs: [finalResponseArtifactUri],
+          }, async (tx) => {
+            const update = await tx.turn.updateMany({
+              where: { id: turnId, state: "RESPONSE_VALIDATING" },
+              data: { state: "VERIFYING" },
+            });
+            if (update.count !== 1) throw new Error(`turn ${turnId} changed before verification`);
+          }));
+          const enteredVerification = await verificationCoordinator.begin(task.id);
+          if (!enteredVerification) throw new Error(`task ${task.id} changed before verification`);
+        }
         // Real verification DAG + completion gate (M8). Verification commands,
         // source identity, environment identity, and evidence all cross the
         // kernel/artifact boundary; no local always-pass fallback is allowed.
@@ -12556,12 +12613,14 @@ async function agentLoop(turnId: string): Promise<void> {
           verificationHint: c.verificationHint,
           required: c.required,
         }));
-        const nodes = defaultCriteriaNodes(criteria);
-        const completionExpression = nodes.map((n) => n.id).join(" && ");
         const sourceRevision = await resolveWorkspaceRevision(
           verificationClients,
           verificationBaseContext,
           workspace.id,
+          abortController.signal,
+        );
+        const environmentDigest = await resolveKernelEnvironmentDigest(
+          verificationClients,
           abortController.signal,
         );
         const previousVerificationPlan = await db.verificationPlan.findFirst({
@@ -12571,57 +12630,117 @@ async function agentLoop(turnId: string): Promise<void> {
         });
         const workspaceChangedSinceLastAttempt = previousVerificationPlan === null
           || previousVerificationPlan.sourceRevision !== sourceRevision;
-        const environmentDigest = await resolveKernelEnvironmentDigest(verificationClients, abortController.signal);
-        const plan = await runtime.lifecycle.createPlan({
-          taskContractId: task.id as never,
-          taskContractVersion: task.activeContractVersion,
-          sourceRevision,
-          criteria,
-          nodes,
-          completionExpression,
-        });
-        const planArtifact = await ingestJsonArtifact(
-          artifactClient,
-          {
-            plan,
-            criteria,
-          },
-          "verification-plan",
-          { taskId: task.id, workspaceId: workspace.id },
-        );
-        await mutateAgentState(() => db.$transaction(async (tx) => {
-          await assertControlWriterLease(tx);
-          await persistPlanToPrisma(tx, {
-            id: plan.id,
-            taskId: task.id,
-            contractVersion: plan.taskContractVersion,
-            sourceRevision: plan.sourceRevision,
-            completionExpression: plan.completionExpression,
-            planArtifact: planArtifact.uri,
-            nodes: plan.nodes.map((n) => ({
-              id: n.id,
-              kind: n.kind,
-              required: n.required,
-              specification: n.specification,
-              timeout: n.timeout,
-              retryPolicy: n.retryPolicy,
-              acceptanceCriterionId: n.acceptanceCriterionId,
-              dependsOn: n.dependsOn,
-            })),
-            edges: plan.edges,
+        const existingVerificationPlan = continuingVerification
+          ? await db.verificationPlan.findFirst({
+              where: { taskId: task.id },
+              orderBy: { createdAt: "desc" },
+              include: { nodes: true, edges: true },
+            })
+          : null;
+        let plan: VerificationPlan;
+        let resumedResults: NonNullable<ReturnType<typeof verificationResultFromPrisma>>[] = [];
+        if (existingVerificationPlan !== null) {
+          if (
+            existingVerificationPlan.environmentDigest === null
+            || existingVerificationPlan.environmentDigest !== environmentDigest
+            || existingVerificationPlan.sourceRevision !== sourceRevision
+          ) {
+            throw new Error("verification recovery found a stale source or environment binding");
+          }
+          const restoredPlan = verificationPlanFromPrisma(existingVerificationPlan);
+          if (
+            restoredPlan === null
+            || restoredPlan.taskContractId !== task.id
+            || restoredPlan.taskContractVersion !== task.activeContractVersion
+          ) {
+            throw new Error("verification recovery found an invalid persisted plan");
+          }
+          const persistedResults = await db.verificationResult.findMany({
+            where: { planId: restoredPlan.id },
+            orderBy: [{ nodeId: "asc" }, { attempt: "asc" }],
           });
-        }));
+          const latestRowByNode = new Map<string, (typeof persistedResults)[number]>();
+          for (const row of persistedResults) latestRowByNode.set(row.nodeId, row);
+          const latestByNode = new Map<string, NonNullable<ReturnType<typeof verificationResultFromPrisma>>>();
+          for (const row of latestRowByNode.values()) {
+            const result = verificationResultFromPrisma(row);
+            if (result !== null) latestByNode.set(result.nodeId, result);
+          }
+          resumedResults = [...latestByNode.values()];
+          await runtime.lifecycle.restorePlan({
+            plan: restoredPlan,
+            criteria,
+            results: resumedResults,
+          });
+          plan = restoredPlan;
+        } else {
+          const nodes = defaultCriteriaNodes(criteria);
+          const completionExpression = nodes.map((n) => n.id).join(" && ");
+          const createdPlan = await runtime.lifecycle.createPlan({
+            taskContractId: task.id as never,
+            taskContractVersion: task.activeContractVersion,
+            sourceRevision,
+            criteria,
+            nodes,
+            completionExpression,
+          });
+          const planArtifact = await ingestJsonArtifact(
+            artifactClient,
+            {
+              plan: createdPlan,
+              criteria,
+              environmentDigest,
+            },
+            "verification-plan",
+            { taskId: task.id, workspaceId: workspace.id },
+          );
+          await mutateAgentState(() => db.$transaction(async (tx) => {
+            await assertControlWriterLease(tx);
+            await persistPlanToPrisma(tx, {
+              id: createdPlan.id,
+              taskId: task.id,
+              contractVersion: createdPlan.taskContractVersion,
+              sourceRevision: createdPlan.sourceRevision,
+              environmentDigest,
+              completionExpression: createdPlan.completionExpression,
+              planArtifact: planArtifact.uri,
+              nodes: createdPlan.nodes.map((n) => ({
+                id: n.id,
+                kind: n.kind,
+                required: n.required,
+                specification: n.specification,
+                timeout: n.timeout,
+                retryPolicy: n.retryPolicy,
+                acceptanceCriterionId: n.acceptanceCriterionId,
+                dependsOn: n.dependsOn,
+              })),
+              edges: createdPlan.edges,
+            });
+          }));
+          plan = createdPlan;
+        }
 
         const evaluation = await runtime.lifecycle.evaluate(
           plan.id,
           sourceRevision,
           environmentDigest,
           abortController.signal,
+          { resumeResults: resumedResults },
         );
         const attempts = await runtime.store.listAttempts(plan.id);
         const evidenceGraph = await runtime.store.getEvidenceGraph(plan.id);
         const allPassed =
           evaluation.allRequiredPassed && evaluation.completionExpressionSatisfied;
+        const resumedNodeIds = new Set(resumedResults.map((result) => result.nodeId));
+        const newlyEvaluatedResults = evaluation.results.filter((result) => !resumedNodeIds.has(result.nodeId));
+        const existingPlanCompletedEvent = await db.semanticEvent.findFirst({
+          where: {
+            eventType: "verification.plan_completed",
+            aggregateType: "verification_plan",
+            aggregateId: plan.id,
+          },
+          select: { eventId: true },
+        });
         await mutateAgentState(async () => {
           await db.$transaction(async (tx) => {
             await assertControlWriterLease(tx);
@@ -12630,7 +12749,7 @@ async function agentLoop(turnId: string): Promise<void> {
               await persistClaimEvidenceGraphToPrisma(tx, evidenceGraph);
             }
           });
-          for (const r of evaluation.results) {
+          for (const r of newlyEvaluatedResults) {
             await emit({
               eventType: r.status === "pass" ? "verification.node_passed" : "verification.node_failed",
               aggregateType: "verification_result",
@@ -12639,13 +12758,15 @@ async function agentLoop(turnId: string): Promise<void> {
               payload: { node_id: r.nodeId, status: r.status },
             });
           }
-          await emit({
-            eventType: "verification.plan_completed",
-            aggregateType: "verification_plan",
-            aggregateId: plan.id,
-            correlationId: task.id,
-            payload: { status: allPassed ? "all_passed" : "failed" },
-          });
+          if (existingPlanCompletedEvent === null) {
+            await emit({
+              eventType: "verification.plan_completed",
+              aggregateType: "verification_plan",
+              aggregateId: plan.id,
+              correlationId: task.id,
+              payload: { status: allPassed ? "all_passed" : "failed" },
+            });
+          }
         });
 
         if (!allPassed) {
@@ -13543,6 +13664,12 @@ async function canResumeTurnAtBoundary(turnId: string, state: string): Promise<b
   if (!providerSafe || !effectsSafe) return false;
   if (state === "PENDING" || state === "REPAIRING") {
     return attempts.length === 0 && toolCalls.length === 0 && effects.length === 0;
+  }
+  if (state === "RESPONSE_VALIDATING" || state === "VERIFYING") {
+    // The provider response and all effect receipts are already durable at
+    // this boundary. The recovery-aware agent loop reuses the response and
+    // persisted verification plan; it never replays the provider request.
+    return true;
   }
   return state === "CONTEXT_COMPILING"
     || (state === "TOOL_SETTLEMENT" && toolCalls.length > 0);

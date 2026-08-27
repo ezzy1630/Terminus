@@ -36,6 +36,7 @@ const TEST_PATHS = [
   "tests/recovery/provider_attempt_recovery.test.ts",
   "tests/recovery/proposal_cancellation_recovery.test.ts",
   "tests/recovery/branch_admission_recovery.test.ts",
+  "tests/recovery/verification_recovery.test.ts",
 ] as const;
 
 const DB_BACKED_SCENARIOS = [
@@ -98,6 +99,11 @@ const DB_BACKED_SCENARIOS = [
     scenario: "branch_admission_recovery_replay",
     boundary: "after_external_merge_before_receipt",
     assertions: ["an in-flight candidate branch is fenced as ADMITTING and moved to MANUAL_REVIEW without retrying the merge"],
+  },
+  {
+    scenario: "verification_recovery_replay",
+    boundary: "after_verification_start",
+    assertions: ["persisted verifier identity resumes missing nodes without replaying the provider"],
   },
 ] as const;
 

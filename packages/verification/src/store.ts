@@ -42,6 +42,9 @@ export interface VerificationAttemptRecord {
   readonly completedAt: Rfc3339Timestamp | null;
   readonly reason: string | null;
   readonly observations: Readonly<Record<string, unknown>>;
+  readonly commandOrQuery: string;
+  readonly exitCode: number | null;
+  readonly verifierVersion: string;
 }
 
 export interface VerificationStore {

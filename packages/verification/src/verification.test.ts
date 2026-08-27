@@ -8,11 +8,14 @@ import type {
   VerificationPlan,
   VerificationNode,
   VerificationResult,
+  AcceptanceCriterion,
   Uuid7,
   Rfc3339Timestamp,
 } from "@terminus/domain";
 import {
   VerificationEngine,
+  VerificationLifecycle,
+  InMemoryVerificationStore,
   buildVerificationPlan,
   ChangedCodeInvalidator,
   evaluateFlaky,
@@ -226,6 +229,107 @@ describe("VerificationEngine evidence binding", () => {
     });
     expect(evaluation.results[0]?.status).toBe("error");
     expect(evaluation.allRequiredPassed).toBe(false);
+  });
+
+  test("resumes from exact persisted results without re-executing settled nodes", async () => {
+    const plan = mkPlan([
+      mkNode("settled", "command", { required: true }),
+      mkNode("missing", "command", { required: true }),
+    ], "settled && missing");
+    const first = new VerificationEngine({
+      executorFor: () => ({
+        async execute(input: NodeExecutorInput): Promise<VerificationResult> {
+          return {
+            ...passResult(plan.id, input.node.id),
+            environmentImageDigest: "env:1",
+          };
+        },
+      }),
+      idSource: () => fakeUuid(93),
+      clock: fakeTs,
+    });
+    const initial = await first.evaluate(plan, "rev-1", null, { environmentImageDigest: "env:1" });
+    const settled = initial.results.find((result) => result.nodeId === "settled");
+    expect(settled).toBeDefined();
+
+    const executed: string[] = [];
+    const resumed = new VerificationEngine({
+      executorFor: () => ({
+        async execute(input: NodeExecutorInput): Promise<VerificationResult> {
+          executed.push(input.node.id);
+          return {
+            ...passResult(input.node.id as unknown as Uuid7, input.node.id),
+            environmentImageDigest: "env:1",
+          };
+        },
+      }),
+      idSource: () => fakeUuid(94),
+      clock: fakeTs,
+    });
+    const evaluation = await resumed.evaluate(plan, "rev-1", null, {
+      environmentImageDigest: "env:1",
+      resumeResults: [settled!],
+    });
+    expect(executed).toEqual(["missing"]);
+    expect(evaluation.results.map((result) => result.nodeId).sort()).toEqual(["missing", "settled"]);
+    expect(evaluation.allRequiredPassed).toBe(true);
+  });
+
+  test("restores lifecycle bindings before a resumed evaluation", async () => {
+    const plan = mkPlan([mkNode("settled", "command", { required: true })], "settled");
+    const criteria: AcceptanceCriterion[] = [];
+    const initial = new VerificationEngine({
+      executorFor: () => ({
+        async execute(input: NodeExecutorInput): Promise<VerificationResult> {
+          return {
+            ...passResult(plan.id, input.node.id),
+            environmentImageDigest: "env:1",
+          };
+        },
+      }),
+      idSource: () => fakeUuid(95),
+      clock: fakeTs,
+    });
+    const sourceStore = new InMemoryVerificationStore();
+    const sourceLifecycle = new VerificationLifecycle({
+      store: sourceStore,
+      engine: initial,
+      idSource: () => fakeUuid(96),
+      clock: fakeTs,
+    });
+    await sourceLifecycle.restorePlan({ plan, criteria });
+    const sourceEvaluation = await sourceLifecycle.evaluate(plan.id, "rev-1", "env:1");
+
+    let executions = 0;
+    const restoredStore = new InMemoryVerificationStore();
+    const restoredLifecycle = new VerificationLifecycle({
+      store: restoredStore,
+      engine: new VerificationEngine({
+        executorFor: () => ({
+          async execute(): Promise<VerificationResult> {
+            executions += 1;
+            throw new Error("settled verification must not execute again");
+          },
+        }),
+        idSource: () => fakeUuid(98),
+        clock: fakeTs,
+      }),
+      idSource: () => fakeUuid(99),
+      clock: fakeTs,
+    });
+    await restoredLifecycle.restorePlan({ plan, criteria, results: sourceEvaluation.results });
+    const resumed = await restoredLifecycle.evaluate(
+      plan.id,
+      "rev-1",
+      "env:1",
+      null,
+      { resumeResults: sourceEvaluation.results },
+    );
+    expect(executions).toBe(0);
+    expect(resumed.allRequiredPassed).toBe(true);
+    expect(await restoredStore.getLifecycleBinding(plan.id)).toMatchObject({
+      verifierBinding: { configurationHash: expect.any(String) },
+    });
   });
 });
 

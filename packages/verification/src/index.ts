@@ -204,6 +204,11 @@ export interface EvaluationOptions {
   readonly onAttempt?: ((result: VerificationResult) => Promise<void> | void) | undefined;
   /** Optional verifier binding; defaults to the engine identity + plan hash. */
   readonly verifierBinding?: VerifierBinding | undefined;
+  /**
+   * Results durably observed before a process restart. Exact results are
+   * treated as settled nodes; only nodes absent from this set execute.
+   */
+  readonly resumeResults?: readonly VerificationResult[] | undefined;
 }
 
 export interface EvaluationResult {
@@ -252,6 +257,57 @@ export class VerificationEngine {
     const resultMap = new Map<string, VerificationResult>();
     const remaining = new Set(sorted.map((n) => n.id));
     const byId = new Map(sorted.map((n) => [n.id, n] as const));
+
+    const resumedNodeIds = new Set<string>();
+    for (const result of options.resumeResults ?? []) {
+      if (result.planId !== plan.id) {
+        throw new ValidationError("verification resume result belongs to another plan", {
+          resultId: result.id,
+          planId: plan.id,
+        });
+      }
+      if (!byId.has(result.nodeId)) {
+        throw new ValidationError("verification resume result belongs to an unknown node", {
+          resultId: result.id,
+          nodeId: result.nodeId,
+        });
+      }
+      if (resumedNodeIds.has(result.nodeId)) {
+        throw new ValidationError("verification resume contains duplicate node results", {
+          nodeId: result.nodeId,
+        });
+      }
+      if (result.sourceRevision !== workspaceRevision) {
+        throw new ValidationError("verification resume result has a stale source revision", {
+          resultId: result.id,
+          expected: workspaceRevision,
+          observed: result.sourceRevision,
+        });
+      }
+      if (result.environmentImageDigest !== environmentImageDigest) {
+        throw new ValidationError("verification resume result has a stale environment binding", {
+          resultId: result.id,
+          expected: environmentImageDigest,
+          observed: result.environmentImageDigest,
+        });
+      }
+      const resultBinding = readVerificationResultBinding(result);
+      if (
+        verificationResultBindingState(result) !== "valid"
+        || resultBinding === null
+        || !isVerifierBindingEqual(resultBinding, verifierBinding)
+        || result.verifierVersion !== verifierBinding.verifierVersion
+      ) {
+        throw new ValidationError("verification resume result has an invalid verifier binding", {
+          resultId: result.id,
+        });
+      }
+      resumedNodeIds.add(result.nodeId);
+      resultMap.set(result.nodeId, result);
+      results.push(result);
+      remaining.delete(result.nodeId);
+      if (result.status === "blocked") blocked.push(result.nodeId);
+    }
 
     while (remaining.size > 0) {
       // Find ready nodes: dependencies all completed (have a result).
