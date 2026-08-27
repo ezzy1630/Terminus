@@ -12439,6 +12439,7 @@ async function agentLoop(turnId: string): Promise<void> {
           "verification-completion",
           { taskId: task.id, workspaceId: workspace.id },
         );
+        const completionRecordId = `completion:${task.id}`;
         try {
           const completionRecord = await runtime.lifecycle.complete({
             taskId: task.id as never,
@@ -12461,7 +12462,7 @@ async function agentLoop(turnId: string): Promise<void> {
           // PREPARED is durable evidence, not a completion claim; the record
           // becomes COMMITTED only with the task/turn admission transaction.
           const completionData = {
-            id: `completion:${task.id}`,
+            id: completionRecordId,
             taskId: task.id,
             contractVersion: completionRecord.contractVersion,
             finalRevision: completionRecord.finalRevision,
@@ -12580,7 +12581,7 @@ async function agentLoop(turnId: string): Promise<void> {
           return;
         }
 
-        await verificationCoordinator.complete(task.id, plan.id, turnId, completionData.id);
+        await verificationCoordinator.complete(task.id, plan.id, turnId, completionRecordId);
         await mutateAgentState(() => emit({
           eventType: "verification.admitted",
           aggregateType: "turn",
