@@ -275,6 +275,7 @@ export class PrismaContextStore implements ContextStore {
     if (row === null) return null;
     const experimentRecord = parseJson<Record<string, unknown>>(row.experimentJson, {});
     const experimentDecisionRecord = experimentRecord.decisionRecord;
+    const observedCachedTokens = readObservedCachedTokens(experimentRecord);
     const estimatedTokens = parseJson<Record<string, unknown>>(row.estimatedTokensJson, {});
     const cachePlan = parseJson<Record<string, unknown>>(row.cachePlanJson, {});
     if (row.epochId === null) {
@@ -318,7 +319,7 @@ export class PrismaContextStore implements ContextStore {
       toolResultReserveTokens: bigintField(estimatedTokens, "toolResult") as ContextManifest["toolResultReserveTokens"],
       recoveryMarginTokens: bigintField(estimatedTokens, "recovery") as ContextManifest["recoveryMarginTokens"],
       predictedCachedTokens: bigintField(cachePlan, "predictedCachedTokens") as ContextManifest["predictedCachedTokens"],
-      observedCachedTokens: null,
+      observedCachedTokens: observedCachedTokens as ContextManifest["observedCachedTokens"],
       confidentialityDecisions: stringRecord(experimentRecord.confidentialityDecisions) as ContextManifest["confidentialityDecisions"],
       taintDecisions: stringRecord(experimentRecord.taintDecisions) as ContextManifest["taintDecisions"],
       experimentAssignments: Array.isArray(experimentRecord.assignments)
@@ -440,6 +441,24 @@ function bigintField(record: Readonly<Record<string, unknown>>, key: string): bi
     }
   }
   return 0n;
+}
+
+function readObservedCachedTokens(record: Readonly<Record<string, unknown>>): bigint | null {
+  const observation = record.observation;
+  if (typeof observation !== "object" || observation === null || Array.isArray(observation)) return null;
+  const cache = (observation as Readonly<Record<string, unknown>>).cache;
+  if (typeof cache !== "object" || cache === null || Array.isArray(cache)) return null;
+  const value = (cache as Readonly<Record<string, unknown>>).observedCachedTokens;
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    try {
+      return BigInt(value);
+    } catch {
+      return null;
+    }
+  }
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? BigInt(value)
+    : null;
 }
 
 function isFiniteNonNegativeInteger(value: unknown): value is number {

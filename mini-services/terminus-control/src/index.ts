@@ -12707,6 +12707,11 @@ async function agentLoop(turnId: string): Promise<void> {
           responseArtifact: responseArtifactMeta.uri,
           usage: jsonSafe(usage),
           projectedFinishReason: projected.finishReason,
+          cache: {
+            predictedCachedTokens: cacheRecord.predictedCachedTokens.toString(),
+            observedCachedTokens: cacheRecord.actualReadTokens.toString(),
+            ratio: observedRatio,
+          },
         });
         await providerSessionService.settleResponse({
           attemptId,
