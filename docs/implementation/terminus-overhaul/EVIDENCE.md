@@ -25,11 +25,11 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`) |
+| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`) |
 | Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`) |
-| HEAD at last evidence capture | `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`) |
+| HEAD at last evidence capture | `327444f` (`Persist repair attempts and fenced recovery leases`) |
 | Branch | `main` |
-| Remote state | Six commits ahead of `origin/main`; no push performed |
+| Remote state | Seven commits ahead of `origin/main`; no push performed |
 | Worktree | Clean at last evidence capture |
 
 ## Current implementation observations
@@ -106,6 +106,9 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `just codegen-check` from committed `d6fb7fb` | PASSED — generated paths are clean against the exact committed tree. |
 | 2026-08-26 | `just check` from committed `d6fb7fb` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
 | 2026-08-26 | `just check-all` from committed `d6fb7fb` | PASSED — 583 TypeScript tests across 82 files, 257 Python tests, Rust integration/security tests, platform probes, standalone/truth checks, generated-contract check, and `cargo deny`; 1 live conformance test remained ignored by its explicit network-test annotation. |
+| 2026-08-26 | `just codegen-check` from committed `327444f` | PASSED — generated protobuf, API, event, tool, config, schema, SQL migration inventory, and documentation outputs are stable against the repair-persistence commit. |
+| 2026-08-26 | `just check` from committed `327444f` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
+| 2026-08-26 | `just check-all` from committed `327444f` | PASSED — 583 TypeScript tests across 82 files, 257 Python tests, full local Rust integration/security, platform probes, standalone/truth checks, generated-contract check, and `cargo deny`; 1 live conformance test remained ignored by its explicit network-test annotation. |
 
 ## Evidence policy
 

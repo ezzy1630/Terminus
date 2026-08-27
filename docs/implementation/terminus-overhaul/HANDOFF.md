@@ -5,7 +5,7 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 ## Current position
 
 - Exact checkout: `/Volumes/Neural/Terminus`.
-- Branch: `main`. The implementation and evidence ledger were clean at `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`); the current repair-persistence slice is being validated on top of that commit. No push was performed.
+- Branch: `main`. The implementation and evidence ledger are clean at `327444f` (`Persist repair attempts and fenced recovery leases`); no push was performed.
 - The worktree was clean before the ledger files and implementation changes were added. Other registered worktrees remain untouched.
 - Durable ledger files live in `docs/implementation/terminus-overhaul/`.
 - The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, anonymous OpenCode Zen free-model inference through the kernel, cumulative repair, durable repair attempts and fencing leases, default-off scout behavior, CI/ruleset declarations, evaluation-run contracts, and the Prisma DateTime upgrade migration.
@@ -32,7 +32,7 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - `just codegen`: passed.
 - `just codegen-check`: passed from the repair-attempt schema change after generated migration inventory refresh.
 - `just check`: passed on the repair-attempt slice; existing clippy warnings and two generated-file ESLint warnings remain non-fatal.
-- `just check-all`: passed from committed `d6fb7fb`; the post-migration rerun is still required before this handoff is final.
+- `just check-all`: passed from committed `327444f`; 583 TypeScript tests, 257 Python tests, full local Rust integration/security, platform probes, standalone/truth checks, generated-contract validation, and `cargo deny` passed. One explicitly ignored live conformance canary remains.
 - `just standalone-check`: passed.
 - `just truth-check`: passed.
 - `just github-ruleset-plan`: passed read-only.
