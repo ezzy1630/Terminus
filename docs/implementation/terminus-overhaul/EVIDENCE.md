@@ -25,11 +25,11 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`) |
-| Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`) |
-| HEAD at last evidence capture | `327444f` (`Persist repair attempts and fenced recovery leases`) |
+| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`) |
+| Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`), `0c3a98a` (`Persist completion admission across recovery`) |
+| HEAD at last evidence capture | `ebf4344` (`Fix completion record scope at admission`) |
 | Branch | `main` |
-| Remote state | Seven commits ahead of `origin/main`; no push performed |
+| Remote state | Twelve commits ahead of `origin/main`; no push performed |
 | Worktree | Clean at last evidence capture |
 
 ## Current implementation observations
@@ -136,6 +136,9 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `bunx prisma validate --schema prisma/schema.prisma` | PASSED — the completion admission fields and nullable candidate-branch association validate in the Prisma schema. |
 | 2026-08-26 | `bun test mini-services/terminus-control/src/services/services.test.ts tests/recovery/completion_admission_recovery.test.ts tests/persistence/migration_integrity.test.ts` | PASSED — 18 tests, 0 failures, 91 expect calls; includes coordinator propagation, fresh-migration completion rollback/replay/quarantine, and migration read-back. |
 | 2026-08-26 | `just fault-injection` | PASSED — the artifact was regenerated from four recovery test files; it records 13 `fixture_only` boundaries, 5 DB-backed scenarios, 22 passing tests, and `completeForRelease: false`. |
+| 2026-08-26 | `just codegen-check` from committed `ebf4344` | PASSED — generated protobuf, API, event, tool, config, schema, SQL migration inventory, and documentation outputs are stable with migration `0013_completion_admission`. |
+| 2026-08-26 | `just check-all` from committed `ebf4344` | PASSED — 583 TypeScript unit tests, 257 Python tests, 281 integration tests, Rust workspace libraries/tests, standalone/truth checks, platform probes, security suites, and `cargo deny`; one public OpenCode TLS canary remained explicitly ignored. |
+| 2026-08-26 | `just fault-injection` from committed `ebf4344` | PASSED — 22 recovery tests, 13 `fixture_only` boundaries, 5 DB-backed scenarios, and `completeForRelease: false`. |
 
 ## Evidence policy
 
