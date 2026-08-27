@@ -11397,7 +11397,10 @@ async function agentLoop(turnId: string): Promise<void> {
     };
     const compileProviderContext = async () => {
       let recent = await toolEpisodeService.loadModelVisibleEpisodes(turnId);
-      const compactionSummarizer = buildSummarizer();
+      // Verification recovery must not make any provider call while it
+      // rebuilds the durable response/plan boundary. A compaction summary is
+      // optional; retain source episodes when recovery has no provider path.
+      const compactionSummarizer = resumeVerificationFromState ? null : buildSummarizer();
       // R4/Cubic round-2: the compaction decision must consider the FULL
       // episode set, not the already window-capped view — otherwise a long
       // turn never crosses the threshold. Byte sizes come from the CAS
@@ -11909,7 +11912,10 @@ async function agentLoop(turnId: string): Promise<void> {
     // opt-in, and a utility ledger disables the scout after repeated
     // zero-yield runs. Result becomes a bounded scout_brief world-state
     // section.
-    const scoutEnabledForTurn = toolsEnabled && resolveScoutEnabled(process.env.TERMINUS_ENABLE_SCOUT) && SCOUT_LEDGER.shouldRun();
+    const scoutEnabledForTurn = !resumeVerificationFromState
+      && toolsEnabled
+      && resolveScoutEnabled(process.env.TERMINUS_ENABLE_SCOUT)
+      && SCOUT_LEDGER.shouldRun();
     let scoutFiles: readonly { path: string; role: string }[] = [];
     if (scoutEnabledForTurn) {
       try {
