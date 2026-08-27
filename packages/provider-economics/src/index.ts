@@ -30,6 +30,7 @@ import {
   checkBudget,
   reconcileCost,
   computeCost,
+  computeExactCostMicros,
 } from "@terminus/provider-core";
 import { settlePartialStream, validateFallbackPolicy } from "@terminus/provider-core";
 
@@ -44,6 +45,7 @@ export type {
 };
 
 export { checkBudget, reconcileCost, settlePartialStream, validateFallbackPolicy };
+export { computeExactCostMicros };
 
 // ────────────────────────── Budget guard (§38.14) ────────────────────────────
 
@@ -58,27 +60,22 @@ export function estimateCostMicros(
   input: CostEstimateInput,
   economics: ProviderEconomics,
 ): Micros {
-  const microsPerMillion = (m: Micros): number => Number(m) / 1_000_000;
   // Cached tokens are a subset of the prompt. An inconsistent caller that
   // reports cached > prompt must not produce a negative input cost, which
   // would deflate budgets through checkBudget/recordSpend.
   const cachedTokens = input.predictedCachedTokens > input.promptTokens
     ? input.promptTokens
     : input.predictedCachedTokens;
-  const inputCost =
-    Number(input.promptTokens - cachedTokens) *
-    microsPerMillion(economics.inputMicrosPerMillion);
-  const cachedCost =
-    Number(cachedTokens) *
-    microsPerMillion(economics.cachedInputMicrosPerMillion);
-  const outputCost =
-    Number(input.predictedOutputTokens) *
-    microsPerMillion(economics.outputMicrosPerMillion);
-  const reasoningCost = economics.reasoningAccounting
-    ? Number(input.predictedReasoningTokens) *
-      microsPerMillion(economics.outputMicrosPerMillion)
-    : 0;
-  return BigInt(Math.round(inputCost + cachedCost + outputCost + reasoningCost)) as Micros;
+  return computeExactCostMicros({
+    inputTokens: input.promptTokens,
+    cachedInputTokens: cachedTokens,
+    cacheWriteTokens: 0n as TokenCount,
+    outputTokens: input.predictedOutputTokens,
+    reasoningTokens: input.predictedReasoningTokens,
+    toolSchemaTokens: 0n as TokenCount,
+    latencyMs: 0,
+    timeToFirstTokenMs: null,
+  }, economics);
 }
 
 /**

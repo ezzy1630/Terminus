@@ -74,6 +74,14 @@ describe("Database Migration Integrity & Corruption Detection", () => {
         .query("PRAGMA table_info(task_contract_versions)")
         .all() as Array<{ name: string }>;
       expect(contractColumns.map((column) => column.name)).toContain("v2_projection_json");
+      const providerAttemptColumns = db
+        .query("PRAGMA table_info(provider_attempts)")
+        .all() as Array<{ name: string }>;
+      expect(providerAttemptColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+        "provider_reported_cost_micros",
+        "computed_cost_micros",
+        "cost_source",
+      ]));
 
       const now = Date.now();
       db.query(

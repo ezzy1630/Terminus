@@ -56,6 +56,7 @@ This file records observed commands and artifacts. It does not turn source decla
 20. Verification recovery now persists the environment binding on the plan and the complete immutable result identity on each result: command/query, exit code, structured observations, artifacts, and verifier version. On restart from `RESPONSE_VALIDATING` or `VERIFYING`, the live loop requires the current source/environment bindings, reconstructs and validates the persisted DAG, reuses only the latest complete result for each node, and executes only missing nodes. It reuses the durable provider response artifact, disables provider-calling scout/compaction auxiliaries, and does not replay provider inference or duplicate proposal/plan-completed events. Fresh migration coverage proves the columns, binding reconstruction, and missing-node-only execution; engine tests reject duplicate, stale, and malformed bindings, while legacy rows are rejected rather than treated as completion evidence.
 21. Verification plan derivation now selects typed predicates from the task contract, changed and scoped paths, risk class, repository instruction hashes, current failure/diagnostic signals, generated paths, and supplied native test commands. Admission mode makes selected auxiliary checks required; incremental mode keeps them optional and prevents them from blocking required criteria. Each node records the derivation version, signal counts, and selection rationale. The live `agentLoop` passes the current task signals into new plans, while governed UI execution remains explicitly unavailable in this runtime. Focused derivation, runtime, recovery, binding, and exit-gate tests pass; automatic repository-map/native-recipe discovery and governed UI proof remain open.
 22. Repair metrics are now derived from durable task, repair-attempt, provider-attempt, and turn records by the provider-neutral `@terminus/verification` reducer and exposed by `GET /v1/tasks/:id`. The reducer preserves exact decimal token and cost values, distinguishes first-proposal success from repair success, records repeated failure and terminal classification, and returns null when trusted usage or cost facts are missing. The repair controller's failure signature now includes normalized evidence references, so a changed evidence artifact counts as progress. `scripts/collect-ops-metrics.ts` now reads a supplied control-plane database and aggregates these records with exact decimal totals; a live stream/export, trusted provider cost source, ground-truth classification labels, and restart/fault proof for the metrics read model remain open.
+23. Provider-attempt accounting now separates `provider_reported_cost_micros`, exact `computed_cost_micros`, and a constrained `cost_source`. Runtime settlement uses bigint arithmetic and records admitted economics only as an estimate; an anonymous zero-priced Zen free-model contract is labeled separately, and unavailable/local-command cost remains null. Legacy `cost_micros` is no longer used as measured spend by the task snapshot or ops collector. Provider-reported billing receipts, live export, ground-truth classification labels, and restart/fault proof for the metrics read model remain open.
 
 ## Durable repair-attempt evidence
 
@@ -183,16 +184,21 @@ durable repair facts. It has no provider, filesystem, database, or clock
 dependency. `mini-services/terminus-control/src/index.ts` reads the task's
 repair attempts, repair-turn provider attempts, verification result state, and
 whole-turn timestamps, then exposes the reducer's snake-case record from
-`GET /v1/tasks/:id`. Zero provider cost is treated as an unmeasured sentinel
-until a trusted cost receipt exists. The reducer tests cover first-proposal
-success, repair success, repeated signatures, blocked/budget outcomes, exact
-decimal aggregation, missing usage, invalid values, and duration failures.
+`GET /v1/tasks/:id`. Cost is included only when its durable source is trusted:
+provider-reported billing or an explicit free-model contract. Admitted
+economics is retained as an estimate for operational accounting, but is not
+presented as provider spend. The reducer tests cover first-proposal success,
+repair success, repeated signatures, blocked/budget outcomes, exact decimal
+aggregation, missing usage, invalid values, and duration failures.
 
 The metrics are local implementation evidence, not release telemetry. The
 collector reads the control-plane database only when
-`TERMINUS_OPS_METRICS_DB` or `DATABASE_URL` is supplied. The current
-provider-session writer still records `costMicros: 0` as a placeholder, so
-aggregate cost remains null until a trusted cost source exists.
+`TERMINUS_OPS_METRICS_DB` or `DATABASE_URL` is supplied. New provider attempts
+persist exact computed cost plus its source in the split accounting columns;
+provider-reported cost is still unavailable in the exercised provider
+responses, so aggregate provider spend remains null unless the source is
+`provider_reported` or `free_model_contract`. The legacy c94 live row below
+predates this split and retains its observed zero sentinel.
 
 ## Live OpenCode free-model evidence
 
@@ -202,7 +208,7 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | --- | --- |
 | Configuration | `PUT /v1/gateway-provider-config` admitted `deployment=zen`, `model=hy3-free`, `free_model=true`, `workspace_access=true`, and `credential_configured=false` at revision `1`, with the current Zen privacy-term identity. |
 | Discovery | `GET /v1/provider-models` returned `hy3-free` as `provider=open_code_zen`, `free=true`, with `context_tokens=190000` and `output_tokens=64000`. The request used the explicit anonymous kernel connector. |
-| Provider attempt | Task `74e8a44f-6333-4def-98da-2a10a843bfb3`, turn `4dc54750-1730-4236-931f-cd7c32a0e435`, and provider attempt `7a59c234-639f-49f5-805e-c98916b124a5` persisted `provider=open_code_zen`, `model=hy3-free`, `status=completed`, `cost_micros=0`, `inputTokens=1177`, and `outputTokens=893`. |
+| Provider attempt | Task `74e8a44f-6333-4def-98da-2a10a843bfb3`, turn `4dc54750-1730-4236-931f-cd7c32a0e435`, and provider attempt `7a59c234-639f-49f5-805e-c98916b124a5` persisted `provider=open_code_zen`, `model=hy3-free`, `status=completed`, `cost_micros=0`, `inputTokens=1177`, and `outputTokens=893`. This c94 observation predates the split cost columns and is retained as a historical legacy sentinel, not current spend evidence. |
 | Kernel receipt | The kernel recorded connector `opencode-gateway-anonymous` to `https://opencode.ai:443` with `status=200`, `outcome=Accepted`, `request_bytes=5863`, and `response_bytes=66967`. No credential header was injected. |
 | Lifecycle | The same turn persisted `turn.response_validating`, `completion.proposed`, `turn.verifying`, `verification.admitted`, `turn.finalizing`, `context.auto_checkpoint_committed`, and `turn.completed`; the turn and task both ended `COMPLETED`. |
 | Immutable response | The provider response was retained as `artifact://sha256/45cb876fa025ad457532eb2da20954deb6f4bf2f7ad8270369a1632d825a65a8`. The verification result was `pass` with its own immutable evidence artifact. |

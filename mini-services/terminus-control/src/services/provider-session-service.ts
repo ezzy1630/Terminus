@@ -66,6 +66,22 @@ export interface ProviderAttemptResponseInput {
   readonly finishReason: string | null;
   readonly continuationId: string | null;
   readonly providerRequestId: string | null;
+  readonly cost: ProviderAttemptCostObservation;
+}
+
+export type ProviderAttemptCostSource =
+  | "provider_reported"
+  | "admitted_economics"
+  | "free_model_contract"
+  | "unavailable";
+
+export interface ProviderAttemptCostObservation {
+  /** Exact provider-reported amount, when the adapter exposes one. */
+  readonly providerReportedCostMicros: bigint | null;
+  /** Exact amount computed from the admitted capability snapshot. */
+  readonly computedCostMicros: bigint | null;
+  /** Why the values are or are not available. */
+  readonly source: ProviderAttemptCostSource;
 }
 
 export interface ProviderSessionTransaction {

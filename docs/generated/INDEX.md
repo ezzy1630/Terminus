@@ -26,6 +26,6 @@
 | `events.md` | 18147 B |
 | `inventory.md` | 1287 B |
 | `public-api.md` | 2876 B |
-| `sqlx.md` | 1332 B |
+| `sqlx.md` | 1380 B |
 | `tools.md` | 9908 B |
 

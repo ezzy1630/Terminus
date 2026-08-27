@@ -247,6 +247,9 @@ model ProviderAttempt {
   status                 String
   usageJson              String?   @map("usage_json")
   costMicros             Int?      @map("cost_micros")
+  providerReportedCostMicros BigInt? @map("provider_reported_cost_micros")
+  computedCostMicros     BigInt?  @map("computed_cost_micros")
+  costSource             String?  @map("cost_source")
   startedAt              DateTime  @default(now()) @map("started_at")
   completedAt            DateTime? @map("completed_at")
   errorJson              String?   @map("error_json")

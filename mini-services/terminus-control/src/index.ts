@@ -346,6 +346,7 @@ import type {
   RenderedProviderRequest,
   ConfidentialityPolicy,
 } from "@terminus/provider-core";
+import { computeCost } from "@terminus/provider-core";
 import { deriveRepairMetrics } from "@terminus/verification";
 import {
   compileSkill,
@@ -4839,6 +4840,9 @@ const routes: Route[] = [
               select: {
                 usageJson: true,
                 costMicros: true,
+                providerReportedCostMicros: true,
+                computedCostMicros: true,
+                costSource: true,
                 startedAt: true,
                 completedAt: true,
               },
@@ -4901,12 +4905,7 @@ const routes: Route[] = [
         return {
           inputTokens: metricDecimal(usage?.inputTokens ?? null),
           outputTokens: metricDecimal(usage?.outputTokens ?? null),
-          // The current provider-session writer stores zero as a placeholder
-          // until a trusted provider cost receipt is available. Do not expose
-          // that sentinel as measured spend.
-          costMicros: attempt.costMicros === null || attempt.costMicros === 0
-            ? null
-            : metricDecimal(attempt.costMicros),
+          costMicros: trustedProviderAttemptCost(attempt),
         };
       });
     const repairTurns = t.turns
@@ -8902,6 +8901,24 @@ function metricDecimal(value: unknown): string | null {
   return typeof value === "string" && /^\d+$/.test(value) ? value : null;
 }
 
+function trustedProviderAttemptCost(input: {
+  readonly costMicros: number | null;
+  readonly providerReportedCostMicros: bigint | null;
+  readonly computedCostMicros: bigint | null;
+  readonly costSource: string | null;
+}): string | null {
+  if (input.costSource === "provider_reported") {
+    return metricDecimal(input.providerReportedCostMicros);
+  }
+  if (input.costSource === "free_model_contract") {
+    return metricDecimal(input.computedCostMicros);
+  }
+  // The legacy field has no provenance and may contain the historical zero
+  // sentinel. It is intentionally excluded from trusted metrics.
+  void input.costMicros;
+  return null;
+}
+
 /** Read only a bounded, normalized terminal reason for repair metrics. */
 function metricTerminalReason(text: string | null): string | null {
   if (text === null) return null;
@@ -9950,7 +9967,13 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
           continuationId: input.continuationId,
           completedAt: new Date(),
           usageJson: JSON.stringify(jsonSafe(input.usage)),
-          costMicros: 0,
+          // Legacy cost_micros was a zero sentinel. New accounting is kept in
+          // exact bigint columns with an explicit source, so old readers do
+          // not mistake a computed estimate for provider-reported spend.
+          costMicros: null,
+          providerReportedCostMicros: input.cost.providerReportedCostMicros,
+          computedCostMicros: input.cost.computedCostMicros,
+          costSource: input.cost.source,
           nativeContinuationJson: input.continuationId === null
             ? null
             : JSON.stringify({ continuation_id: input.continuationId }),
@@ -12336,6 +12359,31 @@ async function agentLoop(turnId: string): Promise<void> {
         }
         const projected = await selectedRenderer.projectResponse(response);
         const usage = selectedRenderer.extractUsage(response);
+        const freeModelContract = gatewayModel !== null
+          && gatewayModel.deployment === "zen"
+          && gatewayModel.free
+          && gatewayProviderConfiguration?.credentialConfigured !== true
+          && selectedProvider.economics.inputMicrosPerMillion === 0n
+          && selectedProvider.economics.cachedInputMicrosPerMillion === 0n
+          && selectedProvider.economics.outputMicrosPerMillion === 0n;
+        const costSource = directConfiguration !== null || gatewayModel !== null
+          ? freeModelContract ? "free_model_contract" as const : "admitted_economics" as const
+          : "unavailable" as const;
+        const cost = costSource === "unavailable"
+          ? {
+              providerReportedCostMicros: null,
+              computedCostMicros: null,
+              source: costSource,
+            }
+          : {
+              providerReportedCostMicros: null,
+              computedCostMicros: computeCost({
+                usage,
+                economics: selectedProvider.economics,
+                providerReportedCostMicros: null,
+              }).computedCostMicros,
+              source: costSource,
+            };
         // R7: reconcile predicted vs actual cache reads for this attempt.
         const predictedCached = predictedCacheByAttempt.get(attemptId) ?? 0n;
         const cacheRecord = cacheMonitor.record(attemptId, predictedCached, usage.cachedInputTokens);
@@ -12405,6 +12453,7 @@ async function agentLoop(turnId: string): Promise<void> {
           finishReason: projected.finishReason,
           continuationId: projected.continuationId,
           providerRequestId: response.providerRequestId ?? providerRequestIdFromChunks(response.chunks),
+          cost,
         });
         lastResponseArtifactUri = responseArtifactMeta.uri;
         currentProjected = projected;

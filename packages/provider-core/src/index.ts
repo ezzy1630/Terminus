@@ -216,6 +216,85 @@ export interface CostRecord {
   readonly anomalyReason: string | null;
 }
 
+const MICROS_PER_MILLION = 1_000_000n;
+
+function nonNegative(value: bigint | number, label: string): bigint {
+  if (typeof value === "bigint") {
+    if (value < 0n) throw new RangeError(`${label} must be non-negative`);
+    return value;
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${label} must be a non-negative safe integer`);
+  }
+  return BigInt(value);
+}
+
+function roundedMicros(tokens: bigint | number, microsPerMillion: bigint | number): Micros {
+  const normalizedTokens = nonNegative(tokens, "token count");
+  const normalizedRate = nonNegative(microsPerMillion, "micros per million");
+  return ((normalizedTokens * normalizedRate + MICROS_PER_MILLION / 2n) / MICROS_PER_MILLION) as Micros;
+}
+
+function costComponents(
+  usage: UsageRecord,
+  economics: ProviderEconomics,
+): {
+  readonly inputMicros: Micros;
+  readonly cachedInputMicros: Micros;
+  readonly outputMicros: Micros;
+  readonly reasoningMicros: Micros;
+} {
+  const inputTokens = nonNegative(usage.inputTokens, "input token count");
+  const cachedInputTokensValue = nonNegative(usage.cachedInputTokens, "cached input token count");
+  const cachedInputTokens = cachedInputTokensValue > inputTokens
+    ? inputTokens
+    : cachedInputTokensValue;
+  const uncachedInputTokens = inputTokens - cachedInputTokens;
+  const inputMicros = roundedMicros(uncachedInputTokens, economics.inputMicrosPerMillion);
+  const cachedInputMicros = roundedMicros(cachedInputTokens, economics.cachedInputMicrosPerMillion);
+  const outputMicros = roundedMicros(
+    nonNegative(usage.outputTokens, "output token count"),
+    economics.outputMicrosPerMillion,
+  );
+  const reasoningMicros = economics.reasoningAccounting
+    ? roundedMicros(
+        nonNegative(usage.reasoningTokens, "reasoning token count"),
+        economics.outputMicrosPerMillion,
+      )
+    : (0n as Micros);
+  return { inputMicros, cachedInputMicros, outputMicros, reasoningMicros };
+}
+
+/** Compute provider economics with bigint arithmetic and deterministic rounding. */
+export function computeExactCostMicros(
+  usage: UsageRecord,
+  economics: ProviderEconomics,
+): Micros {
+  const components = costComponents(usage, economics);
+  return (
+    components.inputMicros
+    + components.cachedInputMicros
+    + components.outputMicros
+    + components.reasoningMicros
+  ) as Micros;
+}
+
+function tolerancePpm(tolerance: number): bigint {
+  if (!Number.isFinite(tolerance) || tolerance < 0) {
+    throw new RangeError("anomaly tolerance must be a finite non-negative number");
+  }
+  const scaled = Math.round(tolerance * Number(MICROS_PER_MILLION));
+  if (!Number.isSafeInteger(scaled)) throw new RangeError("anomaly tolerance is too large");
+  return BigInt(scaled);
+}
+
+function exceedsTolerance(reported: bigint, computed: bigint, tolerance: number): boolean {
+  if (reported < 0n) return true;
+  if (computed === 0n) return reported !== 0n;
+  const difference = reported >= computed ? reported - computed : computed - reported;
+  return difference * MICROS_PER_MILLION > computed * tolerancePpm(tolerance);
+}
+
 // ────────────────────────── Continuation (§38.8) ─────────────────────────────
 
 export interface ContinuationInput {
@@ -363,45 +442,19 @@ export interface CostComputationInput {
 }
 
 export function computeCost(input: CostComputationInput): CostRecord {
-  const microsPerMillion = (m: Micros) => Number(m) / 1_000_000;
-  const inputMicros = BigInt(
-    Math.round(Number(input.usage.inputTokens) * microsPerMillion(input.economics.inputMicrosPerMillion)),
-  ) as Micros;
-  const cachedInputMicros = BigInt(
-    Math.round(
-      Number(input.usage.cachedInputTokens) *
-        microsPerMillion(input.economics.cachedInputMicrosPerMillion),
-    ),
-  ) as Micros;
-  const outputMicros = BigInt(
-    Math.round(
-      Number(input.usage.outputTokens) * microsPerMillion(input.economics.outputMicrosPerMillion),
-    ),
-  ) as Micros;
-  const reasoningMicros = input.economics.reasoningAccounting
-    ? (BigInt(
-        Math.round(
-          Number(input.usage.reasoningTokens) *
-            microsPerMillion(input.economics.outputMicrosPerMillion),
-        ),
-      ) as Micros)
-    : (0n as Micros);
+  const { inputMicros, cachedInputMicros, outputMicros, reasoningMicros } = costComponents(
+    input.usage,
+    input.economics,
+  );
   const computed = (inputMicros + cachedInputMicros + outputMicros + reasoningMicros) as Micros;
   const tolerance = input.anomalyTolerance ?? 0.05;
   let anomaly = false;
   let anomalyReason: string | null = null;
   if (input.providerReportedCostMicros !== null) {
-    const reported = Number(input.providerReportedCostMicros);
-    const computedN = Number(computed);
-    if (computedN === 0 && reported !== 0) {
+    const reported = input.providerReportedCostMicros;
+    if (exceedsTolerance(reported, computed, tolerance)) {
       anomaly = true;
-      anomalyReason = "computed cost is zero but provider reported non-zero";
-    } else if (computedN > 0) {
-      const diff = Math.abs(reported - computedN) / computedN;
-      if (diff > tolerance) {
-        anomaly = true;
-        anomalyReason = `provider reported ${reported} micros but computed ${computedN} (diff ${diff.toFixed(3)})`;
-      }
+      anomalyReason = `provider reported ${reported.toString()} micros but computed ${computed.toString()}`;
     }
   }
   return {

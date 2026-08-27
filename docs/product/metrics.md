@@ -138,7 +138,9 @@ repair:
 The control-plane task snapshot exposes the repair block as a derived,
 replayable record from durable repair attempts, verification results, turns,
 and provider-attempt usage. Missing provider usage or trusted cost remains
-`null`; a stored zero-cost sentinel is not treated as measured spend.
+`null`; a stored zero-cost sentinel is not treated as measured spend. Provider
+attempts retain separate provider-reported cost, exact computed cost, and cost
+source fields so admitted economics cannot be mistaken for provider billing.
 
 The release-gate collector can aggregate the same records when it receives a
 current control-plane database through `TERMINUS_OPS_METRICS_DB` or

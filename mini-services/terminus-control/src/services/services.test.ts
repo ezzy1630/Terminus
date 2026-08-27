@@ -196,6 +196,7 @@ describe("control-plane service boundaries", () => {
     const events: string[] = [];
     const eventIdempotencyKeys: Array<string | null | undefined> = [];
     const operations: string[] = [];
+    let completedInput: ProviderAttemptResponseInput | null = null;
     const start: ProviderAttemptStartInput = {
       attemptId: "attempt-1",
       turnId: "turn-1",
@@ -218,7 +219,10 @@ describe("control-plane service boundaries", () => {
       },
       transaction: () => ({
         startAttempt: async () => { operations.push("start"); },
-        completeAttempt: async () => { operations.push("complete"); },
+        completeAttempt: async (input) => {
+          operations.push("complete");
+          completedInput = input;
+        },
       }),
       mutate: async (operation) => operation(),
       executeLocal: async () => { throw new Error("not used"); },
@@ -236,11 +240,21 @@ describe("control-plane service boundaries", () => {
       finishReason: "stop",
       continuationId: null,
       providerRequestId: "provider-request-1",
+      cost: {
+        providerReportedCostMicros: null,
+        computedCostMicros: null,
+        source: "unavailable",
+      },
     };
     await service.settleResponse(response);
     expect(events).toEqual(["turn.provider_running", "turn.response_validating"]);
     expect(eventIdempotencyKeys).toEqual(["provider-attempt:attempt-1", undefined]);
     expect(operations).toEqual(["start", "complete"]);
+    expect(completedInput?.cost).toEqual({
+      providerReportedCostMicros: null,
+      computedCostMicros: null,
+      source: "unavailable",
+    });
 
     const unavailable = service.execute({
       rendered: { providerId: "local" } as unknown as ProviderExecutionInput["rendered"],

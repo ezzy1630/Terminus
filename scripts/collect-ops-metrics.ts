@@ -106,6 +106,24 @@ function normalizeDatabaseUrl(raw: string): string {
   return `file:${expanded}`;
 }
 
+function trustedCost(input: {
+  readonly costMicros: number | null;
+  readonly providerReportedCostMicros: bigint | null;
+  readonly computedCostMicros: bigint | null;
+  readonly costSource: string | null;
+}): string | null {
+  if (input.costSource === "provider_reported") {
+    return metricDecimal(input.providerReportedCostMicros);
+  }
+  if (input.costSource === "free_model_contract") {
+    return metricDecimal(input.computedCostMicros);
+  }
+  // `cost_micros` predates explicit provenance and may contain the old zero
+  // sentinel. Legacy rows are therefore not promoted into trusted metrics.
+  void input.costMicros;
+  return null;
+}
+
 async function collectRepairMetrics(): Promise<RepairMetricsAggregate> {
   if (REPAIR_DB_URL === "") {
     return aggregateRepairMetrics([]);
@@ -125,7 +143,13 @@ async function collectRepairMetrics(): Promise<RepairMetricsAggregate> {
               startedAt: true,
               completedAt: true,
               providerAttempts: {
-                select: { usageJson: true, costMicros: true },
+                select: {
+                  usageJson: true,
+                  costMicros: true,
+                  providerReportedCostMicros: true,
+                  computedCostMicros: true,
+                  costSource: true,
+                },
               },
             },
           },
@@ -174,9 +198,7 @@ async function collectRepairMetrics(): Promise<RepairMetricsAggregate> {
           return {
             inputTokens: metricDecimal(usage.inputTokens),
             outputTokens: metricDecimal(usage.outputTokens),
-            costMicros: attempt.costMicros === null || attempt.costMicros === 0
-              ? null
-              : metricDecimal(attempt.costMicros),
+            costMicros: trustedCost(attempt),
           };
         });
       const repairTurns = task.turns

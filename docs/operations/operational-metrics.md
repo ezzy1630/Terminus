@@ -39,7 +39,10 @@ artifacts/release-gate/
 database or cache telemetry source is supplied. With a current control-plane
 database, the `repair` block contains aggregate first-proposal, repair,
 repeated-failure, outcome, usage, duration, and missing-measurement counts.
-Missing cost remains `null` until the provider cost source is trusted.
+Missing cost remains `null` until the provider cost source is trusted. The
+provider-attempt ledger keeps provider-reported cost, exact economics-derived
+cost, and the source label separate; only provider-reported cost or an
+explicit free-model contract is promoted into trusted spend metrics.
 
 ## Related
 
