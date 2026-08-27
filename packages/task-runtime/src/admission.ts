@@ -382,7 +382,7 @@ function validateAdmissionProof(
   }
 }
 
-function validateCandidateBranchMergeReceipt(
+export function validateCandidateBranchMergeReceipt(
   branch: CandidateBranch,
   receipt: CandidateBranchMergeReceipt,
   options: {

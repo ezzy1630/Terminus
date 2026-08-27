@@ -5,8 +5,11 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { canonicalJson } from "@terminus/context-ir";
 import {
   AdmissionService,
+  candidateBranchAdmissionOperationId,
+  validateCandidateBranchMergeReceipt,
   type CandidateAdmissionRepository,
   type CandidateBranch,
   type CandidateBranchMergeReceipt,
@@ -39,6 +42,7 @@ import {
   type VerificationPlanMode,
 } from "@terminus/verification";
 import type { KernelUdsClients } from "./kernel-uds.js";
+import { createKernelArtifactClient } from "./context-store.js";
 import type {
   ProcessEvent,
   RequestContext,
@@ -893,7 +897,7 @@ export function createPrismaCompletionAdmission(
   return new AdmissionService(repository, ledger, undefined, merger, mergeReceiptQuery);
 }
 
-function candidateBranchFromRow(row: {
+export function candidateBranchFromRow(row: {
   readonly id: string;
   readonly taskId: string;
   readonly attemptId: string;
@@ -940,6 +944,276 @@ function candidateBranchFromRow(row: {
     mergeReceipt,
     status: row.status,
   };
+}
+
+/**
+ * Load a candidate branch through the Prisma row mapper. Recovery paths use
+ * this to validate trusted receipts against the durable row, including proof
+ * bindings, before any state transition.
+ */
+export async function getPrismaCandidateBranch(
+  db: Pick<PrismaClient, "candidateBranch">,
+  branchId: string,
+): Promise<CandidateBranch | null> {
+  const row = await db.candidateBranch.findUnique({ where: { id: branchId } });
+  return row === null ? null : candidateBranchFromRow(row);
+}
+
+/** Receipt body persisted as the immutable kernel artifact. The artifact
+ * self-reference fields are derived from the ingested hash, never stored in
+ * the body, so the binding is verifiable without recursion. */
+type KernelMergeReceiptBody = Omit<
+  CandidateBranchMergeReceipt,
+  "receiptArtifactUri" | "receiptArtifactHash"
+>;
+
+/**
+ * Observe the authoritative Git state through the kernel and produce a
+ * trusted merge receipt. The adapter never issues a merge: it only reads the
+ * exact-HEAD admission boundary (`git rev-parse HEAD` via the kernel) and
+ * reports EXECUTED only when the authoritative workspace still carries the
+ * exact candidate head revision. Any other revision proves the registered
+ * candidate is no longer authoritative (NOT_EXECUTED); a kernel failure
+ * throws so recovery retries instead of consuming ambiguity.
+ */
+export function createKernelGitMergeReceiptQuery(
+  clients: KernelUdsClients,
+  baseContext: RequestContext,
+  workspaceId: string,
+): CandidateBranchMergeReceiptQuery {
+  return {
+    async getMergeReceipt(branch) {
+      const authoritativeRevision = await resolveWorkspaceRevision(
+        clients,
+        baseContext,
+        workspaceId,
+      );
+      const executed = authoritativeRevision === branch.headRevision;
+      return persistKernelMergeReceiptArtifact(clients, baseContext, branch, {
+        status: executed ? "EXECUTED" : "NOT_EXECUTED",
+        mergeId: executed
+          ? `completion-admission:${branch.branchId}:${authoritativeRevision}`
+          : null,
+        authoritativeRevision: executed ? authoritativeRevision : null,
+      });
+    },
+  };
+}
+
+async function persistKernelMergeReceiptArtifact(
+  clients: KernelUdsClients,
+  baseContext: RequestContext,
+  branch: CandidateBranch,
+  outcome: Pick<KernelMergeReceiptBody, "status" | "mergeId" | "authoritativeRevision">,
+): Promise<CandidateBranchMergeReceipt> {
+  if (branch.proof === null) {
+    throw new Error(
+      `candidate branch '${branch.branchId}' has no completion proof for trusted merge-receipt binding`,
+    );
+  }
+  if (!/^sha256:[0-9a-f]{64}$/i.test(branch.scopeDigest)) {
+    throw new Error(
+      `candidate branch '${branch.branchId}' has no valid scope digest for trusted merge-receipt binding`,
+    );
+  }
+  const body: KernelMergeReceiptBody = {
+    status: outcome.status,
+    operationId: candidateBranchAdmissionOperationId(branch.branchId),
+    branchId: branch.branchId,
+    taskId: branch.taskId,
+    attemptId: branch.attemptId,
+    actorPrincipal: branch.actorPrincipal,
+    baseRevision: branch.baseRevision,
+    candidateHeadRevision: branch.headRevision,
+    scopeDigest: branch.scopeDigest,
+    completionRecordDigest: branch.proof.completionRecordDigest,
+    mergeId: outcome.mergeId,
+    authoritativeRevision: outcome.authoritativeRevision,
+  };
+  const bytes = new TextEncoder().encode(canonicalJson(body));
+  const artifactClient = createKernelArtifactClient(clients.artifacts, baseContext);
+  const artifactMetadata = await artifactClient.ingest(bytes, { mediaType: "application/json" });
+  const hex = /^sha256:([0-9a-f]{64})$/i.exec(artifactMetadata.hash)?.[1];
+  if (hex === undefined) {
+    throw new Error("kernel returned a non-SHA-256 artifact hash for the merge receipt");
+  }
+  const digest = hex.toLowerCase();
+  return {
+    ...body,
+    receiptArtifactUri: `artifact://sha256/${digest}`,
+    receiptArtifactHash: `sha256:${digest}`,
+  };
+}
+
+export class TrustedBranchAlreadyResolvedError extends Error {
+  constructor(readonly branchId: string) {
+    super(`candidate branch ${branchId} was already resolved before trusted receipt recovery`);
+    this.name = "TrustedBranchAlreadyResolvedError";
+  }
+}
+
+export type TrustedBranchReceiptEvent = {
+  readonly eventType: "recovery.reconciled" | "candidate_branch.recovery_manual_review";
+  readonly aggregateType: "task";
+  readonly aggregateId: string;
+  readonly correlationId: string;
+  readonly idempotencyKey: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+};
+
+/** Mirrors the control plane's transactional emit(payload, mutation) contract. */
+export type TransactionalEventEmitter = <T>(
+  event: TrustedBranchReceiptEvent,
+  mutation: (tx: Prisma.TransactionClient) => Promise<T>,
+) => Promise<unknown>;
+
+export type TrustedBranchReceiptDisposition =
+  | {
+    readonly outcome: "ADMITTED";
+    readonly branchId: string;
+    readonly authoritativeRevision: string;
+  }
+  | { readonly outcome: "MANUAL_REVIEW"; readonly branchId: string }
+  | { readonly outcome: "ALREADY_RESOLVED"; readonly branchId: string };
+
+/**
+ * Resolve one ADMITTING branch from a trusted external receipt. The receipt
+ * is fetched (external I/O) before the transaction; inside one transaction
+ * the receipt is re-validated against the fresh durable row, the branch CASes
+ * to ADMITTED (executed) or MANUAL_REVIEW (retained negative receipt), and a
+ * semantic recovery event commits with the same transaction. Executed
+ * receipts never re-issue the merge and leave task/turn completion to the
+ * existing prepared-completion-record recovery.
+ */
+export async function reconcileAdmittingBranchWithTrustedReceipt(
+  db: PrismaClient,
+  branchId: string,
+  trustedReceiptQuery: CandidateBranchMergeReceiptQuery,
+  emitTransactionally: TransactionalEventEmitter,
+): Promise<TrustedBranchReceiptDisposition> {
+  const branchRecord = await getPrismaCandidateBranch(db, branchId);
+  if (branchRecord === null) {
+    throw new Error(`candidate branch '${branchId}' disappeared during trusted receipt recovery`);
+  }
+  if (branchRecord.status !== "ADMITTING") {
+    return { outcome: "ALREADY_RESOLVED", branchId };
+  }
+
+  const receipt = await trustedReceiptQuery.getMergeReceipt(branchRecord);
+  const validated = validateCandidateBranchMergeReceipt(branchRecord, receipt);
+  const executed = validated.status === "EXECUTED";
+
+  await emitTransactionally(
+    executed
+      ? {
+        eventType: "recovery.reconciled",
+        aggregateType: "task",
+        aggregateId: validated.taskId,
+        correlationId: validated.taskId,
+        idempotencyKey: `candidate-branch-receipt-recovery:${branchId}`,
+        payload: {
+          previous_state: "ADMITTING",
+          state: "ADMITTED",
+          reason: "trusted_merge_receipt_executed",
+          branch_id: branchId,
+          merge_id: validated.mergeId,
+          authoritative_revision: validated.authoritativeRevision,
+          receipt_artifact: validated.receiptArtifactUri,
+          admission_operation_id: validated.operationId,
+        },
+      }
+      : {
+        eventType: "candidate_branch.recovery_manual_review",
+        aggregateType: "task",
+        aggregateId: validated.taskId,
+        correlationId: validated.taskId,
+        idempotencyKey: `candidate-branch-receipt-recovery:${branchId}`,
+        payload: {
+          task_id: validated.taskId,
+          branch_id: branchId,
+          previous_status: "ADMITTING",
+          reason: `trusted_merge_receipt_${validated.status.toLowerCase()}`,
+          admission_operation_id: validated.operationId,
+          receipt_artifact: validated.receiptArtifactUri,
+        },
+      },
+    async (tx) => {
+      const current = await tx.candidateBranch.findUnique({
+        where: { id: branchId },
+        select: {
+          id: true,
+          taskId: true,
+          attemptId: true,
+          epoch: true,
+          status: true,
+          worktreePath: true,
+          actorPrincipal: true,
+          baseRevision: true,
+          headRevision: true,
+          scopeDigest: true,
+          effectIdsJson: true,
+          proofJson: true,
+          mergeReceiptJson: true,
+        },
+      });
+      if (
+        current === null
+        || current.status !== "ADMITTING"
+        || current.epoch !== branchRecord.epoch
+        || current.taskId !== branchRecord.taskId
+      ) {
+        throw new TrustedBranchAlreadyResolvedError(branchId);
+      }
+      // Re-validate against the fresh row inside the transaction so a racing
+      // durable change fails closed instead of trusting a stale observation.
+      validateCandidateBranchMergeReceipt(candidateBranchFromRow(current), validated);
+      const updated = await tx.candidateBranch.updateMany({
+        where: {
+          id: branchId,
+          taskId: current.taskId,
+          epoch: current.epoch,
+          status: "ADMITTING",
+        },
+        data: executed
+          ? {
+            status: "ADMITTED",
+            epoch: { increment: 1 },
+            headRevision: validated.authoritativeRevision!,
+            mergeReceiptJson: JSON.stringify(validated),
+          }
+          : {
+            status: "MANUAL_REVIEW",
+            epoch: { increment: 1 },
+            mergeReceiptJson: JSON.stringify(validated),
+          },
+      });
+      if (updated.count !== 1) throw new TrustedBranchAlreadyResolvedError(branchId);
+      if (!executed) {
+        await tx.task.updateMany({
+          where: { id: current.taskId, status: { in: ["ACTIVE", "VERIFYING"] } },
+          data: {
+            status: "BLOCKED",
+            phase: "VERIFY",
+            completedAt: null,
+            terminalReasonJson: JSON.stringify({
+              reason: "candidate_branch_admission_recovery_required",
+              branch_id: branchId,
+              attempt_id: current.attemptId,
+              reconciliation_required: true,
+            }),
+          },
+        });
+      }
+    },
+  );
+
+  return executed
+    ? {
+      outcome: "ADMITTED",
+      branchId,
+      authoritativeRevision: validated.authoritativeRevision!,
+    }
+    : { outcome: "MANUAL_REVIEW", branchId };
 }
 
 export function defaultCriteriaNodes(

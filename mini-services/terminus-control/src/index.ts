@@ -130,6 +130,10 @@ import {
   createPrismaCompletionAdmission,
   resolveKernelEnvironmentDigest,
   resolveWorkspaceRevision,
+  createKernelGitMergeReceiptQuery,
+  reconcileAdmittingBranchWithTrustedReceipt,
+  TrustedBranchAlreadyResolvedError,
+  type TrustedBranchReceiptDisposition,
 } from "./verification-runtime.js";
 import {
   generateUuid7,
@@ -6899,7 +6903,10 @@ const routes: Route[] = [
     // second time.
     const effectRecovery = await reconcileUnsettledSideEffects(true);
     const providerRecovery = await reconcileInFlightProviderAttempts(true);
-    const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions(true);
+    const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions(
+      true,
+      buildTrustedBranchReceiptReconciler() ?? undefined,
+    );
 
     const checkpointLinks = await reconcileCheckpointArtifactLinks();
     const checkpointAdmissions = await reconcilePreparedCheckpointAdmissions();
@@ -14057,22 +14064,52 @@ class CandidateBranchAlreadyResolvedError extends Error {
 
 /**
  * Reconcile candidate branches that crossed the external merge boundary
- * without a durable ADMITTED receipt. A later adapter may add a trusted
- * receipt query; until then, recovery records MANUAL_REVIEW atomically and
- * never issues the merge again.
+ * without a durable ADMITTED receipt. When a trusted receipt reconciler is
+ * available, each ADMITTING branch is resolved from a verified external
+ * receipt (the merge is never issued again); otherwise recovery records
+ * MANUAL_REVIEW atomically and never issues the merge.
  */
 async function reconcileInFlightCandidateBranchAdmissions(
   alreadyUnderMutationLock = false,
-): Promise<CandidateBranchRecoveryResult> {
+  trustedReceiptReconciler?:
+    | ((branch: CandidateBranchRecoveryRecord) => Promise<TrustedBranchReceiptDisposition>)
+    | undefined,
+): Promise<CandidateBranchRecoveryResult & { readonly admitted: readonly string[] }> {
   const branches = await db.candidateBranch.findMany({
     where: { status: "ADMITTING" },
     orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
     select: { id: true, taskId: true, attemptId: true, epoch: true },
   });
   const manualReview: CandidateBranchRecoveryRecord[] = [];
+  const admitted: string[] = [];
   const alreadyResolved: string[] = [];
   const failed: Array<{ id: string; error: string }> = [];
   for (const branch of branches) {
+    if (trustedReceiptReconciler !== undefined) {
+      try {
+        const disposition = trustedReceiptReconciler === undefined
+          ? null
+          : await trustedReceiptReconciler(branch);
+        if (disposition === null) throw new Error("trusted receipt reconciler returned no disposition");
+        if (disposition.outcome === "ADMITTED") {
+          admitted.push(disposition.branchId);
+        } else if (disposition.outcome === "MANUAL_REVIEW") {
+          manualReview.push(branch);
+        } else {
+          alreadyResolved.push(disposition.branchId);
+        }
+      } catch (error: unknown) {
+        if (error instanceof TrustedBranchAlreadyResolvedError) {
+          alreadyResolved.push(error.branchId);
+        } else {
+          failed.push({
+            id: branch.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      continue;
+    }
     const recover = async (): Promise<void> => {
       await emit({
         eventType: "candidate_branch.recovery_manual_review",
@@ -14136,7 +14173,54 @@ async function reconcileInFlightCandidateBranchAdmissions(
       }
     }
   }
-  return { scanned: branches.length, manualReview, alreadyResolved, failed };
+  return { scanned: branches.length, manualReview, admitted, alreadyResolved, failed };
+}
+
+/**
+ * Build the trusted branch receipt reconciler from live kernel clients, or
+ * null when the kernel is unavailable. Each call resolves the branch's
+ * workspace, mints the recovery EXEC capability context, reads authoritative
+ * Git state through the kernel, and commits the validated receipt outcome
+ * transactionally. The conservative MANUAL_REVIEW path stays in charge when
+ * this returns null so recovery never silently trusts an unverified source.
+ */
+function buildTrustedBranchReceiptReconciler():
+  | ((branch: CandidateBranchRecoveryRecord) => Promise<TrustedBranchReceiptDisposition>)
+  | null {
+  if (kernelUds === null) return null;
+  return async (branch) => {
+    const task = await db.task.findUnique({
+      where: { id: branch.taskId },
+      select: { sessionId: true },
+    });
+    if (task === null) {
+      throw new Error(`task '${branch.taskId}' not found for branch receipt recovery`);
+    }
+    const session = await db.session.findUnique({
+      where: { id: task.sessionId },
+      select: { workspaceId: true },
+    });
+    if (session === null) {
+      throw new Error(`session '${task.sessionId}' not found for branch receipt recovery`);
+    }
+    const context = await kernelTaskContextForWorkspace(
+      session.workspaceId,
+      `branch-receipt-recovery:${branch.id}`,
+    );
+    const receiptQuery = createKernelGitMergeReceiptQuery(
+      requireKernelUds(),
+      context,
+      session.workspaceId,
+    );
+    return reconcileAdmittingBranchWithTrustedReceipt(
+      db,
+      branch.id,
+      receiptQuery,
+      (event, mutation) => emit(event, async (tx) => {
+        await mutation(tx);
+      }),
+    );
+  };
 }
 
 /**
@@ -15097,7 +15181,10 @@ await replayArpV2();
 const jobRecovery = await reconcileNonterminalJobs();
 const effectRecovery = await reconcileUnsettledSideEffects();
 const providerRecovery = await reconcileInFlightProviderAttempts();
-const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions();
+const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions(
+  false,
+  buildTrustedBranchReceiptReconciler() ?? undefined,
+);
 const repairedTaskProjections = await reconcileV1TaskProjections();
 const checkpointLinkRecovery = await reconcileCheckpointArtifactLinks();
 const checkpointAdmissionRecovery = await reconcilePreparedCheckpointAdmissions();
@@ -15145,7 +15232,7 @@ if (providerRecovery.scanned > 0) {
 }
 if (candidateBranchRecovery.scanned > 0) {
   console.log(
-    `[terminus-control] candidate branch recovery: ${candidateBranchRecovery.manualReview.length} manual review, ${candidateBranchRecovery.alreadyResolved.length} already resolved`,
+    `[terminus-control] candidate branch recovery: ${candidateBranchRecovery.manualReview.length} manual review, ${candidateBranchRecovery.admitted.length} admitted from trusted receipts, ${candidateBranchRecovery.alreadyResolved.length} already resolved`,
   );
 }
 if (checkpointAdmissionRecovery.prepared > 0) {
