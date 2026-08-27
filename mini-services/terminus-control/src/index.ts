@@ -390,6 +390,7 @@ import {
   ProviderExecutionUnavailableError,
   ToolCycleBudgetExhaustedError,
   ToolPolicyDeniedError,
+  EffectSettlementAlreadyResolvedError,
   type EffectAuthorizationInput,
   type EffectSettlementInput,
   type EffectUnknownInput,
@@ -3230,6 +3231,7 @@ const effectSettlementService = new EffectSettlementService<Prisma.TransactionCl
       aggregateType: event.aggregateType,
       aggregateId: event.aggregateId,
       correlationId: event.correlationId,
+      idempotencyKey: event.idempotencyKey,
       payload: event.payload,
       artifactRefs: event.artifactRefs === undefined ? undefined : [...event.artifactRefs],
     }, mutation);
@@ -3272,18 +3274,45 @@ const effectSettlementService = new EffectSettlementService<Prisma.TransactionCl
       await tx.sideEffect.update({ where: { id: input.sideEffectId }, data: { state: "STARTED", startedAt } });
     },
     markUnknown: async (input: EffectUnknownInput) => {
-      await tx.toolCall.update({
-        where: { id: input.toolCallId },
+      const current = await tx.sideEffect.findUnique({
+        where: { id: input.sideEffectId },
+        select: { state: true },
+      });
+      if (current === null) {
+        throw new Error(`side effect ${input.sideEffectId} disappeared during recovery`);
+      }
+      if (!new Set(["STARTED", "UNKNOWN", "RECONCILING"]).has(current.state)) {
+        throw new EffectSettlementAlreadyResolvedError(input.sideEffectId);
+      }
+      const reconciliation = JSON.stringify({
+        message: input.error,
+        reconciliation_required: true,
+      });
+      const settledAt = new Date();
+      const updatedEffect = await tx.sideEffect.updateMany({
+        where: {
+          id: input.sideEffectId,
+          state: { in: ["STARTED", "UNKNOWN", "RECONCILING"] },
+        },
         data: {
-          state: "UNKNOWN",
-          settledAt: new Date(),
-          resultStatus: "unknown",
-          errorJson: JSON.stringify({ message: input.error, reconciliation_required: true }),
+          state: "MANUAL_REVIEW",
+          reconciliationJson: reconciliation,
         },
       });
-      await tx.sideEffect.update({
-        where: { id: input.sideEffectId },
-        data: { state: "MANUAL_REVIEW", reconciliationJson: JSON.stringify({ message: input.error, reconciliation_required: true }) },
+      if (updatedEffect.count !== 1) {
+        throw new EffectSettlementAlreadyResolvedError(input.sideEffectId);
+      }
+      await tx.toolCall.updateMany({
+        where: {
+          id: input.toolCallId,
+          state: { in: ["AUTHORIZED", "STARTED", "UNKNOWN", "RECONCILING"] },
+        },
+        data: {
+          state: "UNKNOWN",
+          settledAt,
+          resultStatus: "unknown",
+          errorJson: reconciliation,
+        },
       });
     },
     cancel: async (input) => {
@@ -6714,10 +6743,11 @@ const routes: Route[] = [
 
     const jobRecovery = await reconcileNonterminalJobs();
 
-    // Reconcile external side effects in STARTED or UNKNOWN
-    const unsettledEffects = await db.sideEffect.count({
-      where: { state: { in: ["STARTED", "UNKNOWN"] } },
-    });
+    // Reconcile external side effects in STARTED, UNKNOWN, or RECONCILING.
+    // The route already owns mutationMutex, so the recovery helper uses the
+    // same event/row transaction without attempting to acquire the lock a
+    // second time.
+    const effectRecovery = await reconcileUnsettledSideEffects(true);
     // Mark provider attempts interrupted in the same transaction as the
     // recovery report/event below.
     const interruptedAttempts = await db.providerAttempt.count({ where: { status: "running" } });
@@ -6743,18 +6773,12 @@ const routes: Route[] = [
         non_terminal_turns: nonTerminalTurns,
         reconciled_jobs: jobRecovery.scanned,
         lost_jobs: jobRecovery.lost,
-        manual_review_effects: unsettledEffects,
+        manual_review_effects: effectRecovery.manualReview.length,
         interrupted_attempts: interruptedAttempts,
         recovered_active_turns: recoveredActiveTurns,
         recovered_pending_repairs: recoveredPendingRepairs,
       },
     }, async (tx) => {
-      if (unsettledEffects > 0) {
-        await tx.sideEffect.updateMany({
-          where: { state: { in: ["STARTED", "UNKNOWN"] } },
-          data: { state: "MANUAL_REVIEW" },
-        });
-      }
       if (interruptedAttempts > 0) {
         await tx.providerAttempt.updateMany({
           where: { status: "running" },
@@ -6777,13 +6801,20 @@ const routes: Route[] = [
           reconciledJobs: jobRecovery.scanned,
           lostJobs: jobRecovery.lost,
           reconciledEffects: 0,
-          manualReviewEffects: unsettledEffects,
+          manualReviewEffects: effectRecovery.manualReview.length,
           integrityOk: integrityOk
+            && effectRecovery.failed.length === 0
             && checkpointLinks.failed.length === 0
             && checkpointLinks.quarantined.length === 0
             && checkpointAdmissions.failed.length === 0
             && checkpointAdmissions.quarantined.length === 0,
-          detailsJson: JSON.stringify({ interruptedAttempts, jobRecovery, checkpointLinks, checkpointAdmissions }),
+          detailsJson: JSON.stringify({
+            interruptedAttempts,
+            jobRecovery,
+            effectRecovery,
+            checkpointLinks,
+            checkpointAdmissions,
+          }),
         },
       });
     });
@@ -6804,6 +6835,7 @@ const routes: Route[] = [
       recovered_pending_repairs: recoveredPendingRepairs,
       checkpoint_links: checkpointLinks,
       checkpoint_admissions: checkpointAdmissions,
+      effect_recovery: effectRecovery,
     });
   }),
 
@@ -13059,6 +13091,85 @@ async function reconcileNonterminalJobs(): Promise<JobRecoverySummary> {
   return { scanned: jobs.length, lost, live, exited };
 }
 
+interface UnsettledEffectRecoveryRecord {
+  readonly id: string;
+  readonly toolCallId: string;
+  readonly turnId: string;
+  readonly taskId: string | null;
+  readonly previousState: string;
+}
+
+interface UnsettledEffectRecoveryResult {
+  readonly scanned: number;
+  readonly manualReview: readonly UnsettledEffectRecoveryRecord[];
+  readonly alreadyResolved: readonly string[];
+  readonly failed: readonly { id: string; error: string }[];
+}
+
+const AMBIGUOUS_EFFECT_STATES = ["STARTED", "UNKNOWN", "RECONCILING"] as const;
+
+/**
+ * Reconcile every effect whose external receipt is not durably known. This
+ * path never retries the effect: it records an atomic tool/effect
+ * MANUAL_REVIEW transition and a deterministic recovery event. A later
+ * settlement wins safely if it committed before this recovery transaction.
+ */
+async function reconcileUnsettledSideEffects(
+  alreadyUnderMutationLock = false,
+): Promise<UnsettledEffectRecoveryResult> {
+  const effects = await db.sideEffect.findMany({
+    where: { state: { in: [...AMBIGUOUS_EFFECT_STATES] } },
+    orderBy: [{ startedAt: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      toolCallId: true,
+      state: true,
+      toolCall: {
+        select: {
+          turnId: true,
+          turn: { select: { taskId: true } },
+        },
+      },
+    },
+  });
+  const manualReview: UnsettledEffectRecoveryRecord[] = [];
+  const alreadyResolved: string[] = [];
+  const failed: Array<{ id: string; error: string }> = [];
+  for (const effect of effects) {
+    const taskId = effect.toolCall.turn.taskId;
+    const correlationId = taskId ?? effect.toolCall.turnId;
+    try {
+      const input: EffectUnknownInput = {
+        taskId: correlationId,
+        toolCallId: effect.toolCallId,
+        sideEffectId: effect.id,
+        error: "process restarted before a trusted kernel receipt was persisted; manual reconciliation is required",
+        idempotencyKey: `effect-recovery:${effect.id}`,
+      };
+      const changed = alreadyUnderMutationLock
+        ? await effectSettlementService.markUnknownUnderMutation(input)
+        : await effectSettlementService.markUnknown(input);
+      if (changed) {
+        manualReview.push({
+          id: effect.id,
+          toolCallId: effect.toolCallId,
+          turnId: effect.toolCall.turnId,
+          taskId,
+          previousState: effect.state,
+        });
+      } else {
+        alreadyResolved.push(effect.id);
+      }
+    } catch (error: unknown) {
+      failed.push({
+        id: effect.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { scanned: effects.length, manualReview, alreadyResolved, failed };
+}
+
 const RECOVERABLE_TOOL_CALL_STATES = new Set(["SETTLED", "FAILED", "TIMED_OUT", "CANCELLED", "DENIED"]);
 const RECOVERABLE_EFFECT_STATES = new Set(["SETTLED", "FAILED"]);
 const IN_FLIGHT_PROVIDER_STATES = new Set(["running", "submitted", "streaming", "starting"]);
@@ -14013,6 +14124,7 @@ writerLeaseHeartbeat = setInterval(() => {
 const reconciledIdempotencyReservations = await reconcilePendingIdempotencyReservations();
 await replayArpV2();
 const jobRecovery = await reconcileNonterminalJobs();
+const effectRecovery = await reconcileUnsettledSideEffects();
 const repairedTaskProjections = await reconcileV1TaskProjections();
 const checkpointLinkRecovery = await reconcileCheckpointArtifactLinks();
 const checkpointAdmissionRecovery = await reconcilePreparedCheckpointAdmissions();
@@ -14021,12 +14133,14 @@ const recoveredActiveTurns = await recoverActiveAgentTurns();
 const recoveredDurableRepairAttempts = await recoverDurableRepairAttempts();
 const recoveredPendingRepairTurns = await recoverPendingRepairTurns();
 if (
+  effectRecovery.failed.length > 0
+  ||
   checkpointLinkRecovery.failed.length > 0
   || checkpointAdmissionRecovery.failed.length > 0
   || completionAdmissionRecovery.failed.length > 0
 ) {
   throw new Error(
-    `startup admission recovery could not settle: ${checkpointLinkRecovery.failed.length} checkpoint link failures, ${checkpointAdmissionRecovery.failed.length} checkpoint admission failures, ${completionAdmissionRecovery.failed.length} completion admission failures`,
+    `startup recovery could not settle: ${effectRecovery.failed.length} effect failures, ${checkpointLinkRecovery.failed.length} checkpoint link failures, ${checkpointAdmissionRecovery.failed.length} checkpoint admission failures, ${completionAdmissionRecovery.failed.length} completion admission failures`,
   );
 }
 if (repairedTaskProjections > 0) {
@@ -14040,6 +14154,11 @@ if (reconciledIdempotencyReservations > 0) {
 if (jobRecovery.scanned > 0) {
   console.log(
     `[terminus-control] job recovery: ${jobRecovery.scanned} scanned, ${jobRecovery.lost} lost, ${jobRecovery.live} live, ${jobRecovery.exited} exited`,
+  );
+}
+if (effectRecovery.scanned > 0) {
+  console.log(
+    `[terminus-control] effect recovery: ${effectRecovery.manualReview.length} moved to manual review, ${effectRecovery.alreadyResolved.length} already resolved`,
   );
 }
 if (checkpointAdmissionRecovery.prepared > 0) {

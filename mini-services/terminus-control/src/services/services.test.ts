@@ -260,10 +260,12 @@ describe("control-plane service boundaries", () => {
   test("EffectSettlementService keeps lifecycle events paired with transaction mutations", async () => {
     type Transaction = { readonly name: "effect" };
     const events: string[] = [];
+    const eventIdempotencyKeys: Array<string | null | undefined> = [];
     const operations: string[] = [];
     const service = new EffectSettlementService<Transaction>({
       appendEvent: async (event, mutation) => {
         events.push(event.eventType);
+        eventIdempotencyKeys.push(event.idempotencyKey);
         await mutation({ name: "effect" });
       },
       transaction: () => ({
@@ -295,7 +297,13 @@ describe("control-plane service boundaries", () => {
       sideEffectId: "effect-1",
       reason: "user_cancelled",
     });
-    await service.markUnknown({ taskId: "task-1", toolCallId: "call-1", sideEffectId: "effect-1", error: "lost receipt" });
+    await service.markUnknown({
+      taskId: "task-1",
+      toolCallId: "call-1",
+      sideEffectId: "effect-1",
+      error: "lost receipt",
+      idempotencyKey: "effect-recovery:effect-1",
+    });
     const settlement: EffectSettlementInput = {
       taskId: "task-1",
       turnId: "turn-1",
@@ -316,6 +324,7 @@ describe("control-plane service boundaries", () => {
     };
     await service.settle(settlement);
     expect(events).toEqual(["tool.authorized", "tool.started", "tool.cancelled", "tool.settlement_unknown", "tool.settled"]);
+    expect(eventIdempotencyKeys[3]).toBe("effect-recovery:effect-1");
     expect(operations).toEqual(["authorize", "start", "cancel", "unknown", "settle"]);
   });
 

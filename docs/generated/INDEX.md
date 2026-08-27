@@ -23,7 +23,7 @@
 |---|---:|
 | `component-maturity.md` | 13051 B |
 | `config.md` | 6602 B |
-| `events.md` | 16954 B |
+| `events.md` | 17395 B |
 | `inventory.md` | 1287 B |
 | `public-api.md` | 2876 B |
 | `sqlx.md` | 1194 B |

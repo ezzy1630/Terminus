@@ -40,6 +40,19 @@ export interface EffectUnknownInput {
   readonly toolCallId: string;
   readonly sideEffectId: string;
   readonly error: string;
+  readonly idempotencyKey?: string | null;
+}
+
+/**
+ * The effect reached a terminal state before this recovery attempt acquired
+ * the writer transaction. The enclosing event transaction must be rolled
+ * back so recovery does not append a false unknown-settlement event.
+ */
+export class EffectSettlementAlreadyResolvedError extends Error {
+  constructor(readonly sideEffectId: string) {
+    super(`side effect ${sideEffectId} was already resolved before recovery`);
+    this.name = "EffectSettlementAlreadyResolvedError";
+  }
 }
 
 export interface EffectCancellationInput {
@@ -93,12 +106,31 @@ export class EffectSettlementService<TTransaction> {
     }, (transaction) => this.dependencies.transaction(transaction).start(input));
   }
 
-  async markUnknown(input: EffectUnknownInput): Promise<void> {
-    await this.run("tool.settlement_unknown", input.taskId, input.toolCallId, {
-      side_effect_id: input.sideEffectId,
-      error: input.error,
-      reconciliation_required: true,
-    }, (transaction) => this.dependencies.transaction(transaction).markUnknown(input));
+  async markUnknown(input: EffectUnknownInput): Promise<boolean> {
+    return this.markUnknownInternal(input, true);
+  }
+
+  /** Run recovery while the caller already owns the control mutation lock. */
+  async markUnknownUnderMutation(input: EffectUnknownInput): Promise<boolean> {
+    return this.markUnknownInternal(input, false);
+  }
+
+  private async markUnknownInternal(
+    input: EffectUnknownInput,
+    acquireMutationLock: boolean,
+  ): Promise<boolean> {
+    try {
+      await this.run("tool.settlement_unknown", input.taskId, input.toolCallId, {
+        tool_call_id: input.toolCallId,
+        side_effect_id: input.sideEffectId,
+        error: input.error,
+        reconciliation_required: true,
+      }, (transaction) => this.dependencies.transaction(transaction).markUnknown(input), [], input.idempotencyKey, acquireMutationLock);
+      return true;
+    } catch (error: unknown) {
+      if (error instanceof EffectSettlementAlreadyResolvedError) return false;
+      throw error;
+    }
   }
 
   async settle(input: EffectSettlementInput): Promise<void> {
@@ -141,19 +173,24 @@ export class EffectSettlementService<TTransaction> {
     payload: Readonly<Record<string, unknown>>,
     mutation: (transaction: TTransaction) => Promise<void>,
     artifactRefs: readonly string[] = [],
+    idempotencyKey: string | null | undefined = null,
+    acquireMutationLock = true,
   ): Promise<void> {
-    await this.dependencies.mutate(async () => {
+    const operation = async (): Promise<void> => {
       await this.dependencies.appendEvent(
         {
           eventType,
           aggregateType: "tool_call",
           aggregateId: toolCallId,
           correlationId: taskId,
+          idempotencyKey,
           payload,
           artifactRefs,
         },
         mutation,
       );
-    });
+    };
+    if (acquireMutationLock) await this.dependencies.mutate(operation);
+    else await operation();
   }
 }

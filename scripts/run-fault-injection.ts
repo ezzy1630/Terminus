@@ -31,6 +31,7 @@ const TEST_PATHS = [
   "tests/recovery/repair_attempt_recovery.test.ts",
   "tests/recovery/checkpoint_publication_recovery.test.ts",
   "tests/recovery/completion_admission_recovery.test.ts",
+  "tests/recovery/effect_recovery.test.ts",
 ] as const;
 
 const DB_BACKED_SCENARIOS = [
@@ -63,6 +64,11 @@ const DB_BACKED_SCENARIOS = [
     scenario: "completion_record_admission_replay",
     boundary: "after_event_commit",
     assertions: ["an admitted completion intent replays without provider inference"],
+  },
+  {
+    scenario: "effect_recovery_replay",
+    boundary: "after_external_effect_starts",
+    assertions: ["ambiguous effect recovery rolls back atomically and replays without duplicate evidence"],
   },
 ] as const;
 

@@ -103,6 +103,7 @@ export const EVENT_TYPES = [
   "tool.denied",
   "tool.authorized",
   "tool.started",
+  "tool.settlement_unknown",
   "tool.settled",
   "tool.failed",
   "policy.decision",
@@ -527,6 +528,7 @@ export interface EventPayloadMap {
   "tool.denied": RuntimeLifecyclePayload;
   "tool.authorized": ToolAuthorizedPayload;
   "tool.started": ToolStartedPayload;
+  "tool.settlement_unknown": RuntimeLifecyclePayload;
   "tool.settled": ToolSettledPayload;
   "tool.failed": ToolFailedPayload;
   "policy.decision": PolicyDecisionPayload;
@@ -711,6 +713,7 @@ export function payloadSchemaFor(type: EventType): z.ZodType<Readonly<Record<str
     "tool.denied": runtimeLifecyclePayloadSchema,
     "tool.authorized": toolAuthorizedPayloadSchema,
     "tool.started": toolStartedPayloadSchema,
+    "tool.settlement_unknown": runtimeLifecyclePayloadSchema,
     "tool.settled": toolSettledPayloadSchema,
     "tool.failed": toolFailedPayloadSchema,
     "policy.decision": policyDecisionPayloadSchema,

@@ -14,6 +14,7 @@ export interface ServiceEventInput {
   readonly aggregateType: string;
   readonly aggregateId: string;
   readonly correlationId: string;
+  readonly idempotencyKey?: string | null;
   readonly payload: Readonly<Record<string, unknown>>;
   readonly artifactRefs?: readonly string[];
 }

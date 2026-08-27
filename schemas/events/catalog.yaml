@@ -166,6 +166,17 @@
   pii: low
   retention: audit
 
+- type: tool.settlement_unknown
+  version: 1
+  aggregate: tool_call
+  payload:
+    tool_call_id: {type: uuid, required: true}
+    side_effect_id: {type: uuid, required: true}
+    error: {type: string, required: true}
+    reconciliation_required: {type: bool, required: true}
+  pii: none
+  retention: audit
+
 - type: tool.completed
   version: 1
   aggregate: tool_call
