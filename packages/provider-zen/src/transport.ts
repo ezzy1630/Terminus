@@ -14,13 +14,16 @@ export interface GatewayHttpRequest {
   readonly headers: Readonly<Record<string, string>>;
   readonly body?: string;
   readonly credentialBindingId: string;
-  readonly authStyle: "bearer";
+  /** `none` is reserved for an explicitly anonymous public gateway binding. */
+  readonly authStyle: "bearer" | "none";
   readonly signal: AbortSignal | null;
 }
 
 /**
  * Trusted higher layers implement this through the kernel connector. The
  * credential binding is opaque; raw key material never enters this package.
+ * An empty binding is the explicit representation of an anonymous public
+ * endpoint and is only produced for an admitted free Zen model.
  */
 export interface CredentialBoundGatewayClient {
   stream(input: GatewayHttpRequest): AsyncIterable<string | Uint8Array>;
@@ -41,7 +44,7 @@ export class GatewayTransport implements ProviderTransport {
   private readonly client: CredentialBoundGatewayClient;
 
   constructor(input: TransportInput) {
-    if (!input.credentialBindingId.startsWith("secret://")) {
+    if (input.credentialBindingId !== "" && !input.credentialBindingId.startsWith("secret://")) {
       throw new Error("gateway credential binding must be a secret capability URI");
     }
     this.credentialBindingId = input.credentialBindingId;
@@ -73,7 +76,7 @@ export class GatewayTransport implements ProviderTransport {
       },
       body: serialized,
       credentialBindingId: this.credentialBindingId,
-      authStyle: "bearer",
+      authStyle: this.credentialBindingId === "" ? "none" : "bearer",
       signal,
     };
     const decoder = new TextDecoder();

@@ -42,6 +42,32 @@ pub trait WorkspaceSource: Send + Sync {
     fn read_file(&self, path: &str) -> Result<Vec<u8>, CodeIntelError>;
 }
 
+// These trees are dependency, build, cache, or alternate-checkout material,
+// not primary workspace source. Walking them makes a normal monorepo hit the
+// bounded indexing limit before semantic retrieval can run.
+const SKIPPED_WORKSPACE_DIRS: &[&str] = &[
+    ".cache",
+    ".hypothesis",
+    ".mypy_cache",
+    ".next",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    ".worktrees",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "python",
+    "vendor",
+    "venv",
+];
+const MAX_INDEXABLE_FILE_BYTES: u64 = 1_048_576;
+const INDEXABLE_SOURCE_EXTENSIONS: &[&str] = &[
+    "c", "cc", "cpp", "cs", "go", "h", "hpp", "java", "js", "jsx", "kt", "mjs", "php", "py", "rb",
+    "rs", "sql", "swift", "ts", "tsx", "vue", "svelte",
+];
+
 /// Safe local source adapter used by the kernel's local workspace backend.
 /// Paths remain workspace-relative and protected directories are excluded.
 #[derive(Debug, Clone)]
@@ -143,6 +169,7 @@ fn collect_files(
             || name == ".terminus-data"
             || name == "capability.token"
             || name.starts_with("code-intel.sqlite")
+            || (file_type.is_dir() && SKIPPED_WORKSPACE_DIRS.contains(&name.as_ref()))
         {
             continue;
         }
@@ -162,10 +189,27 @@ fn collect_files(
         if file_type.is_dir() {
             collect_files(root, &path, excluded_top_level_dirs, files)?;
         } else if file_type.is_file() {
-            files.push(relative.to_string_lossy().replace('\\', "/"));
+            // Large generated documents and bundled assets are not useful
+            // symbol sources and can otherwise dominate the bounded refresh.
+            if entry.metadata()?.len() <= MAX_INDEXABLE_FILE_BYTES
+                && is_indexable_source_path(&path)
+            {
+                files.push(relative.to_string_lossy().replace('\\', "/"));
+            }
         }
     }
     Ok(())
+}
+
+fn is_indexable_source_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            INDEXABLE_SOURCE_EXTENSIONS
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
+        .unwrap_or(false)
 }
 
 /// The high-level inspect service. LSP/compiler/test details are normalized
@@ -489,6 +533,52 @@ mod tests {
 
         let source = FileSystemWorkspaceSource::for_kernel_data_dir(workspace.path());
         assert_eq!(source.list_files().unwrap(), vec!["main.rs"]);
+    }
+
+    #[test]
+    fn workspace_listing_excludes_dependency_and_generated_trees() {
+        let workspace = tempfile::tempdir().unwrap();
+        for directory in [".worktrees", "vendor", "python", ".next", "dist"] {
+            fs::create_dir_all(workspace.path().join(directory)).unwrap();
+            fs::write(
+                workspace.path().join(directory).join("ignored.ts"),
+                "function ignored() {}\n",
+            )
+            .unwrap();
+        }
+        fs::write(workspace.path().join("main.ts"), "function indexed() {}\n").unwrap();
+
+        let source = FileSystemWorkspaceSource::new(workspace.path());
+        assert_eq!(source.list_files().unwrap(), vec!["main.ts"]);
+    }
+
+    #[test]
+    fn workspace_listing_excludes_oversized_files() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("large.html"), vec![b'x'; 1_048_577]).unwrap();
+        fs::write(workspace.path().join("small.ts"), "function indexed() {}\n").unwrap();
+
+        let source = FileSystemWorkspaceSource::new(workspace.path());
+        assert_eq!(source.list_files().unwrap(), vec!["small.ts"]);
+    }
+
+    #[test]
+    fn workspace_listing_excludes_non_source_documents_and_assets() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace.path().join("README.md"),
+            "function not_indexed() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("package.json"),
+            "{\"name\":\"fixture\"}\n",
+        )
+        .unwrap();
+        fs::write(workspace.path().join("main.ts"), "function indexed() {}\n").unwrap();
+
+        let source = FileSystemWorkspaceSource::new(workspace.path());
+        assert_eq!(source.list_files().unwrap(), vec!["main.ts"]);
     }
 
     #[test]

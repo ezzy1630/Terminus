@@ -174,11 +174,14 @@
         "@terminus/config": "workspace:*",
         "@terminus/context-compiler": "workspace:*",
         "@terminus/context-ir": "workspace:*",
+        "@terminus/cron": "workspace:*",
         "@terminus/domain": "workspace:*",
+        "@terminus/lsp": "workspace:*",
         "@terminus/memory": "workspace:*",
         "@terminus/model-router": "workspace:*",
         "@terminus/observability": "workspace:*",
         "@terminus/orchestration": "workspace:*",
+        "@terminus/permissions": "workspace:*",
         "@terminus/policy-coordinator": "workspace:*",
         "@terminus/provider-anthropic": "workspace:*",
         "@terminus/provider-cache": "workspace:*",
@@ -190,6 +193,7 @@
         "@terminus/provider-zen": "workspace:*",
         "@terminus/public-api": "workspace:*",
         "@terminus/public-client": "workspace:*",
+        "@terminus/rollout": "workspace:*",
         "@terminus/runtime-protocol": "workspace:*",
         "@terminus/session-runtime": "workspace:*",
         "@terminus/task-runtime": "workspace:*",
@@ -268,6 +272,13 @@
         "zod": "^4.0.2",
       },
     },
+    "packages/cron": {
+      "name": "@terminus/cron",
+      "version": "0.1.0",
+      "dependencies": {
+        "zod": "^4.0.2",
+      },
+    },
     "packages/domain": {
       "name": "@terminus/domain",
       "version": "0.1.0",
@@ -282,6 +293,13 @@
         "@terminus/capability-registry": "workspace:*",
         "@terminus/domain": "workspace:*",
         "@terminus/runtime-protocol": "workspace:*",
+        "zod": "^4.0.2",
+      },
+    },
+    "packages/lsp": {
+      "name": "@terminus/lsp",
+      "version": "0.1.0",
+      "dependencies": {
         "zod": "^4.0.2",
       },
     },
@@ -319,6 +337,13 @@
         "@terminus/context-ir": "workspace:*",
         "@terminus/domain": "workspace:*",
         "@terminus/runtime-protocol": "workspace:*",
+        "zod": "^4.0.2",
+      },
+    },
+    "packages/permissions": {
+      "name": "@terminus/permissions",
+      "version": "0.1.0",
+      "dependencies": {
         "zod": "^4.0.2",
       },
     },
@@ -438,6 +463,13 @@
       "version": "0.1.0",
       "dependencies": {
         "@terminus/domain": "workspace:*",
+        "zod": "^4.0.2",
+      },
+    },
+    "packages/rollout": {
+      "name": "@terminus/rollout",
+      "version": "0.1.0",
+      "dependencies": {
         "zod": "^4.0.2",
       },
     },
@@ -1146,6 +1178,8 @@
 
     "@terminus/control-service": ["@terminus/control-service@workspace:mini-services/terminus-control"],
 
+    "@terminus/cron": ["@terminus/cron@workspace:packages/cron"],
+
     "@terminus/desktop": ["@terminus/desktop@workspace:apps/desktop"],
 
     "@terminus/domain": ["@terminus/domain@workspace:packages/domain"],
@@ -1154,6 +1188,8 @@
 
     "@terminus/ide-acp": ["@terminus/ide-acp@workspace:apps/ide-acp"],
 
+    "@terminus/lsp": ["@terminus/lsp@workspace:packages/lsp"],
+
     "@terminus/memory": ["@terminus/memory@workspace:packages/memory"],
 
     "@terminus/model-router": ["@terminus/model-router@workspace:packages/model-router"],
@@ -1161,6 +1197,8 @@
     "@terminus/observability": ["@terminus/observability@workspace:packages/observability"],
 
     "@terminus/orchestration": ["@terminus/orchestration@workspace:packages/orchestration"],
+
+    "@terminus/permissions": ["@terminus/permissions@workspace:packages/permissions"],
 
     "@terminus/policy-coordinator": ["@terminus/policy-coordinator@workspace:packages/policy-coordinator"],
 
@@ -1187,6 +1225,8 @@
     "@terminus/public-client": ["@terminus/public-client@workspace:packages/public-client"],
 
     "@terminus/remote": ["@terminus/remote@workspace:packages/remote"],
+
+    "@terminus/rollout": ["@terminus/rollout@workspace:packages/rollout"],
 
     "@terminus/runtime-protocol": ["@terminus/runtime-protocol@workspace:packages/runtime-protocol"],
 

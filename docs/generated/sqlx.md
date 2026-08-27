@@ -22,6 +22,7 @@ compatibility and emits this note so `codegen-check` can detect drift.
 | `0008_gateway_privacy_admission.sql` |
 | `0009_gateway_privacy_terms_identity.sql` |
 | `0010_foreign_key_indexes.sql` |
+| `0011_prisma_datetime_storage.sql` |
 
 If a future Rust crate adopts SQLx, replace this script with
 `cargo sqlx prepare --workspace --check` and emit the resulting

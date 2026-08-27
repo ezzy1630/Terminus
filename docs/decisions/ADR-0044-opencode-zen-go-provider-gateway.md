@@ -47,6 +47,10 @@ capability. Models.dev provides provider-owned protocol and capability metadata.
 7. Zen and Go credentials use the OS credential store under the exact opaque
    URIs `secret://opencode/zen` and `secret://opencode/go`. Provider selection
    state stores only the URI and a configured marker.
+   An explicitly admitted free Zen model may instead use an empty credential
+   binding. That mode is paired with the registered anonymous connector and
+   is rejected for paid or undiscovered models; it is not a claim about
+   retention, training, or privacy beyond the separately admitted terms.
 8. Gateway profiles allow public context by default. Sending repository content
    requires both `workspace_access: true` and a persisted admission record for
    the current provider terms. The record contains the deployment-specific
@@ -81,5 +85,10 @@ capability. Models.dev provides provider-owned protocol and capability metadata.
   the generated entry afterward.
 - A live TLS canary sends an empty request with a generated invalid credential.
   It proves certificate validation and HTTP settlement without invoking a model.
+- An isolated live task has proven anonymous `hy3-free` Zen model discovery and
+  inference through the Terminus kernel, with a 200/Accepted connector receipt,
+  immutable response artifact, verification pass, and completed task. The
+  exact receipt and lifecycle identifiers are recorded in the overhaul evidence
+  ledger.
 - A real-account canary remains operator-gated because it requires an account
   credential and may consume quota.

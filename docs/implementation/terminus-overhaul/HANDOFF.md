@@ -8,13 +8,13 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - Branch: `main`. The implementation and evidence ledger were clean at `f6c856d` (`Bind overhaul evidence to final handoff`); a final ledger-only commit may be newer, so inspect `git log -3` before resuming.
 - The worktree was clean before the ledger files and implementation changes were added. Other registered worktrees remain untouched.
 - Durable ledger files live in `docs/implementation/terminus-overhaul/`.
-- The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, cumulative repair, default-off scout behavior, CI/ruleset declarations, and evaluation-run contracts.
+- The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, anonymous OpenCode Zen free-model inference through the kernel, cumulative repair, default-off scout behavior, CI/ruleset declarations, and evaluation-run contracts.
 
 ## Remaining blockers
 
 1. The live `main-protection` ruleset (id `21228252`) is weaker than the checked-in target. Applying it is a remote mutation and was not authorized.
-2. Hosted CI/bootstrap, live provider inference, cross-platform sandbox enforcement, signed release artifacts, and private holdout evaluations are not proven locally.
-3. Recovery still quarantines rather than resumes `RESPONSE_VALIDATING`/`VERIFYING`; repair attempts lack a durable lease/parent record.
+2. Hosted CI/bootstrap, paid-account and alternate-provider live conformance, cross-platform sandbox enforcement, signed release artifacts, and private holdout evaluations are not proven locally. The anonymous OpenCode Zen free-model path is now proven; see `EVIDENCE.md`.
+3. Recovery still quarantines rather than resumes `RESPONSE_VALIDATING`/`VERIFYING`; repair attempts lack a durable lease/parent record. Verification node IDs are now plan-scoped so a repair plan cannot collide with its parent in Prisma.
 4. Automatic checkpoint failure is explicit but not atomic with terminal publication. Branch admission and completion-record persistence also remain separate crash boundaries.
 
 ## Safe working rules

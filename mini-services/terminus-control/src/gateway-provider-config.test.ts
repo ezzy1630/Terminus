@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   configuredGatewayModel,
   configuredGatewayProviderSnapshot,
+  gatewayCredentialBindingId,
   gatewayProviderConfigurationWire,
   parseGatewayProviderConfigurationUpdate,
 } from "./gateway-provider-config.js";
@@ -73,6 +74,36 @@ describe("gateway provider configuration", () => {
       deployment: "go",
       providerId: "open_code_go",
     })).toThrow("has no admitted discovery record");
+  });
+
+  test("permits only an admitted free Zen model to use an anonymous binding", () => {
+    const anonymousRow = { ...row, credentialConfigured: false, model: "gpt-5-nano" };
+    const discovered = {
+      id: "gpt-5-nano",
+      name: "GPT-5 Nano",
+      deployment: "zen" as const,
+      providerId: "open_code_zen" as const,
+      baseUrl: "https://opencode.ai/zen/v1",
+      protocol: "chat_completions" as const,
+      free: true,
+      toolCalling: false,
+      structuredOutput: true,
+      imageInput: false,
+      reasoning: false,
+      contextTokens: 32_768,
+      outputTokens: 8_192,
+      inputMicrosPerMillion: 0,
+      cachedInputMicrosPerMillion: 0,
+      outputMicrosPerMillion: 0,
+      observedAt: "2026-08-24T00:01:00.000Z",
+    };
+    const model = configuredGatewayModel(anonymousRow, "2026-08-24T00:02:00.000Z" as Rfc3339Timestamp, discovered);
+    expect(gatewayCredentialBindingId(model, false)).toBe("");
+    expect(() => configuredGatewayModel(
+      { ...anonymousRow, model: "paid-model" },
+      "2026-08-24T00:02:00.000Z" as Rfc3339Timestamp,
+      { ...discovered, id: "paid-model", free: false },
+    )).toThrow("gateway provider credential is not configured");
   });
 
   test("does not admit workspace content without recorded privacy terms", () => {

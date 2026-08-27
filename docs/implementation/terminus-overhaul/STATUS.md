@@ -12,8 +12,8 @@ State vocabulary: `NOT_STARTED`, `IN_PROGRESS`, `BLOCKED`, `DONE`, `REMOVED_BY_D
 | --- | --- | --- |
 | A, evidence and baseline | IN_PROGRESS | Local checks, required platform matrix entries, a declarative ruleset, and an eval registry are present. Hosted bootstrap evidence and remote ruleset enforcement remain open. |
 | B, runtime correctness | IN_PROGRESS | The live loop now records proposal, verification, repair, finalization, and cancellation phases. Full crash-resume coverage and state-owner extraction remain open. |
-| C, context/provider | IN_PROGRESS | Safe cited compaction, full-window sizing, instruction loading, provider abort propagation, and stream retry guards are wired. Retrieval, cache, and live conformance evidence remain open. |
-| D, verification | IN_PROGRESS | Completion is proposal-first and admission is verification-gated; repair re-entry is wired. Durable repair leases and a fully semantic verification plan remain open. |
+| C, context/provider | IN_PROGRESS | Safe cited compaction, full-window sizing, instruction loading, provider abort propagation, stream retry guards, and one live anonymous Zen free-model path are proven. Retrieval, cache, paid-account, alternate-protocol, and broader conformance evidence remain open. |
+| D, verification | IN_PROGRESS | Completion is proposal-first and admission is verification-gated; one live task completed through verification and branch admission, and repair node identity is fixed. Durable repair leases and a fully semantic verification plan remain open. |
 | E, efficiency | IN_PROGRESS | Catalog-derived read classification and default-off scout behavior are wired. Marginal-value telemetry and optimization evidence remain open. |
 | F, secure expansion | IN_PROGRESS | The kernel boundary and fail-closed defaults are retained. Remote trust-root, browser/desktop, client-conformance, and promotion evidence remain open. |
 
@@ -35,8 +35,8 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 | RUN-007 | IN_PROGRESS | `coding-turn-engine.ts`, protocol/UX | Doom-loop is a first-class engine/live stop with focused coverage; client rendering and durable stop-evidence conformance remain open. |
 | CTX-001 | IN_PROGRESS | `compaction-service.ts`, `index.ts` | Pruning now requires materialized source plus immutable provenance, summarizes before hiding, and has an atomic production store path; replay/migration coverage remains open. |
 | CTX-002..CTX-007 | IN_PROGRESS | context compiler/control | Full-window sizing, authoritative overlays, scoped instruction loading, and source-derived hashes are wired; complete ledger, graph retrieval, cache, and ablation proof remain open. |
-| PROV-001..PROV-006 | IN_PROGRESS | provider transports/runtime | Direct abort, incremental stream handling, stream-safe fallback, and provider-native request paths are wired; live provider/cache/accounting conformance remains open. |
-| VER-001..VER-003 | IN_PROGRESS | verification/repair/index | Cumulative budget, durable failure signatures, source revision, and automatic re-entry are wired; semantic plan derivation and durable attempt leases remain open. |
+| PROV-001..PROV-006 | IN_PROGRESS | provider transports/runtime | Direct abort, incremental stream handling, stream-safe fallback, provider-native request paths, and anonymous OpenCode Zen free-model inference are proven; paid-account, cache, accounting, and alternate-protocol conformance remain open. |
+| VER-001..VER-003 | IN_PROGRESS | verification/repair/index | Cumulative budget, durable failure signatures, source revision, automatic re-entry, and one live completion/admission path are wired; repair node identity is fixed, while semantic plan derivation and durable attempt leases remain open. |
 | ACI-001 | IN_PROGRESS | `packages/aci`, control tools | Bounded typed read/patch/exec/poll/search/fetch tools remain kernel-mediated; complete coding-ACI coverage and metrics remain open. |
 | SEC-001..SEC-002 | IN_PROGRESS | kernel/policy/control | Kernel boundary exists; effective sandbox and trust-root restart proof remain open. |
 | EVAL-001 | IN_PROGRESS | `evals`, `python/forge_evals` | Internal cohorts exist; held-out paired evidence is not present. |
@@ -103,7 +103,7 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 | --- | --- | --- |
 | X-DB-01..X-DB-08 | IN_PROGRESS | Existing SQLite migrations are monotonic; overhaul journal/repair fields are not complete. |
 | X-OBS-01..X-OBS-08 | IN_PROGRESS | Semantic events and provider telemetry exist; correlation and artifact bounds need audit. |
-| X-TEST-01..X-TEST-07 | IN_PROGRESS | Focused context/provider/lifecycle/security-adjacent tests pass; fault-injection, exact live-path, cross-platform, and client tests remain. |
+| X-TEST-01..X-TEST-07 | IN_PROGRESS | Focused context/provider/lifecycle/security-adjacent tests and an exact live anonymous Zen completion pass; fault-injection, alternate live paths, cross-platform, and client tests remain. |
 | X-PROM-01..X-PROM-07 | NOT_STARTED | No new advanced default is promoted by this ledger without evidence. |
 | X-DOC-01..X-DOC-15 | IN_PROGRESS | This ledger is the first durable documentation slice. |
 | X-FINAL-01..X-FINAL-27 | IN_PROGRESS | Local implementation and evidence ledgers are updated; external release, runtime, holdout, and client gates remain open. |

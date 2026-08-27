@@ -54,6 +54,39 @@ describe("KernelGatewayClient", () => {
     expect(JSON.stringify(calls)).not.toContain("api-key");
   });
 
+  test("selects the anonymous kernel connector for a public gateway binding", async () => {
+    let connectorId: string | null = null;
+    const client = new KernelGatewayClient({
+      MintGrant: async (request) => {
+        connectorId = request.binding?.connectorId ?? null;
+        return { encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 };
+      },
+      Execute: async () => ({
+        receipt: {
+          grantId: "grant", taskId: "task", effectId: "effect", connectorId: "opencode-gateway-anonymous",
+          method: "GET", path: "/zen/v1/models", destination: "https://opencode.ai:443",
+          requestSha256: "a".repeat(64), statusCode: 200, responseSha256: "b".repeat(64),
+          responseRedactions: 0, outcome: "accepted",
+        },
+        body: new TextEncoder().encode("{}"),
+        contentType: "application/json",
+      }),
+    }, context);
+
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of client.stream({
+      url: "https://opencode.ai/zen/v1/models",
+      method: "GET",
+      headers: { accept: "application/json" },
+      credentialBindingId: "",
+      authStyle: "none",
+      signal: null,
+    })) chunks.push(chunk);
+
+    expect(connectorId).toBe("opencode-gateway-anonymous");
+    expect(new TextDecoder().decode(chunks[0])).toBe("{}");
+  });
+
   test("streams multiple SSE frames incrementally", async () => {
     const sseBody = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\ndata: [DONE]\n\n";
     const client = new KernelGatewayClient({

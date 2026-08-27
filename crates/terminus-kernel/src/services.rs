@@ -38,6 +38,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use terminus_artifacts::ArtifactStore;
 use terminus_authz::{OperationClass, Scope, TokenIssuer, TokenRevoker};
 use terminus_code_intel::{CodeIntelService, FileSystemWorkspaceSource, WorkspaceSource};
@@ -278,7 +279,11 @@ impl KernelHandle {
                     Arc::clone(&egress),
                     grant_key.to_vec(),
                 )
-                .connector("opencode-gateway", terminus_connector::AuthStyle::Bearer)
+                .connector_with_timeout(
+                    "opencode-gateway",
+                    terminus_connector::AuthStyle::Bearer,
+                    Duration::from_secs(120),
+                )
                 .connector("openai-responses", terminus_connector::AuthStyle::Bearer)
                 .connector("openai-chat", terminus_connector::AuthStyle::Bearer)
                 .connector(
@@ -286,6 +291,11 @@ impl KernelHandle {
                     terminus_connector::AuthStyle::NamedHeader("x-api-key".into()),
                 )
                 .connector("web-fetch", terminus_connector::AuthStyle::None)
+                .connector_with_timeout(
+                    "opencode-gateway-anonymous",
+                    terminus_connector::AuthStyle::None,
+                    Duration::from_secs(120),
+                )
                 .build();
                 ConnectorService::new(
                     Arc::new(broker),
@@ -2797,17 +2807,36 @@ impl ConnectorService {
         ttl_secs: u64,
         use_limit: u32,
     ) -> KernelResult<terminus_secrets::ConnectorGrant> {
-        // Anonymous fetches (`web-fetch`, empty secret URI) skip the secret
-        // step but still require the Network operation class scoped to the
-        // exact destination; the L4 egress proxy authorizes the host at
-        // dispatch time. Everything else requires Secret-class capability:
-        // a grant is one step from raw use.
+        // Anonymous connectors (empty secret URI) skip the secret step but
+        // still require the Network operation class scoped to the exact
+        // destination; the L4 egress proxy authorizes the host at dispatch
+        // time. Everything else requires Secret-class capability: a grant is
+        // one step from raw use.
         let anonymous = uri.is_empty();
-        if anonymous && binding.connector_id != "web-fetch" {
+        let connector_is_anonymous = self
+            .broker
+            .is_anonymous_connector(&binding.connector_id)
+            .map_err(|e| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::InvalidRequest,
+                    terminus_kernel_protocol::ErrorCategory::Validation,
+                    format!("{e}"),
+                    false,
+                )
+            })?;
+        if anonymous != connector_is_anonymous {
             return Err(KernelError::new(
                 terminus_kernel_protocol::ErrorCode::PermissionDenied,
                 terminus_kernel_protocol::ErrorCategory::Permission,
-                "anonymous connector grants are restricted to the web-fetch connector".to_string(),
+                format!(
+                    "connector {} requires {} credential binding",
+                    binding.connector_id,
+                    if connector_is_anonymous {
+                        "an anonymous"
+                    } else {
+                        "a secret"
+                    },
+                ),
                 false,
             ));
         }
@@ -2847,7 +2876,7 @@ impl ConnectorService {
                 request_id = %ctx.request_id,
                 task_id = %ctx.task_id,
                 actor_id = %ctx.actor_id,
-                secret_uri = "(anonymous web-fetch)",
+                secret_uri = "(anonymous)",
                 effect_id = %binding.effect_id,
                 "anonymous connector grant minted"
             );

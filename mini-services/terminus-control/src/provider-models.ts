@@ -118,7 +118,8 @@ async function readAll(stream: AsyncIterable<string | Uint8Array>, limit: number
 }
 
 /**
- * Ask the gateway which models this credential can reach.
+ * Ask the gateway which models this credential can reach. An empty secret URI
+ * means an explicitly anonymous request for a public Zen deployment.
  *
  * Runs through the same credential-bound connector as inference, so the bearer
  * stays inside the kernel and the path allowlist still applies.
@@ -136,7 +137,7 @@ export async function fetchAvailableModels(input: {
       method: "GET",
       headers: { accept: "application/json" },
       credentialBindingId: input.secretUri,
-      authStyle: "bearer",
+      authStyle: input.secretUri === "" ? "none" : "bearer",
       signal: input.signal ?? null,
     }),
     MAX_GATEWAY_LIST_BYTES,

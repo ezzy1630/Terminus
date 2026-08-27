@@ -89,6 +89,18 @@ export function gatewaySecretUri(deployment: GatewayDeployment): `secret://openc
   return `secret://opencode/${deployment}`;
 }
 
+/**
+ * Resolve the only two gateway binding modes: a secret capability for paid
+ * or Go deployments, and an empty binding for an admitted free Zen model.
+ */
+export function gatewayCredentialBindingId(
+  model: Pick<GatewayModel, "deployment" | "free">,
+  credentialConfigured: boolean,
+): string {
+  if (model.deployment === "zen" && model.free && !credentialConfigured) return "";
+  return gatewaySecretUri(model.deployment);
+}
+
 export function gatewayProviderConfigurationWire(
   row: GatewayProviderRow | null,
 ): GatewayProviderConfigurationResponse {
@@ -138,7 +150,7 @@ export function configuredGatewayModel(
   discovered?: GatewayModel | null,
 ): GatewayModel {
   const wire = gatewayProviderConfigurationWire(row).configuration;
-  if (wire === null || !wire.credential_configured) {
+  if (wire === null) {
     throw new Error("gateway provider credential is not configured");
   }
   const expectedProviderId = wire.deployment === "zen" ? "open_code_zen" : "open_code_go";
@@ -150,6 +162,10 @@ export function configuredGatewayModel(
     || discovered.providerId !== expectedProviderId
   ) {
     throw new Error(`configured gateway model ${wire.model} has no admitted discovery record`);
+  }
+  const anonymousZenFree = wire.deployment === "zen" && wire.free_model && discovered.free;
+  if (!wire.credential_configured && !anonymousZenFree) {
+    throw new Error("gateway provider credential is not configured");
   }
   return {
     ...discovered,

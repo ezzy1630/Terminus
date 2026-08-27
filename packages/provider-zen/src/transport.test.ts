@@ -85,6 +85,24 @@ describe("GatewayTransport", () => {
     expect(chunks.at(-1)?.kind).toBe("done");
   });
 
+  test("uses an anonymous binding for an admitted free gateway model", async () => {
+    const gatewayModel = { ...model("chat_completions"), free: true };
+    const client = new FakeClient(['data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n']);
+    const transport = new GatewayTransport({
+      credentialBindingId: "",
+      models: [gatewayModel],
+      client,
+    });
+
+    const chunks = [];
+    for await (const chunk of transport.stream(request(gatewayModel.id), { model: gatewayModel.id }, null)) chunks.push(chunk);
+
+    expect(client.seen?.credentialBindingId).toBe("");
+    expect(client.seen?.authStyle).toBe("none");
+    expect(chunks).toContainEqual({ kind: "text", text: "ok" });
+    expect(chunks.at(-1)?.kind).toBe("done");
+  });
+
   test("normalizes Responses events", async () => {
     const gatewayModel = model("responses");
     const client = new FakeClient([

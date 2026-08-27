@@ -28,14 +28,20 @@ export class KernelGatewayClient implements CredentialBoundGatewayClient {
 
   async *stream(input: GatewayHttpRequest): AsyncIterable<Uint8Array> {
     assertNotAborted(input.signal, "gateway request was aborted");
+    const anonymous = input.credentialBindingId === "";
+    const expectedAuthStyle = anonymous ? "none" : "bearer";
+    if (input.authStyle !== expectedAuthStyle) {
+      throw new Error(`gateway auth style ${input.authStyle} does not match its credential binding`);
+    }
     const url = admittedGatewayUrl(input.url);
     const effectId = randomUUID();
+    const connectorId = anonymous ? "opencode-gateway-anonymous" : "opencode-gateway";
     const grant = await withAbortSignal(
       this.connectors.MintGrant({
         context: nextContext(this.context, `gateway-grant:${effectId}`),
         capabilityUri: input.credentialBindingId,
         binding: {
-          connectorId: "opencode-gateway",
+          connectorId,
           destinationHost: GATEWAY_HOST,
           destinationPort: GATEWAY_PORT,
           scheme: "https",

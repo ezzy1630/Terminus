@@ -72,6 +72,7 @@ impl DispatchSink<'_> {
 #[derive(Debug, Clone)]
 struct ConnectorDescriptor {
     auth: AuthStyle,
+    timeout: Option<Duration>,
 }
 
 /// Default bounds. Every byte count is enforced; unbounded I/O is
@@ -129,8 +130,32 @@ impl std::fmt::Debug for ConnectorBrokerBuilder {
 impl ConnectorBrokerBuilder {
     /// Register a connector descriptor at build time.
     pub fn connector(mut self, id: impl Into<String>, auth: AuthStyle) -> Self {
-        self.connectors
-            .insert(id.into(), ConnectorDescriptor { auth });
+        self.connectors.insert(
+            id.into(),
+            ConnectorDescriptor {
+                auth,
+                timeout: None,
+            },
+        );
+        self
+    }
+
+    /// Register a connector with a bounded timeout distinct from the broker
+    /// default. Long-lived model streams need a larger bound than metadata
+    /// lookups, while remaining explicitly finite and broker-owned.
+    pub fn connector_with_timeout(
+        mut self,
+        id: impl Into<String>,
+        auth: AuthStyle,
+        timeout: Duration,
+    ) -> Self {
+        self.connectors.insert(
+            id.into(),
+            ConnectorDescriptor {
+                auth,
+                timeout: Some(timeout),
+            },
+        );
         self
     }
 
@@ -200,8 +225,28 @@ impl ConnectorBroker {
         self.connectors
             .write()
             .map_err(|_| ConnectorError::Protocol("connector registry poisoned".into()))?
-            .insert(id.into(), ConnectorDescriptor { auth });
+            .insert(
+                id.into(),
+                ConnectorDescriptor {
+                    auth,
+                    timeout: None,
+                },
+            );
         Ok(())
+    }
+
+    /// Return whether a registered connector deliberately omits credentials.
+    /// The kernel uses this to keep an empty secret URI bound to an explicit
+    /// anonymous connector descriptor rather than to a caller-selected id.
+    pub fn is_anonymous_connector(&self, id: &str) -> Result<bool, ConnectorError> {
+        let descriptor = self
+            .connectors
+            .read()
+            .map_err(|_| ConnectorError::Protocol("connector registry poisoned".into()))?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ConnectorError::UnknownConnector(id.to_string()))?;
+        Ok(matches!(descriptor.auth, AuthStyle::None))
     }
 
     /// Execute one grant-bound operation end to end.
@@ -246,6 +291,7 @@ impl ConnectorBroker {
             .get(&binding.connector_id)
             .cloned()
             .ok_or_else(|| ConnectorError::UnknownConnector(binding.connector_id.clone()))?;
+        let timeout = descriptor.timeout.unwrap_or(self.timeout);
         // Exact-operation binding: destination must match the mint-time
         // pin before any DNS resolution, credential work, or consumption.
         if op.host != binding.destination_host
@@ -344,13 +390,13 @@ impl ConnectorBroker {
 
         // -- 7. Dispatch the exact HTTP/1.1 request ------------------------
         let dispatch_sink = DispatchSink { inner: sink };
-        let dispatch = tokio::time::timeout(self.timeout, async {
+        let dispatch = tokio::time::timeout(timeout, async {
             let ctx = DispatchContext {
                 op,
                 addresses,
                 egress: &self.egress,
                 max_response_bytes: self.max_response_bytes,
-                timeout: self.timeout,
+                timeout,
             };
             if op.scheme.eq_ignore_ascii_case("https") {
                 dispatch_https(ctx, &header_name, &header_value, dispatch_sink).await
@@ -507,13 +553,14 @@ async fn dispatch_https(
     };
     let method = reqwest::Method::from_bytes(op.method.as_bytes())
         .map_err(|_| ConnectorError::Protocol("invalid HTTP method".to_string()))?;
-    let credential_name = HeaderName::from_bytes(credential_header_name.as_bytes())
-        .map_err(|_| ConnectorError::Protocol("invalid credential header".to_string()))?;
-    let credential_value = HeaderValue::from_str(credential_header_value)
-        .map_err(|_| ConnectorError::Protocol("invalid credential value".to_string()))?;
-    let mut request = client
-        .request(method, url)
-        .header(credential_name, credential_value);
+    let mut request = client.request(method, url);
+    if !credential_header_name.is_empty() {
+        let credential_name = HeaderName::from_bytes(credential_header_name.as_bytes())
+            .map_err(|_| ConnectorError::Protocol("invalid credential header".to_string()))?;
+        let credential_value = HeaderValue::from_str(credential_header_value)
+            .map_err(|_| ConnectorError::Protocol("invalid credential value".to_string()))?;
+        request = request.header(credential_name, credential_value);
+    }
     for (name, value) in &op.headers {
         request = request.header(name, value);
     }
@@ -672,10 +719,20 @@ async fn dispatch_http(
         format!("?{}", op.query)
     };
     let mut request = format!(
-        "{} {}{} HTTP/1.1\r\nHost: {}\r\n{header_name}: {header_value}\r\nContent-Length: {}\r\nConnection: close\r\n",
-        op.method, op.path, query, op.host, op.body.len()
+        "{} {}{} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        op.method,
+        op.path,
+        query,
+        op.host,
+        op.body.len()
     )
     .into_bytes();
+    if !header_name.is_empty() {
+        request.extend_from_slice(header_name.as_bytes());
+        request.extend_from_slice(b": ");
+        request.extend_from_slice(header_value.as_bytes());
+        request.extend_from_slice(b"\r\n");
+    }
     for (name, value) in &op.headers {
         request.extend_from_slice(name.as_bytes());
         request.extend_from_slice(b": ");

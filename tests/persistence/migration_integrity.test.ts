@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
+
+const ROOT = join(import.meta.dir, "..", "..");
+const SQLITE_MIGRATIONS_DIR = join(ROOT, "migrations", "sqlite");
 
 async function runMigrations(
   dbPath: string,
@@ -14,6 +18,20 @@ async function runMigrations(
     stderr: "ignore",
   });
   return proc.exited;
+}
+
+function applyMigrationsThrough(db: Database, lastVersion: number): void {
+  for (const file of readdirSync(SQLITE_MIGRATIONS_DIR).filter((name) => name.endsWith(".sql")).sort()) {
+    const match = /^(\d+)_(.+)\.sql$/.exec(file);
+    if (match === null) throw new Error(`invalid migration filename: ${file}`);
+    const version = Number.parseInt(match[1]!, 10);
+    if (version > lastVersion) break;
+    const sql = readFileSync(join(SQLITE_MIGRATIONS_DIR, file), "utf8");
+    db.exec(sql);
+    db.query(
+      "INSERT INTO schema_migrations (version, name, checksum_sha256, applied_at) VALUES (?, ?, ?, ?)",
+    ).run(version, match[2]!, createHash("sha256").update(sql, "utf8").digest("hex"), new Date(0).toISOString());
+  }
 }
 
 describe("Database Migration Integrity & Corruption Detection", () => {
@@ -72,6 +90,48 @@ describe("Database Migration Integrity & Corruption Detection", () => {
       const integrity = db.query("PRAGMA quick_check").all() as Array<{ quick_check: string }>;
       expect(integrity[0]?.quick_check).toBe("ok");
       db.close();
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  test("DateTime migration converts legacy provider timestamps to strict epoch milliseconds", async () => {
+    const testDir = join(tmpdir(), `terminus-mig-datetime-${Date.now()}`);
+    mkdirSync(testDir, { recursive: true });
+    const dbPath = join(testDir, "test.db");
+    const createdAt = "2026-08-26T12:34:56.789Z";
+    const updatedAt = "2026-08-26T12:35:57.001Z";
+
+    try {
+      const legacy = new Database(dbPath);
+      applyMigrationsThrough(legacy, 10);
+      legacy.query(
+        "INSERT INTO provider_configurations (id, program, args_json, model, timeout_seconds, tools_enabled, revision, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("legacy-local", "opencode", "[]", "hy3-free", 120, 0, 1, "legacy", createdAt, updatedAt);
+      legacy.query(
+        "INSERT INTO gateway_provider_configurations (id, deployment, protocol, model, secret_uri, credential_configured, tools_enabled, free_model, workspace_access, privacy_terms_admitted, privacy_terms_version, revision, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("legacy-gateway", "zen", "chat_completions", "hy3-free", "secret://opencode/zen", 0, 1, 1, 0, 1, "opencode-zen-privacy-v1", 1, "legacy", createdAt, updatedAt);
+      legacy.close();
+
+      expect(await runMigrations(dbPath)).toBe(0);
+      const upgraded = new Database(dbPath);
+      const provider = upgraded.query(
+        "SELECT typeof(created_at) AS created_type, typeof(updated_at) AS updated_type, created_at, updated_at FROM provider_configurations WHERE id = ?",
+      ).get("legacy-local") as { created_type: string; updated_type: string; created_at: number; updated_at: number };
+      const gateway = upgraded.query(
+        "SELECT typeof(created_at) AS created_type, typeof(updated_at) AS updated_type, created_at, updated_at FROM gateway_provider_configurations WHERE id = ?",
+      ).get("legacy-gateway") as { created_type: string; updated_type: string; created_at: number; updated_at: number };
+      const providerColumns = upgraded.query("PRAGMA table_info(provider_configurations)").all() as Array<{ name: string; type: string }>;
+      expect(providerColumns.find((column) => column.name === "created_at")?.type).toBe("INTEGER");
+      expect(provider.created_type).toBe("integer");
+      expect(provider.updated_type).toBe("integer");
+      expect(provider.created_at).toBe(Date.parse(createdAt));
+      expect(provider.updated_at).toBe(Date.parse(updatedAt));
+      expect(gateway.created_type).toBe("integer");
+      expect(gateway.updated_type).toBe("integer");
+      expect(gateway.created_at).toBe(Date.parse(createdAt));
+      expect(gateway.updated_at).toBe(Date.parse(updatedAt));
+      upgraded.close();
     } finally {
       rmSync(testDir, { recursive: true, force: true });
     }

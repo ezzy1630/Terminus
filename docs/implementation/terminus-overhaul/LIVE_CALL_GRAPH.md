@@ -60,8 +60,8 @@ task/turn cancel request
 | `runCompaction` | `compileProviderContext` | live, fail-closed | Source text/provenance, cited summary, signal, and atomic production commit path are required before hiding. |
 | Repository instructions | `loadRepositoryInstructionFragments` | live, kernel-read | Relevant scopes are read through the kernel and injected as hashed required fragments; full invalidation coverage remains. |
 | `Context Compiler` | `compileContext` in `packages/context-compiler` | live | Manifests, exact prefixes, project rules, and source hashes are retained; retrieval/cache ablation remains. |
-| Provider retry/runtime | `agentLoop` and `providers/*` | live, partial | Attempt stages, direct-stream fallback guards, and abort propagation are explicit; live conformance remains. |
-| Verification runtime | `agentLoop` | live, post-proposal | Owns completion admission; DB fault-injection and semantic plan coverage remain. |
+| Provider retry/runtime | `agentLoop` and `providers/*` | live, partial | Attempt stages, direct-stream fallback guards, abort propagation, and one anonymous OpenCode Zen free-model completion through the kernel are proven; paid-account, alternate-protocol, cache, and broader live conformance remain. |
+| Verification runtime | `agentLoop` | live, post-proposal | Owns completion admission; one live plan/result/branch-admission path is proven, while DB fault-injection and semantic plan coverage remain. |
 | `VerificationRepairController` | `agentLoop` | live, partial | Cumulative budget, signatures, directive, child re-entry, and parent supersession are wired; durable lease remains. |
 | Stagnation supervisor | `/v2/orchestration/stagnation/check` | endpoint/live helper | Reconcile with engine/catalog and structured stop state. |
 | Scout runner | `agentLoop` before main context | live only with explicit opt-in | `TERMINUS_ENABLE_SCOUT=1` is required; utility ledger and promotion evidence remain. |

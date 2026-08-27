@@ -64,6 +64,7 @@ import {
 import {
   configuredGatewayModel,
   configuredGatewayProviderSnapshot,
+  gatewayCredentialBindingId,
   gatewayModelKey,
   gatewayProviderConfigurationWire,
   gatewayProviderConfigurationDeleteSchema,
@@ -5745,7 +5746,8 @@ const routes: Route[] = [
     if (row === null) {
       return sendJson(res, 200, providerModelsWire(null, "No OpenCode gateway is configured."));
     }
-    if (!row.credentialConfigured) {
+    const anonymousZenFree = row.deployment === "zen" && row.freeModel && !row.credentialConfigured;
+    if (!row.credentialConfigured && !anonymousZenFree) {
       return sendJson(res, 200, providerModelsWire(null, "The OpenCode gateway has no credential configured."));
     }
     const deployment = row.deployment === "go" ? "go" as const : "zen" as const;
@@ -5758,7 +5760,7 @@ const routes: Route[] = [
       const result = await discoverProviderModels({
         client: new KernelGatewayClient(requireKernelUds().connectors, context),
         deployment,
-        secretUri: gatewaySecretUri(deployment),
+        secretUri: anonymousZenFree ? "" : gatewaySecretUri(deployment),
         observedAt: now(),
       });
       rememberProviderModels(result, Date.now());
@@ -5800,8 +5802,10 @@ const routes: Route[] = [
       if (current === null ? input.expected_revision !== 0 : current.revision !== input.expected_revision) {
         return null;
       }
+      const anonymousZenFree = input.deployment === "zen" && input.free_model && input.credential === undefined;
       if (
         input.credential === undefined
+        && !anonymousZenFree
         && (current === null || !current.credentialConfigured || current.secretUri !== secretUri)
       ) {
         throw new Error("a credential is required when configuring or changing the gateway deployment");
@@ -5821,7 +5825,8 @@ const routes: Route[] = [
         protocol: input.protocol,
         model: input.model,
         secretUri,
-        credentialConfigured: input.credential !== undefined || current?.credentialConfigured === true,
+        credentialConfigured: input.credential !== undefined
+          || (current?.credentialConfigured === true && !anonymousZenFree),
         toolsEnabled: input.tools_enabled,
         freeModel: input.free_model,
         workspaceAccess: input.workspace_access,
@@ -10480,6 +10485,12 @@ async function agentLoop(turnId: string): Promise<void> {
             snapshot: selectedProvider,
             observedAt: selectedProvider.observedAt,
           };
+    const gatewayBindingId: string = gatewayModel === null
+      ? ""
+      : gatewayCredentialBindingId(
+          gatewayModel,
+          gatewayProviderConfiguration?.credentialConfigured === true,
+        );
     const selectedRenderer = directConfiguration !== null
       ? createDirectRenderer(directConfiguration)
       : gatewayModel === null
@@ -10878,7 +10889,9 @@ async function agentLoop(turnId: string): Promise<void> {
       workspaceId: workspace.id,
       operationClasses: directConfiguration !== null || gatewayModel !== null
         ? [
-            CapabilityOperationProto.CAPABILITY_OPERATION_SECRET,
+            ...(directConfiguration !== null || gatewayBindingId !== ""
+              ? [CapabilityOperationProto.CAPABILITY_OPERATION_SECRET]
+              : []),
             CapabilityOperationProto.CAPABILITY_OPERATION_NETWORK,
             CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST,
           ]
@@ -10902,7 +10915,7 @@ async function agentLoop(turnId: string): Promise<void> {
         ? [directConfiguration.secretUri]
         : gatewayModel === null
           ? []
-          : [gatewaySecretUri(gatewayModel.deployment)],
+          : gatewayBindingId === "" ? [] : [gatewayBindingId],
     });
     const buildDirectExecutor = (): ProviderExecutionInput["executeDirectRequest"] => {
       if (directConfiguration === null) return undefined;
@@ -11085,7 +11098,7 @@ async function agentLoop(turnId: string): Promise<void> {
           command: localProviderCommand,
           gateway: gatewayModel === null
             ? null
-            : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
+            : { model: gatewayModel, secretUri: gatewayBindingId },
           direct: directConfiguration === null
             ? null
             : { vendor: directConfiguration.vendor },
@@ -11205,7 +11218,7 @@ async function agentLoop(turnId: string): Promise<void> {
                 command: localProviderCommand,
                 gateway: gatewayModel === null
                   ? null
-                  : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
+                  : { model: gatewayModel, secretUri: gatewayBindingId },
                 direct: directConfiguration === null
                   ? null
                   : { vendor: directConfiguration.vendor },
@@ -11354,7 +11367,7 @@ async function agentLoop(turnId: string): Promise<void> {
               command: localProviderCommand,
               gateway: gatewayModel === null
                 ? null
-                : { model: gatewayModel, secretUri: gatewaySecretUri(gatewayModel.deployment) },
+                : { model: gatewayModel, secretUri: gatewayBindingId },
               direct: directConfiguration === null
                 ? null
                 : { vendor: directConfiguration.vendor },

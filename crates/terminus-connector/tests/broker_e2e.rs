@@ -91,6 +91,17 @@ async fn fixture_stack_with_budget(max_total_bytes: u64) -> (ConnectorBroker, u1
 }
 
 #[tokio::test]
+async fn anonymous_connector_is_explicitly_registered() {
+    let (broker, _port, _listener) = fixture_stack().await;
+    broker
+        .register_connector("public-api", AuthStyle::None)
+        .unwrap();
+
+    assert!(broker.is_anonymous_connector("public-api").unwrap());
+    assert!(!broker.is_anonymous_connector("fixture-api").unwrap());
+}
+
+#[tokio::test]
 #[ignore = "contacts the public OpenCode endpoint with an invalid generated credential"]
 async fn live_opencode_tls_canary_reaches_a_validated_http_response() {
     let secret_broker = Arc::new(SecretBroker::new());

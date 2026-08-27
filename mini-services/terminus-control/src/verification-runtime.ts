@@ -657,46 +657,55 @@ function candidateBranchFromRow(row: {
 export function defaultCriteriaNodes(
   criteria: readonly AcceptanceCriterion[],
 ): ReturnType<typeof criterionNode>[] {
+  // VerificationNode.id is globally unique in the control-plane schema. A
+  // repair creates a new plan for the same criteria, so criterion-derived
+  // names must be namespaced per plan attempt rather than reused.
+  const nodeId = (name: string): string => `${name}_${randomUUID()}`;
   if (criteria.length === 0) {
+    const parseId = nodeId("parse");
+    const diagnosticsId = nodeId("diagnostics");
+    const narrowTestsId = nodeId("narrow_tests");
     return [
       criterionNode({
-        id: "parse",
+        id: parseId,
         criterionId: null,
         predicateType: "file_parses",
         paths: ["."],
         required: true,
       }),
       criterionNode({
-        id: "diagnostics",
+        id: diagnosticsId,
         criterionId: null,
         predicateType: "static_diagnostics",
         paths: ["."],
         required: true,
-        dependsOn: ["parse"],
+        dependsOn: [parseId],
       }),
       criterionNode({
-        id: "narrow_tests",
+        id: narrowTestsId,
         criterionId: null,
         predicateType: "unit_test",
         paths: ["."],
         required: true,
-        dependsOn: ["diagnostics"],
+        dependsOn: [diagnosticsId],
       }),
     ];
   }
+  const nodeIds = criteria.map((criterion) => nodeId(`ac_${criterion.id}`));
   return criteria.map((c, i) => {
     const hint = c.verificationHint?.trim() ?? "";
     const command = hint.toLowerCase().startsWith("command:")
       ? hint.slice("command:".length).trim()
       : undefined;
     const predicateType: PredicateType = i === 0 ? "file_parses" : "unit_test";
+    const id = nodeIds[i]!;
     const node = {
-      id: `ac_${c.id}`,
+      id,
       criterionId: c.id,
       predicateType,
       paths: ["."],
       required: c.required,
-      dependsOn: i === 0 ? [] : [`ac_${criteria[i - 1]!.id}`],
+      dependsOn: i === 0 ? [] : [nodeIds[i - 1]!],
     };
     return criterionNode(command === undefined ? node : { ...node, command });
   });
