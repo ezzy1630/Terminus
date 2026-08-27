@@ -25,11 +25,11 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`) |
+| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`) |
 | Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`), `0c3a98a` (`Persist completion admission across recovery`), `e0a9fda` (`Bind completion recovery evidence to current tree`), `91c377f` (`Finalize current-tree evidence identity`) |
-| HEAD at last implementation evidence capture | `7e66f2f` (`Make checkpoint and terminal publication atomic`) |
+| HEAD at last implementation evidence capture | `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`) |
 | Branch | `main` |
-| Remote state at last implementation evidence capture | Sixteen commits ahead of `origin/main`; no push performed |
+| Remote state at last implementation evidence capture | Eighteen commits ahead of `origin/main`; no push performed |
 | Functional worktree | Clean at last implementation evidence capture; the ledger update was committed separately |
 
 ## Current implementation observations
@@ -48,6 +48,7 @@ This file records observed commands and artifacts. It does not turn source decla
 12. A second DB-backed recovery test exercises checkpoint publication against the same fresh-migration discipline: a crash before publication commit leaves the checkpoint `PREPARED` with no event, duplicate artifact linking collapses through the uniqueness constraint, and repeated recovery leaves one `COMMITTED` row with one `checkpoint.created` event.
 13. Completion admission now persists an immutable `PREPARED` record before candidate-branch admission and flips it to `COMMITTED` in the same transaction as task completion, the verified-turn transition, and `task.completed`. Startup only replays that transition when the associated branch is already `ADMITTED`; otherwise it quarantines the intent. A fresh-migration DB test proves rollback of all four rows/events, replay without a provider attempt, and quarantine of an open branch.
 14. Successful automatic checkpoint admission now shares one writer transaction with `checkpoint.created`, `context.auto_checkpoint_committed`, `turn.completed`, checkpoint `COMMITTED` state, and turn `COMPLETED` state. Startup validates a prepared checkpoint first, then defers a row tied to a completed task and terminal-adjacent turn so recovery can commit that coupled boundary together. Fresh-migration tests cover rollback and idempotent replay of the checkpoint and terminal publication batch.
+15. Restart recovery now enumerates `STARTED`, `UNKNOWN`, and `RECONCILING` side effects before active-turn recovery. For each row it records `tool.settlement_unknown` with `effect-recovery:<side-effect-id>`, updates the linked tool call to `UNKNOWN` and the effect to `MANUAL_REVIEW` in the same writer transaction, and never retries the external operation. A settled effect is skipped without contradictory evidence, and recovery failures make startup fail closed.
 
 ## Durable repair-attempt evidence
 
@@ -79,6 +80,14 @@ without provider inference, while an unadmitted branch is quarantined. This
 closes the branch/record crash window but not the broader provider/effect or
 later-state recovery requirements.
 
+External-effect recovery coverage is in `tests/recovery/effect_recovery.test.ts`.
+It uses a fresh migrated SQLite database to prove rollback of the unknown
+event plus tool/effect state, one-event replay into `UNKNOWN`/`MANUAL_REVIEW`,
+and no recovery event for an already-settled effect. The production recovery
+helper runs at bootstrap and at `POST /v1/system/recover`; it has no trusted
+kernel receipt query for this legacy v1 effect ledger, so the safe outcome is
+manual review rather than a blind retry.
+
 ## Live OpenCode free-model evidence
 
 This closes the live-provider proof for one supported anonymous public Zen path. It does not close paid-account, alternate-protocol, cache, retrieval, cross-platform, hosted-CI, or release gates.
@@ -103,6 +112,10 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `just codegen` | PASSED — protobuf, public API, event, tool, config, v2 schema, SQLx, and generated docs completed. Expected generated docs/inventory changed with the source. |
 | 2026-08-26 | `just codegen-check` | PASSED — generated paths are clean against the committed implementation. |
 | 2026-08-26 | `just check` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
+| 2026-08-26 | `bun test mini-services/terminus-control/src/services/services.test.ts tests/recovery/repair_attempt_recovery.test.ts tests/recovery/checkpoint_publication_recovery.test.ts tests/recovery/completion_admission_recovery.test.ts tests/recovery/effect_recovery.test.ts tests/persistence/migration_integrity.test.ts` | PASSED — 28 tests, 0 failures, 139 expect calls; includes atomic unknown-effect recovery, replay/no-duplicate evidence, repair fencing, completion admission, coupled checkpoint/terminal publication, and migration coverage. |
+| 2026-08-26 | `just codegen` | PASSED — event catalog regenerated to 50 events, including `tool.settlement_unknown`; generated docs and indexes were committed with `5f6a803`. |
+| 2026-08-26 | `just codegen-check` from committed `5f6a803` | PASSED — generated protobuf, API, event, tool, config, schema, SQLx, and documentation outputs are stable. |
+| 2026-08-26 | `just fault-injection` | PASSED — the artifact records 13 `fixture_only` boundaries, 7 DB-backed scenarios, and `completeForRelease: false`; `effect_recovery_replay` now covers the ambiguous effect recovery transaction. |
 | 2026-08-26 | `just check-all` | PASSED — `just check`, standalone and integration suites, 582 TypeScript tests, 257 Python tests, Rust integration/security tests, platform probes, and `cargo deny check`; 1 live conformance test remained ignored by its explicit network-test annotation. |
 | 2026-08-26 | `just standalone-check` | PASSED — no retired OpenCode runtime/build dependency; explicit runtime-protocol -> public-api -> public-client chain. |
 | 2026-08-26 | `just truth-check` | PASSED — CI triggers include the default branch and declarations agree with metadata. |

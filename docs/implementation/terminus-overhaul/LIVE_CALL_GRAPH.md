@@ -1,6 +1,6 @@
 # Terminus live call graph
 
-Revision: functional checkpoint/terminal publication commit `7e66f2f`; ledger state is recorded in `HANDOFF.md`.
+Revision: functional ambiguous-effect recovery commit `5f6a803`; ledger state is recorded in `HANDOFF.md`.
 
 ## Verified primary path
 
@@ -49,7 +49,7 @@ task/turn cancel request
   -> mutation-lock transaction emits `turn.aborted`
   -> every active or REPAIR_PENDING turn is durably ABORTED
   -> turn AbortController reaches compaction/provider/tools/process/verification
-  -> dispatched ambiguous effects are marked for reconciliation
+  -> dispatched ambiguous effects are atomically recorded as tool UNKNOWN + effect MANUAL_REVIEW with `tool.settlement_unknown`
 ```
 
 ## Supporting paths observed in source
@@ -74,6 +74,6 @@ task/turn cancel request
 
 ## Recovery boundary
 
-Startup recovery resumes PENDING/CONTEXT_COMPILING/REPAIRING and settled TOOL_SETTLEMENT work when provider/effect state is unambiguous. Prepared completion records are reconciled only when their candidate branch is `ADMITTED`; a matching VERIFYING task/turn is completed through the coordinator without provider replay, and unsafe intents are quarantined. A valid PREPARED checkpoint tied to a completed task and FINALIZING/VERIFIED source turn is deferred until terminal recovery can commit checkpoint and terminal rows/events together. Verified/finalizing turns require a completed task, a `COMMITTED` completion record, and proposal response artifact; otherwise recovery emits `turn.recovery_failed` and blocks the task. RESPONSE_VALIDATING and VERIFYING without an admitted completion intent are deliberately not replayed blindly and need a separate durable continuation slice.
+Startup recovery first enumerates `STARTED`/`UNKNOWN`/`RECONCILING` effects. Each ambiguous v1 effect is atomically recorded as tool `UNKNOWN`, effect `MANUAL_REVIEW`, and `tool.settlement_unknown` with a deterministic `effect-recovery:<id>` key; no effect is retried without a trusted receipt query. It then resumes PENDING/CONTEXT_COMPILING/REPAIRING and settled TOOL_SETTLEMENT work when provider/effect state is unambiguous. Prepared completion records are reconciled only when their candidate branch is `ADMITTED`; a matching VERIFYING task/turn is completed through the coordinator without provider replay, and unsafe intents are quarantined. A valid PREPARED checkpoint tied to a completed task and FINALIZING/VERIFIED source turn is deferred until terminal recovery can commit checkpoint and terminal rows/events together. Verified/finalizing turns require a completed task, a `COMMITTED` completion record, and proposal response artifact; otherwise recovery emits `turn.recovery_failed` and blocks the task. RESPONSE_VALIDATING and VERIFYING without an admitted completion intent are deliberately not replayed blindly and need a separate durable continuation slice.
 
 The graph is a source-level map, not proof of runtime completion. Proof is in `EVIDENCE.md` and must be extended with live provider, crash/replay, cross-platform, client, and release observations.
