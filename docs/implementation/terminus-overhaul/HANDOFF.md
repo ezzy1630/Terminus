@@ -113,3 +113,4 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - `just codegen` and `just codegen-check` from committed c56e245: passed.
 - `bunx tsc --noEmit -p mini-services/terminus-control/tsconfig.json`: failed on pre-existing test typing errors in unrelated control-plane test files; do not treat that check as green.
 - Current-head `just check`, `just check-all`, `just fault-injection`, `just standalone-check`, and `just truth-check` after c56e245 were not yet recorded; rerun them before handoff.
+- Current-head rerun complete: at `c12f7c3` all of the above passed (see EVIDENCE.md observation 33); fault-injection artifact records 38 tests passed, 13 DB-backed scenarios, `completeForRelease: false`.
