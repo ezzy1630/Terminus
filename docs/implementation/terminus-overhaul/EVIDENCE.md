@@ -25,11 +25,11 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Implementation commit | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`) |
-| Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`) |
-| HEAD at last evidence capture | `f6c856d` (`Bind overhaul evidence to final handoff`) |
+| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`) |
+| Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`) |
+| HEAD at last evidence capture | `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`) |
 | Branch | `main` |
-| Remote state | Three commits ahead of `origin/main`; no push performed |
+| Remote state | Six commits ahead of `origin/main`; no push performed |
 | Worktree | Clean at last evidence capture |
 
 ## Current implementation observations
@@ -42,6 +42,7 @@ This file records observed commands and artifacts. It does not turn source decla
 6. The live GitHub ruleset is active but weaker than the checked-in target: the current remote has zero required approvals, no code-owner requirement, and a repository-role bypass. The apply script remains dry-run by default.
 7. OpenCode Zen free-model execution now has a live end-to-end observation: anonymous model discovery, provider inference, response settlement, proposal, kernel-mediated verification, branch admission, and terminal completion all succeeded in one isolated stack.
 8. The live run exposed and closed two runtime defects in the exercised path: source-only code-intelligence indexing prevents a normal repository refresh from exhausting the file budget, and repair plans now namespace verification node IDs. OpenCode gateway connectors have an explicit bounded 120-second timeout for model responses; the observed successful response settled after the prior 10-second default would have classified it as uncertain.
+9. Migration `0011_prisma_datetime_storage.sql` rebuilds the two Prisma-owned provider tables with strict integer epoch-millisecond timestamps. An upgrade fixture proved legacy ISO timestamps, including fractional seconds, preserve their exact millisecond values.
 
 ## Live OpenCode free-model evidence
 
@@ -80,6 +81,13 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `cargo test --manifest-path crates/terminus-connector/Cargo.toml --test broker_e2e anonymous_connector_is_explicitly_registered` | PASSED — explicit anonymous connector registration and credential-mode classification. |
 | 2026-08-26 | `cargo build --release --manifest-path mini-services/terminus-kernel/Cargo.toml` | PASSED — release kernel rebuilt from the current checkout with anonymous OpenCode routing and the per-connector model timeout. |
 | 2026-08-26 | Isolated fresh kernel/control stack: configure `hy3-free`, refresh discovery, submit a task, poll the public turn/task projections, and read back SQLite plus kernel logs | PASSED — live anonymous Zen inference settled through the kernel and the full task completed; exact evidence is recorded above. |
+| 2026-08-26 | `bun install --frozen-lockfile` | PASSED — 1,034 installs checked with no lockfile changes. |
+| 2026-08-26 | `bun test mini-services/terminus-control/src/verification-runtime.test.ts mini-services/terminus-control/src/gateway-provider-config.test.ts mini-services/terminus-control/src/gateway-kernel-client.test.ts packages/provider-zen/src/transport.test.ts tests/persistence/migration_integrity.test.ts` | PASSED — 26 tests, 0 failures, 82 expect calls. |
+| 2026-08-26 | `cargo test --manifest-path crates/terminus-connector/Cargo.toml --test broker_e2e` | PASSED — 13 tests, 0 failures; 1 explicitly ignored invalid-credential public canary. |
+| 2026-08-26 | `bun test tests/persistence/migration_integrity.test.ts` | PASSED — migration ledger, strict DateTime upgrade, rollback, and corruption tests: 4 tests, 0 failures. |
+| 2026-08-26 | `just codegen-check` from committed `d6fb7fb` | PASSED — generated paths are clean against the exact committed tree. |
+| 2026-08-26 | `just check` from committed `d6fb7fb` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
+| 2026-08-26 | `just check-all` from committed `d6fb7fb` | PASSED — 583 TypeScript tests across 82 files, 257 Python tests, Rust integration/security tests, platform probes, standalone/truth checks, generated-contract check, and `cargo deny`; 1 live conformance test remained ignored by its explicit network-test annotation. |
 
 ## Evidence policy
 
