@@ -4,7 +4,7 @@
 **Version:** 1.0.0  
 **Research cut:** July 11, 2026  
 **Status:** Final normative implementation baseline; unresolved choices are explicitly marked `EXPERIMENTAL` or `OPEN`  
-**Working product name:** **Forge**  
+**Working product name:** **Terminus**  
 **Intended audience:** maintainers, security engineers, systems engineers, coding-agent researchers, client developers, extension authors, and evaluation owners  
 **Primary objective:** build the most capable, efficient, inspectable, secure, and empirically improvable coding-agent harness practical with current models and systems
 
