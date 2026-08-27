@@ -1,6 +1,6 @@
 # Terminus live call graph
 
-Revision: functional plan-derivation commit `a42acc5`; ledger state is recorded in `HANDOFF.md`.
+Revision: durable repair-metrics commit `c94f7fd`; ledger state is recorded in `HANDOFF.md`.
 
 ## Verified primary path
 
@@ -67,7 +67,8 @@ task/turn cancel request
 | `Context Compiler` | `compileContext` in `packages/context-compiler` | live | Manifests, exact prefixes, project rules, and source hashes are retained; retrieval/cache ablation remains. |
 | Provider retry/runtime | `agentLoop` and `providers/*` | live, partial | Attempt stages, canonical request fingerprint/idempotency key, native response metadata, no-duplicate in-flight recovery, direct-stream fallback guards, abort propagation, and one anonymous OpenCode Zen free-model completion through the kernel are proven; endpoint-level deduplication, trusted receipt reconciliation, paid-account, alternate-protocol, cache, and broader live conformance remain. |
 | Verification runtime | `agentLoop` | live, post-proposal | Owns completion admission; new plans derive typed predicates from contract and current task signals, exact `RESPONSE_VALIDATING`/`VERIFYING` resume uses persisted response/plan/result identity, durable `ADMITTING` fencing and conservative `MANUAL_REVIEW` recovery remain, and DB-backed proposal/cancellation/completion/branch/verification replay are proven. Trusted external merge receipt, repository-map/native-recipe discovery, governed UI predicates, and full semantic plan coverage remain. |
-| `VerificationRepairController` | `agentLoop` | live, partial | Cumulative budget, signatures, directive, child re-entry, parent supersession, durable lease, and DB-backed repair replay scenarios are wired; the remaining fault boundaries are open. |
+| `VerificationRepairController` | `agentLoop` | live, partial | Cumulative budget, signatures including normalized evidence references, directive, child re-entry, parent supersession, durable lease, DB-backed repair replay, and task-level repair metrics are wired; trusted cost, aggregate export, and the remaining fault boundaries are open. |
+| Repair metrics projection | `GET /v1/tasks/:id` | live, provider-neutral read model | `deriveRepairMetrics` reduces durable repair attempts, repair-turn provider usage, verification admission, terminal state, and whole-turn duration; missing or sentinel cost remains null. Live aggregation and restart/read-model proof remain open. |
 | Stagnation supervisor | `/v2/orchestration/stagnation/check` | endpoint/live helper | Reconcile with engine/catalog and structured stop state. |
 | Scout runner | `agentLoop` before main context | live only with explicit opt-in | `TERMINUS_ENABLE_SCOUT=1` is required; utility ledger and promotion evidence remain. |
 | Model router | package/control imports | experimental unless proven | Shadow only, fixed fallback. |

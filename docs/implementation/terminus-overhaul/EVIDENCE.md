@@ -25,12 +25,12 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`), `8983439` (`Persist provider attempt identity and response metadata`), `4316ad1` (`Fail closed on in-flight provider recovery`), `a76eb86` (`Make task cancellation atomic and replay-safe`), `a1c794c` (`Fence candidate branch admission across recovery`), `d3760b1` (`Resume verification safely after control-plane restart`), `ea7f34a` (`Keep verification recovery provider-free`), `c04ff58` (`Test verification resume rejection paths`), `a42acc5` (`Derive verification plans from task signals`) |
+| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`), `8983439` (`Persist provider attempt identity and response metadata`), `4316ad1` (`Fail closed on in-flight provider recovery`), `a76eb86` (`Make task cancellation atomic and replay-safe`), `a1c794c` (`Fence candidate branch admission across recovery`), `d3760b1` (`Resume verification safely after control-plane restart`), `ea7f34a` (`Keep verification recovery provider-free`), `c04ff58` (`Test verification resume rejection paths`), `a42acc5` (`Derive verification plans from task signals`), `c94f7fd` (`Expose durable repair metrics`) |
 | Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`), `0c3a98a` (`Persist completion admission across recovery`), `e0a9fda` (`Bind completion recovery evidence to current tree`), `91c377f` (`Finalize current-tree evidence identity`) |
-| HEAD at last implementation evidence capture | `a42acc5` (`Derive verification plans from task signals`) |
+| HEAD at last implementation evidence capture | `c94f7fd` (`Expose durable repair metrics`) |
 | Branch | `main` |
-| Remote state at last implementation evidence capture | Thirty-two commits ahead of `origin/main`; no push performed |
-| Functional worktree | Functional paths are clean at `a42acc5`; `SPEC.md` retains a pre-existing user edit |
+| Remote state at last implementation evidence capture | Thirty-five commits ahead of `origin/main`; no push performed |
+| Functional worktree | Functional paths are clean at `c94f7fd`; `SPEC.md` retains a pre-existing user edit |
 
 ## Current implementation observations
 
@@ -55,6 +55,7 @@ This file records observed commands and artifacts. It does not turn source decla
 19. Candidate-branch admission now advances `OPEN` to durable `ADMITTING` before the external merge boundary. Startup and explicit recovery never turn that state back into `OPEN`; without a trusted merge receipt they atomically emit `candidate_branch.recovery_manual_review`, move the branch to `MANUAL_REVIEW`, and block the active task. A fresh-migration DB test proves rollback, one-event replay, stable idempotency, and that an already `ADMITTED` branch is not rescanned. Trusted external merge-receipt reconciliation remains open.
 20. Verification recovery now persists the environment binding on the plan and the complete immutable result identity on each result: command/query, exit code, structured observations, artifacts, and verifier version. On restart from `RESPONSE_VALIDATING` or `VERIFYING`, the live loop requires the current source/environment bindings, reconstructs and validates the persisted DAG, reuses only the latest complete result for each node, and executes only missing nodes. It reuses the durable provider response artifact, disables provider-calling scout/compaction auxiliaries, and does not replay provider inference or duplicate proposal/plan-completed events. Fresh migration coverage proves the columns, binding reconstruction, and missing-node-only execution; engine tests reject duplicate, stale, and malformed bindings, while legacy rows are rejected rather than treated as completion evidence.
 21. Verification plan derivation now selects typed predicates from the task contract, changed and scoped paths, risk class, repository instruction hashes, current failure/diagnostic signals, generated paths, and supplied native test commands. Admission mode makes selected auxiliary checks required; incremental mode keeps them optional and prevents them from blocking required criteria. Each node records the derivation version, signal counts, and selection rationale. The live `agentLoop` passes the current task signals into new plans, while governed UI execution remains explicitly unavailable in this runtime. Focused derivation, runtime, recovery, binding, and exit-gate tests pass; automatic repository-map/native-recipe discovery and governed UI proof remain open.
+22. Repair metrics are now derived from durable task, repair-attempt, provider-attempt, and turn records by the provider-neutral `@terminus/verification` reducer and exposed by `GET /v1/tasks/:id`. The reducer preserves exact decimal token and cost values, distinguishes first-proposal success from repair success, records repeated failure and terminal classification, and returns null when trusted usage or cost facts are missing. The repair controller's failure signature now includes normalized evidence references, so a changed evidence artifact counts as progress. A live aggregate exporter, trusted provider cost source, ground-truth classification labels, and restart/fault proof for the metrics read model remain open.
 
 ## Durable repair-attempt evidence
 
@@ -175,6 +176,23 @@ signals. It also proves that incremental auxiliary nodes are optional and do
 not become dependencies of the required criterion. The control-plane adapter
 uses the same deriver for newly created admission plans.
 
+## Durable repair metrics evidence
+
+`packages/verification/src/repair-metrics.ts` contains a pure reducer over
+durable repair facts. It has no provider, filesystem, database, or clock
+dependency. `mini-services/terminus-control/src/index.ts` reads the task's
+repair attempts, repair-turn provider attempts, verification result state, and
+whole-turn timestamps, then exposes the reducer's snake-case record from
+`GET /v1/tasks/:id`. Zero provider cost is treated as an unmeasured sentinel
+until a trusted cost receipt exists. The reducer tests cover first-proposal
+success, repair success, repeated signatures, blocked/budget outcomes, exact
+decimal aggregation, missing usage, invalid values, and duration failures.
+
+The metrics are local implementation evidence, not release telemetry. The
+current provider-session writer still records `costMicros: 0` as a placeholder,
+and `scripts/collect-ops-metrics.ts` does not yet aggregate these durable
+records into a live operations stream.
+
 ## Live OpenCode free-model evidence
 
 This closes the live-provider proof for one supported anonymous public Zen path. It does not close paid-account, alternate-protocol, cache, retrieval, cross-platform, hosted-CI, or release gates.
@@ -279,6 +297,14 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `just codegen-check` after `ada2dec` | PASSED — generated paths are stable against the committed signal-derived plan and evidence ledger. |
 | 2026-08-26 | `just fault-injection` after `ada2dec` | PASSED — the artifact records 13 `fixture_only` boundaries, 13 DB-backed scenarios, and `completeForRelease: false`; verification recovery remains in the DB-backed replay set. |
 | 2026-08-26 | `just check-all` after `ada2dec` | PASSED — the full local check-all command exited 0; the final cargo-deny result reported `advisories ok, bans ok, licenses ok, sources ok`. |
+| 2026-08-26 | `bun test packages/verification/src/repair-metrics.test.ts mini-services/terminus-control/src/agent/verification-repair-controller.test.ts` | PASSED — 17 tests, 0 failures, 50 expect calls; repair metrics reduction and evidence-aware repeated-failure detection pass. |
+| 2026-08-26 | `bun test packages/verification/src/repair-metrics.test.ts packages/verification/src/plan-derivation.test.ts packages/verification/src/verification.test.ts packages/verification/src/exit-gate.test.ts mini-services/terminus-control/src/agent/verification-repair-controller.test.ts mini-services/terminus-control/src/verification-runtime.test.ts tests/recovery/verification_recovery.test.ts tests/recovery/repair_attempt_recovery.test.ts` | PASSED — 61 tests, 0 failures, 187 expect calls. |
+| 2026-08-26 | `bun run typecheck --pretty false` after `c94f7fd` | PASSED — root TypeScript typecheck completed with no diagnostics. |
+| 2026-08-26 | `just check` after `c94f7fd` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
+| 2026-08-26 | `just codegen` after `c94f7fd` | PASSED — generated outputs completed and the inventory records 121 TypeScript test files and 949 declared TypeScript test blocks. |
+| 2026-08-26 | `just codegen-check` after committing `c94f7fd` | PASSED — generated protobuf, API, event, tool, config, schema, SQLx, and documentation outputs are stable. |
+| 2026-08-26 | `just fault-injection` after `c94f7fd` | PASSED — 13 DB-backed recovery scenarios ran and the artifact reports `status: passed` with `completeForRelease: false`. |
+| 2026-08-27 | `just check-all` after `c94f7fd` | PASSED — the full local command exited 0; the inspected tail reported `advisories ok, bans ok, licenses ok, sources ok`. |
 
 ## Evidence policy
 
