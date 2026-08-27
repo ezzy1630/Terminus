@@ -30,6 +30,35 @@ import { SequencePolicyEvaluator } from "./sequence-policy.js";
 import { AdmissionService } from "./admission.js";
 import { DurableTaskSubstrate } from "./substrate.js";
 
+function mergeReceiptFor(branch: {
+  readonly branchId: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly actorPrincipal: string;
+  readonly baseRevision: string;
+  readonly headRevision: string;
+  readonly scopeDigest: string;
+  readonly completionRecordDigest: string;
+}, status: "EXECUTED" | "NOT_EXECUTED" | "AMBIGUOUS" = "EXECUTED") {
+  const artifactHash = "a".repeat(64);
+  return {
+    status,
+    operationId: `completion-admission:${branch.branchId}`,
+    receiptArtifactUri: `artifact://sha256/${artifactHash}`,
+    receiptArtifactHash: `sha256:${artifactHash}`,
+    branchId: branch.branchId,
+    taskId: branch.taskId,
+    attemptId: branch.attemptId,
+    actorPrincipal: branch.actorPrincipal,
+    baseRevision: branch.baseRevision,
+    candidateHeadRevision: branch.headRevision,
+    scopeDigest: branch.scopeDigest,
+    completionRecordDigest: branch.completionRecordDigest,
+    mergeId: status === "EXECUTED" ? `merge:${branch.branchId}` : null,
+    authoritativeRevision: status === "EXECUTED" ? "rev-admitted" : null,
+  } as const;
+}
+
 describe("Phase 3: Transactional Effects and Authority", () => {
   let repo: InMemoryDurableTaskRepository;
   let outbox: TransactionalOutbox;
@@ -713,6 +742,155 @@ describe("Phase 3: Transactional Effects and Authority", () => {
       const committed = await repo.getEffectRecord(eff.id);
       expect(committed?.state).toBe("COMMITTED");
       expect((await repo.getCandidateBranch("cand-branch-1"))?.status).toBe("ADMITTED");
+    });
+
+    it("recovers an ADMITTING branch from an exact trusted merge receipt without re-merging", async () => {
+      const branch = {
+        branchId: "cand-receipt-recovery",
+        taskId: "task-receipt-recovery",
+        attemptId: "att-receipt-recovery",
+        actorPrincipal: "agent-candidate",
+        worktreePath: "/tmp/candidate-receipt-recovery",
+        epoch: 1,
+        baseRevision: "rev-base",
+        headRevision: "rev-head",
+        scopeDigest: `sha256:${"1".repeat(64)}`,
+        effectIds: [],
+        proof: {
+          verificationPlanId: "plan-receipt-recovery",
+          completionRecordDigest: `sha256:${"2".repeat(64)}`,
+          sourceRevision: "rev-head",
+          environmentImageDigest: "env:receipt-recovery",
+          completionExpressionSatisfied: true as const,
+          claims: [{
+            claimId: "tests.unit_passed",
+            status: "SATISFIED" as const,
+            evidence: [{
+              evidenceId: "e-receipt-recovery",
+              artifactUri: `artifact://sha256/${"3".repeat(64)}`,
+              artifactHash: `sha256:${"3".repeat(64)}`,
+              sourceRevision: "rev-head",
+              environmentImageDigest: "env:receipt-recovery",
+              verifierResult: "pass" as const,
+            }],
+          }],
+        },
+        status: "OPEN" as const,
+      };
+      await admission.registerCandidateBranch(branch);
+      expect(await repo.claimCandidateBranch(branch.branchId, branch.epoch)).not.toBeNull();
+
+      let mergeCalls = 0;
+      const recoveringAdmission = new AdmissionService(repo, ledger, undefined, {
+        getAuthoritativeRevision: async () => "rev-base",
+        merge: async () => {
+          mergeCalls += 1;
+          return { mergeId: "must-not-run", authoritativeRevision: "must-not-run" };
+        },
+      }, {
+        getMergeReceipt: async (claimedBranch) => mergeReceiptFor({
+          branchId: claimedBranch.branchId,
+          taskId: claimedBranch.taskId,
+          attemptId: claimedBranch.attemptId,
+          actorPrincipal: claimedBranch.actorPrincipal,
+          baseRevision: claimedBranch.baseRevision,
+          headRevision: claimedBranch.headRevision,
+          scopeDigest: claimedBranch.scopeDigest,
+          completionRecordDigest: claimedBranch.proof!.completionRecordDigest,
+        }),
+      });
+
+      const result = await recoveringAdmission.reconcileAdmittingBranch(branch.branchId);
+
+      expect(result).toEqual({
+        disposition: "ADMITTED",
+        committedEffects: [],
+        authoritativeRevision: "rev-admitted",
+      });
+      expect(mergeCalls).toBe(0);
+      const recovered = await repo.getCandidateBranch(branch.branchId);
+      expect(recovered?.status).toBe("ADMITTED");
+      expect(recovered?.epoch).toBe(3);
+      expect(recovered?.mergeReceipt?.status).toBe("EXECUTED");
+      expect(recovered?.mergeReceipt?.operationId).toBe(`completion-admission:${branch.branchId}`);
+    });
+
+    it("keeps an ADMITTING branch fenced when the trusted receipt binding is wrong", async () => {
+      const branch = {
+        branchId: "cand-receipt-mismatch",
+        taskId: "task-receipt-mismatch",
+        attemptId: "att-receipt-mismatch",
+        actorPrincipal: "agent-candidate",
+        worktreePath: "/tmp/candidate-receipt-mismatch",
+        epoch: 1,
+        baseRevision: "rev-base",
+        headRevision: "rev-head",
+        scopeDigest: `sha256:${"4".repeat(64)}`,
+        effectIds: [],
+        proof: {
+          verificationPlanId: "plan-receipt-mismatch",
+          completionRecordDigest: `sha256:${"5".repeat(64)}`,
+          sourceRevision: "rev-head",
+          environmentImageDigest: "env:receipt-mismatch",
+          completionExpressionSatisfied: true as const,
+          claims: [{
+            claimId: "tests.unit_passed",
+            status: "SATISFIED" as const,
+            evidence: [{
+              evidenceId: "e-receipt-mismatch",
+              artifactUri: `artifact://sha256/${"6".repeat(64)}`,
+              artifactHash: `sha256:${"6".repeat(64)}`,
+              sourceRevision: "rev-head",
+              environmentImageDigest: "env:receipt-mismatch",
+              verifierResult: "pass" as const,
+            }],
+          }],
+        },
+        status: "OPEN" as const,
+      };
+      await admission.registerCandidateBranch(branch);
+      expect(await repo.claimCandidateBranch(branch.branchId, branch.epoch)).not.toBeNull();
+
+      const mismatchedReceiptAdmission = new AdmissionService(repo, ledger, undefined, {
+        getAuthoritativeRevision: async () => "rev-base",
+        merge: async () => ({ mergeId: "must-not-run", authoritativeRevision: "must-not-run" }),
+      }, {
+        getMergeReceipt: async (claimedBranch) => mergeReceiptFor({
+          branchId: "another-branch",
+          taskId: claimedBranch.taskId,
+          attemptId: claimedBranch.attemptId,
+          actorPrincipal: claimedBranch.actorPrincipal,
+          baseRevision: claimedBranch.baseRevision,
+          headRevision: claimedBranch.headRevision,
+          scopeDigest: claimedBranch.scopeDigest,
+          completionRecordDigest: claimedBranch.proof!.completionRecordDigest,
+        }),
+      });
+
+      await expect(mismatchedReceiptAdmission.reconcileAdmittingBranch(branch.branchId)).rejects.toThrow(/binding/);
+      expect((await repo.getCandidateBranch(branch.branchId))?.status).toBe("ADMITTING");
+    });
+
+    it("fails closed when no trusted receipt query is configured", async () => {
+      const branch = {
+        branchId: "cand-receipt-unconfigured",
+        taskId: "task-receipt-unconfigured",
+        attemptId: "att-receipt-unconfigured",
+        actorPrincipal: "agent-candidate",
+        worktreePath: "/tmp/candidate-receipt-unconfigured",
+        epoch: 1,
+        baseRevision: "rev-base",
+        headRevision: "rev-head",
+        scopeDigest: `sha256:${"7".repeat(64)}`,
+        effectIds: [],
+        proof: null,
+        status: "OPEN" as const,
+      };
+      await admission.registerCandidateBranch(branch);
+      expect(await repo.claimCandidateBranch(branch.branchId, branch.epoch)).not.toBeNull();
+
+      await expect(admission.reconcileAdmittingBranch(branch.branchId)).rejects.toThrow(/receipt query/);
+      expect((await repo.getCandidateBranch(branch.branchId))?.status).toBe("ADMITTING");
     });
 
     it("fails closed when a candidate has no immutable completion proof", async () => {

@@ -160,6 +160,26 @@ const candidateBranchSchema = z.object({
       claims: z.array(candidateClaimSchema),
     })
     .nullable(),
+  mergeReceipt: z
+    .object({
+      status: z.enum(["EXECUTED", "NOT_EXECUTED", "AMBIGUOUS"]),
+      operationId: z.string(),
+      receiptArtifactUri: z.string(),
+      receiptArtifactHash: z.string(),
+      branchId: z.string(),
+      taskId: z.string(),
+      attemptId: z.string(),
+      actorPrincipal: z.string(),
+      baseRevision: z.string(),
+      candidateHeadRevision: z.string(),
+      scopeDigest: z.string(),
+      completionRecordDigest: z.string(),
+      mergeId: z.string().nullable(),
+      authoritativeRevision: z.string().nullable(),
+    })
+    .nullable()
+    .optional()
+    .default(null),
   status: z.enum(["OPEN", "ADMITTING", "ADMITTED", "REJECTED", "MANUAL_REVIEW"]),
 });
 

@@ -157,6 +157,29 @@ export interface CandidateCompletionProof {
   readonly claims: readonly CandidateClaimRecord[];
 }
 
+/**
+ * Immutable, trusted evidence returned by the adapter that owns the external
+ * candidate-merge state. The adapter must verify the receipt before returning
+ * it; the admission service then checks that every identity and content field
+ * is bound to the durable candidate branch.
+ */
+export interface CandidateBranchMergeReceipt {
+  readonly status: "EXECUTED" | "NOT_EXECUTED" | "AMBIGUOUS";
+  readonly operationId: string;
+  readonly receiptArtifactUri: string;
+  readonly receiptArtifactHash: string;
+  readonly branchId: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly actorPrincipal: string;
+  readonly baseRevision: string;
+  readonly candidateHeadRevision: string;
+  readonly scopeDigest: string;
+  readonly completionRecordDigest: string;
+  readonly mergeId: string | null;
+  readonly authoritativeRevision: string | null;
+}
+
 export interface CandidateBranchRecord {
   readonly branchId: string;
   readonly taskId: string;
@@ -169,5 +192,7 @@ export interface CandidateBranchRecord {
   readonly scopeDigest: string;
   readonly effectIds: readonly string[];
   readonly proof: CandidateCompletionProof | null;
+  /** Only a trusted merger or receipt query may populate this field. */
+  readonly mergeReceipt?: CandidateBranchMergeReceipt | null;
   readonly status: "OPEN" | "ADMITTING" | "ADMITTED" | "REJECTED" | "MANUAL_REVIEW";
 }

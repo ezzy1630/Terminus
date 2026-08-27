@@ -296,11 +296,15 @@ export {
   type AdmitBranchInput,
   type CandidateAdmissionRepository,
   type CandidateBranch,
+  candidateBranchAdmissionOperationId,
   type CandidateBranchMerger,
+  type CandidateBranchMergeReceiptQuery,
+  type CandidateBranchReconciliationResult,
   type CandidateEffectLedger,
 } from "./admission.js";
 export type {
   CandidateBranchRecord,
+  CandidateBranchMergeReceipt,
   CandidateClaimRecord,
   CandidateCompletionProof,
   CandidateEvidenceRecord,

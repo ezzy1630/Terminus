@@ -9,11 +9,16 @@
 import { ScopeViolationError, ValidationError } from "@terminus/domain";
 import type {
   CandidateBranchRecord,
+  CandidateBranchMergeReceipt,
   CandidateCompletionProof,
 } from "./types.js";
 import type { SequencePolicyEvaluator } from "./sequence-policy.js";
 
 export type CandidateBranch = CandidateBranchRecord;
+
+export function candidateBranchAdmissionOperationId(branchId: string): string {
+  return `completion-admission:${branchId}`;
+}
 
 export interface CandidateBranchMerger {
   /** Read the currently authoritative revision for exact-HEAD admission. */
@@ -22,9 +27,27 @@ export interface CandidateBranchMerger {
   readonly merge: (branch: CandidateBranch) => Promise<{
     readonly mergeId: string;
     readonly authoritativeRevision: string;
+    /** A trusted adapter may return the immutable receipt it just verified. */
+    readonly receipt?: CandidateBranchMergeReceipt | undefined;
   }>;
   /** Undo a merge when the local admission transaction fails after merging. */
   readonly rollback?: ((mergeId: string) => Promise<void>) | undefined;
+}
+
+/**
+ * Trusted read-side adapter for an external merge that crossed the process
+ * boundary before the local branch row reached ADMITTED. The adapter owns
+ * authentication and receipt verification; AdmissionService owns exact
+ * binding and the durable state transition.
+ */
+export interface CandidateBranchMergeReceiptQuery {
+  readonly getMergeReceipt: (branch: CandidateBranch) => Promise<CandidateBranchMergeReceipt>;
+}
+
+export interface CandidateBranchReconciliationResult {
+  readonly disposition: "ADMITTED" | "MANUAL_REVIEW" | "ALREADY_RESOLVED";
+  readonly committedEffects: readonly string[];
+  readonly authoritativeRevision: string | null;
 }
 
 /** Narrow persistence contract used by admission. Durable adapters may expose more. */
@@ -61,6 +84,7 @@ export class AdmissionService {
     private readonly ledger: CandidateEffectLedger,
     private readonly sequencePolicy?: SequencePolicyEvaluator,
     private readonly merger?: CandidateBranchMerger,
+    private readonly mergeReceiptQuery?: CandidateBranchMergeReceiptQuery,
   ) {}
 
   /** Register a speculative branch durably before it can produce effects. */
@@ -71,7 +95,10 @@ export class AdmissionService {
     if (!branch.branchId || !branch.taskId || !branch.attemptId || !branch.actorPrincipal) {
       throw new ValidationError("candidate branch identity is incomplete");
     }
-    await this.repo.createCandidateBranch({ ...branch, status: "OPEN" });
+    if (branch.mergeReceipt !== undefined && branch.mergeReceipt !== null) {
+      throw new ValidationError("candidate branch merge receipts are adapter-owned and cannot be registered by a caller");
+    }
+    await this.repo.createCandidateBranch({ ...branch, mergeReceipt: null, status: "OPEN" });
   }
 
   /**
@@ -157,12 +184,21 @@ export class AdmissionService {
     }
 
     const merge = await merger.merge(claimedBranch);
-    if (!merge.authoritativeRevision) {
-      throw new ValidationError("authoritative merge returned no revision");
-    }
-
     const committedEffects: string[] = [];
     try {
+      if (!merge.mergeId) {
+        throw new ValidationError("authoritative merge returned no merge identity");
+      }
+      if (!merge.authoritativeRevision) {
+        throw new ValidationError("authoritative merge returned no revision");
+      }
+      const mergeReceipt = merge.receipt === undefined
+        ? claimedBranch.mergeReceipt ?? null
+        : validateCandidateBranchMergeReceipt(claimedBranch, merge.receipt, {
+          expectedMergeId: merge.mergeId,
+          expectedAuthoritativeRevision: merge.authoritativeRevision,
+          requireExecuted: true,
+        });
       for (const effect of effects) {
         await this.ledger.commitEffect(effect.id);
         committedEffects.push(effect.id);
@@ -172,9 +208,10 @@ export class AdmissionService {
         epoch: claimedBranch.epoch + 1,
         status: "ADMITTED",
         headRevision: merge.authoritativeRevision,
+        mergeReceipt,
       });
     } catch (error) {
-      if (merger.rollback !== undefined) {
+      if (merger.rollback !== undefined && typeof merge.mergeId === "string" && merge.mergeId.length > 0) {
         await merger.rollback(merge.mergeId);
       }
       throw new ValidationError(`candidate admission rolled back after commit failure: ${String(error)}`);
@@ -184,6 +221,86 @@ export class AdmissionService {
       admitted: true,
       committedEffects,
       authoritativeRevision: merge.authoritativeRevision,
+    };
+  }
+
+  /**
+   * Resolve an ADMITTING branch from a trusted external receipt without
+   * issuing the merge again. Executed receipts complete the same effect
+   * commits as normal admission; negative or ambiguous receipts are retained
+   * on a fenced MANUAL_REVIEW branch.
+   */
+  async reconcileAdmittingBranch(branchId: string): Promise<CandidateBranchReconciliationResult> {
+    const branch = await this.repo.getCandidateBranch(branchId);
+    if (branch === null) {
+      throw new ValidationError(`Candidate branch not found: ${branchId}`);
+    }
+    if (branch.status !== "ADMITTING") {
+      return {
+        disposition: "ALREADY_RESOLVED",
+        committedEffects: [],
+        authoritativeRevision: branch.status === "ADMITTED" ? branch.headRevision : null,
+      };
+    }
+
+    const receiptQuery = this.mergeReceiptQuery;
+    if (receiptQuery === undefined) {
+      throw new ValidationError(
+        "trusted external merge-receipt query is not configured; candidate admission remains fenced",
+      );
+    }
+
+    const proof = requireAdmissionProof(branch);
+    validateAdmissionProof(branch, proof, []);
+    const receipt = validateCandidateBranchMergeReceipt(
+      branch,
+      await receiptQuery.getMergeReceipt(branch),
+    );
+
+    if (receipt.status !== "EXECUTED") {
+      await this.repo.updateCandidateBranch({
+        ...branch,
+        epoch: branch.epoch + 1,
+        mergeReceipt: receipt,
+        status: "MANUAL_REVIEW",
+      });
+      return {
+        disposition: "MANUAL_REVIEW",
+        committedEffects: [],
+        authoritativeRevision: null,
+      };
+    }
+
+    const committedEffects: string[] = [];
+    for (const effectId of branch.effectIds) {
+      const effect = await this.repo.getEffectRecord(effectId);
+      if (effect === null) {
+        throw new ValidationError(`candidate branch references missing effect '${effectId}'`);
+      }
+      if (effect.taskId !== branch.taskId || effect.attemptId !== branch.attemptId) {
+        throw new ValidationError(`effect '${effectId}' is not bound to candidate branch '${branch.branchId}'`);
+      }
+      if (effect.state === "VALIDATED") {
+        await this.ledger.commitEffect(effectId);
+        committedEffects.push(effectId);
+      } else if (effect.state !== "COMMITTED") {
+        throw new ValidationError(
+          `effect '${effectId}' is ${effect.state}; trusted merge recovery requires VALIDATED or COMMITTED effects`,
+        );
+      }
+    }
+
+    await this.repo.updateCandidateBranch({
+      ...branch,
+      epoch: branch.epoch + 1,
+      headRevision: receipt.authoritativeRevision!,
+      mergeReceipt: receipt,
+      status: "ADMITTED",
+    });
+    return {
+      disposition: "ADMITTED",
+      committedEffects,
+      authoritativeRevision: receipt.authoritativeRevision,
     };
   }
 
@@ -263,4 +380,89 @@ function validateAdmissionProof(
       }
     }
   }
+}
+
+function validateCandidateBranchMergeReceipt(
+  branch: CandidateBranch,
+  receipt: CandidateBranchMergeReceipt,
+  options: {
+    readonly expectedMergeId?: string;
+    readonly expectedAuthoritativeRevision?: string;
+    readonly requireExecuted?: boolean;
+  } = {},
+): CandidateBranchMergeReceipt {
+  if (receipt === null || typeof receipt !== "object") {
+    throw new ValidationError(`candidate branch '${branch.branchId}' returned no merge receipt`);
+  }
+  if (
+    receipt.status !== "EXECUTED"
+    && receipt.status !== "NOT_EXECUTED"
+    && receipt.status !== "AMBIGUOUS"
+  ) {
+    throw new ValidationError(`candidate branch '${branch.branchId}' returned an invalid merge receipt status`);
+  }
+  const requiredStrings: ReadonlyArray<[string, unknown]> = [
+    ["operationId", receipt.operationId],
+    ["receiptArtifactUri", receipt.receiptArtifactUri],
+    ["receiptArtifactHash", receipt.receiptArtifactHash],
+    ["branchId", receipt.branchId],
+    ["taskId", receipt.taskId],
+    ["attemptId", receipt.attemptId],
+    ["actorPrincipal", receipt.actorPrincipal],
+    ["baseRevision", receipt.baseRevision],
+    ["candidateHeadRevision", receipt.candidateHeadRevision],
+    ["scopeDigest", receipt.scopeDigest],
+    ["completionRecordDigest", receipt.completionRecordDigest],
+  ];
+  for (const [name, value] of requiredStrings) {
+    if (typeof value !== "string" || value.length === 0) {
+      throw new ValidationError(`candidate branch '${branch.branchId}' merge receipt has no ${name}`);
+    }
+  }
+  const artifactHash = /^sha256:([0-9a-f]{64})$/i.exec(receipt.receiptArtifactHash);
+  if (
+    artifactHash === null
+    || receipt.receiptArtifactUri !== `artifact://sha256/${artifactHash[1]!.toLowerCase()}`
+  ) {
+    throw new ValidationError(`candidate branch '${branch.branchId}' merge receipt is not an immutable artifact reference`);
+  }
+  const expectedOperationId = candidateBranchAdmissionOperationId(branch.branchId);
+  if (receipt.operationId !== expectedOperationId) {
+    throw new ValidationError(`candidate branch '${branch.branchId}' merge receipt operation binding does not match`);
+  }
+  if (
+    receipt.branchId !== branch.branchId
+    || receipt.taskId !== branch.taskId
+    || receipt.attemptId !== branch.attemptId
+    || receipt.actorPrincipal !== branch.actorPrincipal
+    || receipt.baseRevision !== branch.baseRevision
+    || receipt.candidateHeadRevision !== branch.headRevision
+    || receipt.scopeDigest !== branch.scopeDigest
+  ) {
+    throw new ValidationError(`candidate branch '${branch.branchId}' merge receipt identity binding does not match`);
+  }
+  const proof = requireAdmissionProof(branch);
+  if (receipt.completionRecordDigest !== proof.completionRecordDigest) {
+    throw new ValidationError(`candidate branch '${branch.branchId}' merge receipt content binding does not match`);
+  }
+  if (options.requireExecuted === true && receipt.status !== "EXECUTED") {
+    throw new ValidationError(`candidate branch '${branch.branchId}' merge did not return an executed receipt`);
+  }
+  if (receipt.status === "EXECUTED") {
+    if (!receipt.mergeId || !receipt.authoritativeRevision) {
+      throw new ValidationError(`candidate branch '${branch.branchId}' executed merge receipt is incomplete`);
+    }
+    if (options.expectedMergeId !== undefined && receipt.mergeId !== options.expectedMergeId) {
+      throw new ValidationError(`candidate branch '${branch.branchId}' merge receipt identity does not match the merge result`);
+    }
+    if (
+      options.expectedAuthoritativeRevision !== undefined
+      && receipt.authoritativeRevision !== options.expectedAuthoritativeRevision
+    ) {
+      throw new ValidationError(`candidate branch '${branch.branchId}' merge receipt revision does not match the merge result`);
+    }
+  } else if (receipt.mergeId !== null || receipt.authoritativeRevision !== null) {
+    throw new ValidationError(`candidate branch '${branch.branchId}' non-executed merge receipt contains settled identity`);
+  }
+  return receipt;
 }

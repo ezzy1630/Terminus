@@ -83,6 +83,10 @@ describe("Database Migration Integrity & Corruption Detection", () => {
         "computed_cost_micros",
         "cost_source",
       ]));
+      const candidateBranchColumns = db
+        .query("PRAGMA table_info(candidate_branches)")
+        .all() as Array<{ name: string }>;
+      expect(candidateBranchColumns.map((column) => column.name)).toContain("merge_receipt_json");
 
       const now = Date.now();
       db.query(

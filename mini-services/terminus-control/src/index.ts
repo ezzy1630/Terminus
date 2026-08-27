@@ -7075,6 +7075,7 @@ const routes: Route[] = [
         scope_digest: branch.scopeDigest, status: branch.status,
         effect_ids: safeParse<unknown[]>(branch.effectIdsJson, []),
         proof: safeParse<unknown>(branch.proofJson ?? "null", null),
+        merge_receipt: safeParse<unknown>(branch.mergeReceiptJson ?? "null", null),
       })),
     };
 

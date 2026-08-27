@@ -9,6 +9,8 @@ import {
   AdmissionService,
   type CandidateAdmissionRepository,
   type CandidateBranch,
+  type CandidateBranchMergeReceipt,
+  type CandidateBranchMergeReceiptQuery,
   type CandidateBranchMerger,
   type CandidateEffectLedger,
 } from "@terminus/task-runtime";
@@ -811,6 +813,7 @@ export async function persistClaimEvidenceGraphToPrisma(
 export function createPrismaCompletionAdmission(
   db: PrismaClient,
   getAuthoritativeRevision: () => Promise<string>,
+  mergeReceiptQuery?: CandidateBranchMergeReceiptQuery,
 ): AdmissionService {
   const repository: CandidateAdmissionRepository = {
     async createCandidateBranch(branch) {
@@ -827,6 +830,7 @@ export function createPrismaCompletionAdmission(
           scopeDigest: branch.scopeDigest,
           effectIdsJson: JSON.stringify(branch.effectIds),
           proofJson: branch.proof === null ? null : JSON.stringify(branch.proof),
+          mergeReceiptJson: branch.mergeReceipt == null ? null : JSON.stringify(branch.mergeReceipt),
           status: branch.status,
         },
       });
@@ -854,6 +858,7 @@ export function createPrismaCompletionAdmission(
           epoch: branch.epoch,
           headRevision: branch.headRevision,
           proofJson: branch.proof === null ? null : JSON.stringify(branch.proof),
+          mergeReceiptJson: branch.mergeReceipt == null ? null : JSON.stringify(branch.mergeReceipt),
           status: branch.status,
         },
       });
@@ -885,7 +890,7 @@ export function createPrismaCompletionAdmission(
       };
     },
   };
-  return new AdmissionService(repository, ledger, undefined, merger);
+  return new AdmissionService(repository, ledger, undefined, merger, mergeReceiptQuery);
 }
 
 function candidateBranchFromRow(row: {
@@ -900,10 +905,14 @@ function candidateBranchFromRow(row: {
   readonly scopeDigest: string;
   readonly effectIdsJson: string;
   readonly proofJson: string | null;
+  readonly mergeReceiptJson: string | null;
   readonly status: string;
 }): CandidateBranch {
   const effectIds = JSON.parse(row.effectIdsJson) as unknown;
   const proof = row.proofJson === null ? null : JSON.parse(row.proofJson) as CandidateBranch["proof"];
+  const mergeReceipt = row.mergeReceiptJson === null
+    ? null
+    : JSON.parse(row.mergeReceiptJson) as CandidateBranchMergeReceipt;
   if (!Array.isArray(effectIds) || !effectIds.every((value): value is string => typeof value === "string")) {
     throw new Error(`candidate branch '${row.id}' has invalid effect IDs`);
   }
@@ -928,6 +937,7 @@ function candidateBranchFromRow(row: {
     scopeDigest: row.scopeDigest,
     effectIds,
     proof,
+    mergeReceipt,
     status: row.status,
   };
 }
