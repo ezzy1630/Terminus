@@ -55,7 +55,7 @@ This file records observed commands and artifacts. It does not turn source decla
 19. Candidate-branch admission now advances `OPEN` to durable `ADMITTING` before the external merge boundary. Startup and explicit recovery never turn that state back into `OPEN`; without a trusted merge receipt they atomically emit `candidate_branch.recovery_manual_review`, move the branch to `MANUAL_REVIEW`, and block the active task. A fresh-migration DB test proves rollback, one-event replay, stable idempotency, and that an already `ADMITTED` branch is not rescanned. Trusted external merge-receipt reconciliation remains open.
 20. Verification recovery now persists the environment binding on the plan and the complete immutable result identity on each result: command/query, exit code, structured observations, artifacts, and verifier version. On restart from `RESPONSE_VALIDATING` or `VERIFYING`, the live loop requires the current source/environment bindings, reconstructs and validates the persisted DAG, reuses only the latest complete result for each node, and executes only missing nodes. It reuses the durable provider response artifact, disables provider-calling scout/compaction auxiliaries, and does not replay provider inference or duplicate proposal/plan-completed events. Fresh migration coverage proves the columns, binding reconstruction, and missing-node-only execution; engine tests reject duplicate, stale, and malformed bindings, while legacy rows are rejected rather than treated as completion evidence.
 21. Verification plan derivation now selects typed predicates from the task contract, changed and scoped paths, risk class, repository instruction hashes, current failure/diagnostic signals, generated paths, and supplied native test commands. Admission mode makes selected auxiliary checks required; incremental mode keeps them optional and prevents them from blocking required criteria. Each node records the derivation version, signal counts, and selection rationale. The live `agentLoop` passes the current task signals into new plans, while governed UI execution remains explicitly unavailable in this runtime. Focused derivation, runtime, recovery, binding, and exit-gate tests pass; automatic repository-map/native-recipe discovery and governed UI proof remain open.
-22. Repair metrics are now derived from durable task, repair-attempt, provider-attempt, and turn records by the provider-neutral `@terminus/verification` reducer and exposed by `GET /v1/tasks/:id`. The reducer preserves exact decimal token and cost values, distinguishes first-proposal success from repair success, records repeated failure and terminal classification, and returns null when trusted usage or cost facts are missing. The repair controller's failure signature now includes normalized evidence references, so a changed evidence artifact counts as progress. A live aggregate exporter, trusted provider cost source, ground-truth classification labels, and restart/fault proof for the metrics read model remain open.
+22. Repair metrics are now derived from durable task, repair-attempt, provider-attempt, and turn records by the provider-neutral `@terminus/verification` reducer and exposed by `GET /v1/tasks/:id`. The reducer preserves exact decimal token and cost values, distinguishes first-proposal success from repair success, records repeated failure and terminal classification, and returns null when trusted usage or cost facts are missing. The repair controller's failure signature now includes normalized evidence references, so a changed evidence artifact counts as progress. `scripts/collect-ops-metrics.ts` now reads a supplied control-plane database and aggregates these records with exact decimal totals; a live stream/export, trusted provider cost source, ground-truth classification labels, and restart/fault proof for the metrics read model remain open.
 
 ## Durable repair-attempt evidence
 
@@ -189,9 +189,10 @@ success, repair success, repeated signatures, blocked/budget outcomes, exact
 decimal aggregation, missing usage, invalid values, and duration failures.
 
 The metrics are local implementation evidence, not release telemetry. The
-current provider-session writer still records `costMicros: 0` as a placeholder,
-and `scripts/collect-ops-metrics.ts` does not yet aggregate these durable
-records into a live operations stream.
+collector reads the control-plane database only when
+`TERMINUS_OPS_METRICS_DB` or `DATABASE_URL` is supplied. The current
+provider-session writer still records `costMicros: 0` as a placeholder, so
+aggregate cost remains null until a trusted cost source exists.
 
 ## Live OpenCode free-model evidence
 
@@ -305,6 +306,8 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `just codegen-check` after committing `c94f7fd` | PASSED — generated protobuf, API, event, tool, config, schema, SQLx, and documentation outputs are stable. |
 | 2026-08-26 | `just fault-injection` after `c94f7fd` | PASSED — 13 DB-backed recovery scenarios ran and the artifact reports `status: passed` with `completeForRelease: false`. |
 | 2026-08-27 | `just check-all` after `c94f7fd` | PASSED — the full local command exited 0; the inspected tail reported `advisories ok, bans ok, licenses ok, sources ok`. |
+| 2026-08-27 | `bun run scripts/collect-ops-metrics.ts` with no database URL | PASSED — the artifact remained `status: placeholder` with an explicit empty repair aggregate. |
+| 2026-08-27 | Fresh migrated SQLite database plus `TERMINUS_OPS_METRICS_DB=... bun run scripts/collect-ops-metrics.ts` | PASSED — Prisma read the current schema and produced the explicit empty repair aggregate; no repository database was modified. |
 
 ## Evidence policy
 

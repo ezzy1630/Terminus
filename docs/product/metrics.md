@@ -140,6 +140,12 @@ replayable record from durable repair attempts, verification results, turns,
 and provider-attempt usage. Missing provider usage or trusted cost remains
 `null`; a stored zero-cost sentinel is not treated as measured spend.
 
+The release-gate collector can aggregate the same records when it receives a
+current control-plane database through `TERMINUS_OPS_METRICS_DB` or
+`DATABASE_URL`. It emits exact decimal token/cost totals, outcome counts,
+duration totals, and missing-measurement counts under the `repair` block.
+Without a database, the block is an explicit empty placeholder.
+
 ## Aggregation
 
 - Per-task records are aggregated per cohort, per session, per workspace, per provider, per model.

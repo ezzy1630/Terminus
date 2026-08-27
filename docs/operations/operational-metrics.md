@@ -7,7 +7,7 @@ evidence lands for the release gate (SPEC §26.6, §46.16).
 
 - Preview canary: `scripts/preview-canary.sh`
 - Soak / RSS smoke: `scripts/soak-leak-test.sh`
-- Placeholder counter snapshot: `scripts/collect-ops-metrics.ts`
+- Ops snapshot: `scripts/collect-ops-metrics.ts` (set `TERMINUS_OPS_METRICS_DB` or `DATABASE_URL` to read durable task records)
 
 ## Categories
 
@@ -35,9 +35,11 @@ artifacts/release-gate/
   exit-gate-report.json  # m12-exit-gate.ts aggregate
 ```
 
-`ops-metrics.json` may be a **placeholder** counter structure during early M12
-while live exporters are wired; the schema (runtime / agentQuality / security)
-is stable for dashboards.
+`ops-metrics.json` may be a **placeholder** counter structure when no live
+database or cache telemetry source is supplied. With a current control-plane
+database, the `repair` block contains aggregate first-proposal, repair,
+repeated-failure, outcome, usage, duration, and missing-measurement counts.
+Missing cost remains `null` until the provider cost source is trusted.
 
 ## Related
 
