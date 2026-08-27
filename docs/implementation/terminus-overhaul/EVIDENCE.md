@@ -272,6 +272,13 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `bun run typecheck --pretty false` | PASSED — root TypeScript typecheck completed with no diagnostics after the verification recovery implementation. |
 | 2026-08-26 | `just fault-injection` from committed `d3760b1` | PASSED — the artifact records 13 `fixture_only` boundaries, 13 DB-backed scenarios, 38 passing recovery tests, and `completeForRelease: false`; `verification_recovery_replay` covers the post-verification-start boundary. |
 | 2026-08-26 | `just codegen-check` after committing `d3760b1` | PASSED — generated protobuf, API, event, tool, config, schema, SQLx, and documentation outputs are stable with migration `0016_verification_recovery_identity`. |
+| 2026-08-26 | `bun test packages/verification/src/plan-derivation.test.ts packages/verification/src/verification.test.ts packages/verification/src/exit-gate.test.ts tests/recovery/verification_recovery.test.ts mini-services/terminus-control/src/verification-runtime.test.ts` | PASSED — 41 tests, 0 failures, 120 expect calls; signal-derived plan selection, incremental/admission dependency rules, verification resume, binding rejection, exit-gate, and control-plane node namespace coverage pass. |
+| 2026-08-26 | `bun run typecheck --pretty false` after `a42acc5` | PASSED — root TypeScript typecheck completed with no diagnostics after wiring structured diagnostics into plan derivation signals. |
+| 2026-08-26 | `just codegen` after `a42acc5` | PASSED — generated outputs completed; inventory now records 120 TypeScript test files and 945 declared TypeScript test blocks. |
+| 2026-08-26 | `just check` after `a42acc5` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
+| 2026-08-26 | `just codegen-check` after `ada2dec` | PASSED — generated paths are stable against the committed signal-derived plan and evidence ledger. |
+| 2026-08-26 | `just fault-injection` after `ada2dec` | PASSED — the artifact records 13 `fixture_only` boundaries, 13 DB-backed scenarios, and `completeForRelease: false`; verification recovery remains in the DB-backed replay set. |
+| 2026-08-26 | `just check-all` after `ada2dec` | PASSED — the full local check-all command exited 0; the final cargo-deny result reported `advisories ok, bans ok, licenses ok, sources ok`. |
 
 ## Evidence policy
 
