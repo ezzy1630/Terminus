@@ -26,10 +26,10 @@ This file records observed commands and artifacts. It does not turn source decla
 | Field | Observed value |
 | --- | --- |
 | Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`) |
-| Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`), `0c3a98a` (`Persist completion admission across recovery`) |
-| HEAD at last evidence capture | `ebf4344` (`Fix completion record scope at admission`) |
+| Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`), `0c3a98a` (`Persist completion admission across recovery`), `e0a9fda` (`Bind completion recovery evidence to current tree`) |
+| HEAD at last evidence capture | `e0a9fda` (`Bind completion recovery evidence to current tree`) |
 | Branch | `main` |
-| Remote state | Twelve commits ahead of `origin/main`; no push performed |
+| Remote state | Thirteen commits ahead of `origin/main`; no push performed |
 | Worktree | Clean at last evidence capture |
 
 ## Current implementation observations
