@@ -25,11 +25,11 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`), `8983439` (`Persist provider attempt identity and response metadata`) |
+| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`), `a163d40` (`Record atomic checkpoint publication evidence`), `5f6a803` (`Make ambiguous effect recovery atomic and replay-safe`), `8983439` (`Persist provider attempt identity and response metadata`), `4316ad1` (`Fail closed on in-flight provider recovery`) |
 | Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`), `0c3a98a` (`Persist completion admission across recovery`), `e0a9fda` (`Bind completion recovery evidence to current tree`), `91c377f` (`Finalize current-tree evidence identity`) |
-| HEAD at last implementation evidence capture | `8983439` (`Persist provider attempt identity and response metadata`) |
+| HEAD at last implementation evidence capture | `4316ad1` (`Fail closed on in-flight provider recovery`) |
 | Branch | `main` |
-| Remote state at last implementation evidence capture | Twenty commits ahead of `origin/main`; no push performed |
+| Remote state at last implementation evidence capture | Twenty-two commits ahead of `origin/main`; no push performed |
 | Functional worktree | Clean at last implementation evidence capture; the ledger update was committed separately |
 
 ## Current implementation observations
@@ -50,6 +50,7 @@ This file records observed commands and artifacts. It does not turn source decla
 14. Successful automatic checkpoint admission now shares one writer transaction with `checkpoint.created`, `context.auto_checkpoint_committed`, `turn.completed`, checkpoint `COMMITTED` state, and turn `COMPLETED` state. Startup validates a prepared checkpoint first, then defers a row tied to a completed task and terminal-adjacent turn so recovery can commit that coupled boundary together. Fresh-migration tests cover rollback and idempotent replay of the checkpoint and terminal publication batch.
 15. Restart recovery now enumerates `STARTED`, `UNKNOWN`, and `RECONCILING` side effects before active-turn recovery. For each row it records `tool.settlement_unknown` with `effect-recovery:<side-effect-id>`, updates the linked tool call to `UNKNOWN` and the effect to `MANUAL_REVIEW` in the same writer transaction, and never retries the external operation. A settled effect is skipped without contradictory evidence, and recovery failures make startup fail closed.
 16. Provider-attempt identity is now durable beyond attempt number: the control plane derives a fingerprint from the exact request artifact hash, provider/model snapshot hash, admitted endpoint, tool-schema hash, immutable context epoch, and attempt ID. The same identity is written to the provider-running event and `provider_attempts` row with a unique kernel idempotency key; provider-native request IDs and continuation IDs are stored in typed columns when the stream exposes them. A fresh-migration DB test proves atomic publication rollback and duplicate-key rejection. This does not claim provider-level deduplication for endpoints that do not support it.
+17. Startup and explicit recovery now enumerate in-flight provider attempts before active-turn recovery. An attempt without a durable response is atomically marked `interrupted`, its active turn is marked `INTERRUPTED`, its active task is `BLOCKED`, and `turn.recovery_interrupted` carries the request identity and reconciliation requirement. A failed transaction leaves all rows and the event unchanged; replay after commit finds no in-flight attempt and emits no second recovery event. No provider request is retried automatically.
 
 ## Durable repair-attempt evidence
 
@@ -106,6 +107,14 @@ idempotency-key enforcement on a fresh migrated SQLite database. Provider
 stream tests cover OpenAI Responses/Chat Completions, Anthropic Messages, and
 Zen Chat Completions/Responses/Messages native IDs.
 
+Provider-attempt recovery coverage is in
+`tests/recovery/provider_attempt_recovery.test.ts`. It uses a fresh migrated
+SQLite database to prove rollback of the event, attempt, turn, and task
+changes; committed interruption/blocking with identity-bearing recovery
+evidence; replay without a second event; and no recovery evidence for an
+already-settled attempt. The production bootstrap and `POST /v1/system/recover`
+paths run this reconciliation before active-turn recovery.
+
 ## Live OpenCode free-model evidence
 
 This closes the live-provider proof for one supported anonymous public Zen path. It does not close paid-account, alternate-protocol, cache, retrieval, cross-platform, hosted-CI, or release gates.
@@ -139,6 +148,11 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `just codegen-check` from committed `8983439` | PASSED — generated protobuf, API, event, tool, config, schema, SQLx, and documentation outputs are stable, including migration `0014_provider_attempt_identity`. |
 | 2026-08-26 | `just fault-injection` from committed `8983439` | PASSED — the artifact records 13 `fixture_only` boundaries, 8 DB-backed scenarios, 29 passing recovery tests, and `completeForRelease: false`; `provider_attempt_identity_replay` covers atomic identity publication and duplicate-key rejection. |
 | 2026-08-26 | `just check-all` from committed `8983439` | PASSED — the full local check-all command exited 0; the final cargo-deny tail reported `advisories ok, bans ok, licenses ok, sources ok`. |
+| 2026-08-26 | `bun test mini-services/terminus-control/src/services/services.test.ts mini-services/terminus-control/src/agent/coding-turn-engine.test.ts packages/provider-openai/src/openai_responses.test.ts packages/provider-anthropic/src/anthropic_messages.test.ts packages/provider-zen/src/transport.test.ts tests/recovery/provider_attempt_identity.test.ts tests/recovery/provider_attempt_recovery.test.ts tests/recovery/repair_attempt_recovery.test.ts tests/recovery/checkpoint_publication_recovery.test.ts tests/recovery/completion_admission_recovery.test.ts tests/recovery/effect_recovery.test.ts tests/persistence/migration_integrity.test.ts` | PASSED — 53 tests, 0 failures, 262 expect calls; includes all current provider, lifecycle, migration, and DB-backed recovery slices. |
+| 2026-08-26 | `just fault-injection` from committed `4316ad1` | PASSED — the artifact records 13 `fixture_only` boundaries, 9 DB-backed scenarios, 32 passing recovery tests, and `completeForRelease: false`; `provider_attempt_recovery_replay` covers no-duplicate in-flight provider recovery. |
+| 2026-08-26 | `bun run typecheck` from committed `4316ad1` | PASSED — root TypeScript typecheck completed with no diagnostics. |
+| 2026-08-26 | `just codegen-check` from committed `4316ad1` | PASSED — generated outputs remain stable after the recovery implementation. |
+| 2026-08-26 | `just check-all` from committed `4316ad1` | PASSED — the full local check-all command exited 0; the final cargo-deny tail reported `advisories ok, bans ok, licenses ok, sources ok`. |
 | 2026-08-26 | `just check-all` | PASSED — `just check`, standalone and integration suites, 582 TypeScript tests, 257 Python tests, Rust integration/security tests, platform probes, and `cargo deny check`; 1 live conformance test remained ignored by its explicit network-test annotation. |
 | 2026-08-26 | `just standalone-check` | PASSED — no retired OpenCode runtime/build dependency; explicit runtime-protocol -> public-api -> public-client chain. |
 | 2026-08-26 | `just truth-check` | PASSED — CI triggers include the default branch and declarations agree with metadata. |
