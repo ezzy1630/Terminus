@@ -1433,6 +1433,22 @@ class EventBus {
     });
   }
 
+  async publishManyAtomically(
+    pending: readonly PendingStoredEvent[],
+    mutation: (tx: Prisma.TransactionClient, events: readonly StoredEvent[]) => Promise<void>,
+  ): Promise<readonly StoredEvent[]> {
+    if (pending.length === 0) return [];
+    return this.enqueuePublishBatch(pending, async (events) => {
+      await db.$transaction(async (tx) => {
+        await assertControlWriterLease(tx);
+        for (const event of events) {
+          await tx.semanticEvent.create({ data: event });
+        }
+        await mutation(tx, events);
+      });
+    });
+  }
+
   private async enqueuePublish(
     pending: PendingStoredEvent,
     persist: (event: StoredEvent) => Promise<void>,
@@ -1465,6 +1481,45 @@ class EventBus {
     this.publishTail = operation.then(() => undefined, () => undefined);
     return operation;
   }
+
+  private async enqueuePublishBatch(
+    pending: readonly PendingStoredEvent[],
+    persist: (events: readonly StoredEvent[]) => Promise<void>,
+  ): Promise<readonly StoredEvent[]> {
+    const operation = this.publishTail.then(async () => {
+      if (!this.initialized) throw new Error("event bus history is not initialized");
+      const aggregateSequences = new Map(this.aggregateSequences);
+      const events = pending.map((item) => {
+        const sequenceKey = `${item.aggregateType}:${item.aggregateId}`;
+        const aggregateSequence = (aggregateSequences.get(sequenceKey) ?? 0) + 1;
+        aggregateSequences.set(sequenceKey, aggregateSequence);
+        return {
+          ...item,
+          eventId: this.nextEventId(),
+          aggregateSequence,
+        } satisfies StoredEvent;
+      });
+      await persist(events);
+      for (const event of events) {
+        this.aggregateSequences.set(
+          `${event.aggregateType}:${event.aggregateId}`,
+          event.aggregateSequence,
+        );
+        for (const sub of this.subscriptions.values()) {
+          try {
+            if (sub.filter(event)) sub.push(event);
+          } catch (error: unknown) {
+            console.error(`[terminus-control] event subscriber ${sub.id} failed after durable commit`, error);
+          }
+        }
+        this.cursor += 1;
+      }
+      return events;
+    });
+    this.publishTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
   subscribe(filter: (ev: StoredEvent) => boolean, push: (ev: StoredEvent) => void): () => void {
     const id = randomUUID();
     this.subscriptions.set(id, { id, filter, push });
@@ -1644,7 +1699,7 @@ researchRunner.registerProfile({
 });
 
 
-async function emit(params: {
+interface EmitInput {
   eventType: string;
   aggregateType: string;
   aggregateId: string;
@@ -1655,8 +1710,10 @@ async function emit(params: {
   payload: unknown;
   artifactRefs?: string[] | undefined;
   traceId?: string | null | undefined;
-}, mutation?: (tx: Prisma.TransactionClient, event: StoredEvent) => Promise<void>): Promise<StoredEvent> {
-  const pending: PendingStoredEvent = {
+}
+
+function pendingEvent(params: EmitInput): PendingStoredEvent {
+  return {
     schemaVersion: 1,
     eventType: params.eventType,
     aggregateType: params.aggregateType,
@@ -1670,10 +1727,24 @@ async function emit(params: {
     artifactRefsJson: JSON.stringify(params.artifactRefs ?? []),
     traceId: params.traceId ?? null,
   };
+}
+
+async function emit(
+  params: EmitInput,
+  mutation?: (tx: Prisma.TransactionClient, event: StoredEvent) => Promise<void>,
+): Promise<StoredEvent> {
+  const pending = pendingEvent(params);
   if (mutation === undefined) {
     return bus.publish(pending);
   }
   return bus.publishAtomically(pending, mutation);
+}
+
+async function emitAtomicBatch(
+  params: readonly EmitInput[],
+  mutation: (tx: Prisma.TransactionClient, events: readonly StoredEvent[]) => Promise<void>,
+): Promise<readonly StoredEvent[]> {
+  return bus.publishManyAtomically(params.map(pendingEvent), mutation);
 }
 
 // ────────────────────────── Helpers ────────────────────────────────────────
@@ -8767,6 +8838,7 @@ function checkpointRequirementStatus(
 interface CheckpointAdmissionRecoveryResult {
   readonly prepared: number;
   readonly recovered: readonly string[];
+  readonly deferred: readonly string[];
   readonly quarantined: readonly string[];
   readonly failed: readonly { id: string; error: string }[];
 }
@@ -8828,6 +8900,80 @@ async function commitCheckpointPublication(publication: CheckpointPublication): 
   });
 }
 
+interface TerminalTurnPublication extends CheckpointPublication {
+  readonly turnId: string;
+  readonly responseArtifactUri: string;
+  readonly summary: string;
+  readonly summaryTruncated: boolean;
+  readonly continuation: string | null;
+  readonly recovered?: boolean;
+}
+
+/**
+ * Commit the successful automatic checkpoint and terminal turn event in one
+ * writer transaction. Artifact bytes were retained before this point; the
+ * transaction only admits the already-prepared checkpoint and terminal row.
+ */
+async function commitCheckpointAndTerminalTurn(
+  publication: TerminalTurnPublication,
+): Promise<void> {
+  await emitAtomicBatch(
+    [
+      {
+        eventType: "checkpoint.created",
+        aggregateType: "checkpoint",
+        aggregateId: publication.id,
+        correlationId: publication.taskId,
+        idempotencyKey: `checkpoint-publication:${publication.id}`,
+        payload: {
+          thread_id: publication.threadId,
+          task_id: publication.taskId,
+          artifact_hash: publication.artifactHash,
+        },
+      },
+      {
+        eventType: "context.auto_checkpoint_committed",
+        aggregateType: "turn",
+        aggregateId: publication.turnId,
+        correlationId: publication.taskId,
+        idempotencyKey: `auto-checkpoint:${publication.turnId}`,
+        payload: { checkpoint_id: publication.id },
+      },
+      {
+        eventType: "turn.completed",
+        aggregateType: "turn",
+        aggregateId: publication.turnId,
+        correlationId: publication.taskId,
+        idempotencyKey: `turn-completed:${publication.turnId}`,
+        payload: {
+          state: "COMPLETED",
+          summary: publication.summary,
+          summary_truncated: publication.summaryTruncated,
+          continuation: publication.continuation,
+          ...(publication.recovered === true ? { recovered: true } : {}),
+        },
+        artifactRefs: [publication.responseArtifactUri],
+      },
+    ],
+    async (tx) => {
+      const checkpoint = await tx.checkpoint.updateMany({
+        where: { id: publication.id, admissionState: "PREPARED" },
+        data: { admissionState: "COMMITTED" },
+      });
+      if (checkpoint.count !== 1) {
+        throw new Error(`checkpoint ${publication.id} changed before terminal publication`);
+      }
+      const turn = await tx.turn.updateMany({
+        where: { id: publication.turnId, state: "FINALIZING" },
+        data: { state: "COMPLETED", completedAt: new Date() },
+      });
+      if (turn.count !== 1) {
+        throw new Error(`turn ${publication.turnId} changed before terminal publication`);
+      }
+    },
+  );
+}
+
 /**
  * R5: load bounded prior-turn history for a thread. Returns null when there
  * is no previous COMPLETED turn. The assistant excerpt comes from the durable
@@ -8887,12 +9033,13 @@ async function loadPriorTurnHistory(
 }
 
 /**
- * R5: automatic end-of-turn checkpoint. Reuses the authoritative checkpoint
- * schema so the existing latest-COMMITTED-checkpoint load path carries task
- * decisions across turns without manual /checkpoints calls. Best-effort:
- * failures emit context.auto_checkpoint_failed and never fail the turn.
+ * R5: prepare the automatic end-of-turn checkpoint. Reuses the authoritative
+ * checkpoint schema so the existing latest-COMMITTED-checkpoint load path
+ * carries task decisions across turns without manual /checkpoints calls.
+ * Publication is completed by the terminal-turn transaction below so a
+ * successful checkpoint and `turn.completed` cannot diverge.
  */
-async function autoCommitTurnCheckpoint(input: {
+async function prepareTurnCheckpoint(input: {
   readonly taskId: string;
   readonly threadId: string;
   readonly sessionId: string;
@@ -8903,7 +9050,7 @@ async function autoCommitTurnCheckpoint(input: {
   readonly criteriaRows: readonly { criterionId: string; statement: string; required: boolean; status: string }[];
   readonly effectState: CheckpointContent["effectState"];
   readonly terminalErrorJson: string | null;
-}): Promise<{ checkpointId: string } | { skipped: string }> {
+}): Promise<{ checkpoint: CheckpointPublication } | { skipped: string }> {
   try {
     const requirementState = input.criteriaRows.map((criterion) => ({
       criterion,
@@ -9012,13 +9159,14 @@ async function autoCommitTurnCheckpoint(input: {
       },
     }));
     await checkpointArtifacts.link(artifact.hash, "checkpoint", id, "content");
-    await commitCheckpointPublication({
-      id,
-      threadId: input.threadId,
-      taskId: input.taskId,
-      artifactHash: artifact.hash,
-    });
-    return { checkpointId: id };
+    return {
+      checkpoint: {
+        id,
+        threadId: input.threadId,
+        taskId: input.taskId,
+        artifactHash: artifact.hash,
+      },
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     try {
@@ -9043,6 +9191,38 @@ async function quarantinePreparedCheckpoint(id: string): Promise<void> {
   }));
 }
 
+async function findPreparedCheckpointForTurn(
+  taskId: string,
+  turnId: string,
+): Promise<CheckpointPublication | null> {
+  const rows = await db.checkpoint.findMany({
+    where: { taskId, admissionState: "PREPARED" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      taskId: true,
+      threadId: true,
+      checkpointArtifact: true,
+      lastCommittedSequencesJson: true,
+    },
+  });
+  for (const row of rows) {
+    const sequenceState = safeParse<Record<string, unknown>>(row.lastCommittedSequencesJson, {});
+    if (sequenceState.sourceTurnId !== turnId || row.taskId !== taskId) continue;
+    const artifactUri = artifactUriSchema.safeParse(row.checkpointArtifact);
+    if (!artifactUri.success) continue;
+    return {
+      id: row.id,
+      taskId,
+      threadId: row.threadId,
+      artifactHash: contentHashSchema.parse(
+        `sha256:${artifactUri.data.slice("artifact://sha256/".length)}`,
+      ),
+    };
+  }
+  return null;
+}
+
 function isTransientKernelFailure(error: unknown): boolean {
   if (error === null || typeof error !== "object") return false;
   const code = "code" in error ? (error as { readonly code?: unknown }).code : undefined;
@@ -9055,6 +9235,7 @@ function isTransientKernelFailure(error: unknown): boolean {
  */
 async function reconcilePreparedCheckpointAdmissions(): Promise<CheckpointAdmissionRecoveryResult> {
   const recovered: string[] = [];
+  const deferred: string[] = [];
   const quarantined: string[] = [];
   const failed: Array<{ id: string; error: string }> = [];
   let prepared = 0;
@@ -9150,6 +9331,32 @@ async function reconcilePreparedCheckpointAdmissions(): Promise<CheckpointAdmiss
         });
         continue;
       }
+      const sequenceState = safeParse<Record<string, unknown>>(row.lastCommittedSequencesJson, {});
+      const sourceTurnId = typeof sequenceState.sourceTurnId === "string"
+        ? sequenceState.sourceTurnId
+        : null;
+      if (sourceTurnId !== null) {
+        const sourceTurn = await db.turn.findUnique({
+          where: { id: sourceTurnId },
+          select: { taskId: true, state: true },
+        });
+        const completion = await db.completionRecord.findUnique({
+          where: { taskId: task.id },
+          select: { status: true, admissionState: true },
+        });
+        if (
+          sourceTurn?.taskId === task.id
+          && (sourceTurn.state === "FINALIZING" || sourceTurn.state === "VERIFIED")
+          && task.status === "COMPLETED"
+          && completion?.status === "completed"
+          && completion.admissionState === "COMMITTED"
+        ) {
+          // Terminal recovery owns this row. Keeping it PREPARED lets the
+          // checkpoint and `turn.completed` event commit together.
+          deferred.push(row.id);
+          continue;
+        }
+      }
       try {
         await commitCheckpointPublication({
           id: row.id,
@@ -9170,7 +9377,7 @@ async function reconcilePreparedCheckpointAdmissions(): Promise<CheckpointAdmiss
     if (cursor === null) throw new Error("checkpoint recovery lost its continuation cursor");
   }
 
-  return { prepared, recovered, quarantined, failed };
+  return { prepared, recovered, deferred, quarantined, failed };
 }
 
 interface CheckpointLinkRecoveryResult {
@@ -12067,6 +12274,9 @@ async function agentLoop(turnId: string): Promise<void> {
       // decisions and criteria state without manual /checkpoints calls. Keep
       // this before terminal publication: a completed turn must have had its
       // continuity checkpoint opportunity after verification admission.
+      let checkpointOutcome: { checkpoint: CheckpointPublication } | { skipped: string } = {
+        skipped: "taskless turn",
+      };
       if (turn.taskId !== null && turn.taskId !== undefined) {
         const autoCheckpointCriteriaRows = await db.acceptanceCriterion.findMany({
           where: { taskId: turn.taskId, contractVersion: contractRow.version },
@@ -12079,7 +12289,7 @@ async function agentLoop(turnId: string): Promise<void> {
             state: effect.state,
             idempotencyKey: effect.semanticIdempotencyKey,
           }));
-        const checkpointOutcome = await autoCommitTurnCheckpoint({
+        checkpointOutcome = await prepareTurnCheckpoint({
           taskId: turn.taskId,
           threadId: turn.threadId,
           sessionId: turn.thread.sessionId,
@@ -12096,20 +12306,22 @@ async function agentLoop(turnId: string): Promise<void> {
           effectState: effectStateForCheckpoint,
           terminalErrorJson: null,
         });
-        if ("checkpointId" in checkpointOutcome) {
-          await mutateAgentState(() => emit({
-            eventType: "context.auto_checkpoint_committed",
-            aggregateType: "turn",
-            aggregateId: turnId,
-            correlationId: turn.taskId ?? undefined,
-            payload: { checkpoint_id: checkpointOutcome.checkpointId },
-          }));
-        }
       }
 
       const summaryCodePoints = Array.from(finalText);
       const summaryTruncated = summaryCodePoints.length > 200;
       const summary = summaryCodePoints.slice(0, 200).join("");
+      if ("checkpoint" in checkpointOutcome) {
+        await mutateAgentState(() => commitCheckpointAndTerminalTurn({
+          ...checkpointOutcome.checkpoint,
+          turnId,
+          responseArtifactUri: finalResponseArtifactUri,
+          summary,
+          summaryTruncated,
+          continuation: summaryTruncated ? finalResponseArtifactUri : null,
+        }));
+        return;
+      }
       await mutateAgentState(() => emit({
         eventType: "turn.completed",
         aggregateType: "turn", aggregateId: turnId,
@@ -12908,6 +13120,22 @@ async function recoverVerifiedOrFinalizingTurn(input: {
     ? proposalPayload.response_artifact
     : proposalRefs[0] ?? null;
   if (responseArtifact === null) return false;
+
+  if (input.state === "FINALIZING") {
+    const preparedCheckpoint = await findPreparedCheckpointForTurn(input.taskId, input.id);
+    if (preparedCheckpoint !== null) {
+      await commitCheckpointAndTerminalTurn({
+        ...preparedCheckpoint,
+        turnId: input.id,
+        responseArtifactUri: responseArtifact,
+        summary: "",
+        summaryTruncated: true,
+        continuation: responseArtifact,
+        recovered: true,
+      });
+      return true;
+    }
+  }
 
   if (input.state === "VERIFIED") {
     await emit({

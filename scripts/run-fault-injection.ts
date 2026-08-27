@@ -55,6 +55,11 @@ const DB_BACKED_SCENARIOS = [
     assertions: ["prepared checkpoint publication and artifact linking are idempotent"],
   },
   {
+    scenario: "checkpoint_terminal_publication",
+    boundary: "during_checkpoint_replacement",
+    assertions: ["checkpoint admission, terminal state, and publication events commit or roll back together"],
+  },
+  {
     scenario: "completion_record_admission_replay",
     boundary: "after_event_commit",
     assertions: ["an admitted completion intent replays without provider inference"],

@@ -17,6 +17,8 @@ const CHECKPOINT_ID = "checkpoint-recovery-1";
 const CHECKPOINT_HASH = `sha256:${"b".repeat(64)}`;
 const CHECKPOINT_URI = `artifact://sha256/${"b".repeat(64)}`;
 const EVENT_ID = "event-checkpoint-created";
+const AUTO_CHECKPOINT_EVENT_ID = "event-auto-checkpoint-committed";
+const TURN_COMPLETED_EVENT_ID = "event-turn-completed";
 
 type QueryRow = Record<string, unknown>;
 
@@ -166,6 +168,77 @@ function publishCheckpoint(db: Database): void {
   });
 }
 
+function appendTerminalPublicationEvents(db: Database): void {
+  const now = Date.now();
+  db.query(
+    `INSERT OR IGNORE INTO semantic_events (
+      event_id, event_type, schema_version, aggregate_type, aggregate_id,
+      aggregate_sequence, occurred_at, actor_json, correlation_id, causation_id,
+      idempotency_key, payload_json, artifact_refs_json, trace_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    AUTO_CHECKPOINT_EVENT_ID,
+    "context.auto_checkpoint_committed",
+    1,
+    "turn",
+    "turn-checkpoint-recovery",
+    1,
+    now,
+    "{}",
+    "task-checkpoint-recovery",
+    null,
+    "auto-checkpoint:turn-checkpoint-recovery",
+    JSON.stringify({ checkpoint_id: CHECKPOINT_ID }),
+    "[]",
+    null,
+  );
+  db.query(
+    `INSERT OR IGNORE INTO semantic_events (
+      event_id, event_type, schema_version, aggregate_type, aggregate_id,
+      aggregate_sequence, occurred_at, actor_json, correlation_id, causation_id,
+      idempotency_key, payload_json, artifact_refs_json, trace_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    TURN_COMPLETED_EVENT_ID,
+    "turn.completed",
+    1,
+    "turn",
+    "turn-checkpoint-recovery",
+    2,
+    now,
+    "{}",
+    "task-checkpoint-recovery",
+    null,
+    "turn-completed:turn-checkpoint-recovery",
+    JSON.stringify({ state: "COMPLETED", summary: "checkpointed" }),
+    JSON.stringify([CHECKPOINT_URI]),
+    null,
+  );
+}
+
+function applyTerminalPublication(db: Database): void {
+  appendCheckpointEvent(db);
+  appendTerminalPublicationEvents(db);
+  const checkpoint = db.query(
+    "UPDATE checkpoints SET admission_state = 'COMMITTED' WHERE id = ? AND admission_state = 'PREPARED'",
+  ).run(CHECKPOINT_ID);
+  if (checkpoint.changes !== 1) {
+    const state = db.query("SELECT admission_state FROM checkpoints WHERE id = ?").get(CHECKPOINT_ID) as QueryRow | null;
+    if (state?.admission_state !== "COMMITTED") throw new Error("checkpoint was not committed");
+  }
+  const turn = db.query(
+    "UPDATE turns SET state = 'COMPLETED', completed_at = ? WHERE id = ? AND state = 'FINALIZING'",
+  ).run(Date.now(), "turn-checkpoint-recovery");
+  if (turn.changes !== 1) {
+    const state = db.query("SELECT state FROM turns WHERE id = ?").get("turn-checkpoint-recovery") as QueryRow | null;
+    if (state?.state !== "COMPLETED") throw new Error("turn was not completed");
+  }
+}
+
+function publishTerminal(db: Database): void {
+  transaction(db, () => applyTerminalPublication(db));
+}
+
 function recoverPreparedCheckpoints(db: Database): void {
   const rows = db.query(
     "SELECT id FROM checkpoints WHERE admission_state = 'PREPARED' ORDER BY id",
@@ -221,6 +294,50 @@ describe("DB-backed checkpoint publication recovery", () => {
 
         expect(db.query("SELECT admission_state FROM checkpoints WHERE id = ?").get(CHECKPOINT_ID) as QueryRow).toEqual({ admission_state: "COMMITTED" });
         expect(db.query("SELECT COUNT(*) AS count FROM semantic_events WHERE event_id = ?").get(EVENT_ID) as QueryRow).toEqual({ count: 1 });
+        expect(db.query("SELECT COUNT(*) AS count FROM artifact_links WHERE owner_type = 'checkpoint' AND owner_id = ?").get(CHECKPOINT_ID) as QueryRow).toEqual({ count: 1 });
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+  test("rolls back checkpoint and terminal publication as one transaction", async () => {
+    await withDatabase(async (db) => {
+      try {
+        seedLineage(db);
+        seedArtifact(db);
+        db.query("UPDATE turns SET state = 'FINALIZING' WHERE id = ?").run("turn-checkpoint-recovery");
+        prepareCheckpoint(db);
+        linkCheckpointArtifact(db);
+
+        expect(() => transaction(db, () => {
+          applyTerminalPublication(db);
+          throw new Error("injected crash before terminal publication commit");
+        })).toThrow("injected crash before terminal publication commit");
+        expect(db.query("SELECT admission_state FROM checkpoints WHERE id = ?").get(CHECKPOINT_ID) as QueryRow).toEqual({ admission_state: "PREPARED" });
+        expect(db.query("SELECT state FROM turns WHERE id = ?").get("turn-checkpoint-recovery") as QueryRow).toEqual({ state: "FINALIZING" });
+        expect(db.query("SELECT COUNT(*) AS count FROM semantic_events WHERE event_id IN (?, ?, ?)").get(EVENT_ID, AUTO_CHECKPOINT_EVENT_ID, TURN_COMPLETED_EVENT_ID) as QueryRow).toEqual({ count: 0 });
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+  test("replays checkpoint and terminal publication without duplicate events", async () => {
+    await withDatabase(async (db) => {
+      try {
+        seedLineage(db);
+        seedArtifact(db);
+        db.query("UPDATE turns SET state = 'FINALIZING' WHERE id = ?").run("turn-checkpoint-recovery");
+        prepareCheckpoint(db);
+        linkCheckpointArtifact(db);
+
+        publishTerminal(db);
+        publishTerminal(db);
+
+        expect(db.query("SELECT admission_state FROM checkpoints WHERE id = ?").get(CHECKPOINT_ID) as QueryRow).toEqual({ admission_state: "COMMITTED" });
+        expect(db.query("SELECT state FROM turns WHERE id = ?").get("turn-checkpoint-recovery") as QueryRow).toEqual({ state: "COMPLETED" });
+        expect(db.query("SELECT COUNT(*) AS count FROM semantic_events WHERE event_id IN (?, ?, ?)").get(EVENT_ID, AUTO_CHECKPOINT_EVENT_ID, TURN_COMPLETED_EVENT_ID) as QueryRow).toEqual({ count: 3 });
         expect(db.query("SELECT COUNT(*) AS count FROM artifact_links WHERE owner_type = 'checkpoint' AND owner_id = ?").get(CHECKPOINT_ID) as QueryRow).toEqual({ count: 1 });
       } finally {
         db.close();
