@@ -63,6 +63,8 @@ pub struct GrpcKernel {
 
 const MAX_REPLAYED_JOB_EVENTS: usize = 4_096;
 const MAX_REPLAYED_JOB_BYTES: usize = 8 * 1_024 * 1_024;
+const DEFAULT_REPOSITORY_MAP_PAGE_SIZE: usize = 200;
+const MAX_REPOSITORY_MAP_PAGE_SIZE: usize = 1_000;
 
 #[derive(Default)]
 struct JobStreamState {
@@ -1670,6 +1672,111 @@ impl CodeIntelligenceRpc for GrpcKernel {
             continuation: None,
         }))
     }
+
+    async fn map(
+        &self,
+        request: Request<protocol::RepositoryMapRequest>,
+    ) -> Result<Response<protocol::RepositoryMapResponse>, Status> {
+        let request = request.into_inner();
+        let mut ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let requested_workspace = request.workspace_id.trim();
+        if requested_workspace.is_empty() {
+            if ctx.workspace_id.is_empty() || ctx.workspace_id == "*" {
+                return Err(Status::invalid_argument(
+                    "workspace_id is required when the request context has no concrete workspace",
+                ));
+            }
+        } else {
+            if requested_workspace == "*" {
+                return Err(Status::invalid_argument(
+                    "workspace_id must identify one concrete workspace",
+                ));
+            }
+            if ctx.workspace_id != "*"
+                && !ctx.workspace_id.is_empty()
+                && ctx.workspace_id != requested_workspace
+            {
+                return Err(Status::permission_denied(
+                    "map workspace_id does not match the request context workspace binder",
+                ));
+            }
+            ctx.workspace_id = requested_workspace.to_string();
+        }
+
+        let limit = if request.limit == 0 {
+            DEFAULT_REPOSITORY_MAP_PAGE_SIZE
+        } else {
+            usize::try_from(request.limit)
+                .map_err(|_| Status::invalid_argument("repository map limit is invalid"))?
+        };
+        if limit > MAX_REPOSITORY_MAP_PAGE_SIZE {
+            return Err(Status::invalid_argument(format!(
+                "repository map limit exceeds {MAX_REPOSITORY_MAP_PAGE_SIZE}"
+            )));
+        }
+        let (expected_revision, offset) = parse_repository_map_continuation(&request.continuation)?;
+        let page = self
+            .kernel
+            .code_intel
+            .repository_map(
+                &ctx,
+                &Default::default(),
+                limit,
+                offset,
+                expected_revision.as_deref(),
+            )
+            .map_err(status)?;
+        let continuation = page
+            .next_offset
+            .map(|next_offset| format!("v1|{}|{next_offset}", page.index_revision));
+        let total_entries = u32::try_from(page.total_entries)
+            .map_err(|_| Status::internal("repository map entry count exceeds protocol range"))?;
+        Ok(Response::new(protocol::RepositoryMapResponse {
+            entries: page
+                .entries
+                .into_iter()
+                .map(|entry| protocol::RepositoryMapEntry {
+                    path: entry.path,
+                    symbols: entry.symbols,
+                    source_sha256: entry.source_sha256,
+                })
+                .collect(),
+            index_revision: page.index_revision,
+            truncated: continuation.is_some(),
+            continuation,
+            total_entries,
+        }))
+    }
+}
+
+fn parse_repository_map_continuation(
+    continuation: &str,
+) -> Result<(Option<String>, usize), Status> {
+    if continuation.trim().is_empty() {
+        return Ok((None, 0));
+    }
+    let parts = continuation.split('|').collect::<Vec<_>>();
+    if parts.len() != 3 || parts[0] != "v1" {
+        return Err(Status::invalid_argument(
+            "repository map continuation has an invalid format",
+        ));
+    }
+    let revision = parts[1];
+    let digest = revision.strip_prefix("sha256:").ok_or_else(|| {
+        Status::invalid_argument("repository map continuation has an invalid revision")
+    })?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Status::invalid_argument(
+            "repository map continuation has an invalid revision",
+        ));
+    }
+    let offset = parts[2].parse::<usize>().map_err(|_| {
+        Status::invalid_argument("repository map continuation has an invalid offset")
+    })?;
+    Ok((Some(revision.to_string()), offset))
 }
 
 #[tonic::async_trait]
@@ -3381,6 +3488,131 @@ mod tests {
         .await
         .expect_err("search requires a concrete workspace from request or context");
         assert_eq!(missing.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn repository_map_pages_and_rejects_stale_continuations() {
+        let (_data_dir, kernel) = test_kernel();
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.rs"), "fn alpha() {}\n").expect("first source");
+        std::fs::write(workspace.path().join("b.rs"), "fn beta() {}\n").expect("second source");
+        register_test_workspace(&kernel, "workspace-map", workspace.path());
+        let token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "terminus-control-test".to_string(),
+                    session_id: "session-1".to_string(),
+                    task_id: "task-1".to_string(),
+                    workspace_id: "workspace-map".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![OperationClass::CodeIntel],
+                Scope::default(),
+                None,
+                "repository-map-test",
+            )
+            .expect("code-intel capability")
+            .encode()
+            .expect("encoded code-intel capability");
+        let scoped_token = kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "terminus-control-test".to_string(),
+                    session_id: "session-1".to_string(),
+                    task_id: "task-1".to_string(),
+                    workspace_id: "workspace-map".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                vec![OperationClass::CodeIntel],
+                Scope {
+                    workspace_paths: vec!["a.rs".to_string()],
+                    ..Default::default()
+                },
+                None,
+                "repository-map-scoped-test",
+            )
+            .expect("scoped code-intel capability")
+            .encode()
+            .expect("encoded scoped code-intel capability");
+        let context = protocol::RequestContext {
+            request_id: "repository-map".to_string(),
+            session_id: "session-1".to_string(),
+            task_id: "task-1".to_string(),
+            actor_id: "terminus-control-test".to_string(),
+            workspace_id: "workspace-map".to_string(),
+            capability_token: token,
+            ..Default::default()
+        };
+        let service = GrpcKernel::new(kernel, test_bootstrap_config(false));
+
+        let first = CodeIntelligenceRpc::map(
+            &service,
+            Request::new(protocol::RepositoryMapRequest {
+                context: Some(context.clone()),
+                workspace_id: String::new(),
+                limit: 1,
+                continuation: String::new(),
+            }),
+        )
+        .await
+        .expect("first repository map page")
+        .into_inner();
+        assert_eq!(first.total_entries, 2);
+        assert_eq!(first.entries.len(), 1);
+        assert!(first.truncated);
+        let continuation = first.continuation.clone().expect("continuation token");
+        assert!(continuation.starts_with("v1|sha256:"));
+
+        let scoped = CodeIntelligenceRpc::map(
+            &service,
+            Request::new(protocol::RepositoryMapRequest {
+                context: Some(protocol::RequestContext {
+                    capability_token: scoped_token,
+                    ..context.clone()
+                }),
+                workspace_id: String::new(),
+                limit: 10,
+                continuation: String::new(),
+            }),
+        )
+        .await
+        .expect("scoped repository map")
+        .into_inner();
+        assert_eq!(scoped.total_entries, 1);
+        assert_eq!(scoped.entries[0].path, "a.rs");
+        assert!(!scoped.truncated);
+
+        let second = CodeIntelligenceRpc::map(
+            &service,
+            Request::new(protocol::RepositoryMapRequest {
+                context: Some(context.clone()),
+                workspace_id: String::new(),
+                limit: 1,
+                continuation,
+            }),
+        )
+        .await
+        .expect("second repository map page")
+        .into_inner();
+        assert_eq!(second.entries.len(), 1);
+        assert!(!second.truncated);
+
+        std::fs::write(workspace.path().join("b.rs"), "fn beta_changed() {}\n")
+            .expect("changed source");
+        let stale = CodeIntelligenceRpc::map(
+            &service,
+            Request::new(protocol::RepositoryMapRequest {
+                context: Some(context),
+                workspace_id: String::new(),
+                limit: 1,
+                continuation: first.continuation.expect("continuation token remains"),
+            }),
+        )
+        .await
+        .expect_err("stale continuation must fail closed");
+        assert_eq!(stale.code(), tonic::Code::Aborted);
     }
 
     #[tokio::test]

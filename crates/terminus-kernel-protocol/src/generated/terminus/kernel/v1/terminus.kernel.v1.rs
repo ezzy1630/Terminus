@@ -1150,6 +1150,40 @@ pub struct CodeSearchResponse {
     #[prost(string, optional, tag="3")]
     pub continuation: ::core::option::Option<::prost::alloc::string::String>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryMapRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    #[prost(string, tag="2")]
+    pub workspace_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="3")]
+    pub limit: u32,
+    #[prost(string, tag="4")]
+    pub continuation: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RepositoryMapEntry {
+    #[prost(string, tag="1")]
+    pub path: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="2")]
+    pub symbols: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Canonical sha256:<hex> source version
+    #[prost(string, tag="3")]
+    pub source_sha256: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RepositoryMapResponse {
+    #[prost(message, repeated, tag="1")]
+    pub entries: ::prost::alloc::vec::Vec<RepositoryMapEntry>,
+    #[prost(string, tag="2")]
+    pub index_revision: ::prost::alloc::string::String,
+    #[prost(bool, tag="3")]
+    pub truncated: bool,
+    #[prost(string, optional, tag="4")]
+    pub continuation: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(uint32, tag="5")]
+    pub total_entries: u32,
+}
 // =============================================================================
 // Extension runtime service (SPEC §12, §35, ADR-0019)
 // =============================================================================

@@ -76,6 +76,16 @@ describe("buildRepositoryMapFragment", () => {
     expect(map.omittedEntries).toBe(1);
     expect(map.text).toContain("omitted");
   });
+
+  test("preserves page omissions and the opaque continuation", () => {
+    const map = buildRepositoryMapFragment([entries[0]!], {
+      omittedEntries: 4,
+      continuationToken: "v1|sha256:revision|1",
+    });
+    expect(map.omittedEntries).toBe(4);
+    expect(map.text).toContain("showing 1 of 5 indexed files");
+    expect(map.text).toContain("continuation: v1|sha256:revision|1");
+  });
 });
 
 describe("hashFragmentText", () => {

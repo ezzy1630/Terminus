@@ -334,6 +334,11 @@ import {
   normalizeFailure,
   type RawVerificationFailure,
 } from "./agent/verification-repair-controller.js";
+import {
+  REPOSITORY_SIGNAL_PATHS,
+  discoverNativeTestRecipes,
+  type RepositoryFileObservation,
+} from "./agent/repository-signals.js";
 import { HARD_MAX_STEPS, TurnBudget } from "./agent/turn-budget.js";
 import type { ArtifactClient } from "@terminus/artifact-client";
 import type {
@@ -347,7 +352,7 @@ import type {
   ConfidentialityPolicy,
 } from "@terminus/provider-core";
 import { computeCost } from "@terminus/provider-core";
-import { deriveRepairMetrics } from "@terminus/verification";
+import { deriveRepairMetrics, type RepositoryMapVerificationSignal } from "@terminus/verification";
 import {
   compileSkill,
   compileWorkflowJson,
@@ -10442,6 +10447,194 @@ async function loadRepositoryInstructionFragments(
   });
 }
 
+interface RepositoryMapObservation {
+  readonly entries: readonly {
+    readonly path: string;
+    readonly symbols: readonly string[];
+    readonly sourceSha256: string;
+  }[];
+  readonly indexRevision: string;
+  readonly totalEntries: number;
+  readonly truncated: boolean;
+  readonly continuationToken: string | null;
+}
+
+interface RepositoryDiscoverySignals {
+  readonly repositoryMap: RepositoryMapObservation | null;
+  readonly verificationRepositoryMap: RepositoryMapVerificationSignal | undefined;
+  readonly nativeTestCommands: readonly string[];
+  readonly nativeRecipeSources: readonly string[];
+  readonly nativeRecipeSourceVersions: readonly string[];
+  readonly observedConfigPaths: readonly string[];
+  readonly unavailableConfigPaths: readonly string[];
+}
+
+interface RepositorySignalDiscoveryInput {
+  readonly clients: KernelUdsClients;
+  readonly codeIntelContext: RequestContext;
+  readonly sessionId: string;
+  readonly taskId: string;
+  readonly turnId: string;
+  readonly workspaceId: string;
+  readonly contractHash: string;
+  readonly signal: AbortSignal;
+}
+
+const SOURCE_VERSION_PATTERN = /^sha256:[0-9a-f]{64}$/i;
+const REPOSITORY_MAP_REVISION_PATTERN = /^sha256:[0-9a-f]{64}$/i;
+
+function isSafeRepositoryMapPath(path: string): boolean {
+  return path.length > 0
+    && path.length <= 1_024
+    && !isAbsolute(path)
+    && !path.includes("\\")
+    && !/[\r\n]/.test(path)
+    && !path.split("/").some((segment) => segment === ".." || segment.length === 0 && path !== "");
+}
+
+function repositoryMapVerificationSignal(
+  observation: RepositoryMapObservation,
+): RepositoryMapVerificationSignal {
+  return {
+    sourceVersion: observation.indexRevision,
+    entryCount: observation.entries.length,
+    totalEntryCount: observation.totalEntries,
+    omittedEntries: Math.max(0, observation.totalEntries - observation.entries.length),
+    continuationToken: observation.continuationToken,
+    paths: observation.entries.map((entry) => entry.path),
+  };
+}
+
+/** Read repository metadata and the bounded semantic map through the kernel. */
+async function discoverRepositorySignals(
+  input: RepositorySignalDiscoveryInput,
+): Promise<RepositoryDiscoverySignals> {
+  if (input.signal.aborted) throw new ToolAbortedError();
+  const unavailableConfigPaths = new Set<string>(REPOSITORY_SIGNAL_PATHS);
+  const observations: RepositoryFileObservation[] = [];
+  let readContext: RequestContext | null = null;
+  try {
+    readContext = await kernelTaskContext({
+      sessionId: input.sessionId,
+      taskId: input.taskId,
+      turnId: input.turnId,
+      workspaceId: input.workspaceId,
+      operationClasses: [CapabilityOperationProto.CAPABILITY_OPERATION_READ],
+    });
+  } catch {
+    // A narrow task contract may not authorize repository metadata. Preserve
+    // that fact as unavailable instead of widening the capability scope.
+  }
+  if (readContext !== null) {
+    for (const relativePath of REPOSITORY_SIGNAL_PATHS) {
+      if (input.signal.aborted) throw new ToolAbortedError();
+      try {
+        const response = await input.clients.files.Read({
+          context: {
+            ...readContext,
+            requestId: randomUUID(),
+            idempotencyKey: `repository-signal:${input.taskId}:${relativePath}`,
+          },
+          intent: {
+            userIntentRef: "repository-signal-discovery",
+            taskContractHash: input.contractHash,
+            trustLabel: "derived",
+            confidentialityLabel: "workspace",
+            taintSources: [],
+            policyProfileId: "secure-local-default",
+            expectedEffectClass: "read_local",
+          },
+          path: { workspaceId: input.workspaceId, relativePath },
+          mode: "full",
+          ranges: [],
+          symbols: [],
+          maxBytes: 64 * 1_024,
+          expectedSha256: "",
+        });
+        if (response.truncated) continue;
+        const sourceVersion = response.sourceVersion?.sha256;
+        if (sourceVersion === undefined || !SOURCE_VERSION_PATTERN.test(sourceVersion)) continue;
+        const content = new TextDecoder("utf-8", { fatal: false }).decode(response.modelProjectionUtf8);
+        observations.push({ path: relativePath, content, sourceVersion });
+        unavailableConfigPaths.delete(relativePath);
+      } catch (error: unknown) {
+        if (input.signal.aborted) throw new ToolAbortedError();
+        // Missing, denied, or unreadable metadata is an explicit unavailable
+        // observation. No guessed recipe is emitted for it.
+      }
+    }
+  }
+
+  const nativeRecipes = discoverNativeTestRecipes(observations);
+  let repositoryMap: RepositoryMapObservation | null = null;
+  try {
+    if (input.signal.aborted) throw new ToolAbortedError();
+    const response = await input.clients.codeIntel.Map({
+      context: {
+        ...input.codeIntelContext,
+        requestId: randomUUID(),
+        idempotencyKey: `repository-map:${input.taskId}:${input.turnId}`,
+      },
+      workspaceId: input.workspaceId,
+      limit: 200,
+      continuation: "",
+    });
+    const continuationToken = response.continuation ?? null;
+    if (!REPOSITORY_MAP_REVISION_PATTERN.test(response.indexRevision)) {
+      throw new Error("kernel returned an invalid repository map revision");
+    }
+    if (response.totalEntries < response.entries.length
+      || response.truncated !== (response.entries.length < response.totalEntries)
+      || response.truncated !== (continuationToken !== null)) {
+      throw new Error("kernel returned an inconsistent repository map page");
+    }
+    const paths = new Set<string>();
+    const entries = response.entries.map((entry) => {
+      if (!isSafeRepositoryMapPath(entry.path) || paths.has(entry.path)) {
+        throw new Error("kernel returned an unsafe or duplicate repository map path");
+      }
+      paths.add(entry.path);
+      if (!SOURCE_VERSION_PATTERN.test(entry.sourceSha256)) {
+        throw new Error("kernel returned an invalid repository map source version");
+      }
+      const symbols = entry.symbols.map((symbol) => {
+        if (symbol.length === 0 || symbol.length > 256 || /[\r\n]/.test(symbol)) {
+          throw new Error("kernel returned an invalid repository map symbol");
+        }
+        return symbol;
+      });
+      return {
+        path: entry.path,
+        symbols,
+        sourceSha256: entry.sourceSha256,
+      };
+    });
+    repositoryMap = {
+      entries,
+      indexRevision: response.indexRevision,
+      totalEntries: response.totalEntries,
+      truncated: response.truncated,
+      continuationToken,
+    };
+  } catch (error: unknown) {
+    if (error instanceof ToolAbortedError) throw error;
+    // Map retrieval is advisory context. A failed or malformed response is
+    // represented as unavailable; no stale or partial map enters the prompt.
+  }
+
+  return {
+    repositoryMap,
+    verificationRepositoryMap: repositoryMap === null
+      ? undefined
+      : repositoryMapVerificationSignal(repositoryMap),
+    nativeTestCommands: nativeRecipes.nativeTestCommands,
+    nativeRecipeSources: nativeRecipes.nativeRecipeSources,
+    nativeRecipeSourceVersions: nativeRecipes.nativeRecipeSourceVersions,
+    observedConfigPaths: observations.map((observation) => observation.path).sort(),
+    unavailableConfigPaths: [...unavailableConfigPaths].sort(),
+  };
+}
+
 /** Kernel-backed code-intelligence retrieval for the live compiler path. */
 function kernelRetrievalPipeline(
   clients: KernelUdsClients,
@@ -10451,6 +10644,7 @@ function kernelRetrievalPipeline(
   sessionId: string,
   taskId: string,
   workspaceId: string,
+  repositoryMap: RepositoryMapObservation | null,
 ): RetrievalPipeline {
   const fileReader: WorkspaceFileReader = async ({ path, startLine, endLine }) => {
     try {
@@ -10487,8 +10681,86 @@ function kernelRetrievalPipeline(
       return { content: null, fileSha256: null, totalLines: null };
     }
   };
+  const repositoryMapFragment = repositoryMap === null || repositoryMap.entries.length === 0
+    ? null
+    : (() => {
+        const entries = repositoryMap.entries.map((entry) => ({
+          path: entry.path,
+          symbols: entry.symbols,
+        }));
+        const rendered = buildRepositoryMapFragment(entries, {
+          maxEntries: entries.length,
+          omittedEntries: Math.max(0, repositoryMap.totalEntries - entries.length),
+          continuationToken: repositoryMap.continuationToken,
+          title: "Kernel repository map",
+        });
+        const hash = computeContentHash(rendered.text);
+        const bytes = new TextEncoder().encode(rendered.text).byteLength;
+        const pathPatterns = entries.map((entry) => entry.path);
+        const fragment: ContextFragment = {
+          id: `kernel-repository-map:${hash}`,
+          kind: "code",
+          contentRef: {
+            hash,
+            uri: `artifact://sha256/${hash.slice("sha256:".length)}` as ContextFragment["contentRef"]["uri"],
+            mediaType: "text/plain",
+            bytes: BigInt(bytes) as ContextFragment["contentRef"]["bytes"],
+          },
+          textContent: rendered.text,
+          source: {
+            uri: `workspace://${workspaceId}/repository-map`,
+            producer: "terminus-kernel-code-intel",
+            producerVersion: "v1",
+            observedAt,
+            observedBy: "kernel",
+            evidenceRefs: [],
+          },
+          sourceVersion: repositoryMap.indexRevision,
+          authority: 55,
+          priority: 60,
+          trust: "derived",
+          confidentiality: "workspace",
+          injectionRisk: "low",
+          exactness: "semantics_preserving",
+          scope: {
+            workspaceId: workspaceId as ContextFragment["scope"]["workspaceId"],
+            sessionId: sessionId as ContextFragment["scope"]["sessionId"],
+            taskId: taskId as ContextFragment["scope"]["taskId"],
+            pathPatterns,
+          },
+          freshness: {
+            observedAt,
+            sourceVersion: repositoryMap.indexRevision,
+            stale: false,
+            staleReason: null,
+          },
+          dependencies: [],
+          invalidation: [{ kind: "file_changed", selector: `workspace://${workspaceId}` }],
+          estimatedTokens: { [modelKey]: Math.max(1, Math.ceil(rendered.text.length / 4)) },
+          selectionFeatures: {
+            relevance: 0.65,
+            novelty: 0.9,
+            coverage: 0.95,
+            uncertaintyReduction: 0.85,
+            riskReduction: 0.55,
+            modelCompatibility: 1,
+            redundancyPenalty: 0,
+            injectionPenalty: 0,
+          },
+        };
+        return fragment;
+      })();
   const retrieve = async (queries: readonly RetrievalQuery[]): Promise<readonly RetrievalResult[]> => {
-    const results: RetrievalResult[] = [];
+    const results: RetrievalResult[] = repositoryMapFragment === null
+      ? []
+      : [{
+          fragment: repositoryMapFragment,
+          method: "semantic",
+          rawScore: 0.8,
+          rerankedScore: 0.8,
+          sourceVersion: repositoryMapFragment.sourceVersion,
+          reason: "kernel repository map",
+        }];
     const seen = new Set<string>();
     for (const query of queries) {
       const response = await clients.codeIntel.Search({
@@ -11535,6 +11807,7 @@ async function agentLoop(turnId: string): Promise<void> {
     let latestInstructionHashes: readonly string[] = [];
     let latestFailureSelectors: readonly string[] = [];
     let latestDiagnostics: readonly string[] = [];
+    const latestRepositorySignals: { value: RepositoryDiscoverySignals | null } = { value: null };
     const contextEpoch = await ensureContextEpoch({
       db,
       threadId: turn.threadId,
@@ -11702,9 +11975,40 @@ async function agentLoop(turnId: string): Promise<void> {
         failingTests: contextState.taskSnapshot.failingTests,
         diagnostics: contextState.taskSnapshot.diagnostics,
       };
+      const repositorySignals = await discoverRepositorySignals({
+        clients: requireKernelUds(),
+        codeIntelContext: artifactContext,
+        sessionId: turn.thread.sessionId,
+        taskId: task.id,
+        turnId,
+        workspaceId: workspace.id,
+        contractHash: contractRow.contentHash,
+        signal: abortController.signal,
+      });
+      latestRepositorySignals.value = repositorySignals;
       const effectiveWorldState: WorldStateSnapshot = {
         ...worldState,
-        sections: { ...worldState.sections, ...contextState.worldStateSections },
+        sections: {
+          ...worldState.sections,
+          ...contextState.worldStateSections,
+          repository_signals: {
+            repository_map: repositorySignals.repositoryMap === null
+              ? { availability: "temporarily_unavailable" }
+              : {
+                  availability: "available",
+                  index_revision: repositorySignals.repositoryMap.indexRevision,
+                  entry_count: repositorySignals.repositoryMap.entries.length,
+                  total_entry_count: repositorySignals.repositoryMap.totalEntries,
+                  truncated: repositorySignals.repositoryMap.truncated,
+                  continuation_available: repositorySignals.repositoryMap.continuationToken !== null,
+                },
+            native_test_commands: repositorySignals.nativeTestCommands,
+            native_recipe_sources: repositorySignals.nativeRecipeSources,
+            native_recipe_source_versions: repositorySignals.nativeRecipeSourceVersions,
+            observed_config_paths: repositorySignals.observedConfigPaths,
+            unavailable_config_paths: repositorySignals.unavailableConfigPaths,
+          },
+        },
       };
       if (scoutBriefSection !== null) {
         (effectiveWorldState.sections as Record<string, unknown>).scout_brief = scoutBriefSection;
@@ -11766,6 +12070,7 @@ async function agentLoop(turnId: string): Promise<void> {
           task.sessionId,
           task.id,
           workspace.id,
+          repositorySignals.repositoryMap,
         ),
         signal: abortController.signal,
       });
@@ -12880,10 +13185,15 @@ async function agentLoop(turnId: string): Promise<void> {
               projectFiles: [
                 ...contract.allowedScope.readPaths,
                 ...contract.allowedScope.writePaths,
+                ...(latestRepositorySignals.value?.observedConfigPaths ?? []),
               ],
               instructionHashes: latestInstructionHashes,
               failingTests: latestFailureSelectors,
               diagnostics: latestDiagnostics,
+              nativeTestCommands: latestRepositorySignals.value?.nativeTestCommands ?? [],
+              nativeRecipeSources: latestRepositorySignals.value?.nativeRecipeSources ?? [],
+              nativeRecipeSourceVersions: latestRepositorySignals.value?.nativeRecipeSourceVersions ?? [],
+              repositoryMap: latestRepositorySignals.value?.verificationRepositoryMap,
               generatedPaths: latestChangedFiles.filter((path) => /generated/i.test(path)),
               uiComputerUseAvailable: false,
             },

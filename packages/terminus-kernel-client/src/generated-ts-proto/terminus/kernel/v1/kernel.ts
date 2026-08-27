@@ -813,6 +813,28 @@ export interface CodeSearchResponse {
   continuation?: string | undefined;
 }
 
+export interface RepositoryMapRequest {
+  context: RequestContext | undefined;
+  workspaceId: string;
+  limit: number;
+  continuation: string;
+}
+
+export interface RepositoryMapEntry {
+  path: string;
+  symbols: string[];
+  /** Canonical sha256:<hex> source version */
+  sourceSha256: string;
+}
+
+export interface RepositoryMapResponse {
+  entries: RepositoryMapEntry[];
+  indexRevision: string;
+  truncated: boolean;
+  continuation?: string | undefined;
+  totalEntries: number;
+}
+
 export interface ExtensionInvokeRequest {
   context: RequestContext | undefined;
   capabilityId: string;
@@ -8545,6 +8567,254 @@ export const CodeSearchResponse: MessageFns<CodeSearchResponse> = {
   },
 };
 
+function createBaseRepositoryMapRequest(): RepositoryMapRequest {
+  return { context: undefined, workspaceId: "", limit: 0, continuation: "" };
+}
+
+export const RepositoryMapRequest: MessageFns<RepositoryMapRequest> = {
+  encode(message: RepositoryMapRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.workspaceId !== "") {
+      writer.uint32(18).string(message.workspaceId);
+    }
+    if (message.limit !== 0) {
+      writer.uint32(24).uint32(message.limit);
+    }
+    if (message.continuation !== "") {
+      writer.uint32(34).string(message.continuation);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RepositoryMapRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRepositoryMapRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.workspaceId = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.limit = reader.uint32();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.continuation = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<RepositoryMapRequest>, I>>(base?: I): RepositoryMapRequest {
+    return RepositoryMapRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RepositoryMapRequest>, I>>(object: I): RepositoryMapRequest {
+    const message = createBaseRepositoryMapRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.workspaceId = object.workspaceId ?? "";
+    message.limit = object.limit ?? 0;
+    message.continuation = object.continuation ?? "";
+    return message;
+  },
+};
+
+function createBaseRepositoryMapEntry(): RepositoryMapEntry {
+  return { path: "", symbols: [], sourceSha256: "" };
+}
+
+export const RepositoryMapEntry: MessageFns<RepositoryMapEntry> = {
+  encode(message: RepositoryMapEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.path !== "") {
+      writer.uint32(10).string(message.path);
+    }
+    for (const v of message.symbols) {
+      writer.uint32(18).string(v!);
+    }
+    if (message.sourceSha256 !== "") {
+      writer.uint32(26).string(message.sourceSha256);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RepositoryMapEntry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRepositoryMapEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.path = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.symbols.push(reader.string());
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.sourceSha256 = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<RepositoryMapEntry>, I>>(base?: I): RepositoryMapEntry {
+    return RepositoryMapEntry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RepositoryMapEntry>, I>>(object: I): RepositoryMapEntry {
+    const message = createBaseRepositoryMapEntry();
+    message.path = object.path ?? "";
+    message.symbols = object.symbols?.map((e) => e) || [];
+    message.sourceSha256 = object.sourceSha256 ?? "";
+    return message;
+  },
+};
+
+function createBaseRepositoryMapResponse(): RepositoryMapResponse {
+  return { entries: [], indexRevision: "", truncated: false, continuation: undefined, totalEntries: 0 };
+}
+
+export const RepositoryMapResponse: MessageFns<RepositoryMapResponse> = {
+  encode(message: RepositoryMapResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.entries) {
+      RepositoryMapEntry.encode(v!, writer.uint32(10).fork()).join();
+    }
+    if (message.indexRevision !== "") {
+      writer.uint32(18).string(message.indexRevision);
+    }
+    if (message.truncated !== false) {
+      writer.uint32(24).bool(message.truncated);
+    }
+    if (message.continuation !== undefined) {
+      writer.uint32(34).string(message.continuation);
+    }
+    if (message.totalEntries !== 0) {
+      writer.uint32(40).uint32(message.totalEntries);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): RepositoryMapResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseRepositoryMapResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.entries.push(RepositoryMapEntry.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.indexRevision = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.truncated = reader.bool();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.continuation = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.totalEntries = reader.uint32();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<RepositoryMapResponse>, I>>(base?: I): RepositoryMapResponse {
+    return RepositoryMapResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<RepositoryMapResponse>, I>>(object: I): RepositoryMapResponse {
+    const message = createBaseRepositoryMapResponse();
+    message.entries = object.entries?.map((e) => RepositoryMapEntry.fromPartial(e)) || [];
+    message.indexRevision = object.indexRevision ?? "";
+    message.truncated = object.truncated ?? false;
+    message.continuation = object.continuation ?? undefined;
+    message.totalEntries = object.totalEntries ?? 0;
+    return message;
+  },
+};
+
 function createBaseExtensionInvokeRequest(): ExtensionInvokeRequest {
   return { context: undefined, capabilityId: "", operation: "", input: new Uint8Array(0) };
 }
@@ -9941,6 +10211,7 @@ export class ConnectorServiceClientImpl implements ConnectorService {
 
 export interface CodeIntelligenceService {
   Search(request: CodeSearchRequest): Promise<CodeSearchResponse>;
+  Map(request: RepositoryMapRequest): Promise<RepositoryMapResponse>;
 }
 
 export const CodeIntelligenceServiceServiceName = "terminus.kernel.v1.CodeIntelligenceService";
@@ -9951,11 +10222,18 @@ export class CodeIntelligenceServiceClientImpl implements CodeIntelligenceServic
     this.service = opts?.service || CodeIntelligenceServiceServiceName;
     this.rpc = rpc;
     this.Search = this.Search.bind(this);
+    this.Map = this.Map.bind(this);
   }
   Search(request: CodeSearchRequest): Promise<CodeSearchResponse> {
     const data = CodeSearchRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "Search", data);
     return promise.then((data) => CodeSearchResponse.decode(new BinaryReader(data)));
+  }
+
+  Map(request: RepositoryMapRequest): Promise<RepositoryMapResponse> {
+    const data = RepositoryMapRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "Map", data);
+    return promise.then((data) => RepositoryMapResponse.decode(new BinaryReader(data)));
   }
 }
 

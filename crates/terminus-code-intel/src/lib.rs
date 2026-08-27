@@ -20,7 +20,7 @@ mod persistent_index;
 mod symbols;
 
 pub use error::CodeIntelError;
-pub use index::{InMemorySymbolIndex, SymbolIndex};
+pub use index::{InMemorySymbolIndex, RepositoryMapEntry, RepositoryMapPage, SymbolIndex};
 pub use inspect::{
     CodeIntelService, DiagnoseResult, FileSystemWorkspaceSource, InspectResult, ReferenceResult,
     WorkspaceDiff, WorkspaceSource,

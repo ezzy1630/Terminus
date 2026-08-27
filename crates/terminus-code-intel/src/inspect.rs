@@ -1,5 +1,5 @@
 use crate::error::CodeIntelError;
-use crate::index::SymbolIndex;
+use crate::index::{RepositoryMapPage, SymbolIndex};
 use crate::symbols::Symbol;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -345,6 +345,51 @@ impl CodeIntelService {
 
     pub fn supported_languages(&self) -> Vec<String> {
         self.index.supported_languages()
+    }
+
+    pub fn repository_map(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<RepositoryMapPage, CodeIntelError> {
+        self.repository_map_filtered(limit, offset, |_| true)
+    }
+
+    /// Return a bounded repository map after applying a caller-owned path
+    /// predicate. The complete index is materialized only inside the kernel;
+    /// the predicate runs before pagination so scoped callers never observe
+    /// paths, counts, or symbols outside their authorization.
+    pub fn repository_map_filtered<F>(
+        &self,
+        limit: usize,
+        offset: usize,
+        allowed: F,
+    ) -> Result<RepositoryMapPage, CodeIntelError>
+    where
+        F: Fn(&str) -> bool,
+    {
+        self.refresh_index()?;
+        const MAX_COMPLETE_INDEX_ENTRIES: usize = 10_000;
+        let complete = self.index.repository_map(MAX_COMPLETE_INDEX_ENTRIES, 0)?;
+        if complete.next_offset.is_some() {
+            return Err(CodeIntelError::LanguageNotIndexed(
+                "repository map requires a complete bounded index".to_string(),
+            ));
+        }
+        let filtered = complete
+            .entries
+            .into_iter()
+            .filter(|entry| allowed(&entry.path))
+            .collect::<Vec<_>>();
+        let total_entries = filtered.len();
+        let start = offset.min(total_entries);
+        let end = start.saturating_add(limit.max(1)).min(total_entries);
+        Ok(RepositoryMapPage {
+            entries: filtered[start..end].to_vec(),
+            index_revision: complete.index_revision,
+            total_entries,
+            next_offset: (end < total_entries).then_some(end),
+        })
     }
 
     fn refresh_index(&self) -> Result<(), CodeIntelError> {

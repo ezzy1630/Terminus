@@ -2992,6 +2992,101 @@ export declare type CodeSearchResponse = Message<"terminus.kernel.v1.CodeSearchR
 export declare const CodeSearchResponseSchema: GenMessage<CodeSearchResponse>;
 
 /**
+ * @generated from message terminus.kernel.v1.RepositoryMapRequest
+ */
+export declare type RepositoryMapRequest = Message<"terminus.kernel.v1.RepositoryMapRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * @generated from field: string workspace_id = 2;
+   */
+  workspaceId: string;
+
+  /**
+   * @generated from field: uint32 limit = 3;
+   */
+  limit: number;
+
+  /**
+   * @generated from field: string continuation = 4;
+   */
+  continuation: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.RepositoryMapRequest.
+ * Use `create(RepositoryMapRequestSchema)` to create a new message.
+ */
+export declare const RepositoryMapRequestSchema: GenMessage<RepositoryMapRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.RepositoryMapEntry
+ */
+export declare type RepositoryMapEntry = Message<"terminus.kernel.v1.RepositoryMapEntry"> & {
+  /**
+   * @generated from field: string path = 1;
+   */
+  path: string;
+
+  /**
+   * @generated from field: repeated string symbols = 2;
+   */
+  symbols: string[];
+
+  /**
+   * Canonical sha256:<hex> source version
+   *
+   * @generated from field: string source_sha256 = 3;
+   */
+  sourceSha256: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.RepositoryMapEntry.
+ * Use `create(RepositoryMapEntrySchema)` to create a new message.
+ */
+export declare const RepositoryMapEntrySchema: GenMessage<RepositoryMapEntry>;
+
+/**
+ * @generated from message terminus.kernel.v1.RepositoryMapResponse
+ */
+export declare type RepositoryMapResponse = Message<"terminus.kernel.v1.RepositoryMapResponse"> & {
+  /**
+   * @generated from field: repeated terminus.kernel.v1.RepositoryMapEntry entries = 1;
+   */
+  entries: RepositoryMapEntry[];
+
+  /**
+   * @generated from field: string index_revision = 2;
+   */
+  indexRevision: string;
+
+  /**
+   * @generated from field: bool truncated = 3;
+   */
+  truncated: boolean;
+
+  /**
+   * @generated from field: optional string continuation = 4;
+   */
+  continuation?: string | undefined;
+
+  /**
+   * @generated from field: uint32 total_entries = 5;
+   */
+  totalEntries: number;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.RepositoryMapResponse.
+ * Use `create(RepositoryMapResponseSchema)` to create a new message.
+ */
+export declare const RepositoryMapResponseSchema: GenMessage<RepositoryMapResponse>;
+
+/**
  * @generated from message terminus.kernel.v1.ExtensionInvokeRequest
  */
 export declare type ExtensionInvokeRequest = Message<"terminus.kernel.v1.ExtensionInvokeRequest"> & {
@@ -3837,6 +3932,14 @@ export declare const CodeIntelligenceService: GenService<{
     methodKind: "unary";
     input: typeof CodeSearchRequestSchema;
     output: typeof CodeSearchResponseSchema;
+  },
+  /**
+   * @generated from rpc terminus.kernel.v1.CodeIntelligenceService.Map
+   */
+  map: {
+    methodKind: "unary";
+    input: typeof RepositoryMapRequestSchema;
+    output: typeof RepositoryMapResponseSchema;
   },
 }>;
 

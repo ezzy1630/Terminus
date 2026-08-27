@@ -617,6 +617,16 @@ fn all_match_or_unrestricted(
 /// - `**` matches recursively across path separators;
 /// - the slash immediately following `**` is optional, so `**/*.rs`
 ///   matches both `main.rs` and `src/main.rs`.
+///
+/// Match one workspace-relative path against an authorization scope glob.
+///
+/// This is public so kernel services can apply the same path semantics to
+/// result sets that are discovered internally rather than supplied as a
+/// single RPC path.
+pub fn workspace_path_matches(pattern: &str, value: &str) -> bool {
+    glob_match(pattern, value)
+}
+
 fn glob_match(pattern: &str, value: &str) -> bool {
     #[derive(Clone, Copy)]
     enum GlobToken {

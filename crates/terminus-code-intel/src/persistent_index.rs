@@ -1,5 +1,5 @@
 use crate::error::CodeIntelError;
-use crate::index::SymbolIndex;
+use crate::index::{RepositoryMapEntry, RepositoryMapPage, SymbolIndex};
 use crate::symbols::{Symbol, SymbolKind};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -558,6 +558,79 @@ impl SymbolIndex for PersistentSymbolIndex {
         Ok(paths)
     }
 
+    fn repository_map(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<RepositoryMapPage, CodeIntelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex lock failed: {e}")))?;
+        let mut revision_stmt =
+            conn.prepare("SELECT path, content_hash FROM file_meta ORDER BY path")?;
+        let revision_rows = revision_stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let revision_parts = revision_rows
+            .map(|row| {
+                let (path, hash) = row?;
+                Ok(format!("{path}\0{hash}"))
+            })
+            .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+        drop(revision_stmt);
+        let revision_input = revision_parts.join("\n");
+        let index_revision = format!("sha256:{:x}", Sha256::digest(revision_input.as_bytes()));
+        let total_entries = conn.query_row("SELECT COUNT(*) FROM file_meta", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        let total_entries = usize::try_from(total_entries).map_err(|_| {
+            CodeIntelError::LanguageNotIndexed("file count exceeds usize".to_string())
+        })?;
+        let effective_limit = limit.max(1);
+        let limit = i64::try_from(effective_limit).map_err(|_| {
+            CodeIntelError::LanguageNotIndexed("repository map limit exceeds i64".to_string())
+        })?;
+        let offset = i64::try_from(offset).map_err(|_| {
+            CodeIntelError::LanguageNotIndexed("repository map offset exceeds i64".to_string())
+        })?;
+        let mut file_stmt = conn
+            .prepare("SELECT path, content_hash FROM file_meta ORDER BY path LIMIT ?1 OFFSET ?2")?;
+        let page_rows = file_stmt
+            .query_map(params![limit, offset], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(file_stmt);
+        let mut entries = Vec::with_capacity(page_rows.len());
+        for (path, source_sha256) in page_rows {
+            let mut symbol_stmt = conn.prepare(
+                "SELECT name FROM symbols WHERE path = ?1 ORDER BY start_line, start_column, name",
+            )?;
+            let symbols = symbol_stmt
+                .query_map(params![path], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut symbols = symbols;
+            symbols.sort();
+            symbols.dedup();
+            entries.push(RepositoryMapEntry {
+                path,
+                symbols,
+                source_sha256: format!("sha256:{source_sha256}"),
+            });
+        }
+        let offset = usize::try_from(offset).map_err(|_| {
+            CodeIntelError::LanguageNotIndexed("repository map offset is negative".to_string())
+        })?;
+        let end = offset.saturating_add(entries.len()).min(total_entries);
+        Ok(RepositoryMapPage {
+            entries,
+            index_revision,
+            total_entries,
+            next_offset: (end < total_entries).then_some(end),
+        })
+    }
+
     fn remove_file(&self, path: &str) -> Result<(), CodeIntelError> {
         let mut conn = self
             .conn
@@ -684,5 +757,32 @@ mod tests {
         let ownership = index.get_test_ownership("tests/auth.test.ts").unwrap();
         assert_eq!(ownership.len(), 1);
         assert_eq!(ownership[0].symbol_name, "test_login");
+    }
+
+    #[test]
+    fn repository_map_is_revisioned_and_paged() {
+        let index = PersistentSymbolIndex::in_memory().unwrap();
+        index.index_file("src/zeta.rs", "fn zeta() {}\n").unwrap();
+        index
+            .index_file("src/alpha.rs", "fn alpha() {}\nfn alpha() {}\n")
+            .unwrap();
+
+        let first = index.repository_map(1, 0).unwrap();
+        assert_eq!(first.total_entries, 2);
+        assert_eq!(first.entries[0].path, "src/alpha.rs");
+        assert_eq!(first.entries[0].symbols, vec!["alpha"]);
+        assert_eq!(first.next_offset, Some(1));
+        assert!(first.index_revision.starts_with("sha256:"));
+
+        let second = index.repository_map(1, 1).unwrap();
+        assert_eq!(second.index_revision, first.index_revision);
+        assert_eq!(second.entries[0].path, "src/zeta.rs");
+        assert_eq!(second.next_offset, None);
+
+        index
+            .index_file("src/zeta.rs", "fn zeta_changed() {}\n")
+            .unwrap();
+        let changed = index.repository_map(1, 0).unwrap();
+        assert_ne!(changed.index_revision, first.index_revision);
     }
 }

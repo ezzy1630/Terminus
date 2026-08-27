@@ -4,6 +4,21 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryMapEntry {
+    pub path: String,
+    pub symbols: Vec<String>,
+    pub source_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryMapPage {
+    pub entries: Vec<RepositoryMapEntry>,
+    pub index_revision: String,
+    pub total_entries: usize,
+    pub next_offset: Option<usize>,
+}
+
 /// The high-level symbol index trait.
 pub trait SymbolIndex: Send + Sync {
     fn index_file(&self, path: &str, content: &str) -> Result<(), CodeIntelError>;
@@ -16,6 +31,12 @@ pub trait SymbolIndex: Send + Sync {
     fn indexed_paths(&self) -> Result<Vec<String>, CodeIntelError>;
     /// Remove every indexed observation belonging to a path.
     fn remove_file(&self, path: &str) -> Result<(), CodeIntelError>;
+    /// Return a deterministic, revisioned file-to-symbol map page.
+    fn repository_map(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<RepositoryMapPage, CodeIntelError>;
     fn supported_languages(&self) -> Vec<String>;
 }
 
@@ -171,6 +192,64 @@ impl SymbolIndex for InMemorySymbolIndex {
             !entries.is_empty()
         });
         Ok(())
+    }
+
+    fn repository_map(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<RepositoryMapPage, CodeIntelError> {
+        let hashes = self
+            .file_hashes
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex: {e}")))?;
+        let mut paths = hashes.keys().cloned().collect::<Vec<_>>();
+        paths.sort();
+        let revision_input = paths
+            .iter()
+            .map(|path| {
+                format!(
+                    "{path}\0{}",
+                    hashes.get(path).map(String::as_str).unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let index_revision = format!("sha256:{:x}", Sha256::digest(revision_input.as_bytes()));
+        let total_entries = paths.len();
+        let start = offset.min(total_entries);
+        let end = start.saturating_add(limit.max(1)).min(total_entries);
+        let symbols = self
+            .symbols
+            .lock()
+            .map_err(|e| CodeIntelError::LanguageNotIndexed(format!("mutex: {e}")))?;
+        let entries = paths[start..end]
+            .iter()
+            .map(|path| {
+                let mut names = symbols
+                    .values()
+                    .flat_map(|items| items.iter())
+                    .filter(|symbol| symbol.path == *path)
+                    .map(|symbol| symbol.name.clone())
+                    .collect::<Vec<_>>();
+                names.sort();
+                names.dedup();
+                RepositoryMapEntry {
+                    path: path.clone(),
+                    symbols: names,
+                    source_sha256: hashes
+                        .get(path)
+                        .map(|hash| format!("sha256:{hash}"))
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        Ok(RepositoryMapPage {
+            entries,
+            index_revision,
+            total_entries,
+            next_offset: (end < total_entries).then_some(end),
+        })
     }
 
     fn supported_languages(&self) -> Vec<String> {

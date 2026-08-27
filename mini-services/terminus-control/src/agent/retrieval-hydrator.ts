@@ -128,6 +128,10 @@ export interface RepoMapEntry {
 export interface RepoMapOptions {
   readonly maxEntries?: number;
   readonly title?: string;
+  /** Number of indexed entries omitted outside the supplied page. */
+  readonly omittedEntries?: number;
+  /** Opaque continuation returned by the kernel map RPC. */
+  readonly continuationToken?: string | null;
 }
 
 /**
@@ -146,12 +150,18 @@ export function buildRepositoryMapFragment(
       ? entry.path
       : `${entry.path}: ${entry.symbols.join(", ")}`,
   );
-  const omittedEntries = entries.length - selected.length;
+  const omittedEntries = Math.max(
+    options.omittedEntries ?? entries.length - selected.length,
+    entries.length - selected.length,
+  );
   const text = [
     `# ${options.title ?? "Repository map"}`,
     ...(omittedEntries > 0
-      ? [`(showing ${selected.length} of ${entries.length} indexed files; ${omittedEntries} omitted — request search for more)`]
+      ? [`(showing ${selected.length} of ${selected.length + omittedEntries} indexed files; ${omittedEntries} omitted — use the continuation token or request search for more)`]
       : []),
+    ...(options.continuationToken === undefined || options.continuationToken === null
+      ? []
+      : [`continuation: ${options.continuationToken}`]),
     "",
     ...lines,
   ].join("\n");

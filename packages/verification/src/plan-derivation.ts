@@ -26,10 +26,25 @@ export interface VerificationDerivationSignals {
   readonly diagnostics?: readonly string[] | undefined;
   /** Repository-native commands that are safe to use as targeted checks. */
   readonly nativeTestCommands?: readonly string[] | undefined;
+  /** Source paths that supplied the native verification recipes. */
+  readonly nativeRecipeSources?: readonly string[] | undefined;
+  /** Source path/version pairs for the native verification recipes. */
+  readonly nativeRecipeSourceVersions?: readonly string[] | undefined;
+  /** Bounded, revisioned repository-map observation from the kernel. */
+  readonly repositoryMap?: RepositoryMapVerificationSignal | undefined;
   /** Paths known to be generated outputs or generated-code inputs. */
   readonly generatedPaths?: readonly string[] | undefined;
   /** Whether a governed UI/browser predicate is available in this runtime. */
   readonly uiComputerUseAvailable?: boolean | undefined;
+}
+
+export interface RepositoryMapVerificationSignal {
+  readonly sourceVersion: string;
+  readonly entryCount: number;
+  readonly totalEntryCount: number;
+  readonly omittedEntries: number;
+  readonly continuationToken: string | null;
+  readonly paths: readonly string[];
 }
 
 export interface VerificationPlanDerivationInput {
@@ -196,6 +211,14 @@ function makeNode(
       failingTestCount: uniqueSorted(input.signals.failingTests ?? []).length,
       diagnosticCount: uniqueSorted(input.signals.diagnostics ?? []).length,
       nativeTestCommandCount: uniqueSorted(input.signals.nativeTestCommands ?? []).length,
+      nativeRecipeSourceCount: uniqueSorted(input.signals.nativeRecipeSources ?? []).length,
+      nativeRecipeSourceVersionCount: uniqueSorted(input.signals.nativeRecipeSourceVersions ?? []).length,
+      repositoryMapAvailable: input.signals.repositoryMap !== undefined,
+      repositoryMapEntryCount: input.signals.repositoryMap?.entryCount ?? 0,
+      repositoryMapTotalEntryCount: input.signals.repositoryMap?.totalEntryCount ?? 0,
+      repositoryMapOmittedEntryCount: input.signals.repositoryMap?.omittedEntries ?? 0,
+      repositoryMapContinuationAvailable: input.signals.repositoryMap?.continuationToken !== null
+        && input.signals.repositoryMap?.continuationToken !== undefined,
       generatedPathCount: uniqueSorted(input.signals.generatedPaths ?? []).length,
       uiComputerUseAvailable: input.signals.uiComputerUseAvailable === true,
     },

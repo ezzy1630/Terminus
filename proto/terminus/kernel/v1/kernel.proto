@@ -818,8 +818,30 @@ message CodeSearchResponse {
   optional string continuation = 3;
 }
 
+message RepositoryMapRequest {
+  RequestContext context = 1;
+  string workspace_id = 2;
+  uint32 limit = 3;
+  string continuation = 4;
+}
+
+message RepositoryMapEntry {
+  string path = 1;
+  repeated string symbols = 2;
+  string source_sha256 = 3;              // Canonical sha256:<hex> source version
+}
+
+message RepositoryMapResponse {
+  repeated RepositoryMapEntry entries = 1;
+  string index_revision = 2;
+  bool truncated = 3;
+  optional string continuation = 4;
+  uint32 total_entries = 5;
+}
+
 service CodeIntelligenceService {
   rpc Search(CodeSearchRequest) returns (CodeSearchResponse);
+  rpc Map(RepositoryMapRequest) returns (RepositoryMapResponse);
 }
 
 // =============================================================================

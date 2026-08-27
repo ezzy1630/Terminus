@@ -21,6 +21,6 @@ mod token;
 
 pub use error::AuthzError;
 pub use token::{
-    CapabilityToken, OperationClass, RevocationList, Scope, TokenBinder, TokenClaims, TokenIssuer,
-    TokenRevoker,
+    workspace_path_matches, CapabilityToken, OperationClass, RevocationList, Scope, TokenBinder,
+    TokenClaims, TokenIssuer, TokenRevoker,
 };

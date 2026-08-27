@@ -3252,6 +3252,50 @@ impl CodeIntelligenceService {
         })
     }
 
+    pub fn repository_map(
+        &self,
+        ctx: &RequestContext,
+        _intent: &EffectIntent,
+        limit: usize,
+        offset: usize,
+        expected_revision: Option<&str>,
+    ) -> KernelResult<terminus_code_intel::RepositoryMapPage> {
+        let token = validate_capability_for_op(
+            &self.token_issuer,
+            ctx,
+            OperationClass::CodeIntel,
+            &Scope::default(),
+        )?;
+        let service = self.service_for_context(ctx, &token)?;
+        let path_patterns = token.claims.max_scope.workspace_paths.clone();
+        let page = service
+            .repository_map_filtered(limit, offset, |path| {
+                path_patterns.is_empty()
+                    || path_patterns
+                        .iter()
+                        .any(|pattern| terminus_authz::workspace_path_matches(pattern, path))
+            })
+            .map_err(|e| {
+                KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::Internal,
+                    terminus_kernel_protocol::ErrorCategory::Internal,
+                    format!("{e}"),
+                    false,
+                )
+            })?;
+        if let Some(expected) = expected_revision {
+            if expected != page.index_revision {
+                return Err(KernelError::new(
+                    terminus_kernel_protocol::ErrorCode::StaleSourceVersion,
+                    terminus_kernel_protocol::ErrorCategory::Conflict,
+                    "repository map continuation references a stale index revision",
+                    true,
+                ));
+            }
+        }
+        Ok(page)
+    }
+
     pub fn find_references(
         &self,
         ctx: &RequestContext,
