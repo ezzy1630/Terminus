@@ -18,6 +18,7 @@ model/budgets control-plane-side, so ``RunRequest.budgets`` /
 provenance but cannot steer the remote turn. Hidden grader inputs under
 ``hidden/`` are excluded from grading trust by end-state graders, since the
 v1 scope grammar has no path negation.
+
 Configuration (all required unless a fake server supplies them in tests):
 
 - ``TERMINUS_CONTROL_URL``   base URL of a running terminus-control instance
