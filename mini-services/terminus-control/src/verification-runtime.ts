@@ -28,12 +28,13 @@ import {
   VerificationLifecycle,
   buildVerificationPlan,
   createStandardPredicateRegistry,
-  criterionNode,
+  deriveVerificationNodes,
   type PredicateCommandRunner,
   type EvidenceArtifactWriter,
   type ClaimEvidenceGraph,
   type VerificationAttemptRecord,
-  type PredicateType,
+  type VerificationDerivationSignals,
+  type VerificationPlanMode,
 } from "@terminus/verification";
 import type { KernelUdsClients } from "./kernel-uds.js";
 import type {
@@ -930,57 +931,20 @@ function candidateBranchFromRow(row: {
 
 export function defaultCriteriaNodes(
   criteria: readonly AcceptanceCriterion[],
-): ReturnType<typeof criterionNode>[] {
-  // VerificationNode.id is globally unique in the control-plane schema. A
-  // repair creates a new plan for the same criteria, so criterion-derived
-  // names must be namespaced per plan attempt rather than reused.
-  const nodeId = (name: string): string => `${name}_${randomUUID()}`;
-  if (criteria.length === 0) {
-    const parseId = nodeId("parse");
-    const diagnosticsId = nodeId("diagnostics");
-    const narrowTestsId = nodeId("narrow_tests");
-    return [
-      criterionNode({
-        id: parseId,
-        criterionId: null,
-        predicateType: "file_parses",
-        paths: ["."],
-        required: true,
-      }),
-      criterionNode({
-        id: diagnosticsId,
-        criterionId: null,
-        predicateType: "static_diagnostics",
-        paths: ["."],
-        required: true,
-        dependsOn: [parseId],
-      }),
-      criterionNode({
-        id: narrowTestsId,
-        criterionId: null,
-        predicateType: "unit_test",
-        paths: ["."],
-        required: true,
-        dependsOn: [diagnosticsId],
-      }),
-    ];
-  }
-  const nodeIds = criteria.map((criterion) => nodeId(`ac_${criterion.id}`));
-  return criteria.map((c, i) => {
-    const hint = c.verificationHint?.trim() ?? "";
-    const command = hint.toLowerCase().startsWith("command:")
-      ? hint.slice("command:".length).trim()
-      : undefined;
-    const predicateType: PredicateType = i === 0 ? "file_parses" : "unit_test";
-    const id = nodeIds[i]!;
-    const node = {
-      id,
-      criterionId: c.id,
-      predicateType,
-      paths: ["."],
-      required: c.required,
-      dependsOn: i === 0 ? [] : [nodeIds[i - 1]!],
-    };
-    return criterionNode(command === undefined ? node : { ...node, command });
+  options: {
+    readonly objective?: string | undefined;
+    readonly riskClass?: "low" | "normal" | "high" | "critical" | undefined;
+    readonly mode?: VerificationPlanMode | undefined;
+    readonly signals?: VerificationDerivationSignals | undefined;
+  } = {},
+): VerificationNode[] {
+  const derivation = deriveVerificationNodes({
+    criteria,
+    objective: options.objective ?? "",
+    riskClass: options.riskClass ?? "normal",
+    mode: options.mode ?? "admission",
+    signals: options.signals ?? { changedFiles: ["."] },
+    idSource: uuid,
   });
+  return [...derivation.nodes];
 }

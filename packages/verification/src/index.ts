@@ -986,4 +986,5 @@ export * from "./binding.js";
 export * from "./completion-gate.js";
 export * from "./standard-predicates.js";
 export * from "./lifecycle.js";
+export * from "./plan-derivation.js";
 export * from "./harness-verify.js";

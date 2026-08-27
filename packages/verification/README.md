@@ -17,6 +17,10 @@ Per SPEC §17, §40.
   engines, etc.
 - `evaluateCompletionExpression(expr, results)` — parses the simple boolean
   expression used by plans.
+- `deriveVerificationNodes(input)` — selects typed verification predicates from
+  acceptance criteria, changed paths, risk, repository signals, and available
+  native test commands. It returns the nodes, required completion expression,
+  and per-node selection rationale.
 
 ## Invariants
 
@@ -26,3 +30,7 @@ Per SPEC §17, §40.
   `unverifiable`, with reason. The harness MUST NOT convert "no test exists"
   into a pass.
 - A flaky pass may not satisfy a high-risk criterion without policy approval.
+- Admission mode makes selected auxiliary checks required. Incremental mode
+  keeps those checks optional and does not let them block required criteria.
+- Derived node specifications record the derivation version and signal counts,
+  so a persisted plan explains why each predicate was selected.

@@ -11375,6 +11375,9 @@ async function agentLoop(turnId: string): Promise<void> {
       priorFailureSignatures: [...new Set([...storedFailureSignatures, ...eventFailureSignatures])],
     });
     let latestChangedFiles: readonly string[] = [];
+    let latestInstructionHashes: readonly string[] = [];
+    let latestFailureSelectors: readonly string[] = [];
+    let latestDiagnostics: readonly string[] = [];
     const contextEpoch = await ensureContextEpoch({
       db,
       threadId: turn.threadId,
@@ -11532,6 +11535,8 @@ async function agentLoop(turnId: string): Promise<void> {
         priorVerificationFailures,
       });
       latestChangedFiles = [...contextState.taskSnapshot.changedFiles];
+      latestFailureSelectors = [...contextState.taskSnapshot.failingTests];
+      latestDiagnostics = [...contextState.taskSnapshot.diagnostics];
       const effectiveTaskSnapshot: TaskSnapshot = {
         ...taskSnapshot,
         changedFiles: contextState.taskSnapshot.changedFiles,
@@ -11559,6 +11564,7 @@ async function agentLoop(turnId: string): Promise<void> {
         observedAt: worldState.observedAt,
         signal: abortController.signal,
       });
+      latestInstructionHashes = projectInstructionFragments.map((fragment) => fragment.contentRef.hash);
       // R5: cross-turn continuity — when this turn has no episodes yet,
       // inject a bounded excerpt of the previous completed turn so the model
       // does not restart from amnesia. Deterministic; no extra LLM call.
@@ -12680,8 +12686,27 @@ async function agentLoop(turnId: string): Promise<void> {
           });
           plan = restoredPlan;
         } else {
-          const nodes = defaultCriteriaNodes(criteria);
-          const completionExpression = nodes.map((n) => n.id).join(" && ");
+          const nodes = defaultCriteriaNodes(criteria, {
+            objective: contract.objective,
+            riskClass: contract.riskClass,
+            mode: "admission",
+            signals: {
+              changedFiles: latestChangedFiles,
+              projectFiles: [
+                ...contract.allowedScope.readPaths,
+                ...contract.allowedScope.writePaths,
+              ],
+              instructionHashes: latestInstructionHashes,
+              failingTests: latestFailureSelectors,
+              diagnostics: latestDiagnostics,
+              generatedPaths: latestChangedFiles.filter((path) => /generated/i.test(path)),
+              uiComputerUseAvailable: false,
+            },
+          });
+          const completionExpression = nodes
+            .filter((node) => node.required)
+            .map((node) => node.id)
+            .join(" && ");
           const createdPlan = await runtime.lifecycle.createPlan({
             taskContractId: task.id as never,
             taskContractVersion: task.activeContractVersion,
