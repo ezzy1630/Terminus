@@ -154,10 +154,13 @@ export function buildRepositoryMapFragment(
     options.omittedEntries ?? entries.length - selected.length,
     entries.length - selected.length,
   );
+  const omissionGuidance = options.continuationToken === undefined || options.continuationToken === null
+    ? "request search for more"
+    : "use the continuation token or request search for more";
   const text = [
     `# ${options.title ?? "Repository map"}`,
     ...(omittedEntries > 0
-      ? [`(showing ${selected.length} of ${selected.length + omittedEntries} indexed files; ${omittedEntries} omitted — use the continuation token or request search for more)`]
+      ? [`(showing ${selected.length} of ${selected.length + omittedEntries} indexed files; ${omittedEntries} omitted; ${omissionGuidance})`]
       : []),
     ...(options.continuationToken === undefined || options.continuationToken === null
       ? []

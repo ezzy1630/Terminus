@@ -86,6 +86,15 @@ describe("buildRepositoryMapFragment", () => {
     expect(map.text).toContain("showing 1 of 5 indexed files");
     expect(map.text).toContain("continuation: v1|sha256:revision|1");
   });
+
+  test("does not advertise a continuation after a complete read", () => {
+    const map = buildRepositoryMapFragment([entries[0]!], {
+      omittedEntries: 1,
+      continuationToken: null,
+    });
+    expect(map.text).toContain("request search for more");
+    expect(map.text).not.toContain("use the continuation token");
+  });
 });
 
 describe("hashFragmentText", () => {

@@ -339,6 +339,10 @@ import {
   discoverNativeTestRecipes,
   type RepositoryFileObservation,
 } from "./agent/repository-signals.js";
+import {
+  readCompleteRepositoryMap,
+  type RepositoryMapObservation,
+} from "./agent/repository-map.js";
 import { HARD_MAX_STEPS, TurnBudget } from "./agent/turn-budget.js";
 import type { ArtifactClient } from "@terminus/artifact-client";
 import type {
@@ -10447,18 +10451,6 @@ async function loadRepositoryInstructionFragments(
   });
 }
 
-interface RepositoryMapObservation {
-  readonly entries: readonly {
-    readonly path: string;
-    readonly symbols: readonly string[];
-    readonly sourceSha256: string;
-  }[];
-  readonly indexRevision: string;
-  readonly totalEntries: number;
-  readonly truncated: boolean;
-  readonly continuationToken: string | null;
-}
-
 interface RepositoryDiscoverySignals {
   readonly repositoryMap: RepositoryMapObservation | null;
   readonly verificationRepositoryMap: RepositoryMapVerificationSignal | undefined;
@@ -10481,16 +10473,9 @@ interface RepositorySignalDiscoveryInput {
 }
 
 const SOURCE_VERSION_PATTERN = /^sha256:[0-9a-f]{64}$/i;
-const REPOSITORY_MAP_REVISION_PATTERN = /^sha256:[0-9a-f]{64}$/i;
-
-function isSafeRepositoryMapPath(path: string): boolean {
-  return path.length > 0
-    && path.length <= 1_024
-    && !isAbsolute(path)
-    && !path.includes("\\")
-    && !/[\r\n]/.test(path)
-    && !path.split("/").some((segment) => segment === ".." || segment.length === 0 && path !== "");
-}
+const REPOSITORY_MAP_PAGE_SIZE = 200;
+const REPOSITORY_MAP_MAX_PAGES = 64;
+const REPOSITORY_MAP_CONTEXT_ENTRY_LIMIT = 200;
 
 function repositoryMapVerificationSignal(
   observation: RepositoryMapObservation,
@@ -10568,54 +10553,30 @@ async function discoverRepositorySignals(
   const nativeRecipes = discoverNativeTestRecipes(observations);
   let repositoryMap: RepositoryMapObservation | null = null;
   try {
-    if (input.signal.aborted) throw new ToolAbortedError();
-    const response = await input.clients.codeIntel.Map({
-      context: {
-        ...input.codeIntelContext,
-        requestId: randomUUID(),
-        idempotencyKey: `repository-map:${input.taskId}:${input.turnId}`,
+    repositoryMap = await readCompleteRepositoryMap({
+      maxPages: REPOSITORY_MAP_MAX_PAGES,
+      readPage: async (continuationToken, pageNumber) => {
+        if (input.signal.aborted) throw new ToolAbortedError();
+        const response = await input.clients.codeIntel.Map({
+          context: {
+            ...input.codeIntelContext,
+            requestId: randomUUID(),
+            idempotencyKey: `repository-map:${input.taskId}:${input.turnId}:${pageNumber}`,
+          },
+          workspaceId: input.workspaceId,
+          limit: REPOSITORY_MAP_PAGE_SIZE,
+          continuation: continuationToken,
+        });
+        if (input.signal.aborted) throw new ToolAbortedError();
+        return {
+          entries: response.entries,
+          indexRevision: response.indexRevision,
+          totalEntries: response.totalEntries,
+          truncated: response.truncated,
+          continuationToken: response.continuation ?? null,
+        };
       },
-      workspaceId: input.workspaceId,
-      limit: 200,
-      continuation: "",
     });
-    const continuationToken = response.continuation ?? null;
-    if (!REPOSITORY_MAP_REVISION_PATTERN.test(response.indexRevision)) {
-      throw new Error("kernel returned an invalid repository map revision");
-    }
-    if (response.totalEntries < response.entries.length
-      || response.truncated !== (response.entries.length < response.totalEntries)
-      || response.truncated !== (continuationToken !== null)) {
-      throw new Error("kernel returned an inconsistent repository map page");
-    }
-    const paths = new Set<string>();
-    const entries = response.entries.map((entry) => {
-      if (!isSafeRepositoryMapPath(entry.path) || paths.has(entry.path)) {
-        throw new Error("kernel returned an unsafe or duplicate repository map path");
-      }
-      paths.add(entry.path);
-      if (!SOURCE_VERSION_PATTERN.test(entry.sourceSha256)) {
-        throw new Error("kernel returned an invalid repository map source version");
-      }
-      const symbols = entry.symbols.map((symbol) => {
-        if (symbol.length === 0 || symbol.length > 256 || /[\r\n]/.test(symbol)) {
-          throw new Error("kernel returned an invalid repository map symbol");
-        }
-        return symbol;
-      });
-      return {
-        path: entry.path,
-        symbols,
-        sourceSha256: entry.sourceSha256,
-      };
-    });
-    repositoryMap = {
-      entries,
-      indexRevision: response.indexRevision,
-      totalEntries: response.totalEntries,
-      truncated: response.truncated,
-      continuationToken,
-    };
   } catch (error: unknown) {
     if (error instanceof ToolAbortedError) throw error;
     // Map retrieval is advisory context. A failed or malformed response is
@@ -10684,13 +10645,13 @@ function kernelRetrievalPipeline(
   const repositoryMapFragment = repositoryMap === null || repositoryMap.entries.length === 0
     ? null
     : (() => {
-        const entries = repositoryMap.entries.map((entry) => ({
+        const entries = repositoryMap.entries.slice(0, REPOSITORY_MAP_CONTEXT_ENTRY_LIMIT).map((entry) => ({
           path: entry.path,
           symbols: entry.symbols,
         }));
         const rendered = buildRepositoryMapFragment(entries, {
           maxEntries: entries.length,
-          omittedEntries: Math.max(0, repositoryMap.totalEntries - entries.length),
+          omittedEntries: Math.max(0, repositoryMap.entries.length - entries.length),
           continuationToken: repositoryMap.continuationToken,
           title: "Kernel repository map",
         });
