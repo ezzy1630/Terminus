@@ -167,6 +167,116 @@ describe("Database Migration Integrity & Corruption Detection", () => {
     }
   });
 
+  test("repair attempts persist identity, provenance, and lease association", async () => {
+    const testDir = join(tmpdir(), `terminus-mig-repair-${Date.now()}`);
+    mkdirSync(testDir, { recursive: true });
+    const dbPath = join(testDir, "test.db");
+
+    try {
+      expect(await runMigrations(dbPath)).toBe(0);
+      const db = new Database(dbPath);
+      db.exec("PRAGMA foreign_keys = ON");
+      const columns = db.query("PRAGMA table_info(repair_attempts)").all() as Array<{ name: string; type: string; notnull: number }>;
+      expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
+        "id",
+        "task_id",
+        "parent_turn_id",
+        "repair_turn_id",
+        "lease_key",
+        "attempt_number",
+        "directive_artifact",
+        "failure_signatures_json",
+        "source_revision",
+        "environment_digest",
+      ]));
+      expect(columns.find((column) => column.name === "id")?.notnull).toBe(1);
+
+      const now = Date.now();
+      db.query(
+        "INSERT INTO workspaces (id, kind, root_uri, canonical_root, trust, policy_profile_id, created_at, last_opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("workspace-repair", "local_directory", "file:///workspace", "/workspace-repair", "trusted", "default", now, now);
+      db.query(
+        "INSERT INTO sessions (id, workspace_id, owner_principal, title, status, default_model_profile, default_permission_profile, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("session-repair", "workspace-repair", "tester", "repair", "active", "default", "default", "{}", now, now);
+      db.query(
+        "INSERT INTO threads (id, session_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      ).run("thread-repair", "session-repair", "active", now, now);
+      db.query(
+        "INSERT INTO tasks (id, session_id, thread_id, status, phase, budget_json, scope_digest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("task-repair", "session-repair", "thread-repair", "ACTIVE", "EXECUTE", "{}", "sha256:scope", now, now);
+      db.query(
+        "INSERT INTO turns (id, thread_id, task_id, sequence, state, initiating_actor) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run("turn-repair-parent", "thread-repair", "task-repair", 1, "REPAIR_PENDING", "agent");
+      db.query(
+        "INSERT INTO leases (lease_key, owner_instance, fencing_token, acquired_at, expires_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run("terminus-repair-attempt:repair-1", "unclaimed", 0, now, 0, "{}");
+      db.query(
+        `INSERT INTO repair_attempts (
+          id, task_id, parent_turn_id, lease_key, attempt_number, max_attempts,
+          state, directive_artifact, failed_node_ids_json, failure_signatures_json,
+          changed_files_json, source_revision, environment_digest, remaining_budget_json,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        "repair-1",
+        "task-repair",
+        "turn-repair-parent",
+        "terminus-repair-attempt:repair-1",
+        1,
+        2,
+        "PENDING",
+        `artifact://sha256/${"a".repeat(64)}`,
+        '["verify-tests"]',
+        '["sig-1"]',
+        '["src/calc.ts"]',
+        "git:source-1",
+        "sha256:environment-1",
+        '{"remaining_attempts":1}',
+        now,
+      );
+      const persisted = db.query(
+        "SELECT state, attempt_number, max_attempts, source_revision, environment_digest, lease_key FROM repair_attempts WHERE id = ?",
+      ).get("repair-1") as { state: string; attempt_number: number; max_attempts: number; source_revision: string; environment_digest: string; lease_key: string };
+      expect(persisted).toEqual({
+        state: "PENDING",
+        attempt_number: 1,
+        max_attempts: 2,
+        source_revision: "git:source-1",
+        environment_digest: "sha256:environment-1",
+        lease_key: "terminus-repair-attempt:repair-1",
+      });
+
+      db.query(
+        "INSERT INTO leases (lease_key, owner_instance, fencing_token, acquired_at, expires_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run("terminus-repair-attempt:repair-2", "unclaimed", 0, now, 0, "{}");
+      expect(() => db.query(
+        `INSERT INTO repair_attempts (
+          id, task_id, parent_turn_id, lease_key, attempt_number, max_attempts,
+          state, directive_artifact, failed_node_ids_json, failure_signatures_json,
+          changed_files_json, source_revision, remaining_budget_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        "repair-2",
+        "task-repair",
+        "turn-repair-parent",
+        "terminus-repair-attempt:repair-2",
+        1,
+        2,
+        "PENDING",
+        `artifact://sha256/${"b".repeat(64)}`,
+        "[]",
+        "[]",
+        "[]",
+        "git:source-2",
+        "{}",
+        now,
+      )).toThrow();
+      db.close();
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   test("Database integrity check rejects corrupted database files", () => {
     const testDir = join(tmpdir(), `terminus-corrupt-test-${Date.now()}`);
     mkdirSync(testDir, { recursive: true });

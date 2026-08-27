@@ -4,6 +4,22 @@ export interface VerificationTaskState {
   readonly status: string;
 }
 
+export interface RepairAttemptPersistenceInput {
+  readonly id: string;
+  readonly taskId: string;
+  readonly parentTurnId: string;
+  readonly leaseKey: string;
+  readonly attemptNumber: number;
+  readonly maxAttempts: number;
+  readonly directiveArtifact: string;
+  readonly failedNodeIds: readonly string[];
+  readonly failureSignatures: readonly string[];
+  readonly changedFiles: readonly string[];
+  readonly sourceRevision: string;
+  readonly environmentDigest: string | null;
+  readonly remainingBudgetJson: string;
+}
+
 export interface VerificationTransitionInput {
   readonly taskId: string;
   readonly status: string;
@@ -19,6 +35,7 @@ export interface VerificationTransitionInput {
     readonly failureSignatures: readonly string[];
     readonly sourceRevision: string;
   };
+  readonly repairAttempt?: RepairAttemptPersistenceInput;
 }
 
 export interface VerificationCoordinatorDependencies<TTransaction> {
@@ -36,6 +53,11 @@ export interface VerificationCoordinatorDependencies<TTransaction> {
     expectedStatuses: readonly string[],
     turnId: string,
     expectedTurnState: string,
+  ) => Promise<void>;
+  /** Persist the repair attempt and its unclaimed lease in the transition transaction. */
+  readonly createRepairAttempt?: (
+    transaction: TTransaction,
+    input: RepairAttemptPersistenceInput,
   ) => Promise<void>;
   readonly mutate: MutationRunner;
   readonly projectTask: (taskId: string, eventType: string) => Promise<void>;
@@ -92,6 +114,9 @@ export class VerificationCoordinator<TTransaction> {
   async scheduleRepair(
     taskId: string,
     input: {
+      readonly repairAttemptId: string;
+      readonly parentTurnId: string;
+      readonly leaseKey: string;
       readonly attemptNumber: number;
       readonly directiveArtifactUri: string;
       readonly failedNodeIds: readonly string[];
@@ -100,6 +125,9 @@ export class VerificationCoordinator<TTransaction> {
       readonly stopReason?: string;
       readonly maxAttempts?: number;
       readonly sourceRevision?: string;
+      readonly changedFiles?: readonly string[];
+      readonly environmentDigest?: string | null;
+      readonly remainingBudgetJson?: string;
     },
   ): Promise<void> {
     await this.transition({
@@ -113,6 +141,7 @@ export class VerificationCoordinator<TTransaction> {
         phase: "EXECUTE",
         status: "ACTIVE",
         repair_attempt: input.attemptNumber,
+        repair_attempt_id: input.repairAttemptId,
         directive_artifact: input.directiveArtifactUri,
         failed_nodes: [...input.failedNodeIds],
         ...(input.failureSignatures === undefined ? {} : { failure_signatures: [...input.failureSignatures] }),
@@ -130,6 +159,23 @@ export class VerificationCoordinator<TTransaction> {
               sourceRevision: input.sourceRevision,
             },
           }),
+      repairAttempt: {
+        id: input.repairAttemptId,
+        taskId,
+        parentTurnId: input.parentTurnId,
+        leaseKey: input.leaseKey,
+        attemptNumber: input.attemptNumber,
+        maxAttempts: input.maxAttempts ?? input.attemptNumber,
+        directiveArtifact: input.directiveArtifactUri,
+        failedNodeIds: [...input.failedNodeIds],
+        failureSignatures: [...input.failureSignatures ?? []],
+        changedFiles: [...input.changedFiles ?? []],
+        sourceRevision: input.sourceRevision ?? "unknown",
+        environmentDigest: input.environmentDigest ?? null,
+        remainingBudgetJson: input.remainingBudgetJson ?? JSON.stringify({
+          remaining_attempts: input.remainingAttempts ?? null,
+        }),
+      },
     }, ["VERIFYING"]);
   }
 
@@ -184,6 +230,13 @@ export class VerificationCoordinator<TTransaction> {
         },
         async (transaction) => {
           await this.dependencies.updateTask(transaction, input, expectedStatuses);
+          if (input.repairAttempt !== undefined) {
+            const createRepairAttempt = this.dependencies.createRepairAttempt;
+            if (createRepairAttempt === undefined) {
+              throw new Error("durable repair-attempt persistence is not configured");
+            }
+            await createRepairAttempt(transaction, input.repairAttempt);
+          }
         },
       );
     });

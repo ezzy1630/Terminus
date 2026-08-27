@@ -6,7 +6,7 @@ This document is the deep dive for the data plane (SPEC §7.3, §29, Appendix C)
 
 The data plane stores:
 
-- **Relational state** — workspaces, sessions, threads, tasks, turns, episodes, provider attempts, tool calls, policy decisions, approvals, side effects, jobs, agents, delegations, verification plans/nodes/edges/results, memory claims/relations, capabilities/activations, idempotency records, leases, event stream cursors.
+- **Relational state** — workspaces, sessions, threads, tasks, turns, episodes, provider attempts, tool calls, policy decisions, approvals, side effects, jobs, agents, delegations, verification plans/nodes/edges/results, repair attempts, memory claims/relations, capabilities/activations, idempotency records, leases, event stream cursors.
 - **Semantic event log** — append-only event stream with opaque cursors.
 - **Content-addressed artifacts** — tool output, diffs, traces, evidence, full provider responses.
 - **Git state** — repository, worktrees, commits, branches.
@@ -40,7 +40,7 @@ Key tables (full list in Appendix C and `prisma/schema.prisma`):
 - `verification_plans`, `verification_nodes`, `verification_edges`, `verification_results`, `completion_records`.
 - `memory_claims`, `memory_relations`.
 - `capabilities`, `capability_activations`.
-- `idempotency_records`, `leases`.
+- `idempotency_records`, `leases`, `repair_attempts` — durable bounded verification-repair continuations and their fencing leases.
 - `semantic_events` — append-only event stream.
 - `event_stream_cursors` — SSE cursor positions.
 

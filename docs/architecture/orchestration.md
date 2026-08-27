@@ -14,6 +14,14 @@ created → planning → executing → verifying → completing → completed
 
 State transitions are guarded by property tests (SPEC §46.2). Non-terminal states are reconciled on restart (SPEC §48.5).
 
+Verification repair is a durable child-turn continuation inside this
+lifecycle. The coordinator persists one task-scoped repair-attempt identity,
+directive/provenance record, and fencing lease before admission. A restart
+reconciles the parent and child from that row, not from an inferred event
+sequence; only the current lease owner may run the child, and a stale owner is
+fenced by the next token after expiry. The child returns through the ordinary
+agent loop and must pass verification again before completion.
+
 ## Task contract (SPEC §14.3, §37.2, Appendix E.1)
 
 ```ts

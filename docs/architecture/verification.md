@@ -106,6 +106,34 @@ The completion record links to all evidence. The completion record is immutable.
 
 "No completion by assertion" (SPEC §26.3 #3) is enforced: a model's "I'm done" message does not complete the task.
 
+## Durable repair continuations (SPEC §23, §37.14, §48.5)
+
+Automatic verification repair is a continuation of the same task, not an
+inference from the latest event. Scheduling writes a `repair_attempts` row in
+the same transaction as the task transition and event. The row records the
+parent turn, directive artifact, failed predicates and normalized signatures,
+source/environment identity, attempt budget, and the eventual repair child
+turn.
+
+Each attempt owns one row in `leases`. Admission changes the attempt through
+`PENDING` → `ADMITTED`; execution claims the lease and changes it to
+`RUNNING`. Claims use the lease owner and monotonically increasing fencing
+token. A live lease prevents a second continuation, including a duplicate
+scheduler pass in the same process. Heartbeats renew the lease while the
+repair actor runs; losing the lease aborts the actor and leaves recovery to a
+later fenced claimant.
+
+Startup recovery treats the durable attempt as authoritative across the
+schedule, parent-state, child-admission, and execution windows. It resumes
+only unambiguous repair boundaries, retries after a stale lease expires, and
+quarantines malformed or uncertain later-stage state with an explicit terminal
+reason. Legacy `REPAIR_PENDING` rows without an attempt are read from the
+semantic event only to backfill the durable record once.
+
+Repair attempts settle as `SUCCEEDED`, `FAILED`, `BLOCKED`, `ABORTED`, or
+`SUPERSEDED`; they never make a task complete without the normal verification
+DAG and completion admission.
+
 ## Review finding lifecycle (SPEC §40.7)
 
 Reviewer findings (from ADR-0020 reviewer) have a lifecycle:

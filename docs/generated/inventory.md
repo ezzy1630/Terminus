@@ -9,7 +9,7 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 
 | Fact | Value | How derived |
 |---|---:|---|
-| SPEC.md lines | 9618 | wc of SPEC.md |
+| SPEC.md lines | 9647 | wc of SPEC.md |
 | Rust crates | 23 | directories in crates/ |
 | TypeScript packages | 37 | directories in packages/ |
 | Client apps | 4 | directories in apps/ |
@@ -21,7 +21,7 @@ A declared test is not a passing run. Executed-test evidence lives in CI
 | Declared Python tests | 268 | `def test_*` in python/** |
 | ADRs | 51 | docs/decisions/ADR-*.md |
 | Runbooks | 15 | docs/runbooks/*.md |
-| SQLite migrations | 11 | migrations/sqlite/*.sql |
+| SQLite migrations | 12 | migrations/sqlite/*.sql |
 
 Maturity classification of every component: see the
 [component maturity registry](component-maturity.md) (`maturity.yaml`).

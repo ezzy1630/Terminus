@@ -35,7 +35,7 @@ This file records observed commands and artifacts. It does not turn source decla
 ## Current implementation observations
 
 1. The live task path now emits `completion.proposed`, enters `VERIFYING`, persists verification artifacts, admits a candidate branch, atomically moves the task to `COMPLETED` and the turn to `VERIFIED`, then finalizes and publishes `turn.completed`.
-2. A failed verification can enter `REPAIR_PENDING`, persist a cited repair directive and cumulative budget state, admit a repair-controller child turn, supersede the parent, and re-enter the same `agentLoop`; durable repair-attempt leases are still missing.
+2. A failed verification can enter `REPAIR_PENDING`, persist a cited repair directive and cumulative budget state, admit a repair-controller child turn, supersede the parent, and re-enter the same `agentLoop`; migration `0012_repair_attempts` now makes the attempt identity, parent/child association, provenance, budget, and fencing lease durable.
 3. Recovery resumes only unambiguous pre-provider/context and settled-tool boundaries. Terminal-adjacent turns without a completion proposal artifact are quarantined as `FAILED`/`BLOCKED`; `RESPONSE_VALIDATING` and `VERIFYING` are not blindly replayed.
 4. Compaction now refuses to hide a row unless body text and immutable artifact provenance are available, preserves source rows on summary failure/cancellation, and provides an atomic production commit callback.
 5. Repository instructions are loaded through the kernel READ capability, converted to source-hashed required context fragments, and injected with scoped precedence. Scout execution is default-off and requires `TERMINUS_ENABLE_SCOUT=1`.
@@ -43,6 +43,21 @@ This file records observed commands and artifacts. It does not turn source decla
 7. OpenCode Zen free-model execution now has a live end-to-end observation: anonymous model discovery, provider inference, response settlement, proposal, kernel-mediated verification, branch admission, and terminal completion all succeeded in one isolated stack.
 8. The live run exposed and closed two runtime defects in the exercised path: source-only code-intelligence indexing prevents a normal repository refresh from exhausting the file budget, and repair plans now namespace verification node IDs. OpenCode gateway connectors have an explicit bounded 120-second timeout for model responses; the observed successful response settled after the prior 10-second default would have classified it as uncertain.
 9. Migration `0011_prisma_datetime_storage.sql` rebuilds the two Prisma-owned provider tables with strict integer epoch-millisecond timestamps. An upgrade fixture proved legacy ISO timestamps, including fractional seconds, preserve their exact millisecond values.
+10. Durable repair recovery now owns the crash windows between schedule, parent transition, child admission, and execution. A live lease blocks duplicate claims; an expired lease increments its fencing token; heartbeats abort a continuation after lease loss; and a restarted control process schedules a retry after a stale lease expires. A `VERIFYING` parent with an already-persisted repair attempt is left for this recovery path instead of being generically quarantined.
+
+## Durable repair-attempt evidence
+
+Migration `0012_repair_attempts.sql` and the Prisma model persist one row per
+task-level repair attempt. The row references the parent and optional repair
+child turns, stores the directive/failure/source/environment/budget evidence,
+and owns a unique `leases` row. Focused unit tests cover stable lease identity,
+live-owner exclusion, fencing-token increment on expiry, missing/terminal
+attempt rejection, and terminal settlement classification. The migration
+integrity test applies all migrations, reads the new columns through SQLite,
+checks the lease association, and rejects duplicate task/attempt numbers.
+
+This is implementation evidence for durable identity and recovery scheduling,
+not proof of the full D3 metric suite or the B2 fault-injection/replay matrix.
 
 ## Live OpenCode free-model evidence
 
@@ -85,6 +100,9 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `bun test mini-services/terminus-control/src/verification-runtime.test.ts mini-services/terminus-control/src/gateway-provider-config.test.ts mini-services/terminus-control/src/gateway-kernel-client.test.ts packages/provider-zen/src/transport.test.ts tests/persistence/migration_integrity.test.ts` | PASSED — 26 tests, 0 failures, 82 expect calls. |
 | 2026-08-26 | `cargo test --manifest-path crates/terminus-connector/Cargo.toml --test broker_e2e` | PASSED — 13 tests, 0 failures; 1 explicitly ignored invalid-credential public canary. |
 | 2026-08-26 | `bun test tests/persistence/migration_integrity.test.ts` | PASSED — migration ledger, strict DateTime upgrade, rollback, and corruption tests: 4 tests, 0 failures. |
+| 2026-08-26 | `bun test mini-services/terminus-control/src/services/repair-attempt-store.test.ts mini-services/terminus-control/src/services/services.test.ts tests/persistence/migration_integrity.test.ts` | PASSED — 20 tests, 0 failures, 81 expect calls; includes durable repair claim/settlement helpers, coordinator transaction persistence, and migration read-back/uniqueness checks. |
+| 2026-08-26 | `bunx prisma validate --schema prisma/schema.prisma` | PASSED — Prisma schema validates with the `RepairAttempt` relations and migration-backed fields. |
+| 2026-08-26 | `DATABASE_URL=file:<temporary> bun run scripts/migrate.ts` plus a Prisma `repairAttempt.count()` read-back | PASSED — migrations 001–012 applied, integrity check passed, and the generated client queried `repair_attempts`. The temporary database was outside the repository. |
 | 2026-08-26 | `just codegen-check` from committed `d6fb7fb` | PASSED — generated paths are clean against the exact committed tree. |
 | 2026-08-26 | `just check` from committed `d6fb7fb` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
 | 2026-08-26 | `just check-all` from committed `d6fb7fb` | PASSED — 583 TypeScript tests across 82 files, 257 Python tests, Rust integration/security tests, platform probes, standalone/truth checks, generated-contract check, and `cargo deny`; 1 live conformance test remained ignored by its explicit network-test annotation. |

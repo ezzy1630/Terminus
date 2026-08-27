@@ -429,6 +429,50 @@ describe("control-plane service boundaries", () => {
     expect(events).toEqual(["task.completed", "project:task.completed"]);
   });
 
+  test("VerificationCoordinator persists repair identity in the same transition transaction", async () => {
+    type Transaction = { readonly name: "durable-repair" };
+    let taskState = "VERIFYING";
+    const events: string[] = [];
+    const persisted: Array<{ readonly id: string; readonly parentTurnId: string; readonly leaseKey: string }> = [];
+    const service = new VerificationCoordinator<Transaction>({
+      readTask: async () => ({ status: taskState }),
+      appendEvent: async (event, mutation) => {
+        events.push(event.eventType);
+        await mutation({ name: "durable-repair" });
+      },
+      updateTask: async (_tx, input) => { taskState = input.status; },
+      createRepairAttempt: async (_tx, input) => {
+        persisted.push({ id: input.id, parentTurnId: input.parentTurnId, leaseKey: input.leaseKey });
+      },
+      mutate: async (operation) => operation(),
+      projectTask: async (_taskId, eventType) => { events.push(`project:${eventType}`); },
+    });
+
+    await service.scheduleRepair("task-1", {
+      repairAttemptId: "attempt-1",
+      parentTurnId: "turn-1",
+      leaseKey: "terminus-repair-attempt:attempt-1",
+      attemptNumber: 1,
+      maxAttempts: 2,
+      directiveArtifactUri: "artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      failedNodeIds: ["verify-tests"],
+      failureSignatures: ["sig-1"],
+      changedFiles: ["src/calc.ts"],
+      sourceRevision: "git:source-1",
+      environmentDigest: "sha256:environment-1",
+      remainingAttempts: 1,
+      remainingBudgetJson: '{"remaining_attempts":1}',
+    });
+
+    expect(taskState).toBe("ACTIVE");
+    expect(persisted).toEqual([{
+      id: "attempt-1",
+      parentTurnId: "turn-1",
+      leaseKey: "terminus-repair-attempt:attempt-1",
+    }]);
+    expect(events).toEqual(["task.repair_scheduled", "project:task.repair_scheduled"]);
+  });
+
   test("TaskProjectionService emits a durable v2 snapshot when v1 state changes", async () => {
     type Transaction = { readonly name: "projection" };
     const task: TaskProjectionTaskRow = {

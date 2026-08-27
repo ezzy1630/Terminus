@@ -8486,6 +8486,35 @@ CREATE TABLE leases (
     metadata_json           TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE repair_attempts (
+    id                      TEXT PRIMARY KEY NOT NULL,
+    task_id                 TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    parent_turn_id          TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    repair_turn_id          TEXT UNIQUE REFERENCES turns(id) ON DELETE SET NULL,
+    lease_key               TEXT NOT NULL UNIQUE REFERENCES leases(lease_key) ON DELETE CASCADE,
+    attempt_number          INTEGER NOT NULL,
+    max_attempts            INTEGER NOT NULL,
+    state                   TEXT NOT NULL,
+    directive_artifact      TEXT NOT NULL,
+    failed_node_ids_json    TEXT NOT NULL,
+    failure_signatures_json TEXT NOT NULL,
+    changed_files_json      TEXT NOT NULL,
+    source_revision         TEXT NOT NULL,
+    environment_digest      TEXT,
+    remaining_budget_json   TEXT NOT NULL,
+    created_at              BIGINT NOT NULL,
+    started_at              BIGINT,
+    completed_at            BIGINT,
+    terminal_reason_json    TEXT,
+    UNIQUE(task_id, attempt_number)
+) STRICT;
+
+CREATE INDEX repair_attempts_task_state
+ON repair_attempts(task_id, state);
+
+CREATE INDEX repair_attempts_parent_turn
+ON repair_attempts(parent_turn_id);
+
 CREATE TABLE semantic_events (
     event_id                TEXT PRIMARY KEY,
     event_type              TEXT NOT NULL,

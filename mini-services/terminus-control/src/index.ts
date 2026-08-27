@@ -401,7 +401,17 @@ import {
   type TurnRow,
   type TurnTaskSnapshot,
   type VerificationTransitionInput,
+  type RepairAttemptPersistenceInput,
 } from "./services/index.js";
+import {
+  REPAIR_ATTEMPT_ACTIVE_STATES,
+  decideRepairAttemptClaim,
+  isRepairAttemptActive,
+  isRepairAttemptTerminal,
+  repairAttemptLeaseKey,
+  repairAttemptStateForTurn,
+  shouldDeferRepairParentRecovery,
+} from "./services/repair-attempt-store.js";
 
 declare const __TERMINUS_CONTROL_BUILD_VERSION__: string;
 declare const __TERMINUS_CONTROL_BUILD_COMMIT__: string;
@@ -687,6 +697,321 @@ async function releaseControlWriterLease(): Promise<void> {
     data: { expiresAt: new Date() },
   });
   writerLease = { ...current, expiresAt: new Date(), healthy: false };
+}
+
+const parsedRepairAttemptLeaseMs = Number(process.env.TERMINUS_REPAIR_ATTEMPT_LEASE_MS ?? "120000");
+const REPAIR_ATTEMPT_LEASE_MS = Number.isFinite(parsedRepairAttemptLeaseMs)
+  ? Math.max(5_000, Math.floor(parsedRepairAttemptLeaseMs))
+  : 120_000;
+interface RepairAttemptClaim {
+  readonly attemptId: string;
+  readonly taskId: string;
+  readonly repairTurnId: string;
+  readonly leaseKey: string;
+  readonly fencingToken: number;
+}
+
+interface ActiveRepairAttemptRun {
+  readonly claim: RepairAttemptClaim;
+  leaseLost: boolean;
+  heartbeat: ReturnType<typeof setInterval> | null;
+}
+
+const activeRepairAttemptRuns = new Map<string, ActiveRepairAttemptRun>();
+const repairAttemptRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Claim one durable repair continuation using the existing fencing lease. */
+async function claimRepairAttempt(attemptId: string): Promise<RepairAttemptClaim | null> {
+  return mutateAgentState(() => writerTransaction(async (tx) => {
+    const attempt = await tx.repairAttempt.findUnique({
+      where: { id: attemptId },
+      select: { id: true, taskId: true, repairTurnId: true, leaseKey: true, state: true },
+    });
+    if (attempt === null) throw new Error(`repair attempt ${attemptId} disappeared`);
+    const lease = await tx.lease.findUnique({
+      where: { leaseKey: attempt.leaseKey },
+      select: { ownerInstance: true, fencingToken: true, expiresAt: true },
+    });
+    if (lease === null) throw new Error(`repair attempt ${attemptId} has no associated lease`);
+    const decision = decideRepairAttemptClaim({
+      state: attempt.state,
+      repairTurnId: attempt.repairTurnId,
+      lease,
+      ownerInstance: CONTROL_WRITER_INSTANCE,
+      now: new Date(),
+    });
+    if (!decision.claimable) return null;
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + REPAIR_ATTEMPT_LEASE_MS);
+    const claimed = await tx.lease.updateMany({
+      where: {
+        leaseKey: attempt.leaseKey,
+        ownerInstance: lease.ownerInstance,
+        fencingToken: lease.fencingToken,
+        expiresAt: lease.expiresAt,
+      },
+      data: {
+        ownerInstance: CONTROL_WRITER_INSTANCE,
+        fencingToken: decision.fencingToken,
+        acquiredAt: now,
+        expiresAt,
+        metadataJson: JSON.stringify({
+          role: "verification-repair",
+          repair_attempt_id: attempt.id,
+          task_id: attempt.taskId,
+        }),
+      },
+    });
+    if (claimed.count !== 1) return null;
+    const running = await tx.repairAttempt.updateMany({
+      where: {
+        id: attempt.id,
+        state: { in: [...REPAIR_ATTEMPT_ACTIVE_STATES] },
+        repairTurnId: { not: null },
+      },
+      data: { state: "RUNNING", startedAt: now },
+    });
+    if (running.count !== 1) throw new Error(`repair attempt ${attemptId} changed during lease claim`);
+    if (attempt.repairTurnId === null) {
+      throw new Error(`repair attempt ${attemptId} lost its continuation during lease claim`);
+    }
+    return {
+      attemptId: attempt.id,
+      taskId: attempt.taskId,
+      repairTurnId: attempt.repairTurnId,
+      leaseKey: attempt.leaseKey,
+      fencingToken: decision.fencingToken,
+    };
+  }));
+}
+
+async function renewRepairAttemptLease(claim: RepairAttemptClaim): Promise<boolean> {
+  return mutateAgentState(() => writerTransaction(async (tx) => {
+    const now = new Date();
+    const renewed = await tx.lease.updateMany({
+      where: {
+        leaseKey: claim.leaseKey,
+        ownerInstance: CONTROL_WRITER_INSTANCE,
+        fencingToken: claim.fencingToken,
+        expiresAt: { gt: now },
+      },
+      data: { expiresAt: new Date(now.getTime() + REPAIR_ATTEMPT_LEASE_MS) },
+    });
+    return renewed.count === 1;
+  }));
+}
+
+/** Release a repair claim without changing its durable attempt state. */
+async function releaseRepairAttemptLease(claim: RepairAttemptClaim): Promise<void> {
+  await mutateAgentState(() => writerTransaction(async (tx) => {
+    await tx.lease.updateMany({
+      where: {
+        leaseKey: claim.leaseKey,
+        ownerInstance: CONTROL_WRITER_INSTANCE,
+        fencingToken: claim.fencingToken,
+      },
+      data: { expiresAt: new Date() },
+    });
+  }));
+}
+
+async function settleRepairAttemptAfterRun(claim: RepairAttemptClaim): Promise<void> {
+  await mutateAgentState(() => writerTransaction(async (tx) => {
+    const attempt = await tx.repairAttempt.findUnique({
+      where: { id: claim.attemptId },
+      select: { state: true, taskId: true, repairTurnId: true, leaseKey: true, attemptNumber: true },
+    });
+    if (attempt === null || isRepairAttemptTerminal(attempt.state)) return;
+    const repairTurn = attempt.repairTurnId === null
+      ? null
+      : await tx.turn.findUnique({ where: { id: attempt.repairTurnId }, select: { state: true } });
+    const task = await tx.task.findUnique({ where: { id: attempt.taskId }, select: { status: true } });
+    const nextAttempt = await tx.repairAttempt.findFirst({
+      where: { taskId: attempt.taskId, attemptNumber: { gt: attempt.attemptNumber } },
+      select: { id: true },
+    });
+    const settled = repairAttemptStateForTurn({
+      turnState: repairTurn?.state ?? "FAILED",
+      taskStatus: task?.status ?? null,
+      hasSuccess: task?.status === "COMPLETED" || repairTurn?.state === "COMPLETED",
+      hasNextAttempt: nextAttempt !== null,
+    });
+    const now = new Date();
+    const updated = await tx.repairAttempt.updateMany({
+      where: {
+        id: claim.attemptId,
+        state: { in: [...REPAIR_ATTEMPT_ACTIVE_STATES] },
+        leaseKey: claim.leaseKey,
+      },
+      data: {
+        state: settled.state,
+        completedAt: now,
+        terminalReasonJson: JSON.stringify({
+          reason: settled.reason,
+          repair_turn_state: repairTurn?.state ?? null,
+          task_status: task?.status ?? null,
+        }),
+      },
+    });
+    if (updated.count !== 1) return;
+    await tx.lease.updateMany({
+      where: {
+        leaseKey: claim.leaseKey,
+        ownerInstance: CONTROL_WRITER_INSTANCE,
+        fencingToken: claim.fencingToken,
+      },
+      data: { expiresAt: now },
+    });
+  }));
+}
+
+async function markRepairAttemptTerminal(
+  attemptId: string,
+  state: "SUCCEEDED" | "FAILED" | "BLOCKED" | "ABORTED" | "SUPERSEDED",
+  reason: string,
+): Promise<void> {
+  await mutateAgentState(() => writerTransaction(async (tx) => {
+    const now = new Date();
+    const attempt = await tx.repairAttempt.findUnique({
+      where: { id: attemptId },
+      select: { leaseKey: true },
+    });
+    if (attempt === null) return;
+    const updated = await tx.repairAttempt.updateMany({
+      where: { id: attemptId, state: { in: [...REPAIR_ATTEMPT_ACTIVE_STATES] } },
+      data: {
+        state,
+        completedAt: now,
+        terminalReasonJson: JSON.stringify({ reason }),
+      },
+    });
+    if (updated.count !== 1) return;
+    await tx.lease.updateMany({ where: { leaseKey: attempt.leaseKey }, data: { expiresAt: now } });
+  }));
+}
+
+/** Backfill the durable row for a repair event written before migration 0012. */
+async function ensureRepairAttemptRecord(input: RepairAttemptPersistenceInput): Promise<void> {
+  await mutateAgentState(() => writerTransaction(async (tx) => {
+    const existing = await tx.repairAttempt.findUnique({ where: { id: input.id }, select: { id: true } });
+    if (existing !== null) return;
+    await tx.lease.create({
+      data: {
+        leaseKey: input.leaseKey,
+        ownerInstance: "unclaimed",
+        fencingToken: 0,
+        expiresAt: new Date(0),
+        metadataJson: JSON.stringify({
+          role: "verification-repair",
+          repair_attempt_id: input.id,
+          task_id: input.taskId,
+          backfilled: true,
+        }),
+      },
+    });
+    await tx.repairAttempt.create({
+      data: {
+        id: input.id,
+        taskId: input.taskId,
+        parentTurnId: input.parentTurnId,
+        leaseKey: input.leaseKey,
+        attemptNumber: input.attemptNumber,
+        maxAttempts: input.maxAttempts,
+        state: "PENDING",
+        directiveArtifact: input.directiveArtifact,
+        failedNodeIdsJson: JSON.stringify(input.failedNodeIds),
+        failureSignaturesJson: JSON.stringify(input.failureSignatures),
+        changedFilesJson: JSON.stringify(input.changedFiles),
+        sourceRevision: input.sourceRevision,
+        environmentDigest: input.environmentDigest,
+        remainingBudgetJson: input.remainingBudgetJson,
+      },
+    });
+  }));
+}
+
+/** Retry a recovery pass after another owner’s fencing lease expires. */
+async function scheduleRepairAttemptRecovery(attemptId: string, repairTurnId: string): Promise<void> {
+  if (activeRepairAttemptRuns.has(attemptId) || repairAttemptRecoveryTimers.has(attemptId)) return;
+  const attempt = await db.repairAttempt.findUnique({
+    where: { id: attemptId },
+    select: {
+      state: true,
+      repairTurnId: true,
+      lease: { select: { expiresAt: true } },
+    },
+  });
+  if (attempt === null || !isRepairAttemptActive(attempt.state)) return;
+  if (attempt.repairTurnId !== repairTurnId) return;
+  const delayMs = Math.max(1_000, attempt.lease.expiresAt.getTime() - Date.now() + 25);
+  const timer = setTimeout(() => {
+    repairAttemptRecoveryTimers.delete(attemptId);
+    void runRepairTurnWithLease(attemptId, repairTurnId).then((started) => {
+      if (!started) void scheduleRepairAttemptRecovery(attemptId, repairTurnId);
+    }).catch((error: unknown) => {
+      console.error(`repair attempt ${attemptId} recovery retry failed`, error);
+      void scheduleRepairAttemptRecovery(attemptId, repairTurnId);
+    });
+  }, delayMs);
+  repairAttemptRecoveryTimers.set(attemptId, timer);
+}
+
+/** Run a repair continuation only while its durable lease is held. */
+async function runRepairTurnWithLease(attemptId: string, repairTurnId: string): Promise<boolean> {
+  let claim: RepairAttemptClaim | null;
+  try {
+    claim = await claimRepairAttempt(attemptId);
+  } catch (error: unknown) {
+    console.error(`repair attempt ${attemptId} could not be claimed`, error);
+    return false;
+  }
+  if (claim === null) {
+    await scheduleRepairAttemptRecovery(attemptId, repairTurnId).catch((error: unknown) => {
+      console.error(`repair attempt ${attemptId} recovery scheduling failed`, error);
+    });
+    return false;
+  }
+  if (claim.repairTurnId !== repairTurnId) {
+    await releaseRepairAttemptLease(claim).catch((error: unknown) => {
+      console.error(`repair attempt ${attemptId} lease release failed after association mismatch`, error);
+    });
+    console.error(`repair attempt ${attemptId} points at ${claim.repairTurnId}, not ${repairTurnId}`);
+    return false;
+  }
+  const active: ActiveRepairAttemptRun = { claim, leaseLost: false, heartbeat: null };
+  activeRepairAttemptRuns.set(attemptId, active);
+  active.heartbeat = setInterval(() => {
+    void renewRepairAttemptLease(claim).then((healthy) => {
+      if (healthy) return;
+      active.leaseLost = true;
+      abortActiveTurn(repairTurnId, "repair_attempt_lease_lost");
+    }).catch((error: unknown) => {
+      active.leaseLost = true;
+      abortActiveTurn(repairTurnId, "repair_attempt_lease_lost");
+      console.error(`repair attempt ${attemptId} lease heartbeat failed`, error);
+    });
+  }, Math.max(1_000, Math.floor(REPAIR_ATTEMPT_LEASE_MS / 3)));
+  try {
+    await agentLoop(repairTurnId);
+  } catch (error: unknown) {
+    console.error(`repair turn ${repairTurnId} failed`, error);
+  } finally {
+    if (active.heartbeat !== null) clearInterval(active.heartbeat);
+    activeRepairAttemptRuns.delete(attemptId);
+    if (!active.leaseLost) {
+      await settleRepairAttemptAfterRun(claim).catch((error: unknown) => {
+        console.error(`repair attempt ${attemptId} settlement failed`, error);
+      });
+      await releaseRepairAttemptLease(claim).catch((error: unknown) => {
+        console.error(`repair attempt ${attemptId} lease release failed`, error);
+      });
+    } else {
+      await scheduleRepairAttemptRecovery(attemptId, repairTurnId).catch((error: unknown) => {
+        console.error(`repair attempt ${attemptId} recovery rescheduling failed`, error);
+      });
+    }
+  }
+  return true;
 }
 
 const kernelUds: KernelUdsClients | null = KERNEL_GRPC_SOCKET
@@ -3107,10 +3432,22 @@ const turnCoordinator = new TurnCoordinator<Prisma.TransactionClient>({
 async function admitRepairTurn(input: {
   readonly taskId: string;
   readonly threadId: string;
+  readonly repairAttemptId: string;
   readonly directiveArtifactUri: string;
   readonly directiveArtifactHash: string;
   readonly attemptNumber: number;
 }): Promise<string> {
+  const durableAttempt = await db.repairAttempt.findUnique({
+    where: { id: input.repairAttemptId },
+    select: { repairTurnId: true, state: true },
+  });
+  if (durableAttempt === null) {
+    throw new Error(`repair attempt ${input.repairAttemptId} not found before turn admission`);
+  }
+  if (durableAttempt.repairTurnId !== null) return durableAttempt.repairTurnId;
+  if (isRepairAttemptTerminal(durableAttempt.state)) {
+    throw new Error(`repair attempt ${input.repairAttemptId} is already ${durableAttempt.state}`);
+  }
   const existing = await db.turn.findFirst({
     where: {
       taskId: input.taskId,
@@ -3120,7 +3457,28 @@ async function admitRepairTurn(input: {
     orderBy: { sequence: "desc" },
     select: { id: true },
   });
-  if (existing !== null) return existing.id;
+  if (existing !== null) {
+    await writerTransaction(async (tx) => {
+      await tx.turn.updateMany({
+        where: { id: existing.id, state: "PENDING" },
+        data: { state: "REPAIRING" },
+      });
+      const associated = await tx.repairAttempt.updateMany({
+        where: { id: input.repairAttemptId, repairTurnId: null },
+        data: { repairTurnId: existing.id, state: "ADMITTED" },
+      });
+      if (associated.count !== 1) {
+        const current = await tx.repairAttempt.findUnique({
+          where: { id: input.repairAttemptId },
+          select: { repairTurnId: true },
+        });
+        if (current?.repairTurnId !== existing.id) {
+          throw new Error(`repair attempt ${input.repairAttemptId} changed during existing-turn association`);
+        }
+      }
+    });
+    return existing.id;
+  }
 
   const latest = await db.turn.findFirst({
     where: { threadId: input.threadId },
@@ -3145,6 +3503,7 @@ async function admitRepairTurn(input: {
     payload: {
       phase: "REPAIRING",
       repair_attempt: input.attemptNumber,
+      repair_attempt_id: input.repairAttemptId,
       directive_artifact: input.directiveArtifactUri,
     },
     artifactRefs: [input.directiveArtifactUri],
@@ -3154,6 +3513,13 @@ async function admitRepairTurn(input: {
       data: { state: "REPAIRING" },
     });
     if (update.count !== 1) throw new Error(`repair turn ${admitted.turn.id} changed before repair execution`);
+    const associated = await tx.repairAttempt.updateMany({
+      where: { id: input.repairAttemptId, repairTurnId: null, state: { in: ["PENDING", "ADMITTED"] } },
+      data: { repairTurnId: admitted.turn.id, state: "ADMITTED" },
+    });
+    if (associated.count !== 1) {
+      throw new Error(`repair attempt ${input.repairAttemptId} changed before continuation association`);
+    }
   }));
   return admitted.turn.id;
 }
@@ -4315,7 +4681,31 @@ const routes: Route[] = [
   route("GET", "/v1/tasks/:id", async (_req, res, params) => {
     const t = await db.task.findUnique({
       where: { id: String(params.id) },
-      include: { contractVersions: { orderBy: { version: "desc" }, take: 1 } },
+      include: {
+        contractVersions: { orderBy: { version: "desc" }, take: 1 },
+        repairAttempts: {
+          orderBy: { attemptNumber: "asc" },
+          select: {
+            id: true,
+            parentTurnId: true,
+            repairTurnId: true,
+            attemptNumber: true,
+            maxAttempts: true,
+            state: true,
+            directiveArtifact: true,
+            failedNodeIdsJson: true,
+            failureSignaturesJson: true,
+            changedFilesJson: true,
+            sourceRevision: true,
+            environmentDigest: true,
+            remainingBudgetJson: true,
+            createdAt: true,
+            startedAt: true,
+            completedAt: true,
+            terminalReasonJson: true,
+          },
+        },
+      },
     });
     if (!t) return sendError(res, 404, "TASK_NOT_FOUND", "task not found", "not_found");
     sendJson(res, 200, {
@@ -4329,6 +4719,27 @@ const routes: Route[] = [
         ? null
         : safeParse<Record<string, unknown> | null>(t.terminalReasonJson, null),
       contract: taskContractWire(t.contractVersions[0]),
+      repair_attempts: t.repairAttempts.map((attempt) => ({
+        id: attempt.id,
+        parent_turn_id: attempt.parentTurnId,
+        repair_turn_id: attempt.repairTurnId,
+        attempt_number: attempt.attemptNumber,
+        max_attempts: attempt.maxAttempts,
+        state: attempt.state,
+        directive_artifact: attempt.directiveArtifact,
+        failed_node_ids: safeParse<string[]>(attempt.failedNodeIdsJson, []),
+        failure_signatures: safeParse<string[]>(attempt.failureSignaturesJson, []),
+        changed_files: safeParse<string[]>(attempt.changedFilesJson, []),
+        source_revision: attempt.sourceRevision,
+        environment_digest: attempt.environmentDigest,
+        remaining_budget: safeParse<Record<string, unknown>>(attempt.remainingBudgetJson, {}),
+        created_at: attempt.createdAt.toISOString(),
+        started_at: attempt.startedAt?.toISOString() ?? null,
+        completed_at: attempt.completedAt?.toISOString() ?? null,
+        terminal_reason: attempt.terminalReasonJson === null
+          ? null
+          : safeParse<Record<string, unknown> | null>(attempt.terminalReasonJson, null),
+      })),
     });
   }),
   // R8: task workspace diff for benchmark patch extraction (git workspaces).
@@ -9833,6 +10244,39 @@ const verificationCoordinator = new VerificationCoordinator<Prisma.TransactionCl
     });
     if (update.count !== 1) throw new Error(`task ${input.taskId} changed during verification transition`);
   },
+  createRepairAttempt: async (tx, input: RepairAttemptPersistenceInput) => {
+    await tx.lease.create({
+      data: {
+        leaseKey: input.leaseKey,
+        ownerInstance: "unclaimed",
+        fencingToken: 0,
+        expiresAt: new Date(0),
+        metadataJson: JSON.stringify({
+          role: "verification-repair",
+          repair_attempt_id: input.id,
+          task_id: input.taskId,
+        }),
+      },
+    });
+    await tx.repairAttempt.create({
+      data: {
+        id: input.id,
+        taskId: input.taskId,
+        parentTurnId: input.parentTurnId,
+        leaseKey: input.leaseKey,
+        attemptNumber: input.attemptNumber,
+        maxAttempts: input.maxAttempts,
+        state: "PENDING",
+        directiveArtifact: input.directiveArtifact,
+        failedNodeIdsJson: JSON.stringify(input.failedNodeIds),
+        failureSignaturesJson: JSON.stringify(input.failureSignatures),
+        changedFilesJson: JSON.stringify(input.changedFiles),
+        sourceRevision: input.sourceRevision,
+        environmentDigest: input.environmentDigest,
+        remainingBudgetJson: input.remainingBudgetJson,
+      },
+    });
+  },
   updateTaskAndTurn: async (tx, input, expectedStatuses, turnId, expectedTurnState) => {
     const taskUpdate = await tx.task.updateMany({
       where: { id: input.taskId, status: { in: [...expectedStatuses] } },
@@ -11884,6 +12328,7 @@ async function agentLoop(turnId: string): Promise<void> {
             requiresUserAuthority: false,
           });
           if (repairDecision.action === "repair") {
+            const repairAttemptId = uuid();
             const directive = buildRepairContext({
               failures: normalizedFailures,
               changedFiles: latestChangedFiles,
@@ -11899,13 +12344,26 @@ async function agentLoop(turnId: string): Promise<void> {
               { taskId: task.id, planId: plan.id, workspaceId: workspace.id },
             );
             await verificationCoordinator.scheduleRepair(task.id, {
+              repairAttemptId,
+              parentTurnId: turnId,
+              leaseKey: repairAttemptLeaseKey(repairAttemptId),
               attemptNumber: repairDecision.attemptNumber,
               directiveArtifactUri: directiveArtifact.uri,
               failedNodeIds: normalizedFailures.map((failure) => failure.nodeId),
               failureSignatures: normalizedFailures.map((failure) => failure.signatureHash),
+              changedFiles: latestChangedFiles,
               sourceRevision,
+              environmentDigest,
               remainingAttempts: repairDecision.maxAttempts - repairDecision.attemptNumber,
               maxAttempts: repairDecision.maxAttempts,
+              remainingBudgetJson: canonicalJson({
+                max_attempts: repairDecision.maxAttempts,
+                attempts_used: repairDecision.attemptNumber,
+                remaining_attempts: repairDecision.maxAttempts - repairDecision.attemptNumber,
+                failure_signatures: normalizedFailures.map((failure) => failure.signatureHash),
+                source_revision: sourceRevision,
+                environment_digest: environmentDigest,
+              }),
             });
             await mutateAgentState(() => emit({
               eventType: "turn.repair_pending",
@@ -11915,6 +12373,7 @@ async function agentLoop(turnId: string): Promise<void> {
               payload: {
                 phase: "REPAIR_PENDING",
                 repair_attempt: repairDecision.attemptNumber,
+                repair_attempt_id: repairAttemptId,
                 directive_artifact: directiveArtifact.uri,
               },
               artifactRefs: [directiveArtifact.uri],
@@ -11928,14 +12387,13 @@ async function agentLoop(turnId: string): Promise<void> {
             const repairTurnId = await admitRepairTurn({
               taskId: task.id,
               threadId: turn.threadId,
+              repairAttemptId,
               directiveArtifactUri: directiveArtifact.uri,
               directiveArtifactHash: directiveArtifact.hash,
               attemptNumber: repairDecision.attemptNumber,
             });
             await supersedeRepairPendingTurn(turnId, repairTurnId, task.id);
-            void agentLoop(repairTurnId).catch((error: unknown) => {
-              console.error(`repair turn ${repairTurnId} failed to start`, error);
-            });
+            void runRepairTurnWithLease(repairAttemptId, repairTurnId);
             return;
           }
           await verificationCoordinator.fail(task.id, {
@@ -12525,11 +12983,18 @@ async function recoverActiveAgentTurns(): Promise<number> {
       threadId: true,
       sequence: true,
       state: true,
+      initiatingActor: true,
       initiatingInputArtifact: true,
       episodes: {
         where: { sequence: 1, kind: "user_message" },
         take: 1,
         select: { contentArtifact: true, sourceVersionsJson: true },
+      },
+      repairAttemptAsContinuation: { select: { id: true } },
+      repairAttemptsAsParent: {
+        where: { state: { in: [...REPAIR_ATTEMPT_ACTIVE_STATES] } },
+        take: 1,
+        select: { id: true },
       },
     },
   });
@@ -12541,6 +13006,26 @@ async function recoverActiveAgentTurns(): Promise<number> {
         taskId: turn.taskId,
         state: turn.state,
       });
+      continue;
+    }
+    const repairAttemptId = turn.repairAttemptAsContinuation?.id ?? null;
+    if (turn.initiatingActor === "repair-controller" && repairAttemptId === null) {
+      // The durable attempt recovery below owns the admission window between
+      // creating the child turn and associating it with its attempt.
+      continue;
+    }
+    if (shouldDeferRepairParentRecovery({
+      turnState: turn.state,
+      hasActiveAttempt: turn.repairAttemptsAsParent.length > 0,
+      hasContinuation: repairAttemptId !== null,
+    })) {
+      // A repair row is authoritative once scheduling commits. Leave this
+      // admission window for recoverDurableRepairAttempts instead of
+      // quarantining the parent as an uncertain verifier restart.
+      continue;
+    }
+    if (repairAttemptId !== null && (turn.state === "REPAIRING" || turn.state === "CONTEXT_COMPILING")) {
+      await runRepairTurnWithLease(repairAttemptId, turn.id);
       continue;
     }
     const safeToResume = await canResumeTurnAtBoundary(turn.id, turn.state);
@@ -12623,6 +13108,27 @@ async function recoverActiveAgentTurns(): Promise<number> {
         if (interrupted.count !== 1) {
           throw new Error(`active turn ${turn.id} changed during startup recovery`);
         }
+        if (repairAttemptId !== null) {
+          const repairAttempt = await tx.repairAttempt.findUnique({
+            where: { id: repairAttemptId },
+            select: { leaseKey: true },
+          });
+          await tx.repairAttempt.updateMany({
+            where: { id: repairAttemptId, state: { in: [...REPAIR_ATTEMPT_ACTIVE_STATES] } },
+            data: {
+              state: "BLOCKED",
+              completedAt: interruptedAt,
+              terminalReasonJson: JSON.stringify({
+                reason: "process_restart_after_work_began",
+                previous_turn_state: turn.state,
+                reconciliation_required: true,
+              }),
+            },
+          });
+          if (repairAttempt !== null) {
+            await tx.lease.updateMany({ where: { leaseKey: repairAttempt.leaseKey }, data: { expiresAt: interruptedAt } });
+          }
+        }
         if (turn.taskId !== null) {
           await tx.task.updateMany({
             where: { id: turn.taskId, status: { in: ["ACTIVE", "VERIFYING"] } },
@@ -12662,6 +13168,10 @@ async function recoverActiveAgentTurns(): Promise<number> {
         });
         if (resumed.count !== 1) throw new Error(`turn ${turn.id} changed during tool-settlement recovery`);
       });
+      if (repairAttemptId !== null) {
+        await runRepairTurnWithLease(repairAttemptId, turn.id);
+        continue;
+      }
     }
     const started = await db.semanticEvent.findFirst({
       where: {
@@ -12721,10 +13231,142 @@ async function recoverActiveAgentTurns(): Promise<number> {
   return active.length;
 }
 
+/**
+ * Recover repair continuations from their durable attempt records. The row is
+ * authoritative for identity and provenance; semantic events are only the
+ * compatibility fallback below for attempts written before migration 0012.
+ */
+async function recoverDurableRepairAttempts(): Promise<number> {
+  const attempts = await db.repairAttempt.findMany({
+    where: { state: { in: [...REPAIR_ATTEMPT_ACTIVE_STATES] } },
+    orderBy: [{ taskId: "asc" }, { attemptNumber: "asc" }],
+    select: {
+      id: true,
+      taskId: true,
+      parentTurnId: true,
+      repairTurnId: true,
+      attemptNumber: true,
+      maxAttempts: true,
+      directiveArtifact: true,
+      failedNodeIdsJson: true,
+      failureSignaturesJson: true,
+      changedFilesJson: true,
+      sourceRevision: true,
+      environmentDigest: true,
+      remainingBudgetJson: true,
+      parentTurn: { select: { id: true, threadId: true, taskId: true, state: true } },
+      repairTurn: { select: { id: true, state: true } },
+    },
+  });
+  for (const attempt of attempts) {
+    const directiveUri = artifactUriSchema.safeParse(attempt.directiveArtifact);
+    if (!directiveUri.success) {
+      await markRepairAttemptTerminal(attempt.id, "BLOCKED", "repair_directive_missing_or_invalid");
+      continue;
+    }
+    if (attempt.parentTurn.taskId !== attempt.taskId) {
+      await markRepairAttemptTerminal(attempt.id, "BLOCKED", "repair_parent_task_mismatch");
+      continue;
+    }
+    let parentState = attempt.parentTurn.state;
+    if (attempt.repairTurnId === null && parentState === "VERIFYING") {
+      await emit({
+        eventType: "turn.repair_pending",
+        aggregateType: "turn",
+        aggregateId: attempt.parentTurnId,
+        correlationId: attempt.taskId,
+        payload: {
+          phase: "REPAIR_PENDING",
+          repair_attempt: attempt.attemptNumber,
+          repair_attempt_id: attempt.id,
+          directive_artifact: directiveUri.data,
+          recovered: true,
+        },
+        artifactRefs: [directiveUri.data],
+      }, async (tx) => {
+        const updated = await tx.turn.updateMany({
+          where: { id: attempt.parentTurnId, state: "VERIFYING" },
+          data: { state: "REPAIR_PENDING" },
+        });
+        if (updated.count !== 1) {
+          const current = await tx.turn.findUnique({ where: { id: attempt.parentTurnId }, select: { state: true } });
+          if (current?.state !== "REPAIR_PENDING") {
+            throw new Error(`repair parent ${attempt.parentTurnId} changed during durable recovery`);
+          }
+        }
+      });
+      parentState = "REPAIR_PENDING";
+    }
+    let repairTurnId = attempt.repairTurnId;
+    if (repairTurnId === null && parentState === "REPAIR_PENDING") {
+      repairTurnId = await admitRepairTurn({
+        taskId: attempt.taskId,
+        threadId: attempt.parentTurn.threadId,
+        repairAttemptId: attempt.id,
+        directiveArtifactUri: directiveUri.data,
+        directiveArtifactHash: `sha256:${directiveUri.data.slice("artifact://sha256/".length)}`,
+        attemptNumber: attempt.attemptNumber,
+      });
+    }
+    if (repairTurnId === null) {
+      await markRepairAttemptTerminal(
+        attempt.id,
+        parentState === "ABORTED" ? "ABORTED" : "BLOCKED",
+        parentState === "ABORTED" ? "repair_parent_aborted" : "repair_continuation_not_admitted",
+      );
+      continue;
+    }
+    if (parentState === "REPAIR_PENDING") {
+      await supersedeRepairPendingTurn(attempt.parentTurnId, repairTurnId, attempt.taskId);
+    }
+    const repairTurn = await db.turn.findUnique({ where: { id: repairTurnId }, select: { state: true } });
+    if (repairTurn === null) {
+      await markRepairAttemptTerminal(attempt.id, "BLOCKED", "repair_turn_missing");
+      continue;
+    }
+    if (repairTurn.state === "REPAIRING" || repairTurn.state === "CONTEXT_COMPILING" || repairTurn.state === "TOOL_SETTLEMENT") {
+      await emit({
+        eventType: "recovery.reconciled",
+        aggregateType: "turn",
+        aggregateId: attempt.parentTurnId,
+        correlationId: attempt.taskId,
+        payload: {
+          previous_state: parentState,
+          repair_turn_id: repairTurnId,
+          repair_attempt_id: attempt.id,
+          reason: "durable_repair_attempt_recovered",
+        },
+        artifactRefs: [directiveUri.data],
+      });
+      await runRepairTurnWithLease(attempt.id, repairTurnId);
+      continue;
+    }
+    if (["COMPLETED", "VERIFIED", "FINALIZING", "FAILED", "BLOCKED", "ABORTED", "BUDGET_EXHAUSTED", "POLICY_DENIED", "USER_ACTION_REQUIRED"].includes(repairTurn.state)) {
+      const settledState = repairTurn.state === "COMPLETED"
+        || repairTurn.state === "VERIFIED"
+        || repairTurn.state === "FINALIZING"
+        ? "SUCCEEDED"
+        : repairTurn.state === "ABORTED"
+          ? "ABORTED"
+          : repairTurn.state === "BLOCKED"
+            || repairTurn.state === "POLICY_DENIED"
+            || repairTurn.state === "USER_ACTION_REQUIRED"
+            ? "BLOCKED"
+            : "FAILED";
+      await markRepairAttemptTerminal(
+        attempt.id,
+        settledState,
+        "repair_turn_was_already_terminal",
+      );
+    }
+  }
+  return attempts.length;
+}
+
 /** Reconcile a crash between repair scheduling and repair-turn admission. */
 async function recoverPendingRepairTurns(): Promise<number> {
   const pending = await db.turn.findMany({
-    where: { state: "REPAIR_PENDING" },
+    where: { state: "REPAIR_PENDING", repairAttemptsAsParent: { none: {} } },
     orderBy: { id: "asc" },
     select: { id: true, taskId: true, threadId: true },
   });
@@ -12777,10 +13419,40 @@ async function recoverPendingRepairTurns(): Promise<number> {
       continue;
     }
     const directiveHash = `sha256:${directiveUri.data.slice("artifact://sha256/".length)}`;
+    const legacyAttemptId = typeof payload?.repair_attempt_id === "string"
+      && payload.repair_attempt_id.length > 0
+      ? payload.repair_attempt_id
+      : `legacy-repair:${turn.id}:${attemptNumber}`;
+    const legacyFailedNodes = Array.isArray(payload?.failed_nodes)
+      ? payload.failed_nodes.filter((value): value is string => typeof value === "string")
+      : [];
+    const legacyFailureSignatures = Array.isArray(payload?.failure_signatures)
+      ? payload.failure_signatures.filter((value): value is string => typeof value === "string")
+      : [];
+    const legacySourceRevision = typeof payload?.source_revision === "string"
+      && payload.source_revision.length > 0
+      ? payload.source_revision
+      : "legacy-recovery";
     try {
+      await ensureRepairAttemptRecord({
+        id: legacyAttemptId,
+        taskId,
+        parentTurnId: turn.id,
+        leaseKey: repairAttemptLeaseKey(legacyAttemptId),
+        attemptNumber,
+        maxAttempts: attemptNumber,
+        directiveArtifact: directiveUri.data,
+        failedNodeIds: legacyFailedNodes,
+        failureSignatures: legacyFailureSignatures,
+        changedFiles: [],
+        sourceRevision: legacySourceRevision,
+        environmentDigest: null,
+        remainingBudgetJson: JSON.stringify({ remaining_attempts: 0 }),
+      });
       const repairTurnId = await admitRepairTurn({
         taskId,
         threadId: turn.threadId,
+        repairAttemptId: legacyAttemptId,
         directiveArtifactUri: directiveUri.data,
         directiveArtifactHash: directiveHash,
         attemptNumber,
@@ -12794,13 +13466,12 @@ async function recoverPendingRepairTurns(): Promise<number> {
         payload: {
           previous_state: "REPAIR_PENDING",
           repair_turn_id: repairTurnId,
+          repair_attempt_id: legacyAttemptId,
           reason: "repair_turn_admitted_after_restart",
         },
         artifactRefs: [directiveUri.data],
       });
-      void agentLoop(repairTurnId).catch((error: unknown) => {
-        console.error(`recovered repair turn ${repairTurnId} failed to start`, error);
-      });
+      void runRepairTurnWithLease(legacyAttemptId, repairTurnId);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       await emit({
@@ -13010,6 +13681,7 @@ const repairedTaskProjections = await reconcileV1TaskProjections();
 const checkpointLinkRecovery = await reconcileCheckpointArtifactLinks();
 const checkpointAdmissionRecovery = await reconcilePreparedCheckpointAdmissions();
 const recoveredActiveTurns = await recoverActiveAgentTurns();
+const recoveredDurableRepairAttempts = await recoverDurableRepairAttempts();
 const recoveredPendingRepairTurns = await recoverPendingRepairTurns();
 if (checkpointLinkRecovery.failed.length > 0 || checkpointAdmissionRecovery.failed.length > 0) {
   throw new Error(
@@ -13032,6 +13704,11 @@ if (jobRecovery.scanned > 0) {
 if (checkpointAdmissionRecovery.prepared > 0) {
   console.log(
     `[terminus-control] checkpoint admission recovery: ${checkpointAdmissionRecovery.recovered.length} recovered, ${checkpointAdmissionRecovery.quarantined.length} quarantined, ${checkpointAdmissionRecovery.failed.length} pending`,
+  );
+}
+if (recoveredDurableRepairAttempts > 0 || recoveredPendingRepairTurns > 0) {
+  console.log(
+    `[terminus-control] repair recovery: ${recoveredDurableRepairAttempts} durable attempts, ${recoveredPendingRepairTurns} legacy pending turns`,
   );
 }
 if (recoveredActiveTurns > 0) {

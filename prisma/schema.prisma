@@ -125,6 +125,7 @@ model Task {
   candidateBranches     CandidateBranch[]
   jobs                  Job[]
   capabilityActivations CapabilityActivation[]
+  repairAttempts        RepairAttempt[]
 
   @@index([sessionId, status, updatedAt])
   @@map("tasks")
@@ -203,6 +204,8 @@ model Turn {
   episodes         Episode[]
   providerAttempts ProviderAttempt[]
   toolCalls        ToolCall[]
+  repairAttemptsAsParent     RepairAttempt[] @relation("RepairAttemptParent")
+  repairAttemptAsContinuation RepairAttempt?  @relation("RepairAttemptContinuation")
 
   @@unique([threadId, sequence])
   @@index([taskId])
@@ -825,7 +828,41 @@ model Lease {
   expiresAt     DateTime @map("expires_at")
   metadataJson  String   @map("metadata_json")
 
+  repairAttempt RepairAttempt?
+
   @@map("leases")
+}
+
+model RepairAttempt {
+  id                    String    @id
+  taskId                String    @map("task_id")
+  parentTurnId          String    @map("parent_turn_id")
+  repairTurnId          String?   @unique @map("repair_turn_id")
+  leaseKey              String    @unique @map("lease_key")
+  attemptNumber         Int       @map("attempt_number")
+  maxAttempts           Int       @map("max_attempts")
+  state                 String    // PENDING | ADMITTED | RUNNING | SUCCEEDED | FAILED | BLOCKED | ABORTED | SUPERSEDED
+  directiveArtifact     String    @map("directive_artifact")
+  failedNodeIdsJson     String    @map("failed_node_ids_json")
+  failureSignaturesJson String    @map("failure_signatures_json")
+  changedFilesJson      String    @default("[]") @map("changed_files_json")
+  sourceRevision        String    @map("source_revision")
+  environmentDigest     String?   @map("environment_digest")
+  remainingBudgetJson   String    @default("{}") @map("remaining_budget_json")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  startedAt             DateTime? @map("started_at")
+  completedAt           DateTime? @map("completed_at")
+  terminalReasonJson    String?   @map("terminal_reason_json")
+
+  task       Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  parentTurn Turn  @relation("RepairAttemptParent", fields: [parentTurnId], references: [id], onDelete: Cascade)
+  repairTurn Turn? @relation("RepairAttemptContinuation", fields: [repairTurnId], references: [id], onDelete: SetNull)
+  lease      Lease @relation(fields: [leaseKey], references: [leaseKey], onDelete: Cascade)
+
+  @@unique([taskId, attemptNumber])
+  @@index([taskId, state])
+  @@index([parentTurnId])
+  @@map("repair_attempts")
 }
 
 // The single durable local-provider configuration owned by the control plane.
