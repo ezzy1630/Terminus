@@ -44,6 +44,7 @@ This file records observed commands and artifacts. It does not turn source decla
 8. The live run exposed and closed two runtime defects in the exercised path: source-only code-intelligence indexing prevents a normal repository refresh from exhausting the file budget, and repair plans now namespace verification node IDs. OpenCode gateway connectors have an explicit bounded 120-second timeout for model responses; the observed successful response settled after the prior 10-second default would have classified it as uncertain.
 9. Migration `0011_prisma_datetime_storage.sql` rebuilds the two Prisma-owned provider tables with strict integer epoch-millisecond timestamps. An upgrade fixture proved legacy ISO timestamps, including fractional seconds, preserve their exact millisecond values.
 10. Durable repair recovery now owns the crash windows between schedule, parent transition, child admission, and execution. A live lease blocks duplicate claims; an expired lease increments its fencing token; heartbeats abort a continuation after lease loss; and a restarted control process schedules a retry after a stale lease expires. A `VERIFYING` parent with an already-persisted repair attempt is left for this recovery path instead of being generically quarantined.
+11. A DB-backed recovery test now exercises three of those boundaries against a fresh database migrated through `0012_repair_attempts`: schedule intent and its event roll back together, parent/child admission replays without duplicate rows/events, and a stale repair claimant cannot settle after lease fencing. The release artifact labels the remaining in-memory matrix as fixture-only and records `completeForRelease: false`.
 
 ## Durable repair-attempt evidence
 
@@ -58,6 +59,10 @@ checks the lease association, and rejects duplicate task/attempt numbers.
 
 This is implementation evidence for durable identity and recovery scheduling,
 not proof of the full D3 metric suite or the B2 fault-injection/replay matrix.
+The DB-backed scenarios are in
+`tests/recovery/repair_attempt_recovery.test.ts`; the broader matrix in
+`tests/recovery/fault_injection_matrix.test.ts` remains an in-memory fixture
+suite and is labeled that way in `fault-injection.json`.
 
 ## Live OpenCode free-model evidence
 
@@ -109,6 +114,9 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `just codegen-check` from committed `327444f` | PASSED — generated protobuf, API, event, tool, config, schema, SQL migration inventory, and documentation outputs are stable against the repair-persistence commit. |
 | 2026-08-26 | `just check` from committed `327444f` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
 | 2026-08-26 | `just check-all` from committed `327444f` | PASSED — 583 TypeScript tests across 82 files, 257 Python tests, full local Rust integration/security, platform probes, standalone/truth checks, generated-contract check, and `cargo deny`; 1 live conformance test remained ignored by its explicit network-test annotation. |
+| 2026-08-26 | `bun test tests/recovery/repair_attempt_recovery.test.ts` | PASSED — 3 DB-backed SQLite recovery tests, 0 failures, 17 expect calls. |
+| 2026-08-26 | `bun test tests/recovery/fault_injection_matrix.test.ts tests/recovery/repair_attempt_recovery.test.ts` | PASSED — 17 tests, 0 failures, 97 expect calls; the 13-boundary in-memory matrix and the 3 DB-backed repair scenarios both executed. |
+| 2026-08-26 | `just fault-injection` | PASSED — `artifacts/release-gate/fault-injection.json` was regenerated from both recovery test files; it records 13 `fixture_only` boundaries, 3 DB-backed repair scenarios, and `completeForRelease: false`. |
 
 ## Evidence policy
 

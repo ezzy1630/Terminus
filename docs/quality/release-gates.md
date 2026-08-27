@@ -24,7 +24,7 @@ Stable release requires:
 
 - [ ] All supported platform checks green (SPEC ?46.13). Evidence: `.github/workflows/ci.yml` matrix (`linux-x86_64`, `linux-arm64`, `linux-container`, `macos-arm64`, `macos-x86_64`, `windows-x86_64`).
 - [ ] No unresolved critical security finding. Evidence: `docs/security/findings-register.yaml` + `artifacts/release-gate/findings-register-status.json`.
-- [ ] Migration and recovery tests pass (SPEC ?46.9, ?50.2). Evidence: `tests/release/*`, `tests/recovery/fault_injection_matrix.test.ts`, `artifacts/release-gate/upgrade-rollback.json`, `fault-injection.json`.
+- [ ] Migration and recovery tests pass (SPEC ?46.9, ?50.2). Evidence: `tests/release/*`, the fixture-tier `tests/recovery/fault_injection_matrix.test.ts`, DB-backed recovery tests, `artifacts/release-gate/upgrade-rollback.json`, and `fault-injection.json`. The artifact's `completeForRelease` must be true for the full boundary requirement; it is currently false.
 - [ ] Default policy/eval results meet non-regression thresholds (ADR-0001, ADR-0025). Evidence: `artifacts/release-gate/eval-release.json` (fixture/baseline tier); live release eval on dedicated runner before stable promote.
 - [ ] Standalone runtime ownership check required (ADR-0039, `just standalone-check`).
 - [ ] Schemas and generated clients published (SPEC ?45.1). Evidence: `schemas/STABLE_VERSIONS.yaml`, release workflow tar bundles.

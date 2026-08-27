@@ -1,8 +1,9 @@
 /**
  * SPEC §46.9 recovery and chaos fault-injection matrix.
  *
- * Each durable boundary has inject + assert using in-memory fakes.
- * No real DB, provider, or filesystem side effects are required.
+ * This is the fixture-tier matrix. Each boundary has inject + assert using
+ * in-memory fakes; DB/effect-backed proof is tracked separately and must not
+ * be inferred from this file alone.
  */
 import { describe, expect, test } from "bun:test";
 
@@ -310,7 +311,7 @@ const INJECTORS: Record<FaultBoundaryId, (ledger: FakeLedger) => InjectResult> =
 };
 
 describe("SPEC §46.9 fault injection matrix", () => {
-  test("FAULT_INJECTION_MATRIX lists every boundary as covered", () => {
+  test("FAULT_INJECTION_MATRIX lists every fixture boundary as covered", () => {
     expect(FAULT_INJECTION_MATRIX.length).toBe(13);
     for (const entry of FAULT_INJECTION_MATRIX) {
       expect(entry.status).toBe("covered");

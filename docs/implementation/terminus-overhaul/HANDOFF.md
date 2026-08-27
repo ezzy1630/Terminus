@@ -5,7 +5,7 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 ## Current position
 
 - Exact checkout: `/Volumes/Neural/Terminus`.
-- Branch: `main`. The implementation and evidence ledger are clean at `327444f` (`Persist repair attempts and fenced recovery leases`); no push was performed.
+- Branch: `main`. The implementation and evidence ledger are clean at the latest local fault-injection/replay commit; no push was performed.
 - The worktree was clean before the ledger files and implementation changes were added. Other registered worktrees remain untouched.
 - Durable ledger files live in `docs/implementation/terminus-overhaul/`.
 - The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, anonymous OpenCode Zen free-model inference through the kernel, cumulative repair, durable repair attempts and fencing leases, default-off scout behavior, CI/ruleset declarations, evaluation-run contracts, and the Prisma DateTime upgrade migration.
@@ -37,9 +37,10 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - `just truth-check`: passed.
 - `just github-ruleset-plan`: passed read-only.
 - `just github-ruleset-verify`: failed against the current weaker remote ruleset, as expected.
+- `just fault-injection`: passed — 17 recovery tests, including 3 DB-backed repair schedule/admission/fencing scenarios; the artifact explicitly remains `completeForRelease: false`.
 
 ## Resume sequence
 
 1. Inspect `git status --short --branch`, the last commit, and all four ledger files.
 2. If the user authorizes remote branch-protection mutation, run `just github-ruleset-apply`, then `just github-ruleset-verify` and read back the exact remote settings.
-3. Finish the post-migration full validation, review the committed repair slice, then extend DB fault-injection/replay and later-state recovery before claiming release readiness.
+3. Extend DB fault-injection/replay to proposal, branch admission, completion record, checkpoint, provider/effect, and cancellation boundaries; then address later-state recovery before claiming release readiness.

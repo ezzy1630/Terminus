@@ -8,9 +8,8 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..");
 const OUT_DIR = join(ROOT, "artifacts", "release-gate");
 const OUT_PATH = join(OUT_DIR, "fault-injection.json");
-const TEST_PATH = "tests/recovery/fault_injection_matrix.test.ts";
 
-/** Mirrors FAULT_INJECTION_MATRIX boundaries in the test file (SPEC §46.9). */
+/** Fixture-only boundaries in the in-memory matrix (SPEC §46.9). */
 const BOUNDARIES = [
   "before_event_commit",
   "after_event_commit",
@@ -27,9 +26,32 @@ const BOUNDARIES = [
   "during_database_migration",
 ] as const;
 
+const TEST_PATHS = [
+  "tests/recovery/fault_injection_matrix.test.ts",
+  "tests/recovery/repair_attempt_recovery.test.ts",
+] as const;
+
+const DB_BACKED_SCENARIOS = [
+  {
+    scenario: "repair_schedule_transaction",
+    boundary: "before_event_commit",
+    assertions: ["schedule intent and lifecycle event roll back together"],
+  },
+  {
+    scenario: "repair_parent_child_replay",
+    boundary: "after_event_commit",
+    assertions: ["parent/child admission and lifecycle events are idempotent"],
+  },
+  {
+    scenario: "repair_lease_fencing",
+    boundary: "after_external_effect_starts",
+    assertions: ["stale repair claim cannot settle after lease fencing"],
+  },
+] as const;
+
 mkdirSync(OUT_DIR, { recursive: true });
 
-const proc = Bun.spawnSync(["bun", "test", TEST_PATH], {
+const proc = Bun.spawnSync(["bun", "test", ...TEST_PATHS], {
   cwd: ROOT,
   stdout: "pipe",
   stderr: "pipe",
@@ -47,8 +69,12 @@ const evidence = {
   boundaries: BOUNDARIES.map((boundary) => ({
     boundary,
     status: "covered" as const,
+    evidenceClass: "fixture_only" as const,
   })),
   coveredCount: BOUNDARIES.length,
+  dbBackedScenarios: DB_BACKED_SCENARIOS,
+  dbBackedCount: DB_BACKED_SCENARIOS.length,
+  completeForRelease: false,
   stdoutTail: stdout.slice(-2000),
   stderrTail: stderr.slice(-2000),
 };

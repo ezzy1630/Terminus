@@ -27,7 +27,7 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 | CORE-001 | IN_PROGRESS | `.github`, `Justfile`, lockfiles | Platform matrix jobs are required locally; exact cold-clone/bootstrap and hosted evidence are not reproduced here. |
 | CORE-002 | IN_PROGRESS | `.github/rulesets`, release scripts | Declarative ruleset and dry-run/apply/verify script exist. Read-only verification found the live ruleset weaker than required; apply is intentionally not authorized. |
 | RUN-001 | IN_PROGRESS | `mini-services/terminus-control/src/index.ts` | Live source order is proposal -> verification -> admission -> finalization -> checkpoint attempt -> `turn.completed`; full runtime proof is pending. |
-| RUN-002 | IN_PROGRESS | `index.ts`, repair controller, turn scheduler | Repair directive, cumulative budget, durable attempt identity, fenced lease claim/heartbeat, pending state, child admission, parent supersession, and automatic re-entry are wired. Full fault-injection/replay proof remains open. |
+| RUN-002 | IN_PROGRESS | `index.ts`, repair controller, turn scheduler | Repair directive, cumulative budget, durable attempt identity, fenced lease claim/heartbeat, pending state, child admission, parent supersession, and automatic re-entry are wired. DB-backed schedule/admission/fencing replay scenarios pass; the full fault-injection/replay proof remains open. |
 | RUN-003 | IN_PROGRESS | recovery/reconciler services | Safe pre-provider/tool-boundary resume and durable repair-child recovery are wired; `RESPONSE_VALIDATING`/`VERIFYING` resume is still conservative quarantine. |
 | RUN-004 | IN_PROGRESS | `index.ts`, `src/services/*` | Large composition root remains. |
 | RUN-005 | IN_PROGRESS | `turn-budget.ts`, `index.ts` | Abort signals, policy-denied outcomes, semantic-operation accounting, and typed doom-loop settlement are wired; restart-aware operation accounting remains open. |
@@ -58,7 +58,7 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 | ID range | State | Notes |
 | --- | --- | --- |
 | B1-01..B1-11 | IN_PROGRESS | Explicit lifecycle events, verification-gated terminal publication, and durable repair-attempt identity/lease association are wired; single transition-owner extraction remains open. |
-| B2-01..B2-11 | IN_PROGRESS | Provider/effect recovery classification, safe boundary resume, fenced repair continuation recovery, cancellation, and quarantine are wired; complete fault-injection/replay proof remains open. |
+| B2-01..B2-11 | IN_PROGRESS | Provider/effect recovery classification, safe boundary resume, fenced repair continuation recovery, cancellation, and quarantine are wired; DB-backed repair replay scenarios pass, while complete fault-injection/replay proof remains open. |
 | B3-01..B3-13 | IN_PROGRESS | Cancellation signal propagation, catalog effect classes, operation normalization, semantic progress, policy denial, and doom-loop stops are wired; durable restart accounting remains open. |
 | B4-01..B4-09 | IN_PROGRESS | Service extraction exists, but `index.ts` remains the composition and business-logic root. |
 
@@ -79,7 +79,7 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 | --- | --- | --- |
 | D1-01..D1-08 | IN_PROGRESS | Completion proposal, verification plan/results/evidence, branch admission, and post-admission terminal ordering are wired; full live runtime/fault proof remains open. |
 | D2-01..D2-10 | NOT_STARTED | Current default plan is criteria-driven but not fully semantic. |
-| D3-01..D3-08, D3-M01 | IN_PROGRESS | One task-level budget, durable signatures, typed directive, durable attempt/lease identity, automatic child re-entry, parent supersession, and re-verification are wired; repair metrics remain open. |
+| D3-01..D3-08, D3-M01 | IN_PROGRESS | One task-level budget, durable signatures, typed directive, durable attempt/lease identity, automatic child re-entry, parent supersession, re-verification, and DB-backed fencing replay are wired; repair metrics remain open. |
 | D4-01..D4-04 | IN_PROGRESS | Clean-review helper exists and must stay experimental until paired evidence. |
 
 ## Gate E and F package states
@@ -101,9 +101,9 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 
 | ID range | State | Notes |
 | --- | --- | --- |
-| X-DB-01..X-DB-08 | IN_PROGRESS | Existing SQLite migrations are monotonic; migration `0012_repair_attempts` now persists repair identity, provenance, budget, child association, and lease linkage. Journal completeness and rollback/replay coverage remain open. |
+| X-DB-01..X-DB-08 | IN_PROGRESS | Existing SQLite migrations are monotonic; migration `0012_repair_attempts` now persists repair identity, provenance, budget, child association, and lease linkage. DB-backed repair rollback/replay/fencing coverage passes; journal completeness and other boundary coverage remain open. |
 | X-OBS-01..X-OBS-08 | IN_PROGRESS | Semantic events and provider telemetry exist; correlation and artifact bounds need audit. |
-| X-TEST-01..X-TEST-07 | IN_PROGRESS | Focused context/provider/lifecycle/security-adjacent tests and an exact live anonymous Zen completion pass; fault-injection, alternate live paths, cross-platform, and client tests remain. |
+| X-TEST-01..X-TEST-07 | IN_PROGRESS | Focused context/provider/lifecycle/security-adjacent tests, an exact live anonymous Zen completion pass, and DB-backed repair replay tests pass; the remaining fault-injection boundaries, alternate live paths, cross-platform, and client tests remain. |
 | X-PROM-01..X-PROM-07 | NOT_STARTED | No new advanced default is promoted by this ledger without evidence. |
 | X-DOC-01..X-DOC-15 | IN_PROGRESS | This ledger is the first durable documentation slice. |
 | X-FINAL-01..X-FINAL-27 | IN_PROGRESS | Local implementation and evidence ledgers are updated; external release, runtime, holdout, and client gates remain open. |
@@ -111,6 +111,6 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 ## Current next actions
 
 1. Obtain approval before applying the checked-in ruleset, then run `just github-ruleset-verify` against the exact repository.
-2. Add DB-backed fault-injection/replay tests for proposal, branch admission, completion record, checkpoint, repair, and cancellation boundaries.
+2. Add DB-backed fault-injection/replay tests for proposal, branch admission, completion record, checkpoint, and cancellation boundaries; the repair schedule/admission/fencing slice is now covered.
 3. Decide and test a durable recovery policy for `RESPONSE_VALIDATING` and `VERIFYING` without duplicate provider effects; current behavior remains conservative quarantine.
 4. Run tiered paired multi-seed evaluations with live and private-holdout evidence before promoting routing, scout, reviewer, browser, or optimization features.

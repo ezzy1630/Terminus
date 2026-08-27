@@ -8,7 +8,7 @@ How M12 release evidence is produced and verified. Maps to
 | Evidence | Producer | Output |
 |---|---|---|
 | Fuzz / property smoke | `scripts/run-fuzz-smoke.sh` | `fuzz-smoke.json`, `property-tests.json` |
-| Fault injection (§46.9) | `scripts/run-fault-injection.ts` | `fault-injection.json` |
+| Fault injection (§46.9) | `scripts/run-fault-injection.ts` | `fault-injection.json` (fixture matrix plus explicitly labeled DB-backed scenarios) |
 | Upgrade / rollback | `bun test tests/release/upgrade_rollback_drill.test.ts` | `upgrade-rollback.json` |
 | Backup / restore | `bun test tests/release/backup_restore_drill.test.ts` | (test-only; covered by upgrade drill evidence) |
 | Clean install / downgrade | `bun test tests/release/clean_install_upgrade_downgrade.test.ts` | (test-only) |
@@ -24,6 +24,14 @@ How M12 release evidence is produced and verified. Maps to
 | Exit gate aggregate | `scripts/m12-exit-gate.ts` | `exit-gate-report.json`, `exit-gate-checklist.md` |
 
 All paths are under `artifacts/release-gate/` unless noted.
+
+The fault-injection artifact separates the in-memory fixture matrix from
+DB-backed evidence. A passing producer means the recorded tests passed; it
+does not mean every SPEC §46.9 boundary has production-equivalent proof.
+The current DB-backed subset covers repair scheduling rollback, parent/child
+admission replay, and fenced lease settlement. `completeForRelease` remains
+false until the remaining provider, effect, checkpoint, migration, and
+cancellation boundaries have equivalent coverage.
 
 Release evidence is produced only from a clean checkout at the exact candidate
 commit. `just release-source-check` rejects dirty or mismatched source before a
