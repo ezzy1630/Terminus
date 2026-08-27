@@ -346,6 +346,7 @@ import type {
   RenderedProviderRequest,
   ConfidentialityPolicy,
 } from "@terminus/provider-core";
+import { deriveRepairMetrics } from "@terminus/verification";
 import {
   compileSkill,
   compileWorkflowJson,
@@ -4829,6 +4830,21 @@ const routes: Route[] = [
       where: { id: String(params.id) },
       include: {
         contractVersions: { orderBy: { version: "desc" }, take: 1 },
+        turns: {
+          select: {
+            id: true,
+            startedAt: true,
+            completedAt: true,
+            providerAttempts: {
+              select: {
+                usageJson: true,
+                costMicros: true,
+                startedAt: true,
+                completedAt: true,
+              },
+            },
+          },
+        },
         repairAttempts: {
           orderBy: { attemptNumber: "asc" },
           select: {
@@ -4854,6 +4870,68 @@ const routes: Route[] = [
       },
     });
     if (!t) return sendError(res, 404, "TASK_NOT_FOUND", "task not found", "not_found");
+    const [completion, verificationPlan] = await Promise.all([
+      db.completionRecord.findUnique({
+        where: { taskId: t.id },
+        select: { status: true, admissionState: true },
+      }),
+      db.verificationPlan.findFirst({
+        where: { taskId: t.id },
+        orderBy: { createdAt: "desc" },
+        select: {
+          nodes: { select: { id: true, required: true } },
+          results: {
+            select: { nodeId: true, attempt: true, status: true },
+          },
+        },
+      }),
+    ]);
+    const repairTurnIds = new Set(
+      t.repairAttempts
+        .map((attempt) => attempt.repairTurnId)
+        .filter((turnId): turnId is string => turnId !== null),
+    );
+    const repairProviderAttempts = t.turns
+      .filter((turn) => repairTurnIds.has(turn.id))
+      .flatMap((turn) => turn.providerAttempts)
+      .map((attempt) => {
+        const usage = attempt.usageJson === null
+          ? null
+          : safeParse<Record<string, unknown> | null>(attempt.usageJson, null);
+        return {
+          inputTokens: metricDecimal(usage?.inputTokens ?? null),
+          outputTokens: metricDecimal(usage?.outputTokens ?? null),
+          // The current provider-session writer stores zero as a placeholder
+          // until a trusted provider cost receipt is available. Do not expose
+          // that sentinel as measured spend.
+          costMicros: attempt.costMicros === null || attempt.costMicros === 0
+            ? null
+            : metricDecimal(attempt.costMicros),
+        };
+      });
+    const repairTurns = t.turns
+      .filter((turn) => repairTurnIds.has(turn.id))
+      .map((turn) => ({
+        startedAtMs: turn.startedAt?.getTime() ?? null,
+        completedAtMs: turn.completedAt?.getTime() ?? null,
+      }));
+    const repairMetrics = deriveRepairMetrics({
+      taskStatus: t.status,
+      terminalReason: metricTerminalReason(t.terminalReasonJson),
+      completionAdmissionCommitted: completion?.status === "completed"
+        && completion.admissionState === "COMMITTED",
+      finalRequiredPredicatesPassed: verificationPlan === null
+        ? null
+        : requiredVerificationPassed(verificationPlan),
+      repairAttempts: t.repairAttempts.map((attempt) => ({
+        attemptNumber: attempt.attemptNumber,
+        state: attempt.state,
+        failureSignatures: safeParse<string[]>(attempt.failureSignaturesJson, []),
+        terminalReason: metricTerminalReason(attempt.terminalReasonJson),
+      })),
+      repairProviderAttempts,
+      repairTurns,
+    });
     sendJson(res, 200, {
       id: t.id, session_id: t.sessionId, thread_id: t.threadId,
       status: t.status, phase: t.phase,
@@ -4865,6 +4943,24 @@ const routes: Route[] = [
         ? null
         : safeParse<Record<string, unknown> | null>(t.terminalReasonJson, null),
       contract: taskContractWire(t.contractVersions[0]),
+      repair_metrics: {
+        schema_version: repairMetrics.schemaVersion,
+        first_proposal_verified_success: repairMetrics.firstProposalVerifiedSuccess,
+        repair_success: repairMetrics.repairSuccess,
+        repair_attempt_count: repairMetrics.repairAttemptCount,
+        repeated_failure: repairMetrics.repeatedFailure,
+        repeated_failure_count: repairMetrics.repeatedFailureCount,
+        false_positive_completion: repairMetrics.falsePositiveCompletion,
+        outcome_class: repairMetrics.outcomeClass,
+        stop_reason: repairMetrics.stopReason,
+        classification_correct: repairMetrics.classificationCorrect,
+        usage: {
+          additional_input_tokens: repairMetrics.usage.additionalInputTokens,
+          additional_output_tokens: repairMetrics.usage.additionalOutputTokens,
+          additional_cost_micros: repairMetrics.usage.additionalCostMicros,
+          additional_duration_ms: repairMetrics.usage.additionalDurationMs,
+        },
+      },
       repair_attempts: t.repairAttempts.map((attempt) => ({
         id: attempt.id,
         parent_turn_id: attempt.parentTurnId,
@@ -8796,6 +8892,44 @@ const routes: Route[] = [
 /** JSON.parse with a fallback so a corrupt stored value never crashes the API. */
 function safeParse<T>(text: string, fallback: T): T {
   try { return JSON.parse(text) as T; } catch { return fallback; }
+}
+
+function metricDecimal(value: unknown): string | null {
+  if (typeof value === "bigint") return value >= 0n ? value.toString() : null;
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+  }
+  return typeof value === "string" && /^\d+$/.test(value) ? value : null;
+}
+
+/** Read only a bounded, normalized terminal reason for repair metrics. */
+function metricTerminalReason(text: string | null): string | null {
+  if (text === null) return null;
+  const parsed = safeParse<unknown>(text, null);
+  if (typeof parsed === "string") return parsed;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  for (const key of ["repair_stop_reason", "reason"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
+function requiredVerificationPassed(input: {
+  readonly nodes: readonly { readonly id: string; readonly required: boolean }[];
+  readonly results: readonly { readonly nodeId: string; readonly attempt: number; readonly status: string }[];
+}): boolean {
+  const latest = new Map<string, { readonly attempt: number; readonly status: string }>();
+  for (const result of input.results) {
+    const prior = latest.get(result.nodeId);
+    if (prior === undefined || result.attempt > prior.attempt) {
+      latest.set(result.nodeId, result);
+    }
+  }
+  return input.nodes
+    .filter((node) => node.required)
+    .every((node) => latest.get(node.id)?.status === "pass");
 }
 
 function taskContractWire(row: {

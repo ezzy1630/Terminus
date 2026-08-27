@@ -21,6 +21,9 @@ Per SPEC §17, §40.
   acceptance criteria, changed paths, risk, repository signals, and available
   native test commands. It returns the nodes, required completion expression,
   and per-node selection rationale.
+- `deriveRepairMetrics(input)` — derives first-proposal/repair success,
+  repeated-failure, false-positive, outcome-classification, and exact repair
+  usage deltas from durable facts. Missing provider cost or usage remains null.
 
 ## Invariants
 

@@ -48,6 +48,12 @@ stream of semantic events (SPEC §30.6). Events are persisted to the
 `semantic_events` SQLite table before delivery, so clients can resume from
 the last durable cursor.
 
+`GET /v1/tasks/:id` includes `repair_metrics`, derived from the task's durable
+verification, repair, turn, and provider-attempt records. It reports first-
+proposal versus repaired success, repeated failures, false-positive admission,
+outcome classification, and repair token/time deltas. Unobserved provider
+usage or trusted cost is returned as `null`.
+
 ## Agent loop
 
 On `POST /v1/turns`, the service compiles and persists the exact provider

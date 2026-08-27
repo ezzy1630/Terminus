@@ -33,6 +33,24 @@ describe("normalizeFailure", () => {
     expect(a.signatureHash).not.toBe(b.signatureHash);
   });
 
+  test("changed evidence yields different signatures regardless of reference order", () => {
+    const first = normalizeFailure({
+      ...rawFailure("n1", "same diagnostic"),
+      artifactRefs: ["artifact://sha256/b", "artifact://sha256/a", "artifact://sha256/a"],
+    });
+    const sameObservation = normalizeFailure({
+      ...rawFailure("n1", "same diagnostic"),
+      artifactRefs: ["artifact://sha256/a", "artifact://sha256/b"],
+    });
+    const changedObservation = normalizeFailure({
+      ...rawFailure("n1", "same diagnostic"),
+      artifactRefs: ["artifact://sha256/a", "artifact://sha256/c"],
+    });
+    expect(first.signatureHash).toBe(sameObservation.signatureHash);
+    expect(first.signatureHash).not.toBe(changedObservation.signatureHash);
+    expect(first.artifactRefs).toEqual(["artifact://sha256/a", "artifact://sha256/b"]);
+  });
+
   test("bounds huge outputs to the failing tail with an elision marker", () => {
     const huge = `${"x".repeat(10_000)}TAIL-MARKER`;
     const normalized = normalizeFailure(rawFailure("n1", huge));

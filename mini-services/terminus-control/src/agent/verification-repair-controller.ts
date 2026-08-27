@@ -46,13 +46,20 @@ function focusDiagnostic(output: string): string {
 
 export function normalizeFailure(raw: RawVerificationFailure): NormalizedFailure {
   const diagnostic = focusDiagnostic(raw.output);
+  // Artifact order is not semantic, but the set is: a new evidence artifact
+  // can prove that the verifier observed a different state even when its
+  // diagnostic text is unchanged. Keep the signature deterministic across
+  // writers while retaining the evidence-change signal for repair policy.
+  const artifactRefs = [...new Set(raw.artifactRefs ?? [])].sort();
   const signature = computeContentHash(
     canonicalJson({
       node_id: raw.nodeId,
       exit_code: raw.exitCode ?? null,
       // The signature intentionally excludes timestamps/durations but keeps
-      // the diagnostic so "same failure" means byte-identical diagnostics.
+      // the diagnostic and evidence identity so "same failure" means the
+      // same verifier observation, not merely the same text.
       diagnostic,
+      artifact_refs: artifactRefs,
     }),
   );
   return {
@@ -61,7 +68,7 @@ export function normalizeFailure(raw: RawVerificationFailure): NormalizedFailure
     command: raw.command ?? null,
     exitCode: raw.exitCode ?? null,
     diagnostic,
-    artifactRefs: raw.artifactRefs ?? [],
+    artifactRefs,
     signatureHash: signature,
   };
 }

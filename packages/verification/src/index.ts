@@ -91,6 +91,17 @@ export {
   type ValidateHumanAcceptanceObligationsInput,
 } from "./human-acceptance.js";
 export {
+  REPAIR_METRICS_SCHEMA_VERSION,
+  deriveRepairMetrics,
+  type RepairAttemptMetricInput,
+  type RepairMetricsInput,
+  type RepairMetricsRecord,
+  type RepairOutcomeClass,
+  type RepairProviderAttemptMetricInput,
+  type RepairTurnMetricInput,
+  type RepairUsageDelta,
+} from "./repair-metrics.js";
+export {
   PROOF_BUNDLE_MEDIA_TYPE,
   PROOF_BUNDLE_SCHEMA,
   assertProofBundleAdmissible,

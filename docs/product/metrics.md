@@ -119,7 +119,26 @@ stale_write_incidents: int
 plugin_descriptor_changes: int
 cost: { model_micros, compute_seconds, wall_clock_seconds, human_approvals }
 features_active: [feature_id]
+repair:
+  first_proposal_verified_success: bool | null
+  repair_success: bool | null
+  attempt_count: int
+  repeated_failure: bool
+  repeated_failure_count: int
+  false_positive_completion: bool | null
+  outcome_class: string
+  stop_reason: string | null
+  classification_correct: bool | null
+  additional_input_tokens: decimal_string | null
+  additional_output_tokens: decimal_string | null
+  additional_cost_micros: decimal_string | null
+  additional_duration_ms: int | null
 ```
+
+The control-plane task snapshot exposes the repair block as a derived,
+replayable record from durable repair attempts, verification results, turns,
+and provider-attempt usage. Missing provider usage or trusted cost remains
+`null`; a stored zero-cost sentinel is not treated as measured spend.
 
 ## Aggregation
 
