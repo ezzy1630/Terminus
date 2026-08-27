@@ -603,9 +603,13 @@ model CompletionRecord {
   durationSeconds      Int      @map("duration_seconds")
   finalCheckpointJson  String   @map("final_checkpoint_json")
   generatedAt          DateTime @map("generated_at")
+  admissionState       String   @default("COMMITTED") @map("admission_state") // PREPARED | COMMITTED | QUARANTINED
+  candidateBranchId    String?  @map("candidate_branch_id")
 
   @@unique([taskId])
+  @@unique([candidateBranchId])
   @@index([verificationPlanId])
+  @@index([admissionState, generatedAt])
   @@map("completion_records")
 }
 

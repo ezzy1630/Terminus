@@ -29,9 +29,10 @@ The fault-injection artifact separates the in-memory fixture matrix from
 DB-backed evidence. A passing producer means the recorded tests passed; it
 does not mean every SPEC §46.9 boundary has production-equivalent proof.
 The current DB-backed subset covers repair scheduling rollback, parent/child
-admission replay, and fenced lease settlement. `completeForRelease` remains
-false until the remaining provider, effect, checkpoint, migration, and
-cancellation boundaries have equivalent coverage.
+admission replay, fenced lease settlement, checkpoint publication replay, and
+completion-record admission replay. `completeForRelease` remains false until
+the remaining provider, effect, migration, cancellation, and other durable
+boundaries have equivalent coverage.
 
 Release evidence is produced only from a clean checkout at the exact candidate
 commit. `just release-source-check` rejects dirty or mismatched source before a

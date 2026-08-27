@@ -37,7 +37,7 @@ Key tables (full list in Appendix C and `prisma/schema.prisma`):
 - `turns`, `episodes`, `provider_attempts`, `tool_calls`, `policy_decisions`, `approvals`, `side_effects`, `jobs`, `agents`, `delegations`.
 - `context_epochs`, `context_manifests`, `context_fragments` — context compiler state.
 - `artifacts`, `artifact_links` — content-addressed store metadata.
-- `verification_plans`, `verification_nodes`, `verification_edges`, `verification_results`, `completion_records`.
+- `verification_plans`, `verification_nodes`, `verification_edges`, `verification_results`, `completion_records` (including durable admission state and candidate-branch association).
 - `memory_claims`, `memory_relations`.
 - `capabilities`, `capability_activations`.
 - `idempotency_records`, `leases`, `repair_attempts` — durable bounded verification-repair continuations and their fencing leases.

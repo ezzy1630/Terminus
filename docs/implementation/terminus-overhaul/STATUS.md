@@ -11,9 +11,9 @@ State vocabulary: `NOT_STARTED`, `IN_PROGRESS`, `BLOCKED`, `DONE`, `REMOVED_BY_D
 | Gate | State | Note |
 | --- | --- | --- |
 | A, evidence and baseline | IN_PROGRESS | Local checks, required platform matrix entries, a declarative ruleset, and an eval registry are present. Hosted bootstrap evidence and remote ruleset enforcement remain open. |
-| B, runtime correctness | IN_PROGRESS | The live loop now records proposal, verification, repair, finalization, and cancellation phases. Durable repair continuation and checkpoint publication recovery are wired; full crash-resume coverage and state-owner extraction remain open. |
+| B, runtime correctness | IN_PROGRESS | The live loop now records proposal, verification, repair, finalization, and cancellation phases. Durable repair continuation, completion admission recovery, and checkpoint publication recovery are wired; full crash-resume coverage and state-owner extraction remain open. |
 | C, context/provider | IN_PROGRESS | Safe cited compaction, full-window sizing, instruction loading, provider abort propagation, stream retry guards, and one live anonymous Zen free-model path are proven. Retrieval, cache, paid-account, alternate-protocol, and broader conformance evidence remain open. |
-| D, verification | IN_PROGRESS | Completion is proposal-first and admission is verification-gated; one live task completed through verification and branch admission, and repair node identity is fixed. Durable repair attempts and fenced leases are wired; semantic plan derivation and repair metrics remain open. |
+| D, verification | IN_PROGRESS | Completion is proposal-first and admission is verification-gated; one live task completed through verification and branch admission, and completion admission now has a durable PREPARED/COMMITTED recovery boundary. Durable repair attempts and fenced leases are wired; semantic plan derivation and repair metrics remain open. |
 | E, efficiency | IN_PROGRESS | Catalog-derived read classification and default-off scout behavior are wired. Marginal-value telemetry and optimization evidence remain open. |
 | F, secure expansion | IN_PROGRESS | The kernel boundary and fail-closed defaults are retained. Remote trust-root, browser/desktop, client-conformance, and promotion evidence remain open. |
 
@@ -26,7 +26,7 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 | INV-01..INV-15 | IN_PROGRESS | control, runtime protocol, kernel, docs | The durable contracts and live slices cover many invariants; exact runtime and release proof is still pending. |
 | CORE-001 | IN_PROGRESS | `.github`, `Justfile`, lockfiles | Platform matrix jobs are required locally; exact cold-clone/bootstrap and hosted evidence are not reproduced here. |
 | CORE-002 | IN_PROGRESS | `.github/rulesets`, release scripts | Declarative ruleset and dry-run/apply/verify script exist. Read-only verification found the live ruleset weaker than required; apply is intentionally not authorized. |
-| RUN-001 | IN_PROGRESS | `mini-services/terminus-control/src/index.ts` | Live source order is proposal -> verification -> admission -> finalization -> checkpoint attempt -> `turn.completed`; full runtime proof is pending. |
+| RUN-001 | IN_PROGRESS | `mini-services/terminus-control/src/index.ts` | Live source order is proposal -> PREPARED completion intent -> branch admission -> atomic task/turn/record completion -> finalization -> checkpoint attempt -> `turn.completed`; full runtime proof is pending. |
 | RUN-002 | IN_PROGRESS | `index.ts`, repair controller, turn scheduler | Repair directive, cumulative budget, durable attempt identity, fenced lease claim/heartbeat, pending state, child admission, parent supersession, and automatic re-entry are wired. DB-backed schedule/admission/fencing replay scenarios pass; the full fault-injection/replay proof remains open. |
 | RUN-003 | IN_PROGRESS | recovery/reconciler services | Safe pre-provider/tool-boundary resume and durable repair-child recovery are wired; `RESPONSE_VALIDATING`/`VERIFYING` resume is still conservative quarantine. |
 | RUN-004 | IN_PROGRESS | `index.ts`, `src/services/*` | Large composition root remains. |
@@ -36,7 +36,7 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 | CTX-001 | IN_PROGRESS | `compaction-service.ts`, `index.ts` | Pruning now requires materialized source plus immutable provenance, summarizes before hiding, and has an atomic production store path; replay/migration coverage remains open. |
 | CTX-002..CTX-007 | IN_PROGRESS | context compiler/control | Full-window sizing, authoritative overlays, scoped instruction loading, and source-derived hashes are wired; complete ledger, graph retrieval, cache, and ablation proof remain open. |
 | PROV-001..PROV-006 | IN_PROGRESS | provider transports/runtime | Direct abort, incremental stream handling, stream-safe fallback, provider-native request paths, and anonymous OpenCode Zen free-model inference are proven; paid-account, cache, accounting, and alternate-protocol conformance remain open. |
-| VER-001..VER-003 | IN_PROGRESS | verification/repair/index | Cumulative budget, durable failure signatures, source revision, automatic re-entry, durable attempt identity/leases, and one live completion/admission path are wired; semantic plan derivation, repair metrics, and full replay proof remain open. |
+| VER-001..VER-003 | IN_PROGRESS | verification/repair/index | Cumulative budget, durable failure signatures, source revision, automatic re-entry, durable attempt identity/leases, and durable completion admission recovery are wired; semantic plan derivation, repair metrics, and full replay proof remain open. |
 | ACI-001 | IN_PROGRESS | `packages/aci`, control tools | Bounded typed read/patch/exec/poll/search/fetch tools remain kernel-mediated; complete coding-ACI coverage and metrics remain open. |
 | SEC-001..SEC-002 | IN_PROGRESS | kernel/policy/control | Kernel boundary exists; effective sandbox and trust-root restart proof remain open. |
 | EVAL-001 | IN_PROGRESS | `evals`, `python/forge_evals` | Internal cohorts exist; held-out paired evidence is not present. |
@@ -57,8 +57,8 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 
 | ID range | State | Notes |
 | --- | --- | --- |
-| B1-01..B1-11 | IN_PROGRESS | Explicit lifecycle events, verification-gated terminal publication, and durable repair-attempt identity/lease association are wired; single transition-owner extraction remains open. |
-| B2-01..B2-11 | IN_PROGRESS | Provider/effect recovery classification, safe boundary resume, fenced repair continuation recovery, checkpoint publication replay, cancellation, and quarantine are wired; DB-backed repair/checkpoint scenarios pass, while complete fault-injection/replay proof remains open. |
+| B1-01..B1-11 | IN_PROGRESS | Explicit lifecycle events, verification-gated terminal publication, durable repair-attempt identity/lease association, and atomic completion-record admission are wired; single transition-owner extraction remains open. |
+| B2-01..B2-11 | IN_PROGRESS | Provider/effect recovery classification, safe boundary resume, fenced repair continuation recovery, completion admission replay, checkpoint publication replay, cancellation, and quarantine are wired; DB-backed repair/completion/checkpoint scenarios pass, while complete fault-injection/replay proof remains open. |
 | B3-01..B3-13 | IN_PROGRESS | Cancellation signal propagation, catalog effect classes, operation normalization, semantic progress, policy denial, and doom-loop stops are wired; durable restart accounting remains open. |
 | B4-01..B4-09 | IN_PROGRESS | Service extraction exists, but `index.ts` remains the composition and business-logic root. |
 
@@ -77,7 +77,7 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 
 | ID range | State | Notes |
 | --- | --- | --- |
-| D1-01..D1-08 | IN_PROGRESS | Completion proposal, verification plan/results/evidence, branch admission, and post-admission terminal ordering are wired; full live runtime/fault proof remains open. |
+| D1-01..D1-08 | IN_PROGRESS | Completion proposal, PREPARED completion intent, verification plan/results/evidence, branch admission, atomic task/turn/record admission, and post-admission terminal ordering are wired; full live runtime/fault proof remains open. |
 | D2-01..D2-10 | NOT_STARTED | Current default plan is criteria-driven but not fully semantic. |
 | D3-01..D3-08, D3-M01 | IN_PROGRESS | One task-level budget, durable signatures, typed directive, durable attempt/lease identity, automatic child re-entry, parent supersession, re-verification, and DB-backed fencing replay are wired; repair metrics remain open. |
 | D4-01..D4-04 | IN_PROGRESS | Clean-review helper exists and must stay experimental until paired evidence. |
@@ -101,9 +101,9 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 
 | ID range | State | Notes |
 | --- | --- | --- |
-| X-DB-01..X-DB-08 | IN_PROGRESS | Existing SQLite migrations are monotonic; migration `0012_repair_attempts` now persists repair identity, provenance, budget, child association, and lease linkage. DB-backed repair and checkpoint rollback/replay/fencing coverage passes; journal completeness and other boundary coverage remain open. |
+| X-DB-01..X-DB-08 | IN_PROGRESS | Existing SQLite migrations are monotonic; migrations `0012_repair_attempts` and `0013_completion_admission` persist repair and completion-admission identity. DB-backed repair, completion, and checkpoint rollback/replay/fencing coverage passes; journal completeness and other boundary coverage remain open. |
 | X-OBS-01..X-OBS-08 | IN_PROGRESS | Semantic events and provider telemetry exist; correlation and artifact bounds need audit. |
-| X-TEST-01..X-TEST-07 | IN_PROGRESS | Focused context/provider/lifecycle/security-adjacent tests, an exact live anonymous Zen completion pass, and DB-backed repair/checkpoint replay tests pass; the remaining fault-injection boundaries, alternate live paths, cross-platform, and client tests remain. |
+| X-TEST-01..X-TEST-07 | IN_PROGRESS | Focused context/provider/lifecycle/security-adjacent tests, an exact live anonymous Zen completion pass, and DB-backed repair/completion/checkpoint replay tests pass; the remaining fault-injection boundaries, alternate live paths, cross-platform, and client tests remain. |
 | X-PROM-01..X-PROM-07 | NOT_STARTED | No new advanced default is promoted by this ledger without evidence. |
 | X-DOC-01..X-DOC-15 | IN_PROGRESS | This ledger is the first durable documentation slice. |
 | X-FINAL-01..X-FINAL-27 | IN_PROGRESS | Local implementation and evidence ledgers are updated; external release, runtime, holdout, and client gates remain open. |
@@ -111,6 +111,6 @@ The package rows below expand the stable IDs in `MASTER_PLAN.md`. IDs with a ran
 ## Current next actions
 
 1. Obtain approval before applying the checked-in ruleset, then run `just github-ruleset-verify` against the exact repository.
-2. Add DB-backed fault-injection/replay tests for proposal, branch admission, completion record, and cancellation boundaries; repair schedule/admission/fencing and checkpoint publication/replay slices are now covered.
+2. Add DB-backed fault-injection/replay tests for proposal, branch admission, provider/effect, and cancellation boundaries; repair schedule/admission/fencing, completion admission, and checkpoint publication/replay slices are now covered.
 3. Decide and test a durable recovery policy for `RESPONSE_VALIDATING` and `VERIFYING` without duplicate provider effects; current behavior remains conservative quarantine.
 4. Run tiered paired multi-seed evaluations with live and private-holdout evidence before promoting routing, scout, reviewer, browser, or optimization features.

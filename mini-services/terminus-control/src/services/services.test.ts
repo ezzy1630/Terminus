@@ -416,6 +416,7 @@ describe("control-plane service boundaries", () => {
         expect(turnId).toBe("turn-1");
         expect(expectedStatuses).toEqual(["VERIFYING"]);
         expect(expectedTurnState).toBe("VERIFYING");
+        expect(input.completionRecordId).toBe("completion-1");
         taskState = input.status;
         turnState = "VERIFIED";
       },
@@ -423,7 +424,7 @@ describe("control-plane service boundaries", () => {
       projectTask: async (_taskId, eventType) => { events.push(`project:${eventType}`); },
     });
 
-    await service.complete("task-1", "plan-1", "turn-1");
+    await service.complete("task-1", "plan-1", "turn-1", "completion-1");
     expect(taskState).toBe("COMPLETED");
     expect(turnState).toBe("VERIFIED");
     expect(events).toEqual(["task.completed", "project:task.completed"]);

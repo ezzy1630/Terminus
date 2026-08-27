@@ -27,6 +27,7 @@ export interface VerificationTransitionInput {
   readonly completedAt: Date | null;
   readonly terminalReasonJson: string | null;
   readonly verificationPlanId?: string | null;
+  readonly completionRecordId?: string | null;
   readonly eventType: string;
   readonly payload: Readonly<Record<string, unknown>>;
   readonly repairBudget?: {
@@ -179,7 +180,12 @@ export class VerificationCoordinator<TTransaction> {
     }, ["VERIFYING"]);
   }
 
-  async complete(taskId: string, verificationPlanId: string, turnId?: string): Promise<void> {
+  async complete(
+    taskId: string,
+    verificationPlanId: string,
+    turnId?: string,
+    completionRecordId?: string,
+  ): Promise<void> {
     const input: VerificationTransitionInput = {
       taskId,
       status: "COMPLETED",
@@ -187,6 +193,7 @@ export class VerificationCoordinator<TTransaction> {
       completedAt: new Date(),
       terminalReasonJson: null,
       verificationPlanId,
+      ...(completionRecordId === undefined ? {} : { completionRecordId }),
       eventType: "task.completed",
       payload: { phase: "COMPLETE", status: "COMPLETED", verification_plan_id: verificationPlanId },
     };

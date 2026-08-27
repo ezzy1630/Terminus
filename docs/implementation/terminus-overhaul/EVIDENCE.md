@@ -46,6 +46,7 @@ This file records observed commands and artifacts. It does not turn source decla
 10. Durable repair recovery now owns the crash windows between schedule, parent transition, child admission, and execution. A live lease blocks duplicate claims; an expired lease increments its fencing token; heartbeats abort a continuation after lease loss; and a restarted control process schedules a retry after a stale lease expires. A `VERIFYING` parent with an already-persisted repair attempt is left for this recovery path instead of being generically quarantined.
 11. A DB-backed recovery test now exercises three of those boundaries against a fresh database migrated through `0012_repair_attempts`: schedule intent and its event roll back together, parent/child admission replays without duplicate rows/events, and a stale repair claimant cannot settle after lease fencing. The release artifact labels the remaining in-memory matrix as fixture-only and records `completeForRelease: false`.
 12. A second DB-backed recovery test exercises checkpoint publication against the same fresh-migration discipline: a crash before publication commit leaves the checkpoint `PREPARED` with no event, duplicate artifact linking collapses through the uniqueness constraint, and repeated recovery leaves one `COMMITTED` row with one `checkpoint.created` event.
+13. Completion admission now persists an immutable `PREPARED` record before candidate-branch admission and flips it to `COMMITTED` in the same transaction as task completion, the verified-turn transition, and `task.completed`. Startup only replays that transition when the associated branch is already `ADMITTED`; otherwise it quarantines the intent. A fresh-migration DB test proves rollback of all four rows/events, replay without a provider attempt, and quarantine of an open branch.
 
 ## Durable repair-attempt evidence
 
@@ -68,6 +69,14 @@ Checkpoint publication coverage is in
 `tests/recovery/checkpoint_publication_recovery.test.ts` and covers the
 `PREPARED`/`COMMITTED` admission boundary, not terminal-turn/checkpoint
 co-transactionality.
+
+Completion admission coverage is in
+`tests/recovery/completion_admission_recovery.test.ts`. Migration
+`0013_completion_admission.sql` adds the durable state and candidate-branch
+association. The test proves that an admitted branch can replay completion
+without provider inference, while an unadmitted branch is quarantined. This
+closes the branch/record crash window but not the broader provider/effect or
+terminal/checkpoint co-transactionality requirements.
 
 ## Live OpenCode free-model evidence
 
@@ -124,6 +133,9 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `bun test tests/recovery/checkpoint_publication_recovery.test.ts` | PASSED — 2 DB-backed SQLite checkpoint recovery tests, 0 failures, 7 expect calls. |
 | 2026-08-26 | `bun test tests/recovery/fault_injection_matrix.test.ts tests/recovery/repair_attempt_recovery.test.ts tests/recovery/checkpoint_publication_recovery.test.ts` | PASSED — 19 tests, 0 failures, 104 expect calls; the fixture matrix, repair replay, and checkpoint publication suites all executed. |
 | 2026-08-26 | `just fault-injection` | PASSED — `artifacts/release-gate/fault-injection.json` was regenerated from all three recovery test files; it records 13 `fixture_only` boundaries, 4 DB-backed scenarios, and `completeForRelease: false`. |
+| 2026-08-26 | `bunx prisma validate --schema prisma/schema.prisma` | PASSED — the completion admission fields and nullable candidate-branch association validate in the Prisma schema. |
+| 2026-08-26 | `bun test mini-services/terminus-control/src/services/services.test.ts tests/recovery/completion_admission_recovery.test.ts tests/persistence/migration_integrity.test.ts` | PASSED — 18 tests, 0 failures, 91 expect calls; includes coordinator propagation, fresh-migration completion rollback/replay/quarantine, and migration read-back. |
+| 2026-08-26 | `just fault-injection` | PASSED — the artifact was regenerated from four recovery test files; it records 13 `fixture_only` boundaries, 5 DB-backed scenarios, 22 passing tests, and `completeForRelease: false`. |
 
 ## Evidence policy
 

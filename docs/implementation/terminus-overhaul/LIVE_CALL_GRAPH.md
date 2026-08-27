@@ -21,8 +21,9 @@ HTTP/RPC route in mini-services/terminus-control/src/index.ts
   -> turn RESPONSE_VALIDATING -> VERIFYING
   -> VerificationCoordinator -> VerificationRuntime -> kernel predicates
   -> verification plan/results/evidence persisted
+  -> completion record persisted as `PREPARED`
   -> candidate branch registered and admitted
-  -> atomic task COMPLETED + turn VERIFIED admission
+  -> atomic task COMPLETED + turn VERIFIED + completion record `COMMITTED` admission
   -> turn FINALIZING
   -> automatic checkpoint attempt (committed or explicit failure event)
   -> turn COMPLETED + `turn.completed`
@@ -61,7 +62,7 @@ task/turn cancel request
 | Repository instructions | `loadRepositoryInstructionFragments` | live, kernel-read | Relevant scopes are read through the kernel and injected as hashed required fragments; full invalidation coverage remains. |
 | `Context Compiler` | `compileContext` in `packages/context-compiler` | live | Manifests, exact prefixes, project rules, and source hashes are retained; retrieval/cache ablation remains. |
 | Provider retry/runtime | `agentLoop` and `providers/*` | live, partial | Attempt stages, direct-stream fallback guards, abort propagation, and one anonymous OpenCode Zen free-model completion through the kernel are proven; paid-account, alternate-protocol, cache, and broader live conformance remain. |
-| Verification runtime | `agentLoop` | live, post-proposal | Owns completion admission; one live plan/result/branch-admission path is proven, while DB fault-injection and semantic plan coverage remain. |
+| Verification runtime | `agentLoop` | live, post-proposal | Owns completion admission; one live plan/result/branch-admission path and DB-backed completion replay are proven, while proposal/provider/effect fault coverage and semantic plan coverage remain. |
 | `VerificationRepairController` | `agentLoop` | live, partial | Cumulative budget, signatures, directive, child re-entry, parent supersession, durable lease, and DB-backed repair replay scenarios are wired; the remaining fault boundaries are open. |
 | Stagnation supervisor | `/v2/orchestration/stagnation/check` | endpoint/live helper | Reconcile with engine/catalog and structured stop state. |
 | Scout runner | `agentLoop` before main context | live only with explicit opt-in | `TERMINUS_ENABLE_SCOUT=1` is required; utility ledger and promotion evidence remain. |
@@ -72,6 +73,6 @@ task/turn cancel request
 
 ## Recovery boundary
 
-Startup recovery resumes PENDING/CONTEXT_COMPILING/REPAIRING and settled TOOL_SETTLEMENT work when provider/effect state is unambiguous. Verified/finalizing turns require a completed task, completion record, and proposal response artifact; otherwise recovery emits `turn.recovery_failed` and blocks the task. RESPONSE_VALIDATING and VERIFYING are deliberately not replayed blindly and need a durable continuation slice.
+Startup recovery resumes PENDING/CONTEXT_COMPILING/REPAIRING and settled TOOL_SETTLEMENT work when provider/effect state is unambiguous. Prepared completion records are reconciled only when their candidate branch is `ADMITTED`; a matching VERIFYING task/turn is completed through the coordinator without provider replay, and unsafe intents are quarantined. Verified/finalizing turns require a completed task, a `COMMITTED` completion record, and proposal response artifact; otherwise recovery emits `turn.recovery_failed` and blocks the task. RESPONSE_VALIDATING and VERIFYING without an admitted completion intent are deliberately not replayed blindly and need a separate durable continuation slice.
 
 The graph is a source-level map, not proof of runtime completion. Proof is in `EVIDENCE.md` and must be extended with live provider, crash/replay, cross-platform, client, and release observations.

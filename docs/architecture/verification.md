@@ -106,6 +106,21 @@ The completion record links to all evidence. The completion record is immutable.
 
 "No completion by assertion" (SPEC §26.3 #3) is enforced: a model's "I'm done" message does not complete the task.
 
+## Durable completion admission
+
+The control plane writes a completion record as `PREPARED` before registering
+the candidate branch. That row contains the immutable completion data and the
+branch identity, but it is not a completion claim. After the branch is
+`ADMITTED`, `VerificationCoordinator` appends `task.completed` and, in one
+writer transaction, moves the task to `COMPLETED`, the turn to `VERIFIED`, and
+the record to `COMMITTED`.
+
+Startup reconciliation replays this transition only when the branch is
+already `ADMITTED` and the task/turn are still `VERIFYING`; it never reruns
+provider inference. Missing, open, rejected, or mismatched branches quarantine
+the prepared record for explicit reconciliation. Existing completion rows
+default to `COMMITTED` through the additive migration.
+
 ## Durable repair continuations (SPEC §23, §37.14, §48.5)
 
 Automatic verification repair is a continuation of the same task, not an

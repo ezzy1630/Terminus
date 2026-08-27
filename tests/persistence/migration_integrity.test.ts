@@ -61,6 +61,15 @@ describe("Database Migration Integrity & Corruption Detection", () => {
         notnull: 1,
         dflt_value: "'PREPARED'",
       }));
+      const completionColumns = db
+        .query("PRAGMA table_info(completion_records)")
+        .all() as Array<{ name: string; notnull: number; dflt_value: string | null }>;
+      expect(completionColumns).toContainEqual(expect.objectContaining({
+        name: "admission_state",
+        notnull: 1,
+        dflt_value: "'COMMITTED'",
+      }));
+      expect(completionColumns.map((column) => column.name)).toContain("candidate_branch_id");
       const contractColumns = db
         .query("PRAGMA table_info(task_contract_versions)")
         .all() as Array<{ name: string }>;

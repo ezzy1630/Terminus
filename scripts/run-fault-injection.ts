@@ -30,6 +30,7 @@ const TEST_PATHS = [
   "tests/recovery/fault_injection_matrix.test.ts",
   "tests/recovery/repair_attempt_recovery.test.ts",
   "tests/recovery/checkpoint_publication_recovery.test.ts",
+  "tests/recovery/completion_admission_recovery.test.ts",
 ] as const;
 
 const DB_BACKED_SCENARIOS = [
@@ -52,6 +53,11 @@ const DB_BACKED_SCENARIOS = [
     scenario: "checkpoint_publication_replay",
     boundary: "during_checkpoint_replacement",
     assertions: ["prepared checkpoint publication and artifact linking are idempotent"],
+  },
+  {
+    scenario: "completion_record_admission_replay",
+    boundary: "after_event_commit",
+    assertions: ["an admitted completion intent replays without provider inference"],
   },
 ] as const;
 

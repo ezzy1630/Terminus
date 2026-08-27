@@ -8,14 +8,14 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - Branch: `main`. The implementation and evidence ledger are clean at the latest local fault-injection/replay commit; no push was performed.
 - The worktree was clean before the ledger files and implementation changes were added. Other registered worktrees remain untouched.
 - Durable ledger files live in `docs/implementation/terminus-overhaul/`.
-- The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, anonymous OpenCode Zen free-model inference through the kernel, cumulative repair, durable repair attempts and fencing leases, default-off scout behavior, CI/ruleset declarations, evaluation-run contracts, and the Prisma DateTime upgrade migration.
+- The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, anonymous OpenCode Zen free-model inference through the kernel, cumulative repair, durable repair attempts and fencing leases, durable completion admission recovery, default-off scout behavior, CI/ruleset declarations, evaluation-run contracts, and the Prisma DateTime upgrade migration.
 
 ## Remaining blockers
 
 1. The live `main-protection` ruleset (id `21228252`) is weaker than the checked-in target. Applying it is a remote mutation and was not authorized.
 2. Hosted CI/bootstrap, paid-account and alternate-provider live conformance, cross-platform sandbox enforcement, signed release artifacts, and private holdout evaluations are not proven locally. The anonymous OpenCode Zen free-model path is now proven; see `EVIDENCE.md`.
 3. Recovery still quarantines rather than resumes `RESPONSE_VALIDATING`/`VERIFYING`; those states need a separate no-duplicate-provider policy and fault-injection proof. Durable repair attempts now have a parent/child record, task-level budget/provenance, and a fenced lease; verification node IDs are plan-scoped so a repair plan cannot collide with its parent in Prisma.
-4. Automatic checkpoint failure is explicit but not atomic with terminal publication. Branch admission and completion-record persistence also remain separate crash boundaries.
+4. Automatic checkpoint failure is explicit but not atomic with terminal publication. Provider/effect and proposal/branch fault boundaries still need production-equivalent replay coverage.
 
 ## Safe working rules
 
@@ -28,6 +28,7 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 ## Verified local commands
 
 - `bun test ...` focused continuation set: 26 passed, 0 failed; the original overhaul set remains recorded in `EVIDENCE.md`. The repair-attempt/migration continuation set is recorded separately there.
+- `bun test mini-services/terminus-control/src/services/services.test.ts tests/recovery/completion_admission_recovery.test.ts tests/persistence/migration_integrity.test.ts`: 18 passed, 0 failed, 91 expect calls, including coordinator propagation, completion admission rollback/replay/quarantine, and migration read-back.
 - `bun test tests/persistence/migration_integrity.test.ts`: 5 passed, 0 failed, including the repair-attempt schema/uniqueness read-back and legacy provider timestamp conversion with millisecond precision.
 - `just codegen`: passed.
 - `just codegen-check`: passed from the repair-attempt schema change after generated migration inventory refresh.
@@ -37,10 +38,10 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - `just truth-check`: passed.
 - `just github-ruleset-plan`: passed read-only.
 - `just github-ruleset-verify`: failed against the current weaker remote ruleset, as expected.
-- `just fault-injection`: passed — 19 recovery tests, including 3 DB-backed repair scenarios and 2 DB-backed checkpoint publication tests; the artifact explicitly remains `completeForRelease: false`.
+- `just fault-injection`: passed — 22 recovery tests, including 3 DB-backed repair scenarios, 2 DB-backed checkpoint publication tests, and 3 DB-backed completion-admission tests; the artifact explicitly remains `completeForRelease: false`.
 
 ## Resume sequence
 
 1. Inspect `git status --short --branch`, the last commit, and all four ledger files.
 2. If the user authorizes remote branch-protection mutation, run `just github-ruleset-apply`, then `just github-ruleset-verify` and read back the exact remote settings.
-3. Extend DB fault-injection/replay to proposal, branch admission, completion record, provider/effect, and cancellation boundaries; checkpoint publication and repair continuation slices are covered, then later-state recovery remains before release readiness.
+3. Extend DB fault-injection/replay to proposal, branch admission, provider/effect, and cancellation boundaries; completion admission, checkpoint publication, and repair continuation slices are covered, then later-state recovery remains before release readiness.

@@ -6810,6 +6810,7 @@ const routes: Route[] = [
       completion_records: completionRecords.map((record) => ({
         id: record.id, task_id: record.taskId, contract_version: record.contractVersion,
         final_revision: record.finalRevision, status: record.status,
+        admission_state: record.admissionState, candidate_branch_id: record.candidateBranchId,
         criteria: safeParse<unknown[]>(record.criteriaJson, []),
         verification_plan_id: record.verificationPlanId,
         unresolved_risks: safeParse<unknown[]>(record.unresolvedRisksJson, []),
@@ -10294,6 +10295,19 @@ const verificationCoordinator = new VerificationCoordinator<Prisma.TransactionCl
       data: { state: "VERIFIED" },
     });
     if (turnUpdate.count !== 1) throw new Error(`turn ${turnId} changed during atomic verification admission`);
+    if (input.completionRecordId !== undefined && input.completionRecordId !== null) {
+      const completionUpdate = await tx.completionRecord.updateMany({
+        where: {
+          id: input.completionRecordId,
+          taskId: input.taskId,
+          admissionState: "PREPARED",
+        },
+        data: { admissionState: "COMMITTED" },
+      });
+      if (completionUpdate.count !== 1) {
+        throw new Error(`completion record ${input.completionRecordId} changed during atomic verification admission`);
+      }
+    }
   },
   mutate: mutateAgentState,
   projectTask: async (taskId, eventType): Promise<void> => { await synchronizeV1TaskProjection(taskId, eventType); },
@@ -12442,9 +12456,10 @@ async function agentLoop(turnId: string): Promise<void> {
             finalCheckpoint: artifactClient.toArtifactRef(finalCheckpoint),
           });
 
-          // Keep the generated record in memory until branch admission. A
-          // rejected/stale branch must not leave a durable record claiming
-          // completion.
+          const candidateBranchId = `completion:${task.id}:${plan.id}`;
+          // Persist an admission intent before the authoritative branch merge.
+          // PREPARED is durable evidence, not a completion claim; the record
+          // becomes COMMITTED only with the task/turn admission transaction.
           const completionData = {
             id: `completion:${task.id}`,
             taskId: task.id,
@@ -12460,12 +12475,13 @@ async function agentLoop(turnId: string): Promise<void> {
             durationSeconds: completionRecord.durationSeconds,
             finalCheckpointJson: canonicalJson(completionRecord.finalCheckpoint),
             generatedAt: new Date(completionRecord.generatedAt),
+            admissionState: "PREPARED",
+            candidateBranchId,
           };
 
           if (evidenceGraph === null) {
             throw new Error("completion admission requires a persisted claim/evidence graph");
           }
-          const candidateBranchId = `completion:${task.id}:${plan.id}`;
           const requiredClaimIds = new Set(
             criteria.filter((criterion) => criterion.required).map((criterion) => `claim:${task.id}:${criterion.id}`),
           );
@@ -12501,6 +12517,31 @@ async function agentLoop(turnId: string): Promise<void> {
             db,
             () => resolveWorkspaceRevision(verificationClients, verificationBaseContext, workspace.id, abortController.signal),
           );
+          await mutateAgentState(async () => {
+            const existing = await db.completionRecord.findUnique({ where: { taskId: task.id } });
+            if (existing === null) {
+              await db.completionRecord.create({ data: completionData });
+              return;
+            }
+            const immutableFieldsMatch = existing.id === completionData.id
+              && existing.contractVersion === completionData.contractVersion
+              && existing.finalRevision === completionData.finalRevision
+              && existing.status === completionData.status
+              && existing.criteriaJson === completionData.criteriaJson
+              && existing.verificationPlanId === completionData.verificationPlanId
+              && existing.unresolvedRisksJson === completionData.unresolvedRisksJson
+              && existing.acceptedRisksJson === completionData.acceptedRisksJson
+              && existing.externalEffectsJson === completionData.externalEffectsJson
+              && existing.costMicros === completionData.costMicros
+              && existing.durationSeconds === completionData.durationSeconds
+              && existing.finalCheckpointJson === completionData.finalCheckpointJson
+              && existing.generatedAt.getTime() === completionData.generatedAt.getTime()
+              && existing.candidateBranchId === completionData.candidateBranchId
+              && existing.admissionState === "PREPARED";
+            if (!immutableFieldsMatch) {
+              throw new Error("completion admission intent already exists with different immutable content");
+            }
+          });
           await admission.registerCandidateBranch({
             branchId: candidateBranchId,
             taskId: task.id,
@@ -12530,30 +12571,6 @@ async function agentLoop(turnId: string): Promise<void> {
             reviewerPrincipal: "principal:verification-reviewer",
             requiredClaimsSatisfied: [...requiredClaimIds],
           });
-
-          await mutateAgentState(async () => {
-            const existing = await db.completionRecord.findUnique({ where: { taskId: task.id } });
-            if (existing === null) {
-              await db.completionRecord.create({ data: completionData });
-              return;
-            }
-            const immutableFieldsMatch = existing.id === completionData.id
-              && existing.contractVersion === completionData.contractVersion
-              && existing.finalRevision === completionData.finalRevision
-              && existing.status === completionData.status
-              && existing.criteriaJson === completionData.criteriaJson
-              && existing.verificationPlanId === completionData.verificationPlanId
-              && existing.unresolvedRisksJson === completionData.unresolvedRisksJson
-              && existing.acceptedRisksJson === completionData.acceptedRisksJson
-              && existing.externalEffectsJson === completionData.externalEffectsJson
-              && existing.costMicros === completionData.costMicros
-              && existing.durationSeconds === completionData.durationSeconds
-              && existing.finalCheckpointJson === completionData.finalCheckpointJson
-              && existing.generatedAt.getTime() === completionData.generatedAt.getTime();
-            if (!immutableFieldsMatch) {
-              throw new Error("completion record already exists with different immutable content");
-            }
-          });
         } catch (gateErr) {
           await verificationCoordinator.fail(task.id, {
             reason: "completion_gate_denied",
@@ -12563,7 +12580,7 @@ async function agentLoop(turnId: string): Promise<void> {
           return;
         }
 
-        await verificationCoordinator.complete(task.id, plan.id, turnId);
+        await verificationCoordinator.complete(task.id, plan.id, turnId, completionData.id);
         await mutateAgentState(() => emit({
           eventType: "verification.admitted",
           aggregateType: "turn",
@@ -12869,9 +12886,13 @@ async function recoverVerifiedOrFinalizingTurn(input: {
   });
   const completion = await db.completionRecord.findUnique({
     where: { taskId: input.taskId },
-    select: { status: true },
+    select: { status: true, admissionState: true },
   });
-  if (task?.status !== "COMPLETED" || completion?.status !== "completed") return false;
+  if (
+    task?.status !== "COMPLETED"
+    || completion?.status !== "completed"
+    || completion.admissionState !== "COMMITTED"
+  ) return false;
 
   const proposal = await db.semanticEvent.findFirst({
     where: { eventType: "completion.proposed", aggregateType: "turn", aggregateId: input.id },
@@ -12924,6 +12945,92 @@ async function recoverVerifiedOrFinalizingTurn(input: {
     if (updated.count !== 1) throw new Error(`turn ${input.id} changed during terminal recovery`);
   });
   return true;
+}
+
+interface CompletionAdmissionRecoveryResult {
+  readonly prepared: number;
+  readonly recovered: readonly string[];
+  readonly quarantined: readonly string[];
+  readonly failed: readonly { id: string; error: string }[];
+}
+
+async function quarantinePreparedCompletionRecord(id: string): Promise<void> {
+  await writerTransaction((tx) => tx.completionRecord.updateMany({
+    where: { id, admissionState: "PREPARED" },
+    data: { admissionState: "QUARANTINED" },
+  }));
+}
+
+/**
+ * Reconcile a crash after candidate-branch admission but before task/turn
+ * completion. The prepared record is the immutable completion intent; an
+ * ADMITTED branch is the only safe proof that the external merge gate passed.
+ */
+async function reconcilePreparedCompletionRecords(): Promise<CompletionAdmissionRecoveryResult> {
+  const records = await db.completionRecord.findMany({
+    where: { admissionState: "PREPARED" },
+    orderBy: [{ generatedAt: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      taskId: true,
+      verificationPlanId: true,
+      candidateBranchId: true,
+    },
+  });
+  const recovered: string[] = [];
+  const quarantined: string[] = [];
+  const failed: Array<{ id: string; error: string }> = [];
+  for (const record of records) {
+    if (record.candidateBranchId === null) {
+      await quarantinePreparedCompletionRecord(record.id);
+      quarantined.push(record.id);
+      continue;
+    }
+    const branch = await db.candidateBranch.findUnique({
+      where: { id: record.candidateBranchId },
+      select: { status: true, taskId: true, attemptId: true },
+    });
+    if (branch === null || branch.status !== "ADMITTED" || branch.taskId !== record.taskId) {
+      await quarantinePreparedCompletionRecord(record.id);
+      quarantined.push(record.id);
+      continue;
+    }
+    const [task, turn] = await Promise.all([
+      db.task.findUnique({ where: { id: record.taskId }, select: { status: true } }),
+      db.turn.findUnique({ where: { id: branch.attemptId }, select: { id: true, taskId: true, state: true } }),
+    ]);
+    if (task === null || turn === null || turn.taskId !== record.taskId) {
+      await quarantinePreparedCompletionRecord(record.id);
+      quarantined.push(record.id);
+      continue;
+    }
+    if (
+      task.status === "COMPLETED"
+      && ["VERIFIED", "FINALIZING", "COMPLETED"].includes(turn.state)
+    ) {
+      const committed = await writerTransaction((tx) => tx.completionRecord.updateMany({
+        where: { id: record.id, admissionState: "PREPARED" },
+        data: { admissionState: "COMMITTED" },
+      }));
+      if (committed.count === 1) recovered.push(record.id);
+      continue;
+    }
+    if (task.status !== "VERIFYING" || turn.state !== "VERIFYING") {
+      await quarantinePreparedCompletionRecord(record.id);
+      quarantined.push(record.id);
+      continue;
+    }
+    try {
+      await verificationCoordinator.complete(record.taskId, record.verificationPlanId, turn.id, record.id);
+      recovered.push(record.id);
+    } catch (error: unknown) {
+      failed.push({
+        id: record.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { prepared: records.length, recovered, quarantined, failed };
 }
 
 /** Quarantine a terminal-adjacent turn when its completion proof is incomplete. */
@@ -13680,12 +13787,17 @@ const jobRecovery = await reconcileNonterminalJobs();
 const repairedTaskProjections = await reconcileV1TaskProjections();
 const checkpointLinkRecovery = await reconcileCheckpointArtifactLinks();
 const checkpointAdmissionRecovery = await reconcilePreparedCheckpointAdmissions();
+const completionAdmissionRecovery = await reconcilePreparedCompletionRecords();
 const recoveredActiveTurns = await recoverActiveAgentTurns();
 const recoveredDurableRepairAttempts = await recoverDurableRepairAttempts();
 const recoveredPendingRepairTurns = await recoverPendingRepairTurns();
-if (checkpointLinkRecovery.failed.length > 0 || checkpointAdmissionRecovery.failed.length > 0) {
+if (
+  checkpointLinkRecovery.failed.length > 0
+  || checkpointAdmissionRecovery.failed.length > 0
+  || completionAdmissionRecovery.failed.length > 0
+) {
   throw new Error(
-    `checkpoint recovery could not settle: ${checkpointLinkRecovery.failed.length} link failures, ${checkpointAdmissionRecovery.failed.length} admission failures`,
+    `startup admission recovery could not settle: ${checkpointLinkRecovery.failed.length} checkpoint link failures, ${checkpointAdmissionRecovery.failed.length} checkpoint admission failures, ${completionAdmissionRecovery.failed.length} completion admission failures`,
   );
 }
 if (repairedTaskProjections > 0) {
@@ -13704,6 +13816,11 @@ if (jobRecovery.scanned > 0) {
 if (checkpointAdmissionRecovery.prepared > 0) {
   console.log(
     `[terminus-control] checkpoint admission recovery: ${checkpointAdmissionRecovery.recovered.length} recovered, ${checkpointAdmissionRecovery.quarantined.length} quarantined, ${checkpointAdmissionRecovery.failed.length} pending`,
+  );
+}
+if (completionAdmissionRecovery.prepared > 0) {
+  console.log(
+    `[terminus-control] completion admission recovery: ${completionAdmissionRecovery.recovered.length} recovered, ${completionAdmissionRecovery.quarantined.length} quarantined, ${completionAdmissionRecovery.failed.length} pending`,
   );
 }
 if (recoveredDurableRepairAttempts > 0 || recoveredPendingRepairTurns > 0) {
