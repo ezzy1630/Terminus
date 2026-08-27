@@ -723,7 +723,7 @@ model CandidateBranch {
   scopeDigest       String   @map("scope_digest")
   effectIdsJson     String   @map("effect_ids_json")
   proofJson         String?  @map("proof_json")
-  status            String
+  status            String   // OPEN | ADMITTING | ADMITTED | REJECTED | MANUAL_REVIEW
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 

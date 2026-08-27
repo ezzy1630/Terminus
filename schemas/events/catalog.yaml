@@ -307,6 +307,18 @@
   pii: none
   retention: audit
 
+- type: candidate_branch.recovery_manual_review
+  version: 1
+  aggregate: task
+  payload:
+    task_id: {type: uuid, required: true}
+    branch_id: {type: uuid, required: true}
+    previous_status: {type: string, required: true}
+    reason: {type: string, required: true}
+    admission_operation_id: {type: string, required: true}
+  pii: none
+  retention: audit
+
 - type: recovery.reconciled
   version: 1
   aggregate: turn

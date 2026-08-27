@@ -148,8 +148,9 @@ export class AdmissionService {
     }
 
     // Claim after all read-only validation and immediately before the merge.
-    // The repository advances the durable epoch with a compare-and-swap, so
-    // two reviewers cannot both merge the same OPEN branch.
+    // The repository advances the durable epoch and marks the branch
+    // ADMITTING with a compare-and-swap, so a restart cannot mistake an
+    // externally submitted merge for an OPEN branch and issue it again.
     const claimedBranch = await this.repo.claimCandidateBranch(branch.branchId, branch.epoch);
     if (claimedBranch === null) {
       throw new ValidationError(`candidate branch '${branch.branchId}' was claimed or changed concurrently`);

@@ -380,7 +380,7 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
     if (current === undefined || current.status !== "OPEN" || current.epoch !== expectedEpoch) {
       return null;
     }
-    const claimed = { ...current, epoch: current.epoch + 1 };
+    const claimed: CandidateBranchRecord = { ...current, epoch: current.epoch + 1, status: "ADMITTING" };
     this.candidateBranches.set(branchId, clone(claimed));
     return clone(claimed);
   }

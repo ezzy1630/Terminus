@@ -35,6 +35,7 @@ const TEST_PATHS = [
   "tests/recovery/provider_attempt_identity.test.ts",
   "tests/recovery/provider_attempt_recovery.test.ts",
   "tests/recovery/proposal_cancellation_recovery.test.ts",
+  "tests/recovery/branch_admission_recovery.test.ts",
 ] as const;
 
 const DB_BACKED_SCENARIOS = [
@@ -92,6 +93,11 @@ const DB_BACKED_SCENARIOS = [
     scenario: "task_cancellation_replay",
     boundary: "before_event_commit",
     assertions: ["all active turns, the task, and cancellation events commit or roll back together without duplicate abort events"],
+  },
+  {
+    scenario: "branch_admission_recovery_replay",
+    boundary: "after_external_merge_before_receipt",
+    assertions: ["an in-flight candidate branch is fenced as ADMITTING and moved to MANUAL_REVIEW without retrying the merge"],
   },
 ] as const;
 

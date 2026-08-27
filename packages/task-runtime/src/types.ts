@@ -96,7 +96,7 @@ export interface DurableTaskRepository {
   // Speculative candidate branches and their immutable admission proof.
   createCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord>;
   getCandidateBranch(branchId: string): Promise<CandidateBranchRecord | null>;
-  /** Atomically claim an OPEN branch by advancing its durable epoch. */
+  /** Atomically claim an OPEN branch by advancing its epoch and marking it ADMITTING. */
   claimCandidateBranch(branchId: string, expectedEpoch: number): Promise<CandidateBranchRecord | null>;
   updateCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord>;
   listCandidateBranches(taskId: string): Promise<readonly CandidateBranchRecord[]>;
@@ -169,5 +169,5 @@ export interface CandidateBranchRecord {
   readonly scopeDigest: string;
   readonly effectIds: readonly string[];
   readonly proof: CandidateCompletionProof | null;
-  readonly status: "OPEN" | "ADMITTED" | "REJECTED";
+  readonly status: "OPEN" | "ADMITTING" | "ADMITTED" | "REJECTED" | "MANUAL_REVIEW";
 }

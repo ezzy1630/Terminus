@@ -6792,6 +6792,7 @@ const routes: Route[] = [
     // second time.
     const effectRecovery = await reconcileUnsettledSideEffects(true);
     const providerRecovery = await reconcileInFlightProviderAttempts(true);
+    const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions(true);
 
     const checkpointLinks = await reconcileCheckpointArtifactLinks();
     const checkpointAdmissions = await reconcilePreparedCheckpointAdmissions();
@@ -6815,6 +6816,7 @@ const routes: Route[] = [
         reconciled_jobs: jobRecovery.scanned,
         lost_jobs: jobRecovery.lost,
         manual_review_effects: effectRecovery.manualReview.length,
+        manual_review_candidate_branches: candidateBranchRecovery.manualReview.length,
         interrupted_attempts: providerRecovery.interrupted.length,
         recovered_active_turns: recoveredActiveTurns,
         recovered_pending_repairs: recoveredPendingRepairs,
@@ -6836,12 +6838,14 @@ const routes: Route[] = [
           integrityOk: integrityOk
             && effectRecovery.failed.length === 0
             && providerRecovery.failed.length === 0
+            && candidateBranchRecovery.failed.length === 0
             && checkpointLinks.failed.length === 0
             && checkpointLinks.quarantined.length === 0
             && checkpointAdmissions.failed.length === 0
             && checkpointAdmissions.quarantined.length === 0,
           detailsJson: JSON.stringify({
             providerRecovery,
+            candidateBranchRecovery,
             jobRecovery,
             effectRecovery,
             checkpointLinks,
@@ -6861,6 +6865,7 @@ const routes: Route[] = [
       non_terminal_turns: report.nonTerminalTurns,
       lost_jobs: report.lostJobs,
       manual_review_effects: report.manualReviewEffects,
+      manual_review_candidate_branches: candidateBranchRecovery.manualReview.length,
       integrity_ok: report.integrityOk,
       interrupted_attempts: providerRecovery.interrupted.length,
       recovered_active_turns: recoveredActiveTurns,
@@ -6869,6 +6874,7 @@ const routes: Route[] = [
       checkpoint_admissions: checkpointAdmissions,
       effect_recovery: effectRecovery,
       provider_recovery: providerRecovery,
+      candidate_branch_recovery: candidateBranchRecovery,
     });
   }),
 
@@ -13414,6 +13420,111 @@ async function reconcileInFlightProviderAttempts(
   return { scanned: attempts.length, interrupted, alreadyResolved, failed };
 }
 
+interface CandidateBranchRecoveryRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly epoch: number;
+}
+
+interface CandidateBranchRecoveryResult {
+  readonly scanned: number;
+  readonly manualReview: readonly CandidateBranchRecoveryRecord[];
+  readonly alreadyResolved: readonly string[];
+  readonly failed: readonly { id: string; error: string }[];
+}
+
+class CandidateBranchAlreadyResolvedError extends Error {
+  constructor(readonly branchId: string) {
+    super(`candidate branch ${branchId} was already resolved before recovery`);
+    this.name = "CandidateBranchAlreadyResolvedError";
+  }
+}
+
+/**
+ * Reconcile candidate branches that crossed the external merge boundary
+ * without a durable ADMITTED receipt. A later adapter may add a trusted
+ * receipt query; until then, recovery records MANUAL_REVIEW atomically and
+ * never issues the merge again.
+ */
+async function reconcileInFlightCandidateBranchAdmissions(
+  alreadyUnderMutationLock = false,
+): Promise<CandidateBranchRecoveryResult> {
+  const branches = await db.candidateBranch.findMany({
+    where: { status: "ADMITTING" },
+    orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
+    select: { id: true, taskId: true, attemptId: true, epoch: true },
+  });
+  const manualReview: CandidateBranchRecoveryRecord[] = [];
+  const alreadyResolved: string[] = [];
+  const failed: Array<{ id: string; error: string }> = [];
+  for (const branch of branches) {
+    const recover = async (): Promise<void> => {
+      await emit({
+        eventType: "candidate_branch.recovery_manual_review",
+        aggregateType: "task",
+        aggregateId: branch.taskId,
+        correlationId: branch.taskId,
+        idempotencyKey: `candidate-branch-recovery:${branch.id}`,
+        payload: {
+          task_id: branch.taskId,
+          branch_id: branch.id,
+          previous_status: "ADMITTING",
+          reason: "candidate_branch_merge_receipt_unavailable_after_restart",
+          admission_operation_id: `completion-admission:${branch.id}`,
+        },
+      }, async (tx) => {
+        const current = await tx.candidateBranch.findUnique({
+          where: { id: branch.id },
+          select: { status: true, epoch: true, taskId: true },
+        });
+        if (
+          current === null
+          || current.status !== "ADMITTING"
+          || current.epoch !== branch.epoch
+          || current.taskId !== branch.taskId
+        ) {
+          throw new CandidateBranchAlreadyResolvedError(branch.id);
+        }
+        const updated = await tx.candidateBranch.updateMany({
+          where: { id: branch.id, taskId: branch.taskId, epoch: branch.epoch, status: "ADMITTING" },
+          data: { status: "MANUAL_REVIEW", epoch: { increment: 1 } },
+        });
+        if (updated.count !== 1) throw new CandidateBranchAlreadyResolvedError(branch.id);
+        await tx.task.updateMany({
+          where: { id: branch.taskId, status: { in: ["ACTIVE", "VERIFYING"] } },
+          data: {
+            status: "BLOCKED",
+            phase: "VERIFY",
+            completedAt: null,
+            terminalReasonJson: JSON.stringify({
+              reason: "candidate_branch_admission_recovery_required",
+              branch_id: branch.id,
+              attempt_id: branch.attemptId,
+              reconciliation_required: true,
+            }),
+          },
+        });
+      });
+    };
+    try {
+      if (alreadyUnderMutationLock) await recover();
+      else await mutateAgentState(recover);
+      manualReview.push(branch);
+    } catch (error: unknown) {
+      if (error instanceof CandidateBranchAlreadyResolvedError) {
+        alreadyResolved.push(error.branchId);
+      } else {
+        failed.push({
+          id: branch.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+  return { scanned: branches.length, manualReview, alreadyResolved, failed };
+}
+
 /**
  * A context boundary is safe to resume when no provider request or effect is
  * ambiguous. A tool-settlement boundary is also resumable once every tool
@@ -14366,6 +14477,7 @@ await replayArpV2();
 const jobRecovery = await reconcileNonterminalJobs();
 const effectRecovery = await reconcileUnsettledSideEffects();
 const providerRecovery = await reconcileInFlightProviderAttempts();
+const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions();
 const repairedTaskProjections = await reconcileV1TaskProjections();
 const checkpointLinkRecovery = await reconcileCheckpointArtifactLinks();
 const checkpointAdmissionRecovery = await reconcilePreparedCheckpointAdmissions();
@@ -14378,12 +14490,14 @@ if (
   ||
   providerRecovery.failed.length > 0
   ||
+  candidateBranchRecovery.failed.length > 0
+  ||
   checkpointLinkRecovery.failed.length > 0
   || checkpointAdmissionRecovery.failed.length > 0
   || completionAdmissionRecovery.failed.length > 0
 ) {
   throw new Error(
-    `startup recovery could not settle: ${effectRecovery.failed.length} effect failures, ${checkpointLinkRecovery.failed.length} checkpoint link failures, ${checkpointAdmissionRecovery.failed.length} checkpoint admission failures, ${completionAdmissionRecovery.failed.length} completion admission failures`,
+    `startup recovery could not settle: ${effectRecovery.failed.length} effect failures, ${providerRecovery.failed.length} provider failures, ${candidateBranchRecovery.failed.length} candidate branch failures, ${checkpointLinkRecovery.failed.length} checkpoint link failures, ${checkpointAdmissionRecovery.failed.length} checkpoint admission failures, ${completionAdmissionRecovery.failed.length} completion admission failures`,
   );
 }
 if (repairedTaskProjections > 0) {
@@ -14407,6 +14521,11 @@ if (effectRecovery.scanned > 0) {
 if (providerRecovery.scanned > 0) {
   console.log(
     `[terminus-control] provider recovery: ${providerRecovery.interrupted.length} interrupted, ${providerRecovery.alreadyResolved.length} already resolved`,
+  );
+}
+if (candidateBranchRecovery.scanned > 0) {
+  console.log(
+    `[terminus-control] candidate branch recovery: ${candidateBranchRecovery.manualReview.length} manual review, ${candidateBranchRecovery.alreadyResolved.length} already resolved`,
   );
 }
 if (checkpointAdmissionRecovery.prepared > 0) {

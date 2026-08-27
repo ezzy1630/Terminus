@@ -568,7 +568,7 @@ export function createPrismaCompletionAdmission(
       return db.$transaction(async (tx) => {
         const claimed = await tx.candidateBranch.updateMany({
           where: { id: branchId, epoch: expectedEpoch, status: "OPEN" },
-          data: { epoch: { increment: 1 } },
+          data: { epoch: { increment: 1 }, status: "ADMITTING" },
         });
         if (claimed.count !== 1) return null;
         const row = await tx.candidateBranch.findUnique({ where: { id: branchId } });
@@ -635,7 +635,13 @@ function candidateBranchFromRow(row: {
   if (!Array.isArray(effectIds) || !effectIds.every((value): value is string => typeof value === "string")) {
     throw new Error(`candidate branch '${row.id}' has invalid effect IDs`);
   }
-  if (row.status !== "OPEN" && row.status !== "ADMITTED" && row.status !== "REJECTED") {
+  if (
+    row.status !== "OPEN"
+    && row.status !== "ADMITTING"
+    && row.status !== "ADMITTED"
+    && row.status !== "REJECTED"
+    && row.status !== "MANUAL_REVIEW"
+  ) {
     throw new Error(`candidate branch '${row.id}' has invalid status '${row.status}'`);
   }
   return {

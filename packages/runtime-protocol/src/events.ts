@@ -128,6 +128,7 @@ export const EVENT_TYPES = [
   "verification.node_failed",
   "verification.plan_completed",
   "verification.admitted",
+  "candidate_branch.recovery_manual_review",
   "recovery.reconciled",
   "task.repair_scheduled",
   "task.blocked",
@@ -459,6 +460,17 @@ export type VerificationPlanCompletedPayload = z.infer<
   typeof verificationPlanCompletedPayloadSchema
 >;
 
+export const candidateBranchRecoveryManualReviewPayloadSchema = z.object({
+  taskId: z.string(),
+  branchId: z.string(),
+  previousStatus: z.string(),
+  reason: z.string(),
+  admissionOperationId: z.string(),
+});
+export type CandidateBranchRecoveryManualReviewPayload = z.infer<
+  typeof candidateBranchRecoveryManualReviewPayloadSchema
+>;
+
 export const memoryClaimCreatedPayloadSchema = z.object({
   claimId: z.string(),
   kind: z.string(),
@@ -553,6 +565,7 @@ export interface EventPayloadMap {
   "verification.node_failed": VerificationNodeFailedPayload;
   "verification.plan_completed": VerificationPlanCompletedPayload;
   "verification.admitted": RuntimeLifecyclePayload;
+  "candidate_branch.recovery_manual_review": CandidateBranchRecoveryManualReviewPayload;
   "recovery.reconciled": RuntimeLifecyclePayload;
   "task.repair_scheduled": RuntimeLifecyclePayload;
   "task.blocked": RuntimeLifecyclePayload;
@@ -574,6 +587,7 @@ export type AnyTypedEvent = {
 /** Maps an event type to its aggregate type. */
 export function aggregateForEventType(t: EventType): AggregateType {
   const overrides: Partial<Record<EventType, AggregateType>> = {
+    "candidate_branch.recovery_manual_review": "task",
     "completion.proposed": "turn",
     "recovery.reconciled": "turn",
     "verification.admitted": "turn",
@@ -738,6 +752,7 @@ export function payloadSchemaFor(type: EventType): z.ZodType<Readonly<Record<str
     "verification.node_failed": verificationNodeFailedPayloadSchema,
     "verification.plan_completed": verificationPlanCompletedPayloadSchema,
     "verification.admitted": runtimeLifecyclePayloadSchema,
+    "candidate_branch.recovery_manual_review": candidateBranchRecoveryManualReviewPayloadSchema,
     "recovery.reconciled": runtimeLifecyclePayloadSchema,
     "task.repair_scheduled": runtimeLifecyclePayloadSchema,
     "task.blocked": runtimeLifecyclePayloadSchema,

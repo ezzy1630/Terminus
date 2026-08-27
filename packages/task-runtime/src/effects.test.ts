@@ -39,6 +39,7 @@ describe("Phase 3: Transactional Effects and Authority", () => {
   let seqPolicy: SequencePolicyEvaluator;
   let admission: AdmissionService;
   let substrate: DurableTaskSubstrate;
+  let mergedBranchStatuses: string[];
 
   beforeEach(() => {
     repo = new InMemoryDurableTaskRepository();
@@ -47,9 +48,13 @@ describe("Phase 3: Transactional Effects and Authority", () => {
     authzManager = new AuthorizationManager(repo, outbox);
     handleManager = new ResourceHandleManager(repo);
     seqPolicy = new SequencePolicyEvaluator(repo);
+    mergedBranchStatuses = [];
     admission = new AdmissionService(repo, ledger, seqPolicy, {
       getAuthoritativeRevision: async () => "rev-base",
-      merge: async () => ({ mergeId: "merge-test", authoritativeRevision: "rev-admitted" }),
+      merge: async (branch) => {
+        mergedBranchStatuses.push(branch.status);
+        return { mergeId: "merge-test", authoritativeRevision: "rev-admitted" };
+      },
     });
     substrate = new DurableTaskSubstrate(repo);
   });
@@ -703,6 +708,7 @@ describe("Phase 3: Transactional Effects and Authority", () => {
 
       expect(admissionResult.admitted).toBe(true);
       expect(admissionResult.committedEffects).toContain(eff.id);
+      expect(mergedBranchStatuses).toEqual(["ADMITTING"]);
 
       const committed = await repo.getEffectRecord(eff.id);
       expect(committed?.state).toBe("COMMITTED");

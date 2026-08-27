@@ -160,7 +160,7 @@ const candidateBranchSchema = z.object({
       claims: z.array(candidateClaimSchema),
     })
     .nullable(),
-  status: z.enum(["OPEN", "ADMITTED", "REJECTED"]),
+  status: z.enum(["OPEN", "ADMITTING", "ADMITTED", "REJECTED", "MANUAL_REVIEW"]),
 });
 
 const candidateBranchDecoder: Decoder = {
@@ -1341,7 +1341,7 @@ export class SqliteDurableTaskRepository
         candidateBranchDecoder,
       );
       if (current === null || current.status !== "OPEN" || current.epoch !== expectedEpoch) return null;
-      const claimed: CandidateBranchRecord = { ...current, epoch: current.epoch + 1 };
+      const claimed: CandidateBranchRecord = { ...current, epoch: current.epoch + 1, status: "ADMITTING" };
       const result = database
         .query(
           "UPDATE task_runtime_records SET payload_json = ?, cas_value = ? WHERE collection = 'candidate_branch' AND record_id = ? AND cas_value = ?",
