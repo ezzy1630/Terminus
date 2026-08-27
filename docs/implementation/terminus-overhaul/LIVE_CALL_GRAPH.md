@@ -1,6 +1,6 @@
 # Terminus live call graph
 
-Revision: working tree after the overhaul slice; final commit is recorded in `HANDOFF.md`.
+Revision: functional checkpoint/terminal publication commit `7e66f2f`; ledger state is recorded in `HANDOFF.md`.
 
 ## Verified primary path
 
@@ -25,8 +25,9 @@ HTTP/RPC route in mini-services/terminus-control/src/index.ts
   -> candidate branch registered and admitted
   -> atomic task COMPLETED + turn VERIFIED + completion record `COMMITTED` admission
   -> turn FINALIZING
-  -> automatic checkpoint attempt (committed or explicit failure event)
-  -> turn COMPLETED + `turn.completed`
+  -> prepare automatic checkpoint
+  -> atomic checkpoint admission + `checkpoint.created` + `context.auto_checkpoint_committed` + turn COMPLETED + `turn.completed`
+  -> explicit `context.auto_checkpoint_failed` fallback when preparation cannot complete
 ```
 
 Repair path:
@@ -73,6 +74,6 @@ task/turn cancel request
 
 ## Recovery boundary
 
-Startup recovery resumes PENDING/CONTEXT_COMPILING/REPAIRING and settled TOOL_SETTLEMENT work when provider/effect state is unambiguous. Prepared completion records are reconciled only when their candidate branch is `ADMITTED`; a matching VERIFYING task/turn is completed through the coordinator without provider replay, and unsafe intents are quarantined. Verified/finalizing turns require a completed task, a `COMMITTED` completion record, and proposal response artifact; otherwise recovery emits `turn.recovery_failed` and blocks the task. RESPONSE_VALIDATING and VERIFYING without an admitted completion intent are deliberately not replayed blindly and need a separate durable continuation slice.
+Startup recovery resumes PENDING/CONTEXT_COMPILING/REPAIRING and settled TOOL_SETTLEMENT work when provider/effect state is unambiguous. Prepared completion records are reconciled only when their candidate branch is `ADMITTED`; a matching VERIFYING task/turn is completed through the coordinator without provider replay, and unsafe intents are quarantined. A valid PREPARED checkpoint tied to a completed task and FINALIZING/VERIFIED source turn is deferred until terminal recovery can commit checkpoint and terminal rows/events together. Verified/finalizing turns require a completed task, a `COMMITTED` completion record, and proposal response artifact; otherwise recovery emits `turn.recovery_failed` and blocks the task. RESPONSE_VALIDATING and VERIFYING without an admitted completion intent are deliberately not replayed blindly and need a separate durable continuation slice.
 
 The graph is a source-level map, not proof of runtime completion. Proof is in `EVIDENCE.md` and must be extended with live provider, crash/replay, cross-platform, client, and release observations.

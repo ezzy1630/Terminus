@@ -25,12 +25,12 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`) |
+| Implementation commits | `3a05ce6` (`Implement durable Terminus overhaul lifecycle gates`), `d6fb7fb` (`Prove anonymous OpenCode Zen inference through kernel`), `327444f` (`Persist repair attempts and fenced recovery leases`), `ad9b458` (`Add database-backed repair recovery replay tests`), `a592cea` (`Add database-backed checkpoint replay tests`), `0c3a98a` (`Persist completion admission across recovery`), `ebf4344` (`Fix completion record scope at admission`), `7e66f2f` (`Make checkpoint and terminal publication atomic`) |
 | Ledger commits | `3840e82` (`Document overhaul evidence and handoff`), `f6c856d` (`Bind overhaul evidence to final handoff`), `8543df6` (`Finalize overhaul verification ledger`), `0c3a98a` (`Persist completion admission across recovery`), `e0a9fda` (`Bind completion recovery evidence to current tree`), `91c377f` (`Finalize current-tree evidence identity`) |
-| HEAD at last evidence capture | `91c377f` (`Finalize current-tree evidence identity`) |
+| HEAD at last implementation evidence capture | `7e66f2f` (`Make checkpoint and terminal publication atomic`) |
 | Branch | `main` |
-| Remote state at last evidence capture | Fourteen commits ahead of `origin/main`; no push performed |
-| Worktree | Clean at last evidence capture |
+| Remote state at last implementation evidence capture | Sixteen commits ahead of `origin/main`; no push performed |
+| Functional worktree | Clean at last implementation evidence capture; the ledger update was committed separately |
 
 ## Current implementation observations
 
@@ -47,6 +47,7 @@ This file records observed commands and artifacts. It does not turn source decla
 11. A DB-backed recovery test now exercises three of those boundaries against a fresh database migrated through `0012_repair_attempts`: schedule intent and its event roll back together, parent/child admission replays without duplicate rows/events, and a stale repair claimant cannot settle after lease fencing. The release artifact labels the remaining in-memory matrix as fixture-only and records `completeForRelease: false`.
 12. A second DB-backed recovery test exercises checkpoint publication against the same fresh-migration discipline: a crash before publication commit leaves the checkpoint `PREPARED` with no event, duplicate artifact linking collapses through the uniqueness constraint, and repeated recovery leaves one `COMMITTED` row with one `checkpoint.created` event.
 13. Completion admission now persists an immutable `PREPARED` record before candidate-branch admission and flips it to `COMMITTED` in the same transaction as task completion, the verified-turn transition, and `task.completed`. Startup only replays that transition when the associated branch is already `ADMITTED`; otherwise it quarantines the intent. A fresh-migration DB test proves rollback of all four rows/events, replay without a provider attempt, and quarantine of an open branch.
+14. Successful automatic checkpoint admission now shares one writer transaction with `checkpoint.created`, `context.auto_checkpoint_committed`, `turn.completed`, checkpoint `COMMITTED` state, and turn `COMPLETED` state. Startup validates a prepared checkpoint first, then defers a row tied to a completed task and terminal-adjacent turn so recovery can commit that coupled boundary together. Fresh-migration tests cover rollback and idempotent replay of the checkpoint and terminal publication batch.
 
 ## Durable repair-attempt evidence
 
@@ -66,9 +67,9 @@ The DB-backed scenarios are in
 `tests/recovery/fault_injection_matrix.test.ts` remains an in-memory fixture
 suite and is labeled that way in `fault-injection.json`.
 Checkpoint publication coverage is in
-`tests/recovery/checkpoint_publication_recovery.test.ts` and covers the
-`PREPARED`/`COMMITTED` admission boundary, not terminal-turn/checkpoint
-co-transactionality.
+`tests/recovery/checkpoint_publication_recovery.test.ts`. It covers the
+`PREPARED`/`COMMITTED` admission boundary, artifact-link uniqueness, and the
+coupled checkpoint/terminal publication transaction.
 
 Completion admission coverage is in
 `tests/recovery/completion_admission_recovery.test.ts`. Migration
@@ -76,7 +77,7 @@ Completion admission coverage is in
 association. The test proves that an admitted branch can replay completion
 without provider inference, while an unadmitted branch is quarantined. This
 closes the branch/record crash window but not the broader provider/effect or
-terminal/checkpoint co-transactionality requirements.
+later-state recovery requirements.
 
 ## Live OpenCode free-model evidence
 
@@ -139,6 +140,9 @@ This closes the live-provider proof for one supported anonymous public Zen path.
 | 2026-08-26 | `just codegen-check` from committed `ebf4344` | PASSED — generated protobuf, API, event, tool, config, schema, SQL migration inventory, and documentation outputs are stable with migration `0013_completion_admission`. |
 | 2026-08-26 | `just check-all` from committed `ebf4344` | PASSED — 583 TypeScript unit tests, 257 Python tests, 281 integration tests, Rust workspace libraries/tests, standalone/truth checks, platform probes, security suites, and `cargo deny`; one public OpenCode TLS canary remained explicitly ignored. |
 | 2026-08-26 | `just fault-injection` from committed `ebf4344` | PASSED — 22 recovery tests, 13 `fixture_only` boundaries, 5 DB-backed scenarios, and `completeForRelease: false`. |
+| 2026-08-26 | `bun test mini-services/terminus-control/src/services/services.test.ts tests/recovery/repair_attempt_recovery.test.ts tests/recovery/checkpoint_publication_recovery.test.ts tests/recovery/completion_admission_recovery.test.ts tests/persistence/migration_integrity.test.ts` | PASSED — 25 tests, 0 failures, 123 expect calls; includes repair, completion-admission, coupled checkpoint/terminal publication rollback/replay, and migration coverage. |
+| 2026-08-26 | `just fault-injection` | PASSED — the artifact records 13 `fixture_only` boundaries, 6 DB-backed scenarios, 24 passing recovery tests, and `completeForRelease: false`; the new scenario covers coupled checkpoint and terminal publication. |
+| 2026-08-26 | `just check` | PASSED — boundary checks, Rust fmt/clippy, ESLint (0 errors; 2 existing generated-file warnings), package/scripts/root TypeScript, and Python ruff/mypy. |
 
 ## Evidence policy
 

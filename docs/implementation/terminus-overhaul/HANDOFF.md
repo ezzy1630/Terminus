@@ -5,7 +5,7 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 ## Current position
 
 - Exact checkout: `/Volumes/Neural/Terminus`.
-- Branch: `main`. The implementation and evidence ledger are clean at the `91c377f` evidence snapshot; no push was performed.
+- Branch: `main`. Functional checkpoint/terminal publication commit `7e66f2f` is complete; the evidence ledger is current and no push was performed.
 - The worktree was clean before the ledger files and implementation changes were added. Other registered worktrees remain untouched.
 - Durable ledger files live in `docs/implementation/terminus-overhaul/`.
 - The implementation slice covers lifecycle ordering, recovery boundaries, cancellation, safe compaction, context instructions, provider stream/abort handling, anonymous OpenCode Zen free-model inference through the kernel, cumulative repair, durable repair attempts and fencing leases, durable completion admission recovery, default-off scout behavior, CI/ruleset declarations, evaluation-run contracts, and the Prisma DateTime upgrade migration.
@@ -15,7 +15,7 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 1. The live `main-protection` ruleset (id `21228252`) is weaker than the checked-in target. Applying it is a remote mutation and was not authorized.
 2. Hosted CI/bootstrap, paid-account and alternate-provider live conformance, cross-platform sandbox enforcement, signed release artifacts, and private holdout evaluations are not proven locally. The anonymous OpenCode Zen free-model path is now proven; see `EVIDENCE.md`.
 3. Recovery still quarantines rather than resumes `RESPONSE_VALIDATING`/`VERIFYING`; those states need a separate no-duplicate-provider policy and fault-injection proof. Durable repair attempts now have a parent/child record, task-level budget/provenance, and a fenced lease; verification node IDs are plan-scoped so a repair plan cannot collide with its parent in Prisma.
-4. Automatic checkpoint failure is explicit but not atomic with terminal publication. Provider/effect and proposal/branch fault boundaries still need production-equivalent replay coverage.
+4. Successful automatic checkpoint publication is atomic with terminal publication, and coupled restart recovery is tested. Checkpoint preparation failure remains explicit/best-effort. Provider/effect and proposal/branch fault boundaries still need production-equivalent replay coverage.
 
 ## Safe working rules
 
@@ -38,10 +38,10 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 - `just truth-check`: passed.
 - `just github-ruleset-plan`: passed read-only.
 - `just github-ruleset-verify`: failed against the current weaker remote ruleset, as expected.
-- `just fault-injection`: passed — 22 recovery tests, including 3 DB-backed repair scenarios, 2 DB-backed checkpoint publication tests, and 3 DB-backed completion-admission tests; the artifact explicitly remains `completeForRelease: false`.
+- `just fault-injection`: passed — 24 recovery tests, including 3 DB-backed repair scenarios, 4 DB-backed checkpoint publication tests, and 3 DB-backed completion-admission tests; the artifact has 13 fixture-only boundaries, 6 DB-backed scenarios, and explicitly remains `completeForRelease: false`.
 
 ## Resume sequence
 
 1. Inspect `git status --short --branch`, the last commit, and all four ledger files.
 2. If the user authorizes remote branch-protection mutation, run `just github-ruleset-apply`, then `just github-ruleset-verify` and read back the exact remote settings.
-3. Extend DB fault-injection/replay to proposal, branch admission, provider/effect, and cancellation boundaries; completion admission, checkpoint publication, and repair continuation slices are covered, then later-state recovery remains before release readiness.
+3. Extend DB fault-injection/replay to proposal, branch admission, provider/effect, and cancellation boundaries; completion admission, coupled checkpoint/terminal publication, and repair continuation slices are covered, then later-state recovery remains before release readiness.
