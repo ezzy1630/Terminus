@@ -77,15 +77,29 @@ export function createKernelArtifactClient(
       };
     },
     async link(hash, ownerType, ownerId, purpose): Promise<void> {
-      const response = await rpc.Link({
-        context: nextRequestContext(context),
-        sha256: hash,
-        ownerType,
-        ownerId,
-        purpose,
-        ownerTaskId: context.taskId,
-      });
-      if (!response.linked) throw new Error("kernel did not admit the artifact ownership link");
+      // The kernel rejects an inadmissible (owner_type, purpose) pair with a
+      // bare INVALID_ARGUMENT whose gRPC details are the generic "kernel
+      // request failed". Without the pair in the message the failure is
+      // indistinguishable from a bad hash or a task-binder mismatch, so name
+      // it on both the throw and the rejection path.
+      const describe = (): string => `${ownerType}/${purpose}`;
+      let response;
+      try {
+        response = await rpc.Link({
+          context: nextRequestContext(context),
+          sha256: hash,
+          ownerType,
+          ownerId,
+          purpose,
+          ownerTaskId: context.taskId,
+        });
+      } catch (error: unknown) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`kernel rejected the ${describe()} artifact ownership link: ${reason}`);
+      }
+      if (!response.linked) {
+        throw new Error(`kernel did not admit the ${describe()} artifact ownership link`);
+      }
     },
     async gcDryRun() {
       throw new Error("artifact GC is not part of the control-plane artifact boundary");

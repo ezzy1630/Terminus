@@ -3711,15 +3711,31 @@ impl ArtifactIngestService {
         let is_turn_initiating_input = owner_type == "turn" && purpose == "initiating-input";
         let is_task_evidence_bundle = owner_type == "task" && purpose == "evidence-bundle";
         let is_turn_evidence_bundle = owner_type == "turn" && purpose == "evidence-bundle";
+        // A tool call spills four durable artifacts and an episode summary
+        // spills one. The control plane has always linked them, but the
+        // allowlist was only ever extended for checkpoint, initiating-input,
+        // and evidence-bundle ownership, so `tool_call/arguments` — the first
+        // link of the first tool call — failed closed and aborted every turn
+        // that used a tool. These owner kinds carry no task or turn identity
+        // of their own, so they are admitted on the task binding enforced
+        // above plus the concreteness check below.
+        let is_tool_call_artifact = owner_type == "tool_call"
+            && matches!(
+                purpose,
+                "arguments" | "result" | "provider-transcript" | "provider-result-transcript"
+            );
+        let is_episode_content = owner_type == "episode" && purpose == "content";
         if !is_checkpoint_content
             && !is_turn_initiating_input
             && !is_task_evidence_bundle
             && !is_turn_evidence_bundle
+            && !is_tool_call_artifact
+            && !is_episode_content
         {
             return Err(KernelError::new(
                 terminus_kernel_protocol::ErrorCode::InvalidArgument,
                 terminus_kernel_protocol::ErrorCategory::Validation,
-                "the public artifact-link boundary admits only checkpoint content, turn initiating-input, or evidence-bundle ownership",
+                "the public artifact-link boundary admits only checkpoint content, turn initiating-input, evidence-bundle, tool-call, or episode-content ownership",
                 false,
             ));
         }
@@ -3752,6 +3768,23 @@ impl ArtifactIngestService {
                 terminus_kernel_protocol::ErrorCode::PermissionDenied,
                 terminus_kernel_protocol::ErrorCategory::Permission,
                 "task evidence-bundle ownership must match the request task",
+                false,
+            ));
+        }
+        // `tool_call` and `episode` owner ids are their own primary keys, so
+        // there is nothing in the request context to match them against.
+        // Require the task binding to be concrete so a wildcard capability
+        // cannot mint ownership across tasks.
+        if (is_tool_call_artifact || is_episode_content)
+            && (owner_id.contains('*')
+                || owner_task_id.contains('*')
+                || ctx.task_id.contains('*')
+                || bound_task == "*")
+        {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                "tool-call and episode artifact ownership require concrete non-wildcard identifiers and a task-bound capability",
                 false,
             ));
         }
@@ -4127,6 +4160,59 @@ mod artifact_ingest_tests {
                 "owner-task",
             )
             .is_ok());
+
+        // Every tool call spills these four artifacts and every episode
+        // summary spills one. They were not on the allowlist, so the first
+        // link of the first tool call aborted the turn.
+        for (owner_type, owner_id, purpose) in [
+            ("tool_call", "tool-call-id", "arguments"),
+            ("tool_call", "tool-call-id", "result"),
+            ("tool_call", "tool-call-id", "provider-transcript"),
+            ("tool_call", "tool-call-id", "provider-result-transcript"),
+            ("episode", "episode-id", "content"),
+        ] {
+            match kernel.artifact_ingest.link(
+                &owner,
+                &Default::default(),
+                &artifact.sha256,
+                owner_type,
+                owner_id,
+                purpose,
+                "owner-task",
+            ) {
+                Ok(_) => {}
+                Err(error) => panic!("{owner_type}/{purpose} link was rejected: {error}"),
+            }
+        }
+
+        // The allowlist stays closed: an unknown purpose on an admitted owner
+        // type is still a caller error.
+        assert!(matches!(
+            kernel.artifact_ingest.link(
+                &owner,
+                &Default::default(),
+                &artifact.sha256,
+                "tool_call",
+                "tool-call-id",
+                "not-a-real-purpose",
+                "owner-task",
+            ),
+            Err(error) if error.code() == ErrorCode::InvalidArgument
+        ));
+
+        // A tool-call link may not cross tasks.
+        assert!(matches!(
+            kernel.artifact_ingest.link(
+                &other,
+                &Default::default(),
+                &artifact.sha256,
+                "tool_call",
+                "tool-call-id",
+                "arguments",
+                "owner-task",
+            ),
+            Err(error) if error.code() == ErrorCode::PermissionDenied
+        ));
 
         let cross_task = kernel.artifact_ingest.link(
             &other,
