@@ -1098,3 +1098,6 @@ export type ForgeClientConfig = TerminusClientConfig;
 export { TerminusClient as ForgeClient };
 /** @deprecated Use `TerminusApiError`. Removed after the identity migration window. */
 export { TerminusApiError as ForgeApiError };
+
+export * from "./projection.js";
+export { fixtureEvent, PUBLIC_CLIENT_EVENT_FIXTURES } from "./projection-fixtures.js";

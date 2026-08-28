@@ -6,11 +6,17 @@ import type {
   TaskSnapshot,
   TaskV2Snapshot,
 } from "@terminus/public-api";
+import { appendProjectedEvent, projectEvent } from "@terminus/public-client";
+import type {
+  ClientEventPresentation,
+  ClientEventProjection,
+  ClientEventTone,
+} from "@terminus/public-client";
 
 export type ConnectionState = "connecting" | "online" | "reconnecting" | "offline";
 export type FocusArea = "sessions" | "tasks" | "timeline" | "composer";
-export type Tone = "default" | "muted" | "good" | "warn" | "danger" | "accent";
-export type TimelinePresentation = "user" | "agent" | "tool" | "system";
+export type Tone = ClientEventTone;
+export type TimelinePresentation = ClientEventPresentation;
 
 export interface HealthSnapshot {
   readonly status: "ok" | "degraded" | "down";
@@ -18,16 +24,7 @@ export interface HealthSnapshot {
   readonly ready: boolean;
 }
 
-export interface TimelineItem {
-  readonly id: string;
-  readonly cursor: string;
-  readonly kind: string;
-  readonly summary: string;
-  readonly detail: string;
-  readonly time: string;
-  readonly tone: Tone;
-  readonly presentation: TimelinePresentation;
-}
+export type TimelineItem = ClientEventProjection;
 
 export interface MaterialQuestionView {
   readonly id: string;
@@ -175,103 +172,23 @@ export function pendingQuestions(state: TuiState): readonly MaterialQuestionView
   );
 }
 
-function eventTone(event: string): Tone {
-  const value = event.toLowerCase();
-  if (value.includes("fail") || value.includes("error") || value.includes("denied")) return "danger";
-  if (value.includes("approval") || value.includes("attention") || value.includes("wait")) return "warn";
-  if (value.includes("complete") || value.includes("verified") || value.includes("allowed")) return "good";
-  if (value.includes("start") || value.includes("task") || value.includes("turn")) return "accent";
-  return "default";
-}
-
-function conciseJson(value: unknown): string | null {
-  if (value === null || typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
-  for (const key of ["message", "summary", "status", "phase", "reason", "error", "objective", "command", "path"]) {
-    const candidate = record[key];
-    if (typeof candidate === "string" && candidate.trim().length > 0) return candidate.trim();
-  }
-  return null;
-}
-
-function recordFrom(value: unknown): Readonly<Record<string, unknown>> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Readonly<Record<string, unknown>>
-    : null;
-}
-
-function stringField(record: Readonly<Record<string, unknown>> | null, ...keys: readonly string[]): string | null {
-  for (const key of keys) {
-    const value = record?.[key];
-    if (typeof value === "string" && value.trim().length > 0) return value.trim();
-  }
-  return null;
-}
-
-function eventPresentation(event: string): TimelinePresentation {
-  if (event === "turn.started") return "user";
-  if (event === "turn.provider_running" || event === "turn.completed" || event.startsWith("response.")) return "agent";
-  if (event.startsWith("tool.")) return "tool";
-  return "system";
-}
-
-function eventSummary(event: string, parsed: unknown, raw: string): string {
-  const record = recordFrom(parsed);
-  if (event === "turn.started") return stringField(record, "user_input", "message") ?? "Turn started";
-  if (event === "turn.provider_running") return stringField(record, "delta", "response", "summary") ?? "Agent is working";
-  if (event === "turn.completed") return stringField(record, "summary", "response", "message") ?? "Turn completed";
-  if (event.startsWith("tool.")) {
-    const tool = stringField(record, "tool", "toolId", "tool_id") ?? "tool";
-    const detail = stringField(record, "args_summary", "summary", "command", "path", "result_status", "status");
-    return detail ? `${tool} · ${detail}` : tool;
-  }
-  return conciseJson(parsed) ?? (raw.trim() || event);
-}
-
 export function timelineItemFromEvent(event: SseEvent, now = new Date()): TimelineItem {
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(event.data);
-  } catch {
-    parsed = null;
-  }
-  const summary = eventSummary(event.event, parsed, event.data);
-  return {
-    id: event.id || `${event.event}:${event.data}`,
-    cursor: event.id,
-    kind: event.event || "message",
-    summary,
-    detail: event.data,
-    time: now.toISOString(),
-    tone: eventTone(event.event),
-    presentation: eventPresentation(event.event),
-  };
+  return projectEvent(event, now);
 }
 
 export function appendEvent(state: TuiState, event: SseEvent, now?: Date): TuiState {
-  const id = event.id || `${event.event}:${event.data}`;
-  if (state.seenEventIds.has(id)) return state;
-  const seenEventIds = new Set(state.seenEventIds);
-  seenEventIds.add(id);
-  const timeline = [...state.timeline, timelineItemFromEvent(event, now)];
-  const retained = timeline.length > 500 ? timeline.slice(timeline.length - 500) : timeline;
-  if (seenEventIds.size > 1_000) {
-    const retainedIds = new Set(retained.map((item) => item.id));
-    return {
-      ...state,
-      timeline: retained,
-      seenEventIds: retainedIds,
-      lastCursor: event.id || state.lastCursor,
-      selectedTimeline: Math.max(0, retained.length - 1),
-      timelineScroll: 0,
-    };
-  }
+  const next = appendProjectedEvent(
+    { items: state.timeline, seenEventIds: state.seenEventIds, cursor: state.lastCursor },
+    event,
+    now === undefined ? {} : { now },
+  );
+  if (!next.accepted) return state;
   return {
     ...state,
-    timeline: retained,
-    seenEventIds,
-    lastCursor: event.id || state.lastCursor,
-    selectedTimeline: Math.max(0, retained.length - 1),
+    timeline: next.items,
+    seenEventIds: next.seenEventIds,
+    lastCursor: next.cursor,
+    selectedTimeline: Math.max(0, next.items.length - 1),
     timelineScroll: 0,
   };
 }

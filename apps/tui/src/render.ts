@@ -355,7 +355,13 @@ function rightPane(state: TuiState, layout: Layout): readonly string[] {
 }
 
 function header(state: TuiState, width: number): string {
-  const connection = state.connection === "online" ? "● online" : state.connection === "connecting" ? "○ connecting" : "◌ reconnecting";
+  const connection = state.connection === "online"
+    ? "● online"
+    : state.connection === "offline"
+      ? "× offline"
+      : state.connection === "connecting"
+        ? "○ connecting"
+        : "◌ reconnecting";
   const connectionTone = state.connection === "online" ? COLORS.good : state.connection === "offline" ? COLORS.danger : COLORS.warn;
   const session = selectedSession(state);
   const task = selectedTask(state);

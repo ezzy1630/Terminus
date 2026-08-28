@@ -20,20 +20,29 @@ import { useMemo } from "react";
 import { api, TerminusApiError, subscribeEvents, type TerminusEventStream } from "../lib/api";
 import { mergePendingApprovals, pendingApprovalFromServerRow, derivePendingApprovals, type PendingApproval } from "../lib/task-surface";
 import { sessionLatency } from "../lib/session-latency";
+import {
+  boundPresentationEvent as boundClientPresentationEvent,
+  DEFAULT_PRESENTATION_EVENT_MAX_CHARS,
+  eventIdentity,
+  eventByteLength,
+  normalizeTaskStatus as normalizeClientTaskStatus,
+  projectCursorExpiredEvent,
+  projectTaskEvent,
+  retainEventWindow,
+} from "@terminus/public-client";
+import type { EventHistoryBoundary } from "@terminus/public-client";
 import type {
   TerminusSseEvent,
   HealthResponse,
   Session,
   Task,
-  TaskDomainStatus,
-  TaskStatusKind,
 } from "../types";
 
 const MAX_EVENTS_PER_TASK = 2000;
 export const MAX_EVENT_BYTES_PER_TASK = 4 * 1024 * 1024;
 export const MAX_EVENT_BYTES_GLOBAL = 32 * 1024 * 1024;
 export const MAX_PENDING_EVENT_BYTES_GLOBAL = 2 * 1024 * 1024;
-export const MAX_PRESENTATION_EVENT_CHARS = 128 * 1024;
+export const MAX_PRESENTATION_EVENT_CHARS = DEFAULT_PRESENTATION_EVENT_MAX_CHARS;
 export const PRESENTATION_REJECTION_KEY = "terminus_presentation_rejection";
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 15_000;
@@ -59,14 +68,8 @@ const pendingEventDropsByTask = new Map<string, { count: number; throughCursor: 
 const pendingApprovalRefreshTasks = new Set<string>();
 const eventIdsByTask = new Map<string, Set<string>>();
 let eventFlushScheduled = false;
-const EVENT_TEXT_ENCODER = new TextEncoder();
-
 /** Exact retained UTF-8 presentation cost for one bounded SSE envelope. */
-export function presentationEventByteLength(event: TerminusSseEvent): number {
-  return EVENT_TEXT_ENCODER.encode(event.id).byteLength
-    + EVENT_TEXT_ENCODER.encode(event.event).byteLength
-    + EVENT_TEXT_ENCODER.encode(event.data).byteLength;
-}
+export const presentationEventByteLength = eventByteLength;
 
 function notePendingEventDrop(taskId: string, event: TerminusSseEvent): void {
   const prior = pendingEventDropsByTask.get(taskId);
@@ -74,7 +77,7 @@ function notePendingEventDrop(taskId: string, event: TerminusSseEvent): void {
     count: (prior?.count ?? 0) + 1,
     throughCursor: event.id || prior?.throughCursor || null,
   });
-  if (event.id) eventIdsByTask.get(taskId)?.delete(event.id);
+  eventIdsByTask.get(taskId)?.delete(eventIdentity(event));
 }
 
 function dropOldestPendingEvent(taskId: string): boolean {
@@ -112,40 +115,7 @@ function isCurrentKeyedGeneration(
  * presentation budget. The cursor and event kind remain intact so replay,
  * approval reconciliation, and terminal task transitions still advance.
  */
-export function boundPresentationEvent(ev: TerminusSseEvent): TerminusSseEvent {
-  if (ev.data.length <= MAX_PRESENTATION_EVENT_CHARS) return ev;
-  return {
-    ...ev,
-    data: JSON.stringify({
-      [PRESENTATION_REJECTION_KEY]: {
-        reason: "event_payload_too_large",
-        source_event: ev.event,
-        character_count: ev.data.length,
-        limit: MAX_PRESENTATION_EVENT_CHARS,
-      },
-    }),
-  };
-}
-
-const TASK_DOMAIN_STATUSES: ReadonlySet<string> = new Set([
-  "DRAFT", "ACTIVE", "NEEDS_USER_DECISION", "BLOCKED", "VERIFYING", "COMPLETED",
-  "FAILED", "FAILED_VERIFICATION", "BUDGET_EXHAUSTED", "POLICY_DENIED", "ABORTED",
-]);
-
-function isTaskDomainStatus(value: unknown): value is TaskDomainStatus {
-  return typeof value === "string" && TASK_DOMAIN_STATUSES.has(value);
-}
-
-export interface EventHistoryBoundary {
-  readonly reason: "bounded_window" | "global_lru" | "cursor_expired";
-  readonly omittedCount: number | null;
-  readonly droppedThroughCursor: string | null;
-  readonly continuationCursor: string | null;
-  readonly snapshotUrl: string | null;
-  readonly reconciliation: "pending" | "ready" | "error";
-  readonly error: string | null;
-  readonly globalEvictedCount?: number;
-}
+export const boundPresentationEvent = boundClientPresentationEvent;
 
 export interface ResourceFreshness {
   readonly status: "idle" | "loading" | "ready" | "stale" | "error";
@@ -224,18 +194,7 @@ function clearTaskRuntimeCaches(taskId: string): void {
 
 // ────────────────────────── Status normalization ───────────────────────────
 
-export function normalizeTaskStatus(status: string): TaskStatusKind {
-  const s = status.toLowerCase();
-  if (s === "active" || s === "running" || s === "verifying" || s === "provider_running") return "working";
-  if (s === "draft" || s === "pending" || s === "queued") return "queued";
-  if (s === "needs_user_decision" || s === "waiting" || s === "blocked") return "waiting";
-  if (s === "needs_approval" || s === "approval_required") return "needs_approval";
-  if (s === "needs_review" || s === "review_required") return "needs_review";
-  if (s === "failed" || s === "failed_verification" || s === "budget_exhausted" || s === "policy_denied" || s === "error") return "failed";
-  if (s === "aborted" || s === "interrupted" || s === "cancelled" || s === "canceled") return "interrupted";
-  if (s === "completed" || s === "done" || s === "success") return "done";
-  return "unknown";
-}
+export const normalizeTaskStatus = normalizeClientTaskStatus;
 
 // ────────────────────────── Pinned tasks ───────────────────────────────────
 
@@ -1280,12 +1239,13 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     const presentationBytes = presentationEventByteLength(presentationEvent);
     let seen = eventIdsByTask.get(taskId);
     if (!seen) {
-      seen = new Set((get().eventsByTask[taskId] ?? []).map((event) => event.id).filter(Boolean));
+      seen = new Set((get().eventsByTask[taskId] ?? []).map(eventIdentity));
       eventIdsByTask.set(taskId, seen);
     }
-    if (presentationEvent.id && seen.has(presentationEvent.id)) return false;
+    const identity = eventIdentity(presentationEvent);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
     if (presentationEvent.id) {
-      seen.add(presentationEvent.id);
       resumeCursorByTask.set(taskId, presentationEvent.id);
     }
     const queue = pendingEventsByTask.get(taskId) ?? [];
@@ -1340,51 +1300,54 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         let eventHistoryByTask = state.eventHistoryByTask;
         for (const [queuedTaskId, batch] of batches) {
           const existing = eventsByTask[queuedTaskId] ?? [];
-          const combined = [...existing, ...batch.map((entry) => entry.event)];
-          const combinedEventBytes = [
-            ...existing.map((event) => presentationEventByteLength(event)),
-            ...batch.map((entry) => entry.bytes),
-          ];
-          let retainedStart = Math.max(0, combined.length - MAX_EVENTS_PER_TASK);
-          let retainedBytes = combinedEventBytes
-            .slice(retainedStart)
-            .reduce((total, bytes) => total + bytes, 0);
-          while (retainedBytes > MAX_EVENT_BYTES_PER_TASK && retainedStart < combined.length) {
-            retainedBytes -= combinedEventBytes[retainedStart] ?? 0;
-            retainedStart += 1;
-          }
-          const dropped = retainedStart > 0 ? combined.slice(0, retainedStart) : [];
-          const next = retainedStart > 0 ? combined.slice(retainedStart) : combined;
+          const prior = state.eventHistoryByTask[queuedTaskId] ?? null;
+          const retained = retainEventWindow(
+            {
+              events: existing,
+              eventBytes: eventBytesByTask[queuedTaskId]
+                ?? existing.reduce((total, event) => total + presentationEventByteLength(event), 0),
+              seenEventIds: new Set(existing.map((event) => event.id || `${event.event}:${event.data}`)),
+              cursor: state.resumeCursorByTask[queuedTaskId] ?? null,
+              boundary: prior,
+            },
+            batch.map((entry) => entry.event),
+            {
+              maxEvents: MAX_EVENTS_PER_TASK,
+              maxBytes: MAX_EVENT_BYTES_PER_TASK,
+              snapshotUrl: `/v1/tasks/${encodeURIComponent(queuedTaskId)}`,
+            },
+          );
+          const next = [...retained.events];
+          const dropped = [...retained.dropped];
           eventsByTask[queuedTaskId] = next;
-          eventBytesByTask[queuedTaskId] = retainedBytes;
+          eventBytesByTask[queuedTaskId] = retained.eventBytes;
+          eventIdsByTask.set(queuedTaskId, new Set(retained.seenEventIds));
           eventLruClock += 1;
           eventLruTickByTask[queuedTaskId] = eventLruClock;
           const resumeCursor = resumeCursorByTask.get(queuedTaskId);
           if (resumeCursor) retainedResumeCursorByTask[queuedTaskId] = resumeCursor;
           const pendingDrop = pendingDrops.get(queuedTaskId);
           if (dropped.length === 0 && !pendingDrop) continue;
-          const seenIds = eventIdsByTask.get(queuedTaskId);
-          for (const event of dropped) if (event.id) seenIds?.delete(event.id);
-          const prior = state.eventHistoryByTask[queuedTaskId];
           const droppedThroughCursor = dropped[dropped.length - 1]?.id
             ?? pendingDrop?.throughCursor
             ?? prior?.droppedThroughCursor
             ?? null;
-          const boundary: EventHistoryBoundary = prior?.reason === "cursor_expired"
+          const retainedBoundary = retained.boundary;
+          const boundary: EventHistoryBoundary = retainedBoundary?.reason === "cursor_expired"
             ? {
-                ...prior,
+                ...retainedBoundary,
                 droppedThroughCursor,
                 continuationCursor: next[0]?.id ?? null,
               }
             : {
                 reason: "bounded_window",
-                omittedCount: (prior?.omittedCount ?? 0) + dropped.length + (pendingDrop?.count ?? 0),
+                omittedCount: (retainedBoundary?.omittedCount ?? 0) + (pendingDrop?.count ?? 0),
                 droppedThroughCursor,
                 continuationCursor: next[0]?.id ?? null,
                 snapshotUrl: `/v1/tasks/${encodeURIComponent(queuedTaskId)}`,
                 reconciliation: "ready",
                 error: null,
-                globalEvictedCount: prior?.globalEvictedCount ?? 0,
+                globalEvictedCount: retainedBoundary?.globalEvictedCount ?? 0,
               };
           if (eventHistoryByTask === state.eventHistoryByTask) eventHistoryByTask = { ...state.eventHistoryByTask };
           eventHistoryByTask[queuedTaskId] = boundary;
@@ -1451,37 +1414,9 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
   },
 
   _updateTaskFromEvent: (ev, streamTaskId) => {
-    // Update task status from task.* events.
-    if (!ev.event.startsWith("task.")) return;
-    let payload: unknown;
-    try {
-      payload = JSON.parse(ev.data) as unknown;
-    } catch {
-      return;
-    }
-    if (!payload || typeof payload !== "object") return;
-    const p = payload as Record<string, unknown>;
-    const explicitTaskId = typeof p.task_id === "string"
-      ? p.task_id
-      : typeof p.id === "string"
-        ? p.id
-        : null;
-    // The stream subscription is task-scoped. A payload claiming another
-    // task is poisoned or buggy input, never authority to mutate that task.
-    if (streamTaskId && explicitTaskId && explicitTaskId !== streamTaskId) return;
-    const taskId = streamTaskId ?? explicitTaskId;
-    if (!taskId) return;
-    const eventStatus = (() => {
-      switch (ev.event) {
-        case "task.completed": return "COMPLETED";
-        case "task.failed": return "FAILED";
-        case "task.interrupted": return "ABORTED";
-        case "task.aborted": return "ABORTED";
-        default: return null;
-      }
-    })();
-    const status = isTaskDomainStatus(p.status) ? p.status : eventStatus;
-    const phase = typeof p.phase === "string" ? p.phase : null;
+    const projection = projectTaskEvent(ev, streamTaskId);
+    if (!projection) return;
+    const { taskId, status, phase, terminalReason } = projection;
     set((state) => {
       const existing = state.taskById[taskId];
       if (!existing) return {};
@@ -1489,12 +1424,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         ...existing,
         status: status ?? existing.status,
         phase: phase ?? existing.phase,
-        terminal_reason: ev.event === "task.blocked" && typeof p.reason === "string"
-          ? {
-              reason: p.reason,
-              ...(typeof p.error === "string" ? { error: p.error } : {}),
-            }
-          : existing.terminal_reason,
+        terminal_reason: terminalReason ?? existing.terminal_reason,
         updated_at: new Date().toISOString(),
       };
       const tasks = state.tasksBySession[updated.session_id] ?? [];
@@ -1545,22 +1475,11 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         } catch {
           // Instrumentation must never break streaming.
         }
-        if (ev.event === "cursor_expired") {
-          let payload: unknown = null;
-          try {
-            payload = JSON.parse(ev.data) as unknown;
-          } catch {
-            // The reconciliation below is still required even if diagnostics
-            // were malformed; never treat the old event tail as complete.
-          }
-          const record = payload && typeof payload === "object" && !Array.isArray(payload)
-            ? payload as Record<string, unknown>
-            : {};
-          const requestedCursor = typeof record.cursor === "string" ? record.cursor : cursor;
-          const oldestCursor = typeof record.oldest_retained_event_id === "string"
-            ? record.oldest_retained_event_id
-            : null;
-          resumeCursor = oldestCursor ?? ev.id ?? null;
+        const cursorExpiry = projectCursorExpiredEvent(ev, taskId, cursor);
+        if (cursorExpiry) {
+          // Reconciliation is required even when the diagnostic payload is
+          // malformed; never treat the old event tail as complete.
+          resumeCursor = cursorExpiry.resumeCursor;
           if (resumeCursor) resumeCursorByTask.set(taskId, resumeCursor);
           else resumeCursorByTask.delete(taskId);
           pendingEventBytesGlobal = Math.max(
@@ -1572,8 +1491,6 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
           pendingEventDropsByTask.delete(taskId);
           pendingApprovalRefreshTasks.delete(taskId);
           eventIdsByTask.set(taskId, new Set());
-          const expectedSnapshotUrl = `/v1/tasks/${encodeURIComponent(taskId)}`;
-          const snapshotUrl = record.snapshot_url === expectedSnapshotUrl ? expectedSnapshotUrl : null;
           set((state) => {
             const eventLruTickByTask = { ...state.eventLruTickByTask };
             delete eventLruTickByTask[taskId];
@@ -1587,16 +1504,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
               resumeCursorByTask: retainedResumeCursorByTask,
               eventHistoryByTask: {
                 ...state.eventHistoryByTask,
-                [taskId]: {
-                  reason: "cursor_expired",
-                  omittedCount: null,
-                  droppedThroughCursor: requestedCursor ?? null,
-                  continuationCursor: oldestCursor,
-                  snapshotUrl,
-                  reconciliation: "pending",
-                  error: null,
-                  globalEvictedCount: 0,
-                },
+                [taskId]: cursorExpiry.boundary,
               },
             };
           });

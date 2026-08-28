@@ -1,5 +1,6 @@
 import { stdin, stdout } from "node:process";
 import { TerminusClient } from "@terminus/public-client";
+import { projectCursorExpiredEvent } from "@terminus/public-client";
 import { COMMANDS, commandSuggestions } from "./commands.js";
 import { decodeTerminalInput, type KeyInput, type MouseInput, type TerminalInput } from "./input.js";
 import {
@@ -285,13 +286,35 @@ export class TuiApp {
     let backoff = 250;
     while (!abort.signal.aborted && !this.stopped && generation === this.streamGeneration) {
       try {
-        this.patch({ connection: backoff === 250 ? "online" : "reconnecting" });
+        this.patch({
+          connection: this.stateValue.connection === "offline"
+            ? "offline"
+            : backoff === 250
+              ? "online"
+              : "reconnecting",
+        });
         for await (const event of this.client.subscribeEvents({
           cursor: this.stateValue.lastCursor,
           task_id: taskId,
           signal: abort.signal,
         })) {
           if (abort.signal.aborted || generation !== this.streamGeneration) return;
+          const cursorExpiry = projectCursorExpiredEvent(event, taskId, this.stateValue.lastCursor);
+          if (cursorExpiry) {
+            this.patch({
+              timeline: [],
+              seenEventIds: new Set(),
+              lastCursor: cursorExpiry.resumeCursor,
+              selectedTimeline: 0,
+              timelineScroll: 0,
+              notice: {
+                message: "Live history expired. Reconciled the task snapshot before replaying.",
+                tone: "warn",
+              },
+            });
+            void this.refreshTaskQueues(taskId);
+            continue;
+          }
           this.setState(appendEvent(this.stateValue, event, this.now()));
           backoff = 250;
           if (event.event.includes("approval") || event.event.includes("attention") || event.event.includes("task")) {
@@ -302,7 +325,7 @@ export class TuiApp {
       } catch (error) {
         if (abort.signal.aborted) return;
         this.patch({
-          connection: "reconnecting",
+          connection: this.stateValue.connection === "offline" ? "offline" : "reconnecting",
           notice: { message: `Live activity disconnected. Retrying from the saved cursor. ${errorMessage(error)}`, tone: "warn" },
         });
         await sleep(backoff, abort.signal);

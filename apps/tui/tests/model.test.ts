@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { projectEvent, PUBLIC_CLIENT_EVENT_FIXTURES } from "@terminus/public-client";
 import { appendEvent, initialState, moveSelection, timelineItemFromEvent } from "../src/model.js";
 
 describe("TUI state model", () => {
@@ -31,6 +32,12 @@ describe("TUI state model", () => {
     expect(user).toMatchObject({ presentation: "user", summary: "Fix the TUI" });
     expect(agent).toMatchObject({ presentation: "agent", summary: "The TUI is ready" });
     expect(tool).toMatchObject({ presentation: "tool", summary: "shell · just check" });
+  });
+
+  test("uses the shared public-client projection for the parity fixture", () => {
+    const fixture = PUBLIC_CLIENT_EVENT_FIXTURES[0]!;
+    const now = new Date("2026-08-28T12:00:00Z");
+    expect(timelineItemFromEvent(fixture, now)).toEqual(projectEvent(fixture, now));
   });
 
   test("bounds selection to available rows", () => {
