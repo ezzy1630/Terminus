@@ -466,11 +466,25 @@ describe("turn failure reporting", () => {
     }),
   ];
 
-  test("leads with the human message, prefixed by the code", () => {
+  test("leads with the human message, not the ALL-CAPS wire code", () => {
     const { blocks } = decodeFeed(failureEvents, TASK_CREATED_AT);
     expect(blocks[0]?.entries[0]?.summary).toBe(
-      "PROVIDER_TRANSPORT_FAILED: The provider refused the request after 3 attempts.",
+      "The provider refused the request after 3 attempts.",
     );
+    expect(blocks[0]?.entries[0]?.summary).not.toContain("PROVIDER_TRANSPORT_FAILED");
+  });
+
+  test("softens a rate-limit failure and keeps the raw text as detail", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("f1", "turn.failed", {
+        code: "PROVIDER_EXECUTION_FAILED",
+        message: "provider dispatch failed after 3 attempt(s): OpenCode gateway returned HTTP 429: Rate limit exceeded.",
+        retryable: true,
+      }),
+    ], TASK_CREATED_AT);
+    expect(blocks[0]?.entries[0]?.summary).toContain("rate limited");
+    expect(blocks[0]?.entries[0]?.detail ?? "").toContain("HTTP 429");
   });
 
   test("keeps the wire envelope out of the reader's transcript", () => {

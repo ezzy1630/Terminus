@@ -649,28 +649,27 @@ export function decodeFeed(
             : null;
         const reason = typeof p.reason === "string" && p.reason.length > 0 ? p.reason : null;
         const knownReason = reason === null ? undefined : TERMINAL_REASON_TEXT[reason];
-        const summary = boundedText(
-          [failureCode, knownReason ?? failureMessage ?? outcome.message]
-            .filter((value): value is string => value !== null)
-            .join(": "),
-          "Turn outcome",
-          MAX_ACTIVITY_SUMMARY_CHARS,
-        );
-        const retryable = p.retryable === true ? "yes" : p.retryable === false ? "no" : null;
         /*
-         * The transcript shows the human failure, not the wire envelope. The
-         * full sentence is the summary; a couple of short qualifiers can help
-         * ("retryable", the mapped reason). The structured `details`
-         * (cause chains, gRPC codes) belong in logs and the inspector, not
-         * dumped as raw JSON into a reader's conversation — that was the wall
-         * of overlapping text on a failed turn.
+         * The transcript leads with a human sentence, not the wire envelope.
+         * A mapped reason wins; otherwise the provider's message is softened
+         * into something a person can act on ("the model is rate limited");
+         * only when there is no message at all do we fall back to the raw
+         * code. The header already says the turn failed, so an ALL-CAPS code
+         * as the first line is noise. The structured `details` (cause chains,
+         * gRPC codes) belong in logs and the inspector, not the conversation.
          */
+        const humanLead = knownReason
+          ?? (failureMessage ? humanizeProviderFailure(failureMessage) : null)
+          ?? failureCode
+          ?? outcome.message;
+        const summary = boundedText(humanLead, "Turn outcome", MAX_ACTIVITY_SUMMARY_CHARS);
+        const retryable = p.retryable === true ? "yes" : p.retryable === false ? "no" : null;
         const detail = [
-          // When the summary showed a mapped reason, surface the provider's
-          // own sentence underneath it. Otherwise the summary already is it.
-          knownReason !== undefined && failureMessage ? failureMessage : null,
+          // Keep the provider's own words underneath when the lead differs
+          // from them (a mapped reason or a softened sentence).
+          failureMessage && failureMessage !== summary ? failureMessage : null,
           // With neither a human sentence nor a mapped reason, the raw reason
-          // token is the only signal the reader has — keep it.
+          // token is the only extra signal the reader has.
           failureMessage === null && knownReason === undefined && reason ? `Reason: ${reason}` : null,
           retryable === "no" ? "This error is not retryable." : null,
         ]
@@ -1155,6 +1154,28 @@ const ACCESSIBLE_TRANSCRIPT_PAGE_SIZE = 100;
 const TERMINAL_REASON_TEXT: Readonly<Record<string, string>> = {
   control_plane_restarted: "Terminus restarted while this turn was running.",
 };
+
+/**
+ * Soften a raw provider transport failure into a sentence a person can act
+ * on. The verbatim provider text is still kept as secondary detail; this is
+ * only the lead line. Unrecognised messages pass through unchanged.
+ */
+function humanizeProviderFailure(message: string): string {
+  const m = message.toLowerCase();
+  if (m.includes("429") || m.includes("rate limit")) {
+    return "The model is rate limited right now — the provider kept refusing after several tries. Wait a moment or switch models.";
+  }
+  if (m.includes("model is unavailable") || m.includes("service unavailable") || m.includes(" 503")) {
+    return "The model is unavailable right now. Try again shortly or switch models.";
+  }
+  if (m.includes("overloaded")) {
+    return "The model is overloaded right now. Try again shortly or switch models.";
+  }
+  if (m.includes("context length") || m.includes("context_length") || m.includes("too many tokens")) {
+    return "This turn outgrew the model's context window.";
+  }
+  return message;
+}
 
 export function terminalReasonText(reason: Record<string, unknown> | null): string | undefined {
   if (!reason) return undefined;

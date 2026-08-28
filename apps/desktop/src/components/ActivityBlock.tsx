@@ -153,39 +153,52 @@ function ActivityBlockImpl({ block, defaultExpanded = false, onRetry }: Activity
         </div>
       ) : null}
 
-      {/* Expanded details. */}
+      {/* Expanded details.
+
+          A turn outcome (the failed/stopped summary) reads as prose — a
+          sentence a person can act on, not a monospace log line with a
+          timestamp and a "turn" token. Actual tool runs keep the compact
+          code row where the timestamp and tool name carry meaning. */}
       {expanded && block.entries.length > 0 ? (
         <div className="activity-detail border-t border-subtle px-2 pb-2 pt-1.5">
           <ul className="flex flex-col gap-1.5">
-            {block.entries.map((entry, i) => (
-              <li
-                key={`entry-${i}`}
-                className="ui-code flex flex-col gap-0.5 text-secondary"
-
-              >
-                <div className="flex items-center gap-2">
-                  <span
-                    className="text-tertiary"
-                    data-tooltip={entry.at}
-                  >
-                    {clockTimestamp(entry.at)}
-                  </span>
-                  <span className="text-tertiary">
-                    {entry.tool}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-primary">
-                    {entry.summary}
-                  </span>
-                </div>
-                {entry.detail ? (
-                  <pre
-                    className="selectable mt-1 max-h-[220px] overflow-auto border-l border-subtle bg-terminal px-2 py-1.5 text-secondary text-xs leading-[1.5]"
-                  >
-                    {renderedDetail(entry.detail)}
-                  </pre>
-                ) : null}
-              </li>
-            ))}
+            {block.entries.map((entry, i) => {
+              const isOutcome = entry.tool === "turn";
+              return (
+                <li
+                  key={`entry-${i}`}
+                  className={cn(
+                    "flex flex-col gap-0.5",
+                    isOutcome ? "text-secondary" : "ui-code text-secondary",
+                  )}
+                >
+                  {isOutcome ? (
+                    <p className="text-sm leading-relaxed text-primary">{entry.summary}</p>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="text-tertiary" data-tooltip={entry.at}>
+                        {clockTimestamp(entry.at)}
+                      </span>
+                      <span className="text-tertiary">{entry.tool}</span>
+                      <span className="min-w-0 flex-1 truncate text-primary">
+                        {entry.summary}
+                      </span>
+                    </div>
+                  )}
+                  {entry.detail ? (
+                    isOutcome ? (
+                      <p className="mt-0.5 whitespace-pre-line text-sm leading-relaxed text-tertiary">
+                        {renderedDetail(entry.detail)}
+                      </p>
+                    ) : (
+                      <pre className="selectable mt-1 max-h-[220px] overflow-auto border-l border-subtle bg-terminal px-2 py-1.5 text-secondary text-xs leading-[1.5]">
+                        {renderedDetail(entry.detail)}
+                      </pre>
+                    )
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         </div>
       ) : null}
