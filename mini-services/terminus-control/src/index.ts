@@ -98,7 +98,6 @@ import {
 import { KernelGatewayClient } from "./gateway-kernel-client.js";
 import {
   MAX_TOOL_MODEL_RESULT_BYTES,
-  STANDALONE_TOOL_CAPABILITY_CARDS,
   STANDALONE_TOOL_SCHEMAS,
   selectStandaloneToolSchemas,
   ObservedSourceTracker,
@@ -280,6 +279,7 @@ import {
 import {
   buildEvidenceIdentity,
   createTerminusMinimalProfile,
+  TERMINUS_MINIMAL_TOOL_IDS,
   type EvidenceTerminalOutcome,
   type TerminusMinimalProfile,
 } from "./agent/minimal-profile.js";
@@ -292,6 +292,8 @@ import {
   DEFAULT_COMPACT_THRESHOLD_TOKENS,
   runCompaction,
   SUMMARY_SYSTEM_INSTRUCTIONS,
+  type CompactionRecallRequest,
+  type CompactionRecallResult,
   type CompactionStore,
   type Summarizer,
 } from "./agent/compaction-service.js";
@@ -12292,15 +12294,26 @@ async function agentLoop(turnId: string): Promise<void> {
       : gatewayModel === null
         ? (localProviderCommand?.toolsEnabled ?? false)
         : gatewayModel.toolCalling;
-    const activatedToolCapabilities = [...new Set(
+    const requestedToolCapabilities = [...new Set(
       (process.env.TERMINUS_ACTIVE_TOOL_CAPABILITIES ?? "")
         .split(",")
         .map((value) => value.trim())
         .filter((value) => value.length > 0),
     )];
+    const declaredToolIds = new Set<string>(TERMINUS_MINIMAL_TOOL_IDS);
+    // `selectStandaloneToolSchemas` also knows about opt-in/always-on tools
+    // used by broader profiles. The shipped control runtime is deliberately
+    // pinned to terminus-minimal, so intersect the selected set with the
+    // profile declaration before rendering or exposing any provider request.
     const activeToolSchemas = selectStandaloneToolSchemas({
       toolsEnabled,
-      activatedCapabilities: activatedToolCapabilities,
+      activatedCapabilities: requestedToolCapabilities,
+    }).filter((schema) => declaredToolIds.has(schema.id));
+    const activatedToolCapabilities = requestedToolCapabilities.filter((capability) => {
+      const toolId = capability.startsWith("standalone.")
+        ? capability.slice("standalone.".length)
+        : capability;
+      return declaredToolIds.has(toolId);
     });
     const selectedProfile = createTerminusMinimalProfile({
       providerId: selectedProvider.providerId,
@@ -12344,7 +12357,8 @@ async function agentLoop(turnId: string): Promise<void> {
         },
         context_budget_policy: contextBudgetSelection.breakdown.policyVersion,
         active_tool_capabilities: activatedToolCapabilities,
-        discoverable_tool_cards: STANDALONE_TOOL_CAPABILITY_CARDS,
+        // No optional capability cards are discoverable in the minimal arm.
+        discoverable_tool_cards: [],
       },
     }));
     const threadSnapshot: ThreadSnapshot = {
@@ -12670,7 +12684,7 @@ async function agentLoop(turnId: string): Promise<void> {
           ...contextState.worldStateSections,
           tool_capabilities: {
             active: activeToolSchemas.map((tool) => ({ id: tool.id, version: tool.version })),
-            discoverable: STANDALONE_TOOL_CAPABILITY_CARDS,
+            discoverable: [],
           },
           repository_signals: {
             repository_map: repositorySignals.repositoryMap === null
@@ -12910,7 +12924,7 @@ async function agentLoop(turnId: string): Promise<void> {
           },
         });
       },
-      commitCompaction: async ({ turnId: summaryTurnId, summaryText, prunedEpisodeIds }) => {
+      commitCompaction: async ({ turnId: summaryTurnId, summaryText, summary, summaryHash, prunedEpisodeIds }) => {
         const summaryId = uuid();
         const artifact = await artifactClient.ingest(
           new TextEncoder().encode(summaryText),
@@ -12945,10 +12959,118 @@ async function agentLoop(turnId: string): Promise<void> {
               modelVisible: true,
               contentArtifact: artifact.uri,
               toolCallId: null,
-              sourceVersionsJson: JSON.stringify({ sourceEpisodeIds: prunedEpisodeIds }),
+              sourceVersionsJson: JSON.stringify({
+                summaryHash,
+                sourceEpisodeIds: prunedEpisodeIds,
+                sourceArtifacts: Object.fromEntries(
+                  summary.sourceEpisodes.map((source) => [source.episodeId, source.artifactRef]),
+                ),
+              }),
             },
           });
         });
+      },
+      recallCompaction: async (input: CompactionRecallRequest): Promise<CompactionRecallResult> => {
+        if (input.turnId !== turnId) {
+          throw new Error(`compaction recall turn mismatch for ${input.turnId}`);
+        }
+        if (!Number.isSafeInteger(input.maxEpisodes) || input.maxEpisodes <= 0) {
+          throw new Error("compaction recall maxEpisodes must be a positive safe integer");
+        }
+
+        const summaryRows = await db.episode.findMany({
+          where: { turnId: input.turnId, kind: "summary" },
+          orderBy: [{ sequence: "desc" }, { id: "desc" }],
+          select: { sourceVersionsJson: true },
+        });
+        const summaryMetadata = summaryRows
+          .map((row) => safeParse<Record<string, unknown> | null>(row.sourceVersionsJson, null))
+          .find((metadata) => metadata?.summaryHash === input.summaryHash);
+        if (summaryMetadata === undefined || summaryMetadata === null) {
+          throw new Error(`compaction summary ${input.summaryHash} is unavailable`);
+        }
+        const sourceEpisodeIds = Array.isArray(summaryMetadata.sourceEpisodeIds)
+          ? summaryMetadata.sourceEpisodeIds.filter((value): value is string => typeof value === "string")
+          : [];
+        if (sourceEpisodeIds.length === 0) {
+          throw new Error(`compaction summary ${input.summaryHash} has no source episodes`);
+        }
+        const sourceIds = new Set(sourceEpisodeIds);
+        const requestedIds = [...new Set(input.episodeIds)];
+        if (requestedIds.some((id) => !sourceIds.has(id))) {
+          throw new Error("compaction recall requested an episode outside the summary source set");
+        }
+        const selectedIds = requestedIds.length > 0 ? requestedIds : sourceEpisodeIds;
+        const rows = await db.episode.findMany({
+          where: { turnId: input.turnId, id: { in: selectedIds } },
+          orderBy: [{ sequence: "asc" }, { id: "asc" }],
+          select: { id: true, kind: true, sequence: true, toolCallId: true, contentArtifact: true },
+        });
+        if (rows.length !== selectedIds.length) {
+          throw new Error(`compaction recall source set is incomplete for ${input.summaryHash}`);
+        }
+        const sourceArtifacts = summaryMetadata.sourceArtifacts;
+        const decoder = new TextDecoder("utf-8", { fatal: true });
+        const episodes = [] as Array<{
+          readonly id: string;
+          readonly kind: string;
+          readonly sequence: number;
+          readonly toolCallId: string | null;
+          readonly contentJson: string;
+          readonly contentArtifact: string;
+          readonly byteSize: number;
+        }>;
+        for (const row of rows) {
+          const artifactUri = row.contentArtifact;
+          const artifactHash = artifactUriHash(artifactUri);
+          if (artifactUri === null || artifactHash === null) {
+            throw new Error(`compaction source ${row.id} has no immutable artifact`);
+          }
+          if (
+            typeof sourceArtifacts !== "object"
+            || sourceArtifacts === null
+            || Array.isArray(sourceArtifacts)
+            || (sourceArtifacts as Record<string, unknown>)[row.id] !== artifactUri
+          ) {
+            throw new Error(`compaction source ${row.id} artifact identity changed`);
+          }
+          const bytes = await artifactClient.get(contentHashSchema.parse(artifactHash));
+          episodes.push({
+            id: row.id,
+            kind: row.kind,
+            sequence: row.sequence,
+            toolCallId: row.toolCallId,
+            contentJson: decoder.decode(bytes),
+            contentArtifact: artifactUri,
+            byteSize: bytes.byteLength,
+          });
+        }
+        const query = input.query?.trim().toLocaleLowerCase() ?? "";
+        const matchingEpisodes = query.length === 0
+          ? episodes
+          : episodes.filter((episode) => episode.contentJson.toLocaleLowerCase().includes(query));
+        const continuationPrefix = `compaction:${encodeURIComponent(input.summaryHash)}:`;
+        let offset = 0;
+        if (input.continuation !== null) {
+          if (!input.continuation.startsWith(continuationPrefix)) {
+            throw new Error("compaction recall continuation does not match the summary");
+          }
+          const parsedOffset = Number(input.continuation.slice(continuationPrefix.length));
+          if (!Number.isSafeInteger(parsedOffset) || parsedOffset < 0) {
+            throw new Error("compaction recall continuation offset is invalid");
+          }
+          offset = parsedOffset;
+        }
+        const page = matchingEpisodes.slice(offset, offset + input.maxEpisodes);
+        const nextOffset = offset + page.length;
+        return {
+          schemaVersion: "terminus.compaction-recall.v1",
+          summaryHash: input.summaryHash,
+          episodes: page,
+          continuation: nextOffset < matchingEpisodes.length
+            ? `${continuationPrefix}${nextOffset}`
+            : null,
+        };
       },
     });
     // R4: one dedicated provider turn producing the structured handoff
@@ -13066,6 +13188,7 @@ async function agentLoop(turnId: string): Promise<void> {
     // section.
     const scoutEnabledForTurn = !resumeVerificationFromState
       && toolsEnabled
+      && selectedProfile.subagentsEnabled
       && resolveScoutEnabled(process.env.TERMINUS_ENABLE_SCOUT)
       && SCOUT_LEDGER.shouldRun();
     let scoutFiles: readonly { path: string; role: string }[] = [];
@@ -13549,6 +13672,12 @@ async function agentLoop(turnId: string): Promise<void> {
         if (!toolsEnabled) {
           throw new ToolPolicyDeniedError("Provider emitted a tool call while standalone tools were disabled");
         }
+        const parsedCall = parseStandaloneToolCall(call);
+        if (!declaredToolIds.has(parsedCall.toolId)) {
+          throw new ToolPolicyDeniedError(
+            `Provider emitted '${parsedCall.toolId}', which is outside the terminus-minimal tool set`,
+          );
+        }
         if (!toolSettlementEnteredFor.has(attemptId)) {
           toolSettlementEnteredFor.add(attemptId);
           const count = currentProjected?.toolCalls.length ?? 0;
@@ -13638,23 +13767,23 @@ async function agentLoop(turnId: string): Promise<void> {
       await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
       switch (stop.kind) {
         case "assistant_message":
-          finalText = stop.text;
-          finalResponseArtifactUri = stop.responseArtifactUri;
-          await mutateAgentState(() => emit({
-            eventType: "turn.assistant_message",
-            aggregateType: "turn",
-            aggregateId: turnId,
-            correlationId: task.id,
-            payload: { state: "COMPLETED", response_artifact: stop.responseArtifactUri },
-            artifactRefs: stop.responseArtifactUri === null ? [] : [stop.responseArtifactUri],
-          }, async (tx) => {
-            const update = await tx.turn.updateMany({
-              where: { id: turnId, state: { in: ["RESPONSE_VALIDATING", "PROVIDER_RUNNING"] } },
-              data: { state: "COMPLETED", completedAt: new Date() },
-            });
-            if (update.count !== 1) throw new Error(`turn ${turnId} changed before assistant-message completion`);
-          }));
-          return;
+          // Ordinary assistant text is durable context, not a completion
+          // proposal. Stop in a recoverable blocked state until the provider
+          // supplies an explicit proposal that can enter verification.
+          throw new EngineTerminalStopError({
+            kind: "blocked",
+            reason: "assistant_message_requires_completion_proposal",
+            error: {
+              code: "COMPLETION_PROPOSAL_REQUIRED",
+              category: "verification",
+              message: "Provider returned an assistant message without an explicit completion proposal.",
+              retryable: true,
+              suggestedAction: "Resume the task with an explicit completion proposal after satisfying its acceptance criteria.",
+              details: {
+                response_artifact: stop.responseArtifactUri,
+              },
+            },
+          });
         case "completion_proposal":
           finalText = stop.proposal.text;
           finalResponseArtifactUri = stop.proposal.responseArtifactUri;
@@ -14116,6 +14245,7 @@ async function agentLoop(turnId: string): Promise<void> {
               artifactRefs: result.artifacts
                 .map((artifact) => String(artifact?.uri ?? ""))
                 .filter((uri) => uri.length > 0),
+              sourceRevision: result.sourceRevision,
             }),
           );
           const repairDecision = verificationRepairController.decideAfterFailure({
