@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Release-tier eval evidence (SPEC §46.11 eval-release).
-# Always writes artifacts/release-gate/eval-release.json — never silent skip.
+# Always writes an evaluation report, defaulting to
+# artifacts/release-gate/eval-release.json — never silent skip.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-OUT_DIR="$ROOT/artifacts/release-gate"
-mkdir -p "$OUT_DIR"
-OUT_JSON="$OUT_DIR/eval-release.json"
+OUT_JSON="${TERMINUS_RELEASE_EVAL_OUTPUT:-$ROOT/artifacts/release-gate/eval-release.json}"
+mkdir -p "$(dirname "$OUT_JSON")"
 generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 status="failed"
@@ -32,7 +32,9 @@ spec = importlib.util.find_spec("forge_evals.baselines")
 sys.exit(0 if spec is not None else 1)
 PY
 then
-  if run_python - <<'PY'
+  baseline_check_output=""
+  baseline_check_status=0
+  if baseline_check_output="$(run_python - <<'PY' 2>&1
 import sys
 from forge_evals.baselines import BASELINES, all_baseline_ids, baseline_by_id
 
@@ -48,18 +50,33 @@ for baseline_id in ids:
     if not baseline.pin_verified or baseline.pin_kind == "unconfigured":
         blocked.append(f"{baseline_id}: exact pin is not independently verified")
 if blocked:
-    print("; ".join(blocked), file=sys.stderr)
+    print("known_unavailable:" + "; ".join(blocked), file=sys.stderr)
     raise SystemExit(2)
 print(f"live_baselines={len(ids)}")
 PY
-  then
+)"; then
     status="blocked"
     mode="forge_evals.baselines"
     reason="catalogued live runners are ready, but this probe did not produce a live benchmark report"
   else
-    status="blocked"
-    mode="forge_evals.baselines"
-    reason="live baseline runner, exact pin, or independent verification is absent"
+    baseline_check_status=$?
+    if [[ -n "$baseline_check_output" ]]; then
+      printf '%s\n' "$baseline_check_output" >&2
+    fi
+    if [[ "$baseline_check_status" == "2" && "$baseline_check_output" == known_unavailable:* ]]; then
+      mode="forge_evals.baselines"
+      if [[ "${TERMINUS_RELEASE_ALLOW_PENDING_LIVE_EVAL:-}" == "1" ]]; then
+        status="pending_live_eval"
+        reason="live baseline runner or exact pin is unavailable; live release evaluation remains pending"
+      else
+        status="blocked"
+        reason="live baseline runner, exact pin, or independent verification is absent"
+      fi
+    else
+      status="blocked"
+      mode="forge_evals.baselines"
+      reason="baseline registry validation failed"
+    fi
   fi
 else
   status="harness_missing"
@@ -82,8 +99,8 @@ cat >"$OUT_JSON" <<EOF
 EOF
 
 echo "[eval-release] status=$status → $OUT_JSON"
-# Release evaluation must fail closed. Fixture imports and catalog metadata do
-# not satisfy a live benchmark gate.
-if [[ "$status" != "passed" ]]; then
+# Release evaluation must fail closed. Pending live evidence is only a
+# CI-local M12 record; it cannot satisfy a stable release gate.
+if [[ "$status" != "passed" && "$status" != "pending_live_eval" ]]; then
   exit 1
 fi
