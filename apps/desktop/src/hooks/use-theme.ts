@@ -38,9 +38,10 @@ function parsePersisted(raw: string | null): PersistedTheme | null {
   }
 }
 
-function readPersisted(): PersistedTheme {
-  if (typeof window === "undefined") return DEFAULT_APPEARANCE;
-  return parsePersisted(window.localStorage.getItem(STORAGE_KEY)) ?? DEFAULT_APPEARANCE;
+/** null when nothing is stored, so the native shell can be asked instead. */
+function readPersisted(): PersistedTheme | null {
+  if (typeof window === "undefined") return null;
+  return parsePersisted(window.localStorage.getItem(STORAGE_KEY));
 }
 
 function writePersisted(state: PersistedTheme): void {
@@ -91,11 +92,16 @@ interface ThemeState {
   refresh: () => void;
 }
 
-const initial = readPersisted();
+const persistedAppearance = readPersisted();
+const initial = persistedAppearance ?? DEFAULT_APPEARANCE;
 const initialResolved = resolveTheme(initial.theme);
 // Apply once at module load so first paint is correct.
 applyAppearance(initialResolved, initial.density);
-applyNativeTheme(initial.theme);
+// With a stored choice the renderer is authoritative and pushes it down. With
+// none, the shell already restored the user's choice from its own mirror and
+// painted the window background with it before this document existed, so it
+// is read rather than overwritten with "system" (see `adoptNativeTheme`).
+if (persistedAppearance !== null) applyNativeTheme(initial.theme);
 
 /**
  * Appearance is now edited in a separate Preferences window, so the store
@@ -163,6 +169,24 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     set({ resolved: r });
   },
 }));
+
+/**
+ * Read the native shell's theme at launch when this renderer has no stored
+ * appearance of its own. Runs after the store exists so the adopted value can
+ * be applied through the normal setter.
+ */
+function adoptNativeTheme(): void {
+  const getTheme = typeof window === "undefined" ? undefined : window.terminusDesktop?.getTheme;
+  if (!getTheme) return;
+  void getTheme()
+    .then((theme) => {
+      if (theme === useThemeStore.getState().theme) return;
+      useThemeStore.getState().setTheme(theme);
+    })
+    .catch(() => undefined);
+}
+
+if (persistedAppearance === null) adoptNativeTheme();
 
 /** Convenience selector hook. */
 export function useTheme(): {

@@ -97,7 +97,24 @@
     },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
-    ]
+      "dist-electron/**/*",
+      "package.json",
+      "!**/node_modules/**/*",
+      "!**/*.map",
+      "!**/*.ts",
+      "!**/*.tsx"
+    ],
+    "protocols": [
+      {
+        "name": "Terminus",
+        "schemes": [
+          "terminus"
+        ],
+        "role": "Viewer"
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [],
+    "npmRebuild": false
   }
 }

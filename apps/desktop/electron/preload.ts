@@ -5,11 +5,10 @@
  * existing typed interfaces. Do not move harness logic into React components
  * or Electron renderer code."
  *
- * The preload exposes one constrained presentation bridge so the renderer can:
- *
- *   1. `terminusDesktop` — read the Terminus API base URL, platform info, send
- *      native notifications, control the window, and read/set the theme.
- *
+ * The preload exposes one constrained presentation bridge (`terminusDesktop`)
+ * so the renderer can read the control-plane origin, send native
+ * notifications, close its own window, read and set the theme, choose and
+ * classify a project directory, and receive navigation and menu commands.
  *
  * Process execution, workspace filesystem access, and computer-use capture
  * are intentionally absent. Those effects require kernel-backed contracts.
@@ -17,14 +16,30 @@
  * All harness logic stays in the Rust kernel + TS control plane. The renderer
  * uses @terminus/public-client to talk to the control plane over HTTP/SSE.
  */
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from "electron";
+import type { DesktopCommandId } from "./menu";
+import type { NavigationTarget } from "./deep-links";
 
-function requireLocalOrigin(value: string, variable: string): string {
+/**
+ * Launch arguments the main process attaches to this window.
+ *
+ * Carried as launch arguments rather than in the URL: the packaged
+ * `terminus://` protocol handler refuses an entry URL with a query or a
+ * fragment, and relaxing that to pass a view name would be a poor trade.
+ */
+function launchArgument(prefix: string): string | undefined {
+  return process.argv.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
+}
+
+function parseLocalOrigin(value: string | undefined): { origin: string | null; error: string | null } {
+  if (value === undefined || value.length === 0) {
+    return { origin: null, error: "The Terminus control origin was not supplied to this window." };
+  }
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new Error(`${variable} must be a valid URL`);
+    return { origin: null, error: `The Terminus control origin is not a URL: ${value}` };
   }
   const port = Number(url.port);
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost";
@@ -42,51 +57,65 @@ function requireLocalOrigin(value: string, variable: string): string {
     || port > 65_535
     || url.origin !== value.replace(/\/$/, "")
   ) {
-    throw new Error(`${variable} must name an approved local Terminus origin`);
+    return { origin: null, error: `The Terminus control origin is not an approved local origin: ${value}` };
   }
-  return url.origin;
+  return { origin: url.origin, error: null };
 }
-
-const TERMINUS_API_BASE = requireLocalOrigin(
-  process.env.TERMINUS_API_BASE ?? "http://127.0.0.1:3050",
-  "TERMINUS_API_BASE",
-);
-const PLATFORM = process.platform;
 
 /**
- * Which root the shared renderer bundle should mount.
+ * The control origin fails closed.
  *
- * Carried as a launch argument rather than in the URL: the packaged
- * `terminus://` protocol handler refuses an entry URL with a query or a
- * fragment, and relaxing that to pass a view name would be a poor trade.
+ * There used to be a `http://127.0.0.1:3050` default here, so a window
+ * launched without a configured origin would quietly talk to whatever was
+ * listening on that port. With no origin the bridge reports the failure and
+ * the renderer has nothing to send requests to.
  */
-function launchArgument(prefix: string): string | undefined {
-  return process.argv.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
-}
-
+const API_BASE = parseLocalOrigin(launchArgument("--terminus-api-base="));
 const RENDERER_VIEW = launchArgument("--terminus-view=") === "settings" ? "settings" : "main";
 /** Whether this window is backed by a vibrant material the renderer may paint over. */
 const RENDERER_VIBRANCY = launchArgument("--terminus-vibrancy=") === "on";
+/**
+ * Which settings category the window should open on.
+ *
+ * This cannot be delivered as a message on `ready-to-show`: that fires before
+ * React has mounted a listener, which is why Help ▸ Keyboard shortcuts always
+ * landed on Appearance. It is a launch argument, read synchronously at mount.
+ */
+const SETTINGS_CATEGORY = launchArgument("--terminus-settings-category=") ?? null;
 
-type WindowBounds = { x: number; y: number; width: number; height: number };
-type DesktopCommandId =
-  | "command-palette"
-  | "open-project"
-  | "settings"
-  | "shortcut-reference"
-  | "new-task"
-  | "show-changes"
-  | "toggle-inspector"
-  | "toggle-sidebar";
+type ThemeChoice = "system" | "light" | "dark";
 
-// ────────────────────────── terminusDesktop ─────────────────────────────────────
+interface NativeThemeState {
+  themeSource: ThemeChoice;
+  shouldUseDarkColors: boolean;
+}
+
+interface DirectoryValidation {
+  ok: boolean;
+  isGit: boolean;
+  canonicalPath: string | null;
+}
+
+function subscribe<Payload>(
+  channel: string,
+  callback: (payload: Payload) => void,
+): () => void {
+  const listener = (_event: IpcRendererEvent, payload: Payload): void => callback(payload);
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
+}
+
+// ────────────────────────── terminusDesktop ─────────────────────────────────
 
 contextBridge.exposeInMainWorld("terminusDesktop", {
-  apiBase: TERMINUS_API_BASE,
-  platform: PLATFORM,
-  isMac: PLATFORM === "darwin",
+  /** null when this window was launched without an approved control origin. */
+  apiBase: API_BASE.origin,
+  /** Why `apiBase` is null, for the renderer to surface rather than hide. */
+  apiBaseError: API_BASE.error,
+  isMac: process.platform === "darwin",
   view: RENDERER_VIEW,
   vibrancy: RENDERER_VIBRANCY,
+  settingsCategory: SETTINGS_CATEGORY,
   // Native notification bridge (SPEC §5: "Use native notifications only when
   // the app is unfocused or a task requires attention"). `taskId` makes the
   // notification actionable: clicking it raises the window on that task.
@@ -96,38 +125,46 @@ contextBridge.exposeInMainWorld("terminusDesktop", {
     ipcRenderer.invoke("desktop:openSettings", category),
   setAttentionCount: (count: number): Promise<unknown> =>
     ipcRenderer.invoke("desktop:setAttentionCount", count),
-  onOpenTask: (callback: (taskId: string) => void): (() => void) => {
-    const listener = (_event: IpcRendererEvent, taskId: string): void => callback(taskId);
-    ipcRenderer.on("terminus:open-task", listener);
-    return () => ipcRenderer.removeListener("terminus:open-task", listener);
-  },
-  onSettingsCategory: (callback: (category: string) => void): (() => void) => {
-    const listener = (_event: IpcRendererEvent, category: string): void => callback(category);
-    ipcRenderer.on("terminus:settings-category", listener);
-    return () => ipcRenderer.removeListener("terminus:settings-category", listener);
-  },
-  // Window controls
-  windowMinimize: (): Promise<unknown> => ipcRenderer.invoke("window:minimize"),
-  windowMaximize: (): Promise<unknown> => ipcRenderer.invoke("window:maximize"),
+  /** Deep links, notification clicks, and File ▸ Open Recent all arrive here. */
+  onNavigate: (callback: (target: NavigationTarget) => void): (() => void) =>
+    subscribe<NavigationTarget>("desktop:navigate", callback),
+  onOpenTask: (callback: (taskId: string) => void): (() => void) =>
+    subscribe<NavigationTarget>("desktop:navigate", (target) => {
+      if (target.kind === "task") callback(target.taskId);
+    }),
+  onSettingsCategory: (callback: (category: string) => void): (() => void) =>
+    subscribe<string>("terminus:settings-category", callback),
+  onNativeThemeChange: (callback: (state: NativeThemeState) => void): (() => void) =>
+    subscribe<NativeThemeState>("terminus:native-theme", callback),
+  /** Closes the window that asked, which for Preferences is Preferences. */
   windowClose: (): Promise<unknown> => ipcRenderer.invoke("window:close"),
-  // Theme
-  getTheme: (): Promise<"system" | "light" | "dark"> => ipcRenderer.invoke("theme:get"),
-  setTheme: (theme: "system" | "light" | "dark"): Promise<"system" | "light" | "dark"> =>
-    ipcRenderer.invoke("theme:set", theme),
+  setWindowTitle: (title: string): Promise<string> => ipcRenderer.invoke("window:setTitle", title),
+  getTheme: (): Promise<ThemeChoice> => ipcRenderer.invoke("theme:get"),
+  setTheme: (theme: ThemeChoice): Promise<ThemeChoice> => ipcRenderer.invoke("theme:set", theme),
   pickDirectory: (): Promise<string | null> => ipcRenderer.invoke("desktop:pickDirectory"),
-  validateDirectoryDrop: (path: string): Promise<string | null> =>
-    ipcRenderer.invoke("desktop:validateDirectoryDrop", path),
+  /** Resolve a directory and report whether it is a git working tree. */
+  validateDirectory: (path: string): Promise<DirectoryValidation> =>
+    ipcRenderer.invoke("desktop:validateDirectory", path),
+  noteRecentProject: (path: string): Promise<readonly string[]> =>
+    ipcRenderer.invoke("desktop:noteRecentProject", path),
   onDirectoryDrop: (callback: (path: string) => void): (() => void) => {
     const allowDrop = (event: DragEvent): void => {
       if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
     };
     const listener = (event: DragEvent): void => {
       const files = Array.from(event.dataTransfer?.files ?? []);
-      const candidate = files[0] as (File & { path?: unknown }) | undefined;
-      if (files.length !== 1 || typeof candidate?.path !== "string") return;
+      const candidate = files[0];
+      if (files.length !== 1 || candidate === undefined) return;
       event.preventDefault();
-      void ipcRenderer.invoke("desktop:validateDirectoryDrop", candidate.path).then((path: unknown) => {
-        if (typeof path === "string") callback(path);
+      // `File.path` was removed in Electron 32, which is why dropping a folder
+      // did nothing at all. `webUtils.getPathForFile` is its replacement.
+      const droppedPath = webUtils.getPathForFile(candidate);
+      if (droppedPath.length === 0) return;
+      void ipcRenderer.invoke("desktop:validateDirectory", droppedPath).then((result: unknown) => {
+        const validation = result as DirectoryValidation | undefined;
+        if (validation?.ok === true && typeof validation.canonicalPath === "string") {
+          callback(validation.canonicalPath);
+        }
       });
     };
     document.addEventListener("dragover", allowDrop, true);
@@ -137,17 +174,6 @@ contextBridge.exposeInMainWorld("terminusDesktop", {
       document.removeEventListener("drop", listener, true);
     };
   },
-  onCommand: (callback: (commandId: DesktopCommandId) => void): (() => void) => {
-    const listener = (_event: IpcRendererEvent, commandId: DesktopCommandId): void => callback(commandId);
-    ipcRenderer.on("terminus:command", listener);
-    return () => ipcRenderer.removeListener("terminus:command", listener);
-  },
-  setWindowTitle: (title: string): Promise<string> => ipcRenderer.invoke("window:setTitle", title),
-  getWindowBounds: (): Promise<WindowBounds | null> => ipcRenderer.invoke("window:getBounds"),
-  setWindowBounds: (bounds: WindowBounds): Promise<WindowBounds> => ipcRenderer.invoke("window:setBounds", bounds),
-  onWindowBoundsChange: (callback: (bounds: WindowBounds) => void): (() => void) => {
-    const listener = (_event: IpcRendererEvent, bounds: WindowBounds): void => callback(bounds);
-    ipcRenderer.on("terminus:window-bounds", listener);
-    return () => ipcRenderer.removeListener("terminus:window-bounds", listener);
-  },
+  onCommand: (callback: (commandId: DesktopCommandId) => void): (() => void) =>
+    subscribe<DesktopCommandId>("terminus:command", callback),
 });

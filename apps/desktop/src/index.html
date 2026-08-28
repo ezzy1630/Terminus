@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src __TERMINUS_CONNECT_SOURCES__; font-src 'self';"
-    />
+    <!-- Substituted by the terminus-content-security-policy plugin in
+         vite.config.ts from electron/csp.ts, which is the same builder the
+         main process uses for the response header. One policy, one source. -->
+    <meta http-equiv="Content-Security-Policy" content="__TERMINUS_CSP__" />
     <title>Terminus</title>
   </head>
   <body>

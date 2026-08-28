@@ -92,3 +92,25 @@ export function normalizeWindowTitle(value: unknown): string | null {
   if ([...title].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) === 0x7f)) return null;
   return title;
 }
+
+/**
+ * The only capability a Terminus renderer may ask the OS for.
+ *
+ * Everything else — camera, microphone, geolocation, MIDI, HID, serial,
+ * pointer lock, clipboard reads — is refused. The renderer is a UI over a
+ * local control plane; none of those are part of that job, and an allowlist
+ * stated positively cannot fall behind a growing set of permission names.
+ */
+const ALLOWED_RENDERER_PERMISSIONS: ReadonlySet<string> = new Set(["notifications"]);
+
+export function isAllowedRendererPermission(permission: string): boolean {
+  return ALLOWED_RENDERER_PERMISSIONS.has(permission);
+}
+
+const SETTINGS_CATEGORY_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** A settings category is a slug the renderer routes on; nothing else. */
+export function normalizeSettingsCategory(value: unknown): string | null {
+  if (typeof value !== "string" || !SETTINGS_CATEGORY_PATTERN.test(value)) return null;
+  return value;
+}

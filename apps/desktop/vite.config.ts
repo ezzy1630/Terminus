@@ -2,24 +2,36 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "node:path";
+import {
+  buildContentSecurityPolicy,
+  devConnectSources,
+  packagedConnectSources,
+  PACKAGED_CSP_API_PLACEHOLDER,
+} from "./electron/csp";
 
-const PACKAGED_CONNECT_SOURCES = [
-  "'self'",
-  "http://127.0.0.1:3050",
-] as const;
-
+/**
+ * The meta-tag policy comes from the same builder the Electron main process
+ * uses for the response header (electron/csp.ts). A build whose meta tag and
+ * header disagree is a policy nobody can reason about, so there is one source.
+ *
+ * The dev document additionally allows inline scripts because Vite injects its
+ * React-refresh preamble inline; packaged documents never do.
+ */
 function contentSecurityPolicy(command: "build" | "serve"): Plugin {
-  const connectSources = command === "serve"
-    ? [...PACKAGED_CONNECT_SOURCES, "http://localhost:3050", "ws://localhost:5173", "http://localhost:5173"]
-    : PACKAGED_CONNECT_SOURCES;
+  const policy = command === "serve"
+    ? buildContentSecurityPolicy({
+        connectSources: devConnectSources(PACKAGED_CSP_API_PLACEHOLDER),
+        allowInlineScripts: true,
+      })
+    : buildContentSecurityPolicy({ connectSources: packagedConnectSources(PACKAGED_CSP_API_PLACEHOLDER) });
   return {
     name: "terminus-content-security-policy",
     transformIndexHtml: {
       order: "pre",
       handler(html) {
-        const marker = "__TERMINUS_CONNECT_SOURCES__";
+        const marker = "__TERMINUS_CSP__";
         if (!html.includes(marker)) throw new Error(`desktop index omitted ${marker}`);
-        return html.replace(marker, connectSources.join(" "));
+        return html.replace(marker, policy);
       },
     },
   };

@@ -14,14 +14,67 @@
  * and control executables described by ADR-0039. It never implements harness
  * effects itself. Workspace effects and provider commands still cross the
  * Rust kernel, and no process handle is exposed through preload IPC.
+ *
+ * This file is wiring. The rules it wires — the menu template, window
+ * routing, geometry restore, durable shell preferences, the content security
+ * policy, deep links, and the crash log — live in pure modules beside it so
+ * they can be tested without an Electron runtime.
  */
-import { app, BrowserWindow, globalShortcut, Menu, nativeTheme, screen, ipcMain, dialog, Notification, session, net, protocol, shell, type IpcMainInvokeEvent } from "electron";
-import { readFile } from "node:fs/promises";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  globalShortcut,
+  ipcMain,
+  Menu,
+  nativeTheme,
+  net,
+  Notification,
+  protocol,
+  screen,
+  session,
+  shell,
+  type IpcMainInvokeEvent,
+  type WebContents,
+} from "electron";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { normalizeWindowTitle, packagedRendererAssetPath, parseWindowBounds, validateDirectoryPath, type WindowBounds } from "./shell-guards";
+import {
+  isAllowedRendererPermission,
+  normalizeSettingsCategory,
+  normalizeWindowTitle,
+  packagedRendererAssetPath,
+  validateDirectoryPath,
+} from "./shell-guards";
 import { StandaloneRuntimeSupervisor } from "./runtime-supervisor";
-import { requireRuntimeBuildKind, requireRuntimeCommit, requireRuntimeVersion, type DesktopRuntimeBuildKind } from "./runtime-contract";
+import {
+  requireRuntimeBuildKind,
+  requireRuntimeCommit,
+  requireRuntimeVersion,
+  type DesktopRuntimeBuildKind,
+} from "./runtime-contract";
+import { aboutPanelOptions, buildMenuTemplate, repositoryLinksFrom, type DesktopCommandId } from "./menu";
+import { resolveTrustedWindow, routingRequest, type WindowRouter } from "./window-routing";
+import { resolveWindowState, type DisplayArea, type WindowState } from "./window-state";
+import { ShellStateStore, withRecentProject, type ThemeChoice } from "./shell-store";
+import {
+  appendCrashLog,
+  crashLogDirectory,
+  crashLogPath,
+  describeFailure,
+  type CrashLogKind,
+} from "./crash-log";
+import { findDeepLink, parseDeepLink, taskDeepLink, type NavigationTarget } from "./deep-links";
+import {
+  buildContentSecurityPolicy,
+  devConnectSources,
+  packagedConnectSources,
+  shouldApplyPolicyHeader,
+  withPolicyHeader,
+  DEV_RENDERER_ORIGIN,
+  PACKAGED_CSP_API_PLACEHOLDER,
+} from "./csp";
 
 // __dirname is provided natively by CommonJS (Electron's main process
 // is compiled to CommonJS by electron/tsconfig.json). We avoid
@@ -30,9 +83,9 @@ import { requireRuntimeBuildKind, requireRuntimeCommit, requireRuntimeVersion, t
 declare const __dirname: string;
 
 const isDev = !app.isPackaged;
+const APP_USER_MODEL_ID = "dev.terminus.desktop";
 const PACKAGED_RENDERER_SCHEME = "terminus";
 const PACKAGED_RENDERER_ENTRY = "terminus://app/index.html";
-const PACKAGED_CSP_API_PLACEHOLDER = "http://127.0.0.1:3050";
 protocol.registerSchemesAsPrivileged([{
   scheme: PACKAGED_RENDERER_SCHEME,
   privileges: {
@@ -44,6 +97,7 @@ protocol.registerSchemesAsPrivileged([{
   },
 }]);
 app.setName("Terminus");
+app.setAppUserModelId(APP_USER_MODEL_ID);
 
 let mainWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
@@ -51,6 +105,11 @@ let runtimeSupervisor: StandaloneRuntimeSupervisor | null = null;
 let runtimeShutdownStarted = false;
 let runtimeAcceptingRequests = false;
 let desktopFatalReported = false;
+let shellState: ShellStateStore | null = null;
+let repositoryLinks: { documentationUrl: string | null; issuesUrl: string | null } = {
+  documentationUrl: null,
+  issuesUrl: null,
+};
 const LOCAL_API_ORIGINS = new Set(["http://127.0.0.1:3050", "http://localhost:3050"]);
 
 function requireLocalOrigin(value: string, allowed: ReadonlySet<string>, variable: string): string {
@@ -85,9 +144,117 @@ function configuredOrigin(value: string): string | null {
   }
 }
 
+// ────────────────────────── Crash and fatal-error log ────────────────────────
+
+function recordCrash(kind: CrashLogKind, error: unknown): string {
+  const failure = describeFailure(error);
+  console.error(`[terminus-desktop] ${kind}: ${failure.message}`);
+  const entry = {
+    timestamp: new Date().toISOString(),
+    kind,
+    message: failure.message,
+    ...(failure.detail === undefined ? {} : { detail: failure.detail }),
+  };
+  const logPath = crashLogPath(app.getPath("userData"));
+  void appendCrashLog(logPath, entry).catch((writeError: unknown) => {
+    console.error("[terminus-desktop] could not append to the crash log", writeError);
+  });
+  return logPath;
+}
+
+/**
+ * A crashed renderer is recoverable: reloading rebuilds it from the same
+ * control plane state. Offer that before offering to quit, and never leave
+ * the user staring at a window that is simply blank.
+ */
+async function offerCrashRecovery(kind: CrashLogKind, message: string, logPath: string): Promise<void> {
+  const parent = mainWindow !== null && !mainWindow.isDestroyed() ? mainWindow : null;
+  const options = {
+    type: "error" as const,
+    buttons: ["Reload", "Quit"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "Terminus stopped responding",
+    message,
+    detail: `Details were written to ${logPath}.`,
+  };
+  const result = parent === null
+    ? await dialog.showMessageBox(options)
+    : await dialog.showMessageBox(parent, options);
+  if (result.response === 1) {
+    app.quit();
+    return;
+  }
+  if (parent === null || parent.isDestroyed()) {
+    ensureMainWindow();
+    return;
+  }
+  parent.webContents.reloadIgnoringCache();
+  void recordCrashRecovery(kind);
+}
+
+async function recordCrashRecovery(kind: CrashLogKind): Promise<void> {
+  await appendCrashLog(crashLogPath(app.getPath("userData")), {
+    timestamp: new Date().toISOString(),
+    kind,
+    message: "user reloaded the renderer after a crash",
+  }).catch(() => undefined);
+}
+
+function registerProcessFailureHandlers(): void {
+  process.on("uncaughtException", (error: unknown) => {
+    const logPath = recordCrash("uncaught-exception", error);
+    void offerCrashRecovery("uncaught-exception", "Terminus hit an unexpected error.", logPath)
+      .catch(() => undefined);
+  });
+  // A rejected promise is logged but does not tear the app down: the shell
+  // supervises long-lived work whose failures are already surfaced elsewhere,
+  // and a modal for every one of them would be its own defect.
+  process.on("unhandledRejection", (reason: unknown) => {
+    recordCrash("unhandled-rejection", reason);
+  });
+  app.on("child-process-gone", (_event, details) => {
+    const logPath = recordCrash(
+      "child-process-gone",
+      `${details.type} process gone: ${details.reason} (exit ${details.exitCode})`,
+    );
+    if (details.reason === "clean-exit") return;
+    void offerCrashRecovery("child-process-gone", "A Terminus helper process stopped unexpectedly.", logPath)
+      .catch(() => undefined);
+  });
+}
+
+function sealRendererRuntimeBoundary(): void {
+  runtimeAcceptingRequests = false;
+  terminusControlToken = "";
+  for (const window of [settingsWindow, mainWindow]) {
+    if (window && !window.isDestroyed()) {
+      window.hide();
+      window.destroy();
+    }
+  }
+}
+
+function handleDesktopFatal(title: string, error: unknown): void {
+  if (desktopFatalReported) return;
+  desktopFatalReported = true;
+  const failure = error instanceof Error ? error : new Error(String(error));
+  const logPath = runtimeSupervisor?.details().logPath;
+  recordCrash("fatal", failure);
+  sealRendererRuntimeBoundary();
+  dialog.showErrorBox(title, logPath ? `${failure.message}\n\nRuntime log: ${logPath}` : failure.message);
+  app.quit();
+}
+
 /** Attach the control capability only to the two configured Terminus origins. */
 function registerAuthenticatedTransport(): void {
-  if (!terminusControlToken) return;
+  if (!terminusControlToken) {
+    // Fail closed: with no capability there is nothing to attach, and a
+    // renderer request that reaches the control plane unauthenticated will be
+    // refused there rather than silently succeeding here.
+    console.warn("[terminus-desktop] no control capability configured; renderer requests will not be authenticated");
+    return;
+  }
   const allowedOrigin = configuredOrigin(terminusApiBase);
   if (allowedOrigin === null) throw new Error("Terminus API base is invalid");
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
@@ -108,7 +275,6 @@ function registerAuthenticatedTransport(): void {
       callback({ requestHeaders });
       return;
     }
-    console.log(`[terminus-desktop] authenticated header injected for renderer request: ${details.method} ${details.url}`);
     callback({
       requestHeaders: {
         ...requestHeaders,
@@ -116,32 +282,44 @@ function registerAuthenticatedTransport(): void {
       },
     });
   });
-  session.defaultSession.webRequest.onSendHeaders((details) => {
-    if (details.webContentsId === mainWindow?.webContents.id && (details.url.includes("/events") || details.url.includes("/v2/events"))) {
-      console.log(`[terminus-desktop] renderer opened SSE connection: ${details.url}`);
-    }
-  });
 }
 
-function sealRendererRuntimeBoundary(): void {
-  runtimeAcceptingRequests = false;
-  terminusControlToken = "";
-  for (const window of [settingsWindow, mainWindow]) {
-    if (window && !window.isDestroyed()) {
-      window.hide();
-      window.destroy();
-    }
-  }
+// ────────────────────────── Content security policy ──────────────────────────
+
+function activeContentSecurityPolicy(): string {
+  return isDev
+    ? buildContentSecurityPolicy({
+        // Vite serves its React-refresh preamble as an inline module script,
+        // so the development document cannot run under `script-src 'self'`
+        // alone. Packaged documents never carry this relaxation.
+        connectSources: devConnectSources(terminusApiBase),
+        allowInlineScripts: true,
+      })
+    : buildContentSecurityPolicy({ connectSources: packagedConnectSources(terminusApiBase) });
 }
 
-function handleDesktopFatal(title: string, error: unknown): void {
-  if (desktopFatalReported) return;
-  desktopFatalReported = true;
-  const failure = error instanceof Error ? error : new Error(String(error));
-  const logPath = runtimeSupervisor?.details().logPath;
-  sealRendererRuntimeBoundary();
-  dialog.showErrorBox(title, logPath ? `${failure.message}\n\nRuntime log: ${logPath}` : failure.message);
-  app.quit();
+/**
+ * Enforce the policy as a response header, not only as a meta tag.
+ *
+ * The packaged `terminus://` documents get the header from the protocol
+ * handler below — `webRequest` filters address http(s) URLs, and the custom
+ * scheme is served by this process anyway, so attaching it at the source is
+ * both simpler and certain. This filter covers every http(s) document, which
+ * in development is the Vite entry and in a packaged build is nothing.
+ */
+function registerContentSecurityPolicyHeaders(): void {
+  const policy = activeContentSecurityPolicy();
+  const documentOrigins = isDev ? [DEV_RENDERER_ORIGIN, "http://127.0.0.1:5173"] : [];
+  session.defaultSession.webRequest.onHeadersReceived(
+    { urls: ["http://*/*", "https://*/*"] },
+    (details, callback) => {
+      if (!shouldApplyPolicyHeader(details.url, details.resourceType, documentOrigins)) {
+        callback({});
+        return;
+      }
+      callback({ responseHeaders: withPolicyHeader(details.responseHeaders ?? {}, policy) });
+    },
+  );
 }
 
 /**
@@ -155,6 +333,8 @@ type RendererView = "main" | "settings";
 
 const RENDERER_VIEW_ARGUMENT = "--terminus-view=";
 const RENDERER_VIBRANCY_ARGUMENT = "--terminus-vibrancy=";
+const RENDERER_API_BASE_ARGUMENT = "--terminus-api-base=";
+const RENDERER_SETTINGS_CATEGORY_ARGUMENT = "--terminus-settings-category=";
 
 function rendererEntryUrl(): string {
   if (!isDev) return PACKAGED_RENDERER_ENTRY;
@@ -178,13 +358,24 @@ function isTrustedRendererUrl(value: string): boolean {
   }
 }
 
-function isTerminusWindow(contents: Electron.WebContents | undefined): boolean {
-  if (!contents) return false;
-  return contents === mainWindow?.webContents || contents === settingsWindow?.webContents;
+function isOwnedWindow(window: BrowserWindow): boolean {
+  return window === mainWindow || window === settingsWindow;
+}
+
+const ipcWindowRouter: WindowRouter<BrowserWindow, WebContents> = {
+  windowForSender: (sender) => BrowserWindow.fromWebContents(sender),
+  isOwnedWindow,
+  isTrustedUrl: isTrustedRendererUrl,
+};
+
+/** The window that sent this message — never a module-level default. */
+function senderWindow(event: IpcMainInvokeEvent): BrowserWindow {
+  return resolveTrustedWindow(routingRequest(event), ipcWindowRouter);
 }
 
 async function registerPackagedRendererProtocol(): Promise<void> {
   if (isDev) return;
+  const policy = activeContentSecurityPolicy();
   await protocol.handle(PACKAGED_RENDERER_SCHEME, (request) => {
     const relativePath = packagedRendererAssetPath(request.url);
     if (relativePath === null) return new Response("Not found", { status: 404 });
@@ -197,7 +388,7 @@ async function registerPackagedRendererProtocol(): Promise<void> {
       }
       const headers = new Headers(response.headers);
       headers.set("content-type", "text/html; charset=utf-8");
-      console.log(`[terminus-desktop] packaged renderer loaded under CSP for ${terminusApiBase}`);
+      headers.set("content-security-policy", policy);
       return new Response(html.replaceAll(PACKAGED_CSP_API_PLACEHOLDER, terminusApiBase), {
         status: response.status,
         statusText: response.statusText,
@@ -207,32 +398,25 @@ async function registerPackagedRendererProtocol(): Promise<void> {
   });
 }
 
-function requireTrustedIpc(event: IpcMainInvokeEvent): void {
-  const senderFrameUrl = event.senderFrame?.url;
-  if (!isTerminusWindow(event.sender) || !senderFrameUrl || !isTrustedRendererUrl(senderFrameUrl)) {
-    throw new Error("desktop IPC rejected an untrusted renderer");
-  }
-}
-
 /** Task identifiers are UUIDs; nothing else may be routed from a notification. */
 const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const SETTINGS_CATEGORY_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 /**
  * System-wide "start a task without finding the window first".
  *
- * Registration can fail — another application may already own the
- * combination — and that is not an error worth interrupting startup for. The
- * in-app shortcut keeps working either way.
+ * ⌥⌘Space used to be the combination, which is Finder's "search this Mac";
+ * ⌃⌘Space is the system character picker. ⌥⌘T is claimed by nothing global.
+ * Registration can still fail — another application may already own it — and
+ * that is not an error worth interrupting startup for. The in-app shortcut
+ * keeps working either way.
  */
-const GLOBAL_NEW_TASK_ACCELERATOR = "Alt+Command+Space";
+const GLOBAL_NEW_TASK_ACCELERATOR = "Alt+Command+T";
 
 function registerGlobalShortcuts(): void {
   if (process.platform !== "darwin") return;
   const registered = globalShortcut.register(GLOBAL_NEW_TASK_ACCELERATOR, () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+    // The main window may have been closed with ⌘W while Preferences stayed
+    // open; the shortcut has to be able to bring it back, not early-return.
+    showMainWindow();
     sendDesktopCommand("new-task");
   });
   if (!registered) {
@@ -242,126 +426,146 @@ function registerGlobalShortcuts(): void {
 
 // ────────────────────────── Window lifecycle ─────────────────────────────────
 
-type DesktopCommandId =
-  | "command-palette"
-  | "open-project"
-  | "settings"
-  | "shortcut-reference"
-  | "new-task"
-  | "show-changes"
-  | "toggle-inspector"
-  | "toggle-sidebar";
+/**
+ * Messages addressed to the main window before its renderer has loaded.
+ *
+ * A deep link, a menu command, or the global shortcut can all arrive while the
+ * window is being recreated. Dropping them would make the feature look broken
+ * exactly when it was most needed, so they queue and flush on load.
+ */
+const pendingMainWindowMessages: Array<{ channel: string; payload: unknown }> = [];
+let mainRendererLoaded = false;
+
+function sendToMainWindow(channel: string, payload: unknown): void {
+  const window = ensureMainWindow();
+  if (!mainRendererLoaded) {
+    pendingMainWindowMessages.push({ channel, payload });
+    return;
+  }
+  window.webContents.send(channel, payload);
+}
+
+function flushPendingMainWindowMessages(window: BrowserWindow): void {
+  mainRendererLoaded = true;
+  for (const message of pendingMainWindowMessages.splice(0)) {
+    if (window.isDestroyed()) return;
+    window.webContents.send(message.channel, message.payload);
+  }
+}
 
 function sendDesktopCommand(commandId: DesktopCommandId): void {
-  mainWindow?.webContents.send("terminus:command", commandId);
+  sendToMainWindow("terminus:command", commandId);
 }
 
-function emitWindowBounds(): void {
-  const bounds = mainWindow?.getBounds();
-  if (bounds) mainWindow?.webContents.send("terminus:window-bounds", bounds);
+/** Show the main window, recreating it when ⌘W has closed it. */
+function showMainWindow(): BrowserWindow {
+  const window = ensureMainWindow();
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+  return window;
 }
 
-function buildApplicationMenu(): void {
-  const command = (label: string, commandId: DesktopCommandId, accelerator: string): Electron.MenuItemConstructorOptions => ({
-    label,
-    accelerator,
-    click: () => sendDesktopCommand(commandId),
-  });
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    {
-      label: app.name,
-      submenu: [
-        { role: "about", label: `About ${app.name}` },
-        { type: "separator" },
-        // macOS puts preferences under the app menu, at ⌘,. It was under View,
-        // which is not where anyone looks for it.
-        { label: "Settings…", accelerator: "CommandOrControl+,", click: () => openSettingsWindow() },
-        { type: "separator" },
-        { role: "services", submenu: [] },
-        { type: "separator" },
-        { role: "hide" },
-        { role: "hideOthers" },
-        { role: "unhide" },
-        { type: "separator" },
-        { role: "quit" },
-      ],
+function ensureMainWindow(): BrowserWindow {
+  if (mainWindow !== null && !mainWindow.isDestroyed()) return mainWindow;
+  return createMainWindow();
+}
+
+// ────────────────────────── Navigation and deep links ────────────────────────
+
+function routeNavigation(target: NavigationTarget): void {
+  showMainWindow();
+  sendToMainWindow("desktop:navigate", target);
+}
+
+function handleDeepLink(value: unknown): void {
+  const target = parseDeepLink(value);
+  if (target === null) {
+    console.warn(`[terminus-desktop] ignoring an unroutable deep link: ${String(value)}`);
+    return;
+  }
+  routeNavigation(target);
+}
+
+// ────────────────────────── Durable shell preferences ────────────────────────
+
+function requireShellState(): ShellStateStore {
+  if (shellState === null) throw new Error("shell preferences were read before they were loaded");
+  return shellState;
+}
+
+function displayWorkAreas(): { areas: DisplayArea[]; primary: DisplayArea } {
+  const areas = screen.getAllDisplays().map((display) => display.workArea);
+  return { areas, primary: screen.getPrimaryDisplay().workArea };
+}
+
+function captureWindowState(window: BrowserWindow): void {
+  if (window.isDestroyed()) return;
+  // `getNormalBounds` is the pre-maximize geometry, which is the only one
+  // worth restoring: restoring a maximized window's outer bounds and then
+  // un-maximizing it would leave the window filling the screen forever.
+  const bounds = window.getNormalBounds();
+  requireShellState().update((state) => ({
+    ...state,
+    window: {
+      bounds,
+      maximized: window.isMaximized(),
+      fullScreen: window.isFullScreen(),
     },
-    {
-      // Every macOS app has a File menu. Its absence was one of the clearest
-      // signals that this window was not a native application.
-      label: "File",
-      submenu: [
-        command("New task", "new-task", "CommandOrControl+N"),
-        command("Open project…", "open-project", "CommandOrControl+O"),
-        { type: "separator" },
-        { role: "close" },
-      ],
+  }));
+}
+
+function noteRecentProject(path: string): void {
+  const store = requireShellState();
+  const before = store.state.recentProjects;
+  const after = store.update((state) => withRecentProject(state, path)).recentProjects;
+  if (after === before) return;
+  app.addRecentDocument(path);
+  refreshApplicationMenu();
+}
+
+// ────────────────────────── Application menu ─────────────────────────────────
+
+function refreshApplicationMenu(): void {
+  Menu.setApplicationMenu(Menu.buildFromTemplate(buildMenuTemplate({
+    appName: app.name,
+    isDev,
+    recentProjects: shellState?.state.recentProjects ?? [],
+    documentationUrl: repositoryLinks.documentationUrl,
+    issuesUrl: repositoryLinks.issuesUrl,
+    actions: {
+      sendCommand: sendDesktopCommand,
+      openSettings: (category) => openSettingsWindow(category),
+      showMainWindow: () => { showMainWindow(); },
+      openRecentProject: (path) => {
+        noteRecentProject(path);
+        routeNavigation({ kind: "project-path", path });
+      },
+      clearRecentProjects: () => {
+        app.clearRecentDocuments();
+        requireShellState().update((state) => ({ ...state, recentProjects: [] }));
+        refreshApplicationMenu();
+      },
+      openLogsFolder: () => {
+        void shell.openPath(crashLogDirectory(app.getPath("userData"))).then((failure) => {
+          if (failure.length > 0) console.error(`[terminus-desktop] could not open the logs folder: ${failure}`);
+        });
+      },
+      openExternal: openExternalLink,
     },
-    {
-      label: "Edit",
-      submenu: [
-        { role: "undo" },
-        { role: "redo" },
-        { type: "separator" },
-        { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
-        { role: "selectAll" },
-      ],
-    },
-    {
-      label: "View",
-      submenu: [
-        command("Command palette", "command-palette", "CommandOrControl+K"),
-        { type: "separator" },
-        command("Show changes", "show-changes", "CommandOrControl+D"),
-        command("Toggle inspector", "toggle-inspector", "CommandOrControl+RightBracket"),
-        command("Toggle sidebar", "toggle-sidebar", "CommandOrControl+Backslash"),
-        ...(isDev ? [
-          { type: "separator" as const },
-          { role: "toggleDevTools" as const },
-          { role: "reload" as const },
-        ] : []),
-      ],
-    },
-    {
-      label: "Window",
-      submenu: [
-        { role: "minimize" },
-        { role: "zoom" },
-        { type: "separator" },
-        { label: "Terminus", accelerator: "CommandOrControl+1", click: () => { mainWindow?.show(); mainWindow?.focus(); } },
-        { label: "Settings", click: () => openSettingsWindow() },
-        { type: "separator" },
-        { role: "front" },
-      ],
-    },
-    {
-      label: "Help",
-      role: "help",
-      submenu: [
-        command("Keyboard shortcuts", "shortcut-reference", "CommandOrControl+/"),
-        { type: "separator" },
-        {
-          label: "Terminus documentation",
-          click: () => { void shell.openExternal("https://github.com/terminus-dev/terminus#readme"); },
-        },
-        {
-          label: "Report an issue",
-          click: () => { void shell.openExternal("https://github.com/terminus-dev/terminus/issues/new"); },
-        },
-      ],
-    },
-  ]));
+  })));
 }
 
 /**
  * Renderer privileges. Identical for every window this app opens: context
  * isolation on, node integration off, sandbox on. `view` selects which root
  * the shared bundle mounts and travels as a preload argument, because the
- * packaged protocol handler refuses an entry URL carrying a query.
+ * packaged protocol handler refuses an entry URL carrying a query. The
+ * control origin and the initial settings category travel the same way — the
+ * category in particular cannot be sent on `ready-to-show`, which fires
+ * before React has mounted a listener.
  */
-function rendererPreferences(view: RendererView): Electron.WebPreferences {
+function rendererPreferences(view: RendererView, settingsCategory?: string): Electron.WebPreferences {
   return {
     preload: join(__dirname, "preload.js"),
     contextIsolation: true,
@@ -370,6 +574,8 @@ function rendererPreferences(view: RendererView): Electron.WebPreferences {
     additionalArguments: [
       `${RENDERER_VIEW_ARGUMENT}${view}`,
       `${RENDERER_VIBRANCY_ARGUMENT}${vibrancyEnabled(view) ? "on" : "off"}`,
+      `${RENDERER_API_BASE_ARGUMENT}${terminusApiBase}`,
+      ...(settingsCategory === undefined ? [] : [`${RENDERER_SETTINGS_CATEGORY_ARGUMENT}${settingsCategory}`]),
     ],
   };
 }
@@ -424,7 +630,7 @@ function openExternalLink(url: string): void {
 }
 
 /** Deny renderer-opened windows and untrusted navigation on every window. */
-function hardenWebContents(window: BrowserWindow): void {
+function hardenWebContents(window: BrowserWindow, label: string): void {
   window.webContents.setWindowOpenHandler(({ url }) => {
     openExternalLink(url);
     return { action: "deny" };
@@ -434,6 +640,15 @@ function hardenWebContents(window: BrowserWindow): void {
   });
   window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     console.log(`[terminus-desktop-renderer] [${level}] ${message} (${sourceId}:${line})`);
+  });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    const logPath = recordCrash(
+      "render-process-gone",
+      `${label} renderer gone: ${details.reason} (exit ${details.exitCode})`,
+    );
+    if (details.reason === "clean-exit") return;
+    void offerCrashRecovery("render-process-gone", `The ${label} window stopped responding.`, logPath)
+      .catch(() => undefined);
   });
 }
 
@@ -449,6 +664,7 @@ function openSettingsWindow(category?: string): void {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.show();
     settingsWindow.focus();
+    // The window is already mounted, so a message is the only way in.
     if (category) settingsWindow.webContents.send("terminus:settings-category", category);
     return;
   }
@@ -465,14 +681,13 @@ function openSettingsWindow(category?: string): void {
     // Deliberately not a child window: a Preferences window on macOS is
     // independent — it can be sent behind the document window and carries
     // its own entry in Window. `parent` would pin it permanently on top.
-    webPreferences: rendererPreferences("settings"),
+    webPreferences: rendererPreferences("settings", category),
   });
   settingsWindow = window;
-  hardenWebContents(window);
+  hardenWebContents(window, "settings");
   window.once("ready-to-show", () => {
     if (window.isDestroyed()) return;
     window.show();
-    if (category) window.webContents.send("terminus:settings-category", category);
   });
   window.once("closed", () => {
     if (settingsWindow === window) settingsWindow = null;
@@ -482,18 +697,16 @@ function openSettingsWindow(category?: string): void {
   });
 }
 
-function createWindow(): void {
+function createMainWindow(): BrowserWindow {
+  const { areas, primary } = displayWorkAreas();
   // SPEC §5: "The default window should open large and centered, occupying
   // approximately 85–90% of the available work area while leaving a visible
-  // desktop margin."
-  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
-  const width = Math.min(Math.round(screenWidth * 0.88), 1600);
-  const height = Math.min(Math.round(screenHeight * 0.88), 1000);
+  // desktop margin." A restored window keeps where the user put it, unless
+  // that place is no longer on any attached display.
+  const placement: WindowState = resolveWindowState(shellState?.state.window ?? null, areas, primary);
 
   const window = new BrowserWindow({
-    width,
-    height,
-    center: true,
+    ...placement.bounds,
     title: "Terminus",
     minWidth: 900,
     minHeight: 600,
@@ -504,143 +717,179 @@ function createWindow(): void {
     webPreferences: rendererPreferences("main"),
   });
   mainWindow = window;
+  mainRendererLoaded = false;
+
+  if (placement.fullScreen) {
+    window.setFullScreen(true);
+  } else if (placement.maximized) {
+    window.maximize();
+  }
 
   window.once("ready-to-show", () => {
     if (!window.isDestroyed()) window.show();
-    emitWindowBounds();
   });
-  window.on("resize", emitWindowBounds);
-  window.on("move", emitWindowBounds);
-  window.once("closed", () => {
-    if (mainWindow === window) mainWindow = null;
+  window.webContents.on("did-finish-load", () => {
+    flushPendingMainWindowMessages(window);
+  });
+  window.webContents.on("did-start-loading", () => {
+    mainRendererLoaded = false;
   });
 
-  // SPEC §5: "Support multiple application windows if existing product
-  // behavior allows it"
-  // For now, single window. Multiple windows can be added later.
+  const capture = (): void => captureWindowState(window);
+  window.on("resize", capture);
+  window.on("move", capture);
+  window.on("maximize", capture);
+  window.on("unmaximize", capture);
+  window.on("enter-full-screen", capture);
+  window.on("leave-full-screen", capture);
+  window.on("close", () => {
+    captureWindowState(window);
+    void shellState?.flush().catch((error: unknown) => {
+      console.error("[terminus-desktop] could not persist window state", error);
+    });
+  });
+  window.once("closed", () => {
+    if (mainWindow === window) {
+      mainWindow = null;
+      mainRendererLoaded = false;
+    }
+  });
 
   // No renderer-controlled window or top-level navigation may inherit preload.
-  hardenWebContents(window);
+  hardenWebContents(window, "main");
 
-  if (isDev) {
-    // Keep the dev renderer from reusing a pre-migration Terminus document from
-    // Electron's HTTP cache after the app rename.
-    void window.loadURL(rendererEntryUrl()).catch((error: unknown) => {
-      handleDesktopFatal("Terminus renderer could not load", error);
-    });
-    if (process.env.TERMINUS_DESKTOP_DEVTOOLS !== "0") {
-      window.webContents.openDevTools({ mode: "detach" });
-    }
-  } else {
-    void window.loadURL(rendererEntryUrl()).catch((error: unknown) => {
-      handleDesktopFatal("Terminus renderer could not load", error);
-    });
+  void window.loadURL(rendererEntryUrl()).catch((error: unknown) => {
+    handleDesktopFatal("Terminus renderer could not load", error);
+  });
+  if (isDev && process.env.TERMINUS_DESKTOP_DEVTOOLS !== "0") {
+    window.webContents.openDevTools({ mode: "detach" });
   }
+  return window;
 }
 
-// SPEC §24: "Theme and density changes should not require restart."
-// Respect the system theme.
-nativeTheme.themeSource = "system";
+// ────────────────────────── Workspace directories ────────────────────────────
+
+interface DirectoryValidation {
+  readonly ok: boolean;
+  readonly isGit: boolean;
+  readonly canonicalPath: string | null;
+}
+
+const INVALID_DIRECTORY: DirectoryValidation = { ok: false, isGit: false, canonicalPath: null };
+
+/**
+ * Resolve a candidate project directory.
+ *
+ * `isGit` decides whether the renderer registers the workspace as `local_git`
+ * or `local_directory`, and getting that wrong is not recoverable — the
+ * control plane rejects the second registration of the same path under a
+ * different kind. So the answer comes from the filesystem, not a guess.
+ */
+async function validateDirectory(value: unknown): Promise<DirectoryValidation> {
+  const candidate = validateDirectoryPath(value);
+  if (candidate === null) return INVALID_DIRECTORY;
+  let canonicalPath: string;
+  try {
+    canonicalPath = await realpath(candidate);
+    if (!(await stat(canonicalPath)).isDirectory()) return INVALID_DIRECTORY;
+  } catch {
+    return INVALID_DIRECTORY;
+  }
+  if (validateDirectoryPath(canonicalPath) === null) return INVALID_DIRECTORY;
+  let isGit = false;
+  try {
+    await access(join(canonicalPath, ".git"));
+    isGit = true;
+  } catch {
+    isGit = false;
+  }
+  return { ok: true, isGit, canonicalPath };
+}
 
 // ────────────────────────── IPC registration ─────────────────────────────────
 
 function registerIpc(): void {
-  // ── Terminus desktop bridge ──
   ipcMain.handle("notify", (event, payload: { title: string; body: string; taskId?: unknown }) => {
-    requireTrustedIpc(event);
-    if (!Notification.isSupported() || mainWindow?.isFocused()) return null;
+    const window = senderWindow(event);
+    if (!Notification.isSupported() || window.isFocused()) return null;
     const notification = new Notification({ title: payload.title, body: payload.body });
     const taskId = typeof payload.taskId === "string" && TASK_ID_PATTERN.test(payload.taskId)
       ? payload.taskId
       : null;
     // A notification that only makes noise is a worse version of a badge.
-    // Clicking one raises the window and opens the task it is about.
+    // Clicking one raises the window and opens the task it is about — through
+    // the same deep link an external caller would use, so there is one path.
     notification.on("click", () => {
-      if (!mainWindow || mainWindow.isDestroyed()) return;
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-      if (taskId) mainWindow.webContents.send("terminus:open-task", taskId);
+      if (taskId === null) {
+        showMainWindow();
+        return;
+      }
+      handleDeepLink(taskDeepLink(taskId));
     });
     notification.show();
     return null;
   });
   ipcMain.handle("desktop:openSettings", (event, category: unknown) => {
-    requireTrustedIpc(event);
-    openSettingsWindow(typeof category === "string" && SETTINGS_CATEGORY_PATTERN.test(category) ? category : undefined);
+    senderWindow(event);
+    openSettingsWindow(normalizeSettingsCategory(category) ?? undefined);
     return null;
   });
   ipcMain.handle("desktop:setAttentionCount", (event, value: unknown) => {
-    requireTrustedIpc(event);
+    senderWindow(event);
     // The Dock badge is the only part of this app visible when the window is
     // not. Anything that needs a person should reach them there.
     const count = typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
     app.setBadgeCount(count);
     return count;
   });
-  ipcMain.handle("window:minimize", (event) => {
-    requireTrustedIpc(event);
-    mainWindow?.minimize();
-    return null;
-  });
-  ipcMain.handle("window:maximize", (event) => {
-    requireTrustedIpc(event);
-    if (mainWindow?.isMaximized()) {
-      mainWindow.unmaximize();
-    } else {
-      mainWindow?.maximize();
-    }
-    return null;
-  });
   ipcMain.handle("window:close", (event) => {
-    requireTrustedIpc(event);
-    mainWindow?.close();
+    // Routed to the sending window: Preferences' Close must close Preferences.
+    senderWindow(event).close();
     return null;
-  });
-  ipcMain.handle("window:getBounds", (event): WindowBounds | null => {
-    requireTrustedIpc(event);
-    const bounds = mainWindow?.getBounds();
-    return bounds ? parseWindowBounds(bounds) : null;
-  });
-  ipcMain.handle("window:setBounds", (event, value: unknown): WindowBounds => {
-    requireTrustedIpc(event);
-    const bounds = parseWindowBounds(value);
-    if (!bounds || !mainWindow) throw new Error("invalid window bounds");
-    mainWindow.setBounds(bounds);
-    return bounds;
   });
   ipcMain.handle("window:setTitle", (event, value: unknown): string => {
-    requireTrustedIpc(event);
+    const window = senderWindow(event);
     const title = normalizeWindowTitle(value);
-    if (!title || !mainWindow) throw new Error("invalid window title");
-    mainWindow.setTitle(title);
+    if (!title) throw new Error("invalid window title");
+    window.setTitle(title);
     return title;
   });
-  ipcMain.handle("theme:get", (event) => {
-    requireTrustedIpc(event);
+  ipcMain.handle("theme:get", (event): ThemeChoice => {
+    senderWindow(event);
     return nativeTheme.themeSource;
   });
-  ipcMain.handle("theme:set", (event, theme: "system" | "light" | "dark") => {
-    requireTrustedIpc(event);
-    nativeTheme.themeSource = theme;
+  ipcMain.handle("theme:set", (event, value: unknown): ThemeChoice => {
+    senderWindow(event);
+    if (value !== "system" && value !== "light" && value !== "dark") {
+      throw new Error("invalid theme choice");
+    }
+    nativeTheme.themeSource = value;
+    // Mirrored under userData so the next launch can paint the right window
+    // background before any renderer exists to be asked.
+    requireShellState().update((state) => ({ ...state, theme: value }));
     return nativeTheme.themeSource;
   });
   ipcMain.handle("desktop:pickDirectory", async (event) => {
-    requireTrustedIpc(event);
-    const options = {
+    const window = senderWindow(event);
+    const result = await dialog.showOpenDialog(window, {
       title: "Open project",
       properties: ["openDirectory", "createDirectory"] as Array<"openDirectory" | "createDirectory">,
-    };
-    const result = mainWindow
-      ? await dialog.showOpenDialog(mainWindow, options)
-      : await dialog.showOpenDialog(options);
-    return result.canceled ? null : result.filePaths[0] ?? null;
+    });
+    const picked = result.canceled ? null : result.filePaths[0] ?? null;
+    if (picked !== null) noteRecentProject(picked);
+    return picked;
   });
-  ipcMain.handle("desktop:validateDirectoryDrop", (event, value: unknown): string | null => {
-    requireTrustedIpc(event);
-    return validateDirectoryPath(value);
+  ipcMain.handle("desktop:validateDirectory", async (event, value: unknown): Promise<DirectoryValidation> => {
+    senderWindow(event);
+    return validateDirectory(value);
   });
-
+  ipcMain.handle("desktop:noteRecentProject", (event, value: unknown): readonly string[] => {
+    senderWindow(event);
+    const path = validateDirectoryPath(value);
+    if (path === null) throw new Error("invalid project path");
+    noteRecentProject(path);
+    return requireShellState().state.recentProjects;
+  });
 }
 
 async function readPackagedAppIdentity(): Promise<{
@@ -648,18 +897,33 @@ async function readPackagedAppIdentity(): Promise<{
   readonly commit: string;
   readonly buildKind: DesktopRuntimeBuildKind;
 }> {
-  const packageJsonPath = join(app.getAppPath(), "package.json");
-  const parsed = JSON.parse(await readFile(packageJsonPath, "utf8")) as unknown;
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("packaged desktop package.json must be an object");
-  }
-  const metadata = parsed as Readonly<Record<string, unknown>>;
+  const metadata = await readAppMetadata();
   if (metadata.name !== "@terminus/desktop") throw new Error("packaged desktop identity is invalid");
   const version = requireRuntimeVersion(metadata.version);
   const commit = requireRuntimeCommit(metadata.terminusCommit);
   const buildKind = requireRuntimeBuildKind(metadata.terminusBuildKind);
   if (app.getVersion() !== version) throw new Error("Electron app version does not match package metadata");
   return { version, commit, buildKind };
+}
+
+async function readAppMetadata(): Promise<Readonly<Record<string, unknown>>> {
+  const packageJsonPath = join(app.getAppPath(), "package.json");
+  const parsed = JSON.parse(await readFile(packageJsonPath, "utf8")) as unknown;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("desktop package.json must be an object");
+  }
+  return parsed as Readonly<Record<string, unknown>>;
+}
+
+/** The packaged build commit, or null in development where there is none. */
+function buildCommit(value: unknown): string | null {
+  if (value === undefined) return null;
+  try {
+    return requireRuntimeCommit(value);
+  } catch (error: unknown) {
+    console.error("[terminus-desktop] package metadata carries an invalid build commit", error);
+    return null;
+  }
 }
 
 async function startPackagedRuntime(): Promise<void> {
@@ -693,30 +957,96 @@ async function startPackagedRuntime(): Promise<void> {
   delete process.env.TERMINUS_LOCAL_PROVIDER_COMMAND_JSON;
 }
 
+/** Refuse every OS capability except the notifications the app actually sends. */
+function registerPermissionHandlers(): void {
+  session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
+    callback(isAllowedRendererPermission(permission));
+  });
+  session.defaultSession.setPermissionCheckHandler((_contents, permission) => (
+    isAllowedRendererPermission(permission)
+  ));
+}
+
 async function launchDesktop(): Promise<void> {
-  await registerPackagedRendererProtocol();
+  shellState = ShellStateStore.forUserData(app.getPath("userData"));
+  const preferences = await shellState.load();
+  // SPEC §24: "Theme and density changes should not require restart." The
+  // persisted choice is applied before the first window exists, so a Light
+  // install no longer flashes the dark background on every launch.
+  nativeTheme.themeSource = preferences.theme;
+  for (const path of preferences.recentProjects) app.addRecentDocument(path);
+
   await startPackagedRuntime();
+  registerContentSecurityPolicyHeaders();
+  await registerPackagedRendererProtocol();
   registerAuthenticatedTransport();
+  registerPermissionHandlers();
   registerIpc();
   runtimeAcceptingRequests = true;
-  createWindow();
-  buildApplicationMenu();
+
+  const metadata = await readAppMetadata().catch((error: unknown) => {
+    console.error("[terminus-desktop] could not read package metadata", error);
+    return {} as Readonly<Record<string, unknown>>;
+  });
+  repositoryLinks = repositoryLinksFrom(metadata);
+  app.setAboutPanelOptions(aboutPanelOptions({
+    appName: app.name,
+    version: app.getVersion(),
+    commit: buildCommit(metadata.terminusCommit),
+  }));
+
+  createMainWindow();
+  refreshApplicationMenu();
   registerGlobalShortcuts();
+
+  nativeTheme.on("updated", () => {
+    const payload = {
+      themeSource: nativeTheme.themeSource,
+      shouldUseDarkColors: nativeTheme.shouldUseDarkColors,
+    };
+    for (const window of [mainWindow, settingsWindow]) {
+      if (window && !window.isDestroyed()) window.webContents.send("terminus:native-theme", payload);
+    }
+  });
+
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    // Not `getAllWindows().length === 0`: with Preferences open and the main
+    // window closed, that test is false and the document window can never
+    // come back.
+    showMainWindow();
   });
 }
+
+// ────────────────────────── Process lifecycle ────────────────────────────────
+
+registerProcessFailureHandlers();
+
+// `terminus://task/<id>` and `terminus://project/<id>`. macOS delivers these
+// through `open-url`, which can fire before `whenReady`, so the handler is
+// installed at module scope and the message queue absorbs the ordering.
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  handleDeepLink(url);
+});
 
 const ownsSingleInstance = app.requestSingleInstanceLock();
 if (!ownsSingleInstance) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
-    if (mainWindow?.isMinimized()) mainWindow.restore();
-    mainWindow?.show();
-    mainWindow?.focus();
+  app.on("second-instance", (_event, argv) => {
+    const target = findDeepLink(argv);
+    if (target === null) {
+      showMainWindow();
+      return;
+    }
+    routeNavigation(target);
   });
-  void app.whenReady().then(launchDesktop).catch((error: unknown) => {
+  void app.whenReady().then(async () => {
+    if (!app.isDefaultProtocolClient(PACKAGED_RENDERER_SCHEME)) {
+      app.setAsDefaultProtocolClient(PACKAGED_RENDERER_SCHEME);
+    }
+    await launchDesktop();
+  }).catch((error: unknown) => {
     handleDesktopFatal("Terminus could not start", error);
   });
 }
@@ -727,6 +1057,9 @@ app.on("will-quit", () => {
 
 app.on("before-quit", (event) => {
   if (runtimeShutdownStarted) return;
+  void shellState?.flush().catch((error: unknown) => {
+    console.error("[terminus-desktop] could not persist shell preferences", error);
+  });
   sealRendererRuntimeBoundary();
   if (runtimeSupervisor === null) return;
   event.preventDefault();

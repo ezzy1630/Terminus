@@ -16,16 +16,32 @@ import type { JSX as ReactJSX } from "react/jsx-runtime";
 // ────────────────────────── Electron preload bridges ─────────────────────────
 
 declare global {
-  type TerminusWindowBounds = { x: number; y: number; width: number; height: number };
   type TerminusDesktopCommandId =
     | "command-palette"
     | "open-project"
     | "settings"
     | "shortcut-reference"
     | "new-task"
+    | "stop-run"
     | "show-changes"
     | "toggle-inspector"
     | "toggle-sidebar";
+  /** Where the native shell is asking the renderer to go. */
+  type TerminusNavigationTarget =
+    | { kind: "task"; taskId: string }
+    | { kind: "project"; sessionId: string }
+    | { kind: "project-path"; path: string };
+  type TerminusThemeChoice = "system" | "light" | "dark";
+  interface TerminusNativeThemeState {
+    themeSource: TerminusThemeChoice;
+    shouldUseDarkColors: boolean;
+  }
+  /** Result of resolving a dropped or picked project directory. */
+  interface TerminusDirectoryValidation {
+    ok: boolean;
+    isGit: boolean;
+    canonicalPath: string | null;
+  }
 
   namespace JSX {
     type Element = ReactJSX.Element;
@@ -41,31 +57,34 @@ declare global {
 
   interface Window {
     terminusDesktop?: {
-      apiBase: string;
-      platform: string;
+      /** null when the shell could not supply an approved control origin. */
+      apiBase: string | null;
+      /** Why `apiBase` is null. Surface it; do not fall back to a guess. */
+      apiBaseError: string | null;
       isMac: boolean;
       /** "settings" when this window is the preferences window. */
       view?: "main" | "settings";
       /** True when the native window is a vibrant material the renderer paints over. */
       vibrancy?: boolean;
+      /** The settings category this window was launched on, if any. */
+      settingsCategory?: string | null;
       notify: (title: string, body: string, taskId?: string) => Promise<unknown>;
       openSettings?: (category?: string) => Promise<unknown>;
       setAttentionCount?: (count: number) => Promise<unknown>;
+      onNavigate?: (callback: (target: TerminusNavigationTarget) => void) => () => void;
       onOpenTask?: (callback: (taskId: string) => void) => () => void;
       onSettingsCategory?: (callback: (category: string) => void) => () => void;
-      windowMinimize: () => Promise<unknown>;
-      windowMaximize: () => Promise<unknown>;
+      onNativeThemeChange?: (callback: (state: TerminusNativeThemeState) => void) => () => void;
+      /** Closes the window that called it, not always the main window. */
       windowClose: () => Promise<unknown>;
-      getTheme: () => Promise<"system" | "light" | "dark">;
-      setTheme: (theme: "system" | "light" | "dark") => Promise<"system" | "light" | "dark">;
+      setWindowTitle: (title: string) => Promise<string>;
+      getTheme: () => Promise<TerminusThemeChoice>;
+      setTheme: (theme: TerminusThemeChoice) => Promise<TerminusThemeChoice>;
       pickDirectory: () => Promise<string | null>;
-      validateDirectoryDrop: (path: string) => Promise<string | null>;
+      validateDirectory?: (path: string) => Promise<TerminusDirectoryValidation>;
+      noteRecentProject?: (path: string) => Promise<readonly string[]>;
       onDirectoryDrop: (callback: (path: string) => void) => () => void;
       onCommand: (callback: (commandId: TerminusDesktopCommandId) => void) => () => void;
-      setWindowTitle: (title: string) => Promise<string>;
-      getWindowBounds: () => Promise<TerminusWindowBounds | null>;
-      setWindowBounds: (bounds: TerminusWindowBounds) => Promise<TerminusWindowBounds>;
-      onWindowBoundsChange: (callback: (bounds: TerminusWindowBounds) => void) => () => void;
     };
   }
 }

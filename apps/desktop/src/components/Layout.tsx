@@ -67,7 +67,6 @@ const RESIZE_HANDLE_WIDTH = 4;
 // width would otherwise pin existing installs to the old, too-narrow rail.
 const SIDEBAR_WIDTH_KEY = "terminus-desktop.sidebar-width.v4";
 const INSPECTOR_WIDTH_KEY = "terminus-desktop.inspector-width.v2";
-const WINDOW_BOUNDS_KEY = "terminus-desktop.window-bounds.v1";
 interface TitleBarProps {
   center?: ReactNode;
   right?: ReactNode;
@@ -154,15 +153,6 @@ function fitDockWidths({
   }
 
   return { sidebarWidth, inspectorWidth, dockBudget };
-}
-
-function isWindowBounds(value: unknown): value is TerminusWindowBounds {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Record<string, unknown>;
-  return [candidate.x, candidate.y, candidate.width, candidate.height]
-    .every((entry) => typeof entry === "number" && Number.isInteger(entry) && Number.isFinite(entry))
-    && (candidate.width as number) >= 900
-    && (candidate.height as number) >= 600;
 }
 
 interface ResizeHandleProps {
@@ -285,24 +275,6 @@ function LayoutImpl({
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
-  useEffect(() => {
-    const bridge = window.terminusDesktop;
-    if (!bridge?.getWindowBounds || !bridge.onWindowBoundsChange) return;
-    const stored = window.localStorage.getItem(WINDOW_BOUNDS_KEY);
-    if (stored) {
-      try {
-        const parsed: unknown = JSON.parse(stored);
-        if (isWindowBounds(parsed)) void bridge.setWindowBounds(parsed).catch(() => undefined);
-      } catch {
-        window.localStorage.removeItem(WINDOW_BOUNDS_KEY);
-      }
-    }
-    const unsubscribe = bridge.onWindowBoundsChange((bounds) => {
-      if (isWindowBounds(bounds)) window.localStorage.setItem(WINDOW_BOUNDS_KEY, JSON.stringify(bounds));
-    });
-    return unsubscribe;
-  }, []);
-
   return (
     <div
       inert={backgroundInert ? true : undefined}
