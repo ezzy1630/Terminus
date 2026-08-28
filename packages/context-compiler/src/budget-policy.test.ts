@@ -5,6 +5,7 @@ import type {
   ProviderCapabilitySnapshot,
   ProviderToolSchema,
 } from "@terminus/provider-core";
+import { tokens } from "@terminus/domain";
 import type { Micros, ModelKey, TokenCount } from "@terminus/domain";
 import { CalibratedModelTokenizer } from "./tokenizer.js";
 import { deriveProviderAwareContextBudget } from "./budget-policy.js";
@@ -135,10 +136,10 @@ describe("provider-aware context budget policy", () => {
       tokenizer: tokenizer(),
       toolSchemas: [toolSchema()],
     });
-    expect(result.budget.hardInputLimit).toBe(60_000n);
+    expect(result.budget.hardInputLimit).toBe(tokens(60_000));
     expect(result.breakdown.toolSchemaTokens).toBe(300n);
     expect(result.breakdown.envelopeTokens).toBe(350n);
-    expect(result.budget.optionalContextTarget).toBe(8_000n);
+    expect(result.budget.optionalContextTarget).toBe(tokens(8_000));
     expect(result.breakdown.policyVersion).toBe("terminus.context-budget-policy.v1");
   });
 
@@ -151,8 +152,8 @@ describe("provider-aware context budget policy", () => {
       tokenizer: tokenizer(),
       toolSchemas: [toolSchema()],
     });
-    expect(result.budget.reasoningReserve).toBe(0n);
-    expect(result.budget.expectedToolResultReserve).toBe(0n);
+    expect(result.budget.reasoningReserve).toBe(tokens(0));
+    expect(result.budget.expectedToolResultReserve).toBe(tokens(0));
     expect(result.breakdown.reasoningReserve).toBe(0n);
     expect(result.breakdown.expectedToolResultReserve).toBe(0n);
   });
