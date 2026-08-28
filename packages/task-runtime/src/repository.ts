@@ -24,9 +24,18 @@ import type {
   SequencePolicyRule,
   EffectState,
   Rfc3339Timestamp,
+  ScopedDelegationExecution,
+} from "@terminus/domain";
+import {
+  ConflictError,
+  IdempotencyConflictError,
+  NotFoundError,
 } from "@terminus/domain";
 import type { EventEnvelopeV2 } from "@terminus/runtime-protocol";
-import type { CandidateBranchRecord, DurableTaskRepository } from "./types.js";
+import type {
+  CandidateBranchRecord,
+  DurableTaskRepository,
+} from "./types.js";
 
 function clone<T>(value: T): T {
   if (value === null || typeof value !== "object") return value;
@@ -59,6 +68,7 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
   private readonly sequencePolicyRules: SequencePolicyRule[] = [];
   private readonly approvalPresentations = new Map<string, ApprovalPresentation>();
   private readonly candidateBranches = new Map<string, CandidateBranchRecord>();
+  private readonly scopedDelegations = new Map<string, ScopedDelegationExecution>();
 
   async createTaskV2(task: TaskV2, outboxMessage?: OutboxMessage): Promise<TaskV2> {
     this.tasks.set(task.id, clone(task));
@@ -388,6 +398,86 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
   async listCandidateBranches(taskId: string): Promise<readonly CandidateBranchRecord[]> {
     return [...this.candidateBranches.values()]
       .filter((branch) => branch.taskId === taskId)
+      .map(clone);
+  }
+
+  async createScopedDelegation(
+    execution: ScopedDelegationExecution,
+    outboxMessage?: OutboxMessage,
+  ): Promise<ScopedDelegationExecution> {
+    const existing = [...this.scopedDelegations.values()].find(
+      (candidate) => candidate.taskId === execution.taskId
+        && candidate.idempotencyKey === execution.idempotencyKey,
+    );
+    if (existing !== undefined) {
+      if (existing.requestHash !== execution.requestHash) {
+        throw new IdempotencyConflictError(execution.idempotencyKey);
+      }
+      return clone(existing);
+    }
+    if (this.scopedDelegations.has(execution.id)) {
+      throw new ConflictError("ALREADY_EXISTS", `scoped delegation already exists: ${execution.id}`);
+    }
+    this.scopedDelegations.set(execution.id, clone(execution));
+    if (outboxMessage) this.outbox.set(outboxMessage.id, clone(outboxMessage));
+    return clone(execution);
+  }
+
+  async getScopedDelegation(id: string): Promise<ScopedDelegationExecution | null> {
+    const execution = this.scopedDelegations.get(id);
+    return execution === undefined ? null : clone(execution);
+  }
+
+  async getScopedDelegationByIdempotencyKey(
+    taskId: string,
+    idempotencyKey: string,
+  ): Promise<ScopedDelegationExecution | null> {
+    for (const execution of this.scopedDelegations.values()) {
+      if (execution.taskId === taskId && execution.idempotencyKey === idempotencyKey) {
+        return clone(execution);
+      }
+    }
+    return null;
+  }
+
+  async updateScopedDelegation(
+    execution: ScopedDelegationExecution,
+    outboxMessage?: OutboxMessage,
+  ): Promise<ScopedDelegationExecution> {
+    const current = this.scopedDelegations.get(execution.id);
+    if (current === undefined) throw new NotFoundError("scoped delegation", execution.id);
+    if (execution.version !== current.version + 1) {
+      throw new ConflictError("STALE_SOURCE_VERSION", `scoped delegation version conflict: ${execution.id}`, {
+        expectedVersion: current.version + 1,
+        actualVersion: execution.version,
+      });
+    }
+    if (
+      current.taskId !== execution.taskId
+      || current.idempotencyKey !== execution.idempotencyKey
+      || current.requestHash !== execution.requestHash
+    ) {
+      throw new ConflictError("INTEGRITY_VIOLATION", `scoped delegation identity changed: ${execution.id}`);
+    }
+    this.scopedDelegations.set(execution.id, clone(execution));
+    if (outboxMessage) this.outbox.set(outboxMessage.id, clone(outboxMessage));
+    return clone(execution);
+  }
+
+  async listScopedDelegations(taskId: string): Promise<readonly ScopedDelegationExecution[]> {
+    return [...this.scopedDelegations.values()]
+      .filter((execution) => execution.taskId === taskId)
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map(clone);
+  }
+
+  async listRecoverableScopedDelegations(taskId?: string): Promise<readonly ScopedDelegationExecution[]> {
+    return [...this.scopedDelegations.values()]
+      .filter((execution) =>
+        (taskId === undefined || execution.taskId === taskId)
+        && ["PENDING", "ADMITTED", "RUNNING", "INTERRUPTED"].includes(execution.state),
+      )
+      .sort((left, right) => left.id.localeCompare(right.id))
       .map(clone);
   }
 
@@ -898,6 +988,7 @@ export class InMemoryDurableTaskRepository implements DurableTaskRepository {
     this.effects.clear();
     this.authorizations.clear();
     this.resourceHandles.clear();
+    this.scopedDelegations.clear();
     this.sequencePolicyRules.length = 0;
     this.approvalPresentations.clear();
   }

@@ -36,6 +36,7 @@ import type {
   Uuid7,
   Rfc3339Timestamp,
   PrincipalId,
+  ScopedDelegationExecution,
 } from "@terminus/domain";
 import type { EventEnvelopeV2, TypedEventV2, ArpV2EventType } from "@terminus/runtime-protocol";
 
@@ -100,6 +101,23 @@ export interface DurableTaskRepository {
   claimCandidateBranch(branchId: string, expectedEpoch: number): Promise<CandidateBranchRecord | null>;
   updateCandidateBranch(branch: CandidateBranchRecord): Promise<CandidateBranchRecord>;
   listCandidateBranches(taskId: string): Promise<readonly CandidateBranchRecord[]>;
+
+  // Durable scoped subagent execution and bounded restart recovery.
+  createScopedDelegation(
+    execution: ScopedDelegationExecution,
+    outboxMessage?: OutboxMessage,
+  ): Promise<ScopedDelegationExecution>;
+  getScopedDelegation(id: string): Promise<ScopedDelegationExecution | null>;
+  getScopedDelegationByIdempotencyKey(
+    taskId: string,
+    idempotencyKey: string,
+  ): Promise<ScopedDelegationExecution | null>;
+  updateScopedDelegation(
+    execution: ScopedDelegationExecution,
+    outboxMessage?: OutboxMessage,
+  ): Promise<ScopedDelegationExecution>;
+  listScopedDelegations(taskId: string): Promise<readonly ScopedDelegationExecution[]>;
+  listRecoverableScopedDelegations(taskId?: string): Promise<readonly ScopedDelegationExecution[]>;
 
   createAuthorization(authz: AuthorizationInstance, outboxMessage?: OutboxMessage): Promise<AuthorizationInstance>;
   getAuthorization(id: string): Promise<AuthorizationInstance | null>;

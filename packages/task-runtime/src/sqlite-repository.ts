@@ -25,6 +25,7 @@ import type {
   WorkerLease,
   Workflow,
   Rfc3339Timestamp,
+  ScopedDelegationExecution,
 } from "@terminus/domain";
 import {
   approvalPresentationSchema,
@@ -44,6 +45,7 @@ import {
   resourceHandleSchema,
   riskSchema,
   sequencePolicyRuleSchema,
+  scopedDelegationExecutionSchema,
   taskAttemptSchema,
   taskContractV2Schema,
   taskV2Schema,
@@ -186,6 +188,12 @@ const candidateBranchSchema = z.object({
 const candidateBranchDecoder: Decoder = {
   parse(value: unknown): unknown {
     return candidateBranchSchema.parse(value);
+  },
+};
+
+const scopedDelegationDecoder: Decoder = {
+  parse(value: unknown): unknown {
+    return scopedDelegationExecutionSchema.parse(value);
   },
 };
 
@@ -1374,6 +1382,90 @@ export class SqliteDurableTaskRepository
 
   async listCandidateBranches(taskId: string): Promise<readonly CandidateBranchRecord[]> {
     return this.listRecords(this.database, "candidate_branch", taskId, candidateBranchDecoder);
+  }
+
+  async createScopedDelegation(
+    execution: ScopedDelegationExecution,
+    outboxMessage?: OutboxMessage,
+  ): Promise<ScopedDelegationExecution> {
+    const normalized = validateInput<ScopedDelegationExecution>(
+      scopedDelegationDecoder,
+      execution,
+      "create scoped delegation",
+    );
+    const normalizedOutbox = outboxMessage === undefined
+      ? undefined
+      : validateInput<OutboxMessage>(outboxMessageSchema, outboxMessage, "outbox message");
+    return this.database.transaction((database) => {
+      const existing = this.listRecords<ScopedDelegationExecution>(
+        database,
+        "scoped_delegation",
+        normalized.taskId,
+        scopedDelegationDecoder,
+      ).find((candidate) => candidate.idempotencyKey === normalized.idempotencyKey);
+      if (existing !== undefined) {
+        if (existing.requestHash !== normalized.requestHash) {
+          throw new IdempotencyConflictError(normalized.idempotencyKey);
+        }
+        return cloneValue(existing);
+      }
+      this.insertRecord(
+        database,
+        "scoped_delegation",
+        normalized.id,
+        normalized,
+        normalized.taskId,
+        normalized.version,
+        normalized.version,
+      );
+      if (normalizedOutbox !== undefined) this.insertOutbox(database, normalizedOutbox);
+      return cloneValue(normalized);
+    });
+  }
+
+  async getScopedDelegation(id: string): Promise<ScopedDelegationExecution | null> {
+    return this.readRecord(this.database, "scoped_delegation", id, scopedDelegationDecoder);
+  }
+
+  async getScopedDelegationByIdempotencyKey(
+    taskId: string,
+    idempotencyKey: string,
+  ): Promise<ScopedDelegationExecution | null> {
+    return this.listRecords<ScopedDelegationExecution>(
+      this.database,
+      "scoped_delegation",
+      taskId,
+      scopedDelegationDecoder,
+    ).find((candidate) => candidate.idempotencyKey === idempotencyKey) ?? null;
+  }
+
+  async updateScopedDelegation(
+    execution: ScopedDelegationExecution,
+    outboxMessage?: OutboxMessage,
+  ): Promise<ScopedDelegationExecution> {
+    return this.updateRecord(
+      "scoped_delegation",
+      execution.id,
+      execution,
+      execution.taskId,
+      scopedDelegationDecoder,
+      outboxMessage,
+    );
+  }
+
+  async listScopedDelegations(taskId: string): Promise<readonly ScopedDelegationExecution[]> {
+    return this.listRecords(this.database, "scoped_delegation", taskId, scopedDelegationDecoder);
+  }
+
+  async listRecoverableScopedDelegations(taskId?: string): Promise<readonly ScopedDelegationExecution[]> {
+    return this.listRecords<ScopedDelegationExecution>(
+      this.database,
+      "scoped_delegation",
+      taskId ?? null,
+      scopedDelegationDecoder,
+    ).filter((execution) =>
+      ["PENDING", "ADMITTED", "RUNNING", "INTERRUPTED"].includes(execution.state),
+    );
   }
 
   async createAuthorization(

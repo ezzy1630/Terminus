@@ -376,3 +376,4 @@ export * from "./authorizations.js";
 export * from "./handles.js";
 export * from "./sequence-policy.js";
 export * from "./admission.js";
+export * from "./scoped-delegation.js";
