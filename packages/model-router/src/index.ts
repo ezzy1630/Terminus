@@ -19,6 +19,9 @@ import type {
 } from "@terminus/provider-core";
 import { isConfidentialityAllowed } from "@terminus/provider-core";
 
+export * from "./outcomes.js";
+export * from "./promotion.js";
+
 // ────────────────────────── Routing profile (§38.3) ──────────────────────────
 
 export const capabilityRequirementsSchema = z.object({

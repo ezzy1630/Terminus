@@ -148,6 +148,9 @@ export class CacheRecorder {
 
 // ────────────────────────── Cache experiment utilities ───────────────────────
 
+/** The default cohort size required before cache behavior can be promoted. */
+export const DEFAULT_CACHE_PROMOTION_MINIMUM_COHORT = 20;
+
 export interface CacheExperimentConfig {
   /** Whether to use explicit breakpoints in this experiment. */
   readonly explicitBreakpoints: boolean;
@@ -155,6 +158,11 @@ export interface CacheExperimentConfig {
   readonly minCacheableTokens: number;
   /** Whether to reorder tools to maximize cache hits. */
   readonly toolOrderOptimization: boolean;
+  /**
+   * Minimum number of independent observations required before promotion.
+   * Defaults to the release cohort size when omitted.
+   */
+  readonly minimumCohort?: number;
 }
 
 export interface CacheExperimentResult {
@@ -170,6 +178,8 @@ export interface CacheExperimentResult {
   readonly aggregateCacheSavingsMicros: Micros | null;
   readonly aggregateEffectiveInputCostMicros: Micros | null;
   readonly economicsComplete: boolean;
+  readonly minimumCohort: number;
+  readonly cohortComplete: boolean;
   readonly stablePrefixDriftCount: number;
   readonly recommendation: "promote" | "retain_experimental" | "rollback";
 }
@@ -183,6 +193,10 @@ export function analyzeCacheExperiment(
   config: CacheExperimentConfig,
   observations: readonly CacheObservationRecord[],
 ): CacheExperimentResult {
+  const minimumCohort = config.minimumCohort ?? DEFAULT_CACHE_PROMOTION_MINIMUM_COHORT;
+  if (!Number.isSafeInteger(minimumCohort) || minimumCohort <= 0) {
+    throw new RangeError("cache promotion minimumCohort must be a positive safe integer");
+  }
   if (observations.length === 0) {
     return {
       config,
@@ -197,6 +211,8 @@ export function analyzeCacheExperiment(
       aggregateCacheSavingsMicros: null,
       aggregateEffectiveInputCostMicros: null,
       economicsComplete: false,
+      minimumCohort,
+      cohortComplete: false,
       stablePrefixDriftCount: 0,
       recommendation: "retain_experimental",
     };
@@ -243,8 +259,13 @@ export function analyzeCacheExperiment(
   const aggregateEffectiveInputCostMicros = economicsComplete
     ? economics.reduce((sum, item) => (sum + (item?.effectiveInputCostMicros ?? 0n)) as Micros, 0n as Micros)
     : null;
-  const recommendation: CacheExperimentResult["recommendation"] =
-    economicsComplete
+  const cohortComplete = observations.length >= minimumCohort;
+  // An incomplete cohort is unknown evidence, not a negative cache result.
+  // Keep it experimental so a single warm/cold request can never promote a
+  // cache layout or silently become the default.
+  const recommendation: CacheExperimentResult["recommendation"] = !cohortComplete
+    ? "retain_experimental"
+    : economicsComplete
       && tokenWeightedHitRate !== null
       && tokenWeightedHitRate >= 0.5
       && driftCount <= observations.length * 0.1
@@ -265,6 +286,8 @@ export function analyzeCacheExperiment(
     aggregateCacheSavingsMicros,
     aggregateEffectiveInputCostMicros,
     economicsComplete,
+    minimumCohort,
+    cohortComplete,
     stablePrefixDriftCount: driftCount,
     recommendation,
   };
@@ -338,3 +361,5 @@ export function computeCacheEconomics(
     cacheSavingsMicros: (baselineInputCostMicros - effectiveInputCostMicros) as Micros,
   };
 }
+
+export * from "./promotion.js";
