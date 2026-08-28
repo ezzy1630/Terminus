@@ -111,8 +111,10 @@ boundary-check:
 standalone-check:
     bun run tools/standalone-check.ts
 
-# Full local validation.
+# Full local validation. The final clean-tree assertion catches generators,
+# formatters, tests, and builds that mutate tracked repository state.
 check-all: check standalone-check kernel-mini-check codegen-check truth-check unit integration security
+    just clean-tree-check
 
 # Regenerate all derived contracts.
 codegen: codegen-proto codegen-public-api codegen-events codegen-tools codegen-config codegen-v2-schemas codegen-sqlx codegen-docs
@@ -123,11 +125,18 @@ codegen-changed:
 
 # Verify no generated drift.
 codegen-check:
+    bash scripts/check-codegen.sh
+
+# Verify validation left no tracked source or generated artifact changes.
+# Untracked developer files are intentionally excluded: this gate detects
+# mutations caused by repository commands without claiming ownership of local
+# scratch files.
+clean-tree-check:
     #!/usr/bin/env bash
     set -eu
-    just codegen
-    if ! git diff --exit-code -- 'packages/**/generated*/**' 'crates/**/generated/**' 'schemas/generated/**' 'docs/generated/**'; then
-      echo "[codegen-check] generated drift detected; run 'just codegen' and commit" >&2
+    if ! git diff --exit-code HEAD; then
+      echo "[clean-tree-check] validation changed tracked repository files" >&2
+      git diff --name-status HEAD >&2
       exit 1
     fi
 
@@ -284,6 +293,7 @@ doctor:
 # Cross-check source declarations against release metadata and CI config.
 truth-check:
     bun run scripts/check-declaration-consistency.ts
+    bun run tools/branding-check.ts
 
 # Read-only plan for the checked-in protected-main ruleset. Applying it is a
 # remote repository mutation and requires TERMINUS_APPLY_GITHUB_RULESET=1.

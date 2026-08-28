@@ -125,6 +125,13 @@ jobs:
           uv run mypy forge_evals
       - name: Codegen drift check
         run: just codegen-check
+      - name: Archive generated-code drift
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: codegen-drift
+          path: artifacts/codegen/
+          if-no-files-found: ignore
       - name: Truth check (declaration consistency, roadmap Phase 0)
         run: just truth-check
 
