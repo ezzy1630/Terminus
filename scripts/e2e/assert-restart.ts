@@ -14,6 +14,7 @@ const token = process.env.TERMINUS_E2E_CONTROL_TOKEN;
 const sessionId = process.env.TERMINUS_E2E_SESSION_ID;
 const taskId = process.env.TERMINUS_E2E_TASK_ID;
 const resumeTaskId = process.env.TERMINUS_E2E_RESUME_TASK_ID;
+const resumeTurnId = process.env.TERMINUS_E2E_RESUME_TURN_ID;
 const threadId = process.env.TERMINUS_E2E_THREAD_ID;
 const checkpointId = process.env.TERMINUS_E2E_CHECKPOINT_ID;
 const checkpointArtifactHash = process.env.TERMINUS_E2E_CHECKPOINT_ARTIFACT_HASH;
@@ -28,6 +29,7 @@ if (
   || !sessionId
   || !taskId
   || !resumeTaskId
+  || !resumeTurnId
   || !threadId
   || !checkpointId
   || !checkpointArtifactHash
@@ -431,6 +433,23 @@ if (verifiedCheckpoint.hash !== checkpointArtifactHash) {
 const tasks = await api("GET", `/v1/sessions/${encodeURIComponent(sessionId)}/tasks`);
 if (!Array.isArray(tasks.tasks) || !tasks.tasks.some((candidate) => object(candidate, "task").id === taskId)) {
   throw new Error(`original task was not recoverable: ${JSON.stringify(tasks)}`);
+}
+
+// This fixture is a process-restart interruption, not a user cancellation.
+// Startup must expose its provider attempt as a resumable BLOCKED task and
+// its interrupted turn before the new turn is admitted.
+const resumableTask = await api("GET", `/v1/tasks/${encodeURIComponent(resumeTaskId)}`);
+const recoveryReason = object(resumableTask.terminal_reason, "restart task terminal reason");
+if (
+  resumableTask.status !== "BLOCKED"
+  || recoveryReason.reason !== "provider_recovery_required"
+  || recoveryReason.reconciliation_required !== true
+) {
+  throw new Error(`process-restart fixture was not exposed as resumable: ${JSON.stringify(resumableTask)}`);
+}
+const recoveredTurn = await api("GET", `/v1/turns/${encodeURIComponent(resumeTurnId)}`);
+if (recoveredTurn.state !== "INTERRUPTED") {
+  throw new Error(`process-restart fixture turn was not interrupted by recovery: ${JSON.stringify(recoveredTurn)}`);
 }
 
 const resumedSession = await api("POST", `/v1/sessions/${encodeURIComponent(sessionId)}/resume`, {});

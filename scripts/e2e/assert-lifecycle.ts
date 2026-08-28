@@ -675,6 +675,46 @@ if (recovery.integrity_ok !== true || typeof recovery.id !== "string") {
   throw new Error(`recovery report did not prove integrity: ${JSON.stringify(recovery)}`);
 }
 
+// Keep the user-interrupt fixture above separate from the process-restart
+// fixture below. A user interrupt intentionally makes its task terminal
+// ABORTED; a crash while a provider attempt is running must instead be
+// recovered as BLOCKED and remain resumable.
+const restartTask = await api("POST", "/v1/tasks", {
+  session_id: sessionId,
+  thread_id: threadId,
+  objective: "exercise deterministic process restart during provider execution",
+  non_goals: ["completion before restart"],
+  acceptance_criteria: [{
+    id: "restart-recovery",
+    statement: "A provider attempt interrupted by process restart is resumable.",
+    verification_hint: "command:/bin/ls -d .",
+    required: true,
+  }],
+  allowed_scope: { read_paths: ["."], write_paths: [], external_systems: [] },
+});
+const restartTaskId = stringField(restartTask, "id", "restart task");
+await api("POST", `/v1/tasks/${encodeURIComponent(restartTaskId)}/start`, {});
+const restartTurn = await api("POST", "/v1/turns", {
+  thread_id: threadId,
+  task_id: restartTaskId,
+  user_input: "TERMINUS_E2E_CRASH_BOUNDARY",
+});
+const restartTurnId = stringField(restartTurn, "id", "restart turn");
+const restartDeadline = Date.now() + 5_000;
+let restartTurnState = "";
+while (Date.now() < restartDeadline) {
+  const current = await api("GET", `/v1/turns/${encodeURIComponent(restartTurnId)}`);
+  restartTurnState = typeof current.state === "string" ? current.state : "";
+  if (restartTurnState === "PROVIDER_RUNNING") break;
+  if (["COMPLETED", "FAILED", "ABORTED", "INTERRUPTED"].includes(restartTurnState)) {
+    throw new Error(`restart fixture settled before the crash boundary: ${JSON.stringify(current)}`);
+  }
+  await new Promise<void>((resolve) => setTimeout(resolve, 50));
+}
+if (restartTurnState !== "PROVIDER_RUNNING") {
+  throw new Error(`restart fixture did not reach PROVIDER_RUNNING: ${restartTurnState}`);
+}
+
 console.log(JSON.stringify({
   status: "passed",
   workspace_id: workspaceId,
@@ -687,7 +727,8 @@ console.log(JSON.stringify({
   provider_response_hash: providerResponseHash,
   contract_fixture_task_id: contractFixtureId,
   pending_recovery_task_id: pendingRecoveryTaskId,
-  resume_task_id: interruptTaskId,
+  resume_task_id: restartTaskId,
+  resume_turn_id: restartTurnId,
   context_manifest_id: manifestId,
   event_count: events.length,
   context_manifest_count: manifests.length,

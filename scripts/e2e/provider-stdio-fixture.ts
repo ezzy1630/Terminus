@@ -44,8 +44,15 @@ if (
   throw new Error("provider request did not satisfy the NDJSON input contract");
 }
 
-// Leave a deterministic interruption window for the lifecycle race fixture.
-await Bun.sleep(250);
+const restartCrashBoundary = "TERMINUS_E2E_CRASH_BOUNDARY";
+if (rawRequest.includes(restartCrashBoundary)) {
+  // The supervisor kills control while this bounded provider attempt is
+  // running. The restart reconciler, rather than a user-interrupt handler,
+  // must own the resulting BLOCKED/INTERRUPTED transition.
+  await Bun.sleep(9_000);
+} else {
+  await Bun.sleep(250);
+}
 
 console.log(JSON.stringify({
   kind: "text",

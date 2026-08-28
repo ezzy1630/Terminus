@@ -260,6 +260,7 @@ export TERMINUS_E2E_CHECKPOINT_ARTIFACT_HASH="$(printf '%s' "$lifecycle_json" | 
 export TERMINUS_E2E_CONTRACT_FIXTURE_TASK_ID="$(printf '%s' "$lifecycle_json" | json_field contract_fixture_task_id)"
 export TERMINUS_E2E_PENDING_RECOVERY_TASK_ID="$(printf '%s' "$lifecycle_json" | json_field pending_recovery_task_id)"
 export TERMINUS_E2E_RESUME_TASK_ID="$(printf '%s' "$lifecycle_json" | json_field resume_task_id)"
+export TERMINUS_E2E_RESUME_TURN_ID="$(printf '%s' "$lifecycle_json" | json_field resume_turn_id)"
 
 echo "[e2e] proving transactional control-writer fencing"
 TERMINUS_TEST_DB="$TMP_DIR/control.db" \
