@@ -215,6 +215,31 @@ describe("ToolRegistry", () => {
     expect(after).not.toBe(before);
   });
 
+  test("activeToolSetHash changes when an active descriptor changes", () => {
+    const makeDefinition = (summary: string): ToolDefinition => ({
+      id: "pack",
+      version: "1.0.0",
+      summary,
+      useWhen: ["inspect"],
+      doNotUseWhen: ["mutate"],
+      inputSchema: { type: "object", properties: { path: { type: "string" } } },
+      resultSchema: { type: "object" },
+      sideEffectClass: "none",
+      requiredCapabilities: [],
+      trustLevel: "verified_third_party",
+      maximumModelResultBytes: 1024,
+      maximumArtifactBytes: 1024,
+      defaultTimeoutMs: 1000,
+      policyTags: [],
+      definitionHash: fakeHash(summary),
+    });
+    const first = new ToolRegistry();
+    first.register(makeDefinition("pack v1"), new FakeToolExecutor("pack"), { alwaysVisible: true });
+    const second = new ToolRegistry();
+    second.register(makeDefinition("pack v2"), new FakeToolExecutor("pack"), { alwaysVisible: true });
+    expect(first.activeToolSetHash()).not.toBe(second.activeToolSetHash());
+  });
+
   test("get on unknown returns null; require throws", () => {
     const r = new ToolRegistry();
     expect(r.get("unknown")).toBeNull();

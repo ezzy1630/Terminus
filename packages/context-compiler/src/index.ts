@@ -67,6 +67,11 @@ import { compactContext, type CompactionTransform } from "./compaction.js";
 import { buildCacheEpochDebugData } from "./cache-debug.js";
 import type { CacheEpochDebugSnapshot } from "./cache-debug.js";
 import { summarizeRetrievalSelection } from "./retrieval-metrics.js";
+import { resolveInstructionPrecedence } from "./project-instructions.js";
+import {
+  deriveProviderAwareContextBudget,
+  CONTEXT_BUDGET_POLICY_VERSION,
+} from "./budget-policy.js";
 export {
   compactContext,
 } from "./compaction.js";
@@ -91,6 +96,15 @@ export type {
   TokenizerBinding,
   TokenizerOptions,
 } from "./tokenizer.js";
+export {
+  deriveProviderAwareContextBudget,
+  CONTEXT_BUDGET_POLICY_VERSION,
+} from "./budget-policy.js";
+export type {
+  ProviderAwareBudgetBreakdown,
+  ProviderAwareBudgetInput,
+  ProviderAwareBudgetResult,
+} from "./budget-policy.js";
 export {
   CalibratedModelTokenizer,
   DEFAULT_CALIBRATION_POLICY,
@@ -500,6 +514,12 @@ export interface RequiredFragments {
   readonly policy: readonly ContextFragment[];
   /** Applicable repository instructions, ordered from closest to root. */
   readonly projectRules: readonly ContextFragment[];
+  /** Conflicts resolved by scoped instruction precedence. */
+  readonly instructionConflicts: ReadonlyArray<{
+    readonly directive: string;
+    readonly winner: string;
+    readonly overridden: readonly string[];
+  }>;
   /** One fragment per unresolved acceptance criterion (§8.4 step 2). */
   readonly acceptanceCriteria: readonly ContextFragment[];
 }
@@ -691,11 +711,17 @@ export async function collectRequiredFragments(
     });
   }
 
+  const resolvedInstructions = resolveInstructionPrecedence(
+    input.projectInstructionFragments ?? [],
+    (input.projectInstructionFragments ?? []).map((fragment) => fragment.id),
+  );
+
   return {
     authority: authorityFragments,
     taskContract: [taskContract],
     policy: [policy],
-    projectRules: input.projectInstructionFragments ?? [],
+    projectRules: resolvedInstructions.fragments,
+    instructionConflicts: resolvedInstructions.conflicts,
     acceptanceCriteria,
   };
 }
@@ -1442,8 +1468,23 @@ export function planCacheEpoch(
 
 export async function compileContext(input: CompileInput): Promise<CompiledContext> {
   const warnings: string[] = [];
+  const budgetPolicy = deriveProviderAwareContextBudget({
+    budget: input.budget,
+    provider: input.provider,
+    model: input.model,
+    tokenizer: input.tokenEstimator
+      ?? resolveTokenizer(input.provider.providerId, input.model.modelKey),
+    toolSchemas: input.toolSchemas ?? [],
+  });
+  // Keep the rest of compilation on one reconciled budget. The original
+  // caller budget remains represented by the immutable input at the API
+  // boundary; provider overhead is accounted for before allocation.
+  input = { ...input, budget: budgetPolicy.budget };
   // 1. Required fragments.
   const required = await collectRequiredFragments(input);
+  if (required.instructionConflicts.length > 0) {
+    warnings.push(`resolved ${required.instructionConflicts.length} repository instruction conflict(s) by scope`);
+  }
   // 2. Retrieval queries.
   const queries = deriveRetrievalQueries(input);
   // 3. Retrieval pipeline.
@@ -1585,6 +1626,7 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
   }
 
   const toolSchemas = input.toolSchemas ?? [];
+  const toolSchemaHash = computeContentHash(canonicalJson(toolSchemas));
   const cacheEpochDebug = buildCacheEpochDebugData({
     providerId: input.provider.providerId,
     modelKey: input.model.modelKey,
@@ -1692,10 +1734,27 @@ export async function compileContext(input: CompileInput): Promise<CompiledConte
       reason: omission.reason,
     })),
     freshnessOmissions: [...firstPass.omitted, ...secondPass.omitted],
+    instructionConflicts: required.instructionConflicts,
     confidentialityOmissions: confFiltered.omitted,
     transforms: compactionTransforms,
-    toolSchemas: toolSchemas.map((schema) => ({ id: schema.id, version: schema.version })),
+    toolSchemas: toolSchemas.map((schema) => ({
+      id: schema.id,
+      version: schema.version,
+      summary: schema.summary,
+      inputSchema: schema.inputSchema,
+      resultSchema: schema.resultSchema,
+      sideEffectClass: schema.sideEffectClass,
+      requiredCapabilities: [...schema.requiredCapabilities],
+      trustLevel: schema.trustLevel,
+      maximumModelResultBytes: schema.maximumModelResultBytes,
+      maximumArtifactBytes: schema.maximumArtifactBytes,
+      defaultTimeoutMs: schema.defaultTimeoutMs,
+      policyTags: [...schema.policyTags],
+    })),
+    toolSchemaHash,
     tokenEstimator: tokenizer.calibration,
+    contextBudgetPolicy: CONTEXT_BUDGET_POLICY_VERSION,
+    contextBudgetBreakdown: budgetPolicy.breakdown,
     cacheEpochDebug,
     memory: {
       enabled: false,

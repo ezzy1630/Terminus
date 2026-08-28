@@ -15,7 +15,7 @@ import type {
   Micros,
 } from "@terminus/domain";
 import { ValidationError, NotFoundError } from "@terminus/domain";
-import { computeContentHash } from "@terminus/context-ir";
+import { canonicalJson, computeContentHash } from "@terminus/context-ir";
 import type { ConfidentialityLabel } from "@terminus/provider-core";
 
 // ────────────────────────── Re-export Tool Modules ────────────────────────────
@@ -367,10 +367,32 @@ export class ToolRegistry {
     this.disabled.delete(toolId);
   }
 
-  activeToolSetHash(): string {
-    const ids = this.listActive().map((t) => `${t.definition.id}@${t.definition.version}`);
-    ids.sort();
-    return ids.join("|");
+  /**
+   * Hash the exact active descriptors, not only their ids. A description or
+   * schema change must invalidate the provider-visible tool layer cache.
+   */
+  activeToolSetHash(): ContentHash {
+    const descriptors = this.listActive()
+      .map(({ definition, alwaysVisible }) => ({
+        id: definition.id,
+        version: definition.version,
+        summary: definition.summary,
+        useWhen: [...definition.useWhen],
+        doNotUseWhen: [...definition.doNotUseWhen],
+        definitionHash: definition.definitionHash,
+        inputSchema: definition.inputSchema,
+        resultSchema: definition.resultSchema,
+        sideEffectClass: definition.sideEffectClass,
+        requiredCapabilities: [...definition.requiredCapabilities].sort(),
+        trustLevel: definition.trustLevel,
+        maximumModelResultBytes: definition.maximumModelResultBytes,
+        maximumArtifactBytes: definition.maximumArtifactBytes,
+        defaultTimeoutMs: definition.defaultTimeoutMs,
+        policyTags: [...definition.policyTags].sort(),
+        alwaysVisible,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id) || a.version.localeCompare(b.version));
+    return computeContentHash(canonicalJson(descriptors));
   }
 }
 
@@ -468,6 +490,11 @@ export class ProgressiveDisclosure {
 
   activeToolSet(): readonly RegisteredTool[] {
     return this.deps.registry.listActive();
+  }
+
+  /** Stable identity exposed to capability executors without dependency leaks. */
+  activeToolSetHash(): ContentHash {
+    return this.deps.registry.activeToolSetHash();
   }
 }
 

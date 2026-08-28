@@ -96,7 +96,7 @@ export class ProductionCapabilityExecutor implements ToolExecutor<CapabilityResu
 
         const data: CapabilityResultData = {
           op: input.op,
-          activeToolSetHash: (this.pd as any).deps.registry.activeToolSetHash(),
+          activeToolSetHash: this.pd.activeToolSetHash(),
           cards: filteredCards,
           schemaCostTokens: totalCost,
         };
@@ -128,7 +128,7 @@ export class ProductionCapabilityExecutor implements ToolExecutor<CapabilityResu
 
         const data: CapabilityResultData = {
           op: "describe",
-          activeToolSetHash: (this.pd as any).deps.registry.activeToolSetHash(),
+          activeToolSetHash: this.pd.activeToolSetHash(),
           targetCard: card,
           schemaCostTokens: card.schemaCostTokens,
         };
@@ -150,7 +150,7 @@ export class ProductionCapabilityExecutor implements ToolExecutor<CapabilityResu
 
         try {
           const activatedCard = this.pd.activate(input.capability_id);
-          const newHash = (this.pd as any).deps.registry.activeToolSetHash();
+          const newHash = this.pd.activeToolSetHash();
 
           const data: CapabilityResultData = {
             op: "activate",
@@ -183,7 +183,7 @@ export class ProductionCapabilityExecutor implements ToolExecutor<CapabilityResu
 
         try {
           this.pd.deactivate(input.capability_id);
-          const newHash = (this.pd as any).deps.registry.activeToolSetHash();
+          const newHash = this.pd.activeToolSetHash();
 
           const data: CapabilityResultData = {
             op: "deactivate",
@@ -206,7 +206,7 @@ export class ProductionCapabilityExecutor implements ToolExecutor<CapabilityResu
 
       case "status": {
         const activeCards = this.pd.activeCards();
-        const hash = (this.pd as any).deps.registry.activeToolSetHash();
+        const hash = this.pd.activeToolSetHash();
 
         const data: CapabilityResultData = {
           op: "status",

@@ -24,6 +24,7 @@ import type {
   RenderedProviderRequest,
   ProviderCapabilitySnapshot,
   ModelCapabilitySnapshot,
+  ProviderToolSchema,
 } from "@terminus/provider-core";
 import { canonicalJson, computeContentHash } from "@terminus/context-ir";
 
@@ -54,6 +55,8 @@ export interface ReplayInput {
   readonly model: ModelCapabilitySnapshot;
   readonly epoch: ContextEpochSnapshot | null;
   readonly signal: AbortSignal | null;
+  /** Exact provider-visible schemas. If omitted, replay reads the manifest record. */
+  readonly toolSchemas?: readonly ProviderToolSchema[] | undefined;
 }
 
 // ──────────────────────── Replay result ──────────────────────────────────────
@@ -80,6 +83,7 @@ export async function replayContext(
   input: ReplayInput,
 ): Promise<ReplayResult> {
   assertManifestSelection(input.manifest, input.selectedFragments);
+  const toolSchemas = replayToolSchemas(input);
   const cachePlan: ContextCachePlan = {
     stablePrefixHash: input.manifest.cachePlan.stablePrefixHash,
     volatileSuffixBoundary: input.manifest.cachePlan.volatileSuffixBoundary,
@@ -91,7 +95,7 @@ export async function replayContext(
     provider: input.provider,
     model: input.model,
     fragments: input.selectedFragments,
-    toolSchemas: [],
+    toolSchemas,
     cachePlan: {
       stablePrefixHash: cachePlan.stablePrefixHash,
       breakpoints: cachePlan.breakpoints,
@@ -134,6 +138,7 @@ export async function replayWithAblation(
   ablation: AblationSpec,
 ): Promise<ReplayResult> {
   assertManifestSelection(input.manifest, input.selectedFragments);
+  const toolSchemas = replayToolSchemas(input);
   const removeSet = new Set(ablation.removeFragmentIds);
   let fragments = input.selectedFragments.filter(
     (frag) => !removeSet.has(frag.id),
@@ -154,7 +159,7 @@ export async function replayWithAblation(
     provider: input.provider,
     model: input.model,
     fragments,
-    toolSchemas: [],
+    toolSchemas,
     cachePlan: {
       stablePrefixHash: cachePlan.stablePrefixHash,
       breakpoints: cachePlan.breakpoints,
@@ -254,6 +259,43 @@ function replayHardInputLimit(manifest: ContextManifest): TokenCount {
   // recoverable fallback rather than pretending the recovery margin was an
   // input limit.
   return (manifest.outputReserveTokens + manifest.reasoningReserveTokens + manifest.recoveryMarginTokens) as TokenCount;
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isProviderToolSchema(value: unknown): value is ProviderToolSchema {
+  if (!isRecord(value)) return false;
+  const trustLevels = new Set(["builtin", "first_party", "verified_third_party", "untrusted"]);
+  return typeof value.id === "string"
+    && typeof value.version === "string"
+    && typeof value.summary === "string"
+    && isRecord(value.inputSchema)
+    && isRecord(value.resultSchema)
+    && typeof value.sideEffectClass === "string"
+    && Array.isArray(value.requiredCapabilities)
+    && value.requiredCapabilities.every((entry) => typeof entry === "string")
+    && typeof value.trustLevel === "string"
+    && trustLevels.has(value.trustLevel)
+    && typeof value.maximumModelResultBytes === "number"
+    && Number.isSafeInteger(value.maximumModelResultBytes)
+    && value.maximumModelResultBytes >= 0
+    && typeof value.maximumArtifactBytes === "number"
+    && Number.isSafeInteger(value.maximumArtifactBytes)
+    && value.maximumArtifactBytes >= 0
+    && typeof value.defaultTimeoutMs === "number"
+    && Number.isSafeInteger(value.defaultTimeoutMs)
+    && value.defaultTimeoutMs > 0
+    && Array.isArray(value.policyTags)
+    && value.policyTags.every((entry) => typeof entry === "string");
+}
+
+function replayToolSchemas(input: ReplayInput): readonly ProviderToolSchema[] {
+  if (input.toolSchemas !== undefined) return input.toolSchemas;
+  const candidate = input.manifest.decisionRecord?.toolSchemas;
+  if (!Array.isArray(candidate)) return [];
+  return candidate.filter(isProviderToolSchema);
 }
 
 function assertManifestSelection(

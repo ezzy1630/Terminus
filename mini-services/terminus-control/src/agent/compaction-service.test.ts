@@ -1,11 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   BYTES_PER_TOKEN_ESTIMATE,
+  COMPACTION_RECALL_VERSION,
   DEFAULT_COMPACT_THRESHOLD_TOKENS,
   MAX_COMPACTION_TRANSCRIPT_CHARS,
+  buildCompactionRecallRequest,
   planDeterministicPrune,
+  runCompactionRecall,
   runCompaction,
   SUMMARY_SYSTEM_INSTRUCTIONS,
+  structureCompactionSummary,
+  type CompactionStore,
+  type StructuredCompactionSummary,
   type EpisodeLike,
 } from "./compaction-service.js";
 
@@ -68,6 +74,22 @@ describe("R4 deterministic prune planning", () => {
     expect(plan.prune.has("ref-1")).toBe(false);
     expect(plan.prune.has("big-1")).toBe(true);
   });
+
+  test("sorts source episodes before planning and retains incomplete tool pairs", () => {
+    const oldUnpaired = episode("old-call", 1, "tool_call", "old", "missing-result");
+    const newest = episode("new", 3, "user_message", "new");
+    const plan = planDeterministicPrune([newest, oldUnpaired], 1);
+    expect(plan.keep.has("old-call")).toBe(true);
+    expect(plan.prune.has("old-call")).toBe(false);
+  });
+
+  test("rejects duplicate call or result rows instead of silently overwriting a pair", () => {
+    const duplicateCall = [
+      episode("call-1", 1, "tool_call", "one", "pair"),
+      episode("call-2", 2, "tool_call", "two", "pair"),
+    ];
+    expect(() => planDeterministicPrune(duplicateCall, 1_000)).toThrow("duplicate tool call id");
+  });
 });
 
 describe("R4 compaction service", () => {
@@ -77,14 +99,20 @@ describe("R4 compaction service", () => {
     let latestSequence = 10;
     return {
       store: {
-        hideEpisodes: async (ids: readonly string[]) => {
-          hidden.push(...ids);
+        commitCompaction: async (input: {
+          readonly turnId: string;
+          readonly summaryText: string;
+          readonly summary: StructuredCompactionSummary;
+          readonly summaryHash: string;
+          readonly prunedEpisodeIds: readonly string[];
+        }) => {
+          hidden.push(...input.prunedEpisodeIds);
           latestSequence += 1;
-        },
-        latestSequence: async () => latestSequence,
-        appendSummaryEpisode: async (input: { readonly turnId: string; readonly sequence: number; readonly summaryText: string }) => {
-          appended.push(input);
-          latestSequence = Math.max(latestSequence, input.sequence);
+          appended.push({
+            turnId: input.turnId,
+            sequence: latestSequence,
+            summaryText: input.summaryText,
+          });
         },
       },
       state: { hidden, appended },
@@ -131,8 +159,9 @@ describe("R4 compaction service", () => {
     expect(summarizedChars).toBeGreaterThan(1_500);
   });
 
-  test("does not silently truncate source before summarization", async () => {
+  test("chunks oversized source instead of silently truncating it", async () => {
     const { store, state } = fakeStore();
+    const transcripts: string[] = [];
     const report = await runCompaction(store, {
       turnId: "turn-1",
       totalBytes: 1_700,
@@ -143,13 +172,19 @@ describe("R4 compaction service", () => {
         episode("old-result", 2, "tool_result", "r".repeat(100), "tp"),
         episode("new", 3, "tool_result", "n", "tn"),
       ],
-      summarizer: async () => "must not be called",
+      summarizer: async ({ transcript }) => {
+        transcripts.push(transcript);
+        return "GOAL: preserve the oversized source\nNEXT STEPS: recall the exact episodes";
+      },
     });
-    expect(report.triggered).toBe(false);
-    expect(report.reason).toBe("source_too_large");
-    expect(report.failureCode).toBe("source_too_large");
-    expect(state.hidden).toEqual([]);
-    expect(state.appended).toEqual([]);
+    expect(report.triggered).toBe(true);
+    expect(report.reason).toBe("compacted");
+    expect(transcripts.length).toBeGreaterThan(1);
+    expect(transcripts.every((transcript) => transcript.length <= MAX_COMPACTION_TRANSCRIPT_CHARS)).toBe(true);
+    expect(transcripts.join("\n")).toContain("id=old-call");
+    expect(state.hidden).toEqual(["old-call", "old-result"]);
+    expect(state.appended).toHaveLength(1);
+    expect(report.summary?.chunks.length).toBe(transcripts.length);
   });
 
   test("does not prune content without immutable source provenance", async () => {
@@ -230,6 +265,69 @@ describe("R4 compaction service", () => {
     expect(report.triggered).toBe(false);
     expect(report.reason).toBe("summary_failed");
     expect(state.hidden).toEqual([]);
+  });
+
+  test("refuses a summary when the store has no transactional commit", async () => {
+    const report = await runCompaction({} satisfies CompactionStore, {
+      turnId: "turn-1",
+      totalBytes: 1_700,
+      compactThresholdTokens: 100,
+      keepRecentTokens: 20,
+      episodes: [
+        episode("old-call", 1, "tool_call", "c".repeat(800), "tp"),
+        episode("old-result", 2, "tool_result", "r".repeat(800), "tp"),
+        episode("new", 3, "tool_result", "n", "tn"),
+      ],
+      summarizer: async () => "GOAL: preserve source\nNEXT STEPS: verify",
+    });
+    expect(report).toMatchObject({
+      triggered: false,
+      reason: "transaction_unavailable",
+      failureCode: "transaction_unavailable",
+      summaryHash: null,
+      summary: null,
+    });
+  });
+
+  test("stores a structured summary with deterministic coverage and recall identity", async () => {
+    const summary = structureCompactionSummary({
+      summary: [
+        "GOAL: repair the parser",
+        "CONSTRAINTS: preserve the public API; no network",
+        "PROGRESS: reproduced the failure",
+        "KEY DECISIONS: inspect the tokenizer first",
+        "FILES: src/parser.ts",
+        "NEXT STEPS: add a regression test",
+        "CRITICAL CONTEXT: failure hash sha256:abc",
+      ].join("\n"),
+      sourceEpisodes: [{
+        episodeId: "old-call",
+        sequence: 1,
+        artifactRef: "artifact://sha256/abc",
+      }],
+      chunks: [{ chunkId: "chunk-000001", episodeIds: ["old-call"], summary: "reproduced" }],
+      prunedBytes: 42,
+      hypothesisId: "sha256:hypothesis",
+    });
+    expect(summary.schemaVersion).toBe("terminus.compaction-summary.v1");
+    expect(summary.coverage).toEqual({ "old-call": ["artifact://sha256/abc"] });
+    expect(summary.hypotheses).toEqual(["sha256:hypothesis"]);
+
+    const request = buildCompactionRecallRequest({
+      turnId: "turn-1",
+      summary,
+      maxEpisodes: 1,
+    });
+    const recalled = await runCompactionRecall({
+      recallCompaction: async (input) => ({
+        schemaVersion: COMPACTION_RECALL_VERSION,
+        summaryHash: input.summaryHash,
+        episodes: [episode("old-call", 1, "tool_call", "exact source", "tp")],
+        continuation: null,
+      }),
+    }, request);
+    expect(recalled.episodes[0]?.contentJson).toBe("exact source");
+    expect(recalled.summaryHash).toBe(request.summaryHash);
   });
 
   test("threshold constants align with the documented defaults", () => {

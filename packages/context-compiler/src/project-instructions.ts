@@ -58,6 +58,8 @@ export interface InstructionDiscoveryConfig {
   readonly maxDepth?: number | undefined;
   /** Maximum bytes per instruction file before explicit truncation. */
   readonly maxBytes?: number | undefined;
+  /** Resolve an authoritative source version, such as a git blob hash. */
+  readonly sourceVersion?: ((path: string, content: string) => string) | undefined;
 }
 
 // ──────────────────────── Discovery function ─────────────────────────────────
@@ -101,6 +103,8 @@ export function discoverInstructions(
       const fullPath = `${current}/${filename}`;
       const rawContent = readFile(fullPath);
       if (rawContent !== null) {
+        const sourceVersion = config.sourceVersion?.(fullPath, rawContent)
+          ?? computeContentHash(rawContent);
         let content = rawContent;
         if (Buffer.byteLength(content, "utf8") > maxBytes) {
           content =
@@ -113,7 +117,7 @@ export function discoverInstructions(
           path: fullPath,
           precedence: (maxDepth - depth) * 100 + (filenames.length - fileIndex),
           content,
-          sourceVersion: "current", // Caller should resolve true version.
+          sourceVersion,
         });
         if (filename === "AGENTS.override.md") {
           // AGENTS.override.md takes complete precedence at this level
@@ -270,17 +274,95 @@ export interface ResolvedInstructions {
  */
 export function resolveInstructionPrecedence(
   fragments: readonly ContextFragment[],
-  _precedenceOrder: readonly string[],
+  precedenceOrder: readonly string[],
 ): ResolvedInstructions {
-  // For now, fragments are simply kept in precedence order.
-  // More sophisticated merging (e.g., directive-by-directive override)
-  // is a future enhancement — SPEC permits this as an initial
-  // "greedy policy" (§33.11).
-  const conflicts: ResolvedInstructions["conflicts"] = [];
+  const order = new Map(precedenceOrder.map((id, index) => [id, index]));
+  const rankFor = (fragment: ContextFragment): number => {
+    const sourceUri = fragment.source.uri;
+    const sourcePath = sourceUri.startsWith("file://") ? sourceUri.slice("file://".length) : sourceUri;
+    return Math.min(
+      order.get(fragment.id) ?? Number.MAX_SAFE_INTEGER,
+      order.get(sourceUri) ?? Number.MAX_SAFE_INTEGER,
+      order.get(sourcePath) ?? Number.MAX_SAFE_INTEGER,
+    );
+  };
+  const ordered = [...fragments].sort((a, b) => {
+    const aOrder = rankFor(a);
+    const bOrder = rankFor(b);
+    return aOrder - bOrder || a.id.localeCompare(b.id);
+  });
+  const winners = new Map<string, { readonly fragment: ContextFragment; readonly line: string }>();
+  const overridden = new Map<string, string[]>();
+  const linesByFragment = new Map<string, readonly string[]>();
+  for (const fragment of ordered) {
+    const lines = (fragment.textContent ?? "").split("\n");
+    linesByFragment.set(fragment.id, lines);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) {
+        continue;
+      }
+      const key = instructionDirectiveKey(trimmed);
+      const previous = winners.get(key);
+      if (previous === undefined) {
+        winners.set(key, { fragment, line: trimmed });
+        continue;
+      }
+      if (previous.fragment.id === fragment.id && previous.line === trimmed) {
+        continue;
+      }
+      const ids = overridden.get(key) ?? [];
+      if (!ids.includes(previous.fragment.id)) ids.push(previous.fragment.id);
+      overridden.set(key, ids);
+    }
+  }
+
+  const conflicts: Array<ResolvedInstructions["conflicts"][number]> = [];
+  for (const [directive, overriddenIds] of overridden) {
+    const winner = winners.get(directive);
+    if (winner !== undefined) {
+      conflicts.push({
+        directive,
+        winner: winner.fragment.id,
+        overridden: overriddenIds,
+      });
+    }
+  }
+  conflicts.sort((a, b) => a.directive.localeCompare(b.directive));
+  const resolved = ordered.map((fragment) => {
+    const lines = (linesByFragment.get(fragment.id) ?? []).filter((line) => {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) return true;
+      const winner = winners.get(instructionDirectiveKey(trimmed));
+      return winner?.fragment.id === fragment.id && winner.line === trimmed;
+    });
+    if (lines.length === 0 || lines.every((line) => line.trim().length === 0)) return null;
+    const text = lines.join("\n");
+    if (text === fragment.textContent) return fragment;
+    const contentHash = computeContentHash(text);
+    return {
+      ...fragment,
+      contentRef: {
+        ...fragment.contentRef,
+        hash: contentHash,
+        bytes: BigInt(new TextEncoder().encode(text).byteLength) as typeof fragment.contentRef.bytes,
+      },
+      textContent: text,
+      sourceVersion: fragment.sourceVersion,
+      freshness: fragment.freshness,
+    };
+  }).filter((fragment): fragment is ContextFragment => fragment !== null);
 
   return {
-    fragments,
+    fragments: resolved,
     conflicts,
-    precedenceOrder: fragments.map((f) => f.id),
+    precedenceOrder: ordered.map((f) => f.id),
   };
+}
+
+function instructionDirectiveKey(line: string): string {
+  const withoutMarker = line.replace(/^(?:[-*+]\s+|\[[ xX]\]\s+)/, "");
+  const colon = withoutMarker.indexOf(":");
+  if (colon > 0) return withoutMarker.slice(0, colon).trim().toLowerCase();
+  return withoutMarker.toLowerCase();
 }
