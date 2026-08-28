@@ -25,6 +25,7 @@ __all__ = [
     "CodexAdapter",
     "ExternalHarnessUnavailable",
     "HarnessSelection",
+    "LiveHarnessContract",
     "OhMyPiAdapter",
     "PiAdapter",
     "TerminusFullAdapter",
@@ -37,6 +38,30 @@ __all__ = [
 
 class ExternalHarnessUnavailable(RuntimeError):
     """Raised when a catalogued competitor has no configured external runner."""
+
+
+@dataclass(frozen=True)
+class LiveHarnessContract:
+    """Explicit identity for a configured non-fixture harness runner."""
+
+    harness_id: str
+    exact_pin: str
+    pin_verified: bool
+    runner_version: str
+    execution_mode: str = "external_live"
+
+    def validate_for(self, harness_id: str) -> None:
+        """Reject a contract that cannot support a release claim."""
+        if self.execution_mode != "external_live":
+            raise ExternalHarnessUnavailable("configured runner is not marked external_live")
+        if self.harness_id != harness_id:
+            raise ExternalHarnessUnavailable(
+                "live harness contract id does not match requested harness"
+            )
+        if not self.exact_pin.strip() or not self.runner_version.strip() or not self.pin_verified:
+            raise ExternalHarnessUnavailable(
+                "live harness contract requires an exact, independently verified pin and runner version"
+            )
 
 
 @dataclass(frozen=True)
@@ -55,6 +80,7 @@ class HarnessSelection:
     fixture_only: bool
     release_eligible: bool
     reason: str
+    live_contract: LiveHarnessContract | None = None
 
 
 def canonical_harness_id(harness_id: str) -> str:
@@ -333,13 +359,15 @@ def select_harness(
     live_harness: Harness | None = None,
     live_pin: str | None = None,
     live_pin_verified: bool = False,
+    live_contract: LiveHarnessContract | None = None,
     **kwargs: Any,
 ) -> HarnessSelection:
     """Resolve a harness id with an explicit evidence mode.
 
     The repository currently contains deterministic fixture adapters only.
-    Callers with a real live adapter must mark it with ``is_live_runner =
-    True``, provide its exact pin, and provide independent pin verification.
+    Callers with a real live adapter must provide an explicit
+    :class:`LiveHarnessContract`. The legacy marker/pin arguments remain
+    accepted for source compatibility but cannot establish release evidence.
     This keeps selection from mistaking an importable fixture for live
     evidence.
     """
@@ -347,22 +375,22 @@ def select_harness(
     if require_live:
         if (
             live_harness is None
-            or getattr(live_harness, "is_live_runner", False) is not True
-            or not live_pin
-            or not live_pin_verified
+            or live_contract is None
         ):
             raise ExternalHarnessUnavailable(
                 f"live evidence is unavailable for {canonical_id!r}; "
                 "configure a marked live harness, independently verified exact pin, "
                 "and live evidence before release evaluation"
             )
+        live_contract.validate_for(canonical_id)
         return HarnessSelection(
             requested_id=harness_id,
             harness_id=canonical_id,
             harness=live_harness,
             fixture_only=False,
             release_eligible=True,
-            reason="live harness and independently verified exact pin selected",
+            reason="live harness contract and independently verified exact pin selected",
+            live_contract=live_contract,
         )
     if not fixture_mode:
         raise ExternalHarnessUnavailable(

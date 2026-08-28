@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from forge_evals.analysis.load_runs import load_runs_from_parquet
+from forge_evals.evidence import EvidenceClass
 from forge_evals.identity import EvaluationIdentity
 from forge_evals.paired_evaluation import derive_paired_evidence
 from forge_evals.promotion_gate import PromotionDecision, evaluate_paired_promotion
@@ -44,6 +45,18 @@ def _record(task: str, seed: int, harness: str, passed: bool) -> RunRecord:
         environment_digest="sha256:env",
         random_seed=seed,
         evaluation_identity=_identity(task, seed, harness),
+        evidence_class=EvidenceClass.EXTERNAL_LIVE,
+        holdout_partition="final_release_holdout",
+        independently_verified=True,
+        provider_receipts=[
+            {
+                "receipt_id": f"receipt-{harness}-{task}-{seed}",
+                "provider": "provider",
+                "model": "model-v1",
+                "artifact_ref": f"sha256:{seed:064x}",
+                "verified": True,
+            }
+        ],
     )
     record.outcome = Outcome.COMPLETED if passed else Outcome.FAILED
     record.grader_results = [GraderResult(
@@ -139,7 +152,18 @@ def test_derive_paired_evidence_calculates_token_independent_paired_statistics()
 def test_paired_promotion_does_not_promote_without_operational_evidence() -> None:
     baseline = [_record(f"task-{i}", i, "baseline", False) for i in range(3)]
     candidate = [_record(f"task-{i}", i, "candidate", True) for i in range(3)]
-    evidence = derive_paired_evidence(baseline, candidate, min_pairs=3, n_bootstrap=100)
+    evidence = derive_paired_evidence(
+        baseline,
+        candidate,
+        min_pairs=3,
+        n_bootstrap=100,
+        require_live=True,
+        require_independent_verification=True,
+        required_holdout_partition="final_release_holdout",
+        required_tasks={f"task-{i}" for i in range(3)},
+        required_seeds={0, 1, 2},
+        require_provider_receipts=True,
+    )
 
     result = evaluate_paired_promotion(
         evidence,
@@ -150,9 +174,20 @@ def test_paired_promotion_does_not_promote_without_operational_evidence() -> Non
 
 
 def test_paired_promotion_requires_explicit_operational_and_frontier_claims() -> None:
-    baseline = [_record(f"task-{i}", i, "baseline", False) for i in range(3)]
-    candidate = [_record(f"task-{i}", i, "candidate", True) for i in range(3)]
-    evidence = derive_paired_evidence(baseline, candidate, min_pairs=3, n_bootstrap=100)
+    baseline = [_record(f"task-{i}", seed, "baseline", False) for i in range(3) for seed in range(3)]
+    candidate = [_record(f"task-{i}", seed, "candidate", True) for i in range(3) for seed in range(3)]
+    evidence = derive_paired_evidence(
+        baseline,
+        candidate,
+        min_pairs=9,
+        n_bootstrap=100,
+        require_live=True,
+        require_independent_verification=True,
+        required_holdout_partition="final_release_holdout",
+        required_tasks={f"task-{i}" for i in range(3)},
+        required_seeds={0, 1, 2},
+        require_provider_receipts=True,
+    )
 
     result = evaluate_paired_promotion(
         evidence,
@@ -165,5 +200,10 @@ def test_paired_promotion_requires_explicit_operational_and_frontier_claims() ->
         has_migration_behavior=True,
         maintainability_within_budget=True,
         divergence_within_budget=True,
+        require_live=True,
+        require_independent_verification=True,
+        require_holdout=True,
+        require_provider_receipts=True,
+        require_complete_cohort=True,
     )
     assert result.decision is PromotionDecision.PROMOTE

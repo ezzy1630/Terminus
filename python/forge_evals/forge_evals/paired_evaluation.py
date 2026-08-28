@@ -8,10 +8,11 @@ an independent verifier and the configured release harness attest to it.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .evidence import EvidenceClass, has_complete_provider_receipt
 from .run_record import RunRecord
 from .statistics.bootstrap import bootstrap_ci
 from .statistics.effect_size import cohens_d_paired
@@ -66,6 +67,11 @@ class PairedEvaluationEvidence:
     confidence_level: float
     identity_locked: bool
     eligible: bool
+    same_model: bool = False
+    live_evidence_complete: bool = False
+    holdout_complete: bool = False
+    provider_receipts_complete: bool = False
+    cohort_complete: bool = False
     issues: tuple[PairingIssue, ...] = field(default_factory=tuple)
 
     @property
@@ -110,6 +116,11 @@ class PairedEvaluationEvidence:
             "confidence_level": self.confidence_level,
             "noninferiority": ni.to_dict() if ni is not None else None,
             "identity_locked": self.identity_locked,
+            "same_model": self.same_model,
+            "live_evidence_complete": self.live_evidence_complete,
+            "holdout_complete": self.holdout_complete,
+            "provider_receipts_complete": self.provider_receipts_complete,
+            "cohort_complete": self.cohort_complete,
             "eligible": self.eligible,
             "issues": [{"key": issue.key, "reason": issue.reason} for issue in self.issues],
         }
@@ -154,8 +165,19 @@ def derive_paired_evidence(
     min_pairs: int = 2,
     n_bootstrap: int = 2_000,
     rng_seed: int = 0,
+    require_live: bool = False,
+    require_independent_verification: bool = False,
+    required_holdout_partition: str | None = None,
+    required_tasks: Collection[str] | None = None,
+    required_seeds: Collection[int] | None = None,
+    require_provider_receipts: bool = False,
 ) -> PairedEvaluationEvidence:
-    """Derive paired statistics only from exact, identity-locked records."""
+    """Derive paired statistics only from exact, identity-locked records.
+
+    The optional provenance arguments are deliberately fail-closed.  Release
+    callers should provide the expected task and seed cohort instead of
+    treating a shared but incomplete subset as a complete experiment.
+    """
     if not 0 < confidence_level < 1:
         raise ValueError("confidence_level must be in (0, 1)")
     if min_pairs <= 0:
@@ -172,6 +194,27 @@ def derive_paired_evidence(
     issues.extend(candidate_issues)
     pairs: list[PairedDelta] = []
     identity_bindings: list[PairIdentityBinding] = []
+    same_model = True
+    live_evidence_complete = require_live or require_independent_verification
+    holdout_complete = required_holdout_partition is not None
+    provider_receipts_complete = require_provider_receipts
+
+    expected_keys: set[tuple[str, str, int]] | None = None
+    if required_tasks is not None or required_seeds is not None:
+        if required_tasks is None or required_seeds is None:
+            issues.append(PairingIssue("cohort", "required_tasks and required_seeds must be supplied together"))
+        else:
+            expected_keys = {
+                (baseline_records[0].suite if baseline_records else "unknown", task, seed)
+                for task in required_tasks
+                for seed in required_seeds
+            }
+            observed_suites = {record.suite for record in (*baseline_records, *candidate_records)}
+            if len(observed_suites) != 1:
+                issues.append(PairingIssue("cohort", "expected task/seed cohort spans multiple suites"))
+            elif expected_keys:
+                suite = next(iter(observed_suites))
+                expected_keys = {(suite, task, seed) for _, task, seed in expected_keys}
 
     for key in sorted(set(baseline) & set(candidate)):
         b = baseline[key]
@@ -200,7 +243,37 @@ def derive_paired_evidence(
             )
             continue
         if not b_identity.compatible_model_fixed(c_identity):
+            same_model = False
             issues.append(PairingIssue(pair_key, "model-fixed identity differs across harnesses"))
+            continue
+        if b_identity.provider != c_identity.provider or b_identity.model != c_identity.model:
+            same_model = False
+            issues.append(PairingIssue(pair_key, "provider/model identity differs across harnesses"))
+            continue
+        if require_live or require_independent_verification:
+            live_ok = (
+                b.evidence_class is EvidenceClass.EXTERNAL_LIVE
+                and c.evidence_class is EvidenceClass.EXTERNAL_LIVE
+            )
+            verified_ok = b.independently_verified and c.independently_verified
+            if not live_ok or (require_independent_verification and not verified_ok):
+                live_evidence_complete = False
+                issues.append(PairingIssue(pair_key, "both records require verified external live evidence"))
+                continue
+        if required_holdout_partition is not None and (
+            b.holdout_partition != required_holdout_partition
+            or c.holdout_partition != required_holdout_partition
+        ):
+            holdout_complete = False
+            issues.append(PairingIssue(pair_key, "both records require the configured holdout partition"))
+            continue
+        if require_provider_receipts and (
+            not b.provider_receipts
+            or not c.provider_receipts
+            or any(not has_complete_provider_receipt(r) for r in (*b.provider_receipts, *c.provider_receipts))
+        ):
+            provider_receipts_complete = False
+            issues.append(PairingIssue(pair_key, "both records require complete provider receipts"))
             continue
         if b.end is None or c.end is None:
             issues.append(PairingIssue(pair_key, "both records require terminal end timestamps"))
@@ -223,6 +296,13 @@ def derive_paired_evidence(
         issues.append(PairingIssue(f"baseline:{key}", "candidate record is missing"))
     for key in sorted(set(candidate) - set(baseline)):
         issues.append(PairingIssue(f"candidate:{key}", "baseline record is missing"))
+
+    if expected_keys is not None:
+        for key in sorted(expected_keys - (set(baseline) & set(candidate))):
+            issues.append(PairingIssue(f"cohort:{key}", "required task/seed pair is missing"))
+    cohort_complete = expected_keys is not None and not any(
+        issue.key.startswith("cohort:") for issue in issues
+    )
 
     sequence = PairedSequence(deltas=pairs)
     deltas = sequence.values
@@ -248,7 +328,11 @@ def derive_paired_evidence(
         if noninferiority_margin is not None and deltas
         else None
     )
-    identity_locked = not any("identity" in issue.reason or "model-fixed" in issue.reason for issue in issues)
+    identity_locked = not any(
+        token in issue.reason
+        for issue in issues
+        for token in ("identity", "model-fixed", "provider/model")
+    )
     eligible = identity_locked and len(pairs) >= min_pairs and not issues
     return PairedEvaluationEvidence(
         baseline_harness=baseline_harness,
@@ -267,5 +351,10 @@ def derive_paired_evidence(
         confidence_level=confidence_level,
         identity_locked=identity_locked,
         eligible=eligible,
+        same_model=same_model,
+        live_evidence_complete=live_evidence_complete,
+        holdout_complete=holdout_complete,
+        provider_receipts_complete=provider_receipts_complete,
+        cohort_complete=cohort_complete,
         issues=tuple(issues),
     )

@@ -441,17 +441,38 @@ def evaluate_paired_promotion(
     divergence_within_budget: bool = False,
     satisfies_hard_security_need: bool = False,
     satisfies_hard_reliability_need: bool = False,
+    require_live: bool = True,
+    require_independent_verification: bool = True,
+    require_holdout: bool = True,
+    require_provider_receipts: bool = True,
+    require_complete_cohort: bool = True,
 ) -> PromotionGateResult:
     """Apply the promotion gate to derived, identity-locked paired evidence.
 
-    Missing identity or insufficient pairs is a hard evidence block. The
-    wrapper deliberately defaults operational and Pareto claims to false so a
-    caller cannot promote from statistical output alone.
+    Missing identity, fixture evidence, incomplete holdouts, or insufficient
+    pairs is a hard evidence block.  Release defaults are intentionally strict;
+    callers doing exploratory analysis can opt out explicitly.
     """
+    evidence_requirements: list[str] = []
     if not evidence.eligible:
+        evidence_requirements.append("paired evidence is not eligible")
+    if require_live and not evidence.live_evidence_complete:
+        evidence_requirements.append("external live evidence is required")
+    if require_independent_verification and not evidence.live_evidence_complete:
+        evidence_requirements.append("independent verification is required")
+    if require_holdout and not evidence.holdout_complete:
+        evidence_requirements.append("release holdout partition is required")
+    if require_provider_receipts and not evidence.provider_receipts_complete:
+        evidence_requirements.append("complete provider receipts are required")
+    if require_complete_cohort and not evidence.cohort_complete:
+        evidence_requirements.append("complete expected task/seed cohort is required")
+    if not evidence.same_model:
+        evidence_requirements.append("same provider/model identity is required")
+    if evidence_requirements:
         detail = "paired evidence is not promotion eligible"
         if evidence.issues:
             detail += ": " + "; ".join(issue.reason for issue in evidence.issues)
+        detail += "; " + "; ".join(evidence_requirements)
         verdict = GateVerdict(
             name="paired_evidence",
             status=GateStatus.BLOCKED,

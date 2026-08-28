@@ -22,11 +22,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from .evidence import EvidenceClass
 from .identity import EvaluationIdentity
 
 __all__ = [
     "CostBreakdown",
     "EvaluationIdentity",
+    "EvidenceClass",
     "GraderResult",
     "Outcome",
     "RunRecord",
@@ -128,6 +130,12 @@ class RunRecord:
     # Required for model-fixed promotion; legacy/fixture records remain
     # readable but are ineligible until this is supplied.
     evaluation_identity: EvaluationIdentity | None = None
+    # Provenance is explicit.  Existing records default to fixture-only and
+    # therefore cannot satisfy a live release gate by accident.
+    evidence_class: EvidenceClass = EvidenceClass.FIXTURE_ONLY
+    holdout_partition: str | None = None
+    independently_verified: bool = False
+    provider_receipts: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -169,6 +177,7 @@ class RunRecord:
         d["cost"] = asdict(self.cost) if self.cost else None
         d["grader_results"] = [asdict(g) for g in self.grader_results]
         d["evaluation_identity"] = self.evaluation_identity.to_dict() if self.evaluation_identity else None
+        d["evidence_class"] = self.evidence_class.value
         return d
 
     def to_json(self, path: Path | str) -> Path:
@@ -205,6 +214,7 @@ class RunRecord:
             "context_manifests",
             "trajectory",
             "evaluation_identity",
+            "provider_receipts",
         ):
             d[col] = json.dumps(d.get(col) or [], sort_keys=True)
         if d.get("cost") is not None:
@@ -228,6 +238,10 @@ class RunRecord:
         model_capability_snapshot: dict[str, Any] | None = None,
         budgets: dict[str, Any] | None = None,
         evaluation_identity: EvaluationIdentity | None = None,
+        evidence_class: EvidenceClass = EvidenceClass.FIXTURE_ONLY,
+        holdout_partition: str | None = None,
+        independently_verified: bool = False,
+        provider_receipts: list[dict[str, Any]] | None = None,
     ) -> RunRecord:
         """Create a fresh record with a generated ``run_id`` and ``start`` timestamp."""
         return cls(
@@ -241,6 +255,10 @@ class RunRecord:
             random_seed=random_seed,
             budgets=budgets or {},
             evaluation_identity=evaluation_identity,
+            evidence_class=evidence_class,
+            holdout_partition=holdout_partition,
+            independently_verified=independently_verified,
+            provider_receipts=list(provider_receipts or []),
         )
 
     @classmethod
@@ -276,6 +294,10 @@ class RunRecord:
                 if d.get("evaluation_identity") is not None
                 else None
             ),
+            evidence_class=EvidenceClass(d.get("evidence_class", EvidenceClass.FIXTURE_ONLY.value)),
+            holdout_partition=d.get("holdout_partition"),
+            independently_verified=bool(d.get("independently_verified", False)),
+            provider_receipts=d.get("provider_receipts", []) or [],
         )
 
     @classmethod

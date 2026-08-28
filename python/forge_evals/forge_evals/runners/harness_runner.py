@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..evidence import EvidenceClass
 from ..graders.end_state import EndStateGrader, EndStateGraderInput, WorkspaceSnapshot
 from ..identity import EvaluationIdentity
 from ..run_record import CostBreakdown, GraderResult, Outcome, RunRecord, utc_now
@@ -179,6 +180,9 @@ class RunRequest:
     tool_schema_hash: str | None = None
     instruction_hash: str | None = None
     harness_config_hash: str | None = None
+    # Release comparisons must identify the partition explicitly.  Leaving it
+    # unset is safe for local fixtures and ineligible for release promotion.
+    holdout_partition: str | None = None
 
 
 def build_evaluation_identity(
@@ -260,6 +264,9 @@ class HarnessResult:
     # External harnesses may replace the task-package fallback with a digest
     # resolved from the actual image/environment they executed.
     environment_digest: str | None = None
+    evidence_class: EvidenceClass = EvidenceClass.FIXTURE_ONLY
+    independently_verified: bool = False
+    provider_receipts: list[dict[str, Any]] = field(default_factory=list)
 
 
 class Harness(Protocol):
@@ -356,6 +363,7 @@ class HarnessRunner:
                 request,
                 environment_digest=env_digest.to_digest(),
             ),
+            holdout_partition=request.holdout_partition,
         )
         record.experiment_assignments = list(request.experiment_assignments)
 
@@ -419,6 +427,9 @@ class HarnessRunner:
             for g in result.grader_outcomes
         ]
         record.notes = result.notes
+        record.evidence_class = result.evidence_class
+        record.independently_verified = result.independently_verified
+        record.provider_receipts = list(result.provider_receipts)
 
         recorder.record_run_ended(
             outcome=outcome.value,

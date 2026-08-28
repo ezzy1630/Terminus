@@ -24,6 +24,7 @@ from .conformance_levels import (
     ConformanceLevel,
     assess_conformance,
 )
+from .evidence import RELEASE_HOLDOUT_PARTITIONS, EvidenceClass
 from .evolution_lab import (
     CanaryDecision,
     CanaryObservation,
@@ -81,6 +82,7 @@ __all__ = [
     "BASELINES",
     "COHORTS",
     "CONFORMANCE_REQUIREMENTS",
+    "RELEASE_HOLDOUT_PARTITIONS",
     "Baseline",
     "CanaryDecision",
     "CanaryObservation",
@@ -100,6 +102,7 @@ __all__ = [
     "EvaluationIdentity",
     "EvaluationPartition",
     "EvaluationReceipt",
+    "EvidenceClass",
     "EvolutionCandidate",
     "ExperimentManifest",
     "FailureAttribution",

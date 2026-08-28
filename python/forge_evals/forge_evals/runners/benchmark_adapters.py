@@ -20,6 +20,7 @@ from typing import Literal, Protocol
 
 import yaml
 
+from ..evidence import EvidenceClass
 from .baseline_adapters import ExternalHarnessUnavailable
 from .harness_runner import HarnessResult, RunRequest
 from .trajectory_recorder import TrajectoryRecorder
@@ -35,6 +36,7 @@ __all__ = [
     "BenchmarkInvocation",
     "BenchmarkManifest",
     "BenchmarkManifestError",
+    "ExternalHarnessContract",
     "HarborAdapter",
     "HarborTerminalBenchAdapter",
     "LiveBenchmarkHarness",
@@ -433,8 +435,44 @@ class BenchmarkExecution:
     resolved_image_digests: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ExternalHarnessContract:
+    """Pinned identity of a real external benchmark runner.
+
+    A fixture can implement the same ``run`` shape, so the adapter requires
+    this separate contract before it will accept an execution.  The contract
+    records what the runner claims; a release verifier must still attest the
+    resulting artifacts independently.
+    """
+
+    harness_id: str
+    repository: str
+    commit: str
+    runner_version: str
+    pin_verified: bool
+    execution_mode: Literal["external_live"] = "external_live"
+
+    def validate(self, manifest: BenchmarkManifest) -> None:
+        """Reject an unpinned or fixture-shaped runner for this manifest."""
+
+        if self.execution_mode != "external_live":
+            raise BenchmarkAdapterError("external benchmark runner is not marked external_live")
+        if not self.harness_id.strip() or not self.runner_version.strip():
+            raise BenchmarkAdapterError("external benchmark contract requires id and runner version")
+        if self.repository != manifest.harness_repository or self.commit != manifest.harness_commit:
+            raise BenchmarkAdapterError(
+                "external benchmark runner pin does not match the suite harness manifest"
+            )
+        if not self.pin_verified:
+            raise BenchmarkAdapterError("external benchmark runner pin is not verified")
+
 class LiveBenchmarkHarness(Protocol):
     """The only execution dependency accepted by an external adapter."""
+
+    @property
+    def contract(self) -> ExternalHarnessContract:
+        """Return the exact external runner contract and pin evidence."""
+        ...
 
     def is_available(self) -> bool:
         """Return whether the pinned live harness and its runtime are usable."""
@@ -522,6 +560,13 @@ class _ExternalBenchmarkAdapter(ABC):
                 f"{self.manifest.suite_id}: live {self._executable} harness is unavailable; "
                 "fixture mode remains non-release"
             )
+        contract = getattr(live_harness, "contract", None)
+        if not isinstance(contract, ExternalHarnessContract):
+            raise BenchmarkAdapterError(
+                "external benchmark adapter requires an ExternalHarnessContract; "
+                "fixture-shaped runners are not accepted"
+            )
+        contract.validate(self.manifest)
         if not live_harness.is_available():
             raise ExternalHarnessUnavailable(
                 f"{self.manifest.suite_id}: pinned {self._executable} harness is unavailable"
@@ -531,6 +576,10 @@ class _ExternalBenchmarkAdapter(ABC):
         if not isinstance(execution, BenchmarkExecution):
             raise BenchmarkAdapterError(
                 "live benchmark harness returned no BenchmarkExecution boundary result"
+            )
+        if execution.harness_result.evidence_class is not EvidenceClass.EXTERNAL_LIVE:
+            raise BenchmarkAdapterError(
+                "external benchmark runner returned fixture-only evidence"
             )
         environment_digest = _validate_execution(execution, self.manifest)
 

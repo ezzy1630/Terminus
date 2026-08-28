@@ -7,14 +7,17 @@ from pathlib import Path
 import pytest
 import yaml
 
+from forge_evals.evidence import EvidenceClass
 from forge_evals.run_record import Outcome
 from forge_evals.runners import (
     BenchmarkAdapterError,
     BenchmarkExecution,
     BenchmarkInvocation,
+    ExternalHarnessContract,
     ExternalHarnessUnavailable,
     HarborTerminalBenchAdapter,
     HarnessResult,
+    LiveHarnessContract,
     ModelCapabilitySnapshot,
     RunRequest,
     SweBenchVerifiedAdapter,
@@ -62,11 +65,19 @@ def _harness_result() -> HarnessResult:
         artifacts=[],
         context_manifests=[],
         grader_outcomes=[],
+        evidence_class=EvidenceClass.EXTERNAL_LIVE,
     )
 
 
 class _StubLiveHarness:
     is_live_runner = True
+    contract = ExternalHarnessContract(
+        harness_id="harbor-test",
+        repository="https://github.com/harbor-framework/harbor.git",
+        commit="72f7dd0134162c5b7229f6a31286e05a49c0f8a4",
+        runner_version="test-runner-v1",
+        pin_verified=True,
+    )
 
     def __init__(
         self, *, available: bool, digests: tuple[str, ...] = (VALID_IMAGE_DIGEST,)
@@ -93,6 +104,12 @@ class _StubLiveHarness:
 
 class _MarkedLiveHarness:
     is_live_runner = True
+    contract = LiveHarnessContract(
+        harness_id="terminus-full",
+        exact_pin="sha256:" + "b" * 64,
+        pin_verified=True,
+        runner_version="test-runner-v1",
+    )
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
         return _harness_result()
@@ -273,6 +290,7 @@ def test_harness_selection_accepts_only_verified_live_runner() -> None:
         live_harness=live_harness,
         live_pin="sha256:" + "b" * 64,
         live_pin_verified=True,
+        live_contract=live_harness.contract,
     )
 
     assert selection.harness_id == "terminus-full"
