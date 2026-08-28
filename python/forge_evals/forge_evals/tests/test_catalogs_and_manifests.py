@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from forge_evals.baselines import BASELINES, baseline_by_id
+from forge_evals.baselines import (
+    BASELINES,
+    all_baseline_ids,
+    baseline_by_id,
+    canonical_baseline_id,
+)
 from forge_evals.cohort_tasks import COHORTS, cohort_by_id
 from forge_evals.experiment_manifest import (
     ChangeManifest,
@@ -69,6 +74,15 @@ def test_baseline_by_id_returns_baseline() -> None:
     b = baseline_by_id("forge_minimal")
     assert b.name == "Terminus minimal"
     assert b.pin_kind in ("git_commit", "image_digest", "release_tag")
+
+
+def test_terminus_baselines_are_canonical_and_forge_names_are_aliases() -> None:
+    assert "terminus-minimal" in all_baseline_ids()
+    assert "terminus-full" in all_baseline_ids()
+    assert "forge_minimal" not in all_baseline_ids()
+    assert "forge_full" not in all_baseline_ids()
+    assert canonical_baseline_id("forge_minimal") == "terminus-minimal"
+    assert baseline_by_id("forge_minimal") is baseline_by_id("terminus-minimal")
 
 
 def test_forge_minimal_supports_native_best_and_model_fixed() -> None:

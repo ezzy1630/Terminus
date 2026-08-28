@@ -53,6 +53,97 @@ def test_run_record_new_generates_id_and_start() -> None:
     assert r.outcome is Outcome.MISSING
 
 
+def test_runner_binds_complete_model_fixed_identity_from_request(tmp_path: Path) -> None:
+    task_dir = _make_task_dir(tmp_path / "task")
+    snapshot = ModelCapabilitySnapshot(
+        provider="provider",
+        model="model",
+        api_version="api-v1",
+        context_window=128_000,
+        max_output_tokens=8_192,
+        supports_tool_calls=True,
+        supports_streaming=True,
+        supports_cache=True,
+    )
+    request = RunRequest(
+        suite="tiny-bugfix",
+        task="task-1",
+        task_dir=task_dir,
+        harness_id="terminus-minimal",
+        harness_commit="git:terminus@pinned",
+        model_snapshot=snapshot,
+        random_seed=7,
+        experiment_assignments=[{"experiment": "cache-v2", "variant": "candidate"}],
+        task_version="task-v1",
+        repository_digest="sha256:repo",
+        sampling_config_hash="sha256:sampling",
+        sandbox_policy_hash="sha256:sandbox",
+        network_policy="proxy-only",
+        tool_schema_hash="sha256:tools",
+        instruction_hash="sha256:instructions",
+    )
+    runner = HarnessRunner(
+        harness=FakeScriptHarness(
+            result=HarnessResult(
+                outcome=Outcome.COMPLETED,
+                final_revision="git:result",
+                cost=None,
+                artifacts=[],
+                context_manifests=[],
+                grader_outcomes=[],
+            )
+        )
+    )
+
+    record = runner.run(request)
+
+    identity = record.evaluation_identity
+    assert identity is not None
+    assert identity.is_complete
+    assert identity.task_id == request.task
+    assert identity.harness_id == request.harness_id
+    assert identity.model_fixed_key.startswith("sha256:")
+    assert identity.sampling_config_hash == "sha256:sampling"
+
+
+def test_runner_marks_unconfigured_identity_ineligible_for_promotion(tmp_path: Path) -> None:
+    task_dir = _make_task_dir(tmp_path / "task")
+    snapshot = ModelCapabilitySnapshot(
+        provider="provider",
+        model="model",
+        api_version="api-v1",
+        context_window=128_000,
+        max_output_tokens=8_192,
+        supports_tool_calls=True,
+        supports_streaming=True,
+        supports_cache=True,
+    )
+    request = RunRequest(
+        suite="tiny-bugfix",
+        task="task-1",
+        task_dir=task_dir,
+        harness_id="terminus-minimal",
+        harness_commit="git:terminus@pinned",
+        model_snapshot=snapshot,
+        random_seed=7,
+    )
+    record = HarnessRunner(
+        harness=FakeScriptHarness(
+            result=HarnessResult(
+                outcome=Outcome.COMPLETED,
+                final_revision="git:result",
+                cost=None,
+                artifacts=[],
+                context_manifests=[],
+                grader_outcomes=[],
+            )
+        )
+    ).run(request)
+
+    assert record.evaluation_identity is not None
+    assert not record.evaluation_identity.is_complete
+
+
 def test_run_record_score_validation() -> None:
     """GraderResult rejects scores outside [0, 1]."""
     with pytest.raises(RunRecordError):

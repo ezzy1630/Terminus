@@ -7,8 +7,9 @@ They are not live competitor adapters and cannot support release claims.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
+from ..baselines import canonical_baseline_id
 from ..run_record import CostBreakdown, Outcome
 from .harness_runner import (
     Budgets,
@@ -23,11 +24,14 @@ __all__ = [
     "ClaudeCodeAdapter",
     "CodexAdapter",
     "ExternalHarnessUnavailable",
+    "HarnessSelection",
     "OhMyPiAdapter",
     "PiAdapter",
     "TerminusFullAdapter",
     "TerminusMinimalAdapter",
+    "canonical_harness_id",
     "get_baseline_harness",
+    "select_harness",
 ]
 
 
@@ -35,17 +39,41 @@ class ExternalHarnessUnavailable(RuntimeError):
     """Raised when a catalogued competitor has no configured external runner."""
 
 
+@dataclass(frozen=True)
+class HarnessSelection:
+    """The result of selecting a harness for an eval invocation.
+
+    Fixture adapters are executable for local tests, but ``release_eligible``
+    stays false. A release caller must request live evidence explicitly and
+    receives :class:`ExternalHarnessUnavailable` until a configured live
+    runner exists.
+    """
+
+    requested_id: str
+    harness_id: str
+    harness: Harness
+    fixture_only: bool
+    release_eligible: bool
+    reason: str
+
+
+def canonical_harness_id(harness_id: str) -> str:
+    """Return the canonical Terminus id for a baseline or ADR-0052 alias."""
+    return canonical_baseline_id(harness_id)
+
+
 @dataclass
 class TerminusMinimalAdapter:
     """Terminus in minimal 5-tool shell mode (SPEC §3.7)."""
 
+    harness_id: ClassVar[str] = "terminus-minimal"
     final_revision: str = "git:terminus@v0.1.0-minimal"
     cost: CostBreakdown | None = None
     outcome: Outcome = Outcome.COMPLETED
     notes: str = "fixture-only Terminus minimal shape; not a live harness run"
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
-        recorder.record("task.activated", {"task": request.task, "harness": "forge_minimal"})
+        recorder.record("task.activated", {"task": request.task, "harness": self.harness_id})
         recorder.record("turn.started", {"turn": 1})
         recorder.record_tool_proposed(
             tool_call_id="tool-min-1",
@@ -81,13 +109,14 @@ class TerminusMinimalAdapter:
 class TerminusFullAdapter:
     """Terminus in full production mode with context compiler, verification, and subagents."""
 
+    harness_id: ClassVar[str] = "terminus-full"
     final_revision: str = "git:terminus@v0.1.0-full"
     cost: CostBreakdown | None = None
     outcome: Outcome = Outcome.COMPLETED
     notes: str = "fixture-only Terminus full shape; not a live harness run"
 
     def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
-        recorder.record("task.activated", {"task": request.task, "harness": "forge_full"})
+        recorder.record("task.activated", {"task": request.task, "harness": self.harness_id})
         recorder.record("turn.started", {"turn": 1})
         recorder.record(
             "context.manifest_persisted",
@@ -269,30 +298,85 @@ def get_baseline_harness(baseline_id: str, **kwargs: Any) -> Harness:
     Raises ``ExternalHarnessUnavailable`` for required-but-unconfigured external
     comparisons and ``KeyError`` if ``baseline_id`` is unknown.
     """
-    if baseline_id == "upstream_opencode":
+    canonical_id = canonical_harness_id(baseline_id)
+    if canonical_id == "upstream_opencode":
         raise ExternalHarnessUnavailable(
             "OpenCode is an external comparison only; configure an exact pin and "
             "adapter-protocol runner before executing it"
         )
     adapters: dict[str, type[Harness]] = {
-        "forge_minimal": TerminusMinimalAdapter,
-        "forge_full": TerminusFullAdapter,
+        "terminus-minimal": TerminusMinimalAdapter,
+        "terminus-full": TerminusFullAdapter,
         "codex": CodexAdapter,
         "pi": PiAdapter,
         "oh_my_pi": OhMyPiAdapter,
         "claude_code": ClaudeCodeAdapter,
         "mini_swe_agent": MiniSweAgentAdapter,
     }
-    if baseline_id not in adapters:
+    if canonical_id not in adapters:
         raise KeyError(f"Unknown baseline harness id: {baseline_id!r}")
 
-    if baseline_id == "mini_swe_agent" and "turns" not in kwargs:
+    if canonical_id == "mini_swe_agent" and "turns" not in kwargs:
         from .mini_swe_adapter import MiniSweAgentTurn
 
         kwargs["turns"] = [MiniSweAgentTurn(turn=1, command="ls", stdout="a.py\nb.py\n")]
 
-    cls = adapters[baseline_id]
+    cls = adapters[canonical_id]
     return cls(**kwargs)
+
+
+def select_harness(
+    harness_id: str,
+    *,
+    fixture_mode: bool = False,
+    require_live: bool = False,
+    live_harness: Harness | None = None,
+    live_pin: str | None = None,
+    live_pin_verified: bool = False,
+    **kwargs: Any,
+) -> HarnessSelection:
+    """Resolve a harness id with an explicit evidence mode.
+
+    The repository currently contains deterministic fixture adapters only.
+    Callers with a real live adapter must mark it with ``is_live_runner =
+    True``, provide its exact pin, and provide independent pin verification.
+    This keeps selection from mistaking an importable fixture for live
+    evidence.
+    """
+    canonical_id = canonical_harness_id(harness_id)
+    if require_live:
+        if (
+            live_harness is None
+            or getattr(live_harness, "is_live_runner", False) is not True
+            or not live_pin
+            or not live_pin_verified
+        ):
+            raise ExternalHarnessUnavailable(
+                f"live evidence is unavailable for {canonical_id!r}; "
+                "configure a marked live harness, independently verified exact pin, "
+                "and live evidence before release evaluation"
+            )
+        return HarnessSelection(
+            requested_id=harness_id,
+            harness_id=canonical_id,
+            harness=live_harness,
+            fixture_only=False,
+            release_eligible=True,
+            reason="live harness and independently verified exact pin selected",
+        )
+    if not fixture_mode:
+        raise ExternalHarnessUnavailable(
+            f"harness {canonical_id!r} requires an explicit --fixture-mode or a configured live runner"
+        )
+    harness = get_baseline_harness(canonical_id, **kwargs)
+    return HarnessSelection(
+        requested_id=harness_id,
+        harness_id=canonical_id,
+        harness=harness,
+        fixture_only=True,
+        release_eligible=False,
+        reason="deterministic fixture output is not release evidence",
+    )
 
 
 def _default_adapter_cost(budgets: Budgets, multiplier: float = 1.0) -> CostBreakdown:

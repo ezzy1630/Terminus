@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from forge_evals.analysis.load_runs import load_runs_from_parquet
@@ -95,6 +96,21 @@ def test_derive_paired_evidence_requires_exact_locked_identity() -> None:
     assert evidence.n == 1
     assert not evidence.eligible
     assert not evidence.issues
+
+
+def test_derive_paired_evidence_rejects_runner_identity_with_missing_policy_fields() -> None:
+    baseline = _record("task-1", 7, "baseline", False)
+    candidate = _record("task-1", 7, "candidate", True)
+    assert baseline.evaluation_identity is not None
+    baseline.evaluation_identity = replace(
+        baseline.evaluation_identity,
+        sandbox_policy_hash="missing:sandbox_policy_hash",
+    )
+    evidence = derive_paired_evidence(baseline_records=[baseline], candidate_records=[candidate])
+
+    assert not evidence.eligible
+    assert evidence.n == 0
+    assert any("complete task, policy" in issue.reason for issue in evidence.issues)
 
 
 def test_derive_paired_evidence_calculates_token_independent_paired_statistics() -> None:

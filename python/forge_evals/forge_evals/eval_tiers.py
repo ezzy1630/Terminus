@@ -58,7 +58,7 @@ _TIER_CONFIGS: dict[EvalTier, TierConfig] = {
         max_tasks_per_cohort=1,
         budget_multiplier=0.5,
         required_cohorts=("tiny-bugfix", "build-failure"),
-        baseline_harnesses=("forge_minimal", "forge_full"),
+        baseline_harnesses=("terminus-minimal", "terminus-full"),
     ),
     EvalTier.TARGETED: TierConfig(
         tier=EvalTier.TARGETED,
@@ -68,7 +68,7 @@ _TIER_CONFIGS: dict[EvalTier, TierConfig] = {
         max_tasks_per_cohort=5,
         budget_multiplier=1.0,
         required_cohorts=("tiny-bugfix", "refactor", "security-sensitive"),
-        baseline_harnesses=("forge_minimal", "forge_full"),
+        baseline_harnesses=("terminus-minimal", "terminus-full"),
     ),
     EvalTier.NIGHTLY: TierConfig(
         tier=EvalTier.NIGHTLY,
@@ -87,7 +87,7 @@ _TIER_CONFIGS: dict[EvalTier, TierConfig] = {
             "test-debug",
             "build-fix",
         ),
-        baseline_harnesses=("forge_minimal", "forge_full", "codex", "pi"),
+        baseline_harnesses=("terminus-minimal", "terminus-full", "codex", "pi"),
     ),
     EvalTier.RELEASE: TierConfig(
         tier=EvalTier.RELEASE,
@@ -118,8 +118,8 @@ _TIER_CONFIGS: dict[EvalTier, TierConfig] = {
             "research-task",
         ),
         baseline_harnesses=(
-            "forge_minimal",
-            "forge_full",
+            "terminus-minimal",
+            "terminus-full",
             "upstream_opencode",
             "codex",
             "claude_code",
@@ -136,7 +136,7 @@ _TIER_CONFIGS: dict[EvalTier, TierConfig] = {
         max_tasks_per_cohort=None,
         budget_multiplier=2.0,
         required_cohorts=(),
-        baseline_harnesses=("forge_minimal", "forge_full"),
+        baseline_harnesses=("terminus-minimal", "terminus-full"),
     ),
 }
 

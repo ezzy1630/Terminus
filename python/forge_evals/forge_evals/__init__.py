@@ -15,7 +15,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
-from .baselines import BASELINES, Baseline, baseline_by_id
+from .baselines import BASELINES, Baseline, baseline_by_id, canonical_baseline_id
 from .cohort_tasks import COHORTS, Cohort, cohort_by_id
 from .conformance_levels import (
     CONFORMANCE_REQUIREMENTS,
@@ -124,6 +124,7 @@ __all__ = [
     "assert_partition_access",
     "assess_conformance",
     "baseline_by_id",
+    "canonical_baseline_id",
     "cohort_by_id",
     "derive_paired_evidence",
     "evaluate_paired_promotion",

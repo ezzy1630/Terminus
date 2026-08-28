@@ -54,6 +54,20 @@ class EvaluationIdentity:
         """Short alias for callers that use the SPEC's capability wording."""
         return self.model_capability_snapshot_hash
 
+    @property
+    def is_complete(self) -> bool:
+        """Whether every identity field is backed by configured evidence.
+
+        The runner records explicit ``missing:<field>`` markers when a caller
+        has not supplied a policy or task identity. Those records remain
+        useful for diagnostics, but paired promotion must reject them.
+        """
+        return all(
+            not value.startswith("missing:")
+            for name, value in self.to_dict().items()
+            if name != "random_seed" and isinstance(value, str)
+        )
+
     def to_dict(self) -> dict[str, str | int]:
         """Return the exact result-key fields as JSON-safe values."""
         return {

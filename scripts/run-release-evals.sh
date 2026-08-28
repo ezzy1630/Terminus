@@ -33,22 +33,33 @@ sys.exit(0 if spec is not None else 1)
 PY
 then
   if run_python - <<'PY'
-from forge_evals.baselines import BASELINES, all_baseline_ids
+import sys
+from forge_evals.baselines import BASELINES, all_baseline_ids, baseline_by_id
 
 ids = all_baseline_ids()
 assert isinstance(ids, list)
 assert len(BASELINES) > 0
 assert len(ids) == len(BASELINES)
-print(f"baselines={len(ids)}")
+blocked = []
+for baseline_id in ids:
+    baseline = baseline_by_id(baseline_id)
+    if not baseline.live_runner_available:
+        blocked.append(f"{baseline_id}: live runner unavailable")
+    if not baseline.pin_verified or baseline.pin_kind == "unconfigured":
+        blocked.append(f"{baseline_id}: exact pin is not independently verified")
+if blocked:
+    print("; ".join(blocked), file=sys.stderr)
+    raise SystemExit(2)
+print(f"live_baselines={len(ids)}")
 PY
   then
-    status="fixture_pass"
+    status="blocked"
     mode="forge_evals.baselines"
-    reason="baseline registry importable; comparison fixtures validated"
+    reason="catalogued live runners are ready, but this probe did not produce a live benchmark report"
   else
-    status="failed"
+    status="blocked"
     mode="forge_evals.baselines"
-    reason="baseline registry import failed validation"
+    reason="live baseline runner, exact pin, or independent verification is absent"
   fi
 else
   status="harness_missing"
@@ -63,7 +74,7 @@ cat >"$OUT_JSON" <<EOF
 {
   "tier": "release",
   "status": "$status",
-  "pass": $([[ "$status" == "fixture_pass" || "$status" == "passed" ]] && echo true || echo false),
+  "pass": $([[ "$status" == "passed" ]] && echo true || echo false),
   "generatedAt": "$generated_at",
   "mode": "$mode",
   "reason": "$reason_json"
@@ -71,8 +82,8 @@ cat >"$OUT_JSON" <<EOF
 EOF
 
 echo "[eval-release] status=$status → $OUT_JSON"
-# Gate-visible statuses: fixture_pass/passed are success; harness_missing is
-# explicit (not silent) and exits 0 so local M12 can proceed with evidence.
-if [[ "$status" == "failed" ]]; then
+# Release evaluation must fail closed. Fixture imports and catalog metadata do
+# not satisfy a live benchmark gate.
+if [[ "$status" != "passed" ]]; then
   exit 1
 fi

@@ -18,10 +18,12 @@ from forge_evals.runners import (
     ModelCapabilitySnapshot,
     RunRequest,
     SweBenchVerifiedAdapter,
+    TerminusFullAdapter,
     TerminusMinimalAdapter,
     TrajectoryRecorder,
     adapter_for_suite,
     get_baseline_harness,
+    select_harness,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -64,6 +66,8 @@ def _harness_result() -> HarnessResult:
 
 
 class _StubLiveHarness:
+    is_live_runner = True
+
     def __init__(
         self, *, available: bool, digests: tuple[str, ...] = (VALID_IMAGE_DIGEST,)
     ) -> None:
@@ -85,6 +89,13 @@ class _StubLiveHarness:
             harness_result=_harness_result(),
             resolved_image_digests=self.digests,
         )
+
+
+class _MarkedLiveHarness:
+    is_live_runner = True
+
+    def run(self, request: RunRequest, recorder: TrajectoryRecorder) -> HarnessResult:
+        return _harness_result()
 
 
 def test_harbor_translation_uses_pinned_dataset_and_task_filter(tmp_path: Path) -> None:
@@ -226,6 +237,47 @@ def test_existing_fixture_mode_remains_non_release() -> None:
     assert isinstance(fixture, TerminusMinimalAdapter)
     assert "fixture-only" in fixture.notes
     assert "not a live harness run" in fixture.notes
+
+
+@pytest.mark.parametrize(
+    "requested_id,canonical_id,adapter_type",
+    [
+        ("terminus-minimal", "terminus-minimal", TerminusMinimalAdapter),
+        ("forge_minimal", "terminus-minimal", TerminusMinimalAdapter),
+        ("terminus-full", "terminus-full", TerminusFullAdapter),
+        ("forge_full", "terminus-full", TerminusFullAdapter),
+    ],
+)
+def test_terminus_harness_ids_are_canonical_with_explicit_adr_aliases(
+    requested_id: str, canonical_id: str, adapter_type: type[object]
+) -> None:
+    selection = select_harness(requested_id, fixture_mode=True)
+
+    assert selection.harness_id == canonical_id
+    assert selection.fixture_only
+    assert not selection.release_eligible
+    assert isinstance(selection.harness, adapter_type)
+
+
+def test_harness_selection_fails_closed_when_live_evidence_is_required() -> None:
+    with pytest.raises(ExternalHarnessUnavailable, match="live evidence is unavailable"):
+        select_harness("terminus-full", require_live=True)
+
+
+def test_harness_selection_accepts_only_verified_live_runner() -> None:
+    live_harness = _MarkedLiveHarness()
+
+    selection = select_harness(
+        "forge_full",
+        require_live=True,
+        live_harness=live_harness,
+        live_pin="sha256:" + "b" * 64,
+        live_pin_verified=True,
+    )
+
+    assert selection.harness_id == "terminus-full"
+    assert not selection.fixture_only
+    assert selection.release_eligible
 
 
 def test_zero_digest_in_suite_manifest_is_rejected(tmp_path: Path) -> None:

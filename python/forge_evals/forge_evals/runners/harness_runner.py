@@ -21,12 +21,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 from ..graders.end_state import EndStateGrader, EndStateGraderInput, WorkspaceSnapshot
+from ..identity import EvaluationIdentity
 from ..run_record import CostBreakdown, GraderResult, Outcome, RunRecord, utc_now
 from .trajectory_recorder import TrajectoryRecorder
 
@@ -39,6 +40,7 @@ __all__ = [
     "HarnessRunner",
     "ModelCapabilitySnapshot",
     "RunRequest",
+    "build_evaluation_identity",
 ]
 
 
@@ -166,6 +168,66 @@ class RunRequest:
     random_seed: int
     budgets: Budgets = field(default_factory=Budgets)
     experiment_assignments: list[dict[str, Any]] = field(default_factory=list)
+    # Optional identity inputs. Missing policy/config inputs are recorded as
+    # explicit markers and make paired promotion ineligible.
+    task_version: str | None = None
+    repository_digest: str | None = None
+    model_version: str | None = None
+    sampling_config_hash: str | None = None
+    sandbox_policy_hash: str | None = None
+    network_policy: str | None = None
+    tool_schema_hash: str | None = None
+    instruction_hash: str | None = None
+    harness_config_hash: str | None = None
+
+
+def build_evaluation_identity(
+    request: RunRequest,
+    *,
+    environment_digest: str,
+) -> EvaluationIdentity:
+    """Derive the locked identity used by the runner's actual run path.
+
+    Explicit request fields win. The runner derives stable hashes for model,
+    budgets, and experiment assignments. Policy and task fields that are not
+    supplied are marked as missing instead of being replaced with guessed
+    values, so the resulting record cannot qualify for promotion by accident.
+    """
+    source_commit = _read_or(request.task_dir / "task.yaml", "source_commit")
+    if source_commit.startswith("source_commit="):
+        source_commit = "missing:task_source_commit"
+    task_version = request.task_version or source_commit
+    repository_digest = request.repository_digest or source_commit
+    return EvaluationIdentity(
+        task_id=request.task,
+        task_version=task_version,
+        repository_digest=repository_digest,
+        environment_digest=environment_digest,
+        harness_id=request.harness_id,
+        harness_commit=request.harness_commit,
+        harness_config_hash=request.harness_config_hash
+        or _stable_hash(
+            {"harness_id": request.harness_id, "assignments": request.experiment_assignments}
+        ),
+        provider=request.model_snapshot.provider,
+        model=request.model_snapshot.model,
+        model_version=request.model_version or request.model_snapshot.api_version,
+        model_capability_snapshot_hash=_stable_hash(request.model_snapshot.to_dict()),
+        random_seed=request.random_seed,
+        sampling_config_hash=request.sampling_config_hash
+        or _stable_hash(request.experiment_assignments),
+        sandbox_policy_hash=request.sandbox_policy_hash or "missing:sandbox_policy_hash",
+        network_policy=request.network_policy or "missing:network_policy",
+        budget_hash=_stable_hash(request.budgets.to_dict()),
+        tool_schema_hash=request.tool_schema_hash or "missing:tool_schema_hash",
+        instruction_hash=request.instruction_hash or "missing:instruction_hash",
+    )
+
+
+def _stable_hash(value: object) -> str:
+    """Hash JSON-compatible identity inputs with one canonical encoding."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -290,6 +352,10 @@ class HarnessRunner:
             random_seed=request.random_seed,
             model_capability_snapshot=request.model_snapshot.to_dict(),
             budgets=request.budgets.to_dict(),
+            evaluation_identity=build_evaluation_identity(
+                request,
+                environment_digest=env_digest.to_digest(),
+            ),
         )
         record.experiment_assignments = list(request.experiment_assignments)
 
@@ -332,6 +398,11 @@ class HarnessRunner:
         record.outcome = outcome
         if result.environment_digest is not None:
             record.environment_digest = result.environment_digest
+            if record.evaluation_identity is not None:
+                record.evaluation_identity = replace(
+                    record.evaluation_identity,
+                    environment_digest=record.environment_digest,
+                )
         record.end = utc_now()
         record.cost = result.cost
         record.artifacts = list(result.artifacts)

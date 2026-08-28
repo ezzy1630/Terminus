@@ -10,11 +10,14 @@ from .baseline_adapters import (
     ClaudeCodeAdapter,
     CodexAdapter,
     ExternalHarnessUnavailable,
+    HarnessSelection,
     OhMyPiAdapter,
     PiAdapter,
     TerminusFullAdapter,
     TerminusMinimalAdapter,
+    canonical_harness_id,
     get_baseline_harness,
+    select_harness,
 )
 from .benchmark_adapters import (
     SWE_BENCH_HARNESS_COMMIT,
@@ -65,6 +68,7 @@ from .harness_runner import (
     HarnessRunner,
     ModelCapabilitySnapshot,
     RunRequest,
+    build_evaluation_identity,
     make_default_cost,
 )
 from .mini_swe_adapter import MiniSweAgentAdapter, MiniSweAgentTurn
@@ -101,6 +105,7 @@ __all__ = [
     "Harness",
     "HarnessResult",
     "HarnessRunner",
+    "HarnessSelection",
     "HarnessSpec",
     "LiveBenchmarkHarness",
     "MiniSweAgentAdapter",
@@ -118,10 +123,13 @@ __all__ = [
     "TrajectoryRecorder",
     "TranslatedTaskManifest",
     "adapter_for_suite",
+    "build_evaluation_identity",
+    "canonical_harness_id",
     "fake_text_provider",
     "fake_tool_call_provider",
     "get_baseline_harness",
     "load_benchmark_manifest",
     "make_default_cost",
     "run_paired_comparison",
+    "select_harness",
 ]

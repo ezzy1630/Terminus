@@ -55,7 +55,9 @@ from .runners import (
     HarnessRunner,
     ModelCapabilitySnapshot,
     RunRequest,
+    build_evaluation_identity,
     make_default_cost,
+    select_harness,
 )
 
 __all__ = ["main"]
@@ -372,6 +374,7 @@ def build_live_run_record(
                 "truncated": bool(patch_payload.get("truncated")),
             }
         )
+    environment_digest = f"remote:{notes.get('workspace_id', 'unknown')}"
     return RunRecord(
         run_id=f"live-{request.suite}-{request.task}-{seed}-{uuid.uuid4().hex[:8]}",
         suite=request.suite,
@@ -382,7 +385,7 @@ def build_live_run_record(
             "provider": request.model_snapshot.provider,
             "model": request.model_snapshot.model,
         },
-        environment_digest=f"remote:{notes.get('workspace_id', 'unknown')}",
+        environment_digest=environment_digest,
         random_seed=seed,
         budgets={},
         experiment_assignments=[],
@@ -401,6 +404,10 @@ def build_live_run_record(
                 "evaluation": ("pending_grader" if patch_payload.get("diff") else "no_patch"),
             },
             sort_keys=True,
+        ),
+        evaluation_identity=build_evaluation_identity(
+            request,
+            environment_digest=environment_digest,
         ),
     )
 
@@ -430,6 +437,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
         return 2
 
+    selection = select_harness(args.harness, fixture_mode=True)
     harness_runner = HarnessRunner(harness=FakeScriptHarness(result=_fake_result(args)))
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -440,7 +448,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             suite=args.suite,
             task=args.task,
             task_dir=Path(args.task_dir),
-            harness_id=args.harness,
+            harness_id=selection.harness_id,
             harness_commit=args.harness_commit,
             model_snapshot=ModelCapabilitySnapshot(
                 provider=args.provider,

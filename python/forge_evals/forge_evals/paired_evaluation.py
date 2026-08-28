@@ -191,6 +191,14 @@ def derive_paired_evidence(
         if b_identity.harness_id != b.harness or c_identity.harness_id != c.harness:
             issues.append(PairingIssue(pair_key, "identity harness id does not match run record"))
             continue
+        if not b_identity.is_complete or not c_identity.is_complete:
+            issues.append(
+                PairingIssue(
+                    pair_key,
+                    "both records require complete task, policy, tool, and instruction identity",
+                )
+            )
+            continue
         if not b_identity.compatible_model_fixed(c_identity):
             issues.append(PairingIssue(pair_key, "model-fixed identity differs across harnesses"))
             continue

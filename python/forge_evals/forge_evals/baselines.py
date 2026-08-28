@@ -17,11 +17,13 @@ from typing import Any, Literal
 
 __all__ = [
     "BASELINES",
+    "BASELINE_ID_ALIASES",
     "Baseline",
     "ComparisonMode",
     "HarnessCapabilities",
     "all_baseline_ids",
     "baseline_by_id",
+    "canonical_baseline_id",
     "validate_harness_task_compatibility",
 ]
 
@@ -102,7 +104,7 @@ class Baseline:
 
 BASELINES: list[Baseline] = [
     Baseline(
-        id="forge_minimal",
+        id="terminus-minimal",
         name="Terminus minimal",
         description=(
             "Terminus in minimal shell-only mode (SPEC §3.7): Bash, Read, Edit, List, "
@@ -131,7 +133,7 @@ BASELINES: list[Baseline] = [
         supports_native_best=True,
     ),
     Baseline(
-        id="forge_full",
+        id="terminus-full",
         name="Terminus full",
         description=(
             "Terminus with all components enabled: context compiler, orchestration, "
@@ -294,12 +296,26 @@ BASELINES: list[Baseline] = [
 
 _BASELINE_INDEX: dict[str, Baseline] = {b.id: b for b in BASELINES}
 
+# ADR-0052 keeps the historical ids readable for one compatibility window.
+# They are aliases, not additional baselines and must never appear in new
+# tier plans or emitted run records.
+BASELINE_ID_ALIASES: dict[str, str] = {
+    "forge_minimal": "terminus-minimal",
+    "forge_full": "terminus-full",
+}
+
+
+def canonical_baseline_id(baseline_id: str) -> str:
+    """Return the canonical Terminus id for a baseline or compatibility alias."""
+    return BASELINE_ID_ALIASES.get(baseline_id, baseline_id)
+
 
 def baseline_by_id(baseline_id: str) -> Baseline:
     """Return the baseline with ``baseline_id`` or raise ``KeyError``."""
-    if baseline_id not in _BASELINE_INDEX:
+    canonical_id = canonical_baseline_id(baseline_id)
+    if canonical_id not in _BASELINE_INDEX:
         raise KeyError(f"unknown baseline id: {baseline_id!r}")
-    return _BASELINE_INDEX[baseline_id]
+    return _BASELINE_INDEX[canonical_id]
 
 
 def all_baseline_ids() -> list[str]:
