@@ -90,34 +90,44 @@ const unavailableKernel: ScopedDelegationKernelPort = {
 describe("control-plane composition", () => {
   it("persists scoped admission and fails closed through restart recovery without a dispatcher", async () => {
     const driver = new BunSqliteDriver();
-    const repository = new SqliteDurableTaskRepository(new SqliteDatabaseAdapter(driver));
-    let idSequence = 0;
-    const service = new DurableScopedDelegationService({
-      repo: repository,
-      kernel: unavailableKernel,
-      idSource: () => `event-${++idSequence}`,
-      clock: () => NOW,
-      maxRecoveryAttempts: 1,
-    });
+    try {
+      const repository = new SqliteDurableTaskRepository(new SqliteDatabaseAdapter(driver));
+      let idSequence = 0;
+      const service = new DurableScopedDelegationService({
+        repo: repository,
+        kernel: unavailableKernel,
+        idSource: () => `event-${++idSequence}`,
+        clock: () => NOW,
+        maxRecoveryAttempts: 1,
+      });
 
-    const admitted = await service.admit({
-      id: "execution-1",
-      taskId: "task-1",
-      parentTurnId: "turn-1",
-      contract: contract(),
-      idempotencyKey: "delegation-1",
-    });
-    expect(admitted.execution.state).toBe("ADMITTED");
+      const admitted = await service.admit({
+        id: "execution-1",
+        taskId: "task-1",
+        parentTurnId: "turn-1",
+        contract: contract(),
+        idempotencyKey: "delegation-1",
+      });
+      expect(admitted.execution.state).toBe("ADMITTED");
 
-    const interrupted = await service.start(admitted.execution.id);
-    expect(interrupted.state).toBe("INTERRUPTED");
+      const interrupted = await service.start(admitted.execution.id);
+      expect(interrupted.state).toBe("INTERRUPTED");
 
-    const recovery = await service.recoverAfterRestart("task-1");
-    expect(recovery).toHaveLength(1);
-    expect(recovery[0]?.outcome).toBe("manual_review");
-    expect(recovery[0]?.execution.state).toBe("MANUAL_REVIEW");
-    expect((await repository.getScopedDelegation("execution-1"))?.state).toBe("MANUAL_REVIEW");
-    driver.database.close();
+      const restartedRepository = new SqliteDurableTaskRepository(new SqliteDatabaseAdapter(driver));
+      const restartedService = new DurableScopedDelegationService({
+        repo: restartedRepository,
+        kernel: unavailableKernel,
+        clock: () => NOW,
+        maxRecoveryAttempts: 1,
+      });
+      const recovery = await restartedService.recoverAfterRestart("task-1");
+      expect(recovery).toHaveLength(1);
+      expect(recovery[0]?.outcome).toBe("manual_review");
+      expect(recovery[0]?.execution.state).toBe("MANUAL_REVIEW");
+      expect((await restartedRepository.getScopedDelegation("execution-1"))?.state).toBe("MANUAL_REVIEW");
+    } finally {
+      driver.database.close();
+    }
   });
 
   it("only admits an observation when the configured coordinator has a trusted verifier", () => {

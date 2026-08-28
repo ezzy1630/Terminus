@@ -580,7 +580,14 @@ function sqliteDatabasePath(url: string): string {
     throw new Error("terminus-control scoped delegation storage requires a file: DATABASE_URL");
   }
   const path = url.slice("file:".length).split("?", 1)[0] ?? "";
-  if (path.length === 0 || path.startsWith("//")) {
+  if (path.length === 0) {
+    throw new Error("terminus-control scoped delegation storage requires a local SQLite file path");
+  }
+  // `file:///absolute/path` is the URI form of the same local path accepted
+  // by Prisma as `file:/absolute/path`. Reject `file://host/path` instead of
+  // allowing a remote authority to be interpreted as a local filename.
+  if (path.startsWith("///")) return path.slice(2);
+  if (path.startsWith("//")) {
     throw new Error("terminus-control scoped delegation storage requires a local SQLite file path");
   }
   return path;
@@ -638,7 +645,6 @@ const scopedDelegationRepository = new SqliteDurableTaskRepository(
  * stays explicit and fail-closed instead of treating a process-local worker
  * or a generic extension call as trusted execution.
  */
-const trustedScopedDelegationKernel: ScopedDelegationKernelPort | null = null;
 const unavailableScopedDelegationKernel: ScopedDelegationKernelPort = {
   start: async () => {
     throw new SandboxUnavailableError(
@@ -653,7 +659,7 @@ const unavailableScopedDelegationKernel: ScopedDelegationKernelPort = {
 };
 const scopedDelegationService = new DurableScopedDelegationService({
   repo: scopedDelegationRepository,
-  kernel: trustedScopedDelegationKernel ?? unavailableScopedDelegationKernel,
+  kernel: unavailableScopedDelegationKernel,
 });
 
 const CONTROL_WRITER_LEASE_KEY = "terminus-control-writer";
@@ -1790,9 +1796,9 @@ interface TrustedComputerUseBackend {
 }
 
 /**
- * Browser/desktop execution is enabled only by one authenticated adapter that
- * owns observation verification, settlement verification, and pool leases.
- * A configured kernel socket alone is not sufficient evidence of that binding.
+ * No authenticated browser/desktop adapter is linked in this composition
+ * root. Keep the unavailable value explicit: a kernel socket alone cannot
+ * prove observation verification, settlement verification, or pool leases.
  */
 function resolveTrustedComputerUseBackend(): TrustedComputerUseBackend | null {
   return null;
@@ -16546,8 +16552,11 @@ async function shutdownControl(): Promise<void> {
   await releaseControlWriterLease().catch((error: unknown) => {
     console.error("[terminus-control] failed to release writer lease", error);
   });
-  await db.$disconnect();
-  scopedDelegationDatabase.close();
+  try {
+    await db.$disconnect();
+  } finally {
+    scopedDelegationDatabase.close();
+  }
 }
 
 process.on("SIGINT", () => { void shutdownControl().finally(() => process.exit(0)); });
