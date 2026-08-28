@@ -1,4 +1,4 @@
-# Forge — Complete Product, Architecture, Security, and Implementation Specification
+# Terminus — Complete Product, Architecture, Security, and Implementation Specification
 
 **Document:** `SPEC.md`  
 **Version:** 1.0.0  
@@ -1572,8 +1572,8 @@ At minimum:
 - Pi;
 - Oh My Pi;
 - mini-SWE-agent;
-- Forge minimal mode;
-- Forge full mode.
+- Terminus minimal mode;
+- Terminus full mode.
 
 Run two comparison modes:
 
@@ -1985,7 +1985,7 @@ Architecture should make these swappable.
 
 # 25. Final reference specification
 
-Forge is:
+Terminus is:
 
 > **A standalone, provider-neutral coding-agent system with its own runtime protocol and public clients; enforced by a non-bypassable Rust effect microkernel; driven by a typed, provenance-bearing Context Compiler with provider-specific renderers; equipped with a small empirically optimized ACI and progressively disclosed skills/MCP capabilities; capable of durable scoped worktree agents and external harness workers; and governed by an integrated evidence laboratory that requires every feature to prove its effect on correctness, cost, latency, continuity, maintainability, and safety.**
 
@@ -2011,9 +2011,9 @@ A harness that can answer those questions and improve from the answers has a cre
 
 ## 26.1 Product definition
 
-Forge is a local-first coding-agent operating system that can inspect, modify, execute, test, review, and explain software changes while preserving an exact record of model inputs, environmental effects, security decisions, evidence, cost, and uncertainty.
+Terminus is a local-first coding-agent operating system that can inspect, modify, execute, test, review, and explain software changes while preserving an exact record of model inputs, environmental effects, security decisions, evidence, cost, and uncertainty.
 
-Forge is not merely a conversational CLI. The durable product is the combination of:
+Terminus is not merely a conversational CLI. The durable product is the combination of:
 
 - a task and session runtime;
 - a canonical Context Compiler;
@@ -2030,7 +2030,7 @@ A UI process MAY disconnect without stopping a task. A model provider MAY change
 
 ## 26.2 Product modes
 
-Forge MUST support the following modes. Each mode is a policy profile over the same domain model; it is not a separate implementation.
+Terminus MUST support the following modes. Each mode is a policy profile over the same domain model; it is not a separate implementation.
 
 | Mode | Purpose | Writable effects | Network | Agents | Default verification |
 |---|---|---:|---:|---:|---|
@@ -2059,12 +2059,12 @@ The following invariants are release blockers:
 8. **No implicit extension authority.** Skills, plugins, MCP servers, and external harnesses MUST declare capabilities and execute under enforceable scopes.
 9. **No blind retry of uncertain effects.** An operation with an unknown settlement state MUST be reconciled before retry.
 10. **No unpinned experiment as a default.** A feature that affects context, tools, routing, compression, memory, or orchestration MUST carry a version and an evaluation record.
-11. **No unreported degradation.** When the requested sandbox or policy cannot be enforced, Forge MUST fail closed or require explicit user selection of a named degraded profile.
+11. **No unreported degradation.** When the requested sandbox or policy cannot be enforced, Terminus MUST fail closed or require explicit user selection of a named degraded profile.
 12. **No inherited runtime dependency.** First-party runtime and build code MUST pass `just standalone-check`; external harnesses integrate only through provider-neutral adapter protocols.
 
 ## 26.4 Goals
 
-Forge SHALL:
+Terminus SHALL:
 
 - maximize verified task success subject to cost, latency, security, and maintainability constraints;
 - support multiple model providers and local models without leaking provider concepts into the canonical domain;
@@ -2145,24 +2145,24 @@ The status MUST appear in the relevant ADR and machine-readable decision registr
 A standard local installation consists of these processes:
 
 ```text
-forge client(s)
+Terminus client(s)
     │ HTTPS/UDS HTTP + SSE
     ▼
-forge-control (TypeScript)
+terminus-control (TypeScript)
     │ gRPC over Unix domain socket
     ▼
-forge-kernel (Rust, privileged effect boundary)
+terminus-kernel (Rust, privileged effect boundary)
     ├── sandboxed command/job processes
     ├── LSP/DAP/index workers
     ├── plugin/WASI workers
     ├── MCP server processes
     └── external harness adapter processes
 
-forge-eval (Python, offline or isolated)
+terminus-eval (Python, offline or isolated)
     └── reads exported traces/artifacts; never owns production effects
 ```
 
-`forge-control` owns cognition and product state. `forge-kernel` owns authority to affect the host or external systems. Clients own presentation and user interaction. Python owns offline analysis only.
+`terminus-control` owns cognition and product state. `terminus-kernel` owns authority to affect the host or external systems. Clients own presentation and user interaction. Python owns offline analysis only.
 
 ## 27.2 Trust zones
 
@@ -2517,7 +2517,7 @@ Events MUST be immutable. Corrections are new events. High-volume byte streams s
 
 ## 29.1 Storage responsibilities
 
-Forge uses a hybrid storage model:
+Terminus uses a hybrid storage model:
 
 - **SQLite/WAL** for authoritative indexed operational state;
 - **semantic audit events** for explanation, recovery, and replay;
@@ -2642,7 +2642,7 @@ Startup recovery procedure:
 9. expose tasks as resumable, blocked, or requiring manual review;
 10. emit a recovery report artifact.
 
-Forge MUST NOT silently continue a turn if doing so could duplicate an external effect.
+Terminus MUST NOT silently continue a turn if doing so could duplicate an external effect.
 
 ## 29.6 Backups and export
 
@@ -2666,7 +2666,7 @@ Exports MUST be self-describing, versioned, checksum-listed, and redactable. A r
 
 ## 30.1 Three protocol boundaries
 
-Forge MUST NOT use one protocol to serve three incompatible purposes.
+Terminus MUST NOT use one protocol to serve three incompatible purposes.
 
 ### Boundary A — Public product API
 
@@ -2698,7 +2698,7 @@ Purpose: run Codex, Claude Code, Pi, Oh My Pi, OpenHands, Omnigent, or future sy
 
 - Transport: subprocess stdio JSON-RPC by default; remote adapters MAY use authenticated streaming HTTP.
 - Contract: normalized lifecycle, capability profile, task contract, budget, event stream, artifact export, cancellation, and typed result.
-- Isolation: adapter and inner harness run inside an outer Forge sandbox.
+- Isolation: adapter and inner harness run inside an outer Terminus sandbox.
 - Honesty: unsupported or opaque semantics MUST be declared; the adapter MUST NOT fabricate context visibility or enforcement capabilities.
 
 ## 30.2 Compatibility rules
@@ -3021,7 +3021,7 @@ The kernel MUST resolve the executable independently of the model-provided displ
 - Case normalization is platform aware.
 - Windows device names, alternate data streams, UNC paths, and reparse points receive explicit handling.
 - Nonexistent targets are resolved against the nearest existing ancestor and checked after creation.
-- Protected paths such as `.git`, Forge state, credential stores, and sandbox control sockets are re-mounted or ACL-protected even when their parent is writable.
+- Protected paths such as `.git`, Terminus state, credential stores, and sandbox control sockets are re-mounted or ACL-protected even when their parent is writable.
 
 ## 31.6 Capability tokens
 
@@ -3880,7 +3880,7 @@ The selected dialect MAY vary by model, but the kernel normalizes every operatio
 17. verify final hashes and repository status;
 18. emit result and release leases.
 
-Multi-file application is **atomic at the Forge transaction layer**, not claimed to be one native filesystem operation. The journal and snapshots guarantee recovery from partial host-level application.
+Multi-file application is **atomic at the Terminus transaction layer**, not claimed to be one native filesystem operation. The journal and snapshots guarantee recovery from partial host-level application.
 
 ## 34.9 Patch validation profiles
 
@@ -4137,7 +4137,7 @@ Installation, activation, and invocation are separate decisions.
 
 ## 35.2 Skills
 
-Forge SHALL support the open Agent Skills structure:
+Terminus SHALL support the open Agent Skills structure:
 
 ```text
 skill-name/
@@ -4147,7 +4147,7 @@ skill-name/
   assets/
 ```
 
-Forge adds an optional `forge.skill.yaml`:
+Terminus accepts the compatibility manifest `forge.skill.yaml`; new manifests use `terminus.skill.yaml`:
 
 ```yaml
 skill:
@@ -4235,11 +4235,11 @@ A changed descriptor, schema, server version, package digest, or requested scope
 - Server-generated instructions are untrusted data.
 - Secrets are provided as opaque handles or child-process injection, never in model arguments.
 - Tool outputs are bounded and artifact-backed.
-- Rate and concurrency limits are enforced by Forge, not trusted to the server.
+- Rate and concurrency limits are enforced by Terminus, not trusted to the server.
 
 ## 35.7 Programmatic tool composition mode
 
-`EXPERIMENTAL`: for large catalogs or data-heavy workflows, Forge MAY expose generated typed clients inside a sandboxed code runner.
+`EXPERIMENTAL`: for large catalogs or data-heavy workflows, Terminus MAY expose generated typed clients inside a sandboxed code runner.
 
 Constraints:
 
@@ -4296,7 +4296,7 @@ A hook MUST NOT mutate arbitrary in-memory objects. Hook ordering is determinist
 
 ## 35.10 Extension installation
 
-Forge MUST NOT automatically run arbitrary package installation scripts at every startup. Installation is an explicit, isolated operation:
+Terminus MUST NOT automatically run arbitrary package installation scripts at every startup. Installation is an explicit, isolated operation:
 
 1. resolve and pin package graph;
 2. verify checksums/signatures and policy;
@@ -4338,7 +4338,7 @@ The profile is generated from live probes when possible. Declared capability and
 
 ## 35.12 Delegating to an external harness
 
-Forge gives the adapter:
+Terminus gives the adapter:
 
 - a scoped task contract;
 - a disposable or isolated worktree;
@@ -4348,14 +4348,14 @@ Forge gives the adapter:
 - an output/result schema;
 - stop and cancellation conditions.
 
-Forge independently inspects the final workspace, collects artifacts, and runs verification. Inner-harness self-report is not sufficient evidence.
+Terminus independently inspects the final workspace, collects artifacts, and runs verification. Inner-harness self-report is not sufficient evidence.
 
 
 # 36. Security implementation contract
 
 ## 36.1 Security objectives
 
-Forge SHALL protect:
+Terminus SHALL protect:
 
 - host filesystem and user data;
 - repository integrity and Git metadata;
@@ -4376,13 +4376,13 @@ The security design assumes the model, repository, external content, third-party
 - a malicious repository author;
 - a compromised npm/PyPI/crate/MCP/skill package;
 - a malicious plugin or external harness;
-- an attacker with access to a remote Forge endpoint;
+- an attacker with access to a remote Terminus endpoint;
 - another tenant in a shared execution environment;
 - accidental user approval or misconfiguration;
 - compromised provider or leaked provider response;
-- local malware outside Forge, which is only partially in scope.
+- local malware outside Terminus, which is only partially in scope.
 
-Forge does not claim to defend a user from a fully compromised host administrator. It MUST clearly state this boundary.
+Terminus does not claim to defend a user from a fully compromised host administrator. It MUST clearly state this boundary.
 
 ## 36.3 Security control layers
 
@@ -4600,7 +4600,7 @@ Changing any material field invalidates the approval. A model cannot reinterpret
 
 ## 36.12 Network egress broker
 
-Direct outbound sockets are denied in the secure profile. Network-enabled processes operate in an isolated namespace whose only reachable destination is a Forge proxy bridge.
+Direct outbound sockets are denied in the secure profile. Network-enabled processes operate in an isolated namespace whose only reachable destination is a Terminus proxy bridge.
 
 The broker enforces:
 
@@ -4614,7 +4614,7 @@ The broker enforces:
 - destination-bound credential injection;
 - no implicit proxy credential exposure to the model.
 
-Forge SHOULD avoid TLS interception. Authorization is based on the requested CONNECT/HTTP destination plus broker-controlled DNS and routing. When content inspection is required, it is an explicit enterprise policy with separate trust implications.
+Terminus SHOULD avoid TLS interception. Authorization is based on the requested CONNECT/HTTP destination plus broker-controlled DNS and routing. When content inspection is required, it is an explicit enterprise policy with separate trust implications.
 
 ## 36.13 Secret broker
 
@@ -4643,13 +4643,13 @@ Model-visible messages contain only the capability URI and outcome. Secret redac
 ## 36.14 Repository and Git protection
 
 - `.git` and resolved external gitdirs are read-only in ordinary agent sandboxes.
-- Forge performs commits, branches, worktrees, resets, and merges through dedicated kernel methods with policy checks.
+- Terminus performs commits, branches, worktrees, resets, and merges through dedicated kernel methods with policy checks.
 - Git hooks from untrusted repositories are disabled unless explicitly admitted.
 - Config includes are sanitized.
 - Credential helpers are brokered.
 - Submodules and LFS filters are treated as executable supply-chain inputs.
 - Clean/smudge filters are disabled in untrusted workspaces unless required and sandboxed.
-- Worktree deletion validates ownership and refuses paths outside the Forge-managed root.
+- Worktree deletion validates ownership and refuses paths outside the Terminus-managed root.
 
 ## 36.15 Prompt injection and taint tracking
 
@@ -4681,7 +4681,7 @@ The system prompt alone is not a defense. Enforcement rests on capability bounda
 
 ## 36.16 Intent-action authorization check
 
-Before a sensitive effect, Forge compares:
+Before a sensitive effect, Terminus compares:
 
 - authenticated user request and task contract;
 - action class and target;
@@ -5265,7 +5265,7 @@ The default implementation-agent profile is `terse`. Post-processing MAY remove 
 
 ## 38.10 Token efficiency hierarchy
 
-Forge optimizes in this order:
+Terminus optimizes in this order:
 
 1. omit irrelevant schemas and capabilities;
 2. retrieve a narrow working set;
@@ -5374,7 +5374,7 @@ The broker implements:
 
 ## 39.1 Separation of memory classes
 
-Forge distinguishes:
+Terminus distinguishes:
 
 1. **authoritative repository knowledge** — versioned files such as `AGENTS.md`, ADRs, runbooks, and architecture docs;
 2. **working memory** — current task contract, plan, progress, failures, unknowns, jobs, and evidence;
@@ -5678,20 +5678,20 @@ Each product uses its strongest supported configuration. Results answer product 
 
 ### Component ablation
 
-Forge varies one or more versioned components within controlled runs.
+Terminus varies one or more versioned components within controlled runs.
 
 ## 41.2 Permanent baselines
 
 Maintain pinned runners for:
 
-- the Forge minimal shell baseline;
+- the Terminus minimal shell baseline;
 - OpenCode as an external comparison where automation and licensing permit;
 - current Codex;
 - current Claude Code where automation/licensing permits;
 - Pi;
 - Oh My Pi;
 - mini-SWE-agent or another minimal terminal agent;
-- Forge full mode.
+- Terminus full mode.
 
 Baselines are refreshed deliberately; old results retain exact version metadata.
 
@@ -6125,7 +6125,7 @@ TypeScript owns product semantics, context, providers, clients, and rapid extens
 
 - Target modern Node.js LTS and standards-based ESM.
 - Production Terminus packages MUST NOT use Bun-specific APIs. Tests and repository tooling MAY use the pinned Bun runner.
-- Use `pnpm` workspaces for Forge-owned package management.
+- Use the repository package manager for Terminus-owned package management.
 - Use Effect where typed service composition benefits; do not require Effect in leaf utility packages without reason.
 - Use runtime schemas at every boundary.
 - Use generated clients rather than hand-written wire code.
@@ -6516,7 +6516,7 @@ Scaffolds include README, AGENTS, tests, ownership, lint config, observability p
 
 ## 45.8 Agent-assisted code generation workflow
 
-Coding agents implementing Forge MUST follow:
+Coding agents implementing Terminus MUST follow:
 
 1. read root and scoped `AGENTS.md`;
 2. load the relevant ADR and package README;
@@ -6554,7 +6554,7 @@ This order allows clients and tests to develop before privileged behavior exists
 
 ## 46.1 Testing layers
 
-Forge uses these layers:
+Terminus uses these layers:
 
 1. unit tests;
 2. property tests;
@@ -7130,10 +7130,10 @@ The product needs one canonical runtime architecture. ARP, the public API and cl
 2. Inventory all first-party effect paths: process, filesystem, network, environment, plugin, MCP, LSP, formatter, and Git.
 3. Add exact provider-request capture at Terminus provider boundaries.
 4. Capture tool definitions and provider options used per request.
-5. Introduce Forge task contracts over the canonical session behavior.
+5. Introduce Terminus task contracts over the canonical session behavior.
 6. Introduce a context-manifest skeleton linked to provider attempts.
 7. Add an artifact store for bounded tool spill output.
-8. Define the public Forge API and generated client skeleton.
+8. Define the public Terminus API and generated client skeleton.
 9. Implement the four substrate tests:
    - exact context visibility;
    - total effect interception feasibility;
@@ -7142,8 +7142,8 @@ The product needs one canonical runtime architecture. ARP, the public API and cl
 10. Declare direct workspace dependencies from the public API to ARP and from the public client to the public API.
 11. Add current-to-previous protocol and client compatibility fixtures.
 12. Keep production packages Node-compatible; limit Bun use to tests and repository tooling.
-13. Disable or contain automatic plugin installation in the secure Forge profile.
-14. Require explicit extension lockfiles for Forge mode.
+13. Disable or contain automatic plugin installation in the secure Terminus profile.
+14. Require explicit extension lockfiles for Terminus mode.
 15. Adopt ADR-0039 and remove the retired bridge, source pin, overlays, and fork gates.
 
 ### Deliverables
@@ -7205,7 +7205,7 @@ Establish the privileged Rust boundary and route all new effects through it.
 9. Implement durable jobs and PTY streams.
 10. Implement control-plane kernel client and fake kernel.
 11. Route one inherited command path through the kernel.
-12. Route all Forge-owned commands through the kernel.
+12. Route all Terminus-owned commands through the kernel.
 13. Add direct-effect architecture checks in TypeScript.
 14. Add process restart and job reconciliation.
 15. Add kernel protocol compatibility tests.
@@ -7213,7 +7213,7 @@ Establish the privileged Rust boundary and route all new effects through it.
 
 ### Exit gate
 
-No Forge-owned process or file mutation bypasses the kernel. Remaining inherited bypasses are known, contained, tested, and scheduled for removal.
+No Terminus-owned process or file mutation bypasses the kernel. Remaining inherited bypasses are known, contained, tested, and scheduled for removal.
 
 ## 48.7 Milestone M4 — Sandbox, policy, secrets, network, and Git protection
 
@@ -7225,7 +7225,7 @@ Make the effect boundary enforce meaningful security.
 
 1. Implement common sandbox policy model and backend trait.
 2. Implement Linux Bubblewrap backend with read-only root and writable worktree.
-3. Re-protect `.git`, Forge state, secret paths, and denied globs.
+3. Re-protect `.git`, Terminus state, secret paths, and denied globs.
 4. Add user/PID/network namespaces, no-new-privileges, seccomp, and cgroup controls.
 5. Implement explicit degraded-mode detection and reporting.
 6. Implement structured command normalization and shell AST parser.
@@ -7750,7 +7750,7 @@ A release candidate is not complete until every applicable item is checked with 
 - [ ] Direct network sockets are blocked where claimed.
 - [ ] Secret values do not enter model-visible context.
 - [ ] Policy and approval binding tests pass.
-- [ ] Git metadata and Forge state are protected.
+- [ ] Git metadata and Terminus state are protected.
 - [ ] Malicious plugin/MCP/descriptor tests pass.
 - [ ] Prompt-injection tasks cannot cause unauthorized effects.
 - [ ] Supply-chain scans and SBOM are complete.
@@ -9330,7 +9330,7 @@ Lower layers cannot weaken non-overridable organization or platform controls. Th
 # Appendix G — Root `AGENTS.md` template
 
 ```markdown
-# Forge repository instructions
+# Terminus repository instructions
 
 ## Mission
 
@@ -9441,7 +9441,7 @@ Each package/crate `AGENTS.md` adds local boundaries and commands but may not we
 | ADR-0014 | Linux Bubblewrap secure backend | ADOPTED |
 | ADR-0015 | Proxy-only default network egress | ADOPTED |
 | ADR-0016 | Capability-based secret broker | ADOPTED |
-| ADR-0017 | Agent Skills compatibility with Forge manifest extension | ADOPTED |
+| ADR-0017 | Agent Skills compatibility with the legacy manifest extension | ADOPTED |
 | ADR-0018 | MCP as isolated capability source, not trust boundary | ADOPTED |
 | ADR-0019 | Third-party plugins out of process/WASI | ADOPTED |
 | ADR-0020 | Single-agent default and expected-value scheduling | ADOPTED |
@@ -9450,7 +9450,7 @@ Each package/crate `AGENTS.md` adds local boundaries and commands but may not we
 | ADR-0023 | Durable memory disabled until precision/harm gate passes | ADOPTED |
 | ADR-0024 | External text compression shadow-only by default | ADOPTED |
 | ADR-0025 | Permanent minimal baseline and feature promotion gates | ADOPTED |
-| ADR-0026 | Node-compatible Forge packages; Bun isolated to upstream bridge | SUPERSEDED by ADR-0039 |
+| ADR-0026 | Node-compatible Terminus packages; Bun isolated to upstream bridge | SUPERSEDED by ADR-0039 |
 | ADR-0027 | Container/micro-VM backend selection | ADOPTED (OCI digest-pinned) |
 | ADR-0028 | Semantic index implementation | OPEN |
 | ADR-0029 | Public WebSocket transport | OPEN |
@@ -9566,7 +9566,7 @@ Every published result includes:
 - Project README benchmark numbers are treated as project-reported until reproduced.
 - Vendor compression results are treated as vendor-reported until independently reproduced.
 - Provider caching and continuation behavior is consumed through a tested capability registry because APIs and models change.
-- Security papers demonstrate plausible attack classes; production controls are validated against concrete Forge threat fixtures.
+- Security papers demonstrate plausible attack classes; production controls are validated against concrete Terminus threat fixtures.
 - The specification prefers primary papers, official repositories, and official documentation over summaries.
 
 ## J.3 Key evidence translated into requirements
@@ -9579,7 +9579,7 @@ Every published result includes:
 | SWE-agent ACI ablations show file-view/edit/search feedback matters | ACI treated as first-order, benchmarked subsystem |
 | OpenCode typed context sources and epochs provide useful research evidence | implement the useful behavior behind Terminus-owned Context IR and epoch contracts |
 | Codex app-server and Linux sandbox demonstrate typed runtime and OS enforcement patterns | generated protocols, bounded queues, Bubblewrap-class kernel |
-| OpenCode plugins can auto-install packages and receive shell access in the upstream model | secure Forge profile isolates installation and removes ambient plugin authority |
+| OpenCode plugins can auto-install packages and receive shell access in the upstream model | secure Terminus profile isolates installation and removes ambient plugin authority |
 | MCP permits powerful tool interoperability while security remains implementation responsibility | descriptor pinning, isolation, per-tool scopes, reauthorization |
 | Multi-agent systems can be token intensive and coding work often overlaps | one-agent default and expected-value scheduler |
 | Aider repo maps/edit formats show model-specific ACI value | graph-ranked map and edit-dialect experiments |

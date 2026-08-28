@@ -14,14 +14,11 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Forge — Public API",
+  title: "Terminus",
   description:
-    "Forge public API surface. The durable clients are the TUI (apps/tui/) and CLI (apps/cli/). A web dashboard is explicitly optional per SPEC §43.4.",
-  keywords: ["Forge", "coding-agent", "Rust kernel", "control plane", "public API"],
-  authors: [{ name: "Forge" }],
-  icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
-  },
+    "Local coding work with durable state, governed effects, and verification evidence.",
+  keywords: ["Terminus", "coding agent", "effect kernel", "verification"],
+  authors: [{ name: "Terminus" }],
 };
 
 export default function RootLayout({
@@ -30,14 +27,15 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className="dark" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
         <ThemeProvider
           attribute="class"
-          defaultTheme="system"
-          enableSystem
+          defaultTheme="dark"
+          forcedTheme="dark"
+          enableSystem={false}
           disableTransitionOnChange
         >
           {children}

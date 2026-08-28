@@ -12,7 +12,7 @@
  */
 import { z } from "zod";
 import {
-  ForgeError,
+  TerminusError,
   ValidationError,
 } from "@terminus/domain";
 
@@ -308,7 +308,7 @@ export const budgetsConfigSchema = z.object({
   }),
 });
 
-export const forgeConfigSchema = z.object({
+export const terminusConfigSchema = z.object({
   version: z.literal(1).default(1),
   dataDir: z.string().default("~/.local/share/terminus"),
   runtimeDir: z.string().default("~/.local/run/terminus"),
@@ -341,7 +341,7 @@ export const forgeConfigSchema = z.object({
   budgets: budgetsConfigSchema,
 });
 
-export type ForgeConfig = z.infer<typeof forgeConfigSchema>;
+export type TerminusConfig = z.infer<typeof terminusConfigSchema>;
 
 const UNSAFE_CONFIG_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
@@ -357,14 +357,14 @@ export interface ConfigSource {
 }
 
 export interface LayeredConfigResult {
-  readonly config: ForgeConfig;
+  readonly config: TerminusConfig;
   readonly provenance: Readonly<Record<string, ConfigLayer>>;
   readonly warnings: readonly string[];
 }
 
 /** Compile-secure defaults. Always present, always layer 0. */
 export function compiledDefaults(): Readonly<Record<string, unknown>> {
-  return forgeConfigSchema.parse({}) as unknown as Readonly<Record<string, unknown>>;
+  return terminusConfigSchema.parse({}) as unknown as Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -412,7 +412,7 @@ export function mergeConfigLayers(sources: readonly ConfigSource[]): LayeredConf
 
   let config: ForgeConfig;
   try {
-    config = forgeConfigSchema.parse(merged);
+    config = terminusConfigSchema.parse(merged);
   } catch (err) {
     if (err instanceof z.ZodError) {
       throw new ValidationError("config validation failed", {
@@ -566,4 +566,10 @@ function structuredCloneSafe<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T;
 }
 
-export { ForgeError };
+/** @deprecated Use `terminusConfigSchema`. Removed after the identity migration window. */
+export const forgeConfigSchema = terminusConfigSchema;
+/** @deprecated Use `TerminusConfig`. Removed after the identity migration window. */
+export type ForgeConfig = TerminusConfig;
+export { TerminusError };
+/** @deprecated Use `TerminusError`. Removed after the identity migration window. */
+export { TerminusError as ForgeError };

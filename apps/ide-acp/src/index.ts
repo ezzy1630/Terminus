@@ -24,10 +24,10 @@
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline";
 import { ApprovalDecisionParam, V2_ENDPOINTS } from "@terminus/public-api";
-import { ForgeClient, type MutationRequestOptions } from "@terminus/public-client";
+import { TerminusClient, type MutationRequestOptions } from "@terminus/public-client";
 
 const GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
-let cachedClient: ForgeClient | null = null;
+let cachedClient: TerminusClient | null = null;
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -51,8 +51,8 @@ function terminusToken(): string {
   return token;
 }
 
-function publicClient(): ForgeClient {
-  cachedClient ??= new ForgeClient({
+function publicClient(): TerminusClient {
+  cachedClient ??= new TerminusClient({
     baseUrl: GATEWAY,
     xformPort: 3050,
     token: terminusToken(),
@@ -266,10 +266,24 @@ async function handleRequest(req: JsonRpcRequest): Promise<void> {
       }
       case "terminus/v2/intervene": {
         const p = publicParams(req.params ?? {});
+        const taskId = requiredStringParam(p, "taskId");
+        const verb = requiredStringParam(p, "verb");
+        const taskScopedVerbs = new Set([
+          "elaborate",
+          "change_constraint",
+          "pause",
+          "resume",
+          "takeover",
+          "fork",
+          "terminate",
+          "request_independent_review",
+        ]);
         const input = V2_ENDPOINTS.ProposeInterventionV2.request.parse({
-          ...p,
-          actorPrincipal: typeof p.actorPrincipal === "string" ? p.actorPrincipal : "ide-operator",
-          targetEntityId: p.targetEntityId ?? null,
+          taskId,
+          attemptId: p.attemptId ?? undefined,
+          rationale: requiredStringParam(p, "rationale"),
+          verb,
+          targetEntityId: p.targetEntityId ?? (taskScopedVerbs.has(verb) ? taskId : null),
           payload: p.payload ?? {},
         });
         respond(id, await publicClient().proposeInterventionV2(

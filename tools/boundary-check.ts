@@ -32,7 +32,7 @@
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join, relative, extname } from "node:path";
 
-const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..");
+const ROOT = process.env.TERMINUS_ROOT ?? process.env.FORGE_ROOT ?? join(import.meta.dir, "..");
 const PACKAGES_DIR = join(ROOT, "packages");
 const CRATES_DIR = join(ROOT, "crates");
 const MINI_SERVICES_DIR = join(ROOT, "mini-services");

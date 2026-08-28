@@ -16,7 +16,7 @@
 import { readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
+const ROOT = process.env.TERMINUS_ROOT ?? process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
 const OUT_PATH = join(ROOT, "docs", "generated", "inventory.md");
 
 function countDirs(rel: string): number {

@@ -14,7 +14,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
+const ROOT = process.env.TERMINUS_ROOT ?? process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
 const type = process.argv[2];
 if (!type) {
   console.error("Usage: bun run tools/scaffold/new-event.ts <type> [aggregate]");

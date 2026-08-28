@@ -35,7 +35,7 @@ export const ErrorCategory = z.enum([
 ]);
 export type ErrorCategory = z.infer<typeof ErrorCategory>;
 
-export const ForgeError = z.object({
+export const TerminusError = z.object({
   code: z.string(),
   message: z.string(),
   retryable: z.boolean(),
@@ -44,9 +44,14 @@ export const ForgeError = z.object({
   suggested_action: z.string().nullable().default(null),
   trace_id: z.string().nullable().default(null),
 });
-export type ForgeError = z.infer<typeof ForgeError>;
+export type TerminusError = z.infer<typeof TerminusError>;
 
-export const ErrorResponse = z.object({ error: ForgeError });
+export const ErrorResponse = z.object({ error: TerminusError });
+
+/** @deprecated Use `TerminusError`. Removed after the identity migration window. */
+export const ForgeError = TerminusError;
+/** @deprecated Use `TerminusError`. Removed after the identity migration window. */
+export type ForgeError = TerminusError;
 export type ErrorResponse = z.infer<typeof ErrorResponse>;
 
 // ────────────────────────── Initialization handshake ───────────────────────

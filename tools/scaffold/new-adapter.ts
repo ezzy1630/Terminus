@@ -11,7 +11,7 @@
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
+const ROOT = process.env.TERMINUS_ROOT ?? process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
 const id = process.argv[2];
 
 if (!id) {

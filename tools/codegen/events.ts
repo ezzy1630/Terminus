@@ -16,7 +16,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
+const ROOT = process.env.TERMINUS_ROOT ?? process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
 const SRC = join(ROOT, "schemas", "events", "catalog.yaml");
 const OUT_DIR = join(ROOT, "docs", "generated");
 const OUT = join(OUT_DIR, "events.md");

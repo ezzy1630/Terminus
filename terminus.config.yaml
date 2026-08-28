@@ -1,6 +1,6 @@
-# Forge reference configuration (SPEC Appendix F).
+# Terminus reference configuration (SPEC Appendix F).
 #
-# This file is the canonical, fully-commented Forge configuration. It is
+# This file is the canonical, fully-commented Terminus configuration. It is
 # loaded by `packages/config` after the compiled-secure defaults layer.
 # Per SPEC Appendix F, configuration is layered in the order:
 #
@@ -70,7 +70,7 @@ storage:
 # Provider accounts (SPEC §15). Each account is keyed by an opaque id
 # and references an adapter by name. Credentials are never stored in
 # config; they are brokered as short-lived, destination-scoped tokens by
-# the secret broker (packages/forge-secrets).
+# the secret broker. The historical package name remains documented in ADR-0052.
 providers:
   policy:
     allowed_confidentiality:
@@ -258,7 +258,7 @@ budgets:
 
 # Evaluation laboratory (SPEC §41). The control plane does not load
 # these — they are consumed by the Python eval harness in python/forge_evals.
-# They are listed here so a single forge.config.yaml is a complete
+# They are listed here so a single terminus.config.yaml is a complete
 # description of how a deployment evaluates itself.
 evals:
   suites_dir: evals/suites

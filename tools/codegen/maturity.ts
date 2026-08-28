@@ -21,7 +21,7 @@
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
+const ROOT = process.env.TERMINUS_ROOT ?? process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
 const REGISTRY_PATH = join(ROOT, "maturity.yaml");
 const OUT_PATH = join(ROOT, "docs", "generated", "component-maturity.md");
 

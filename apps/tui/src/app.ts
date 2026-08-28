@@ -1,5 +1,5 @@
 import { stdin, stdout } from "node:process";
-import { ForgeClient } from "@terminus/public-client";
+import { TerminusClient } from "@terminus/public-client";
 import { COMMANDS, commandSuggestions } from "./commands.js";
 import { decodeTerminalInput, type KeyInput, type MouseInput, type TerminalInput } from "./input.js";
 import {
@@ -36,7 +36,7 @@ interface InputPort {
 }
 
 export interface TuiAppOptions {
-  readonly client: ForgeClient;
+  readonly client: TerminusClient;
   readonly terminal?: TerminalPort;
   readonly input?: InputPort;
   readonly now?: () => Date;
@@ -92,7 +92,7 @@ function helpLines(): readonly string[] {
 
 export class TuiApp {
   private stateValue: TuiState = initialState();
-  private readonly client: ForgeClient;
+  private readonly client: TerminusClient;
   private readonly terminal: TerminalPort;
   private readonly input: InputPort;
   private readonly now: () => Date;
@@ -905,6 +905,6 @@ export class TuiApp {
   }
 }
 
-export function createTuiClient(baseUrl: string, token: string): ForgeClient {
-  return new ForgeClient({ baseUrl, xformPort: 3050, token });
+export function createTuiClient(baseUrl: string, token: string): TerminusClient {
+  return new TerminusClient({ baseUrl, xformPort: 3050, token });
 }

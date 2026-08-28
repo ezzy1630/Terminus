@@ -158,7 +158,7 @@ export const RETRYABLE_BY_DEFAULT: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
  * Base class for all Terminus domain errors. Carries a stable code, category,
  * retryability, structured details, a suggested recovery action, and a trace id.
  */
-export class ForgeError extends Error {
+export class TerminusError extends Error {
   readonly code: ErrorCode;
   readonly category: ErrorCategory;
   readonly retryable: boolean;
@@ -177,7 +177,7 @@ export class ForgeError extends Error {
     cause?: unknown | undefined;
   }) {
     super(params.message, { cause: params.cause });
-    this.name = "ForgeError";
+    this.name = "TerminusError";
     this.code = params.code;
     this.category = CODE_CATEGORY[params.code];
     this.retryable = params.retryable ?? RETRYABLE_BY_DEFAULT.has(params.code);
@@ -202,14 +202,14 @@ export class ForgeError extends Error {
   }
 }
 
-export class ValidationError extends ForgeError {
+export class ValidationError extends TerminusError {
   constructor(message: string, details?: Record<string, unknown>) {
     super({ code: "VALIDATION_FAILED", message, details });
     this.name = "ValidationError";
   }
 }
 
-export class NotFoundError extends ForgeError {
+export class NotFoundError extends TerminusError {
   constructor(resource: string, id: string) {
     super({
       code: "NOT_FOUND",
@@ -221,14 +221,14 @@ export class NotFoundError extends ForgeError {
   }
 }
 
-export class ConflictError extends ForgeError {
+export class ConflictError extends TerminusError {
   constructor(code: ErrorCode, message: string, details?: Record<string, unknown>) {
     super({ code, message, details });
     this.name = "ConflictError";
   }
 }
 
-export class StaleSourceVersionError extends ForgeError {
+export class StaleSourceVersionError extends TerminusError {
   constructor(path: string, expected: string, actual: string) {
     super({
       code: "STALE_SOURCE_VERSION",
@@ -241,14 +241,14 @@ export class StaleSourceVersionError extends ForgeError {
   }
 }
 
-export class PermissionError extends ForgeError {
+export class PermissionError extends TerminusError {
   constructor(message: string, details?: Record<string, unknown>) {
     super({ code: "PERMISSION_DENIED", message, details });
     this.name = "PermissionError";
   }
 }
 
-export class PolicyDeniedError extends ForgeError {
+export class PolicyDeniedError extends TerminusError {
   constructor(message: string, details?: Record<string, unknown>) {
     super({
       code: "POLICY_DENIED",
@@ -260,7 +260,7 @@ export class PolicyDeniedError extends ForgeError {
   }
 }
 
-export class ApprovalRequiredError extends ForgeError {
+export class ApprovalRequiredError extends TerminusError {
   constructor(message: string, details?: Record<string, unknown>) {
     super({
       code: "APPROVAL_REQUIRED",
@@ -272,14 +272,14 @@ export class ApprovalRequiredError extends ForgeError {
   }
 }
 
-export class SandboxUnavailableError extends ForgeError {
+export class SandboxUnavailableError extends TerminusError {
   constructor(message: string, details?: Record<string, unknown>) {
     super({ code: "SANDBOX_UNAVAILABLE", message, details });
     this.name = "SandboxUnavailableError";
   }
 }
 
-export class ResourceExhaustedError extends ForgeError {
+export class ResourceExhaustedError extends TerminusError {
   constructor(resource: string, details?: Record<string, unknown>) {
     super({
       code: "RESOURCE_EXHAUSTED",
@@ -290,7 +290,7 @@ export class ResourceExhaustedError extends ForgeError {
   }
 }
 
-export class BudgetExhaustedError extends ForgeError {
+export class BudgetExhaustedError extends TerminusError {
   constructor(scope: string, details?: Record<string, unknown>) {
     super({
       code: "BUDGET_EXHAUSTED",
@@ -301,7 +301,7 @@ export class BudgetExhaustedError extends ForgeError {
   }
 }
 
-export class TimeoutError extends ForgeError {
+export class TimeoutError extends TerminusError {
   constructor(operation: string, timeoutMs: number) {
     super({
       code: "TIMEOUT",
@@ -312,21 +312,21 @@ export class TimeoutError extends ForgeError {
   }
 }
 
-export class CancelledError extends ForgeError {
+export class CancelledError extends TerminusError {
   constructor(operation: string) {
     super({ code: "CANCELLED", message: `${operation} cancelled` });
     this.name = "CancelledError";
   }
 }
 
-export class ProviderError extends ForgeError {
+export class ProviderError extends TerminusError {
   constructor(code: ErrorCode, message: string, details?: Record<string, unknown>) {
     super({ code, message, details });
     this.name = "ProviderError";
   }
 }
 
-export class ExternalDependencyError extends ForgeError {
+export class ExternalDependencyError extends TerminusError {
   constructor(dependency: string, message: string, details?: Record<string, unknown>) {
     super({
       code: "EXTERNAL_DEPENDENCY_FAILED",
@@ -337,7 +337,7 @@ export class ExternalDependencyError extends ForgeError {
   }
 }
 
-export class IntegrityError extends ForgeError {
+export class IntegrityError extends TerminusError {
   constructor(message: string, details?: Record<string, unknown>) {
     super({
       code: "INTEGRITY_VIOLATION",
@@ -349,7 +349,7 @@ export class IntegrityError extends ForgeError {
   }
 }
 
-export class IdempotencyConflictError extends ForgeError {
+export class IdempotencyConflictError extends TerminusError {
   constructor(key: string) {
     super({
       code: "IDEMPOTENCY_KEY_CONFLICT",
@@ -360,7 +360,7 @@ export class IdempotencyConflictError extends ForgeError {
   }
 }
 
-export class CursorExpiredError extends ForgeError {
+export class CursorExpiredError extends TerminusError {
   constructor(cursor: string) {
     super({
       code: "CURSOR_EXPIRED",
@@ -372,7 +372,7 @@ export class CursorExpiredError extends ForgeError {
   }
 }
 
-export class UnknownSettlementError extends ForgeError {
+export class UnknownSettlementError extends TerminusError {
   constructor(operation: string, details?: Record<string, unknown>) {
     super({
       code: "UNKNOWN_SETTLEMENT",
@@ -384,7 +384,7 @@ export class UnknownSettlementError extends ForgeError {
   }
 }
 
-export class StateTransitionError extends ForgeError {
+export class StateTransitionError extends TerminusError {
   constructor(aggregate: string, from: string, to: string) {
     super({
       code: "STATE_TRANSITION_INVALID",
@@ -395,7 +395,7 @@ export class StateTransitionError extends ForgeError {
   }
 }
 
-export class ScopeViolationError extends ForgeError {
+export class ScopeViolationError extends TerminusError {
   constructor(messageOrPath: string, scope?: string, details?: Record<string, unknown>) {
     super({
       code: "SCOPE_VIOLATION",
@@ -406,7 +406,7 @@ export class ScopeViolationError extends ForgeError {
   }
 }
 
-export class StaleHandleError extends ForgeError {
+export class StaleHandleError extends TerminusError {
   constructor(message: string, details?: Record<string, unknown>) {
     super({
       code: "STALE_SOURCE_VERSION",
@@ -418,7 +418,7 @@ export class StaleHandleError extends ForgeError {
   }
 }
 
-export class CompilationAuthorityError extends ForgeError {
+export class CompilationAuthorityError extends TerminusError {
   constructor(reason: string, details?: Record<string, unknown>) {
     super({
       code: "CONTEXT_COMPILER_BYPASS",
@@ -430,7 +430,7 @@ export class CompilationAuthorityError extends ForgeError {
   }
 }
 
-export class InternalError extends ForgeError {
+export class InternalError extends TerminusError {
   constructor(message: string, details?: Record<string, unknown>) {
     super({ code: "INTERNAL", message, details });
     this.name = "InternalError";
@@ -438,13 +438,18 @@ export class InternalError extends ForgeError {
 }
 
 /**
- * Narrows an unknown caught value into a ForgeError if possible. Useful with
+ * Narrows an unknown caught value into a TerminusError if possible. Useful with
  * `useUnknownInCatchVariables`.
  */
-export function asForgeError(err: unknown): ForgeError {
-  if (err instanceof ForgeError) return err;
+export function asTerminusError(err: unknown): TerminusError {
+  if (err instanceof TerminusError) return err;
   if (err instanceof Error) {
     return new InternalError(err.message, { cause: err });
   }
   return new InternalError(String(err));
 }
+
+/** @deprecated Use `TerminusError`. Removed after the identity migration window. */
+export { TerminusError as ForgeError };
+/** @deprecated Use `asTerminusError`. Removed after the identity migration window. */
+export const asForgeError = asTerminusError;

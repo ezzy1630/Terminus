@@ -1,10 +1,10 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { ForgeClient } from "@terminus/public-client";
+import { TerminusClient } from "@terminus/public-client";
 import { createTuiClient, TuiApp } from "./app.js";
 
 const GATEWAY = process.env.TERMINUS_GATEWAY ?? "http://127.0.0.1:81";
-let cachedClient: ForgeClient | null = null;
+let cachedClient: TerminusClient | null = null;
 
 function terminusToken(): string {
   const token = process.env.TERMINUS_TOKEN;
@@ -14,7 +14,7 @@ function terminusToken(): string {
   return token;
 }
 
-function publicClient(): ForgeClient {
+function publicClient(): TerminusClient {
   cachedClient ??= createTuiClient(GATEWAY, terminusToken());
   return cachedClient;
 }

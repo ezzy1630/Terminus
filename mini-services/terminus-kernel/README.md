@@ -44,7 +44,7 @@ bash scripts/start-mini-services.sh
 - **Bearer token**: `Authorization: Bearer <TERMINUS_KERNEL_TOKEN>` (default
   `terminus-kernel-dev-token`).
 - **Capability token**: mutating endpoints require `x-capability-token`
-  validated via `forge_authz::TokenIssuer::validate()`. A long-lived dev token
+  validated via the compatibility crate `forge_authz::TokenIssuer::validate()`. A long-lived dev token
   is minted at startup and logged.
 
 ## Errors

@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
+const ROOT = process.env.TERMINUS_ROOT ?? process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
 const SRC = join(ROOT, "packages", "public-api", "src", "index.ts");
 const OUT_DIR = join(ROOT, "docs", "generated");
 const OUT = join(OUT_DIR, "public-api.md");

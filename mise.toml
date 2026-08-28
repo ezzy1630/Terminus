@@ -19,5 +19,8 @@ just = "1.43.0"
 # Put pinned toolchain bin dirs first so any system-installed versions do not
 # shadow mise-managed binaries.
 RUST_BACKTRACE = "1"
+TERMINUS_ROOT = "{{ config_root }}"
+# Compatibility alias for scripts and external tooling during ADR-0052's
+# deprecation window.
 FORGE_REPO_ROOT = "{{ config_root }}"
 PROTOC = "{{ env.PROTOC_BIN_PREFIX | default(value='protoc') }}"

@@ -5,7 +5,7 @@
 > When an OpenAPI document is added, this catalog should be replaced by
 > generated OpenAPI clients (SPEC §45.3).
 
-Total exports: **86**
+Total exports: **88**
 
 | Export | Kind |
 |---|---|
@@ -87,6 +87,8 @@ Total exports: **86**
 | `SystemHealth` | const |
 | `TaskSnapshot` | const |
 | `TaskSnapshot` | type |
+| `TerminusError` | const |
+| `TerminusError` | type |
 | `ToolCallSnapshot` | const |
 | `ToolCallSnapshot` | type |
 | `ToolSnapshot` | const |

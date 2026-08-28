@@ -61,7 +61,7 @@ describe("IDE-ACP JSON-RPC Bridge", () => {
             attemptId: null,
             actorPrincipal: "ide-operator",
             verb: "pause",
-            targetEntityId: null,
+            targetEntityId: "task-001",
             payload: {},
             rationale: "operator paused for manual inspection",
             status: "PROPOSED",

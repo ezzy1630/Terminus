@@ -53,7 +53,7 @@ export interface MutationRequestOptions {
   readonly signal?: AbortSignal | null;
 }
 
-export interface ForgeClientConfig {
+export interface TerminusClientConfig {
   /** Base URL of the Terminus control plane. Use "" for same-origin. */
   baseUrl: string;
   /** Optional XTransformPort query parameter for gateway routing. */
@@ -64,12 +64,12 @@ export interface ForgeClientConfig {
   fetchImpl?: FetchImplementation;
 }
 
-export class ForgeClient {
+export class TerminusClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: FetchImplementation;
   private readonly headers: Record<string, string>;
 
-  constructor(config: ForgeClientConfig) {
+  constructor(config: TerminusClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
     this.fetchImpl = config.fetchImpl ?? fetch;
     this._xformPort = config.xformPort ?? null;
@@ -141,7 +141,7 @@ export class ForgeClient {
         typeof body.error === "object" && "message" in body.error
           ? String((body.error as { message: unknown }).message)
           : `HTTP ${res.status}`;
-      throw new ForgeApiError(res.status, message, body);
+      throw new TerminusApiError(res.status, message, body);
     }
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
@@ -316,7 +316,7 @@ export class ForgeClient {
       this.url(`/v1/artifacts/${encodeURIComponent(hash)}?${query.toString()}`),
       init,
     );
-    if (!res.ok) throw new ForgeApiError(res.status, `HTTP ${res.status}`, null);
+    if (!res.ok) throw new TerminusApiError(res.status, `HTTP ${res.status}`, null);
     const buf = await res.arrayBuffer();
     return new Uint8Array(buf);
   }
@@ -398,7 +398,7 @@ export class ForgeClient {
     if (opts.signal) init.signal = opts.signal;
     const res = await this.fetchImpl(url, init);
     if (!res.ok || !res.body) {
-      throw new ForgeApiError(res.status, `SSE failed: HTTP ${res.status}`, null);
+      throw new TerminusApiError(res.status, `SSE failed: HTTP ${res.status}`, null);
     }
     const reader = res.body.getReader();
     const decoder = createSseDecoder();
@@ -1068,13 +1068,20 @@ export class ForgeClient {
   }
 }
 
-export class ForgeApiError extends Error {
+export class TerminusApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
     readonly body: unknown,
   ) {
     super(message);
-    this.name = "ForgeApiError";
+    this.name = "TerminusApiError";
   }
 }
+
+/** @deprecated Use `TerminusClientConfig`. Removed after the identity migration window. */
+export type ForgeClientConfig = TerminusClientConfig;
+/** @deprecated Use `TerminusClient`. Removed after the identity migration window. */
+export { TerminusClient as ForgeClient };
+/** @deprecated Use `TerminusApiError`. Removed after the identity migration window. */
+export { TerminusApiError as ForgeApiError };

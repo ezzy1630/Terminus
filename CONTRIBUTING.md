@@ -32,7 +32,7 @@ See `SPEC.md` §42.1 for the normative monorepo layout. Quick map:
 
 - `crates/` — Rust workspace (privileged effect kernel).
 - `packages/` — TypeScript workspace (control plane, context, providers, orchestration).
-- `python/forge_evals/` — offline evaluation laboratory.
+- `python/forge_evals/` — offline evaluation laboratory (compatibility import path; ADR-0052).
 - `mini-services/` — kernel (port 3040) and control (port 3050) mini-services.
 - `apps/` — TUI/CLI/web/desktop/IDE clients.
 - `proto/` — Protobuf source of truth for kernel RPC.

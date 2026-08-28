@@ -14,7 +14,7 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
-const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
+const ROOT = process.env.TERMINUS_ROOT ?? process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
 
 interface CodegenTarget {
   id: string;

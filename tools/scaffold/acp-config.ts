@@ -13,7 +13,7 @@
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
-const ROOT = process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
+const ROOT = process.env.TERMINUS_ROOT ?? process.env.FORGE_ROOT ?? join(import.meta.dir, "..", "..");
 const ACP_SCRIPT = join(ROOT, "apps", "ide-acp", "src", "index.ts");
 
 const t3codeConfig = {
