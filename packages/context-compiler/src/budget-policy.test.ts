@@ -5,7 +5,7 @@ import type {
   ProviderCapabilitySnapshot,
   ProviderToolSchema,
 } from "@terminus/provider-core";
-import type { ModelKey, TokenCount } from "@terminus/domain";
+import type { Micros, ModelKey, TokenCount } from "@terminus/domain";
 import { CalibratedModelTokenizer } from "./tokenizer.js";
 import { deriveProviderAwareContextBudget } from "./budget-policy.js";
 
@@ -49,9 +49,9 @@ function providerSnapshot(overrides: {
       summaryAvailable: overrides.reasoning ?? true,
     },
     economics: {
-      inputMicrosPerMillion: 1n,
-      cachedInputMicrosPerMillion: 1n,
-      outputMicrosPerMillion: 1n,
+      inputMicrosPerMillion: 1n as Micros,
+      cachedInputMicrosPerMillion: 1n as Micros,
+      outputMicrosPerMillion: 1n as Micros,
       reasoningAccounting: overrides.reasoning ?? true,
     },
     reliability: {
