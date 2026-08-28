@@ -161,7 +161,7 @@ try {
     const turn = recoveredPostPendingTurns.find((candidate) => candidate.id === fixture.id);
     const recoveryEvents = await database.semanticEvent.findMany({
       where: {
-        eventType: "turn.recovery_interrupted",
+        eventType: fixture.state === "FINALIZING" ? "turn.recovery_failed" : "turn.recovery_interrupted",
         aggregateType: "turn",
         aggregateId: fixture.id,
       },
@@ -178,6 +178,39 @@ try {
     const reconciliation = sideEffect?.reconciliationJson
       ? object(JSON.parse(sideEffect.reconciliationJson) as unknown, `side-effect reconciliation ${fixture.id}`)
       : null;
+    // Terminal quarantine keeps the effect reconciler's canonical `unknown`;
+    // generic active-turn interruption applies the legacy `unknown_settlement` marker.
+    const expectedToolResultStatus = fixture.state === "FINALIZING"
+      ? "unknown"
+      : "unknown_settlement";
+    const effectRecoveryValid =
+      turn?.toolCalls.length === 1
+      && toolCall?.state === "UNKNOWN"
+      && toolCall.resultStatus === expectedToolResultStatus
+      && toolCall.settledAt !== null
+      && toolCall.sideEffects.length === 1
+      && sideEffect?.state === "MANUAL_REVIEW"
+      && reconciliation?.reconciliation_required === true;
+    if (fixture.state === "FINALIZING") {
+      if (
+        turn?.state !== "FAILED"
+        || turn.completedAt === null
+        || terminal?.reason !== "terminal_recovery_proof_incomplete"
+        || terminal.previous_state !== fixture.state
+        || terminal.reconciliation_required !== true
+        || recoveryPayload?.reason !== "terminal_recovery_proof_incomplete"
+        || recoveryPayload.previous_state !== fixture.state
+        || recoveryPayload.state !== "FAILED"
+        || recoveryPayload.reconciliation_required !== true
+        || !effectRecoveryValid
+      ) {
+        throw new Error(`terminal-adjacent startup recovery diverged for ${fixture.state}: ${JSON.stringify({
+          turn,
+          recoveryEvents,
+        })}`);
+      }
+      continue;
+    }
     if (
       turn?.state !== "INTERRUPTED"
       || turn.completedAt === null
@@ -186,13 +219,7 @@ try {
       || terminal.reconciliation_required !== true
       || recoveryPayload?.previous_state !== fixture.state
       || recoveryPayload.reconciliation_required !== true
-      || turn.toolCalls.length !== 1
-      || toolCall?.state !== "UNKNOWN"
-      || toolCall.resultStatus !== "unknown_settlement"
-      || toolCall.settledAt === null
-      || toolCall.sideEffects.length !== 1
-      || sideEffect?.state !== "MANUAL_REVIEW"
-      || reconciliation?.reconciliation_required !== true
+      || !effectRecoveryValid
     ) {
       throw new Error(`active-turn startup recovery diverged for ${fixture.state}: ${JSON.stringify({
         turn,
