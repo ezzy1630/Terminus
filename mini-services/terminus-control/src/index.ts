@@ -252,6 +252,7 @@ import {
   type ThreadSnapshot,
   type WorldStateSnapshot,
 } from "@terminus/context-compiler";
+import { deriveProviderAwareContextBudget, resolveTokenizer } from "@terminus/context-compiler";
 import {
   canonicalJson,
   computeContentHash,
@@ -268,7 +269,19 @@ import { ANTHROPIC_MODEL_PROFILES } from "@terminus/provider-anthropic";
 import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
 import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
-import { CodingTurnEngine } from "./agent/coding-turn-engine.js";
+import {
+  CodingTurnEngine,
+  type CompletionClaim,
+  type EngineStop,
+  type EngineToolSettlement,
+} from "./agent/coding-turn-engine.js";
+import {
+  buildEvidenceIdentity,
+  createTerminusMinimalProfile,
+  type EvidenceTerminalOutcome,
+  type TerminusMinimalProfile,
+} from "./agent/minimal-profile.js";
+import { classifyLoopError, type OperationObservation } from "./agent/loop-contracts.js";
 import { CacheRatioMonitor } from "./agent/cache-telemetry.js";
 import { withProviderRetry } from "./providers/provider-retry.js";
 import { createNativeDirectExecutor } from "./providers/native-direct-executor.js";
@@ -347,7 +360,12 @@ import {
   readCompleteRepositoryMap,
   type RepositoryMapObservation,
 } from "./agent/repository-map.js";
-import { HARD_MAX_STEPS, TurnBudget } from "./agent/turn-budget.js";
+import {
+  HARD_MAX_STEPS,
+  TurnBudget,
+  type BudgetLedgerSnapshot,
+  type OperationProgressAnalysis,
+} from "./agent/turn-budget.js";
 import type { ArtifactClient } from "@terminus/artifact-client";
 import type {
   ModelCapabilitySnapshot,
@@ -355,6 +373,7 @@ import type {
   ProviderResponse,
   ProviderResponseChunk,
   ProviderToolCallChunk,
+  ProviderToolSchema,
   ProjectedResponse,
   RenderedProviderRequest,
   ConfidentialityPolicy,
@@ -5022,7 +5041,7 @@ const routes: Route[] = [
       },
     });
     if (!t) return sendError(res, 404, "TASK_NOT_FOUND", "task not found", "not_found");
-    const [completion, verificationPlan] = await Promise.all([
+    const [completion, verificationPlan, evidenceBundle, latestBudgetLedger, operationObservations] = await Promise.all([
       db.completionRecord.findUnique({
         where: { taskId: t.id },
         select: { status: true, admissionState: true },
@@ -5036,6 +5055,19 @@ const routes: Route[] = [
             select: { nodeId: true, attempt: true, status: true },
           },
         },
+      }),
+      db.evidenceBundle.findFirst({
+        where: { taskId: t.id },
+        orderBy: { createdAt: "desc" },
+      }),
+      db.turnBudgetLedger.findFirst({
+        where: { turn: { taskId: t.id } },
+        orderBy: { updatedAt: "desc" },
+      }),
+      db.operationObservation.findMany({
+        where: { turn: { taskId: t.id } },
+        orderBy: { createdAt: "asc" },
+        take: 256,
       }),
     ]);
     const repairTurnIds = new Set(
@@ -5090,6 +5122,71 @@ const routes: Route[] = [
         ? null
         : safeParse<Record<string, unknown> | null>(t.terminalReasonJson, null),
       contract: taskContractWire(t.contractVersions[0]),
+      profile: evidenceBundle === null
+        ? null
+        : {
+            id: evidenceBundle.profileId,
+            version: evidenceBundle.profileVersion,
+            hash: evidenceBundle.profileHash,
+          },
+      evidence_bundle: evidenceBundle === null
+        ? null
+        : {
+            schema_version: evidenceBundle.schemaVersion,
+            identity_hash: evidenceBundle.identityHash,
+            artifact: evidenceBundle.bundleArtifact,
+            terminal_outcome: evidenceBundle.terminalOutcome,
+            admission_state: evidenceBundle.admissionState,
+            base_workspace_revision: evidenceBundle.baseWorkspaceRevision,
+            final_workspace_revision: evidenceBundle.finalWorkspaceRevision,
+          },
+      budget_ledger: latestBudgetLedger === null
+        ? null
+        : {
+            schema_version: latestBudgetLedger.schemaVersion,
+            steps_used: latestBudgetLedger.stepsUsed,
+            max_steps: latestBudgetLedger.maxSteps,
+            hard_max_steps: latestBudgetLedger.hardMaxSteps,
+            tokens_used: latestBudgetLedger.tokensUsed.toString(),
+            input_tokens: latestBudgetLedger.inputTokens.toString(),
+            cached_input_tokens: latestBudgetLedger.cachedInputTokens.toString(),
+            cache_write_tokens: latestBudgetLedger.cacheWriteTokens.toString(),
+            output_tokens: latestBudgetLedger.outputTokens.toString(),
+            reasoning_tokens: latestBudgetLedger.reasoningTokens.toString(),
+            tool_schema_tokens: latestBudgetLedger.toolSchemaTokens.toString(),
+            max_tokens: latestBudgetLedger.maxTokens?.toString() ?? null,
+            cost_micros: latestBudgetLedger.costMicros.toString(),
+            max_cost_micros: latestBudgetLedger.maxCostMicros?.toString() ?? null,
+            context_headroom_tokens: latestBudgetLedger.contextHeadroomTokens?.toString() ?? null,
+            evidence: safeParse<Record<string, unknown>>(latestBudgetLedger.evidenceJson, {}),
+            last_progress: latestBudgetLedger.lastProgressJson === null
+              ? null
+              : safeParse<Record<string, unknown>>(latestBudgetLedger.lastProgressJson, {}),
+          },
+      operation_observations: operationObservations.map((observation) => ({
+        schema_version: observation.schemaVersion,
+        observation_hash: observation.observationHash,
+        semantic_fingerprint: observation.semanticFingerprint,
+        attempt_number: observation.attemptNumber,
+        provider_call_id: observation.providerCallId,
+        tool_id: observation.toolId,
+        tool_version: observation.toolVersion,
+        status: observation.status,
+        result_hash: observation.resultHash,
+        error_code: observation.errorCode,
+        error_class: observation.errorClass,
+        mutates_workspace: observation.mutatesWorkspace,
+        workspace_revision_before: observation.workspaceRevisionBefore,
+        workspace_revision_after: observation.workspaceRevisionAfter,
+        verification_delta: observation.verificationDelta,
+        progressed: observation.progressed,
+        no_op: observation.noOp,
+        repeated_failure: observation.repeatedFailure,
+        oscillating: observation.oscillating,
+        failure_class: observation.failureClass,
+        progress_reason: observation.progressReason,
+        recommended_recovery: safeParse<string[]>(observation.recommendedRecoveryJson, []),
+      })),
       repair_metrics: {
         schema_version: repairMetrics.schemaVersion,
         first_proposal_verified_success: repairMetrics.firstProposalVerifiedSuccess,
@@ -10077,18 +10174,25 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
   },
 });
 
+interface ContextBudgetSelection {
+  readonly budget: ContextBudget;
+  readonly breakdown: ReturnType<typeof deriveProviderAwareContextBudget>["breakdown"];
+}
+
 function makeContextBudget(
   provider: ProviderCapabilitySnapshot,
+  model: ModelCapabilitySnapshot,
   taskBudget: TaskSnapshot["contract"]["budget"],
-): ContextBudget {
-  const hard = BigInt(provider.context.testedSafeTokens) as TokenCount;
+  toolSchemas: readonly ProviderToolSchema[],
+): ContextBudgetSelection {
+  const hard = BigInt(Math.max(0, Math.floor(provider.context.testedSafeTokens))) as TokenCount;
   const output = 1024n as TokenCount;
   const reasoning = 0n as TokenCount;
   const toolResult = 512n as TokenCount;
   const recovery = 256n as TokenCount;
   const reserved = output + reasoning + toolResult + recovery;
   const optional = hard > reserved ? hard - reserved : 0n;
-  return {
+  const baseBudget: ContextBudget = {
     modelAdvertisedTokens: BigInt(provider.context.advertisedTokens) as TokenCount,
     testedSafeTokens: hard,
     protocolOverheadTokens: 128n as TokenCount,
@@ -10101,6 +10205,236 @@ function makeContextBudget(
     hardInputLimit: hard,
     hardCostMicros: taskBudget.modelMicros,
   };
+  return deriveProviderAwareContextBudget({
+    budget: baseBudget,
+    provider,
+    model,
+    tokenizer: resolveTokenizer(provider.providerId, model.modelKey),
+    toolSchemas,
+  });
+}
+
+const TURN_BUDGET_LEDGER_VERSION = "terminus.turn-budget-ledger.v1" as const;
+
+function nonNegativeBigInt(value: unknown): bigint | null {
+  if (typeof value === "bigint") return value >= 0n ? value : null;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (typeof value === "string" && /^\d+$/.test(value)) return BigInt(value);
+  return null;
+}
+
+function artifactUriHash(uri: string | null | undefined): string | null {
+  if (uri === undefined || uri === null || !uri.startsWith("artifact://sha256/")) return null;
+  const hash = `sha256:${uri.slice("artifact://sha256/".length)}`;
+  return /^sha256:[0-9a-f]{64}$/.test(hash) ? hash : null;
+}
+
+function ledgerProgressJson(progress: OperationProgressAnalysis | null): string | null {
+  return progress === null ? null : canonicalJson(progress);
+}
+
+async function persistTurnBudgetLedger(
+  turnId: string,
+  ledger: BudgetLedgerSnapshot,
+  contextBudgetJson?: string | null,
+): Promise<void> {
+  await writerTransaction(async (tx) => {
+    const data = {
+      schemaVersion: TURN_BUDGET_LEDGER_VERSION,
+      stepsUsed: ledger.stepsUsed,
+      maxSteps: ledger.maxSteps,
+      hardMaxSteps: ledger.hardMaxSteps,
+      tokensUsed: ledger.tokensUsed,
+      inputTokens: ledger.usage.inputTokens,
+      cachedInputTokens: ledger.usage.cachedInputTokens,
+      cacheWriteTokens: ledger.usage.cacheWriteTokens,
+      outputTokens: ledger.usage.outputTokens,
+      reasoningTokens: ledger.usage.reasoningTokens,
+      toolSchemaTokens: ledger.usage.toolSchemaTokens,
+      maxTokens: ledger.maxTokens,
+      costMicros: ledger.costMicros,
+      maxCostMicros: ledger.maxCostMicros,
+      contextHeadroomTokens: ledger.contextHeadroomTokens,
+      finalVerificationReserveTokens: ledger.finalVerificationReserveTokens,
+      finalVerificationReserveCostMicros: ledger.finalVerificationReserveCostMicros,
+      contextBudgetJson: contextBudgetJson ?? null,
+      evidenceJson: canonicalJson(ledger.evidence),
+      lastProgressJson: ledgerProgressJson(ledger.lastProgress),
+    };
+    await tx.turnBudgetLedger.upsert({
+      where: { turnId },
+      create: { id: uuid(), turnId, ...data },
+      update: data,
+    });
+  });
+}
+
+async function persistOperationObservation(
+  turnId: string,
+  observation: OperationObservation,
+  progress: OperationProgressAnalysis | null,
+): Promise<void> {
+  const analysis = progress ?? {
+    progressed: false,
+    noOp: false,
+    repeatedFailure: false,
+    oscillating: false,
+    failureClass: null,
+    recommendedRecovery: ["inspect_evidence"] as const,
+    reason: "new_operation" as const,
+  };
+  await writerTransaction(async (tx) => {
+    await tx.operationObservation.upsert({
+      where: {
+        turnId_observationHash: {
+          turnId,
+          observationHash: observation.observationHash,
+        },
+      },
+      create: {
+        id: uuid(),
+        turnId,
+        providerAttemptId: observation.attemptId,
+        schemaVersion: observation.schemaVersion,
+        observationHash: observation.observationHash,
+        semanticFingerprint: observation.semanticFingerprint,
+        attemptNumber: observation.attemptNumber,
+        providerCallId: observation.providerCallId,
+        toolId: observation.toolId,
+        toolVersion: observation.toolVersion,
+        status: observation.status,
+        resultHash: observation.resultHash,
+        errorCode: observation.errorCode,
+        errorClass: observation.errorClass,
+        mutatesWorkspace: observation.mutatesWorkspace,
+        workspaceRevisionBefore: observation.workspaceRevisionBefore,
+        workspaceRevisionAfter: observation.workspaceRevisionAfter,
+        verificationDelta: observation.verificationDelta,
+        hypothesisId: observation.hypothesisId,
+        criterionIdsJson: canonicalJson(observation.criterionIds),
+        objectiveStep: observation.objectiveStep,
+        progressed: analysis.progressed,
+        noOp: analysis.noOp,
+        repeatedFailure: analysis.repeatedFailure,
+        oscillating: analysis.oscillating,
+        failureClass: analysis.failureClass,
+        progressReason: analysis.reason,
+        recommendedRecoveryJson: canonicalJson(analysis.recommendedRecovery),
+      },
+      update: {
+        progressed: analysis.progressed,
+        noOp: analysis.noOp,
+        repeatedFailure: analysis.repeatedFailure,
+        oscillating: analysis.oscillating,
+        failureClass: analysis.failureClass,
+        progressReason: analysis.reason,
+        recommendedRecoveryJson: canonicalJson(analysis.recommendedRecovery),
+      },
+    });
+  });
+}
+
+interface EvidenceBundlePersistenceInput {
+  readonly taskId: string;
+  readonly turnId: string;
+  readonly contractVersion: number;
+  readonly baseWorkspaceRevision: string;
+  readonly finalWorkspaceRevision: string;
+  readonly profile: TerminusMinimalProfile;
+  readonly providerAttemptIds: readonly string[];
+  readonly contextManifestIds: readonly string[];
+  readonly requestArtifactHashes: readonly string[];
+  readonly responseArtifactHashes: readonly string[];
+  readonly toolCallIds: readonly string[];
+  readonly verificationResultIds: readonly string[];
+  readonly proofBundleHash?: string | null | undefined;
+  readonly terminalOutcome: EvidenceTerminalOutcome;
+  readonly admissionState?: "PREPARED" | "COMMITTED" | "QUARANTINED" | undefined;
+  readonly artifacts: ArtifactClient;
+}
+
+/** Persist the queryable evidence identity and its self-contained artifact. */
+async function persistEvidenceBundle(input: EvidenceBundlePersistenceInput): Promise<{
+  readonly identityHash: string;
+  readonly artifactUri: string;
+}> {
+  const identity = buildEvidenceIdentity(input);
+  const bundleArtifact = await input.artifacts.ingest(
+    new TextEncoder().encode(canonicalJson({
+      schema_version: identity.schemaVersion,
+      identity_hash: identity.identityHash,
+      task_id: identity.taskId,
+      turn_id: identity.turnId,
+      contract_version: identity.contractVersion,
+      base_workspace_revision: identity.baseWorkspaceRevision,
+      final_workspace_revision: identity.finalWorkspaceRevision,
+      profile: {
+        profile_id: input.profile.profileId,
+        version: input.profile.version,
+        provider_id: input.profile.providerId,
+        model_key: input.profile.modelKey,
+        tool_ids: input.profile.toolIds,
+        configuration_hash: input.profile.configurationHash,
+        profile_hash: input.profile.profileHash,
+      },
+      provider_attempt_ids: identity.providerAttemptIds,
+      context_manifest_ids: identity.contextManifestIds,
+      request_artifact_hashes: identity.requestArtifactHashes,
+      response_artifact_hashes: identity.responseArtifactHashes,
+      tool_call_ids: identity.toolCallIds,
+      verification_result_ids: identity.verificationResultIds,
+      proof_bundle_hash: identity.proofBundleHash,
+      terminal_outcome: identity.terminalOutcome,
+    })),
+    {
+      mediaType: "application/json",
+      custom: { purpose: "evidence-bundle", taskId: input.taskId, turnId: input.turnId },
+    },
+  );
+  await input.artifacts.link(bundleArtifact.hash, "task", input.taskId, "evidence-bundle");
+  await input.artifacts.link(bundleArtifact.hash, "turn", input.turnId, "evidence-bundle");
+  const admissionState = input.admissionState ?? "COMMITTED";
+  await writerTransaction(async (tx) => {
+    const existing = await tx.evidenceBundle.findUnique({
+      where: { taskId_turnId: { taskId: input.taskId, turnId: input.turnId } },
+    });
+    if (existing !== null) {
+      if (existing.identityHash !== identity.identityHash) {
+        throw new Error(`evidence bundle ${input.taskId}/${input.turnId} changed immutable identity`);
+      }
+      await tx.evidenceBundle.update({
+        where: { id: existing.id },
+        data: { admissionState, bundleArtifact: bundleArtifact.uri },
+      });
+      return;
+    }
+    await tx.evidenceBundle.create({
+      data: {
+        id: `evidence:${input.taskId}:${input.turnId}`,
+        taskId: input.taskId,
+        turnId: input.turnId,
+        schemaVersion: identity.schemaVersion,
+        identityHash: identity.identityHash,
+        contractVersion: identity.contractVersion,
+        baseWorkspaceRevision: identity.baseWorkspaceRevision,
+        finalWorkspaceRevision: identity.finalWorkspaceRevision,
+        profileId: input.profile.profileId,
+        profileVersion: input.profile.version,
+        profileHash: identity.profileHash,
+        bundleArtifact: bundleArtifact.uri,
+        providerAttemptIdsJson: canonicalJson(identity.providerAttemptIds),
+        contextManifestIdsJson: canonicalJson(identity.contextManifestIds),
+        requestArtifactHashesJson: canonicalJson(identity.requestArtifactHashes),
+        responseArtifactHashesJson: canonicalJson(identity.responseArtifactHashes),
+        toolCallIdsJson: canonicalJson(identity.toolCallIds),
+        verificationResultIdsJson: canonicalJson(identity.verificationResultIds),
+        proofBundleHash: identity.proofBundleHash,
+        terminalOutcome: identity.terminalOutcome,
+        admissionState,
+      },
+    });
+  });
+  return { identityHash: identity.identityHash, artifactUri: bundleArtifact.uri };
 }
 
 const EMPTY_CONTEXT_HASH = ("sha256:" + "0".repeat(64)) as ContentHash;
@@ -11084,6 +11418,13 @@ class AmbiguousToolSettlementError extends Error {
   }
 }
 
+class EngineTerminalStopError extends Error {
+  constructor(readonly stop: EngineStop) {
+    super(`coding loop stopped with ${stop.kind}`);
+    this.name = "EngineTerminalStopError";
+  }
+}
+
 interface StandaloneToolSettlementInput {
   readonly callChunk: ProviderToolCallChunk;
   readonly providerAttemptId: string;
@@ -11100,7 +11441,7 @@ interface StandaloneToolSettlementInput {
 
 async function settleStandaloneProviderTool(
   input: StandaloneToolSettlementInput,
-): Promise<void> {
+): Promise<EngineToolSettlement> {
   if (input.signal?.aborted === true) throw new ToolAbortedError();
   const call = parseStandaloneToolCall(input.callChunk);
   const toolCallId = uuid();
@@ -11175,7 +11516,7 @@ async function settleStandaloneProviderTool(
       }),
       policyDecisionId,
     };
-    await persistSettledToolResult({
+    return persistSettledToolResult({
       input,
       call,
       toolCallId,
@@ -11183,7 +11524,6 @@ async function settleStandaloneProviderTool(
       sideEffectId: null,
       result,
     });
-    return;
   }
 
   let context: RequestContext;
@@ -11228,7 +11568,7 @@ async function settleStandaloneProviderTool(
       }),
       policyDecisionId,
     };
-    await persistSettledToolResult({
+    return persistSettledToolResult({
       input,
       call,
       toolCallId,
@@ -11236,7 +11576,6 @@ async function settleStandaloneProviderTool(
       sideEffectId: null,
       result,
     });
-    return;
   }
 
   const policyDecisionId = uuid();
@@ -11338,7 +11677,7 @@ async function settleStandaloneProviderTool(
     };
   }
 
-  await persistSettledToolResult({
+  return persistSettledToolResult({
     input,
     call,
     toolCallId,
@@ -11399,7 +11738,7 @@ async function persistSettledToolResult(input: {
   readonly callTranscriptArtifactUri: string;
   readonly sideEffectId: string | null;
   readonly result: ToolResult<unknown>;
-}): Promise<void> {
+}): Promise<EngineToolSettlement> {
   const fullResultText = canonicalJson(input.result);
   const fullResultArtifact = await input.input.artifactClient.ingest(
     new TextEncoder().encode(fullResultText),
@@ -11456,6 +11795,16 @@ async function persistSettledToolResult(input: {
     errorJson: toolState === "SETTLED" ? null : JSON.stringify({ summary: input.result.summary }),
     truncation: input.result.truncation,
   });
+  const status = input.result.status;
+  return {
+    status: status === "success" || status === "partial" || status === "error"
+      || status === "denied" || status === "timeout" || status === "cancelled" || status === "unknown"
+      ? status
+      : "unknown",
+    resultHash: fullResultArtifact.hash,
+    errorCode: status === "success" || status === "partial" ? null : `TOOL_RESULT_${status.toUpperCase()}`,
+    errorClass: status === "success" || status === "partial" ? null : status,
+  };
 }
 
 // ────────────────────────── Agent loop ─────────────────────────────────────
@@ -11516,6 +11865,18 @@ async function agentLoop(turnId: string): Promise<void> {
   const existingController = activeTurnAbortControllers.get(turnId);
   const abortController = existingController ?? new AbortController();
   activeTurnAbortControllers.set(turnId, abortController);
+  let turnProfile: TerminusMinimalProfile | null = null;
+  let turnBaseWorkspaceRevision = "unresolved";
+  let turnContextBudgetJson: string | null = null;
+  let activeEngine: CodingTurnEngine | null = null;
+  let persistEvidenceForCurrentTurn: (
+    terminalOutcome: EvidenceTerminalOutcome,
+    options?: {
+      readonly finalWorkspaceRevision?: string | undefined;
+      readonly proofBundleHash?: string | null | undefined;
+      readonly admissionState?: "PREPARED" | "COMMITTED" | "QUARANTINED" | undefined;
+    },
+  ) => Promise<void> = async () => {};
   try {
     // 1. CONTEXT_COMPILING. A restart may leave the turn at the last safe
     // pre-provider boundary; continuing from there is idempotent.
@@ -11566,6 +11927,29 @@ async function agentLoop(turnId: string): Promise<void> {
     };
 
     const workspace = turn.thread.session.workspace;
+    try {
+      const baseRevisionContext = await kernelTaskContext({
+        sessionId: turn.thread.sessionId,
+        taskId: task.id,
+        turnId,
+        workspaceId: workspace.id,
+        operationClasses: [CapabilityOperationProto.CAPABILITY_OPERATION_EXEC],
+        workspacePaths: leastWorkspaceScope([
+          ...contract.allowedScope.readPaths,
+          ...contract.allowedScope.writePaths,
+        ]),
+      });
+      turnBaseWorkspaceRevision = await resolveWorkspaceRevision(
+        requireKernelUds(),
+        baseRevisionContext,
+        workspace.id,
+        abortController.signal,
+      );
+    } catch {
+      // A terminal provider/policy outcome can still be recorded, but the
+      // evidence bundle marks the unavailable source identity explicitly.
+      turnBaseWorkspaceRevision = "unresolved";
+    }
     const artifactContext: RequestContext = {
       ...await kernelTaskContext({
         sessionId: turn.thread.sessionId,
@@ -11588,6 +11972,60 @@ async function agentLoop(turnId: string): Promise<void> {
       idempotencyKey: `context:${turnId}`,
     };
     const artifactClient = createKernelArtifactClient(requireKernelUds().artifacts, artifactContext);
+    persistEvidenceForCurrentTurn = async (
+      terminalOutcome: EvidenceTerminalOutcome,
+      options: {
+        readonly finalWorkspaceRevision?: string | undefined;
+        readonly proofBundleHash?: string | null | undefined;
+        readonly admissionState?: "PREPARED" | "COMMITTED" | "QUARANTINED" | undefined;
+      } = {},
+    ): Promise<void> => {
+      if (turnProfile === null) return;
+      const [attempts, toolCalls, verificationResults] = await Promise.all([
+        db.providerAttempt.findMany({
+          where: { turnId },
+          orderBy: { attemptNumber: "asc" },
+          select: {
+            id: true,
+            contextManifestId: true,
+            requestArtifact: true,
+            responseArtifact: true,
+          },
+        }),
+        db.toolCall.findMany({
+          where: { turnId },
+          orderBy: { proposedAt: "asc" },
+          select: { id: true },
+        }),
+        db.verificationResult.findMany({
+          where: { plan: { taskId: task.id } },
+          orderBy: { startedAt: "asc" },
+          select: { id: true },
+        }),
+      ]);
+      await persistEvidenceBundle({
+        taskId: task.id,
+        turnId,
+        contractVersion: contractRow.version,
+        baseWorkspaceRevision: turnBaseWorkspaceRevision,
+        finalWorkspaceRevision: options.finalWorkspaceRevision ?? turnBaseWorkspaceRevision,
+        profile: turnProfile,
+        providerAttemptIds: attempts.map((attempt) => attempt.id),
+        contextManifestIds: attempts.map((attempt) => attempt.contextManifestId),
+        requestArtifactHashes: attempts
+          .map((attempt) => artifactUriHash(attempt.requestArtifact))
+          .filter((hash): hash is string => hash !== null),
+        responseArtifactHashes: attempts
+          .map((attempt) => artifactUriHash(attempt.responseArtifact))
+          .filter((hash): hash is string => hash !== null),
+        toolCallIds: toolCalls.map((toolCall) => toolCall.id),
+        verificationResultIds: verificationResults.map((result) => result.id),
+        proofBundleHash: options.proofBundleHash ?? null,
+        terminalOutcome,
+        admissionState: options.admissionState,
+        artifacts: artifactClient,
+      });
+    };
     const inputArtifactUri = artifactUriSchema.parse(turn.initiatingInputArtifact);
     const inputArtifactHash = contentHashSchema.parse(
       `sha256:${inputArtifactUri.slice("artifact://sha256/".length)}`,
@@ -11728,7 +12166,50 @@ async function agentLoop(turnId: string): Promise<void> {
       : gatewayModel === null
         ? (localProviderCommand?.toolsEnabled ?? false)
         : gatewayModel.toolCalling;
-    const contextBudget = makeContextBudget(selectedProvider, taskSnapshot.contract.budget);
+    const activeToolSchemas = toolsEnabled ? STANDALONE_TOOL_SCHEMAS : [];
+    const selectedProfile = createTerminusMinimalProfile({
+      providerId: selectedProvider.providerId,
+      modelKey: String(selectedModel.modelKey),
+      configuration: {
+        transport: directConfiguration !== null ? "direct" : gatewayModel === null ? "local" : "gateway",
+        provider_revision: gatewayProviderConfiguration?.revision ?? providerConfiguration?.revision ?? 0,
+        tools_enabled: toolsEnabled,
+        tool_schema_hash: computeContentHash(canonicalJson(activeToolSchemas.map((tool) => ({ id: tool.id, version: tool.version })))),
+        context_compatibility_key: selectedProvider.continuation.compatibilityKey,
+        tested_safe_tokens: selectedProvider.context.testedSafeTokens,
+      },
+    });
+    turnProfile = selectedProfile;
+    const contextBudgetSelection = makeContextBudget(
+      selectedProvider,
+      selectedModel,
+      taskSnapshot.contract.budget,
+      activeToolSchemas,
+    );
+    const contextBudget = contextBudgetSelection.budget;
+    turnContextBudgetJson = canonicalJson(jsonSafe(contextBudgetSelection.breakdown));
+    await mutateAgentState(() => emit({
+      eventType: "turn.profile_selected",
+      aggregateType: "turn",
+      aggregateId: turnId,
+      correlationId: task.id,
+      payload: {
+        profile_id: selectedProfile.profileId,
+        profile_version: selectedProfile.version,
+        profile_hash: selectedProfile.profileHash,
+        configuration_hash: selectedProfile.configurationHash,
+        provider_id: selectedProfile.providerId,
+        model_key: selectedProfile.modelKey,
+        tool_ids: selectedProfile.toolIds,
+        disabled: {
+          router: !selectedProfile.routerEnabled,
+          memory: !selectedProfile.memoryEnabled,
+          workflow: !selectedProfile.workflowEnabled,
+          subagents: !selectedProfile.subagentsEnabled,
+        },
+        context_budget_policy: contextBudgetSelection.breakdown.policyVersion,
+      },
+    }));
     const threadSnapshot: ThreadSnapshot = {
       threadId: turn.threadId as ThreadSnapshot["threadId"],
       sessionId: turn.thread.sessionId as ThreadSnapshot["sessionId"],
@@ -11741,6 +12222,7 @@ async function agentLoop(turnId: string): Promise<void> {
       mutateAgentState,
       assertControlWriterLease,
     );
+    const settlementByProviderCallId = new Map<string, EngineToolSettlement>();
     const toolEpisodeService = new ToolEpisodeService({
       store: {
         // R4/Cubic: page newest-first so the byte-budgeted walk always sees
@@ -11776,6 +12258,8 @@ async function agentLoop(turnId: string): Promise<void> {
         artifactClient: toolInput.artifactClient,
         observedSources,
         signal: abortController.signal,
+      }).then((settlement) => {
+        settlementByProviderCallId.set(toolInput.call.toolCallId, settlement);
       }),
     });
     const toolEpisodeSession = toolEpisodeService.startTurn();
@@ -12082,13 +12566,13 @@ async function agentLoop(turnId: string): Promise<void> {
         // and the shipped tool contract replace the two-sentence stub.
         authorityDocuments: standaloneAuthorityDocuments(),
         activeCapabilities: toolsEnabled
-          ? STANDALONE_TOOL_SCHEMAS.map((tool) => ({ id: tool.id, version: tool.version }))
+          ? activeToolSchemas.map((tool) => ({ id: tool.id, version: tool.version }))
           : [],
         budget: contextBudget,
         experimentAssignments: [],
         renderer: selectedRenderer,
         confidentialityPolicy,
-        toolSchemas: toolsEnabled ? STANDALONE_TOOL_SCHEMAS : [],
+        toolSchemas: activeToolSchemas,
         compactionPolicy: { enabled: false, targetTokens: Number(contextBudget.optionalContextTarget) },
         store: contextStore,
         retrievalPipeline: kernelRetrievalPipeline(
@@ -12146,6 +12630,7 @@ async function agentLoop(turnId: string): Promise<void> {
 
     let finalText: string | null = null;
     let finalResponseArtifactUri: string | null = null;
+    let completionClaims: readonly CompletionClaim[] = [];
     // Rank 1/Rank 2: run the bounded coding loop through the extracted
     // engine — adaptive budgets replace the fixed four-cycle ceiling, and
     // multi-call responses are batched (reads parallel-safe, writes ordered).
@@ -12583,16 +13068,50 @@ async function agentLoop(turnId: string): Promise<void> {
         }));
       }
     }
-    const engine = new CodingTurnEngine({
+    const maxTokens = nonNegativeBigInt(taskBudget.max_tokens);
+    const maxCostMicros = nonNegativeBigInt(taskBudget.model_micros) ?? taskSnapshot.contract.budget.modelMicros;
+    const wallClockSeconds = numberOr(taskBudget.wall_clock_seconds, taskSnapshot.contract.budget.wallClockSeconds);
+    const finalVerificationReserveTokens = contextBudget.outputReserve + contextBudget.recoveryMargin;
+    const finalVerificationReserveCostMicros = 0n;
+    const ledgerBudget = {
+      maxSteps: configuredMaxSteps,
+      hardMaxSteps: HARD_MAX_STEPS,
+      wallClockMs: Math.max(0, Math.floor(wallClockSeconds * 1_000)),
+      ...(maxTokens === null ? {} : { maxTokens }),
+      maxCostMicros,
+      contextHeadroomTokens: contextBudget.hardInputLimit,
+      finalVerificationReserveTokens,
+      finalVerificationReserveCostMicros,
+    };
+    activeEngine = new CodingTurnEngine({
       budget: {
         // The explicit knob is clamped to the hard safety ceiling (ADR-0039):
         // an operator may lower the budget but never raise the invariant.
-        maxSteps: configuredMaxSteps,
-        hardMaxSteps: HARD_MAX_STEPS,
+        ...ledgerBudget,
       },
       newId: uuid,
       sideEffectClassOf,
       signal: abortController.signal,
+      taskId: task.id,
+      contractVersion: contractRow.version,
+      operationContext: ({ call }) => {
+        try {
+          const parsedCall = parseStandaloneToolCall(call);
+          return { toolVersion: parsedCall.toolVersion };
+        } catch {
+          return {};
+        }
+      },
+      onOperationObserved: async (observation) => {
+        await persistOperationObservation(
+          turnId,
+          observation,
+          activeEngine?.budget.latestProgress ?? null,
+        );
+        if (activeEngine !== null) {
+          await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
+        }
+      },
       onPolicyDenied: async (message) => {
         await mutateAgentState(() => emit({
           eventType: "turn.policy_denied",
@@ -12806,7 +13325,32 @@ async function agentLoop(turnId: string): Promise<void> {
             payload: { provider_attempt_id: attemptId, tool_calls: 0 },
           }));
         }
-        return { projected, interrupted: false };
+        const claims: readonly CompletionClaim[] = criteriaRows.map((criterion) => ({
+          criterionId: criterion.criterionId,
+          // A proposal carries the criterion mapping, but no verifier result.
+          // The independent verification gate remains the only completion
+          // authority.
+          evidenceRefs: [],
+          changedArtifactRefs: [],
+        }));
+        const completion = projected.finishReason === "stop" && projected.text.trim().length > 0
+          ? { kind: "completion_proposal" as const, claims }
+          : { kind: "assistant_message" as const };
+        return {
+          projected,
+          interrupted: false,
+          responseArtifactUri: responseArtifactMeta.uri,
+          usage: {
+            inputTokens: usage.inputTokens,
+            cachedInputTokens: usage.cachedInputTokens,
+            cacheWriteTokens: usage.cacheWriteTokens,
+            outputTokens: usage.outputTokens,
+            reasoningTokens: usage.reasoningTokens,
+            toolSchemaTokens: usage.toolSchemaTokens,
+            costMicros: cost.computedCostMicros ?? undefined,
+          },
+          completion,
+        };
       },
       settleToolCall: async ({ call, attemptNumber, attemptId }) => {
         if (!toolsEnabled) {
@@ -12841,16 +13385,7 @@ async function agentLoop(turnId: string): Promise<void> {
           contractHash: contractRow.contentHash,
           artifactClient,
         });
-        // Stagnation tracking over normalized operations.
-        try {
-          const parsedCall = parseStandaloneToolCall(call);
-          engine.budget.recordOperation(
-            normalizedToolOperationHash({ taskId: task.id, contractVersion: contractRow.version, call: parsedCall }),
-            sideEffectClassOf(parsedCall.toolId) !== "read",
-          );
-        } catch {
-          // Unparseable calls are refused by settlement itself.
-        }
+        return settlementByProviderCallId.get(call.toolCallId);
       },
       afterToolsSettled: async () => {
         await mutateAgentState(() => emit({
@@ -12867,6 +13402,11 @@ async function agentLoop(turnId: string): Promise<void> {
           if (update.count !== 1) throw new Error(`turn ${turnId} changed before context recompilation`);
         }));
       },
+    });
+    activeEngine.budget.recordEvidence({
+      outstandingCriteria: criteriaRows.filter((criterion) => criterion.required).length,
+      satisfiedCriteria: 0,
+      evidenceCoverage: 0,
     });
     if (resumeVerificationFromState) {
       // A completed provider response is already durably identified by the
@@ -12900,24 +13440,53 @@ async function agentLoop(turnId: string): Promise<void> {
       finalText = "";
       finalResponseArtifactUri = parsedResponseArtifact.data;
     } else {
-      const stop = await engine.run();
+      if (activeEngine === null) throw new Error("coding loop engine was not initialized");
+      const stop = await activeEngine.run();
+      await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
       switch (stop.kind) {
-        case "interrupted":
+        case "assistant_message":
+          finalText = stop.text;
+          finalResponseArtifactUri = stop.responseArtifactUri;
+          await mutateAgentState(() => emit({
+            eventType: "turn.assistant_message",
+            aggregateType: "turn",
+            aggregateId: turnId,
+            correlationId: task.id,
+            payload: { state: "COMPLETED", response_artifact: stop.responseArtifactUri },
+            artifactRefs: stop.responseArtifactUri === null ? [] : [stop.responseArtifactUri],
+          }, async (tx) => {
+            const update = await tx.turn.updateMany({
+              where: { id: turnId, state: { in: ["RESPONSE_VALIDATING", "PROVIDER_RUNNING"] } },
+              data: { state: "COMPLETED", completedAt: new Date() },
+            });
+            if (update.count !== 1) throw new Error(`turn ${turnId} changed before assistant-message completion`);
+          }));
           return;
-        case "budget_exhausted":
-          throw new ToolCycleBudgetExhaustedError(`Adaptive turn budget stopped the loop: ${stop.reason}`);
-        case "policy_denied":
-          throw new ToolPolicyDeniedError(stop.message);
-        case "no_final_response":
-          throw new ToolCycleBudgetExhaustedError("Provider turn ended without a final response");
-        case "doom_loop":
-          throw new ToolCycleBudgetExhaustedError(
-            `Provider repeated identical tool calls ${stop.count} times; loop stopped for safety`,
-          );
+        case "completion_proposal":
+          finalText = stop.proposal.text;
+          finalResponseArtifactUri = stop.proposal.responseArtifactUri;
+          completionClaims = stop.proposal.claims;
+          break;
         case "final":
           finalText = stop.text;
-          finalResponseArtifactUri = lastResponseArtifactUri;
+          finalResponseArtifactUri = stop.responseArtifactUri ?? lastResponseArtifactUri;
+          completionClaims = criteriaRows.map((criterion) => ({
+            criterionId: criterion.criterionId,
+            evidenceRefs: [],
+            changedArtifactRefs: [],
+          }));
           break;
+        case "interrupted":
+        case "budget_stop":
+        case "policy_stop":
+        case "blocked":
+        case "needs_user_input":
+        case "failed_verification":
+        case "budget_exhausted":
+        case "policy_denied":
+        case "doom_loop":
+        case "no_final_response":
+          throw new EngineTerminalStopError(stop);
       }
     }
 
@@ -12950,6 +13519,8 @@ async function agentLoop(turnId: string): Promise<void> {
       select: { eventId: true },
     });
     if (existingCompletionProposal === null) {
+      const evidenceProfile = turnProfile;
+      if (evidenceProfile === null) throw new Error("completion proposal has no selected profile");
       await mutateAgentState(() => emit({
         eventType: "completion.proposed",
         aggregateType: "turn",
@@ -12958,6 +13529,11 @@ async function agentLoop(turnId: string): Promise<void> {
         payload: {
           status: "PROPOSED",
           response_artifact: finalResponseArtifactUri,
+          claims: completionClaims,
+          profile_id: evidenceProfile.profileId,
+          profile_version: evidenceProfile.version,
+          profile_hash: evidenceProfile.profileHash,
+          evidence_bundle_version: "terminus.evidence-bundle.v1",
         },
         artifactRefs: [finalResponseArtifactUri],
       }));
@@ -13431,6 +14007,17 @@ async function agentLoop(turnId: string): Promise<void> {
               repairDecision.action === "stop" ? repairDecision.reason : undefined,
             failure_signatures: normalizedFailures.map((failure) => failure.signatureHash),
           });
+          if (activeEngine !== null) {
+            activeEngine.budget.recordEvidence({
+              outstandingCriteria: criteria.filter((criterion) => criterion.required).length,
+              satisfiedCriteria: Math.max(0, criteria.filter((criterion) => criterion.required).length - normalizedFailures.length),
+              verificationFailures: normalizedFailures.length,
+              repairAttempts: Math.max(priorRepairs, storedAttemptsUsed),
+              evidenceCoverage: criteria.length === 0 ? 0 : Math.max(0, (criteria.length - normalizedFailures.length) / criteria.length),
+            });
+            await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
+          }
+          await persistEvidenceForCurrentTurn("FAILED_VERIFICATION", { finalWorkspaceRevision: sourceRevision });
           await failVerificationTurn({
             blocked: evaluation.blocked,
             repair_stop_reason:
@@ -13453,6 +14040,11 @@ async function agentLoop(turnId: string): Promise<void> {
           "verification-completion",
           { taskId: task.id, workspaceId: workspace.id },
         );
+        await persistEvidenceForCurrentTurn("COMPLETED", {
+          finalWorkspaceRevision: sourceRevision,
+          proofBundleHash: finalCheckpoint.hash,
+          admissionState: "PREPARED",
+        });
         const completionRecordId = `completion:${task.id}`;
         try {
           const completionRecord = await runtime.lifecycle.complete({
@@ -13587,6 +14179,10 @@ async function agentLoop(turnId: string): Promise<void> {
             requiredClaimsSatisfied: [...requiredClaimIds],
           });
         } catch (gateErr) {
+          await writerTransaction((tx) => tx.evidenceBundle.updateMany({
+            where: { taskId: task.id, turnId },
+            data: { admissionState: "QUARANTINED" },
+          }));
           await verificationCoordinator.fail(task.id, {
             reason: "completion_gate_denied",
             error: String(gateErr),
@@ -13596,6 +14192,10 @@ async function agentLoop(turnId: string): Promise<void> {
         }
 
         await verificationCoordinator.complete(task.id, plan.id, turnId, completionRecordId);
+        await writerTransaction((tx) => tx.evidenceBundle.updateMany({
+          where: { taskId: task.id, turnId },
+          data: { admissionState: "COMMITTED" },
+        }));
         await mutateAgentState(() => emit({
           eventType: "verification.admitted",
           aggregateType: "turn",
@@ -13616,34 +14216,100 @@ async function agentLoop(turnId: string): Promise<void> {
     }
   } catch (err) {
     console.error("agentLoop error", err);
+    const classified = classifyLoopError(err);
+    const engineStop = err instanceof EngineTerminalStopError ? err.stop : null;
+    const stopEnvelope = engineStop !== null && "error" in engineStop
+      ? engineStop.error
+      : null;
     const providerUnavailable = err instanceof ProviderExecutionUnavailableError;
     const ambiguousToolSettlement = err instanceof AmbiguousToolSettlementError;
     const policyDenied = err instanceof ToolPolicyDeniedError;
     const budgetExhausted = err instanceof ToolCycleBudgetExhaustedError;
-    const blockedError = providerUnavailable || ambiguousToolSettlement || policyDenied || budgetExhausted;
-    const terminalTurnState = policyDenied
-      ? "POLICY_DENIED"
-      : budgetExhausted
+    const stopKind = engineStop?.kind ?? null;
+    const terminalTurnState = stopKind === "interrupted"
+      ? "ABORTED"
+      : stopKind === "budget_stop" || stopKind === "budget_exhausted" || budgetExhausted
         ? "BUDGET_EXHAUSTED"
-        : ambiguousToolSettlement
-          ? "INTERRUPTED"
-          : "FAILED";
-    const terminalTurnEvent = policyDenied
-      ? "turn.policy_denied"
-      : budgetExhausted
+        : stopKind === "policy_stop" || stopKind === "policy_denied" || policyDenied
+          ? "POLICY_DENIED"
+          : stopKind === "blocked"
+            ? "BLOCKED"
+            : stopKind === "needs_user_input"
+              ? "USER_ACTION_REQUIRED"
+              : ambiguousToolSettlement
+                ? "INTERRUPTED"
+                : "FAILED";
+    const terminalTurnEvent = terminalTurnState === "ABORTED"
+      ? "turn.aborted"
+      : terminalTurnState === "BUDGET_EXHAUSTED"
         ? "turn.budget_exhausted"
-        : ambiguousToolSettlement
-          ? "turn.interrupted"
-          : "turn.failed";
-      const failureCode = providerUnavailable
-      ? "PROVIDER_TRANSPORT_UNAVAILABLE"
-      : policyDenied
-        ? "TOOL_POLICY_DENIED"
-        : budgetExhausted
-          ? "TOOL_BUDGET_EXHAUSTED"
-          : ambiguousToolSettlement
-            ? "TOOL_SETTLEMENT_UNKNOWN"
-            : "PROVIDER_EXECUTION_FAILED";
+        : terminalTurnState === "POLICY_DENIED"
+          ? "turn.policy_denied"
+          : terminalTurnState === "BLOCKED"
+            ? "turn.blocked"
+            : terminalTurnState === "USER_ACTION_REQUIRED"
+              ? "turn.needs_user_input"
+              : ambiguousToolSettlement
+                ? "turn.interrupted"
+                : "turn.failed";
+    const failureCode = stopEnvelope?.code
+      ?? (stopKind === "budget_stop" ? "BUDGET_EXHAUSTED"
+        : stopKind === "policy_stop" ? "POLICY_DENIED"
+          : stopKind === "blocked" ? "PROVIDER_BLOCKED"
+            : stopKind === "needs_user_input" ? "USER_INPUT_REQUIRED"
+              : stopKind === "interrupted" ? "CANCELLED"
+                : providerUnavailable
+                  ? "PROVIDER_TRANSPORT_UNAVAILABLE"
+                  : policyDenied
+                    ? "TOOL_POLICY_DENIED"
+                    : budgetExhausted
+                      ? "TOOL_BUDGET_EXHAUSTED"
+                      : ambiguousToolSettlement
+                        ? "TOOL_SETTLEMENT_UNKNOWN"
+                        : "PROVIDER_EXECUTION_FAILED");
+    const failureMessage = stopEnvelope?.message ?? classified.envelope.message;
+    const failureDetails = stopEnvelope?.details ?? classified.envelope.details;
+    const failureReason = stopKind === "budget_stop" || stopKind === "budget_exhausted" || budgetExhausted
+      ? "budget_exhausted"
+      : stopKind === "policy_stop" || stopKind === "policy_denied" || policyDenied
+        ? "policy_denied"
+        : stopKind === "blocked" || providerUnavailable
+          ? "provider_blocked"
+          : stopKind === "needs_user_input"
+            ? "needs_user_input"
+            : stopKind === "interrupted"
+              ? "aborted"
+              : ambiguousToolSettlement
+                ? "tool_settlement_unknown"
+                : stopKind === "failed_verification"
+                  ? "failed_verification"
+                  : "agent_loop_error";
+    const taskStatusForStop = terminalTurnState === "ABORTED"
+      ? "ABORTED"
+      : terminalTurnState === "BUDGET_EXHAUSTED"
+        ? "BUDGET_EXHAUSTED"
+        : terminalTurnState === "POLICY_DENIED"
+          ? "POLICY_DENIED"
+          : terminalTurnState === "BLOCKED" || terminalTurnState === "USER_ACTION_REQUIRED"
+          ? terminalTurnState === "USER_ACTION_REQUIRED" ? "NEEDS_USER_DECISION" : "BLOCKED"
+            : stopKind === "failed_verification" ? "FAILED_VERIFICATION" : null;
+    const terminalEvidenceOutcome: EvidenceTerminalOutcome | null = taskStatusForStop === "ABORTED"
+      ? "ABORTED"
+      : taskStatusForStop === "BUDGET_EXHAUSTED"
+        ? "BUDGET_EXHAUSTED"
+        : taskStatusForStop === "POLICY_DENIED"
+          ? "POLICY_DENIED"
+          : taskStatusForStop === "NEEDS_USER_DECISION"
+            ? "NEEDS_USER_DECISION"
+            : taskStatusForStop === "BLOCKED"
+              ? "BLOCKED"
+              : taskStatusForStop === "FAILED_VERIFICATION"
+                ? "FAILED_VERIFICATION"
+              : null;
+    const blockedError = taskStatusForStop === "BLOCKED" || taskStatusForStop === "NEEDS_USER_DECISION";
+    if (activeEngine !== null) {
+      await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
+    }
     const immutableTurnStates = [
       "COMPLETED",
       "INTERRUPTED",
@@ -13668,7 +14334,14 @@ async function agentLoop(turnId: string): Promise<void> {
           eventType: terminalTurnEvent,
           aggregateType: "turn", aggregateId: turnId,
           correlationId: turn.taskId ?? undefined,
-          payload: { error: String(err) },
+          payload: {
+            code: failureCode,
+            category: stopEnvelope?.category ?? classified.envelope.category,
+            message: failureMessage,
+            reason: failureReason,
+            retryable: stopEnvelope?.retryable ?? classified.envelope.retryable,
+            details: failureDetails,
+          },
         }, async (tx) => {
           await tx.providerAttempt.updateMany({
             where: { turnId, status: "running" },
@@ -13677,7 +14350,9 @@ async function agentLoop(turnId: string): Promise<void> {
               completedAt: new Date(),
               errorJson: JSON.stringify({
                 code: failureCode,
-                message: String(err),
+                message: failureMessage,
+                category: stopEnvelope?.category ?? classified.envelope.category,
+                details: failureDetails,
               }),
             },
           });
@@ -13689,7 +14364,12 @@ async function agentLoop(turnId: string): Promise<void> {
             data: {
               state: terminalTurnState,
               completedAt: new Date(),
-              terminalErrorJson: JSON.stringify({ message: String(err) }),
+              terminalErrorJson: JSON.stringify({
+                code: failureCode,
+                message: failureMessage,
+                reason: failureReason,
+                details: failureDetails,
+              }),
             },
           });
           if (update.count !== 1) throw new Error(`turn ${turnId} changed during failure settlement`);
@@ -13700,10 +14380,12 @@ async function agentLoop(turnId: string): Promise<void> {
           data: {
             status: "failed",
             completedAt: new Date(),
-            errorJson: JSON.stringify({
-              code: failureCode,
-              message: String(err),
-            }),
+              errorJson: JSON.stringify({
+                code: failureCode,
+                message: failureMessage,
+                category: stopEnvelope?.category ?? classified.envelope.category,
+                details: failureDetails,
+              }),
           },
         }));
       }
@@ -13715,12 +14397,11 @@ async function agentLoop(turnId: string): Promise<void> {
         select: { status: true },
       });
       if (failedTask?.status !== "ACTIVE" && failedTask?.status !== "VERIFYING") return;
-      const status = blockedError
-        ? "BLOCKED"
-        : failedTask.status === "VERIFYING"
-          ? "FAILED_VERIFICATION"
-          : "FAILED";
-      const eventType = blockedError ? "task.blocked" : "task.failed";
+      const status = taskStatusForStop
+        ?? (failedTask.status === "VERIFYING" ? "FAILED_VERIFICATION" : "FAILED");
+      const eventType = status === "BLOCKED" ? "task.blocked" : "task.failed";
+      const evidenceOutcome = terminalEvidenceOutcome
+        ?? (failedTask.status === "VERIFYING" ? "FAILED_VERIFICATION" : null);
       await emit({
         eventType,
         aggregateType: "task",
@@ -13728,16 +14409,10 @@ async function agentLoop(turnId: string): Promise<void> {
         correlationId: failedTaskId,
         payload: {
           status,
-          error: String(err),
-          reason: providerUnavailable
-            ? "provider_transport_unavailable"
-            : ambiguousToolSettlement
-              ? "tool_settlement_unknown"
-              : policyDenied
-                ? "tool_policy_denied"
-                : budgetExhausted
-                  ? "tool_budget_exhausted"
-                  : "agent_loop_error",
+          code: failureCode,
+          message: failureMessage,
+          reason: failureReason,
+          details: failureDetails,
         },
       }, async (tx) => {
         const update = await tx.task.updateMany({
@@ -13747,23 +14422,18 @@ async function agentLoop(turnId: string): Promise<void> {
             phase: failedTask.status === "VERIFYING" ? "VERIFY" : "IMPLEMENT",
             completedAt: blockedError ? null : new Date(),
             terminalReasonJson: JSON.stringify({
-              reason: providerUnavailable
-                ? "provider_transport_unavailable"
-                : ambiguousToolSettlement
-                  ? "tool_settlement_unknown"
-                  : policyDenied
-                    ? "tool_policy_denied"
-                    : budgetExhausted
-                      ? "tool_budget_exhausted"
-                : failedTask.status === "VERIFYING"
-                  ? "verification_runtime_error"
-                  : "agent_loop_error",
-              error: String(err),
+              reason: failureReason,
+              code: failureCode,
+              message: failureMessage,
+              details: failureDetails,
             }),
           },
         });
         if (update.count !== 1) throw new Error(`task ${failedTaskId} changed during failure settlement`);
       });
+      if (evidenceOutcome !== null) {
+        await persistEvidenceForCurrentTurn(evidenceOutcome);
+      }
       await synchronizeV1TaskProjection(failedTaskId, eventType);
     });
   } finally {
@@ -14488,6 +15158,39 @@ async function reconcilePreparedCompletionRecords(): Promise<CompletionAdmission
   return { prepared: records.length, recovered, quarantined, failed };
 }
 
+interface EvidenceBundleRecoveryResult {
+  readonly prepared: number;
+  readonly committed: readonly string[];
+  readonly quarantined: readonly string[];
+}
+
+/** Reconcile the small crash window between completion admission and bundle commit. */
+async function reconcilePreparedEvidenceBundles(): Promise<EvidenceBundleRecoveryResult> {
+  const bundles = await db.evidenceBundle.findMany({
+    where: { admissionState: "PREPARED" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: { id: true, taskId: true, turnId: true },
+  });
+  const committed: string[] = [];
+  const quarantined: string[] = [];
+  for (const bundle of bundles) {
+    const [task, turn] = await Promise.all([
+      db.task.findUnique({ where: { id: bundle.taskId }, select: { status: true } }),
+      db.turn.findUnique({ where: { id: bundle.turnId }, select: { taskId: true, state: true } }),
+    ]);
+    const shouldCommit = task?.status === "COMPLETED"
+      && turn?.taskId === bundle.taskId
+      && ["VERIFIED", "FINALIZING", "COMPLETED"].includes(turn.state);
+    const updated = await writerTransaction((tx) => tx.evidenceBundle.updateMany({
+      where: { id: bundle.id, admissionState: "PREPARED" },
+      data: { admissionState: shouldCommit ? "COMMITTED" : "QUARANTINED" },
+    }));
+    if (updated.count !== 1) continue;
+    (shouldCommit ? committed : quarantined).push(bundle.id);
+  }
+  return { prepared: bundles.length, committed, quarantined };
+}
+
 /** Quarantine a terminal-adjacent turn when its completion proof is incomplete. */
 async function quarantineTerminalRecoveryTurn(input: {
   readonly id: string;
@@ -14621,7 +15324,7 @@ async function recoverActiveAgentTurns(): Promise<number> {
           data: {
             state: "UNKNOWN",
             settledAt: interruptedAt,
-            resultStatus: "unknown_settlement",
+            resultStatus: "unknown",
             errorJson: JSON.stringify({ reason: "process_restart", reconciliation_required: true }),
           },
         });
@@ -15249,6 +15952,7 @@ const repairedTaskProjections = await reconcileV1TaskProjections();
 const checkpointLinkRecovery = await reconcileCheckpointArtifactLinks();
 const checkpointAdmissionRecovery = await reconcilePreparedCheckpointAdmissions();
 const completionAdmissionRecovery = await reconcilePreparedCompletionRecords();
+const evidenceBundleRecovery = await reconcilePreparedEvidenceBundles();
 const recoveredActiveTurns = await recoverActiveAgentTurns();
 const recoveredDurableRepairAttempts = await recoverDurableRepairAttempts();
 const recoveredPendingRepairTurns = await recoverPendingRepairTurns();
@@ -15303,6 +16007,11 @@ if (checkpointAdmissionRecovery.prepared > 0) {
 if (completionAdmissionRecovery.prepared > 0) {
   console.log(
     `[terminus-control] completion admission recovery: ${completionAdmissionRecovery.recovered.length} recovered, ${completionAdmissionRecovery.quarantined.length} quarantined, ${completionAdmissionRecovery.failed.length} pending`,
+  );
+}
+if (evidenceBundleRecovery.prepared > 0) {
+  console.log(
+    `[terminus-control] evidence bundle recovery: ${evidenceBundleRecovery.committed.length} committed, ${evidenceBundleRecovery.quarantined.length} quarantined`,
   );
 }
 if (recoveredDurableRepairAttempts > 0 || recoveredPendingRepairTurns > 0) {

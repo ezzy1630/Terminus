@@ -126,6 +126,7 @@ model Task {
   jobs                  Job[]
   capabilityActivations CapabilityActivation[]
   repairAttempts        RepairAttempt[]
+  evidenceBundles       EvidenceBundle[]
 
   @@index([sessionId, status, updatedAt])
   @@map("tasks")
@@ -206,6 +207,9 @@ model Turn {
   toolCalls        ToolCall[]
   repairAttemptsAsParent     RepairAttempt[] @relation("RepairAttemptParent")
   repairAttemptAsContinuation RepairAttempt?  @relation("RepairAttemptContinuation")
+  operationObservations      OperationObservation[]
+  budgetLedger               TurnBudgetLedger?
+  evidenceBundles             EvidenceBundle[]
 
   @@unique([threadId, sequence])
   @@index([taskId])
@@ -257,10 +261,87 @@ model ProviderAttempt {
   turn            Turn             @relation(fields: [turnId], references: [id])
   contextManifest ContextManifest? @relation("AttemptManifest")
   toolCalls       ToolCall[]
+  operationObservations OperationObservation[]
 
   @@unique([turnId, attemptNumber])
   @@unique([providerIdempotencyKey])
   @@map("provider_attempts")
+}
+
+// The durable, provider-neutral observation emitted for every settled tool
+// operation. Arguments remain content-addressed elsewhere; this record keeps
+// only hashes and progress metadata so it is safe to expose to audit readers.
+model OperationObservation {
+  id                       String   @id
+  turnId                   String   @map("turn_id")
+  providerAttemptId        String   @map("provider_attempt_id")
+  schemaVersion            String   @map("schema_version")
+  observationHash          String   @map("observation_hash")
+  semanticFingerprint      String   @map("semantic_fingerprint")
+  attemptNumber            Int      @map("attempt_number")
+  providerCallId           String   @map("provider_call_id")
+  toolId                   String   @map("tool_id")
+  toolVersion              String?  @map("tool_version")
+  status                   String
+  resultHash               String?  @map("result_hash")
+  errorCode                String?  @map("error_code")
+  errorClass               String?  @map("error_class")
+  mutatesWorkspace         Boolean  @map("mutates_workspace")
+  workspaceRevisionBefore  String?  @map("workspace_revision_before")
+  workspaceRevisionAfter   String?  @map("workspace_revision_after")
+  verificationDelta        String?  @map("verification_delta")
+  hypothesisId             String?  @map("hypothesis_id")
+  criterionIdsJson         String   @default("[]") @map("criterion_ids_json")
+  objectiveStep            String?  @map("objective_step")
+  progressed               Boolean
+  noOp                     Boolean  @map("no_op")
+  repeatedFailure          Boolean  @map("repeated_failure")
+  oscillating              Boolean
+  failureClass             String?  @map("failure_class")
+  progressReason           String   @map("progress_reason")
+  recommendedRecoveryJson  String   @map("recommended_recovery_json")
+  createdAt                DateTime @default(now()) @map("created_at")
+
+  turn            Turn            @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  providerAttempt ProviderAttempt @relation(fields: [providerAttemptId], references: [id], onDelete: Cascade)
+
+  @@unique([turnId, observationHash])
+  @@index([turnId, semanticFingerprint])
+  @@index([providerAttemptId])
+  @@map("operation_observations")
+}
+
+// One authoritative snapshot per turn. The JSON fields retain the complete
+// deterministic ledger/evidence dimensions without provider-specific schema.
+model TurnBudgetLedger {
+  id                              String   @id
+  turnId                          String   @unique @map("turn_id")
+  schemaVersion                   String   @map("schema_version")
+  stepsUsed                       Int      @map("steps_used")
+  maxSteps                       Int      @map("max_steps")
+  hardMaxSteps                   Int      @map("hard_max_steps")
+  tokensUsed                     BigInt   @map("tokens_used")
+  inputTokens                    BigInt   @map("input_tokens")
+  cachedInputTokens              BigInt   @map("cached_input_tokens")
+  cacheWriteTokens               BigInt   @map("cache_write_tokens")
+  outputTokens                   BigInt   @map("output_tokens")
+  reasoningTokens                BigInt   @map("reasoning_tokens")
+  toolSchemaTokens               BigInt   @map("tool_schema_tokens")
+  maxTokens                      BigInt?  @map("max_tokens")
+  costMicros                     BigInt   @map("cost_micros")
+  maxCostMicros                  BigInt?  @map("max_cost_micros")
+  contextHeadroomTokens          BigInt?  @map("context_headroom_tokens")
+  finalVerificationReserveTokens BigInt   @map("final_verification_reserve_tokens")
+  finalVerificationReserveCostMicros BigInt @map("final_verification_reserve_cost_micros")
+  contextBudgetJson              String?  @map("context_budget_json")
+  evidenceJson                   String   @default("{}") @map("evidence_json")
+  lastProgressJson               String?  @map("last_progress_json")
+  createdAt                      DateTime @default(now()) @map("created_at")
+  updatedAt                      DateTime @updatedAt @map("updated_at")
+
+  turn Turn @relation(fields: [turnId], references: [id], onDelete: Cascade)
+
+  @@map("turn_budget_ledgers")
 }
 
 model ContextEpoch {
@@ -741,6 +822,42 @@ model CandidateBranch {
 
   @@index([taskId, status])
   @@map("candidate_branches")
+}
+
+// Immutable terminal evidence identity. The bundle artifact contains the
+// canonical projection; this row is the queryable index and admission state.
+model EvidenceBundle {
+  id                       String   @id
+  taskId                   String   @map("task_id")
+  turnId                   String   @map("turn_id")
+  schemaVersion            String   @map("schema_version")
+  identityHash             String   @map("identity_hash")
+  contractVersion          Int      @map("contract_version")
+  baseWorkspaceRevision    String   @map("base_workspace_revision")
+  finalWorkspaceRevision   String   @map("final_workspace_revision")
+  profileId                String   @map("profile_id")
+  profileVersion           String   @map("profile_version")
+  profileHash              String   @map("profile_hash")
+  bundleArtifact           String   @map("bundle_artifact")
+  providerAttemptIdsJson   String   @default("[]") @map("provider_attempt_ids_json")
+  contextManifestIdsJson   String   @default("[]") @map("context_manifest_ids_json")
+  requestArtifactHashesJson String  @default("[]") @map("request_artifact_hashes_json")
+  responseArtifactHashesJson String @default("[]") @map("response_artifact_hashes_json")
+  toolCallIdsJson          String   @default("[]") @map("tool_call_ids_json")
+  verificationResultIdsJson String  @default("[]") @map("verification_result_ids_json")
+  proofBundleHash          String?  @map("proof_bundle_hash")
+  terminalOutcome          String   @map("terminal_outcome")
+  admissionState           String   @default("COMMITTED") @map("admission_state")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  turn Turn @relation(fields: [turnId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, turnId])
+  @@index([taskId, terminalOutcome, createdAt])
+  @@index([identityHash])
+  @@map("evidence_bundles")
 }
 
 // --- Memory ---------------------------------------------------------------

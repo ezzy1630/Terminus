@@ -87,6 +87,38 @@ describe("Database Migration Integrity & Corruption Detection", () => {
         .query("PRAGMA table_info(candidate_branches)")
         .all() as Array<{ name: string }>;
       expect(candidateBranchColumns.map((column) => column.name)).toContain("merge_receipt_json");
+      const operationObservationColumns = db
+        .query("PRAGMA table_info(operation_observations)")
+        .all() as Array<{ name: string }>;
+      expect(operationObservationColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+        "observation_hash",
+        "semantic_fingerprint",
+        "progressed",
+        "no_op",
+        "repeated_failure",
+        "oscillating",
+        "recommended_recovery_json",
+      ]));
+      const budgetLedgerColumns = db
+        .query("PRAGMA table_info(turn_budget_ledgers)")
+        .all() as Array<{ name: string }>;
+      expect(budgetLedgerColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+        "tokens_used",
+        "cost_micros",
+        "context_headroom_tokens",
+        "evidence_json",
+        "last_progress_json",
+      ]));
+      const evidenceBundleColumns = db
+        .query("PRAGMA table_info(evidence_bundles)")
+        .all() as Array<{ name: string }>;
+      expect(evidenceBundleColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+        "identity_hash",
+        "profile_hash",
+        "bundle_artifact",
+        "terminal_outcome",
+        "admission_state",
+      ]));
 
       const now = Date.now();
       db.query(
