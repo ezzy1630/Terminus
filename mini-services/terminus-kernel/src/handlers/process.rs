@@ -67,8 +67,7 @@ pub async fn start(
 
     // The first event MUST be ProcessEvent::Started; we wait for it (with a
     // short timeout) to get the ids.
-    let Ok(Some(first)) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
+    let Ok(Some(first)) = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await
     else {
         return Err(ApiError::internal(
             "process failed to emit Started event within 2s",
@@ -112,7 +111,8 @@ pub async fn start(
             let mut retained_bytes = 0usize;
             let mut truncated = false;
             while let Some(ev) = rx.recv().await {
-                if let Err(error) = persist_job_event(&manager, &event_job_id, &lease_token, &ev).await
+                if let Err(error) =
+                    persist_job_event(&manager, &event_job_id, &lease_token, &ev).await
                 {
                     tracing::error!(
                         target: "terminus_kernel_audit",
@@ -173,9 +173,7 @@ async fn persist_job_event(
             .await
         {
             Ok(()) => return Ok(()),
-            Err(terminus_jobs::JobError::Database(error))
-                if attempt < MAX_DATABASE_RETRIES =>
-            {
+            Err(terminus_jobs::JobError::Database(error)) if attempt < MAX_DATABASE_RETRIES => {
                 tracing::warn!(
                     target: "terminus_kernel_audit",
                     event = "process_event_persistence_retry",
@@ -314,13 +312,13 @@ pub async fn output(
         let mut available_from = 0_u64;
         for stream in ["stdout", "stderr"] {
             match manager.output_since(&record.id, stream, cursor).await {
-                Ok(stream_chunks) => durable_chunks.extend(stream_chunks.into_iter().map(|chunk| {
-                    OutputChunk {
+                Ok(stream_chunks) => {
+                    durable_chunks.extend(stream_chunks.into_iter().map(|chunk| OutputChunk {
                         cursor: chunk.end_cursor,
                         bytes: chunk.bytes,
                         redacted: chunk.redacted,
-                    }
-                })),
+                    }))
+                }
                 Err(terminus_jobs::JobError::OutputTruncated {
                     available_from: stream_cursor,
                     ..
@@ -360,9 +358,7 @@ pub async fn output(
 
     if truncated && continuation.is_none() {
         let memory_boundary = chunks.first().map_or(cursor, |chunk| {
-            chunk
-                .cursor
-                .saturating_sub(chunk.bytes.len() as u64)
+            chunk.cursor.saturating_sub(chunk.bytes.len() as u64)
         });
         continuation = Some(OutputContinuation {
             cursor: memory_boundary,

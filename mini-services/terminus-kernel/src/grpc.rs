@@ -210,9 +210,7 @@ async fn persist_job_event(
             .await
         {
             Ok(()) => return Ok(()),
-            Err(terminus_jobs::JobError::Database(error))
-                if attempt < MAX_DATABASE_RETRIES =>
-            {
+            Err(terminus_jobs::JobError::Database(error)) if attempt < MAX_DATABASE_RETRIES => {
                 tracing::warn!(
                     target: "terminus_kernel_audit",
                     event = "job_event_persistence_retry",
@@ -2005,12 +2003,7 @@ impl JobServiceRpc for GrpcKernel {
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         let job_id = request.job_id;
-        let retained = self
-            .job_streams
-            .lock()
-            .await
-            .get(&job_id)
-            .cloned();
+        let retained = self.job_streams.lock().await.get(&job_id).cloned();
         let from_sequence = request.from_sequence;
         if let Some(retained) = retained {
             let stream = async_stream::try_stream! {
@@ -2050,12 +2043,8 @@ impl JobServiceRpc for GrpcKernel {
         // record and output chunks survive a kernel restart. Reconstruct a
         // terminal stream from those durable records instead of reporting a
         // false "no stream" failure after every restart.
-        let events = replay_durable_job_stream(
-            self.kernel.jobs.manager(),
-            &record,
-            from_sequence,
-        )
-        .await?;
+        let events =
+            replay_durable_job_stream(self.kernel.jobs.manager(), &record, from_sequence).await?;
         let stream = tokio_stream::iter(events.into_iter().map(Ok));
         Ok(Response::new(Box::pin(stream)))
     }
@@ -4592,18 +4581,12 @@ mod tests {
         );
         let process = std::sync::Arc::new(terminus_process::ProcessManager::new(artifacts));
         let storage_path = dir.path().join("jobs.sqlite");
-        let manager = terminus_jobs::JobManager::with_storage(
-            std::sync::Arc::clone(&process),
-            &storage_path,
-        );
+        let manager =
+            terminus_jobs::JobManager::with_storage(std::sync::Arc::clone(&process), &storage_path);
         let job_id = terminus_kernel_protocol::new_id();
         let process_id = "process-after-restart".to_string();
-        let mut record = terminus_jobs::JobRecord::new(
-            job_id.clone(),
-            "session",
-            "task",
-            "echo durable",
-        );
+        let mut record =
+            terminus_jobs::JobRecord::new(job_id.clone(), "session", "task", "echo durable");
         record.state = terminus_jobs::JobState::Running;
         record.process_identity = Some(process_id.clone());
         record.resolved_executable = "/bin/echo".to_string();
