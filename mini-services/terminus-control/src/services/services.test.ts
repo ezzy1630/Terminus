@@ -192,6 +192,46 @@ describe("control-plane service boundaries", () => {
     await handle.close();
   });
 
+  test("EventSubscriptionService aborts an in-flight replay delivery and unsubscribes", async () => {
+    type Event = EventCursorRecord & { readonly value: string };
+    let livePush: ((event: Event) => void) | null = null;
+    let unsubscribed = false;
+    let releaseDelivery: (() => void) | undefined;
+    let resolveDeliveryStarted: (() => void) | undefined;
+    const deliveryStarted = new Promise<void>((resolve) => { resolveDeliveryStarted = resolve; });
+    const delivery = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+    const controller = new AbortController();
+    const service = new EventSubscriptionService<Event>({
+      subscribeLive: (_filter, push) => {
+        livePush = push;
+        return () => { unsubscribed = true; livePush = null; };
+      },
+      latestEventId: async () => "0002",
+      oldestEventId: async () => "0001",
+      eventExists: async () => true,
+      replay: async (_since, _through, _filter, push) => {
+        await push({ eventId: "0002", aggregateSequence: 2, value: "replay" });
+      },
+      persistCursor: async () => undefined,
+    });
+    const opening = service.open({
+      streamName: "task:cancelled-replay",
+      cursor: "0001",
+      filter: () => true,
+      onEvent: async () => {
+        resolveDeliveryStarted?.();
+        await delivery;
+      },
+      signal: controller.signal,
+    });
+
+    await deliveryStarted;
+    controller.abort();
+    await expect(opening).rejects.toThrow(/aborted/);
+    expect(unsubscribed).toBe(true);
+    releaseDelivery?.();
+  });
+
   test("TurnCoordinator repeats admission checks inside the event transaction", async () => {
     type Transaction = { readonly name: "turn" };
     const task: TurnTaskSnapshot = { id: "task-1", threadId: "thread-1", status: "BLOCKED" };

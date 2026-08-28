@@ -61,7 +61,12 @@ function nonEmpty(value: JsonObject, key: string, label: string): string {
   return field;
 }
 
-async function api(method: "GET" | "POST", path: string, body?: JsonObject): Promise<JsonObject> {
+async function api(
+  method: "GET" | "POST",
+  path: string,
+  body?: JsonObject,
+  signal?: AbortSignal,
+): Promise<JsonObject> {
   const headers: Record<string, string> = {
     authorization: `Bearer ${token}`,
     accept: "application/json",
@@ -72,6 +77,7 @@ async function api(method: "GET" | "POST", path: string, body?: JsonObject): Pro
     headers["Idempotency-Key"] = crypto.randomUUID();
     init.body = JSON.stringify(body);
   }
+  if (signal) init.signal = signal;
   const response = await fetch(`${baseUrl}${path}`, init);
   const text = await response.text();
   const parsed: unknown = text.length > 0 ? JSON.parse(text) : null;
@@ -85,19 +91,42 @@ interface SseEvent {
   readonly data: JsonObject;
 }
 
+const SSE_CLEANUP_TIMEOUT_MS = 2_000;
+
+async function boundedCleanup(operation: Promise<unknown>): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const observed = operation.then(() => true, () => true);
+  const completed = await Promise.race([
+    observed,
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), SSE_CLEANUP_TIMEOUT_MS);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return completed;
+}
+
 async function readReplayEvents(
   cursor: string,
   filterTaskId: string,
   expectedCount: number,
-  triggerLiveEvent: () => Promise<unknown>,
+  triggerLiveEvent: (signal: AbortSignal) => Promise<unknown>,
+  cursorTransport: "query" | "header" = "query",
 ): Promise<readonly SseEvent[]> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
+    const query = new URLSearchParams({ task_id: filterTaskId });
+    if (cursorTransport === "query") query.set("cursor", cursor);
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${token}`,
+      accept: "text/event-stream",
+    };
+    if (cursorTransport === "header") headers["last-event-id"] = cursor;
     const response = await fetch(
-      `${baseUrl}/v1/events?cursor=${encodeURIComponent(cursor)}&task_id=${encodeURIComponent(filterTaskId)}`,
+      `${baseUrl}/v1/events?${query.toString()}`,
       {
-        headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" },
+        headers,
         signal: controller.signal,
       },
     );
@@ -107,37 +136,52 @@ async function readReplayEvents(
     const reader = response.body.getReader();
     let liveEventFailed = false;
     let liveEventError: unknown;
-    const liveEventPromise = triggerLiveEvent().catch((error: unknown) => {
+    const liveEventPromise = triggerLiveEvent(controller.signal).catch((error: unknown) => {
       liveEventFailed = true;
       liveEventError = error;
     });
     const decoder = new TextDecoder();
     const events: SseEvent[] = [];
     let buffered = "";
+    let reachedExpectedCount = false;
+    let liveCleanupTimedOut = false;
+    let readerCleanupTimedOut = false;
+    const consumeBufferedFrames = (): void => {
+      for (;;) {
+        const boundary = buffered.indexOf("\n\n");
+        if (boundary < 0) return;
+        const block = buffered.slice(0, boundary);
+        buffered = buffered.slice(boundary + 2);
+        if (block.length === 0 || block.startsWith(":")) continue;
+        const fields = new Map<string, string>();
+        for (const line of block.split("\n")) {
+          const separator = line.indexOf(":");
+          if (separator < 0) continue;
+          fields.set(line.slice(0, separator), line.slice(separator + 1).trimStart());
+        }
+        const id = fields.get("id");
+        const event = fields.get("event");
+        const data = fields.get("data");
+        if (!id || !event || !data) continue;
+        events.push({ id, event, data: object(JSON.parse(data) as unknown, `SSE event ${id}`) });
+        if (events.length >= expectedCount) {
+          reachedExpectedCount = true;
+          return;
+        }
+      }
+    };
     try {
-      while (events.length < expectedCount) {
+      while (!reachedExpectedCount) {
         const next = await reader.read();
         if (next.done) break;
-        buffered += decoder.decode(next.value, { stream: true }).replaceAll("\r\n", "\n");
-        for (;;) {
-          const boundary = buffered.indexOf("\n\n");
-          if (boundary < 0) break;
-          const block = buffered.slice(0, boundary);
-          buffered = buffered.slice(boundary + 2);
-          if (block.length === 0 || block.startsWith(":")) continue;
-          const fields = new Map<string, string>();
-          for (const line of block.split("\n")) {
-            const separator = line.indexOf(":");
-            if (separator < 0) continue;
-            fields.set(line.slice(0, separator), line.slice(separator + 1).trimStart());
-          }
-          const id = fields.get("id");
-          const event = fields.get("event");
-          const data = fields.get("data");
-          if (!id || !event || !data) continue;
-          events.push({ id, event, data: object(JSON.parse(data) as unknown, `SSE event ${id}`) });
-          if (events.length >= expectedCount) break;
-        }
+        buffered += decoder.decode(next.value, { stream: true });
+        buffered = buffered.replaceAll("\r\n", "\n");
+        consumeBufferedFrames();
+      }
+      if (!reachedExpectedCount) {
+        buffered += decoder.decode();
+        buffered = buffered.replaceAll("\r\n", "\n");
+        consumeBufferedFrames();
       }
     } catch (error: unknown) {
       if (controller.signal.aborted) {
@@ -145,8 +189,27 @@ async function readReplayEvents(
       }
       throw error;
     } finally {
-      await reader.cancel().catch(() => undefined);
-      await liveEventPromise;
+      if (reachedExpectedCount) {
+        // The live mutation is part of the proof. Let its HTTP response settle
+        // after its event is observed; abort only if the bounded cleanup fence
+        // says the response did not finish.
+        const liveSettled = await boundedCleanup(liveEventPromise);
+        if (!liveSettled) {
+          liveCleanupTimedOut = true;
+          controller.abort();
+        }
+      } else {
+        controller.abort();
+        await boundedCleanup(liveEventPromise);
+      }
+      readerCleanupTimedOut = !(await boundedCleanup(reader.cancel()));
+      if (readerCleanupTimedOut) controller.abort();
+    }
+    if (liveCleanupTimedOut) {
+      throw new Error(`live mutation did not settle within ${SSE_CLEANUP_TIMEOUT_MS}ms`);
+    }
+    if (readerCleanupTimedOut) {
+      throw new Error(`SSE reader did not cancel within ${SSE_CLEANUP_TIMEOUT_MS}ms`);
     }
     if (liveEventFailed) throw liveEventError;
     if (events.length !== expectedCount) {
@@ -252,7 +315,7 @@ const replayedEvents = await readReplayEvents(
   sseCursor,
   sseTaskId,
   sseEventCount + 1,
-  () => api("POST", `/v1/tasks/${encodeURIComponent(sseTaskId)}/cancel`, { reason: overlapReason }),
+  (signal) => api("POST", `/v1/tasks/${encodeURIComponent(sseTaskId)}/cancel`, { reason: overlapReason }, signal),
 );
 const replayedIds = replayedEvents.map((event) => event.id);
 if (new Set(replayedIds).size !== replayedIds.length) {
@@ -278,6 +341,45 @@ for (const event of replayedEvents) {
   if (!isReplayFixture && !isOverlapEvent) {
     throw new Error(`SSE replay leaked a cross-task or cross-schema event: ${JSON.stringify(event)}`);
   }
+}
+
+// Reconnect without the compatibility query parameter. The task is created
+// after the previous stream's final watermark, so its creation event is a
+// deterministic replay and its cancellation is a deterministic live event.
+const reconnectTask = await api("POST", "/v1/tasks", {
+  session_id: sessionId,
+  thread_id: threadId,
+  objective: "prove deterministic SSE reconnect after restart",
+  acceptance_criteria: [{
+    id: "sse-reconnect",
+    statement: "The reconnect stream delivers its durable creation and live cancellation exactly once.",
+    required: true,
+  }],
+});
+const reconnectTaskId = nonEmpty(reconnectTask, "id", "SSE reconnect task");
+const reconnectReason = "exercise Last-Event-ID reconnect";
+const reconnectEvents = await readReplayEvents(
+  replayedIds.at(-1)!,
+  reconnectTaskId,
+  2,
+  (signal) => api("POST", `/v1/tasks/${encodeURIComponent(reconnectTaskId)}/cancel`, { reason: reconnectReason }, signal),
+  "header",
+);
+const reconnectIds = reconnectEvents.map((event) => event.id);
+if (
+  new Set(reconnectIds).size !== reconnectIds.length
+  || reconnectIds.some((id, index) => index > 0 && id <= reconnectIds[index - 1]!)
+) {
+  throw new Error(`Last-Event-ID reconnect was not strictly ordered and unique: ${JSON.stringify(reconnectEvents)}`);
+}
+const reconnectCreated = reconnectEvents.filter((event) =>
+  event.event === "task.created" && event.data.objective === "prove deterministic SSE reconnect after restart"
+);
+const reconnectCancelled = reconnectEvents.filter((event) =>
+  event.event === "task.aborted" && event.data.reason === reconnectReason
+);
+if (reconnectCreated.length !== 1 || reconnectCancelled.length !== 1 || reconnectEvents.length !== 2) {
+  throw new Error(`Last-Event-ID reconnect diverged: ${JSON.stringify(reconnectEvents)}`);
 }
 
 const session = await api("GET", `/v1/sessions/${encodeURIComponent(sessionId)}`);
@@ -576,10 +678,12 @@ console.log(JSON.stringify({
   recovered_session_id: sessionId,
   original_task_id: taskId,
   resumed_task_id: resumedTaskId,
+  sse_reconnect_task_id: reconnectTaskId,
   bridged_task_id: v2CreatedId,
   projection_task_id: projectionTaskId,
   resumed_turn_id: resumedTurnId,
   sse_replayed_event_count: replayedEvents.length,
+  sse_reconnect_event_count: reconnectEvents.length,
   terminal_race_task_id: raceTaskId,
   startup_reconciled_job_count: startupReconciledJobs.length,
   recovery_reports: [beforeRecovery.id, afterRecovery.id],

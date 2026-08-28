@@ -188,4 +188,28 @@ describe("ForgeClient v2 runtime contracts", () => {
     );
     expect([...bytes]).toEqual([1, 2, 3]);
   });
+
+  test("reconnects SSE with both the explicit cursor and Last-Event-ID", async () => {
+    let requestedUrl = "";
+    let requestHeaders = new Headers();
+    const fetchImpl: FetchMock = async (input, init) => {
+      requestedUrl = String(input);
+      requestHeaders = new Headers(init?.headers);
+      return new Response("id: 0002\nevent: task.updated\ndata: {\"ok\":true}\n\n");
+    };
+    const client = new ForgeClient({ baseUrl: "http://control.test", fetchImpl });
+
+    const received: unknown[] = [];
+    for await (const event of client.subscribeEvents({ cursor: "0001", task_id: "task-1" })) {
+      received.push(event);
+    }
+
+    expect(requestedUrl).toBe("http://control.test/v1/events?cursor=0001&task_id=task-1");
+    expect(requestHeaders.get("last-event-id")).toBe("0001");
+    expect(received).toEqual([{
+      id: "0002",
+      event: "task.updated",
+      data: "{\"ok\":true}",
+    }]);
+  });
 });

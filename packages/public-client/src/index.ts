@@ -394,7 +394,9 @@ export class TerminusClient {
       task_id: opts.task_id,
       session_id: opts.session_id,
     });
-    const init: RequestInit = { headers: { ...this.headers, accept: "text/event-stream" } };
+    const headers: Record<string, string> = { ...this.headers, accept: "text/event-stream" };
+    if (opts.cursor !== undefined && opts.cursor !== null) headers["last-event-id"] = opts.cursor;
+    const init: RequestInit = { headers };
     if (opts.signal) init.signal = opts.signal;
     const res = await this.fetchImpl(url, init);
     if (!res.ok || !res.body) {
@@ -404,13 +406,24 @@ export class TerminusClient {
     const decoder = createSseDecoder();
     const decoder_ = new TextDecoder();
     try {
+      let eof = false;
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          eof = true;
+          break;
+        }
         const text = decoder_.decode(value, { stream: true });
         for (const ev of decoder.feed(text)) {
           yield ev;
         }
+      }
+      if (eof) {
+        const text = decoder_.decode();
+        for (const ev of decoder.feed(text)) {
+          yield ev;
+        }
+        decoder.finish();
       }
     } finally {
       reader.releaseLock();

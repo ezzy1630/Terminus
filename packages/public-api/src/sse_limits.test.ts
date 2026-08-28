@@ -39,4 +39,16 @@ describe("bounded SSE decoder", () => {
     }]);
     expect(() => decoder.finish()).not.toThrow();
   });
+
+  test("accepts CRLF-delimited events and clean EOF", () => {
+    const decoder = createSseDecoder({ maxFrameBytes: 64, maxBufferBytes: 128 });
+
+    expect(decoder.feed("id: 2\r\nevent: update\r\ndata: hello\r\n")).toEqual([]);
+    expect(decoder.feed("\r\n")).toEqual([{
+      id: "2",
+      event: "update",
+      data: "hello",
+    }]);
+    expect(() => decoder.finish()).not.toThrow();
+  });
 });

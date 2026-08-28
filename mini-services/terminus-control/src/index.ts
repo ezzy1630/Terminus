@@ -3845,6 +3845,12 @@ interface EventStreamOptions {
   readonly cursorExpiredFrame: (expired: EventCursorExpired) => string;
 }
 
+function eventCursorFromRequest(request: IncomingMessage, explicitCursor: string | null): string | null {
+  if (explicitCursor !== null && explicitCursor.length > 0) return explicitCursor;
+  const lastEventId = request.headers["last-event-id"];
+  return typeof lastEventId === "string" && lastEventId.length > 0 ? lastEventId : null;
+}
+
 /**
  * Serve both public event versions through the same replay/live broker.
  * Headers are flushed before replay so the caller can exercise the overlap
@@ -4721,70 +4727,67 @@ const routes: Route[] = [
       return sendError(res, 409, "TASK_ALREADY_TERMINAL", `task is already terminal (${current.status})`, "conflict");
     }
     try {
-      await mutateAgentState(async () => {
-        // Cancellation is one logical state transition. Keeping each turn
-        // abort in its own event transaction leaves a crash window where a
-        // turn is terminal but its task is still mutable. Read the turns
-        // under the mutation lock, then publish every turn/task event and
-        // CAS every authoritative row in one database transaction.
-        const activeTurns = await db.turn.findMany({
-          where: { taskId, state: { in: [...V1_ACTIVE_TURN_STATES, "REPAIR_PENDING"] } },
-          orderBy: { sequence: "asc" },
-        });
-        const cancellationEvents: EmitInput[] = [
-          ...activeTurns.map((activeTurn) => ({
-            eventType: "turn.aborted" as const,
-            aggregateType: "turn" as const,
-            aggregateId: activeTurn.id,
-            correlationId: taskId,
-            idempotencyKey: `task-cancel:${taskId}:turn:${activeTurn.id}`,
-            payload: {
-              reason,
-              previous_state: activeTurn.state,
-              phase: activeTurn.state,
-            },
-          })),
-          {
-            eventType: "task.aborted" as const,
-            aggregateType: "task" as const,
-            aggregateId: taskId,
-            correlationId: taskId,
-            idempotencyKey: `task-cancel:${taskId}`,
-            payload: { reason, turn_ids: activeTurns.map((turn) => turn.id) },
+      // The HTTP dispatcher already owns mutationMutex for this mutating
+      // route. Reacquiring it here deadlocks the request before the durable
+      // task.aborted event can reach an overlapping SSE subscriber.
+      // Cancellation remains one event-plus-row transaction below.
+      const activeTurns = await db.turn.findMany({
+        where: { taskId, state: { in: [...V1_ACTIVE_TURN_STATES, "REPAIR_PENDING"] } },
+        orderBy: { sequence: "asc" },
+      });
+      const cancellationEvents: EmitInput[] = [
+        ...activeTurns.map((activeTurn) => ({
+          eventType: "turn.aborted" as const,
+          aggregateType: "turn" as const,
+          aggregateId: activeTurn.id,
+          correlationId: taskId,
+          idempotencyKey: `task-cancel:${taskId}:turn:${activeTurn.id}`,
+          payload: {
+            reason,
+            previous_state: activeTurn.state,
+            phase: activeTurn.state,
           },
-        ];
-        await emitAtomicBatch(cancellationEvents, async (tx) => {
-          for (const activeTurn of activeTurns) {
-            const turnUpdate = await tx.turn.updateMany({
-              where: {
-                id: activeTurn.id,
-                taskId,
-                state: { in: [...V1_ACTIVE_TURN_STATES, "REPAIR_PENDING"] },
-              },
-              data: {
-                state: "ABORTED",
-                completedAt: new Date(),
-                terminalErrorJson: JSON.stringify({ reason, cancellation: true }),
-              },
-            });
-            if (turnUpdate.count !== 1) {
-              throw new TurnAdmissionError("state_changed", activeTurn.state);
-            }
-          }
-          const update = await tx.task.updateMany({
-            where: { id: taskId, status: { in: [...V1_MUTABLE_TASK_STATUSES] } },
+        })),
+        {
+          eventType: "task.aborted" as const,
+          aggregateType: "task" as const,
+          aggregateId: taskId,
+          correlationId: taskId,
+          idempotencyKey: `task-cancel:${taskId}`,
+          payload: { reason, turn_ids: activeTurns.map((turn) => turn.id) },
+        },
+      ];
+      await emitAtomicBatch(cancellationEvents, async (tx) => {
+        for (const activeTurn of activeTurns) {
+          const turnUpdate = await tx.turn.updateMany({
+            where: {
+              id: activeTurn.id,
+              taskId,
+              state: { in: [...V1_ACTIVE_TURN_STATES, "REPAIR_PENDING"] },
+            },
             data: {
-              status: "ABORTED",
+              state: "ABORTED",
               completedAt: new Date(),
-              terminalReasonJson: JSON.stringify({ reason }),
+              terminalErrorJson: JSON.stringify({ reason, cancellation: true }),
             },
           });
-          if (update.count !== 1) throw new Error(`task ${taskId} changed before atomic cancellation`);
-        });
-        for (const activeTurn of activeTurns) {
-          abortActiveTurn(activeTurn.id, reason);
+          if (turnUpdate.count !== 1) {
+            throw new TurnAdmissionError("state_changed", activeTurn.state);
+          }
         }
+        const update = await tx.task.updateMany({
+          where: { id: taskId, status: { in: [...V1_MUTABLE_TASK_STATUSES] } },
+          data: {
+            status: "ABORTED",
+            completedAt: new Date(),
+            terminalReasonJson: JSON.stringify({ reason }),
+          },
+        });
+        if (update.count !== 1) throw new Error(`task ${taskId} changed before atomic cancellation`);
       });
+      for (const activeTurn of activeTurns) {
+        abortActiveTurn(activeTurn.id, reason);
+      }
     } catch (error: unknown) {
       if (error instanceof TurnAdmissionError) {
         return sendError(
@@ -5548,7 +5551,7 @@ const routes: Route[] = [
   // ────────────────────────── /events (SSE) ──────────────────────────────
   route("GET", "/v1/events", async (req, res) => {
     const url = new URL(req.url ?? "", "http://x");
-    const cursor = url.searchParams.get("cursor");
+    const cursor = eventCursorFromRequest(req, url.searchParams.get("cursor"));
     const taskId = url.searchParams.get("task_id");
     const sessionId = url.searchParams.get("session_id");
 
@@ -8932,7 +8935,7 @@ const routes: Route[] = [
   }),
   route("GET", "/v2/events", async (req, res) => {
     const url = new URL(req.url ?? "", "http://x");
-    const cursor = url.searchParams.get("cursor");
+    const cursor = eventCursorFromRequest(req, url.searchParams.get("cursor"));
     const taskId = url.searchParams.get("taskId");
     const aggregateType = url.searchParams.get("aggregateType");
 

@@ -827,6 +827,20 @@ export interface SseDecoder {
 export const DEFAULT_SSE_MAX_FRAME_BYTES = 1 * 1024 * 1024;
 export const DEFAULT_SSE_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 
+interface SseBoundary {
+  readonly index: number;
+  readonly length: number;
+}
+
+function findSseBoundary(buffer: string): SseBoundary | null {
+  const lfIndex = buffer.indexOf("\n\n");
+  const crlfIndex = buffer.indexOf("\r\n\r\n");
+  if (lfIndex < 0 && crlfIndex < 0) return null;
+  if (lfIndex < 0) return { index: crlfIndex, length: 4 };
+  if (crlfIndex < 0 || lfIndex < crlfIndex) return { index: lfIndex, length: 2 };
+  return { index: crlfIndex, length: 4 };
+}
+
 export function createSseDecoder(options: SseDecoderOptions = {}): SseDecoder {
   const maxFrameBytes = options.maxFrameBytes ?? DEFAULT_SSE_MAX_FRAME_BYTES;
   const maxBufferBytes = options.maxBufferBytes ?? DEFAULT_SSE_MAX_BUFFER_BYTES;
@@ -853,15 +867,16 @@ export function createSseDecoder(options: SseDecoderOptions = {}): SseDecoder {
       bufferBytes += chunkBytes;
       const out: SseEvent[] = [];
       while (true) {
-        const idx = buffer.indexOf("\n\n");
-        if (idx < 0) break;
-        const block = buffer.slice(0, idx);
-        const consumedBytes = encoder.encode(buffer.slice(0, idx + 2)).byteLength;
+        const boundary = findSseBoundary(buffer);
+        if (!boundary) break;
+        const rawBlock = buffer.slice(0, boundary.index);
+        const block = rawBlock.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+        const consumedBytes = encoder.encode(buffer.slice(0, boundary.index + boundary.length)).byteLength;
         const frameBytes = encoder.encode(block).byteLength;
         if (frameBytes > maxFrameBytes) {
           throw new SseDecoderLimitError("frame", maxFrameBytes, frameBytes);
         }
-        buffer = buffer.slice(idx + 2);
+        buffer = buffer.slice(boundary.index + boundary.length);
         bufferBytes -= consumedBytes;
         for (const line of block.split("\n")) {
           if (line.startsWith("id:")) pendingId = line.slice(3).trim();
