@@ -30,9 +30,14 @@
   --text-display: var(--font-size-display-large);
   --text-display--line-height: var(--line-height-display-large);
 
+  /* What the sidebar actually paints. Identical to --bg-sidebar except on a
+     vibrant macOS window, where it becomes translucent so the material shows
+     through (see the [data-vibrancy] block in globals.css). */
+  --sidebar-material: var(--bg-sidebar);
+
   --color-canvas: var(--bg-canvas);
   --color-elevated: var(--bg-elevated);
-  --color-sidebar: var(--bg-sidebar);
+  --color-sidebar: var(--sidebar-material);
   --color-inspector: var(--bg-inspector);
   --color-terminal: var(--bg-terminal);
   --color-diff: var(--bg-diff);
@@ -183,6 +188,9 @@
   --focus-color: #79a6f6;
   --focus-border: color-mix(in srgb, var(--focus-color) 72%, var(--border-strong));
   --focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px color-mix(in srgb, var(--focus-color) 24%, transparent);
+  /* The composer's focused border. Neutral on purpose — see the
+     .composer-surface:focus-within note in globals.css. */
+  --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 46%, var(--border-strong));
   --elevation-sm: 0 1px 2px rgb(0 0 0 / 20%);
   --elevation-md: 0 4px 12px rgb(0 0 0 / 24%);
   --elevation-lg: 0 12px 32px rgb(0 0 0 / 38%);
@@ -224,6 +232,7 @@
     --semantic-info: #2868b2;
     --action-primary: var(--accent);
     --focus-color: #356fd6;
+  --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 40%, var(--border-strong));
     --elevation-sm: 0 1px 2px rgb(35 35 30 / 7%);
     --elevation-md: 0 8px 24px rgb(35 35 30 / 11%);
     --elevation-lg: 0 20px 52px rgb(35 35 30 / 16%);
@@ -270,6 +279,7 @@
   --semantic-info: #2868b2;
   --action-primary: var(--accent);
   --focus-color: #356fd6;
+  --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 40%, var(--border-strong));
   --elevation-sm: 0 1px 2px rgb(35 35 30 / 7%);
   --elevation-md: 0 8px 24px rgb(35 35 30 / 11%);
   --elevation-lg: 0 20px 52px rgb(35 35 30 / 16%);

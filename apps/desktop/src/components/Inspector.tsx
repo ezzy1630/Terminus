@@ -22,12 +22,12 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { BadgeCheck, Check, ChevronDown, ChevronRight, Copy, FileDiff, GitBranch, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, UsersRound, Workflow } from "lucide-react";
 import { cn } from "../lib/cn";
+import { lifecycleFromTask } from "../lib/task-lifecycle";
 import {
   useSelectedTask,
   useSelectedTaskApprovals,
   useSelectedTaskEventHistory,
   useSelectedTaskEvents,
-  normalizeTaskStatus,
   useTerminusStore,
 } from "../hooks/use-terminus";
 import { deriveSubagentActivity, deriveVerificationActivity, extractUnifiedDiffs } from "../lib/task-surface";
@@ -397,7 +397,7 @@ function InspectorImpl({
     );
   }
 
-  const statusKind = normalizeTaskStatus(task.status);
+  const statusKind = lifecycleFromTask(task);
   const blockedByProvider = task.status === "BLOCKED"
     && task.terminal_reason?.reason === "provider_transport_unavailable";
 

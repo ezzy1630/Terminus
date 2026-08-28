@@ -5,11 +5,32 @@
  * when loaded with `?mock=true`.
  */
 import { useTerminusStore } from "../hooks/use-terminus";
+import { seedTurnInputCache } from "../hooks/use-turn-inputs";
+import { api } from "./api";
 import { arpV2 } from "./api-v2";
 import type { ClaimSnapshot, EvidenceSnapshot, MaterialQuestionSnapshot, TaskV2Snapshot } from "../types/v2";
 import type { Task, TaskDomainStatus } from "../types";
 
+/** A monotonic SSE event id, `<16-digit-ms>-<8-digit-seq>`, N seconds ago. */
+function mockEventId(secondsAgo: number): string {
+  const millis = Date.now() - secondsAgo * 1000;
+  return `${String(millis).padStart(16, "0")}-00000000`;
+}
+
+/** The admitted input artifact behind the fixture's one user turn. */
+const MOCK_PROMPT = "Refactor the Rust effect kernel RPC and UDS socket handler so the security checks cannot be bypassed. Keep the RPC surface unchanged.";
+const MOCK_PROMPT_HASH = "f0ad0acf468ae9f15b174f34ac6f995585c93fbd168a48a7ed3d466fd0e3e1f1";
+/**
+ * A second turn, still in flight. The fixture used to show only settled turns,
+ * which is the state the app spends the least time in — a running turn is what
+ * a design pass actually needs to look at.
+ */
+const MOCK_LIVE_PROMPT = "Add an activity pulse to the sidebar session cards so a running task is visible without opening it.";
+const MOCK_LIVE_PROMPT_HASH = "206f18355d70ee49af5a7004f013e04d14017342908da34d71e70dd595190d2f";
+
 export function setupDevMock(): void {
+  seedTurnInputCache(MOCK_PROMPT_HASH, MOCK_PROMPT);
+  seedTurnInputCache(MOCK_LIVE_PROMPT_HASH, MOCK_LIVE_PROMPT);
   try {
     window.localStorage.setItem("terminus-desktop.onboarding.completed.v1", "true");
   } catch {}
@@ -251,6 +272,36 @@ export function setupDevMock(): void {
     "task-105": "thread-3",
   };
 
+  // The v1 client backs the sidebar and the status dot. Without these the
+  // fixture ran against a control plane that is not there, so the design audit
+  // it exists for was conducted under a red "Offline" badge and an empty
+  // session tree — neither of which is what the app looks like in use.
+  const emptyTruncation = { occurred: false, continuation: null } as const;
+  api.health = async () => ({
+    status: "ok",
+    version: "0.1.0",
+    build_commit: "mock",
+    instance_id: "mock-instance",
+    uptime_seconds: 4_812,
+    ready: true,
+  });
+  api.listSessions = async () => ({
+    sessions,
+    total: sessions.length,
+    next_cursor: null,
+    truncation: emptyTruncation,
+  });
+  api.listTasks = async (sessionId: string) => {
+    const owned = Object.values(taskById).filter((task) => task.session_id === sessionId);
+    return { tasks: owned, total: owned.length, next_cursor: null, truncation: emptyTruncation };
+  };
+  api.listApprovals = async () => ({
+    approvals: [],
+    total: 0,
+    next_cursor: null,
+    truncation: emptyTruncation,
+  });
+
   // Intercept arpV2 calls for mock mode
   arpV2.listTasks = async () => tasks;
   arpV2.listMaterialQuestions = async () => questions;
@@ -308,50 +359,180 @@ export function setupDevMock(): void {
       "session-3": Object.values(taskById).filter((task) => task.session_id === "session-3"),
     },
     eventsByTask: {
+      // These are the *real* control-plane shapes, not a convenient
+      // approximation of them: `tool.proposed` names the tool and its operand,
+      // settlement carries only `provider_call_id` and a summary, and event ids
+      // are the monotonic `<16-digit-ms>-<8-digit-seq>` the SSE stream uses. A
+      // fixture that disagrees with the wire makes a visual audit lie.
       "task-101": [
         {
-          id: "ev-1",
+          id: mockEventId(1800),
           event: "turn.started",
           data: JSON.stringify({
-            user_input: "Refactor Rust effect kernel RPC and UDS socket handler to ensure non-bypassable security checks.",
+            // The prompt is admitted as content-addressed input, not inlined
+            // into the event — see lib/turn-input.ts.
+            input_artifact: `artifact://sha256/${MOCK_PROMPT_HASH}`,
+            input_hash: MOCK_PROMPT_HASH,
             started_at: new Date(Date.now() - 1800000).toISOString(),
           }),
         },
         {
-          id: "ev-2",
-          event: "tool.settled",
+          id: mockEventId(1798),
+          event: "turn.context_compiling",
+          data: JSON.stringify({ phase: "context_compiling" }),
+        },
+        {
+          id: mockEventId(1794),
+          event: "turn.provider_running",
+          data: JSON.stringify({ provider: "open_code_zen", model: "ox-alpha" }),
+        },
+        {
+          id: mockEventId(1788),
+          event: "turn.tool_settlement",
+          data: JSON.stringify({ tool_calls: 3 }),
+        },
+        {
+          id: mockEventId(1787),
+          event: "tool.proposed",
           data: JSON.stringify({
-            tool: "read",
-            args_summary: "crates/terminus-kernel/src/socket.rs",
-            result_status: "success",
-            summary: "read 180 lines",
+            provider_call_id: "call-read-1",
+            tool_id: "read",
+            arguments_excerpt: "crates/terminus-kernel/src/socket.rs",
           }),
         },
         {
-          id: "ev-3",
+          id: mockEventId(1785),
           event: "tool.settled",
           data: JSON.stringify({
-            tool: "patch",
-            args_summary: "crates/terminus-kernel/src/socket.rs",
-            result_status: "success",
-            summary: "updated UDS permission checks",
+            provider_call_id: "call-read-1",
+            status: "success",
+            summary: "Read 180 lines of crates/terminus-kernel/src/socket.rs",
           }),
         },
         {
-          id: "ev-4",
-          event: "tool.settled",
+          id: mockEventId(1780),
+          event: "tool.proposed",
           data: JSON.stringify({
-            tool: "verify",
-            args_summary: "cargo test --package terminus-kernel",
-            result_status: "success",
-            summary: "12 tests passed",
+            provider_call_id: "call-patch-1",
+            tool_id: "patch",
+            arguments_excerpt: "crates/terminus-kernel/src/socket.rs",
           }),
         },
         {
-          id: "ev-5",
+          id: mockEventId(1776),
+          event: "tool.settled",
+          data: JSON.stringify({
+            provider_call_id: "call-patch-1",
+            status: "success",
+            summary: "Tightened the UDS peer-credential check before dispatch",
+          }),
+        },
+        {
+          id: mockEventId(1770),
+          event: "tool.proposed",
+          data: JSON.stringify({
+            provider_call_id: "call-exec-1",
+            tool_id: "exec",
+            arguments_excerpt: "cargo test --package terminus-kernel",
+          }),
+        },
+        {
+          id: mockEventId(1700),
+          event: "tool.settled",
+          data: JSON.stringify({
+            provider_call_id: "call-exec-1",
+            status: "success",
+            summary: "12 tests passed in 41s",
+          }),
+        },
+        {
+          id: mockEventId(1698),
+          event: "turn.verifying",
+          data: JSON.stringify({ phase: "verifying" }),
+        },
+        {
+          id: mockEventId(1695),
+          event: "turn.finalizing",
+          data: JSON.stringify({ phase: "finalizing" }),
+        },
+        {
+          id: mockEventId(1694),
           event: "turn.completed",
           data: JSON.stringify({
-            summary: "I have refactored the Rust effect kernel RPC and UDS socket handler. All 12 adversarial security invariant tests are passing without bypass paths.",
+            state: "COMPLETED",
+            summary: [
+              "## What changed",
+              "",
+              "The UDS socket handler now checks peer credentials **before** dispatch, so a",
+              "connection that fails the check never reaches `EffectKernel::dispatch`.",
+              "",
+              "- `socket.rs` — moved the credential check ahead of the dispatch call",
+              "- `services.rs` — removed the second, redundant check it made unreachable",
+              "",
+              "### Verification",
+              "",
+              "`cargo test --package terminus-kernel` passes all 12 adversarial invariant",
+              "tests, including the two that previously exercised the bypass path.",
+              "",
+              "> One thing to flag: `non_bypassability.rs` still asserts the old ordering in",
+              "> a comment. The assertion itself is correct.",
+            ].join("\n"),
+            summary_truncated: false,
+            continuation: null,
+            reasoning: "The check ran after dispatch, so the bypass was reachable whenever the caller closed the socket early. Moving it ahead of dispatch closes that window without changing the RPC surface.",
+          }),
+        },
+      ],
+      "task-102": [
+        {
+          id: mockEventId(96),
+          event: "turn.started",
+          data: JSON.stringify({
+            input_artifact: `artifact://sha256/${MOCK_LIVE_PROMPT_HASH}`,
+            input_hash: MOCK_LIVE_PROMPT_HASH,
+            started_at: new Date(Date.now() - 96000).toISOString(),
+          }),
+        },
+        {
+          id: mockEventId(95),
+          event: "turn.context_compiling",
+          data: JSON.stringify({ phase: "context_compiling" }),
+        },
+        {
+          id: mockEventId(91),
+          event: "turn.provider_running",
+          data: JSON.stringify({ provider: "open_code_zen", model: "ox-alpha" }),
+        },
+        {
+          id: mockEventId(74),
+          event: "turn.tool_settlement",
+          data: JSON.stringify({ tool_calls: 2 }),
+        },
+        {
+          id: mockEventId(73),
+          event: "tool.proposed",
+          data: JSON.stringify({
+            provider_call_id: "call-glob-1",
+            tool_id: "glob",
+            arguments_excerpt: "apps/desktop/src/components/Sidebar*.tsx",
+          }),
+        },
+        {
+          id: mockEventId(71),
+          event: "tool.settled",
+          data: JSON.stringify({
+            provider_call_id: "call-glob-1",
+            status: "success",
+            summary: "Matched 2 files",
+          }),
+        },
+        {
+          id: mockEventId(64),
+          event: "tool.proposed",
+          data: JSON.stringify({
+            provider_call_id: "call-read-2",
+            tool_id: "read",
+            arguments_excerpt: "apps/desktop/src/components/SidebarItem.tsx",
           }),
         },
       ],

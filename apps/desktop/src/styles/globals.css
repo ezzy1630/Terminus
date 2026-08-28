@@ -170,7 +170,7 @@ textarea::placeholder,
   z-index: 0;
   width: var(--titlebar-sidebar-width, 0px);
   border-right: 1px solid var(--sidebar-separator);
-  background: var(--bg-sidebar);
+  background: var(--sidebar-material);
   pointer-events: none;
 }
 
@@ -314,6 +314,13 @@ textarea::placeholder,
   flex-shrink: 0;
 }
 
+/* With nothing to read, bottom-anchoring pins the empty state just above the
+   composer and leaves the rest of the surface as one tall void. An empty
+   surface has no newest turn to keep in view, so it centres instead. */
+.feed-column.is-empty {
+  justify-content: center;
+}
+
 /* The outer surface owns focus treatment. The textarea itself should stay
    quiet, otherwise the browser focus ring reads as a blue overlay. */
 .composer-surface textarea:focus-visible {
@@ -324,6 +331,7 @@ textarea::placeholder,
 /* The composer is the base of the reading column, so it carries the only
    real elevation on the primary surface. */
 .composer-surface {
+  border: 1px solid var(--border-default);
   box-shadow:
     var(--elevation-md),
     inset 0 1px 0 color-mix(in srgb, var(--border-strong) 45%, transparent);
@@ -333,14 +341,30 @@ textarea::placeholder,
     transform var(--duration-fast) var(--easing-default);
 }
 
+/* The composer is focused for almost the whole life of the app — both start
+   and task surfaces focus it on mount. So its focused state is its *resting*
+   state, and it cannot be drawn with the accent focus ring: a permanently lit
+   blue halo around the primary input reads as a stuck browser selection, not
+   as focus. Focus here is carried by a brighter neutral border and a slightly
+   deeper lift, which is what native macOS text surfaces do. Every other
+   control in the app keeps the accent ring, where it still means "the keyboard
+   is here". */
 .composer-surface:focus-within {
-  border-color: var(--focus-border);
-  box-shadow: var(--focus-ring), var(--elevation-md);
+  border-color: var(--composer-focus-border);
+  box-shadow:
+    var(--elevation-lg),
+    inset 0 1px 0 color-mix(in srgb, var(--border-strong) 70%, transparent);
 }
 
-/* Feed content scrolls under the composer instead of colliding with it. */
+/* Feed content scrolls under the composer instead of colliding with it.
+   The inline padding is owned here, not by a utility class at each of the
+   three call sites, because it has to stay equal to the feed's own inset:
+   24px of padding plus the 8px stable scrollbar gutter. When they drifted,
+   the transcript and the composer that produces it sat on different axes at
+   every window narrower than the reading column. */
 .composer-dock {
   position: relative;
+  padding-inline: 32px;
   background: var(--bg-canvas);
 }
 
@@ -466,7 +490,7 @@ textarea::placeholder,
   position: relative;
   flex-shrink: 0;
   border-top: 1px solid var(--sidebar-separator);
-  background: var(--bg-sidebar);
+  background: var(--sidebar-material);
 }
 
 .sidebar-dock::before {
@@ -477,7 +501,7 @@ textarea::placeholder,
   left: 0;
   height: 20px;
   pointer-events: none;
-  background: linear-gradient(to top, var(--bg-sidebar), transparent);
+  background: linear-gradient(to top, var(--sidebar-material), transparent);
 }
 
 /* Section headers in sidebar */
@@ -823,6 +847,36 @@ html[data-reduce-transparency="true"] .inspector-card,
 html[data-reduce-transparency="true"] .command-palette-shell {
   backdrop-filter: none !important;
   background: var(--bg-inspector) !important;
+}
+
+/* ── Vibrant window material (macOS only) ───────────────────────────────────
+   The window is an NSVisualEffectView, so the renderer must stop painting an
+   opaque colour over it. Chrome — the title bar and the sidebar — goes
+   translucent and picks up the desktop behind it; the working surface stays
+   fully opaque, because body text over a live, moving backdrop is unreadable
+   and unmistakably a gimmick.
+
+   The main process sets this only on the document window, only on macOS, and
+   only when the system is not asking for reduced transparency. */
+html[data-vibrancy="on"],
+html[data-vibrancy="on"] body,
+html[data-vibrancy="on"] .app-shell {
+  background: transparent;
+}
+
+html[data-vibrancy="on"] .app-content {
+  background: var(--bg-canvas);
+}
+
+/* The title bar is chrome, so it goes vibrant too — and its sidebar strip
+   must composite over the same material as the sidebar below it, or the two
+   meet at a visible seam. */
+html[data-vibrancy="on"] .titlebar-shell {
+  background: transparent;
+}
+
+html[data-vibrancy="on"] {
+  --sidebar-material: color-mix(in srgb, var(--bg-sidebar) 62%, transparent);
 }
 
 /* Mission Board responds to the space left after the docked sidebar and task

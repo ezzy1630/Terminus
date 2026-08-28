@@ -52,13 +52,14 @@ import type { Approval, ApprovalSummary, Task, TaskDomainStatus, TaskListRespons
 
 describe("StatusIndicator", () => {
   const STATUSES = [
+    "planning",
     "working",
+    "verifying",
     "queued",
-    "waiting",
-    "needs_approval",
-    "needs_review",
+    "needs_you",
+    "review",
     "failed",
-    "interrupted",
+    "cancelled",
     "done",
   ] as const;
 
@@ -83,13 +84,16 @@ describe("StatusIndicator", () => {
 
 function expectedAriaLabel(status: string): string {
   switch (status) {
+    // The three states the agent advances on its own share the spinner, whose
+    // label is the lifecycle label lowercased.
+    case "planning": return "planning";
     case "working": return "working";
+    case "verifying": return "verifying";
     case "queued": return "queued";
-    case "waiting": return "waiting";
-    case "needs_approval": return "needs approval";
-    case "needs_review": return "needs review";
+    case "needs_you": return "needs you";
+    case "review": return "ready for review";
     case "failed": return "failed";
-    case "interrupted": return "interrupted";
+    case "cancelled": return "cancelled";
     case "done": return "done";
     default: return "unknown";
   }
@@ -1354,15 +1358,17 @@ describe("NewTaskScreen — first turn lifecycle", () => {
     expect(screen.queryByText("Map the codebase")).not.toBeInTheDocument();
   });
 
-  test("keeps local-service recovery beside the disabled start composer", async () => {
+  test("leaves connection status to the sidebar rather than repeating it", async () => {
+    // The sidebar is always on screen and owns runtime status and recovery.
+    // A second offline banner here meant the same state shouted twice on the
+    // one surface where the user is trying to start work.
     const originalRefreshAll = useTerminusStore.getState().refreshAll;
     const refreshAll = vi.fn(async () => undefined);
     useTerminusStore.setState({ healthReady: false, healthStatus: "offline", refreshAll });
 
     render(<NewTaskScreen />);
-    expect(screen.getByText(/Terminus is offline|Local service offline/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(refreshAll).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Terminus is offline|Starting Terminus/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
 
     act(() => useTerminusStore.setState({
       refreshAll: originalRefreshAll,

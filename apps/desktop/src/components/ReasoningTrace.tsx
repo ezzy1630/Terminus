@@ -19,10 +19,13 @@ import { Button } from "../ui/Button";
 import type { ReasoningBlock, ReasoningPhaseKind } from "../types";
 
 const PHASE_LABEL: Record<ReasoningPhaseKind, string> = {
-  context_compiling: "Compiling context",
+  context_compiling: "Reading context",
   provider_running: "Thinking",
-  response_validating: "Validating response",
-  finalizing: "Finalizing",
+  tool_settlement: "Running tools",
+  response_validating: "Checking the response",
+  verifying: "Verifying",
+  repairing: "Repairing",
+  finalizing: "Finishing up",
 };
 
 /** Ticks once a second, but only while a turn is actually running. */
@@ -52,13 +55,15 @@ function ReasoningTraceImpl({ block }: { block: ReasoningBlock }): JSX.Element |
   const running = block.endedAt === null;
   const elapsed = useElapsed(block.startedAt, block.endedAt);
 
-  // A turn that settled without reporting a single phase has nothing to say.
-  if (!running && block.phases.length === 0) return null;
+  // A turn that settled without reporting a single phase or any reasoning has
+  // nothing to say.
+  if (!running && block.phases.length === 0 && !block.text) return null;
 
   const current = block.phases[block.phases.length - 1];
   const label = running
     ? PHASE_LABEL[current?.kind ?? "provider_running"]
     : `Thought for ${formatDuration(elapsed)}`;
+  const thinking = block.text?.trim() ?? "";
 
   if (running) {
     return (
@@ -86,7 +91,16 @@ function ReasoningTraceImpl({ block }: { block: ReasoningBlock }): JSX.Element |
         <span className="ui-meta">{label}</span>
       </Button>
       {expanded ? (
-        <ul className="mt-1 ml-2 flex flex-col gap-0.5 border-l border-subtle pl-3">
+        <div className="mt-1 ml-2 border-l border-subtle pl-3">
+        {/* The model's own words, when the provider returned any. Quiet and
+            slightly inset so it reads as an aside to the answer, not as part
+            of it. */}
+        {thinking ? (
+          <p className="selectable ui-prose mb-2 whitespace-pre-wrap text-tertiary">
+            {thinking}
+          </p>
+        ) : null}
+        <ul className="flex flex-col gap-0.5">
           {block.phases.map((phase, index) => {
             const next = block.phases[index + 1];
             const from = Date.parse(phase.at);
@@ -102,6 +116,7 @@ function ReasoningTraceImpl({ block }: { block: ReasoningBlock }): JSX.Element |
             );
           })}
         </ul>
+        </div>
       ) : null}
     </div>
   );

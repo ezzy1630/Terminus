@@ -122,13 +122,25 @@ describe("task surface event projections", () => {
   });
 
   test("renders the control-plane completion summary when no stream delta is available", () => {
-    const feed = decodeFeed([
-      event("1", "turn.started", { user_input: "Check the UI", started_at: "2026-07-12T00:00:00.000Z" }),
+    // turn.started carries input_artifact, not user_input — the prompt is
+    // admitted as immutable content-addressed input and joined back on by
+    // useTurnInputs, which decodeFeed receives as its third argument.
+    const promptHash = "c".repeat(64);
+    const events = [
+      event("1", "turn.started", {
+        thread_id: "thread-1",
+        input_artifact: `artifact://sha256/${promptHash}`,
+        input_hash: `sha256:${promptHash}`,
+        started_at: "2026-07-12T00:00:00.000Z",
+      }),
       event("2", "turn.provider_running", { provider: "fixture" }),
       event("3", "turn.response_validating", { status: "completed" }),
       event("4", "tool.settled", { tool: "read", status: "success", summary: "Read 1 file (412 lines)." }),
       event("5", "turn.completed", { summary: "Acknowledged: Check the UI" }),
-    ], "2026-07-12T00:00:00.000Z");
+    ];
+    const feed = decodeFeed(events, "2026-07-12T00:00:00.000Z", new Map([
+      ["1", { status: "ready", text: "Check the UI", truncated: false } as const],
+    ]));
 
     expect(feed.messages).toEqual([
       expect.objectContaining({ role: "user", content: "Check the UI" }),
@@ -137,6 +149,48 @@ describe("task surface event projections", () => {
     expect(feed.blocks).toEqual([
       expect.objectContaining({ title: "Explored codebase", status: "done", metric: "1 file" }),
     ]);
+  });
+
+  test("never renders a user message as an empty bubble", () => {
+    // The original defect: user_input was read off turn.started, was always
+    // undefined, and produced a 30x22px empty pill in the transcript.
+    const promptHash = "d".repeat(64);
+    const started = event("1", "turn.started", {
+      thread_id: "thread-1",
+      input_artifact: `artifact://sha256/${promptHash}`,
+      input_hash: `sha256:${promptHash}`,
+      started_at: "2026-07-12T00:00:00.000Z",
+    });
+
+    const unresolved = decodeFeed([started], "2026-07-12T00:00:00.000Z");
+    const unresolvedUser = unresolved.messages.find((message) => message.role === "user");
+    expect(unresolvedUser?.content.length).toBeGreaterThan(0);
+
+    const loading = decodeFeed([started], "2026-07-12T00:00:00.000Z", new Map([
+      ["1", { status: "loading" } as const],
+    ]));
+    expect(loading.messages.find((message) => message.role === "user")?.content).toBe("Loading prompt…");
+
+    const failed = decodeFeed([started], "2026-07-12T00:00:00.000Z", new Map([
+      ["1", { status: "unavailable", reason: "artifact 404" } as const],
+    ]));
+    expect(failed.messages.find((message) => message.role === "user")?.content).toContain("artifact 404");
+  });
+
+  test("states truncation rather than silently cutting a long prompt", () => {
+    const promptHash = "e".repeat(64);
+    const started = event("1", "turn.started", {
+      thread_id: "thread-1",
+      input_artifact: `artifact://sha256/${promptHash}`,
+      input_hash: `sha256:${promptHash}`,
+      started_at: "2026-07-12T00:00:00.000Z",
+    });
+    const feed = decodeFeed([started], "2026-07-12T00:00:00.000Z", new Map([
+      ["1", { status: "ready", text: "the first half", truncated: true } as const],
+    ]));
+    const content = feed.messages.find((message) => message.role === "user")?.content ?? "";
+    expect(content).toContain("the first half");
+    expect(content).toContain("truncated");
   });
 
   test("rejects oversized SSE payloads before parsing or retaining presentation data", () => {

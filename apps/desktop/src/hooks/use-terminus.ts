@@ -17,7 +17,7 @@
  */
 import { create } from "zustand";
 import { useMemo } from "react";
-import { api, TerminusApiError, subscribeEvents, type TerminusEventStream } from "../lib/api";
+import { api, createIdempotencyKey, TerminusApiError, subscribeEvents, type TerminusEventStream } from "../lib/api";
 import { mergePendingApprovals, pendingApprovalFromServerRow, derivePendingApprovals, type PendingApproval } from "../lib/task-surface";
 import { sessionLatency } from "../lib/session-latency";
 import {
@@ -44,6 +44,29 @@ export const MAX_EVENT_BYTES_GLOBAL = 32 * 1024 * 1024;
 export const MAX_PENDING_EVENT_BYTES_GLOBAL = 2 * 1024 * 1024;
 export const MAX_PRESENTATION_EVENT_CHARS = DEFAULT_PRESENTATION_EVENT_MAX_CHARS;
 export const PRESENTATION_REJECTION_KEY = "terminus_presentation_rejection";
+/**
+ * How much of a long conversation to replay on open. The presentation window
+ * holds 2000 events, so asking for more would only fill it and evict the
+ * oldest again; "load earlier" pages backwards from there on demand.
+ */
+const TRANSCRIPT_PAGE_EVENTS = 500;
+/**
+ * Replay reads the database directly and answers in about a millisecond, but
+ * it must never be able to hold the live stream hostage: on timeout the stream
+ * attaches anyway, with the transcript marked incomplete rather than absent.
+ */
+const TRANSCRIPT_REPLAY_TIMEOUT_MS = 6_000;
+
+export interface TranscriptReplayState {
+  status: "loading" | "ready" | "error";
+  /** Cursor for the page before what is loaded; null once the start is reached. */
+  earlierCursor: string | null;
+  loadingEarlier: boolean;
+  /** Events the control plane holds for this task, including ones not replayed. */
+  total: number;
+  error: string | null;
+}
+
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 15_000;
 const EVENT_BATCH_MS = 50;
@@ -56,6 +79,7 @@ const taskPageRequestGenerationBySession = new Map<string, number>();
 const taskRequestGenerationById = new Map<string, number>();
 const approvalRequestGenerationByTask = new Map<string, number>();
 const approvalPageRequestGenerationByTask = new Map<string, number>();
+const transcriptRequestGenerationByTask = new Map<string, number>();
 interface PendingPresentationEvent {
   readonly event: TerminusSseEvent;
   readonly bytes: number;
@@ -155,6 +179,31 @@ const compareSessions = (left: Session, right: Session): number =>
   right.updated_at.localeCompare(left.updated_at) || left.id.localeCompare(right.id);
 const compareTasks = (left: Task, right: Task): number =>
   right.updated_at.localeCompare(left.updated_at) || left.id.localeCompare(right.id);
+/**
+ * Carry detail-only fields forward.
+ *
+ * `active_turn` and `budget_ledger` come from `GET /v1/tasks/:id`; the list
+ * route omits them. Replacing a row wholesale on a list refresh would blank
+ * both, and the composer reads `active_turn` to decide whether a run is in
+ * flight — so a routine sidebar refresh would make a running task look idle.
+ * `undefined` means "this response did not report it"; `null` means "reported,
+ * and there is none".
+ */
+function reconcileTask(previous: Task | undefined, next: Task): Task {
+  if (previous === undefined) return next;
+  return {
+    ...next,
+    active_turn: next.active_turn === undefined ? previous.active_turn : next.active_turn,
+    budget_ledger: next.budget_ledger === undefined ? previous.budget_ledger : next.budget_ledger,
+  };
+}
+
+function mergeTasks(current: readonly Task[], incoming: readonly Task[]): Task[] {
+  const byId = new Map(current.map((task) => [task.id, task]));
+  for (const task of incoming) byId.set(task.id, reconcileTask(byId.get(task.id), task));
+  return Array.from(byId.values()).sort(compareTasks);
+}
+
 const compareApprovals = (left: PendingApproval, right: PendingApproval): number =>
   (right.requestedAt ?? "").localeCompare(left.requestedAt ?? "") || left.id.localeCompare(right.id);
 
@@ -202,6 +251,11 @@ const PINS_KEY = "terminus-desktop.pinned-tasks.v1";
 const DRAFTS_KEY = "terminus-desktop.drafts.v1";
 const MAX_PINNED_TASKS = 50;
 const PIN_HYDRATION_CONCURRENCY = 4;
+/** How long the liveness probe may hang before the UI calls the plane degraded. */
+const HEALTH_PROBE_TIMEOUT_MS = 5_000;
+const SESSION_TASK_HYDRATION_CONCURRENCY = 4;
+/** How many spaces get their tasks hydrated up front, most recent first. */
+const MAX_HYDRATED_SESSIONS = 12;
 export const MAX_DRAFT_BYTES = 16 * 1024;
 const MAX_DRAFT_COUNT = 100;
 const MAX_DRAFT_BYTES_TOTAL = 512 * 1024;
@@ -365,6 +419,16 @@ interface TerminusState {
   pinnedTaskIds: Set<string>;
   pinPersistenceError: string | null;
 
+  /**
+   * Messages waiting for the current run to finish.
+   *
+   * `POST /v1/turns` refuses a second concurrent turn with
+   * `TASK_TURN_ALREADY_ACTIVE`, so "steer while it works" cannot be a direct
+   * send. Holding the text here means the user types once and it goes as soon
+   * as the turn settles, instead of them watching for the run to end.
+   */
+  queuedSteerByTask: Record<string, string>;
+
   // Drafts per task (Composer spec: "Preserve drafts per task").
   draftsByTask: Record<string, string>;
   /** Drafts retained only in this renderer when the durable collection is full. */
@@ -383,6 +447,14 @@ interface TerminusState {
   resumeCursorByTask: Record<string, string>;
   /** Explicit boundary metadata for the bounded presentation event window. */
   eventHistoryByTask: Record<string, EventHistoryBoundary>;
+  /**
+   * Replay of a task's durable transcript.
+   *
+   * Opening a task that already ran used to show an empty conversation: the
+   * SSE stream is a live tail, so without a cursor it delivers only what
+   * happens next, and the events were sitting unread in `semantic_events`.
+   */
+  transcriptByTask: Record<string, TranscriptReplayState>;
 
   // Server-side pending approvals per task, reconciled from GET /v1/approvals
   // and merged with event-derived entries at render time.
@@ -397,17 +469,32 @@ interface TerminusState {
   // Actions.
   refreshAll: () => Promise<void>;
   refreshPinnedTasks: () => Promise<void>;
+  refreshVisibleSessionTasks: () => Promise<void>;
   refreshSessions: () => Promise<void>;
   loadMoreSessions: () => Promise<void>;
   refreshTasks: (sessionId: string) => Promise<void>;
   loadMoreTasks: (sessionId: string) => Promise<void>;
   refreshTask: (taskId: string) => Promise<void>;
+  /** Replay the durable transcript, then attach the live stream after it. */
+  hydrateTranscript: (taskId: string) => Promise<void>;
+  /** Fetch the page of events preceding what is already replayed. */
+  loadEarlierTranscript: (taskId: string) => Promise<void>;
+  /**
+   * Interrupt the task's in-flight turn, leaving the task steerable. Resolves
+   * to an error message, or null on success.
+   */
+  stopTask: (taskId: string) => Promise<string | null>;
+  /** End the task outright. Resolves to an error message, or null on success. */
+  cancelTask: (taskId: string) => Promise<string | null>;
   selectSession: (sessionId: string | null) => void;
   selectTask: (taskId: string | null, cursor?: string | null) => void;
   refreshApprovals: (taskId: string) => Promise<void>;
   loadMoreApprovals: (taskId: string) => Promise<void>;
   acknowledgeApprovalResolution: (taskId: string, approvalId: string) => void;
   togglePin: (taskId: string) => void;
+  /** Hold `text` until the task's active turn settles. Replaces any prior queue. */
+  queueSteer: (taskId: string, text: string) => void;
+  clearQueuedSteer: (taskId: string) => void;
   setDraft: (taskId: string, text: string, source?: "external" | "composer") => DraftPersistenceState;
   clearDraft: (taskId: string) => void;
   retryDraftPersistence: (taskId: string) => DraftPersistenceState;
@@ -422,6 +509,42 @@ interface TerminusState {
   _updateTaskFromEvent: (ev: TerminusSseEvent, streamTaskId?: string) => void;
 }
 
+type HealthSetter = (partial: Partial<TerminusState>) => void;
+
+/**
+ * Bounded liveness probe, run alongside the session fetch rather than ahead of
+ * it. A control plane that stops answering health degrades the status
+ * indicator; it does not empty the sidebar.
+ */
+async function probeHealth(set: HealthSetter, isCurrent: () => boolean): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HEALTH_PROBE_TIMEOUT_MS);
+  try {
+    const health: HealthResponse = await api.health(controller.signal);
+    if (!isCurrent()) return;
+    const kernelState = health.kernel?.status ?? health.status;
+    set({
+      healthReady: health.ready,
+      healthStatus: health.ready ? "ready" : "degraded",
+      healthDetail: health.ready ? null : `kernel status ${kernelState}`,
+    });
+  } catch (err) {
+    if (!isCurrent()) return;
+    const timedOut = controller.signal.aborted;
+    // A hung probe means a degraded control plane, not an offline one: the
+    // rest of the API is usually still answering.
+    set({
+      healthReady: false,
+      healthStatus: timedOut ? "degraded" : "offline",
+      healthDetail: timedOut
+        ? `health check did not answer within ${Math.round(HEALTH_PROBE_TIMEOUT_MS / 1000)}s`
+        : err instanceof Error ? err.message : "health check failed",
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const useTerminusStore = create<TerminusState>((set, get) => ({
   healthReady: false,
   healthStatus: "unknown",
@@ -432,6 +555,8 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
   sessions: [],
   tasksBySession: {},
   taskById: {},
+  queuedSteerByTask: {},
+  transcriptByTask: {},
   sessionsFreshness: { status: "idle", error: null },
   taskListFreshnessBySession: {},
   taskFreshnessById: {},
@@ -467,9 +592,40 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     await get().refreshSessions();
     const sessId = get().selectedSessionId;
     if (sessId) await get().refreshTasks(sessId);
+    // Work started in another space has to be visible without clicking into it,
+    // otherwise the sidebar counts and the attention badge only ever describe
+    // whichever space happens to be open.
+    await get().refreshVisibleSessionTasks();
     await get().refreshPinnedTasks();
     const taskId = get().selectedTaskId;
     if (taskId) await Promise.all([get().refreshTask(taskId), get().refreshApprovals(taskId)]);
+  },
+
+  refreshVisibleSessionTasks: async () => {
+    const selectedSessionId = get().selectedSessionId;
+    // Bounded on both axes: the most recently touched spaces only, a few at a
+    // time. Opening thirty projects must not fan out thirty parallel requests.
+    const sessionIds = [...get().sessions]
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at) || left.id.localeCompare(right.id))
+      .slice(0, MAX_HYDRATED_SESSIONS)
+      .map((session) => session.id)
+      .filter((sessionId) => sessionId !== selectedSessionId);
+    let nextIndex = 0;
+    const worker = async (): Promise<void> => {
+      while (nextIndex < sessionIds.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        const sessionId = sessionIds[index];
+        if (!sessionId) continue;
+        await get().refreshTasks(sessionId);
+      }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(SESSION_TASK_HYDRATION_CONCURRENCY, sessionIds.length) },
+        () => worker(),
+      ),
+    );
   },
 
   refreshPinnedTasks: async () => {
@@ -504,20 +660,12 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         error: null,
       },
     }));
-    try {
-      const health: HealthResponse = await api.health();
-      if (!isCurrent()) return;
-      const kernelState = health.kernel?.status ?? health.status;
-      set({
-        healthReady: health.ready,
-        healthStatus: health.ready ? "ready" : "degraded",
-        healthDetail: health.ready ? null : `kernel status ${kernelState}`,
-      });
-    } catch (err) {
-      if (!isCurrent()) return;
-      const message = err instanceof Error ? err.message : "health check failed";
-      set({ healthReady: false, healthStatus: "offline", healthDetail: message, lastError: message });
-    }
+    // A liveness probe must never gate the data the sidebar needs, and it must
+    // be bounded. `/v1/system/health` reports writer state, so it stops
+    // answering while a turn holds the writer lease — awaiting it first left
+    // the app on "Starting Terminus" with an empty sidebar for the whole
+    // duration of a run, even though every other endpoint answered in ~1ms.
+    void probeHealth(set, isCurrent);
     try {
       const res = await api.listSessions();
       if (!isCurrent()) return;
@@ -578,6 +726,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
           tasksBySession,
           taskById,
           taskFreshnessById: omitTaskKeys(state.taskFreshnessById, removedTaskIds),
+          queuedSteerByTask: omitTaskKeys(state.queuedSteerByTask, removedTaskIds),
           eventsByTask: omitTaskKeys(state.eventsByTask, removedTaskIds),
           eventBytesByTask: omitTaskKeys(state.eventBytesByTask, removedTaskIds),
           eventLruTickByTask: omitTaskKeys(state.eventLruTickByTask, removedTaskIds),
@@ -702,11 +851,13 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
             if (state.selectedTaskId === previousTask.id) removedSelectedTask = true;
           }
         }
-        for (const task of visibleTasks) taskById[task.id] = task;
+        const reconciled = visibleTasks.map((task) => reconcileTask(taskById[task.id], task));
+        for (const task of reconciled) taskById[task.id] = task;
         return {
-          tasksBySession: { ...state.tasksBySession, [sessionId]: visibleTasks },
+          tasksBySession: { ...state.tasksBySession, [sessionId]: reconciled },
           taskById,
           taskFreshnessById: omitTaskKeys(state.taskFreshnessById, removedTaskIds),
+          queuedSteerByTask: omitTaskKeys(state.queuedSteerByTask, removedTaskIds),
           eventsByTask: omitTaskKeys(state.eventsByTask, removedTaskIds),
           eventBytesByTask: omitTaskKeys(state.eventBytesByTask, removedTaskIds),
           eventLruTickByTask: omitTaskKeys(state.eventLruTickByTask, removedTaskIds),
@@ -779,9 +930,9 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
       const res = await api.listTasks(sessionId, { cursor });
       if (!isCurrent()) return;
       set((state) => {
-        const tasks = mergeById(state.tasksBySession[sessionId] ?? [], res.tasks, compareTasks);
+        const tasks = mergeTasks(state.tasksBySession[sessionId] ?? [], res.tasks);
         const taskById = { ...state.taskById };
-        for (const task of tasks) taskById[task.id] = task;
+        for (const task of tasks) taskById[task.id] = reconcileTask(taskById[task.id], task);
         return {
           tasksBySession: { ...state.tasksBySession, [sessionId]: tasks },
           taskById,
@@ -810,6 +961,222 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         },
       }));
     }
+  },
+
+  /**
+   * Stop the run without ending the task.
+   *
+   * Stopping interrupts the active turn; it does not cancel the task. Those
+   * are different intentions and `POST /v1/tasks/:id/cancel` only expresses
+   * the second: it drives the task to ABORTED, which is terminal, so the
+   * composer then refuses further input and the user cannot say "not like
+   * that, try this" — the single most common thing to want after pressing
+   * stop. `POST /v1/turns/:id/interrupt` aborts the turn and leaves the task
+   * ACTIVE and steerable.
+   *
+   * The active turn id comes from the task snapshot rather than the event
+   * stream, so this works for a task that was already running when the window
+   * opened. The snapshot is re-read first because a turn that has settled
+   * since the last refresh is not interruptible and saying so beats sending a
+   * request that can only 409.
+   */
+  stopTask: async (taskId: string) => {
+    try {
+      const task = await api.getTask(taskId);
+      const activeTurn = task.active_turn ?? null;
+      if (activeTurn === null) {
+        // Not an error state: the run this stop was aimed at has already
+        // finished. Reflecting the settled task is the honest response.
+        set((state) => ({
+          taskById: { ...state.taskById, [task.id]: reconcileTask(state.taskById[task.id], task) },
+          tasksBySession: {
+            ...state.tasksBySession,
+            [task.session_id]: mergeTasks(state.tasksBySession[task.session_id] ?? [], [task]),
+          },
+        }));
+        return null;
+      }
+      await api.interruptTurn(
+        activeTurn.id,
+        { idempotencyKey: createIdempotencyKey("turn-interrupt") },
+        "user_stopped",
+      );
+      await get().refreshTask(taskId);
+      return null;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Stop failed.";
+      set({ lastError: message });
+      return message;
+    }
+  },
+
+  /**
+   * End the task.
+   *
+   * `api.cancelTask` is deliberate: it is the only client method that reaches
+   * the control plane's `abortActiveTurn` for every in-flight turn *and*
+   * drives the task terminal. The v2 `transitionTask(..., "CANCELLED")` path
+   * writes the snapshot and projects the v1 status without signalling the
+   * running loop, so the agent keeps working on a task the board has already
+   * marked cancelled.
+   */
+  cancelTask: async (taskId: string) => {
+    try {
+      await api.cancelTask(taskId, { idempotencyKey: createIdempotencyKey("task-cancel") }, "user_cancelled");
+      await get().refreshTask(taskId);
+      return null;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Cancel failed.";
+      set({ lastError: message });
+      return message;
+    }
+  },
+
+  /**
+   * Replay the durable transcript, then attach the live stream immediately
+   * after the last replayed event.
+   *
+   * Order matters. Attaching first and replaying second would append older
+   * events after newer ones, because the presentation window is append-only.
+   * Replaying first and attaching at `next_cursor` means the control plane
+   * delivers everything that happened during the replay, so the two meet
+   * exactly once with no gap and no duplicate.
+   */
+  hydrateTranscript: async (taskId: string) => {
+    const requestGeneration = nextKeyedGeneration(transcriptRequestGenerationByTask, taskId);
+    const isCurrent = (): boolean => isCurrentKeyedGeneration(
+      transcriptRequestGenerationByTask,
+      taskId,
+      requestGeneration,
+    );
+    set((state) => ({
+      transcriptByTask: {
+        ...state.transcriptByTask,
+        [taskId]: {
+          status: "loading",
+          earlierCursor: null,
+          loadingEarlier: false,
+          total: state.transcriptByTask[taskId]?.total ?? 0,
+          error: null,
+        },
+      },
+    }));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TRANSCRIPT_REPLAY_TIMEOUT_MS);
+    try {
+      const page = await api.getTaskTranscript(taskId, {
+        limit: TRANSCRIPT_PAGE_EVENTS,
+        signal: controller.signal,
+      });
+      if (!isCurrent()) return;
+      for (const event of page.events) get()._appendEvent(taskId, event);
+      set((state) => ({
+        transcriptByTask: {
+          ...state.transcriptByTask,
+          [taskId]: {
+            status: "ready",
+            earlierCursor: page.earlier_cursor,
+            loadingEarlier: false,
+            total: page.total,
+            error: null,
+          },
+        },
+      }));
+      get()._attachStream(taskId, page.next_cursor);
+    } catch (error: unknown) {
+      if (!isCurrent()) return;
+      const message = error instanceof Error ? error.message : "The conversation could not be loaded.";
+      set((state) => ({
+        transcriptByTask: {
+          ...state.transcriptByTask,
+          [taskId]: {
+            status: "error",
+            earlierCursor: null,
+            loadingEarlier: false,
+            total: state.transcriptByTask[taskId]?.total ?? 0,
+            error: message,
+          },
+        },
+      }));
+      // Live updates matter more than history. Attach without a cursor rather
+      // than leaving the task with no stream at all.
+      get()._attachStream(taskId, null);
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  /**
+   * Page backwards through the transcript.
+   *
+   * Earlier events are prepended, because they belong before what is already
+   * on screen — unlike every other write to the event window, which appends.
+   */
+  loadEarlierTranscript: async (taskId: string) => {
+    const current = get().transcriptByTask[taskId];
+    if (!current || current.earlierCursor === null || current.loadingEarlier) return;
+    const cursor = current.earlierCursor;
+    set((state) => ({
+      transcriptByTask: {
+        ...state.transcriptByTask,
+        [taskId]: { ...(state.transcriptByTask[taskId] ?? current), loadingEarlier: true, error: null },
+      },
+    }));
+    try {
+      const page = await api.getTaskTranscript(taskId, {
+        before: cursor,
+        limit: TRANSCRIPT_PAGE_EVENTS,
+      });
+      set((state) => {
+        const seen = new Set((state.eventsByTask[taskId] ?? []).map((event) => event.id));
+        const earlier = page.events
+          .filter((event) => !seen.has(event.id))
+          .map((event) => boundPresentationEvent(event));
+        const existing = state.eventsByTask[taskId] ?? [];
+        const merged = [...earlier, ...existing];
+        const bytes = merged.reduce((total, event) => total + presentationEventByteLength(event), 0);
+        eventIdsByTask.set(taskId, new Set(merged.map((event) => event.id)));
+        return {
+          eventsByTask: { ...state.eventsByTask, [taskId]: merged },
+          eventBytesByTask: { ...state.eventBytesByTask, [taskId]: bytes },
+          transcriptByTask: {
+            ...state.transcriptByTask,
+            [taskId]: {
+              status: "ready",
+              earlierCursor: page.earlier_cursor,
+              loadingEarlier: false,
+              total: page.total,
+              error: null,
+            },
+          },
+        };
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Earlier messages could not be loaded.";
+      set((state) => ({
+        transcriptByTask: {
+          ...state.transcriptByTask,
+          [taskId]: {
+            ...(state.transcriptByTask[taskId] ?? current),
+            loadingEarlier: false,
+            error: message,
+          },
+        },
+      }));
+    }
+  },
+
+  queueSteer: (taskId: string, text: string) => {
+    set((state) => ({ queuedSteerByTask: { ...state.queuedSteerByTask, [taskId]: text } }));
+  },
+
+  clearQueuedSteer: (taskId: string) => {
+    set((state) => {
+      if (state.queuedSteerByTask[taskId] === undefined) return {};
+      const queuedSteerByTask = { ...state.queuedSteerByTask };
+      delete queuedSteerByTask[taskId];
+      return { queuedSteerByTask };
+    });
   },
 
   refreshTask: async (taskId: string) => {
@@ -844,11 +1211,11 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
           sessions: ownerSession
             ? mergeById(state.sessions, [ownerSession], compareSessions)
             : state.sessions,
-          taskById: { ...state.taskById, [task.id]: task },
+          taskById: { ...state.taskById, [task.id]: reconcileTask(state.taskById[task.id], task) },
           ...(state.selectedTaskId === task.id ? { selectedSessionId: task.session_id } : {}),
           tasksBySession: {
             ...state.tasksBySession,
-            [task.session_id]: mergeById(state.tasksBySession[task.session_id] ?? [], [task], compareTasks),
+            [task.session_id]: mergeTasks(state.tasksBySession[task.session_id] ?? [], [task]),
           },
           taskFreshnessById: {
             ...state.taskFreshnessById,
@@ -925,11 +1292,26 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         } : {}),
       };
     });
-    if (taskId) {
-      void get().refreshTask(taskId);
-      void get().refreshApprovals(taskId);
+    if (!taskId) {
+      get()._attachStream(null, null);
+      return;
     }
-    get()._attachStream(taskId, cursor);
+    void get().refreshTask(taskId);
+    void get().refreshApprovals(taskId);
+    if (cursor !== null) {
+      // The caller just created this task and holds its activation cursor;
+      // there is no history to replay and the control plane will deliver
+      // everything from that point.
+      set((state) => ({
+        transcriptByTask: {
+          ...state.transcriptByTask,
+          [taskId]: { status: "ready", earlierCursor: null, loadingEarlier: false, total: 0, error: null },
+        },
+      }));
+      get()._attachStream(taskId, cursor);
+      return;
+    }
+    void get().hydrateTranscript(taskId);
   },
 
   /**
@@ -1512,6 +1894,11 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
           // cursor reconciliation cannot overwrite a newer manual refresh,
           // and the second successful resource settles the pending boundary.
           void Promise.all([get().refreshTask(taskId), get().refreshApprovals(taskId)]);
+          // The window was just emptied. Replaying the durable transcript
+          // refills it and re-attaches the stream at the replayed tail, which
+          // is the difference between "we lost your history" and a two-second
+          // reload the user never notices.
+          void get().hydrateTranscript(taskId);
           return;
         }
         const presentationEvent = boundPresentationEvent(ev);
@@ -1575,6 +1962,12 @@ export function useSelectedTaskEvents(): TerminusSseEvent[] {
   const id = useTerminusStore((s) => s.selectedTaskId);
   const events = useTerminusStore((s) => (id ? s.eventsByTask[id] : undefined) ?? EMPTY_EVENTS);
   return events;
+}
+
+/** Durable-transcript replay state for the selected task. */
+export function useSelectedTaskTranscript(): TranscriptReplayState | null {
+  const id = useTerminusStore((s) => s.selectedTaskId);
+  return useTerminusStore((s) => (id ? s.transcriptByTask[id] : undefined) ?? null);
 }
 
 /** Explicit truncation/cursor-expiry state for the selected event window. */

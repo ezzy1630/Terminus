@@ -306,7 +306,7 @@ function LayoutImpl({
   return (
     <div
       inert={backgroundInert ? true : undefined}
-      className="flex h-full w-full flex-col bg-canvas text-primary"
+      className="app-shell flex h-full w-full flex-col bg-canvas text-primary"
       style={{
         fontFamily: "var(--font-family)",
         "--titlebar-sidebar-width": sidebarVisible ? `${fittedDocks.sidebarWidth}px` : "0px",
@@ -351,7 +351,7 @@ function LayoutImpl({
         ) : null}
 
         {/* Main working surface and a docked, resizable inspector. */}
-        <main className="flex min-w-0 flex-1">
+        <main className="app-content flex min-w-0 flex-1">
           <section className="flex min-w-0 flex-1 flex-col">
             <div className="min-h-0 flex-1 overflow-hidden">{main}</div>
           </section>

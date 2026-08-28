@@ -5,12 +5,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { App } from "../src/App";
 import { AgentsView } from "../src/components/AgentsView";
+import { CockpitEmptyState, CockpitErrorState } from "../src/components/Cockpit/CockpitPrimitives";
 import { AttentionCenterModal } from "../src/components/Cockpit/AttentionCenterModal";
-import { CausalReplayView } from "../src/components/Cockpit/CausalReplayView";
-import { DepartmentRoomsView } from "../src/components/Cockpit/DepartmentRoomsView";
-import { EffectQueueView } from "../src/components/Cockpit/EffectQueueView";
 import { StructuredInterventionModal } from "../src/components/Cockpit/StructuredInterventionModal";
-import { WorkflowGraphView } from "../src/components/Cockpit/WorkflowGraphView";
 import { buildDefaultCommands } from "../src/lib/command-catalog";
 import { Sidebar } from "../src/components/Sidebar";
 import { useTerminusStore } from "../src/hooks/use-terminus";
@@ -232,26 +229,39 @@ describe("truthful operator cockpit", () => {
     })).toThrow(/renderer admission limit/);
   });
 
-  test("renders API errors, unavailability, and empty collections as distinct states", async () => {
-    const rooms = vi.spyOn(arpV2, "listAgentRooms")
-      .mockRejectedValueOnce(new TerminusApiError(500, "directory failed", null))
-      .mockRejectedValueOnce(new TerminusApiError(0, "network error: refused", null))
-      .mockResolvedValueOnce([]);
+  test("renders API errors, unavailability, and empty collections as distinct states", () => {
+    // These are the three resource states shared by every data-backed view, so
+    // they are asserted on the primitive rather than through whichever view
+    // happens to consume it today.
+    const retry = vi.fn();
 
-    const errorRender = render(<DepartmentRoomsView />);
-    expect(await screen.findByText(/Could not load operator data|Couldn't load this view/)).toBeInTheDocument();
+    const errorRender = render(
+      <CockpitErrorState error={new TerminusApiError(500, "directory failed", null)} retry={retry} />,
+    );
+    expect(screen.getByText("Couldn't load this view")).toBeInTheDocument();
+    expect(screen.getByText("directory failed")).toBeInTheDocument();
     expect(document.querySelector('[data-cockpit-state="error"]')).toBeInTheDocument();
     errorRender.unmount();
 
-    const unavailableRender = render(<DepartmentRoomsView />);
-    expect(await screen.findByText(/Control plane unavailable|Terminus is offline/)).toBeInTheDocument();
+    const offlineRender = render(
+      <CockpitErrorState error={new TerminusApiError(0, "network error: refused", null)} retry={retry} />,
+    );
+    expect(screen.getByText("Terminus is offline")).toBeInTheDocument();
     expect(document.querySelector('[data-cockpit-state="unavailable"]')).toBeInTheDocument();
-    unavailableRender.unmount();
+    offlineRender.unmount();
 
-    render(<DepartmentRoomsView />);
-    expect(await screen.findByText("No agent rooms")).toBeInTheDocument();
+    // A control plane that does not implement the route is unavailable, not broken.
+    const unimplementedRender = render(
+      <CockpitErrorState error={new TerminusApiError(501, "not implemented", null)} retry={retry} />,
+    );
+    expect(screen.getByText("This view is unavailable")).toBeInTheDocument();
+    expect(document.querySelector('[data-cockpit-state="unavailable"]')).toBeInTheDocument();
+    unimplementedRender.unmount();
+
+    render(<CockpitEmptyState title="No agent rooms" description="Nothing has been registered yet." />);
+    expect(screen.getByText("No agent rooms")).toBeInTheDocument();
     expect(document.querySelector('[data-cockpit-state="empty"]')).toBeInTheDocument();
-    expect(rooms).toHaveBeenCalledTimes(3);
+    expect(document.querySelector('[data-cockpit-state="error"]')).not.toBeInTheDocument();
   });
 
   test("joins server-reported organizations, departments, operators, and rooms in Agents", async () => {
@@ -380,21 +390,6 @@ describe("truthful operator cockpit", () => {
     expect(onNavigate).toHaveBeenNthCalledWith(1, "board");
     expect(onNavigate).toHaveBeenNthCalledWith(2, "agents");
     expect(useTerminusStore.getState().selectedTaskId).toBe("task-durable");
-  });
-
-  test("disables task actions and task-scoped data requests without a durable task", () => {
-    const listEffects = vi.spyOn(arpV2, "listEffects");
-    render(<EffectQueueView selectedTaskId={null} />);
-    expect(screen.getByText(/Choose a (durable )?task/)).toBeInTheDocument();
-    expect(listEffects).not.toHaveBeenCalled();
-
-    cleanup();
-    render(<Sidebar compact activeDestination="chat" taskActionsEnabled={false} />);
-    expect(screen.queryByRole("button", { name: "Task activity" })).not.toBeInTheDocument();
-
-    cleanup();
-    render(<StructuredInterventionModal isOpen onClose={() => {}} selectedTaskId={null} />);
-    expect(screen.getByText(/Choose a (durable )?task/)).toBeInTheDocument();
   });
 
   test("requires typed destructive confirmation and never applies a proposal silently", async () => {
@@ -566,9 +561,8 @@ describe("truthful operator cockpit", () => {
       openAttentionCenter: vi.fn(),
       openInterventions: vi.fn(),
     });
-    expect(commands.find((command) => command.id === "cockpit.attention-center")?.hint).toBeUndefined();
-    expect(commands.find((command) => command.id === "cockpit.interventions")?.hint).toBeUndefined();
-    expect(commands.filter((command) => command.group === "Cockpit")).toHaveLength(2);
+    expect(commands.find((command) => command.id === "task.attention")?.hint).toBeUndefined();
+    expect(commands.find((command) => command.id === "task.intervene")?.hint).toBeUndefined();
   });
 
   test("opens the project dialog without treating the sidebar click as a path", async () => {
@@ -579,9 +573,10 @@ describe("truthful operator cockpit", () => {
     render(<App />);
     await waitFor(() => expect(refreshAll).toHaveBeenCalled());
 
-    const openProjectButton = screen.getAllByRole("button", { name: "Open project" }).at(0);
-    if (openProjectButton === undefined) throw new Error("Open project button is missing");
-    await user.click(openProjectButton);
+    // Exactly one, deliberately: the sidebar used to offer "Open project"
+    // three times at once — the Spaces header, the empty state, and a docked
+    // nav row.
+    await user.click(screen.getByRole("button", { name: "Open project" }));
 
     expect(await screen.findByRole("dialog", { name: "Open project" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Project path" })).toHaveValue("");
@@ -604,13 +599,10 @@ describe("truthful operator cockpit", () => {
     expect(screen.queryByText("Toggle inspector")).not.toBeInTheDocument();
   });
 
-  test("keeps a Board-only canonical task selected across every task workspace command", async () => {
+  test("keeps a Board-only canonical task selected across the task workspace tabs", async () => {
     const refreshAll = vi.fn(async () => {});
     useTerminusStore.setState({ refreshAll });
     window.localStorage.setItem("terminus-desktop.onboarding.completed.v1", "true");
-    // R12: governance tabs (Overview/Activity/Replay/Usage/Evidence) are now
-    // opt-in; this routing test exercises them explicitly.
-    window.localStorage.setItem("terminus-desktop.governance-views.enabled", "true");
     vi.spyOn(arpV2, "listTasks").mockResolvedValue([CANONICAL_TASK]);
     vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
     vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue({
@@ -619,11 +611,6 @@ describe("truthful operator cockpit", () => {
       addEventListener: () => () => {},
       close: vi.fn(),
     });
-    const getTask = vi.spyOn(arpV2, "getTask").mockRejectedValue(new Error("task fixture stops after routing"));
-    const listEffects = vi.spyOn(arpV2, "listEffects").mockRejectedValue(new Error("effect fixture stops after routing"));
-    const listArtifacts = vi.spyOn(api, "listTaskArtifacts").mockRejectedValue(new Error("artifact fixture stops after routing"));
-    const getBudget = vi.spyOn(arpV2, "getTaskBudget").mockRejectedValue(new Error("budget fixture stops after routing"));
-    const getCausalTrace = vi.spyOn(arpV2, "getCausalTrace").mockRejectedValue(new Error("replay fixture stops after routing"));
     const user = userEvent.setup();
     render(<App />);
     await waitFor(() => expect(refreshAll).toHaveBeenCalled());
@@ -632,23 +619,24 @@ describe("truthful operator cockpit", () => {
     await screen.findByRole("heading", { name: /Sessions|Board|Kanban/ });
     await user.click(await screen.findByRole("button", { name: "Actions for Polish the desktop UI" }));
     await user.click(screen.getByRole("menuitem", { name: /Task details|View details/ }));
-    await screen.findByRole("tab", { name: "Overview" });
 
-    const cases = [
-      { command: "Task overview", tab: "Overview", verify: () => expect(getTask).toHaveBeenCalledWith(CANONICAL_TASK.id, expect.any(AbortSignal)) },
-      { command: "Task activity", tab: "Activity", verify: () => expect(listEffects).toHaveBeenCalledWith(CANONICAL_TASK.id, expect.any(AbortSignal)) },
-      { command: "Task changes", tab: "Changes", verify: () => expect(listArtifacts).toHaveBeenCalledWith(CANONICAL_TASK.id, null, expect.any(AbortSignal)) },
-      { command: "Task usage", tab: "Usage", verify: () => expect(getBudget).toHaveBeenCalledWith(CANONICAL_TASK.id, expect.any(AbortSignal)) },
-      { command: "Task replay", tab: "Replay", verify: () => expect(getCausalTrace).toHaveBeenCalledWith(CANONICAL_TASK.id, expect.any(AbortSignal)) },
-    ] as const;
-
-    for (const commandCase of cases) {
-      await user.click(screen.getByRole("button", { name: "Search tasks and commands" }));
-      await user.click(await screen.findByText(commandCase.command));
-      await waitFor(() => expect(screen.getByRole("tab", { name: commandCase.tab })).toHaveAttribute("aria-selected", "true"));
-      expect(screen.queryByText("Choose a durable task")).not.toBeInTheDocument();
-      await waitFor(commandCase.verify);
+    // Two tabs, session first. The retired governance tabs must not come back.
+    const sessionTab = await screen.findByRole("tab", { name: "Session" });
+    expect(sessionTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Changes" })).toBeInTheDocument();
+    expect(screen.getAllByRole("tab")).toHaveLength(2);
+    for (const retired of ["Overview", "Activity", "Replay", "Usage", "Evidence"]) {
+      expect(screen.queryByRole("tab", { name: retired })).not.toBeInTheDocument();
     }
+
+    // Switching tabs must not drop the canonical task that the Board selected.
+    await user.click(screen.getByRole("tab", { name: "Changes" }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Changes" })).toHaveAttribute("aria-selected", "true"));
+
+    // A board-only canonical task has no durable event stream yet, so Changes
+    // states that plainly instead of rendering an empty pane.
+    expect(await screen.findByText("Choose a task")).toBeInTheDocument();
+    expect(document.querySelector('[data-cockpit-state="task-required"]')).toBeInTheDocument();
   });
 
   test("exposes the combined Agents workspace as one navigation command", () => {
@@ -662,70 +650,20 @@ describe("truthful operator cockpit", () => {
     expect(openAgents).toHaveBeenCalledTimes(1);
   });
 
-  test("keeps task evidence inside Overview instead of exposing a duplicate command", () => {
-    const commands = buildDefaultCommands({ openMissionLedger: vi.fn() });
+  test("exposes no governance-view commands after the cockpit tabs were removed", () => {
+    const commands = buildDefaultCommands({ openAttentionCenter: vi.fn(), openInterventions: vi.fn() });
 
-    expect(commands.filter((command) => command.id === "cockpit.mission-ledger")).toHaveLength(1);
-    expect(commands.some((command) => command.id === "cockpit.claim-evidence")).toBe(false);
+    for (const retired of [
+      "cockpit.mission-ledger",
+      "cockpit.effect-queue",
+      "cockpit.artifact-diff",
+      "cockpit.fleet-budget",
+      "cockpit.causal-replay",
+      "cockpit.claim-evidence",
+    ]) {
+      expect(commands.some((command) => command.id === retired)).toBe(false);
+    }
+    expect(commands.some((command) => command.group === ("Cockpit" as never))).toBe(false);
   });
 
-  test("states unsupported task capabilities as unavailable instead of rendering demo nodes", () => {
-    render(<WorkflowGraphView selectedTaskId="task-1" />);
-    expect(screen.getByText(/Task workflow graph.*unavailable/)).toBeInTheDocument();
-    expect(document.querySelector('[data-cockpit-state="unavailable"]')).toBeInTheDocument();
-    expect(screen.queryByText("Parse Context & Directives")).not.toBeInTheDocument();
-  });
-
-  test("renders a missing causal trace as empty instead of an error or fabricated timeline", async () => {
-    vi.spyOn(arpV2, "getCausalTrace").mockResolvedValue(null);
-    render(<CausalReplayView selectedTaskId="task-1" />);
-
-    expect(await screen.findByText("No causal trace")).toBeInTheDocument();
-    expect(document.querySelector('[data-cockpit-state="empty"]')).toBeInTheDocument();
-    expect(document.querySelector('[data-cockpit-state="error"]')).not.toBeInTheDocument();
-  });
-
-  test("keeps a confirmed null causal trace visible when its refresh becomes stale", async () => {
-    vi.spyOn(arpV2, "getCausalTrace")
-      .mockResolvedValueOnce(null)
-      .mockRejectedValueOnce(new TerminusApiError(500, "trace refresh failed", null));
-    const user = userEvent.setup();
-    render(<CausalReplayView selectedTaskId="task-1" />);
-
-    expect(await screen.findByText("No causal trace")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Refresh snapshot" }));
-
-    expect(await screen.findByText(/Showing the last successful snapshot/)).toBeInTheDocument();
-    expect(screen.getByText("No causal trace")).toBeInTheDocument();
-    expect(document.querySelector('[data-cockpit-state="stale"]')).toBeInTheDocument();
-  });
-
-  test("allows a changed counterfactual after a definitive rejection", async () => {
-    vi.spyOn(arpV2, "getCausalTrace").mockResolvedValue(CAUSAL_TRACE);
-    const run = vi.spyOn(arpV2, "runCounterfactual")
-      .mockRejectedValueOnce(new TerminusApiError(400, "variation rejected", null))
-      .mockResolvedValueOnce(COUNTERFACTUAL);
-    const user = userEvent.setup();
-    render(<CausalReplayView selectedTaskId="task-1" />);
-
-    const detail = await screen.findByLabelText("Variation detail");
-    await user.type(detail, "profile-a");
-    await user.click(screen.getByRole("button", { name: "Evaluate experiment" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("variation rejected");
-
-    await user.clear(detail);
-    await user.type(detail, "profile-b");
-    await user.click(screen.getByRole("button", { name: "Evaluate experiment" }));
-
-    expect(await screen.findByText(/Counterfactual hypothesis/)).toBeInTheDocument();
-    expect(run).toHaveBeenCalledTimes(2);
-  });
-
-  test("renders only server-reported room data", async () => {
-    vi.spyOn(arpV2, "listAgentRooms").mockResolvedValue([ROOM]);
-    render(<DepartmentRoomsView />);
-    expect(await screen.findByText(ROOM.name)).toBeInTheDocument();
-    expect(screen.getByText("worker-1")).toBeInTheDocument();
-    expect(screen.queryByText("Agent progressing normally")).not.toBeInTheDocument();
-  });
 });

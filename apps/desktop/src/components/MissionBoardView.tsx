@@ -4,6 +4,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CircleDashed,
   CircleDot,
   Columns3,
   GitBranch,
@@ -106,7 +107,6 @@ function missionLabel(missionId: string | null): string {
 
 function transitionOutcomeLabel(status: TaskV2Status): string {
   const placement = boardColumnForStatus(status);
-  if (placement === "closed") return "Closed";
   return MISSION_BOARD_COLUMNS.find((column) => column.id === placement)?.label ?? taskStatusLabel(status);
 }
 
@@ -138,10 +138,14 @@ function CardStatus({ task, needsAttention }: { task: TaskV2Snapshot; needsAtten
 
 function columnIcon(id: MissionBoardColumnId): JSX.Element {
   switch (id) {
-    case "running":
+    case "queued":
+      return <CircleDashed size={13} className="text-tertiary" aria-hidden />;
+    case "working":
       return <Play size={12} className="fill-info text-info" aria-hidden />;
-    case "waiting_for_review":
-      return <CircleDot size={13} className="text-warning" aria-hidden />;
+    case "needs_you":
+      return <AlertTriangle size={13} className="text-warning" aria-hidden />;
+    case "review":
+      return <CircleDot size={13} className="text-success" aria-hidden />;
     case "done":
       return <Check size={13} className="text-success" aria-hidden />;
   }
@@ -366,9 +370,17 @@ function BoardColumn({
 
       <div className="flex min-h-10 flex-col gap-2.5">
         {tasks.length === 0 ? (
-          <div className={cn("flex min-h-24 items-center justify-center rounded-lg border border-dashed border-subtle px-3 text-center text-xs text-tertiary", acceptsDrop && "border-info text-info bg-info/5")}>
-            {acceptsDrop ? `Move to ${label}` : <span className="sr-only">No tasks in {label}</span>}
-          </div>
+          // An empty column is empty. It used to render a 96px dashed box with
+          // nothing in it, so a board with three quiet columns showed three
+          // large placeholders competing with the work. The drop target only
+          // appears while a card that this column can accept is being dragged.
+          acceptsDrop ? (
+            <div className="flex min-h-24 items-center justify-center rounded-lg border border-dashed border-info bg-info/5 px-3 text-center text-xs text-info">
+              Move to {label}
+            </div>
+          ) : (
+            <p className="px-0.5 py-1 text-xs text-tertiary/70">{description}</p>
+          )
         ) : tasks.map((task) => (
           <MissionBoardCard
             key={task.id}
@@ -516,6 +528,7 @@ function CancelTaskDialog({ task, pending, onCancel, onConfirm }: {
 
 export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardViewProps): JSX.Element {
   const sessions = useTerminusStore((state) => state.sessions);
+  const cancelTask = useTerminusStore((state) => state.cancelTask);
   const load = useCallback(async (signal: AbortSignal): Promise<MissionBoardData> => {
     const [tasks, questions] = await Promise.all([
       arpV2.listTasks(signal),
@@ -536,11 +549,10 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
   const [statusFilter, setStatusFilter] = useState("all");
   const [prFilter, setPrFilter] = useState("all");
   const [attentionOnly, setAttentionOnly] = useState(false);
-  const [closedOpen, setClosedOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
-  const [cancelTask, setCancelTask] = useState<TaskV2Snapshot | null>(null);
+  const [taskPendingCancel, setTaskPendingCancel] = useState<TaskV2Snapshot | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<StreamState>("connecting");
 
@@ -641,8 +653,6 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
       return right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id);
     }), [attentionOnly, normalizedQuery, prFilter, questions, spaceFilter, statusFilter, tasks]);
 
-  const closedTasks = visibleTasks.filter((task) => boardColumnForStatus(task.status) === "closed");
-  const activeTasks = visibleTasks.filter((task) => boardColumnForStatus(task.status) !== "closed");
   const attentionCount = tasks.filter((task) => taskNeedsAttention(task, questions)).length;
   const selectedTask = visibleTasks.find((task) => task.id === selectedTaskId) ?? null;
   const draggingTask = tasks.find((task) => task.id === draggingTaskId) ?? null;
@@ -677,10 +687,18 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     try {
       const updated = await arpV2.transitionTask(task.id, targetStatus, { idempotencyKey }, task.version);
       mutation.settle(idempotencyKey);
+      if (targetStatus === "CANCELLED") {
+        // transitionTask writes the snapshot and projects the v1 status, but
+        // never signals the running loop — without this the agent keeps working
+        // on a task the board has already marked cancelled. `cancelTask`, not
+        // `stopTask`: stopping interrupts the turn and leaves the task
+        // steerable, which is the opposite of what Cancel means here.
+        await cancelTask(task.id);
+      }
       setMessage(`Moved ${task.contract.mission} to ${transitionOutcomeLabel(updated.status)}.`);
       if (targetStatus === "CANCELLED") {
         setSelectedTaskId((current) => current === task.id ? null : current);
-        setCancelTask(null);
+        setTaskPendingCancel(null);
       }
       resource.retry();
     } catch (error: unknown) {
@@ -691,11 +709,11 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     } finally {
       setPendingTaskId(null);
     }
-  }, [mutation, resource]);
+  }, [cancelTask, mutation, resource]);
 
   const chooseTransition = useCallback((task: TaskV2Snapshot, targetStatus: TaskV2Status, destructive: boolean): void => {
     if (destructive) {
-      setCancelTask(task);
+      setTaskPendingCancel(task);
       return;
     }
     void requestTransition(task, targetStatus);
@@ -908,7 +926,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
 
       <div className="flex min-h-0 flex-1">
         <div className="mission-board-scroll min-w-0 flex-1 overflow-auto p-4">
-          {activeTasks.length === 0 && closedTasks.length === 0 ? (
+          {visibleTasks.length === 0 ? (
             <div className="flex min-h-full items-center justify-center">
               <div className="max-w-sm text-center" role="status">
                 <Columns3 size={20} className="mx-auto text-tertiary" aria-hidden />
@@ -935,14 +953,17 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
             <>
               <div
                 data-testid="mission-board-grid"
-                className="grid gap-5 w-full max-w-[1600px]"
-                style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(220px, 100%), 1fr))" }}
+                // A lane that wraps onto a second row stops being a lane, so the
+                // board always lays out one column per stage and lets the
+                // container scroll horizontally when they no longer fit.
+                className="mission-board-grid grid gap-4 w-full max-w-[1600px]"
+                style={{ gridTemplateColumns: `repeat(${MISSION_BOARD_COLUMNS.length}, minmax(200px, 1fr))` }}
               >
                 {MISSION_BOARD_COLUMNS.map((column) => (
                   <BoardColumn
                     key={column.id}
                     {...column}
-                    tasks={activeTasks.filter((task) => boardColumnForStatus(task.status) === column.id)}
+                    tasks={visibleTasks.filter((task) => boardColumnForStatus(task.status) === column.id)}
                     questions={questions}
                     selectedTaskId={selectedTaskId}
                     pendingTaskId={pendingTaskId}
@@ -970,7 +991,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                   </div>
                   <div
                     onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "move"; }}
-                    onDrop={(event) => { event.preventDefault(); setDraggingTaskId(null); setCancelTask(draggingTask); }}
+                    onDrop={(event) => { event.preventDefault(); setDraggingTaskId(null); setTaskPendingCancel(draggingTask); }}
                     className="flex h-7 min-w-20 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-medium text-error"
                   >
                     <Archive size={13} aria-hidden /> Cancel
@@ -978,23 +999,6 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                 </div>
               ) : null}
 
-              {closedTasks.length > 0 ? (
-                <div className="mt-6 border-t border-subtle pt-2">
-                  <Button type="button" onClick={() => setClosedOpen((open) => !open)} aria-expanded={closedOpen} aria-label={`Closed work, ${closedTasks.length} ${closedTasks.length === 1 ? "task" : "tasks"}`} className="flex h-7 w-full items-center justify-start gap-1.5 px-1 text-left text-xs text-secondary hover:bg-hover">
-                    {closedOpen ? <ChevronDown size={13} aria-hidden /> : <ChevronRight size={13} aria-hidden />}
-                    <Archive size={13} aria-hidden />
-                    <span className="font-medium">Closed</span>
-                    <span className="tabular-nums text-tertiary">{closedTasks.length}</span>
-                  </Button>
-                  {closedOpen ? (
-                    <div className="grid grid-cols-1 gap-3 pt-2 md:grid-cols-2 xl:grid-cols-3">
-                      {closedTasks.map((task) => (
-                        <MissionBoardCard key={task.id} task={task} spaceName={projectNameForTask(task)} questions={questions} selected={selectedTaskId === task.id} pending={false} onSelect={() => setSelectedTaskId(task.id)} onOpen={() => onOpenTask(task)} onInspect={() => onInspectTask(task.id)} onDragStart={() => {}} onDragEnd={() => {}} onTransition={() => {}} />
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
             </>
           ) : (
             <div role="table" aria-label="Mission board tasks" className="overflow-hidden rounded-lg border border-default bg-card">
@@ -1034,12 +1038,12 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
         </div>
       ) : null}
 
-      {cancelTask ? (
+      {taskPendingCancel ? (
         <CancelTaskDialog
-          task={cancelTask}
-          pending={pendingTaskId === cancelTask.id}
-          onCancel={() => setCancelTask(null)}
-          onConfirm={() => void requestTransition(cancelTask, "CANCELLED")}
+          task={taskPendingCancel}
+          pending={pendingTaskId === taskPendingCancel.id}
+          onCancel={() => setTaskPendingCancel(null)}
+          onConfirm={() => void requestTransition(taskPendingCancel, "CANCELLED")}
         />
       ) : null}
     </section>

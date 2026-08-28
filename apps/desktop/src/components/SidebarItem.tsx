@@ -12,7 +12,7 @@ import { memo, type KeyboardEventHandler } from "react";
 import { GitBranch, GitPullRequest, Pin } from "lucide-react";
 import { cn } from "../lib/cn";
 import { StatusIndicator } from "./StatusIndicator";
-import type { TaskStatusKind } from "../types";
+import { lifecycleShortLabel, type TaskLifecycle } from "../lib/task-lifecycle";
 import { IconButton } from "../ui/IconButton";
 import { Button } from "../ui/Button";
 
@@ -20,7 +20,7 @@ interface SidebarItemProps {
   /** Title to display. */
   title: string;
   /** Status kind for tasks. Projects/spaces omit this. */
-  status?: TaskStatusKind;
+  status?: TaskLifecycle;
   /** ISO timestamp for relative time display. */
   updatedAt?: string;
   /** Branch name if associated with a worktree/branch. */
@@ -45,17 +45,14 @@ interface SidebarItemProps {
   onPrimaryKeyDown?: KeyboardEventHandler<HTMLButtonElement>;
 }
 
-function statusPhrase(status?: TaskStatusKind): string | null {
-  switch (status) {
-    case "working": return "Working";
-    case "queued": return "Queued";
-    case "waiting": return "Waiting";
-    case "needs_approval": return "Needs approval";
-    case "needs_review": return "Needs review";
-    case "failed": return "Failed";
-    case "interrupted": return "Stopped";
-    default: return null;
-  }
+/**
+ * A finished task needs no word beside a row that has stopped moving, so
+ * `done` and `unknown` contribute nothing and the row falls back to the
+ * timestamp alone.
+ */
+function statusPhrase(status?: TaskLifecycle): string | null {
+  if (status === undefined || status === "done" || status === "unknown") return null;
+  return lifecycleShortLabel(status);
 }
 
 /**
@@ -63,7 +60,7 @@ function statusPhrase(status?: TaskStatusKind): string | null {
  * task only needs the time — repeating "Done" beside a row with no activity
  * mark is a word that carries nothing.
  */
-function metaLine(status?: TaskStatusKind, updatedAt?: string): string {
+function metaLine(status?: TaskLifecycle, updatedAt?: string): string {
   const phrase = statusPhrase(status);
   const when = updatedAt ? relativeTimeAgo(updatedAt) : "";
   if (phrase && when) return `${phrase} · ${when}`;

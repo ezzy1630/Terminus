@@ -65,9 +65,13 @@ import type {
   StartTurnInput,
   SubscribeEventsOptions,
   Task,
+  TaskActiveTurn,
+  TaskBudgetLedger,
   TaskContract,
   TaskDomainStatus,
   TaskListResponse,
+  TaskTranscriptPage,
+  TaskWorkspaceDiff,
   Turn,
   WorkspaceSnapshot,
 } from "../types";
@@ -298,6 +302,14 @@ export async function readBoundedResponseText(
   }
 }
 
+/** A signed integer: process exit codes are legitimately negative. */
+function responseInteger(value: unknown, what: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new TerminusApiError(502, `${what} was not a safe integer`, null);
+  }
+  return value;
+}
+
 function responseNonNegativeInteger(value: unknown, what: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new TerminusApiError(502, `${what} was not a non-negative safe integer`, null);
@@ -417,6 +429,63 @@ function decodeGatewayProviderConfigurationResponse(
   return { configured: true, configuration };
 }
 
+/**
+ * Counters wide enough to exceed the safe integer range arrive as decimal
+ * strings. Anything else — including a number, which a future control plane
+ * could start sending — is rejected rather than coerced, so a silent precision
+ * loss can never reach a budget readout.
+ */
+function responseDecimalString(value: unknown, what: string): string {
+  const decimal = responseString(value, what);
+  if (!/^\d+$/.test(decimal)) {
+    throw new TerminusApiError(502, `${what} was not a non-negative decimal string`, null);
+  }
+  return decimal;
+}
+
+function responseNullableDecimalString(value: unknown, what: string): string | null {
+  return value === undefined || value === null ? null : responseDecimalString(value, what);
+}
+
+/**
+ * Both of these are additive fields on the task detail route. A control plane
+ * that predates them omits them entirely, which must read as "not running" and
+ * "no ledger" rather than as a decode failure that blanks the whole task.
+ */
+function decodeTaskActiveTurn(value: unknown): TaskActiveTurn | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const turn = responseObject(value, "task.active_turn");
+  return {
+    id: responseString(turn.id, "task.active_turn.id"),
+    sequence: responseNonNegativeInteger(turn.sequence, "task.active_turn.sequence"),
+    state: responseString(turn.state, "task.active_turn.state"),
+    started_at: responseNullableTimestamp(turn.started_at ?? null, "task.active_turn.started_at"),
+  };
+}
+
+function decodeTaskBudgetLedger(value: unknown): TaskBudgetLedger | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const ledger = responseObject(value, "task.budget_ledger");
+  return {
+    steps_used: responseNonNegativeInteger(ledger.steps_used, "task.budget_ledger.steps_used"),
+    max_steps: responseNonNegativeInteger(ledger.max_steps, "task.budget_ledger.max_steps"),
+    tokens_used: responseDecimalString(ledger.tokens_used, "task.budget_ledger.tokens_used"),
+    input_tokens: responseDecimalString(ledger.input_tokens, "task.budget_ledger.input_tokens"),
+    output_tokens: responseDecimalString(ledger.output_tokens, "task.budget_ledger.output_tokens"),
+    reasoning_tokens: responseDecimalString(ledger.reasoning_tokens, "task.budget_ledger.reasoning_tokens"),
+    cached_input_tokens: responseDecimalString(ledger.cached_input_tokens, "task.budget_ledger.cached_input_tokens"),
+    max_tokens: responseNullableDecimalString(ledger.max_tokens, "task.budget_ledger.max_tokens"),
+    cost_micros: responseDecimalString(ledger.cost_micros, "task.budget_ledger.cost_micros"),
+    max_cost_micros: responseNullableDecimalString(ledger.max_cost_micros, "task.budget_ledger.max_cost_micros"),
+    context_headroom_tokens: responseNullableDecimalString(
+      ledger.context_headroom_tokens,
+      "task.budget_ledger.context_headroom_tokens",
+    ),
+  };
+}
+
 function decodeTask(value: unknown): Task {
   const task = responseObject(value, "task");
   const contract = decodeTaskContract(task.contract);
@@ -435,6 +504,8 @@ function decodeTask(value: unknown): Task {
       ? null
       : responseObject(task.terminal_reason, "task.terminal_reason"),
     contract,
+    active_turn: decodeTaskActiveTurn(task.active_turn),
+    budget_ledger: decodeTaskBudgetLedger(task.budget_ledger),
   };
 }
 
@@ -953,6 +1024,85 @@ export class TerminusApiClient {
   async getTask(taskId: string, signal?: AbortSignal | null): Promise<Task> {
     const task = decodeTask(await this.request<unknown>("GET", `/v1/tasks/${encodeURIComponent(taskId)}`, { signal }));
     return assertScopedResponse(task, task.id, taskId, "task detail");
+  }
+
+  /**
+   * Replay a task's durable transcript.
+   *
+   * `subscribeEvents` is a live tail: opened without a cursor it delivers only
+   * what happens next, which is why reopening a finished task used to show an
+   * empty conversation. This reads the stored events instead — the most recent
+   * page first — and returns the cursor to attach the tail at, so replay and
+   * stream meet exactly once.
+   */
+  async getTaskTranscript(
+    taskId: string,
+    options: { before?: string | null; limit?: number; signal?: AbortSignal | null } = {},
+  ): Promise<TaskTranscriptPage> {
+    const query = new URLSearchParams();
+    if (options.before) query.set("before", options.before);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    const page = responseObject(
+      await this.request<unknown>("GET", `/v1/tasks/${encodeURIComponent(taskId)}/transcript${suffix}`, {
+        signal: options.signal,
+      }),
+      "task transcript",
+    );
+    const rawEvents = page.events;
+    if (!Array.isArray(rawEvents)) {
+      throw new TerminusApiError(502, "task transcript.events was not an array", null);
+    }
+    const truncation = responseObject(page.truncation, "task transcript.truncation");
+    const transcript: TaskTranscriptPage = {
+      task_id: responseString(page.task_id, "task transcript.task_id"),
+      events: rawEvents.map((entry, index) => {
+        const event = responseObject(entry, `task transcript.events[${index}]`);
+        return {
+          id: responseString(event.id, `task transcript.events[${index}].id`),
+          event: responseString(event.event, `task transcript.events[${index}].event`),
+          data: responseString(event.data, `task transcript.events[${index}].data`, true),
+        };
+      }),
+      total: responseNonNegativeInteger(page.total, "task transcript.total"),
+      next_cursor: responseNullableString(page.next_cursor, "task transcript.next_cursor"),
+      earlier_cursor: responseNullableString(page.earlier_cursor ?? null, "task transcript.earlier_cursor"),
+      truncation: {
+        occurred: responseBoolean(truncation.occurred, "task transcript.truncation.occurred"),
+        continuation: responseNullableString(truncation.continuation, "task transcript.truncation.continuation"),
+      },
+    };
+    return assertScopedResponse(transcript, transcript.task_id, taskId, "task transcript");
+  }
+
+  /**
+   * The task's uncommitted working tree, diffed against HEAD by the kernel.
+   *
+   * The review pane used to reconstruct changes from patch text embedded in
+   * tool events, which shows what the agent reported rather than what the
+   * workspace holds, and shows nothing at all once those events fall out of
+   * the retained window.
+   */
+  async getTaskDiff(taskId: string, signal?: AbortSignal | null): Promise<TaskWorkspaceDiff> {
+    const body = responseObject(
+      await this.request<unknown>("GET", `/v1/tasks/${encodeURIComponent(taskId)}/diff`, { signal }),
+      "task diff",
+    );
+    const untracked = body.untracked_files;
+    if (!Array.isArray(untracked)) {
+      throw new TerminusApiError(502, "task diff.untracked_files was not an array", null);
+    }
+    const diff: TaskWorkspaceDiff = {
+      task_id: responseString(body.task_id, "task diff.task_id"),
+      workspace_id: responseString(body.workspace_id, "task diff.workspace_id"),
+      git_available: responseBoolean(body.git_available, "task diff.git_available"),
+      diff: responseString(body.diff, "task diff.diff", true),
+      diff_truncated: responseBoolean(body.diff_truncated, "task diff.diff_truncated"),
+      untracked_files: untracked.map((entry, index) =>
+        responseString(entry, `task diff.untracked_files[${index}]`)),
+      exit_code: responseInteger(body.exit_code, "task diff.exit_code"),
+    };
+    return assertScopedResponse(diff, diff.task_id, taskId, "task diff");
   }
 
   async cancelTask(taskId: string, options: MutationRequestOptions, reason?: string | null): Promise<Task> {

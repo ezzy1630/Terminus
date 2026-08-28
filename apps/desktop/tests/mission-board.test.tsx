@@ -9,6 +9,7 @@ import {
   boardTransitionForDrop,
   directTaskActions,
   taskNeedsAttention,
+  taskStatusLabel,
 } from "../src/lib/mission-board";
 import * as apiV2Module from "../src/lib/api-v2";
 import { arpV2 } from "../src/lib/api-v2";
@@ -90,27 +91,65 @@ describe("mission board domain mapping", () => {
     expect(openMissionBoard).toHaveBeenCalledOnce();
   });
 
-  test("projects runtime states into stable workflow columns without calling cancelled work done", () => {
-    expect(boardColumnForStatus("DRAFT")).toBe("running");
-    expect(boardColumnForStatus("READY")).toBe("running");
-    expect(boardColumnForStatus("RUNNING")).toBe("running");
-    expect(boardColumnForStatus("PAUSED")).toBe("running");
-    expect(boardColumnForStatus("WAITING_USER")).toBe("waiting_for_review");
-    expect(boardColumnForStatus("VERIFYING")).toBe("waiting_for_review");
+  test("does not call unstarted work running", () => {
+    // The board and the sidebar disagreed here: DRAFT and READY were placed in
+    // the running column while the sidebar rendered the same task as "Queued".
+    expect(boardColumnForStatus("DRAFT")).toBe("queued");
+    expect(boardColumnForStatus("READY")).toBe("queued");
+  });
+
+  test("projects runtime states into stable workflow columns", () => {
+    expect(boardColumnForStatus("RUNNING")).toBe("working");
+    expect(boardColumnForStatus("VERIFYING")).toBe("working");
+    expect(boardColumnForStatus("WAITING_USER")).toBe("needs_you");
+    expect(boardColumnForStatus("WAITING_AUTH")).toBe("needs_you");
+    expect(boardColumnForStatus("WAITING_RESOURCE")).toBe("needs_you");
+    expect(boardColumnForStatus("BLOCKED")).toBe("needs_you");
+    expect(boardColumnForStatus("PAUSED")).toBe("needs_you");
+    expect(boardColumnForStatus("PARTIAL")).toBe("review");
     expect(boardColumnForStatus("COMPLETED")).toBe("done");
-    expect(boardColumnForStatus("FAILED")).toBe("waiting_for_review");
-    expect(boardColumnForStatus("CANCELLED")).toBe("closed");
-    expect(boardColumnForStatus("PARTIAL")).toBe("closed");
+  });
+
+  test("puts failures in front of the human instead of filing them as review or done", () => {
+    expect(boardColumnForStatus("FAILED")).toBe("needs_you");
+  });
+
+  test("does not call cancelled work done, nor hide it off the board", () => {
+    // Cancelled work used to land in a hidden "closed" bucket. It now sits in
+    // Done, which is visible, and is still distinguishable by its label.
+    expect(boardColumnForStatus("CANCELLED")).toBe("done");
+    expect(taskStatusLabel("CANCELLED")).toBe("Cancelled");
+    expect(taskStatusLabel("COMPLETED")).toBe("Done");
   });
 
   test("maps only lawful direct drops to canonical transitions", () => {
-    expect(boardTransitionForDrop("DRAFT", "running")).toBeNull();
-    expect(boardTransitionForDrop("READY", "running")).toBe("RUNNING");
-    expect(boardTransitionForDrop("RUNNING", "waiting_for_review")).toBe("VERIFYING");
-    expect(boardTransitionForDrop("VERIFYING", "running")).toBe("RUNNING");
+    expect(boardTransitionForDrop("READY", "working")).toBe("RUNNING");
+    expect(boardTransitionForDrop("VERIFYING", "working")).toBe("RUNNING");
+    expect(boardTransitionForDrop("PAUSED", "working")).toBe("RUNNING");
+    expect(boardTransitionForDrop("BLOCKED", "working")).toBe("RUNNING");
+  });
+
+  test("refuses drops the state machine does not admit", () => {
+    // DRAFT and READY share the queued column, so the drop moves nothing.
+    expect(boardTransitionForDrop("DRAFT", "queued")).toBeNull();
+    expect(boardTransitionForDrop("READY", "queued")).toBeNull();
+    // Completion is evidence-only.
     expect(boardTransitionForDrop("RUNNING", "done")).toBeNull();
     expect(boardTransitionForDrop("VERIFYING", "done")).toBeNull();
-    expect(boardTransitionForDrop("COMPLETED", "running")).toBeNull();
+    expect(boardTransitionForDrop("COMPLETED", "working")).toBeNull();
+    // Attention is observed, never assigned by dragging a card into it.
+    expect(boardTransitionForDrop("RUNNING", "needs_you")).toBeNull();
+    expect(boardTransitionForDrop("READY", "needs_you")).toBeNull();
+  });
+
+  test("never admits a drop that would bounce the card out of the target column", () => {
+    // Review has no inbound transition: VERIFYING is unattended agent work and
+    // is projected into Working, so accepting the drop would move the card away
+    // from where the user released it.
+    for (const status of ["DRAFT", "READY", "RUNNING", "PAUSED", "BLOCKED", "VERIFYING"] as const) {
+      const target = boardTransitionForDrop(status, "review");
+      expect(target).toBeNull();
+    }
   });
 
   test("keeps pause immediate, cancel destructive, and failed work non-actionable", () => {
@@ -125,12 +164,14 @@ describe("mission board domain mapping", () => {
     expect(taskNeedsAttention(running, [])).toBe(false);
     expect(taskNeedsAttention(running, [question(running.id)])).toBe(true);
     expect(taskNeedsAttention(task("task-auth", "WAITING_AUTH", "Approval task"), [])).toBe(true);
-    expect(taskNeedsAttention(task("task-resource", "WAITING_RESOURCE", "Resource task"), [])).toBe(false);
+    expect(taskNeedsAttention(task("task-resource", "WAITING_RESOURCE", "Resource task"), [])).toBe(true);
+    expect(taskNeedsAttention(task("task-failed", "FAILED", "Failed task"), [])).toBe(true);
+    expect(taskNeedsAttention(task("task-done", "COMPLETED", "Done task"), [])).toBe(false);
   });
 });
 
 describe("MissionBoardView", () => {
-  test("renders canonical tasks, attention, closed history, and a persistent quick view", async () => {
+  test("renders canonical tasks, attention, cancelled work, and a persistent quick view", async () => {
     const tasks = [
       task("task-ready", "READY", "Add token refresh"),
       task("task-running", "RUNNING", "Repair OAuth callback"),
@@ -149,8 +190,8 @@ describe("MissionBoardView", () => {
     expect(screen.getByText("Add token refresh")).toBeInTheDocument();
     expect(screen.getByText("Repair OAuth callback")).toBeInTheDocument();
     expect(screen.getByText("Audit authentication")).toBeInTheDocument();
-    expect(screen.queryByText("Discard obsolete migration")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Closed work, 1 task/ })).toBeInTheDocument();
+    expect(screen.getByText("Discard obsolete migration")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Closed work/ })).not.toBeInTheDocument();
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "List view" }));
@@ -161,8 +202,9 @@ describe("MissionBoardView", () => {
     await user.click(screen.getByRole("button", { name: "Board view" }));
 
     const boardGrid = screen.getByTestId("mission-board-grid");
-    expect(boardGrid).toHaveStyle({ gridTemplateColumns: "repeat(auto-fit, minmax(min(220px, 100%), 1fr))" });
-    expect(boardGrid).not.toHaveStyle({ minWidth: "1160px" });
+    // One column per stage, always on one row: an auto-fit track count would
+    // wrap Done underneath Queued at ordinary window widths.
+    expect(boardGrid).toHaveStyle({ gridTemplateColumns: "repeat(5, minmax(200px, 1fr))" });
 
     const taskButton = screen.getByRole("button", { name: "Open Repair OAuth callback" });
     await user.click(taskButton);
@@ -199,30 +241,32 @@ describe("MissionBoardView", () => {
   });
 
   test("executes a lawful drag transition with the card version and an idempotency key", async () => {
-    const runningTask = task("task-running", "RUNNING", "Repair OAuth callback", 7);
-    const verifyingTask = { ...runningTask, status: "VERIFYING" as const, version: 8 };
+    // Working is the only column that admits a drop, so resuming a paused task
+    // by dragging it there is the lawful transition to exercise.
+    const pausedTask = task("task-paused", "PAUSED", "Repair OAuth callback", 7);
+    const runningTask = { ...pausedTask, status: "RUNNING" as const, version: 8 };
     vi.spyOn(arpV2, "listTasks")
-      .mockResolvedValueOnce([runningTask])
-      .mockResolvedValue([verifyingTask]);
+      .mockResolvedValueOnce([pausedTask])
+      .mockResolvedValue([runningTask]);
     vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
     vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
-    const transition = vi.spyOn(arpV2, "transitionTask").mockResolvedValue(verifyingTask);
+    const transition = vi.spyOn(arpV2, "transitionTask").mockResolvedValue(runningTask);
 
     render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
-    const card = await screen.findByTestId("mission-board-card-task-running");
-    const waitingColumn = screen.getByTestId("mission-board-column-waiting_for_review");
+    const card = await screen.findByTestId("mission-board-card-task-paused");
+    const workingColumn = screen.getByTestId("mission-board-column-working");
 
     fireEvent.dragStart(card);
-    fireEvent.dragOver(waitingColumn);
-    fireEvent.drop(waitingColumn);
+    fireEvent.dragOver(workingColumn);
+    fireEvent.drop(workingColumn);
 
     await waitFor(() => expect(transition).toHaveBeenCalledWith(
-      "task-running",
-      "VERIFYING",
+      "task-paused",
+      "RUNNING",
       { idempotencyKey: expect.any(String) },
       7,
     ));
-    expect(await screen.findByText("Moved Repair OAuth callback to Waiting for review.")).toBeInTheDocument();
+    expect(await screen.findByText("Moved Repair OAuth callback to Working.")).toBeInTheDocument();
   });
 
   test("refreshes from canonical state after a relevant live event", async () => {
@@ -247,7 +291,8 @@ describe("MissionBoardView", () => {
     vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(stream);
 
     render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
-    expect(await screen.findByTestId("mission-board-column-running")).toHaveTextContent("Live task");
+    // READY has not started, so it waits in Queued until the runtime picks it up.
+    expect(await screen.findByTestId("mission-board-column-queued")).toHaveTextContent("Live task");
 
     await act(async () => {
       for (const handler of handlers.get("message") ?? []) {
@@ -271,6 +316,8 @@ describe("MissionBoardView", () => {
       await new Promise((resolve) => window.setTimeout(resolve, 180));
     });
 
-    expect(await screen.findByTestId("mission-board-column-running")).toHaveTextContent("Live task");
+    // The live event moved it to RUNNING, so it crosses into Working.
+    expect(await screen.findByTestId("mission-board-column-working")).toHaveTextContent("Live task");
+    expect(screen.getByTestId("mission-board-column-queued")).not.toHaveTextContent("Live task");
   });
 });

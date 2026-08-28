@@ -20,23 +20,27 @@ interface PersistedTheme {
   density: Density;
 }
 
-function readPersisted(): PersistedTheme {
-  if (typeof window === "undefined") return { theme: "system", density: "compact" };
+const DEFAULT_APPEARANCE: PersistedTheme = { theme: "system", density: "compact" };
+
+/** null when the payload is missing or unreadable, so callers can tell the two apart. */
+function parsePersisted(raw: string | null): PersistedTheme | null {
+  if (!raw) return null;
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { theme: "system", density: "compact" };
     const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === "object") {
-      const p = parsed as Partial<PersistedTheme>;
-      const theme: Theme =
-        p.theme === "light" || p.theme === "dark" || p.theme === "system" ? p.theme : "system";
-      const density: Density = p.density === "spacious" ? "spacious" : "compact";
-      return { theme, density };
-    }
+    if (!parsed || typeof parsed !== "object") return null;
+    const p = parsed as Partial<PersistedTheme>;
+    const theme: Theme =
+      p.theme === "light" || p.theme === "dark" || p.theme === "system" ? p.theme : "system";
+    const density: Density = p.density === "spacious" ? "spacious" : "compact";
+    return { theme, density };
   } catch {
-    // ignore
+    return null;
   }
-  return { theme: "system", density: "compact" };
+}
+
+function readPersisted(): PersistedTheme {
+  if (typeof window === "undefined") return DEFAULT_APPEARANCE;
+  return parsePersisted(window.localStorage.getItem(STORAGE_KEY)) ?? DEFAULT_APPEARANCE;
 }
 
 function writePersisted(state: PersistedTheme): void {
@@ -92,6 +96,26 @@ const initialResolved = resolveTheme(initial.theme);
 // Apply once at module load so first paint is correct.
 applyAppearance(initialResolved, initial.density);
 applyNativeTheme(initial.theme);
+
+/**
+ * Appearance is now edited in a separate Preferences window, so the store
+ * that owns it lives in two renderers at once. localStorage broadcasts a
+ * `storage` event to every other same-origin document when one of them
+ * writes, which is exactly the signal needed: adopt the new appearance
+ * without writing it back, so the two windows cannot ping-pong.
+ */
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key !== STORAGE_KEY) return;
+    // A payload we cannot read is not an instruction to reset the user's
+    // appearance; keep what is already applied.
+    const remote = parsePersisted(event.newValue);
+    if (remote === null) return;
+    const resolved = resolveTheme(remote.theme);
+    applyAppearance(resolved, remote.density);
+    useThemeStore.setState({ theme: remote.theme, density: remote.density, resolved });
+  });
+}
 
 // Listen for system color-scheme changes when theme === "system".
 if (typeof window !== "undefined" && window.matchMedia) {

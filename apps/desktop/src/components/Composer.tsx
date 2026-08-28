@@ -32,8 +32,12 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
+  Clock3,
   FolderGit2,
+  Gauge,
   ShieldCheck,
+  Square,
+  X,
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, TerminusApiError } from "../lib/api";
@@ -46,8 +50,10 @@ import {
 } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
-import { normalizeTaskStatus } from "../hooks/use-terminus";
-import type { ComposerSendMode } from "../types";
+import { lifecycleFromDomainStatus, lifecycleFromTask, lifecycleIsTerminal } from "../lib/task-lifecycle";
+import { budgetMetrics, primaryBudgetMetric } from "../lib/task-budget";
+import { taskRunIsActive } from "../lib/turn-activity";
+import type { ComposerSendMode, Task } from "../types";
 import { FIXED_SHORTCUTS, matchesShortcut } from "../lib/shortcuts";
 import { sessionLatency } from "../lib/session-latency";
 import { Button } from "../ui/Button";
@@ -73,12 +79,12 @@ function computeSendMode(taskStatus: string | undefined, _hasStartedTurn: boolea
   // A DRAFT task has been created but has not started its first turn yet.
   // Keep Send available so onSubmit can call startTask before startTurn.
   if (taskStatus === "DRAFT") return "send";
-  const kind = normalizeTaskStatus(taskStatus);
-  if (kind === "working" || kind === "waiting" || kind === "needs_approval" || kind === "needs_review") {
-    return "steer";
-  }
-  if (kind === "queued") return "steer";
-  return "send";
+  // Anything still in flight takes a steer; only terminal work starts a new
+  // exchange. `lifecycleIsTerminal` keeps this in step with the vocabulary
+  // instead of re-listing states that a future status would not appear in.
+  const lifecycle = lifecycleFromDomainStatus(taskStatus);
+  if (lifecycle === "unknown") return "send";
+  return lifecycleIsTerminal(lifecycle) ? "send" : "steer";
 }
 
 function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProps): JSX.Element {
@@ -100,7 +106,10 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   const resetDraftStorage = useTerminusStore((s) => s.resetDraftStorage);
   const taskId = task?.id ?? "__new__";
   const refreshTasks = useTerminusStore((s) => s.refreshTasks);
+  const stopTask = useTerminusStore((s) => s.stopTask);
   const healthReady = useTerminusStore((s) => s.healthReady);
+  const queueSteer = useTerminusStore((s) => s.queueSteer);
+  const clearQueuedSteer = useTerminusStore((s) => s.clearQueuedSteer);
 
   const storedDraft = sessionDraftsByTask[taskId] ?? draftsByTask[taskId] ?? "";
 
@@ -117,6 +126,8 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   const [draftInputError, setDraftInputError] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const turnMutation = useLogicalMutation(`composer-turn.${taskId}`);
+  const stopMutation = useLogicalMutation(`composer-stop.${taskId}`);
+  const [stopping, setStopping] = useState(false);
   const draft = localDraft.taskId === taskId ? localDraft.text : storedDraft;
   const draftPersistence = draftPersistenceByTask[taskId];
 
@@ -171,8 +182,21 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
 
   const hasStartedTurn = events.some((event) => event.event === "turn.started");
   const sendMode = computeSendMode(task?.status, hasStartedTurn);
-  const taskStatusKind = task ? normalizeTaskStatus(task.status) : null;
-  const taskTerminal = taskStatusKind === "done" || taskStatusKind === "failed" || taskStatusKind === "interrupted";
+  const taskStatusKind = task ? lifecycleFromTask(task) : null;
+  const taskTerminal = taskStatusKind !== null && lifecycleIsTerminal(taskStatusKind);
+  // Authoritative "is work in flight" — the live event tail where it has said
+  // anything, the task snapshot otherwise. Three things read it: Stop, the
+  // steer queue, and the send button's wording.
+  const runIsActive = taskRunIsActive(task, events);
+  const queuedSteer = useTerminusStore((s) => (task ? s.queuedSteerByTask[task.id] ?? null : null));
+  const flushingQueueRef = useRef(false);
+  const budgetMetric = useMemo(() => primaryBudgetMetric(task?.budget_ledger), [task?.budget_ledger]);
+  const budgetDetail = useMemo(
+    () => budgetMetrics(task?.budget_ledger)
+      .map((metric) => `${metric.label} ${metric.value}${metric.detail ? ` (${metric.detail})` : ""}`)
+      .join(" · "),
+    [task?.budget_ledger],
+  );
   const isStartSurface = !task && Boolean(onCreateTask);
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === (task?.session_id ?? selectedSessionId)),
@@ -268,9 +292,105 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     }
   };
 
-  // Send / steer logic. Task-wide cancellation and local-only queuing are not
-  // inferred from editor keys; both require authoritative control contracts.
-  const onSubmit = async (mode: Extract<ComposerSendMode, "send" | "steer">): Promise<void> => {
+  /**
+   * Stop the run. `api.cancelTask` is deliberate: it is the only client method
+   * that reaches the control plane's `abortActiveTurn`. The v2
+   * `transitionTask(..., "CANCELLED")` path used by the board only writes the
+   * snapshot and projects the v1 status — the in-flight loop is never signalled
+   * and keeps running.
+   */
+  const onStop = async (): Promise<void> => {
+    if (!task || stopping) return;
+    setError(null);
+    let idempotencyKey: string;
+    try {
+      idempotencyKey = stopMutation.acquire(JSON.stringify({ taskId: task.id, action: "stop" })).key;
+    } catch (admissionError: unknown) {
+      setError(admissionError instanceof Error ? admissionError.message : "Could not admit the stop request.");
+      return;
+    }
+    setStopping(true);
+    try {
+      const failure = await stopTask(task.id);
+      if (failure === null) stopMutation.settle(idempotencyKey);
+      else {
+        stopMutation.abandon(idempotencyKey);
+        setError(failure);
+      }
+    } finally {
+      setStopping(false);
+    }
+  };
+
+  /**
+   * Create a turn.
+   *
+   * The only place that happens, so a queued flush and a direct send cannot
+   * drift apart. `retryable` distinguishes losing a race against a turn that
+   * started between the activity check and the request — which should stay
+   * queued — from a real failure, which should be shown.
+   */
+  const submitTurn = useCallback(async (
+    target: Task,
+    text: string,
+  ): Promise<{ ok: true } | { ok: false; message: string; retryable: boolean }> => {
+    let operationKey: string | null = null;
+    let hasDurableStep = false;
+    try {
+      const admission = turnMutation.acquire(JSON.stringify({ taskId: target.id, text }));
+      operationKey = admission.key;
+      hasDurableStep = admission.completedSteps.task_started !== undefined;
+      // For the very first send on a DRAFT task, start the task.
+      // For subsequent sends, this is a steer — the control plane's
+      // /v1/turns endpoint creates a new turn in the existing thread.
+      if (target.status === "DRAFT" && !hasDurableStep) {
+        const started = await api.startTask(target.id, { idempotencyKey: `${operationKey}:start-task` });
+        turnMutation.checkpoint(
+          operationKey,
+          "task_started",
+          JSON.stringify({ eventCursor: started.event_cursor }),
+        );
+        hasDurableStep = true;
+      }
+      await api.startTurn({
+        thread_id: target.thread_id,
+        task_id: target.id,
+        user_input: text,
+      }, { idempotencyKey: `${operationKey}:turn` });
+      // R12: open a TTFT sample; the first streamed event for this task
+      // closes it (see lib/session-view SessionLatencyTracker).
+      sessionLatency.markTurnSubmitted(target.id);
+      turnMutation.settle(operationKey);
+      void refreshTasks(target.session_id);
+      return { ok: true };
+    } catch (err) {
+      if (operationKey && isDefinitiveMutationFailure(err)) {
+        try {
+          if (hasDurableStep) {
+            await refreshTasks(target.session_id);
+            turnMutation.completePartial(operationKey);
+          } else {
+            turnMutation.abandon(operationKey);
+          }
+        } catch (recoveryError) {
+          return {
+            ok: false,
+            retryable: false,
+            message: recoveryError instanceof Error ? recoveryError.message : "Couldn't recover the saved request.",
+          };
+        }
+      }
+      const alreadyActive = err instanceof TerminusApiError
+        && err.envelope?.code === "TASK_TURN_ALREADY_ACTIVE";
+      return {
+        ok: false,
+        retryable: alreadyActive,
+        message: err instanceof TerminusApiError || err instanceof Error ? err.message : "Couldn't send the request.",
+      };
+    }
+  }, [refreshTasks, turnMutation]);
+
+  const onSubmit = async (_mode: Extract<ComposerSendMode, "send" | "steer">): Promise<void> => {
     setError(null);
 
     const text = draft.trim();
@@ -283,8 +403,6 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
       setError("This task is finished. Create a new task to continue working.");
       return;
     }
-    let operationKey: string | null = null;
-    let hasDurableStep = false;
     try {
       setSending(true);
       if (!task) {
@@ -292,55 +410,57 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
           setError("Select or create a project before sending.");
           return;
         }
-        await onCreateTask(text);
+        try {
+          await onCreateTask(text);
+        } catch (err) {
+          // The click handler's promise is not a place to leave a rejection.
+          // The draft stays put, so the objective is not lost with it.
+          setError(err instanceof Error ? err.message : "Couldn't create the task.");
+          return;
+        }
         clearCurrentDraft();
         return;
       }
-      const admission = turnMutation.acquire(JSON.stringify({ taskId: task.id, text }));
-      operationKey = admission.key;
-      hasDurableStep = admission.completedSteps.task_started !== undefined;
-      // For the very first send on a DRAFT task, start the task.
-      // For subsequent sends, this is a steer — the control plane's
-      // /v1/turns endpoint creates a new turn in the existing thread.
-      if (task.status === "DRAFT" && !hasDurableStep) {
-        const started = await api.startTask(task.id, { idempotencyKey: `${operationKey}:start-task` });
-        turnMutation.checkpoint(
-          operationKey,
-          "task_started",
-          JSON.stringify({ eventCursor: started.event_cursor }),
-        );
-        hasDurableStep = true;
+      // The control plane refuses a second concurrent turn with
+      // TASK_TURN_ALREADY_ACTIVE, so steering during a run cannot be a send.
+      // Queue it instead of making the user watch for the run to finish and
+      // press the button again. The text leaves the composer either way — it
+      // is held by the task now, and the banner below says so.
+      if (runIsActive) {
+        queueSteer(task.id, text);
+        clearCurrentDraft();
+        return;
       }
-      await api.startTurn({
-        thread_id: task.thread_id,
-        task_id: task.id,
-        user_input: text,
-      }, { idempotencyKey: `${operationKey}:turn` });
-      // R12: open a TTFT sample; the first streamed event for this task
-      // closes it (see lib/session-view SessionLatencyTracker).
-      sessionLatency.markTurnSubmitted(task.id);
-      turnMutation.settle(operationKey);
+      const outcome = await submitTurn(task, text);
+      if (!outcome.ok) {
+        setError(outcome.message);
+        return;
+      }
       clearCurrentDraft();
-      void refreshTasks(task.session_id);
-    } catch (err) {
-      if (operationKey && isDefinitiveMutationFailure(err)) {
-        try {
-          if (hasDurableStep) {
-            if (task) await refreshTasks(task.session_id);
-            turnMutation.completePartial(operationKey);
-          } else {
-            turnMutation.abandon(operationKey);
-          }
-        } catch (recoveryError) {
-          setError(recoveryError instanceof Error ? recoveryError.message : "Couldn't recover the saved request.");
-          return;
-        }
-      }
-      setError(err instanceof TerminusApiError || err instanceof Error ? err.message : "Couldn't send the request.");
     } finally {
       setSending(false);
     }
   };
+
+  /**
+   * Send the queued message as soon as the run settles.
+   *
+   * A message that cannot be sent is never discarded: if the task ended
+   * instead of continuing, the banner keeps the text and offers to put it
+   * back, rather than an effect silently rewriting what is in the composer.
+   */
+  useEffect(() => {
+    if (queuedSteer === null || !task || taskTerminal || runIsActive || !healthReady) return;
+    if (flushingQueueRef.current) return;
+    flushingQueueRef.current = true;
+    const target = task;
+    void (async () => {
+      const outcome = await submitTurn(target, queuedSteer);
+      flushingQueueRef.current = false;
+      if (outcome.ok || !outcome.retryable) clearQueuedSteer(target.id);
+      if (!outcome.ok && !outcome.retryable) setError(outcome.message);
+    })();
+  }, [clearQueuedSteer, healthReady, queuedSteer, runIsActive, submitTurn, task, taskTerminal]);
 
   // Keyboard shortcuts.
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -352,10 +472,14 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     }
   };
 
-  // Send button content varies by mode.
+  // Send button content varies by mode. While a run is in flight the button
+  // says what will actually happen — the message is held, not delivered.
   const sendButtonContent: { icon: JSX.Element; label: string; mode: Extract<ComposerSendMode, "send" | "steer"> } = (() => {
     if (!task && onCreateTask) {
       return { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Create task", mode: "send" };
+    }
+    if (runIsActive) {
+      return { icon: <Clock3 size={14} />, label: "Queue for the current run", mode: "steer" };
     }
     switch (sendMode) {
       case "steer":
@@ -366,21 +490,34 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     }
   })();
 
+  // Stop is offered only while there is a run to stop. It is a separate
+  // control rather than a mode of the send button, so steering and stopping
+  // are never the same click. `hasStartedTurn` was the old test and it stayed
+  // true forever once any turn had ever started, so the button outlived the
+  // work it claimed to stop.
+  const canStop = Boolean(task) && !taskTerminal && runIsActive;
+
   const permissionProfile = activeSession?.default_permission_profile?.trim() || "Workspace policy";
   const permissionLabel = permissionProfile === "secure-local-default" ? "Full access" : permissionProfile;
   const sendDisabled = sending || draft.trim().length === 0 || !healthReady || taskTerminal;
   const sendTitle = taskTerminal
     ? "Task is terminal; create a new task to continue"
-    : healthReady ? `${sendButtonContent.label} · ⌘↵` : "Kernel not ready";
+    : !healthReady
+      ? "Kernel not ready"
+      : runIsActive
+        ? "Held until the current run finishes, then sent · ⌘↵"
+        : `${sendButtonContent.label} · ⌘↵`;
 
   return (
     <div className={cn("relative", className)}>
       {/* Reading-column-width container — matches Conversation. */}
       <div className={isStartSurface ? "start-column" : "content-column"}>
         <div
-          className={cn(
-            "composer-surface flex flex-col rounded-xl border border-default bg-composer",
-          )}
+          /* The border lives in .composer-surface, not in a utility: Tailwind's
+             utilities layer outranks the components layer, so a `border-default`
+             class here silently won over the focus rule and the composer's
+             focused state showed no border change at all. */
+          className="composer-surface flex flex-col rounded-xl bg-composer"
         >
           {/* Textarea. */}
           <textarea
@@ -442,6 +579,25 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
               </span>
             )}
 
+            {/* What this task has spent. Both numbers are already on the wire
+                in `budget_ledger`; before this the app displayed neither. */}
+            {budgetMetric ? (
+              <span
+                className={cn(
+                  "budget-meter flex h-7 items-center gap-1 px-1 text-xs tabular-nums",
+                  budgetMetric.tone === "critical" ? "text-error"
+                    : budgetMetric.tone === "warning" ? "text-warning"
+                      : "text-tertiary",
+                )}
+                role="status"
+                aria-label={`${budgetMetric.label} ${budgetMetric.value}${budgetMetric.detail ? `, ${budgetMetric.detail}` : ""}`}
+                data-tooltip={budgetDetail}
+              >
+                <Gauge size={12} strokeWidth={1.8} aria-hidden />
+                <span>{budgetMetric.value}</span>
+              </span>
+            ) : null}
+
             {/* Right side — mode pill + send button. */}
             <div className="ml-auto flex items-center gap-2">
               {error ? (
@@ -455,6 +611,20 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
                 >
                   {error}
                 </span>
+              ) : null}
+              {canStop ? (
+                <Button
+                  type="button"
+                  onClick={() => void onStop()}
+                  disabled={stopping}
+                  aria-label="Stop"
+                  data-tooltip={stopping ? "Stopping…" : "Stop this run · ⌘."}
+                  variant="secondary"
+                  className="stop-control flex h-8 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-error"
+                >
+                  <Square size={11} strokeWidth={2.5} fill="currentColor" aria-hidden />
+                  {stopping ? "Stopping…" : "Stop"}
+                </Button>
               ) : null}
               <Button
                 type="button"
@@ -471,6 +641,50 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
             </div>
           </div>
         </div>
+
+        {queuedSteer !== null && task ? (
+          <div
+            role="status"
+            className={cn(
+              "mt-2 flex flex-wrap items-start gap-2 rounded-md border px-2.5 py-1.5 text-xs",
+              taskTerminal ? "border-warning/45 text-warning" : "border-subtle text-secondary",
+            )}
+          >
+            <Clock3 size={12} strokeWidth={1.8} className="mt-0.5 shrink-0" aria-hidden />
+            <span className="min-w-0 flex-1">
+              <span className="font-medium text-primary">
+                {taskTerminal ? "Not sent — the task finished first." : "Queued."}
+              </span>{" "}
+              {taskTerminal
+                ? "Put it back in the composer to send it somewhere else."
+                : "It goes as soon as the current run finishes."}
+              <span className="mt-0.5 block truncate text-tertiary">{queuedSteer}</span>
+            </span>
+            {taskTerminal ? (
+              <Button
+                type="button"
+                onClick={() => {
+                  discardPendingDraft();
+                  setLocalDraft({ taskId, text: queuedSteer });
+                  setDraft(taskId, queuedSteer, "composer");
+                  clearQueuedSteer(task.id);
+                  requestAnimationFrame(() => textareaRef.current?.focus());
+                }}
+                className="font-medium text-primary hover:underline"
+              >
+                Put back
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              onClick={() => clearQueuedSteer(task.id)}
+              aria-label="Discard the queued message"
+              className="flex h-5 w-5 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
+            >
+              <X size={12} aria-hidden />
+            </Button>
+          </div>
+        ) : null}
 
         {draftInputError ? (
           <div role="alert" className="mt-2 border-l-2 border-warning/55 px-2.5 py-1.5 text-xs text-warning" >

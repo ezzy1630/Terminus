@@ -44,7 +44,15 @@ declare global {
       apiBase: string;
       platform: string;
       isMac: boolean;
-      notify: (title: string, body: string) => Promise<unknown>;
+      /** "settings" when this window is the preferences window. */
+      view?: "main" | "settings";
+      /** True when the native window is a vibrant material the renderer paints over. */
+      vibrancy?: boolean;
+      notify: (title: string, body: string, taskId?: string) => Promise<unknown>;
+      openSettings?: (category?: string) => Promise<unknown>;
+      setAttentionCount?: (count: number) => Promise<unknown>;
+      onOpenTask?: (callback: (taskId: string) => void) => () => void;
+      onSettingsCategory?: (callback: (category: string) => void) => () => void;
       windowMinimize: () => Promise<unknown>;
       windowMaximize: () => Promise<unknown>;
       windowClose: () => Promise<unknown>;

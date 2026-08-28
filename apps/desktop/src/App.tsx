@@ -36,9 +36,10 @@ import {
   useSelectedTask,
   useSelectedTaskEventHistory,
   useSelectedTaskEvents,
-  normalizeTaskStatus,
 } from "./hooks/use-terminus";
 import { useThemeStore } from "./hooks/use-theme";
+import { useNativeAttention } from "./hooks/use-native-attention";
+import { lifecycleFromTask } from "./lib/task-lifecycle";
 import type { Theme } from "./types";
 import type { SidebarDestination } from "./components/Sidebar";
 import type { SettingCategoryId } from "./components/Settings";
@@ -51,6 +52,7 @@ import { DialogSurface } from "./ui/Dialog";
 import { IconButton } from "./ui/IconButton";
 import { Skeleton, Spinner } from "./ui/Status";
 import { Tabs } from "./ui/Tabs";
+import { TaskRequiredState } from "./components/Cockpit/CockpitPrimitives";
 
 const CommandPalette = lazy(async () => {
   const paletteModule = await import("./components/CommandPalette");
@@ -88,36 +90,6 @@ const AgentsView = lazy(async () => {
   return { default: agentsModule.AgentsView };
 });
 
-const MissionLedgerView = lazy(async () => {
-  const cockpitModule = await import("./components/Cockpit/MissionLedgerView");
-  return { default: cockpitModule.MissionLedgerView };
-});
-
-const EffectQueueView = lazy(async () => {
-  const cockpitModule = await import("./components/Cockpit/EffectQueueView");
-  return { default: cockpitModule.EffectQueueView };
-});
-
-const ArtifactDiffInspectorView = lazy(async () => {
-  const cockpitModule = await import("./components/Cockpit/ArtifactDiffInspectorView");
-  return { default: cockpitModule.ArtifactDiffInspectorView };
-});
-
-const FleetBudgetView = lazy(async () => {
-  const cockpitModule = await import("./components/Cockpit/FleetBudgetView");
-  return { default: cockpitModule.FleetBudgetView };
-});
-
-const CausalReplayView = lazy(async () => {
-  const cockpitModule = await import("./components/Cockpit/CausalReplayView");
-  return { default: cockpitModule.CausalReplayView };
-});
-
-const ClaimEvidenceGraphView = lazy(async () => {
-  const cockpitModule = await import("./components/Cockpit/ClaimEvidenceGraphView");
-  return { default: cockpitModule.ClaimEvidenceGraphView };
-});
-
 const AttentionCenterModal = lazy(async () => {
   const cockpitModule = await import("./components/Cockpit/AttentionCenterModal");
   return { default: cockpitModule.AttentionCenterModal };
@@ -147,9 +119,7 @@ function SelectedTaskReviewPane({
 }
 
 import {
-  GOVERNANCE_VIEWS_CHANGED_EVENT,
   parseTaskWorkspaceTab as parseTaskWorkspaceTabValue,
-  readGovernanceViewsEnabled,
   taskWorkspaceTabs,
   type TaskWorkspaceTab,
 } from "./lib/session-view";
@@ -157,7 +127,7 @@ import {
 const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
 const INSPECTOR_VISIBILITY_KEY = "terminus-desktop.inspector-visible.";
 type AppOverlay = "palette" | "settings" | "onboarding" | "attention" | null;
-// R12: session-first tabs and governance gating live in lib/session-view.
+// Session-first tabs live in lib/session-view.
 const parseTaskWorkspaceTab = parseTaskWorkspaceTabValue;
 
 function readInspectorVisibility(taskId: string): boolean {
@@ -233,6 +203,7 @@ export function App(): JSX.Element {
   const selectedTaskPage = useTerminusStore((s) => s.selectedSessionId ? s.taskPagesBySession[s.selectedSessionId] : undefined);
   const loadMoreTasks = useTerminusStore((s) => s.loadMoreTasks);
   const selectTask = useTerminusStore((s) => s.selectTask);
+  const stopTask = useTerminusStore((s) => s.stopTask);
   const setDraft = useTerminusStore((s) => s.setDraft);
   const selectedTask = useSelectedTask();
   const selectedSessionTasks = useSelectedSessionTasks();
@@ -251,18 +222,6 @@ export function App(): JSX.Element {
   const [settingsCategory, setSettingsCategory] = useState<SettingCategoryId>("appearance");
   const [activeDestination, setActiveDestination] = useState<SidebarDestination>("new_task");
   const [selectedCanonicalTaskId, setSelectedCanonicalTaskId] = useState<string | null>(null);
-  // R12: session is the default workspace surface; governance views are
-  // opt-in per browser via lib/session-view.
-  const [governanceViewsEnabled, setGovernanceViewsEnabled] = useState<boolean>(
-    () => readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null),
-  );
-  // R12/Cubic: settings toggles take effect without an app restart.
-  useEffect(() => {
-    const listener = (): void =>
-      setGovernanceViewsEnabled(readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null));
-    window.addEventListener(GOVERNANCE_VIEWS_CHANGED_EVENT, listener);
-    return () => window.removeEventListener(GOVERNANCE_VIEWS_CHANGED_EVENT, listener);
-  }, []);
   const [taskWorkspaceTab, setTaskWorkspaceTab] = useState<TaskWorkspaceTab>("session");
 
   const [changesOpen, setChangesOpen] = useState(false);
@@ -307,7 +266,7 @@ export function App(): JSX.Element {
   }, []);
 
   const openTaskWorkspace = useCallback((tab: TaskWorkspaceTab): void => {
-    const allowed = taskWorkspaceTabs(governanceViewsEnabled).some((entry) => entry.value === tab);
+    const allowed = taskWorkspaceTabs().some((entry) => entry.value === tab);
     setTaskWorkspaceTab(allowed ? tab : "session");
     setActiveDestination("task_details");
     setChangesOpen(false);
@@ -331,7 +290,30 @@ export function App(): JSX.Element {
     selectTask(task.id);
   }, [inspectCanonicalTask, selectTask]);
 
+  /** Open a task by id — from a clicked notification, or from the board. */
+  const openTaskById = useCallback((taskId: string): void => {
+    setSelectedCanonicalTaskId(null);
+    setActiveDestination("chat");
+    setChangesOpen(false);
+    setOverlay(null);
+    selectTask(taskId);
+  }, [selectTask]);
+
+  // Dock badge and native notifications for tasks that want a human.
+  useNativeAttention(openTaskById);
+
   const openSettings = useCallback((category: SettingCategoryId = "appearance"): void => {
+    // Preferences belong in their own window on macOS. Fall back to the
+    // in-app overlay wherever there is no native shell to open one — the
+    // browser build and tests — and if the window refuses to open.
+    const openNativeSettings = window.terminusDesktop?.openSettings;
+    if (openNativeSettings) {
+      void openNativeSettings(category).catch(() => {
+        setSettingsCategory(category);
+        setOverlay("settings");
+      });
+      return;
+    }
     setSettingsCategory(category);
     setOverlay("settings");
   }, []);
@@ -430,7 +412,13 @@ export function App(): JSX.Element {
         return;
       }
       if (overlay !== null) return;
-      if (matchesShortcut(e, FIXED_SHORTCUTS.newTask)) {
+      if (matchesShortcut(e, FIXED_SHORTCUTS.stopRun)) {
+        const target = selectedTaskId ?? selectedCanonicalTaskId;
+        if (target) {
+          e.preventDefault();
+          void stopTask(target);
+        }
+      } else if (matchesShortcut(e, FIXED_SHORTCUTS.newTask)) {
         e.preventDefault();
         goToNewTask();
       } else if (matchesShortcut(e, FIXED_SHORTCUTS.showChanges) && selectedTaskId) {
@@ -478,11 +466,16 @@ export function App(): JSX.Element {
   // Build the command catalog. Memoized so the palette doesn't re-rank
   // on every App re-render.
   const taskCommandsEnabled = selectedTaskId !== null || selectedCanonicalTaskId !== null;
+  // Stop applies to whichever task is on screen, including one selected only
+  // on the board and therefore absent from the v1 selection.
+  const stopTarget = selectedTaskId ?? selectedCanonicalTaskId;
+
   const commands = useMemo(
     () => [
       ...buildDefaultCommands({
         openProject,
         newTask: goToNewTask,
+        stopRun: stopTarget ? () => { void stopTask(stopTarget); } : undefined,
         showChanges: selectedTaskId ? () => setChangesOpen(true) : undefined,
         toggleInspector: selectedTaskId ? toggleInspector : undefined,
         toggleSidebar: () => setSidebarVisible((visible) => !visible),
@@ -493,12 +486,6 @@ export function App(): JSX.Element {
         openMissionBoard: () => openDestination("board"),
         openAttentionCenter: () => setOverlay("attention"),
         openAgents: () => openDestination("agents"),
-        openMissionLedger: taskCommandsEnabled ? () => openTaskWorkspace("overview") : undefined,
-        openEffectQueue: taskCommandsEnabled ? () => openTaskWorkspace("activity") : undefined,
-        openArtifactDiff: taskCommandsEnabled ? () => openTaskWorkspace("changes") : undefined,
-        openFleetBudget: taskCommandsEnabled ? () => openTaskWorkspace("usage") : undefined,
-        openCausalReplay: taskCommandsEnabled ? () => openTaskWorkspace("replay") : undefined,
-        openClaimEvidence: taskCommandsEnabled ? () => openTaskWorkspace("evidence") : undefined,
         viewShortcuts: () => openSettings("shortcuts"),
       }),
       ...selectedSessionTasks.map((task) => ({
@@ -521,7 +508,7 @@ export function App(): JSX.Element {
         action: () => loadMoreTasks(selectedSessionId),
       }] : []),
     ],
-    [cycleTheme, goToNewTask, loadMoreTasks, openDestination, openProject, openSettings, openTaskWorkspace, selectTask, selectedSessionId, selectedSessionTasks, selectedTask, selectedTaskId, selectedTaskPage?.nextCursor, sidebarVisible, taskCommandsEnabled, toggleDensity, toggleInspector],
+    [cycleTheme, goToNewTask, loadMoreTasks, openDestination, openProject, openSettings, openTaskWorkspace, selectTask, selectedSessionId, selectedSessionTasks, selectedTask, selectedTaskId, selectedTaskPage?.nextCursor, sidebarVisible, stopTarget, stopTask, taskCommandsEnabled, toggleDensity, toggleInspector],
   );
 
   const showNewTask = selectedTaskId === null && activeDestination === "new_task";
@@ -565,7 +552,7 @@ export function App(): JSX.Element {
           <span className="flex min-w-0 max-w-2xl items-center gap-2.5 text-primary">
             <FolderClosed size={14} className="shrink-0 text-tertiary" aria-hidden />
             <span className="ui-page-title truncate">{selectedTask.contract?.objective ?? selectedTask.id}</span>
-            <TaskStatusPill status={normalizeTaskStatus(selectedTask.status)} />
+            <TaskStatusPill status={lifecycleFromTask(selectedTask)} />
           </span>
         ) : undefined}
         sidebar={
@@ -609,29 +596,30 @@ export function App(): JSX.Element {
                 }}
                 label="Task workspace views"
                 items={[
-                  ...taskWorkspaceTabs(governanceViewsEnabled).map((tab) => ({
+                  ...taskWorkspaceTabs().map((tab) => ({
                     value: tab.value,
                     label: tab.label,
                     content: tab.value === "session"
                       ? (
                           <div className="flex h-full flex-col">
                             <div className="min-h-0 flex-1">{conversation}</div>
-                            <div className="composer-dock px-5 pb-3 pt-2">
+                            <div className="composer-dock shrink-0 pb-3 pt-2">
                               <Composer />
                             </div>
                           </div>
                         )
-                      : tab.value === "changes"
-                        ? <ArtifactDiffInspectorView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />
-                        : tab.value === "overview"
-                          ? <MissionLedgerView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />
-                          : tab.value === "activity"
-                            ? <EffectQueueView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />
-                            : tab.value === "replay"
-                              ? <CausalReplayView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />
-                              : tab.value === "usage"
-                                ? <FleetBudgetView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />
-                                : <ClaimEvidenceGraphView selectedTaskId={selectedCanonicalTaskId ?? durableTaskId} />,
+                      : durableTaskId
+                        ? (
+                            <SelectedTaskReviewPane
+                              taskId={durableTaskId}
+                              onClose={() => setTaskWorkspaceTab("session")}
+                              onDraftRevision={draftReviewRevision}
+                            />
+                          )
+                        // The review pane reads the durable task's event
+                        // stream, which a task selected only on the board does
+                        // not have yet. Say so rather than render a blank tab.
+                        : <TaskRequiredState feature="Changes" />,
                   })),
                 ]}
               />
@@ -641,7 +629,7 @@ export function App(): JSX.Element {
               <ResizableReviewLayout
                 conversation={<div className="flex h-full min-w-0 flex-col">
                   <div className="min-h-0 flex-1">{conversation}</div>
-                  <div className="composer-dock px-5 pb-3 pt-2">
+                  <div className="composer-dock shrink-0 pb-3 pt-2">
                     <Composer />
                   </div>
                 </div>}
@@ -658,7 +646,7 @@ export function App(): JSX.Element {
                 <div className="min-h-0 flex-1">
                   {conversation}
                 </div>
-                <div className="composer-dock px-6 pb-3 pt-2">
+                <div className="composer-dock shrink-0 pb-3 pt-2">
                   <Composer />
                 </div>
               </div>

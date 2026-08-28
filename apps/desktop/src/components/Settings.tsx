@@ -29,7 +29,6 @@
  * the existing useThemeStore so the preview is immediate.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { applyGovernanceViewsEnabled, readGovernanceViewsEnabled } from "../lib/session-view";
 import { useDialogFocus } from "../hooks/use-dialog-focus";
 import {
   Bell,
@@ -79,7 +78,6 @@ export type SettingCategoryId =
   | "performance"
   | "integrations"
   | "advanced"
-  | "governance"
   | "diagnostics";
 
 export type SettingControl =
@@ -498,23 +496,6 @@ function buildCatalog(): SettingCategory[] {
       ],
     },
     {
-      id: "governance",
-      label: "Governance views",
-      description: "Operator cockpit surfaces (ledger, effects, replay, budgets, evidence).",
-      icon: <Sliders size={14} />,
-      settings: [
-        {
-          id: "governance.views-enabled",
-          label: "Enable governance views",
-          description:
-            "Adds Overview / Activity / Replay / Usage / Evidence tabs to task workspaces. Off keeps the session-first default.",
-          control: { kind: "toggle" },
-          defaultValue: readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null),
-          apply: (v) => applyGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null, v === true || v === "true"),
-        },
-      ],
-    },
-    {
       id: "advanced",
       label: "Advanced",
       description: "Low-level behavior. Change with care.",
@@ -605,17 +586,6 @@ const CATALOG = buildCatalog().flatMap((category): SettingCategory[] => {
       settings: category.settings.map((descriptor) => ({ ...descriptor, readOnly: true })),
     }];
   }
-  // R12: governance views toggle has real renderer-local behavior (it gates
-  // the task-workspace tabs), so it is surfaced like appearance.
-  if (category.id === "governance") {
-    return [{
-      ...category,
-      settings: category.settings.map((descriptor) => ({
-        ...descriptor,
-        defaultValue: readGovernanceViewsEnabled(typeof window !== "undefined" ? window.localStorage : null),
-      })),
-    }];
-  }
   return [];
 });
 const CATEGORIES = CATALOG;
@@ -636,19 +606,20 @@ const SETTINGS_KEY = "terminus-desktop.settings.v1";
 type SettingValue = string | number | boolean;
 type SettingValueMap = Record<string, SettingValue>;
 
+/** null when the payload is missing or unreadable, so callers can tell the two apart. */
+function parsePersisted(raw: string | null): SettingValueMap | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" ? parsed as SettingValueMap : null;
+  } catch {
+    return null;
+  }
+}
+
 function readPersisted(): SettingValueMap {
   if (typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(SETTINGS_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === "object") {
-      return parsed as SettingValueMap;
-    }
-  } catch {
-    // ignore
-  }
-  return {};
+  return parsePersisted(window.localStorage.getItem(SETTINGS_KEY)) ?? {};
 }
 
 function writePersisted(values: SettingValueMap): void {
@@ -692,9 +663,9 @@ function normalizeSettingValue(id: string, value: unknown): SettingValue {
   return typeof value === "string" ? value : descriptor.defaultValue;
 }
 
-function normalizedPersistedValues(): SettingValueMap {
+function normalizedPersistedValues(raw: SettingValueMap): SettingValueMap {
   const values: SettingValueMap = {};
-  for (const [id, value] of Object.entries(persisted)) {
+  for (const [id, value] of Object.entries(raw)) {
     if (id === "appearance.theme" || id === "appearance.density") continue;
     if (findDescriptor(id)) values[id] = normalizeSettingValue(id, value);
   }
@@ -713,7 +684,7 @@ interface SettingsState {
 const persisted = readPersisted();
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
-  values: { ...defaultValues(), ...normalizedPersistedValues() },
+  values: { ...defaultValues(), ...normalizedPersistedValues(persisted) },
   get: (id) => get().values[id],
   set: (id, value) => {
     const normalized = normalizeSettingValue(id, value);
@@ -750,6 +721,30 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 }));
+
+/**
+ * Preferences are edited in their own window (see SettingsWindow), so this
+ * store is live in two renderers. A `storage` event means the other window
+ * saved: re-read what it wrote and re-apply the live side effects, so a
+ * change to motion or transparency takes hold here too. Adopting the written
+ * value without writing it back keeps the two windows from echoing.
+ */
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key !== SETTINGS_KEY) return;
+    // A payload we cannot read is not an instruction to reset every
+    // preference; keep what is already in effect.
+    const remote = parsePersisted(event.newValue);
+    if (remote === null) return;
+    const next = { ...defaultValues(), ...normalizedPersistedValues(remote) };
+    const previous = useSettingsStore.getState().values;
+    useSettingsStore.setState({ values: next });
+    for (const [id, value] of Object.entries(next)) {
+      if (previous[id] === value) continue;
+      findDescriptor(id)?.apply?.(value);
+    }
+  });
+}
 
 // Install every live preference once at module load so persisted motion,
 // transparency, theme, and density choices are true before Settings opens.

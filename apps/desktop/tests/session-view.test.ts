@@ -1,11 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
-  GOVERNANCE_VIEWS_KEY,
   SessionLatencyTracker,
   parseTaskWorkspaceTab,
-  readGovernanceViewsEnabled,
   taskWorkspaceTabs,
-  writeGovernanceViewsEnabled,
 } from "../src/lib/session-view";
 
 function fakeStorage(initial: Record<string, string> = {}): Storage {
@@ -23,33 +20,17 @@ function fakeStorage(initial: Record<string, string> = {}): Storage {
 describe("R12 session-first task workspace", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  test("governance views default off and persist via storage", () => {
-    expect(readGovernanceViewsEnabled(null)).toBe(false);
-    const storage = fakeStorage();
-    expect(readGovernanceViewsEnabled(storage)).toBe(false);
-    writeGovernanceViewsEnabled(storage, true);
-    expect(storage.getItem(GOVERNANCE_VIEWS_KEY)).toBe("true");
-    expect(readGovernanceViewsEnabled(storage)).toBe(true);
-    // Unreadable storage degrades to off.
-    const throwing = { getItem: () => { throw new Error("blocked"); } } as unknown as Storage;
-    expect(readGovernanceViewsEnabled(throwing)).toBe(false);
+  test("offers only the session and changes tabs", () => {
+    expect(taskWorkspaceTabs().map((t) => t.value)).toEqual(["session", "changes"]);
   });
 
-  test("tabs are session-first; governance tabs append only when enabled", () => {
-    const disabled = taskWorkspaceTabs(false).map((t) => t.value);
-    expect(disabled).toEqual(["session", "changes"]);
-    const enabled = taskWorkspaceTabs(true).map((t) => t.value);
-    expect(enabled[0]).toBe("session");
-    expect(enabled).toContain("overview");
-    expect(enabled).toContain("evidence");
-    expect(new Set(enabled).size).toBe(enabled.length);
-  });
-
-  test("tab parsing accepts every value and rejects unknown ones", () => {
-    for (const value of ["session", "changes", "overview", "activity", "replay", "usage", "evidence"]) {
+  test("tab parsing accepts both values and rejects the retired governance tabs", () => {
+    for (const value of ["session", "changes"]) {
       expect(parseTaskWorkspaceTab(value)).toBe(value);
     }
-    expect(parseTaskWorkspaceTab("ledger")).toBeNull();
+    for (const retired of ["overview", "activity", "replay", "usage", "evidence", "ledger"]) {
+      expect(parseTaskWorkspaceTab(retired)).toBeNull();
+    }
   });
 });
 

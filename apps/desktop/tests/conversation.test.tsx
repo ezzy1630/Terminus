@@ -191,7 +191,7 @@ describe("ReasoningTrace", () => {
       endedAt: null,
       phases: [{ kind: "context_compiling", at: new Date().toISOString() }],
     }} />);
-    expect(screen.getByText("Compiling context")).toBeInTheDocument();
+    expect(screen.getByText("Reading context")).toBeInTheDocument();
   });
 
   test("collapses to a duration and expands into the phases it went through", () => {
@@ -207,11 +207,11 @@ describe("ReasoningTrace", () => {
 
     const summary = screen.getByRole("button", { name: /Thought for 4\.5s/ });
     expect(summary).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("Compiling context")).not.toBeInTheDocument();
+    expect(screen.queryByText("Reading context")).not.toBeInTheDocument();
 
     fireEvent.click(summary);
     expect(summary).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("Compiling context")).toBeInTheDocument();
+    expect(screen.getByText("Reading context")).toBeInTheDocument();
     expect(screen.getByText("Thinking")).toBeInTheDocument();
   });
 
@@ -223,5 +223,161 @@ describe("ReasoningTrace", () => {
       phases: [],
     }} />);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+// ────────────────────────── Tool activity ────────────────────────────────────
+// A tool call is reported as `tool.proposed` — which names the tool and the
+// operand — and later `tool.settled` / `tool.failed` / `tool.denied`, which
+// carry the outcome but not the tool id. Only `provider_call_id` spans both.
+
+function toolEvent(id: string, event: string, payload: Record<string, unknown>): TerminusSseEvent {
+  return { id, event, data: JSON.stringify(payload) };
+}
+
+const TASK_CREATED_AT = "2026-08-24T00:59:00.000Z";
+
+describe("tool activity decoding", () => {
+  test("folds a proposal and its settlement into one activity entry", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("t1", "tool.proposed", {
+        provider_call_id: "call-1",
+        tool_id: "read",
+        arguments_excerpt: "src/App.tsx",
+      }),
+      toolEvent("t2", "tool.authorized", { policy_decision_id: "pd-1", side_effect_id: "se-1" }),
+      toolEvent("t3", "tool.started", { side_effect_id: "se-1" }),
+      toolEvent("t4", "tool.settled", {
+        provider_call_id: "call-1",
+        status: "success",
+        summary: "Read 42 lines",
+      }),
+    ], TASK_CREATED_AT);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.title).toBe("Explored codebase");
+    expect(blocks[0]?.status).toBe("done");
+    expect(blocks[0]?.entries).toHaveLength(1);
+    expect(blocks[0]?.entries[0]).toMatchObject({
+      tool: "read",
+      summary: "Read 42 lines",
+      phase: "settled",
+      outcome: "succeeded",
+    });
+  });
+
+  test("shows the operand a proposal names while it is still running", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("t1", "tool.proposed", {
+        provider_call_id: "call-1",
+        tool_id: "exec",
+        arguments_excerpt: "npm test",
+      }),
+    ], TASK_CREATED_AT);
+
+    expect(blocks[0]?.status).toBe("working");
+    expect(blocks[0]?.entries[0]).toMatchObject({ tool: "exec", summary: "npm test" });
+  });
+
+  test("marks a group failed when one of its calls is denied", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("t1", "tool.proposed", { provider_call_id: "c1", tool_id: "patch", arguments_excerpt: "a.ts" }),
+      toolEvent("t2", "tool.denied", { provider_call_id: "c1", explanation: "Outside the task contract scope" }),
+    ], TASK_CREATED_AT);
+
+    expect(blocks[0]?.status).toBe("failed");
+    expect(blocks[0]?.entries[0]).toMatchObject({
+      summary: "Outside the task contract scope",
+      outcome: "failed",
+    });
+  });
+
+  test("settles a group closed by an intervening turn event", () => {
+    // The settlement lands after `turn.tool_settlement` has already closed the
+    // group. Deriving status at flush time froze such blocks on "working".
+    const { blocks } = decodeFeed([
+      toolEvent("t1", "tool.proposed", { provider_call_id: "c1", tool_id: "read", arguments_excerpt: "a.ts" }),
+      toolEvent("t2", "turn.tool_settlement", { tool_calls: 1 }),
+      toolEvent("t3", "tool.settled", { provider_call_id: "c1", status: "success", summary: "Read a.ts" }),
+    ], TASK_CREATED_AT);
+
+    expect(blocks[0]?.status).toBe("done");
+  });
+
+  test("timestamps an entry from the event id when the payload carries none", () => {
+    const { blocks } = decodeFeed([
+      toolEvent(`${String(1_756_339_200_000).padStart(16, "0")}-00000001`, "tool.proposed", {
+        provider_call_id: "c1",
+        tool_id: "read",
+        arguments_excerpt: "a.ts",
+      }),
+    ], TASK_CREATED_AT);
+
+    expect(blocks[0]?.entries[0]?.at).toBe(new Date(1_756_339_200_000).toISOString());
+  });
+});
+
+// ────────────────────────── Turn outcomes ────────────────────────────────────
+
+describe("turn outcome decoding", () => {
+  test("does not open a reply until the turn has something to say", () => {
+    const { order, messages } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("p1", "turn.provider_running", {}),
+    ], TASK_CREATED_AT);
+
+    expect(order.map((entry) => entry.kind)).toEqual(["message", "reasoning"]);
+    expect(messages.every((message) => message.role === "user")).toBe(true);
+  });
+
+  test("places the reply after the tool calls that produced it", () => {
+    const { order } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("t1", "tool.proposed", { provider_call_id: "c1", tool_id: "read", arguments_excerpt: "a.ts" }),
+      toolEvent("t2", "tool.settled", { provider_call_id: "c1", status: "success", summary: "Read a.ts" }),
+      toolEvent("c1", "turn.completed", { summary: "a.ts defines the shell." }),
+    ], TASK_CREATED_AT);
+
+    expect(order.map((entry) => entry.kind)).toEqual(["message", "reasoning", "block", "message"]);
+  });
+
+  test("reports a failed turn instead of streaming forever", () => {
+    const { blocks, messages } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("f1", "turn.failed", { reason: "verification_failed" }),
+    ], TASK_CREATED_AT);
+
+    expect(messages.some((message) => message.streaming)).toBe(false);
+    expect(blocks[0]).toMatchObject({ title: "Turn failed", status: "failed" });
+    expect(blocks[0]?.entries[0]?.detail).toContain("verification_failed");
+  });
+
+  test("reports a stopped turn without calling it a failure", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("a1", "turn.aborted", {}),
+    ], TASK_CREATED_AT);
+
+    expect(blocks[0]).toMatchObject({ title: "Turn stopped", status: "interrupted" });
+  });
+
+  test("attaches provider reasoning to the turn's trace", () => {
+    const { reasoning } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("c1", "turn.completed", { summary: "Done.", reasoning: "Checked the shell first." }),
+    ], TASK_CREATED_AT);
+
+    expect(reasoning[0]?.text).toBe("Checked the shell first.");
+  });
+
+  test("never leaves a completed turn as an empty reply", () => {
+    const { messages } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("c1", "turn.completed", {}),
+    ], TASK_CREATED_AT);
+
+    const reply = messages.find((message) => message.role === "agent");
+    expect(reply?.streaming).toBe(false);
+    expect(reply?.content).toBe("Terminus finished this turn without a written response.");
   });
 });

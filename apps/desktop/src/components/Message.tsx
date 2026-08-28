@@ -14,9 +14,12 @@
  * by the parent Conversation, which sets a max-width); the message
  * itself is just typography.
  *
- * The renderer intentionally supports only a tiny markdown subset
- * (paragraphs, line breaks, fenced code blocks, inline code). Full
- * markdown rendering is a Phase-5 concern and would be lazy-loaded.
+ * The renderer covers the markdown an agent actually writes: headings,
+ * bullet and numbered lists, blockquotes, rules, fenced code blocks, and
+ * inline code / bold / italic / strikethrough / links. Tables, footnotes and
+ * nested lists are still out of scope and render as their source text, which
+ * is legible; the previous subset was paragraphs and code fences only, so
+ * every list and heading in a response arrived as raw `#` and `-`.
  */
 import { memo, useMemo, useState } from "react";
 import { Check, Copy } from "lucide-react";
@@ -55,65 +58,231 @@ function parseSegments(content: string): ParsedSegment[] {
   return segments;
 }
 
-/** Render inline code (`...`) and **bold** within a line of prose. */
-function renderInline(text: string, keyBase: string): JSX.Element[] {
-  // Tokenize on `code` and **bold** spans.
-  const tokens: Array<{ kind: "text" | "code" | "bold"; content: string }> = [];
-  const re = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+interface InlineToken {
+  kind: "text" | "code" | "bold" | "italic" | "strike" | "link";
+  content: string;
+  href?: string;
+}
+
+/**
+ * Inline spans: `code`, **bold**, *italic*, ~~strike~~ and [links](url).
+ *
+ * Code is matched first and never re-scanned, so `**not bold**` inside a code
+ * span stays literal.
+ */
+const INLINE_PATTERN =
+  /(`[^`]+`|\[[^\]\n]+\]\([^)\s]+\)|\*\*[^*\n]+\*\*|~~[^~\n]+~~|(?<![\w*])\*[^*\n]+\*(?![\w*])|(?<![\w_])_[^_\n]+_(?![\w_]))/g;
+
+function tokenizeInline(text: string): InlineToken[] {
+  const tokens: InlineToken[] = [];
   let lastIdx = 0;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > lastIdx) {
-      tokens.push({ kind: "text", content: text.slice(lastIdx, m.index) });
-    }
+  INLINE_PATTERN.lastIndex = 0;
+  while ((m = INLINE_PATTERN.exec(text)) !== null) {
+    if (m.index > lastIdx) tokens.push({ kind: "text", content: text.slice(lastIdx, m.index) });
     const tok = m[0];
-    if (tok.startsWith("`")) tokens.push({ kind: "code", content: tok.slice(1, -1) });
-    else tokens.push({ kind: "bold", content: tok.slice(2, -2) });
-    lastIdx = re.lastIndex;
+    if (tok.startsWith("`")) {
+      tokens.push({ kind: "code", content: tok.slice(1, -1) });
+    } else if (tok.startsWith("[")) {
+      const split = tok.indexOf("](");
+      tokens.push({ kind: "link", content: tok.slice(1, split), href: tok.slice(split + 2, -1) });
+    } else if (tok.startsWith("**")) {
+      tokens.push({ kind: "bold", content: tok.slice(2, -2) });
+    } else if (tok.startsWith("~~")) {
+      tokens.push({ kind: "strike", content: tok.slice(2, -2) });
+    } else {
+      tokens.push({ kind: "italic", content: tok.slice(1, -1) });
+    }
+    lastIdx = INLINE_PATTERN.lastIndex;
   }
   if (lastIdx < text.length) tokens.push({ kind: "text", content: text.slice(lastIdx) });
+  return tokens;
+}
 
-  return tokens.map((t, i) => {
-    if (t.kind === "code") {
-      return (
-        <code
-          key={`${keyBase}-${i}`}
-          className="rounded bg-hover px-1 py-0.5 font-mono text-primary text-xs"
+/** Only schemes a desktop app should ever hand to the OS. */
+function safeHref(href: string): string | null {
+  return /^https?:\/\//i.test(href) ? href : null;
+}
 
-        >
-          {t.content}
-        </code>
-      );
+function renderInline(text: string, keyBase: string): JSX.Element[] {
+  return tokenizeInline(text).map((t, i) => {
+    const key = `${keyBase}-${i}`;
+    switch (t.kind) {
+      case "code":
+        return (
+          <code key={key} className="rounded bg-hover px-1 py-0.5 font-mono text-primary text-xs">
+            {t.content}
+          </code>
+        );
+      case "bold":
+        return <strong key={key} className="font-semibold text-primary">{t.content}</strong>;
+      case "italic":
+        return <em key={key} className="italic">{t.content}</em>;
+      case "strike":
+        return <s key={key} className="text-tertiary">{t.content}</s>;
+      case "link": {
+        const href = safeHref(t.href ?? "");
+        // A link the app cannot safely open is still readable prose, so it
+        // renders as text rather than as a control that does nothing.
+        if (href === null) return <span key={key}>{t.content}</span>;
+        return (
+          <a
+            key={key}
+            href={href}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-accent underline decoration-from-font underline-offset-2"
+            data-tooltip={href}
+          >
+            {t.content}
+          </a>
+        );
+      }
+      default:
+        return <span key={key}>{t.content}</span>;
     }
-    if (t.kind === "bold") {
-      return (
-        <strong key={`${keyBase}-${i}`} className="font-semibold text-primary">
-          {t.content}
-        </strong>
-      );
-    }
-    return <span key={`${keyBase}-${i}`}>{t.content}</span>;
   });
 }
 
+type ProseBlock =
+  | { kind: "heading"; level: number; text: string }
+  | { kind: "list"; ordered: boolean; items: string[] }
+  | { kind: "quote"; lines: string[] }
+  | { kind: "rule" }
+  | { kind: "paragraph"; lines: string[] };
+
+const HEADING = /^(#{1,6})\s+(.*)$/;
+const BULLET = /^\s*[-*+]\s+(.*)$/;
+const NUMBERED = /^\s*\d+[.)]\s+(.*)$/;
+const QUOTE = /^\s*>\s?(.*)$/;
+const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+
+/**
+ * Group prose lines into blocks.
+ *
+ * Headings, lists, quotes and rules used to fall through to the paragraph
+ * path, so an agent response — which is nearly always a heading and a bulleted
+ * list — rendered as a literal wall of `##` and `-` characters.
+ */
+function parseProseBlocks(text: string): ProseBlock[] {
+  const blocks: ProseBlock[] = [];
+  const lines = text.split("\n");
+  let index = 0;
+
+  const takeWhile = (match: RegExp): string[] => {
+    const captured: string[] = [];
+    while (index < lines.length) {
+      const found = match.exec(lines[index] ?? "");
+      if (!found) break;
+      captured.push(found[1] ?? "");
+      index += 1;
+    }
+    return captured;
+  };
+
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    if (line.trim().length === 0) { index += 1; continue; }
+
+    const heading = HEADING.exec(line);
+    if (heading) {
+      blocks.push({ kind: "heading", level: heading[1]!.length, text: heading[2] ?? "" });
+      index += 1;
+      continue;
+    }
+    if (RULE.test(line)) {
+      blocks.push({ kind: "rule" });
+      index += 1;
+      continue;
+    }
+    if (BULLET.test(line)) {
+      blocks.push({ kind: "list", ordered: false, items: takeWhile(BULLET) });
+      continue;
+    }
+    if (NUMBERED.test(line)) {
+      blocks.push({ kind: "list", ordered: true, items: takeWhile(NUMBERED) });
+      continue;
+    }
+    if (QUOTE.test(line)) {
+      blocks.push({ kind: "quote", lines: takeWhile(QUOTE) });
+      continue;
+    }
+    // A paragraph runs to the next blank line or the next block opener.
+    const paragraph: string[] = [];
+    while (index < lines.length) {
+      const current = lines[index] ?? "";
+      if (current.trim().length === 0) break;
+      if (HEADING.test(current) || BULLET.test(current) || NUMBERED.test(current)
+        || QUOTE.test(current) || RULE.test(current)) break;
+      paragraph.push(current);
+      index += 1;
+    }
+    if (paragraph.length > 0) blocks.push({ kind: "paragraph", lines: paragraph });
+  }
+  return blocks;
+}
+
+const HEADING_CLASS: Record<number, string> = {
+  1: "ui-display-title mb-2 mt-5 first:mt-0 text-primary",
+  2: "ui-page-title mb-1.5 mt-5 first:mt-0 text-primary",
+  3: "ui-section-title mb-1.5 mt-4 first:mt-0 text-primary",
+};
+
 function renderProse(text: string, keyBase: string): JSX.Element[] {
-  // Split on blank lines → paragraphs. Single newlines become <br/>.
-  const paragraphs = text.split(/\n{2,}/);
-  return paragraphs.map((para, pi) => {
-    const lines = para.split("\n");
-    return (
-      <p
-        key={`${keyBase}-p-${pi}`}
-        className="ui-prose mb-3 text-primary last:mb-0"
-      >
-        {lines.map((line, li) => (
-          <span key={`${keyBase}-p-${pi}-l-${li}`}>
-            {renderInline(line, `${keyBase}-p-${pi}-l-${li}`)}
-            {li < lines.length - 1 ? <br /> : null}
-          </span>
-        ))}
-      </p>
-    );
+  return parseProseBlocks(text).map((block, bi) => {
+    const key = `${keyBase}-b-${bi}`;
+    switch (block.kind) {
+      case "heading": {
+        const Tag = (`h${Math.min(block.level + 1, 6)}`) as "h2";
+        return (
+          <Tag key={key} className={HEADING_CLASS[Math.min(block.level, 3)] ?? HEADING_CLASS[3]}>
+            {renderInline(block.text, key)}
+          </Tag>
+        );
+      }
+      case "rule":
+        return <hr key={key} className="my-4 border-0 border-t border-subtle" />;
+      case "quote":
+        return (
+          <blockquote key={key} className="ui-prose mb-3 border-l-2 border-default pl-3 text-secondary last:mb-0">
+            {block.lines.map((line, li) => (
+              <span key={`${key}-l-${li}`}>
+                {renderInline(line, `${key}-l-${li}`)}
+                {li < block.lines.length - 1 ? <br /> : null}
+              </span>
+            ))}
+          </blockquote>
+        );
+      case "list": {
+        const ListTag = block.ordered ? "ol" : "ul";
+        return (
+          <ListTag
+            key={key}
+            className={cn(
+              "ui-prose mb-3 flex flex-col gap-1 pl-5 text-primary last:mb-0",
+              block.ordered ? "list-decimal" : "list-disc",
+            )}
+          >
+            {block.items.map((item, ii) => (
+              <li key={`${key}-i-${ii}`} className="marker:text-tertiary">
+                {renderInline(item, `${key}-i-${ii}`)}
+              </li>
+            ))}
+          </ListTag>
+        );
+      }
+      default:
+        return (
+          <p key={key} className="ui-prose mb-3 text-primary last:mb-0">
+            {block.lines.map((line, li) => (
+              <span key={`${key}-l-${li}`}>
+                {renderInline(line, `${key}-l-${li}`)}
+                {li < block.lines.length - 1 ? <br /> : null}
+              </span>
+            ))}
+          </p>
+        );
+    }
   });
 }
 

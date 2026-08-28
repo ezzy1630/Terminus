@@ -26,6 +26,7 @@ export const FIXED_SHORTCUTS = {
   toggleSidebar: { id: "toggle-sidebar", label: "Toggle sidebar", scope: "global", display: "⌘\\", settingValue: "Cmd+\\", key: "\\", modifier: "primary" },
   taskSlot: { id: "task-slot", label: "Open task 1 through 9", scope: "global", display: "⌘1–9", settingValue: "Cmd+1–9", key: "1-9", modifier: "primary" },
   send: { id: "send", label: "Send or steer message", scope: "composer", display: "⌘↵", settingValue: "Cmd+Enter", key: "Enter", modifier: "primary" },
+  stopRun: { id: "stop-run", label: "Stop the current run", scope: "global", display: "⌘.", settingValue: "Cmd+.", key: ".", modifier: "primary" },
   diffNextChange: { id: "diff-next-change", label: "Next change", scope: "diff", display: "J", settingValue: "J", key: "j", modifier: "none" },
   diffPreviousChange: { id: "diff-previous-change", label: "Previous change", scope: "diff", display: "K", settingValue: "K", key: "k", modifier: "none" },
   diffPreviousFile: { id: "diff-previous-file", label: "Previous file", scope: "diff", display: "[", settingValue: "[", key: "[", modifier: "none" },

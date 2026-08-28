@@ -6,6 +6,13 @@ export type EffectToolState = "SETTLED" | "DENIED" | "FAILED";
 export interface EffectAuthorizationInput {
   readonly taskId: string;
   readonly toolCallId: string;
+  /**
+   * The tool this effect belongs to. Optional because recovery paths reach
+   * settlement from a durable row rather than a parsed call; when it is known
+   * it travels on the event so a client can attribute the settlement without
+   * having to have seen the proposal.
+   */
+  readonly toolId?: string | undefined;
   readonly sideEffectId: string;
   readonly policyDecisionId: string;
   readonly effectType: string;
@@ -21,6 +28,7 @@ export interface EffectSettlementInput {
   readonly turnId: string;
   readonly providerAttemptId: string;
   readonly toolCallId: string;
+  readonly toolId?: string | undefined;
   readonly sideEffectId: string | null;
   readonly providerCallId: string;
   readonly status: ToolResultStatus;
@@ -58,6 +66,7 @@ export class EffectSettlementAlreadyResolvedError extends Error {
 export interface EffectCancellationInput {
   readonly taskId: string;
   readonly toolCallId: string;
+  readonly toolId?: string | undefined;
   readonly sideEffectId: string;
   readonly reason: string;
 }
@@ -92,6 +101,8 @@ export class EffectSettlementService<TTransaction> {
 
   async authorize(input: EffectAuthorizationInput): Promise<void> {
     await this.run("tool.authorized", input.taskId, input.toolCallId, {
+      tool_call_id: input.toolCallId,
+      ...(input.toolId === undefined ? {} : { tool_id: input.toolId }),
       policy_decision_id: input.policyDecisionId,
       side_effect_id: input.sideEffectId,
       effect_type: input.effectType,
@@ -101,6 +112,8 @@ export class EffectSettlementService<TTransaction> {
 
   async start(input: EffectAuthorizationInput): Promise<void> {
     await this.run("tool.started", input.taskId, input.toolCallId, {
+      tool_call_id: input.toolCallId,
+      ...(input.toolId === undefined ? {} : { tool_id: input.toolId }),
       side_effect_id: input.sideEffectId,
       effect_type: input.effectType,
     }, (transaction) => this.dependencies.transaction(transaction).start(input));
@@ -139,6 +152,8 @@ export class EffectSettlementService<TTransaction> {
       input.taskId,
       input.toolCallId,
       {
+        tool_call_id: input.toolCallId,
+        ...(input.toolId === undefined ? {} : { tool_id: input.toolId }),
         provider_call_id: input.providerCallId,
         status: input.status,
         summary: input.summary,
@@ -155,7 +170,12 @@ export class EffectSettlementService<TTransaction> {
       "tool.cancelled",
       input.taskId,
       input.toolCallId,
-      { side_effect_id: input.sideEffectId, reason: input.reason },
+      {
+        tool_call_id: input.toolCallId,
+        ...(input.toolId === undefined ? {} : { tool_id: input.toolId }),
+        side_effect_id: input.sideEffectId,
+        reason: input.reason,
+      },
       (transaction) => {
         const mutation = this.dependencies.transaction(transaction).cancel;
         if (mutation === undefined) {

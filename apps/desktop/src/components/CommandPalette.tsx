@@ -160,7 +160,6 @@ export function fuzzyMatch(query: string, haystacks: string[]): FuzzyMatch {
 
 const GROUP_ORDER: CommandGroup[] = [
   "Navigation",
-  "Cockpit",
   "Task",
   "Changes",
   "Terminal",

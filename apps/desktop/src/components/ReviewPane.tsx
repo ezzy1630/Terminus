@@ -50,6 +50,33 @@ interface EventDiffSource {
   files: DiffFile[];
 }
 
+/** Server messages rarely end in punctuation; ours run into the next sentence. */
+function sentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+/** The one source that is ground truth rather than a report of it. */
+const WORKSPACE_SOURCE_ID = "workspace-diff";
+
+interface WorkspaceDiffState {
+  taskId: string | null;
+  files: DiffFile[];
+  gitAvailable: boolean;
+  truncated: boolean;
+  error: string | null;
+  loading: boolean;
+}
+
+const NO_WORKSPACE_DIFF: WorkspaceDiffState = {
+  taskId: null,
+  files: [],
+  gitAvailable: true,
+  truncated: false,
+  error: null,
+  loading: false,
+};
+
 /**
  * Event-derived review notes are bound to the authoritative stream event id.
  * The patch body is deliberately not fingerprinted: short presentation hashes
@@ -202,9 +229,13 @@ interface ReviewPaneProps {
 }
 
 /**
- * Changes review surface grounded in two real evidence sources:
+ * Changes review surface grounded in three real evidence sources:
  *
- *   1. Unified diffs attached to patch tool events by the runtime.
+ *   0. The workspace itself (GET /v1/tasks/:id/diff), which the kernel
+ *      produces by running git in the task's workspace. This is what the
+ *      agent actually changed, so it leads and is selected by default.
+ *   1. Unified diffs attached to patch tool events by the runtime — what the
+ *      agent reported changing, and only while those events are retained.
  *   2. The task's artifact inventory (GET /v1/tasks/:id/artifacts), served
  *      from the kernel's content-addressed store. Diff-typed artifacts are
  *      fetched and parsed through the same viewer; other artifacts open as
@@ -240,6 +271,7 @@ function ReviewPaneImpl({
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [selectedEventSourceId, setSelectedEventSourceId] = useState<string | null>(null);
+  const [workspaceDiff, setWorkspaceDiff] = useState<WorkspaceDiffState>(NO_WORKSPACE_DIFF);
   const [browsingArtifacts, setBrowsingArtifacts] = useState(false);
   const [inventoryRequestVersion, setInventoryRequestVersion] = useState(0);
   const [previewRequestVersion, setPreviewRequestVersion] = useState(0);
@@ -275,10 +307,62 @@ function ReviewPaneImpl({
     return sources.filter((source) => source.files.length > 0);
   }, [events]);
   const visibleEventSources = eventHistoryIncomplete ? [] : eventSources;
-  const activeEventSource = visibleEventSources.find((source) => source.id === selectedEventSourceId)
+
+  // The workspace as it stands. Unlike event patches this does not expire with
+  // the event window, and it reflects edits the agent made without announcing
+  // them in a patch tool call.
+  useEffect(() => {
+    if (!taskId) {
+      setWorkspaceDiff(NO_WORKSPACE_DIFF);
+      return;
+    }
+    const controller = new AbortController();
+    setWorkspaceDiff({ ...NO_WORKSPACE_DIFF, taskId, loading: true });
+    void api.getTaskDiff(taskId, controller.signal).then((diff) => {
+      if (controller.signal.aborted) return;
+      setWorkspaceDiff({
+        taskId,
+        files: diff.diff.trim().length > 0 ? parseUnifiedDiff(diff.diff) : [],
+        gitAvailable: diff.git_available,
+        truncated: diff.diff_truncated,
+        error: null,
+        loading: false,
+      });
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      // Event patches and artifacts remain; this source simply drops out.
+      setWorkspaceDiff({
+        ...NO_WORKSPACE_DIFF,
+        taskId,
+        error: error instanceof TerminusApiError || error instanceof Error
+          ? error.message
+          : "The workspace diff could not be read.",
+      });
+    });
+    return () => controller.abort();
+  }, [taskId]);
+
+  const workspaceSource = useMemo<EventDiffSource | null>(() => {
+    if (workspaceDiff.taskId !== (taskId ?? null) || workspaceDiff.files.length === 0) return null;
+    const count = workspaceDiff.files.length;
+    return {
+      id: WORKSPACE_SOURCE_ID,
+      label: `Working tree · ${count} ${count === 1 ? "file" : "files"}`,
+      files: workspaceDiff.files,
+    };
+  }, [taskId, workspaceDiff]);
+
+  const visibleSources = useMemo<EventDiffSource[]>(
+    () => workspaceSource === null ? visibleEventSources : [workspaceSource, ...visibleEventSources],
+    [visibleEventSources, workspaceSource],
+  );
+  // The workspace leads when nothing is explicitly selected; otherwise the
+  // most recent event patch, as before.
+  const activeEventSource = visibleSources.find((source) => source.id === selectedEventSourceId)
+    ?? workspaceSource
     ?? visibleEventSources[visibleEventSources.length - 1]
     ?? null;
-  const eventFileCount = visibleEventSources.reduce((total, source) => total + source.files.length, 0);
+  const eventFileCount = visibleSources.reduce((total, source) => total + source.files.length, 0);
 
   useEffect(() => {
     setSelectedHash(null);
@@ -459,6 +543,16 @@ function ReviewPaneImpl({
     }
   }, [artifactPage, taskId]);
 
+  const workspaceIssue = workspaceDiff.taskId !== (taskId ?? null) || workspaceDiff.loading
+    ? null
+    : workspaceDiff.error !== null
+      ? `The working tree could not be read: ${sentence(workspaceDiff.error)} Patch evidence below comes from tool events.`
+      : !workspaceDiff.gitAvailable
+        ? "This workspace is not a git repository, so there is no working-tree diff to show. Patch evidence below comes from tool events."
+        : workspaceDiff.truncated
+          ? "The working-tree diff is too large to show in full and was cut short. Open the workspace to see everything that changed."
+          : null;
+
   const selectedIsDiff = openArtifact ? isDiffArtifact(openArtifact.artifact) : false;
   const hasEvidence = activeEventSource !== null || (artifactPage?.artifacts.length ?? 0) > 0;
 
@@ -534,6 +628,13 @@ function ReviewPaneImpl({
           Event-derived patch evidence is hidden because the live history has a retention gap. Immutable task artifacts remain available below.
         </p>
       ) : null}
+      {/* Why the working tree is absent or partial. Silence here would read as
+          "the agent changed nothing", which is a different claim entirely. */}
+      {workspaceIssue ? (
+        <p className="border-b border-warning/40 bg-warning/5 px-3 py-2 text-xs text-warning" role="status">
+          {workspaceIssue}
+        </p>
+      ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto">
         {openArtifact?.truncated ? (
           <p
@@ -600,14 +701,14 @@ function ReviewPaneImpl({
           <div className="flex h-full min-h-0 flex-col">
             {!openArtifact && activeEventSource ? (
               <div className="flex flex-shrink-0 items-center gap-2 bg-elevated px-3 py-2 text-xs" >
-                <label htmlFor="review-event-source" className="sr-only">Event evidence</label>
+                <label htmlFor="review-event-source" className="sr-only">Change source</label>
                 <Select
                   id="review-event-source"
-                  label="Event diff snapshot"
+                  label="Change source"
                   value={activeEventSource.id}
                   onValueChange={setSelectedEventSourceId}
                   className="min-w-0 flex-1 font-mono text-xs"
-                  options={visibleEventSources.map((source) => ({ value: source.id, label: source.label }))}
+                  options={visibleSources.map((source) => ({ value: source.id, label: source.label }))}
                 />
                 {taskId ? (
                   <Button

@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, TerminusApiError } from "../lib/api";
+import { WORKSPACE_TASK_SCOPE } from "../lib/task-scope";
 import { useTerminusStore } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
 import type { Session } from "../types";
@@ -313,6 +314,7 @@ function OnboardingImpl({
             thread_id: session.active_thread_id,
             objective,
             risk_class: "normal",
+            allowed_scope: WORKSPACE_TASK_SCOPE,
           }, { idempotencyKey: `${operationKey}:task` });
         if (!taskId) onboardingMutation.checkpoint(operationKey, "task_created", task.id);
         const startReceipt = resumed.completedSteps.task_started;

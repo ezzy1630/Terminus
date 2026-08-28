@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { ArtifactDiffInspectorView } from "../src/components/Cockpit/ArtifactDiffInspectorView";
 import { eventDiffSourceId, ReviewPane } from "../src/components/ReviewPane";
 import { api } from "../src/lib/api";
 import type { TaskArtifactsPage, TerminusSseEvent } from "../src/types";
@@ -277,7 +276,7 @@ describe("ReviewPane", () => {
     expect(screen.queryByText("Only for the first snapshot.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add to composer" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("combobox", { name: "Event diff snapshot" }));
+    await user.click(screen.getByRole("combobox", { name: "Change source" }));
     await user.click(await screen.findByRole("option", { name: /event event-first/ }));
     expect(await screen.findByText("Only for the first snapshot.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Browse artifacts" }));
@@ -288,73 +287,116 @@ describe("ReviewPane", () => {
     expect(onDraftRevision).toHaveBeenCalledWith(expect.stringContaining("event event-first"));
   });
 
-  test("renders a truncated diff artifact only as a bounded raw preview", async () => {
-    vi.spyOn(api, "listTaskArtifacts").mockResolvedValue({
+});
+
+/**
+ * The workspace diff.
+ *
+ * Review used to be reconstructed from patch text embedded in tool events —
+ * what the agent *said* it changed, and only while those events were still in
+ * the retained window. Reopening a finished task showed "No reviewable
+ * changes yet" for a task that had rewritten half a file. The control plane
+ * has always exposed GET /v1/tasks/:id/diff, which runs git in the workspace
+ * through the kernel; nothing in the client ever called it.
+ */
+describe("ReviewPane — working tree", () => {
+  const WORKSPACE_DIFF = [
+    "diff --git a/src/worktree.ts b/src/worktree.ts",
+    "--- a/src/worktree.ts",
+    "+++ b/src/worktree.ts",
+    "@@ -1 +1 @@",
+    "-const committed = true;",
+    "+const committed = false;",
+  ].join("\n");
+
+  function diffResponse(overrides: Partial<Awaited<ReturnType<typeof api.getTaskDiff>>> = {}): Awaited<ReturnType<typeof api.getTaskDiff>> {
+    return {
       task_id: "task-1",
-      artifacts: [{ hash: "sha256:partial", purpose: "partial diff", media_type: "text/x-diff", size_bytes: DIFF.length * 2 }],
-      total: 1,
-      next_cursor: null,
+      workspace_id: "workspace-1",
+      git_available: true,
+      diff: WORKSPACE_DIFF,
+      diff_truncated: false,
+      untracked_files: [],
+      exit_code: 0,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.spyOn(api, "listTaskArtifacts").mockResolvedValue({
+      task_id: "task-1", artifacts: [], total: 0, next_cursor: null,
     });
-    vi.spyOn(api, "getArtifactText").mockResolvedValue({ text: DIFF, truncated: true, totalBytes: DIFF.length * 2 });
+  });
+  afterEach(() => vi.restoreAllMocks());
 
-    render(<ArtifactDiffInspectorView selectedTaskId="task-1" />);
-    fireEvent.click(await screen.findByRole("button", { name: /partial diff/ }));
+  test("shows what the workspace actually holds", async () => {
+    vi.spyOn(api, "getTaskDiff").mockResolvedValue(diffResponse());
 
-    expect(await screen.findByText(/Preview stopped at/)).toHaveTextContent("sha256:partial");
-    expect(document.querySelector("pre")?.textContent).toBe(DIFF);
-    expect(screen.queryByRole("region", { name: "Diff viewer" })).not.toBeInTheDocument();
+    render(<ReviewPane taskId="task-1" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+
+    expect(await screen.findByText("src/worktree.ts")).toBeInTheDocument();
   });
 
-  test("invalidates an in-flight continuation when the artifact snapshot refreshes", async () => {
-    const basePage: TaskArtifactsPage = {
-      task_id: "task-refresh",
-      artifacts: [{ hash: "sha256:base", purpose: "base", media_type: "text/plain", size_bytes: 4 }],
-      total: 2,
-      next_cursor: "cursor-1",
-    };
-    let firstPageCalls = 0;
-    let continuationCalls = 0;
-    let resolveRefresh: (page: typeof basePage) => void = () => undefined;
-    let resolveOldContinuation: (page: typeof basePage) => void = () => undefined;
-    let resolveNewContinuation: (page: typeof basePage) => void = () => undefined;
-    vi.spyOn(api, "listTaskArtifacts").mockImplementation((_taskId, cursor) => {
-      if (cursor === null || cursor === undefined) {
-        firstPageCalls += 1;
-        if (firstPageCalls === 1) return Promise.resolve(basePage);
-        return new Promise((resolve) => { resolveRefresh = resolve; });
-      }
-      continuationCalls += 1;
-      return new Promise((resolve) => {
-        if (continuationCalls === 1) resolveOldContinuation = resolve;
-        else resolveNewContinuation = resolve;
-      });
-    });
+  test("prefers it over patch text scraped from events", async () => {
+    vi.spyOn(api, "getTaskDiff").mockResolvedValue(diffResponse());
 
-    render(<ArtifactDiffInspectorView selectedTaskId="task-refresh" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load more artifacts" }));
-    fireEvent.click(screen.getByRole("button", { name: "Refresh snapshot" }));
-    expect(screen.getByRole("button", { name: "Refresh snapshot" })).toBeDisabled();
+    render(<ReviewPane taskId="task-1" events={[patchEvent()]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
 
-    await act(async () => {
-      resolveRefresh(basePage);
-      resolveOldContinuation({
-        ...basePage,
-        artifacts: [{ hash: "sha256:stale", purpose: "stale", media_type: "text/plain", size_bytes: 5 }],
-        next_cursor: null,
-      });
-    });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Load more artifacts" })).toBeEnabled());
-    expect(screen.queryByText("stale")).not.toBeInTheDocument();
+    // Both are offered, but the workspace is the one shown first: it is the
+    // ground truth, and an event patch may have been superseded since.
+    expect(await screen.findByText("src/worktree.ts")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Change source" })).toHaveTextContent(/Working tree/);
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "Load more artifacts" }));
-    await act(async () => {
-      resolveNewContinuation({
-        ...basePage,
-        artifacts: [{ hash: "sha256:fresh", purpose: "fresh", media_type: "text/plain", size_bytes: 5 }],
-        next_cursor: null,
-      });
-    });
-    expect(await screen.findByText("fresh")).toBeInTheDocument();
-    expect(screen.queryByText("stale")).not.toBeInTheDocument();
+  test("still offers the event patches beside it", async () => {
+    vi.spyOn(api, "getTaskDiff").mockResolvedValue(diffResponse());
+    const user = userEvent.setup();
+    render(<ReviewPane taskId="task-1" events={[patchEvent()]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+    await user.click(await screen.findByRole("combobox", { name: "Change source" }));
+    await user.click(await screen.findByRole("option", { name: /event patch-1/ }));
+
+    expect(await screen.findByText("src/answer.ts")).toBeInTheDocument();
+  });
+
+  test("says the workspace is clean rather than claiming no evidence exists", async () => {
+    vi.spyOn(api, "getTaskDiff").mockResolvedValue(diffResponse({ diff: "" }));
+
+    render(<ReviewPane taskId="task-1" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+
+    expect(await screen.findByRole("heading", { name: "No reviewable changes yet" })).toBeInTheDocument();
+  });
+
+  test("says so when the workspace is not a git repository", async () => {
+    vi.spyOn(api, "getTaskDiff").mockResolvedValue(diffResponse({ diff: "", git_available: false }));
+
+    render(<ReviewPane taskId="task-1" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+
+    // Silence here reads as "the agent changed nothing", which is a lie.
+    expect(await screen.findByText(/not a git repository/i)).toBeInTheDocument();
+  });
+
+  test("reports a truncated diff instead of presenting a partial one as whole", async () => {
+    vi.spyOn(api, "getTaskDiff").mockResolvedValue(diffResponse({ diff_truncated: true }));
+
+    render(<ReviewPane taskId="task-1" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+
+    expect(await screen.findByText(/too large to show in full/i)).toBeInTheDocument();
+  });
+
+  test("keeps event evidence usable when the workspace diff fails", async () => {
+    vi.spyOn(api, "getTaskDiff").mockRejectedValue(new Error("kernel unavailable"));
+
+    render(<ReviewPane taskId="task-1" events={[patchEvent()]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+
+    expect(await screen.findByText("src/answer.ts")).toBeInTheDocument();
+  });
+
+  test("does not ask for a diff when there is no task", () => {
+    const getTaskDiff = vi.spyOn(api, "getTaskDiff").mockResolvedValue(diffResponse());
+
+    render(<ReviewPane events={[patchEvent()]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+
+    expect(getTaskDiff).not.toHaveBeenCalled();
   });
 });

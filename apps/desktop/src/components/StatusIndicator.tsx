@@ -1,30 +1,32 @@
 /**
  * Terminus Desktop — StatusIndicator.
  *
- * Per SPEC §7.2 "Task statuses": minimal semantic status representation.
- * No large colorful badges. The eight kinds are:
+ * Minimal semantic status representation, keyed on the one task vocabulary in
+ * lib/task-lifecycle.ts. No large colorful badges:
  *
- *   working         → tiny spinner
- *   queued          → muted dot
- *   waiting         → warning dot
- *   needs_approval  → warning dot
- *   needs_review    → info dot
- *   failed          → error dot
- *   interrupted     → muted dot
- *   done            → muted dot
+ *   planning / working / verifying → tiny spinner (the agent is moving)
+ *   queued / cancelled / done      → muted dot
+ *   needs_you                      → warning dot
+ *   review                         → success dot
+ *   failed                         → error dot
  *
- * Per SPEC §7.2: "Selected active tasks may show a small live activity
- * indicator similar to Codex." — the working spinner serves this role.
+ * A task the agent is advancing on its own gets motion; a task that stopped
+ * gets a still dot. That distinction is the whole point of the glyph, so it is
+ * driven by `lifecycleIsActive()` rather than re-listed here.
  *
  * Per design constraints: "No emojis. Use lucide-react for icons."
  */
 import { memo } from "react";
 import { cn } from "../lib/cn";
-import type { TaskStatusKind } from "../types";
+import {
+  lifecycleIsActive,
+  lifecycleLabel,
+  type TaskLifecycle,
+} from "../lib/task-lifecycle";
 
 interface StatusIndicatorProps {
-  status: TaskStatusKind;
-  /** Override size in px. Defaults to 12px (tiny per SPEC §7.2). */
+  status: TaskLifecycle;
+  /** Override size in px. Defaults to 12px. */
   size?: number;
   /** Optional label rendered as muted secondary text. */
   label?: string;
@@ -53,29 +55,29 @@ function StatusGlyph({
   status,
   size,
 }: {
-  status: TaskStatusKind;
+  status: TaskLifecycle;
   size: number;
 }): JSX.Element {
+  // Anything the agent is advancing unattended reads as motion, so planning
+  // and verifying are not silently downgraded to a still dot.
+  if (lifecycleIsActive(status)) {
+    return (
+      <span
+        className="spinner"
+        role="img"
+        aria-label={lifecycleLabel(status).toLowerCase()}
+        style={{ width: size, height: size }}
+      />
+    );
+  }
   switch (status) {
-    case "working":
-      // Tiny spinner — uses the `.spinner` class from globals.css.
-      return (
-        <span
-          className="spinner"
-          role="img"
-          aria-label="working"
-          style={{ width: size, height: size }}
-        />
-      );
     case "queued":
-    case "interrupted":
+    case "cancelled":
       return <StatusDot size={size} color="var(--color-agent-queued)" label={status} />;
-    case "waiting":
-      return <StatusDot size={size} color="var(--color-agent-waiting)" label="waiting" />;
-    case "needs_approval":
-      return <StatusDot size={size} color="var(--color-approval-risk)" label="needs approval" />;
-    case "needs_review":
-      return <StatusDot size={size} color="var(--color-info)" label="needs review" />;
+    case "needs_you":
+      return <StatusDot size={size} color="var(--color-agent-waiting)" label="needs you" />;
+    case "review":
+      return <StatusDot size={size} color="var(--color-success)" label="ready for review" />;
     case "failed":
       return <StatusDot size={size} color="var(--color-error)" label="failed" />;
     case "done":
@@ -123,7 +125,7 @@ export const StatusIndicator = memo(StatusIndicatorImpl);
  * announce their own version of the same state.
  */
 export const TaskStatusPill = memo(function TaskStatusPill(
-  { status }: { status: TaskStatusKind },
+  { status }: { status: TaskLifecycle },
 ): JSX.Element {
   return (
     <span
@@ -136,18 +138,8 @@ export const TaskStatusPill = memo(function TaskStatusPill(
   );
 });
 
-/** Map a domain status string to a UI-facing kind, then to a label. */
-export function statusLabel(status: TaskStatusKind): string {
-  switch (status) {
-    case "working": return "Working";
-    case "queued": return "Queued";
-    case "waiting": return "Waiting";
-    case "needs_approval": return "Needs approval";
-    case "needs_review": return "Needs review";
-    case "failed": return "Failed";
-    case "interrupted": return "Interrupted";
-    case "done": return "Done";
-    case "unknown":
-    default: return "Pending";
-  }
-}
+/**
+ * Re-exported so callers that already import from this module keep one import.
+ * The vocabulary itself lives in lib/task-lifecycle.ts.
+ */
+export const statusLabel = lifecycleLabel;

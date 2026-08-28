@@ -44,7 +44,8 @@ import {
 } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
-import { useTerminusStore, usePinnedTasks, normalizeTaskStatus } from "../hooks/use-terminus";
+import { useTerminusStore, usePinnedTasks } from "../hooks/use-terminus";
+import { lifecycleFromTask, lifecycleNeedsAttention, taskTitle } from "../lib/task-lifecycle";
 import { useThemeStore } from "../hooks/use-theme";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
@@ -157,13 +158,8 @@ function SidebarImpl({
   }), [normalizedQuery, pinnedTaskIds, taskById]);
   const attentionCount = useMemo(() => Object.values(tasksBySession)
     .flat()
-    .filter((task) => {
-      const status = normalizeTaskStatus(task.status);
-      return status === "waiting"
-        || status === "needs_approval"
-        || status === "needs_review"
-        || status === "failed";
-    }).length, [tasksBySession]);
+    .filter((task) => lifecycleNeedsAttention(lifecycleFromTask(task)))
+    .length, [tasksBySession]);
 
   const toggleCollapsed = (sessionId: string): void => {
     setCollapsedSessions((prev) => {
@@ -322,7 +318,7 @@ function SidebarImpl({
               <SidebarItem
                 key={`pin-${t.id}`}
                 title={taskTitle(t)}
-                status={normalizeTaskStatus(t.status)}
+                status={lifecycleFromTask(t)}
                 updatedAt={t.updated_at}
                 selected={t.id === selectedTaskId}
                 pinned
@@ -384,9 +380,9 @@ function SidebarImpl({
                 aria-pressed={searchOpen}
                 className={cn("h-5 w-5 rounded text-tertiary hover:bg-hover hover:text-primary", searchOpen && "bg-selected text-primary")}
               />
-              {onOpenProject ? (
+              {onOpenProject && filteredSessions.length > 0 ? (
                 <IconButton
-                  label="Add Space / Open project"
+                  label="Open project"
                   icon={<Plus size={12} strokeWidth={1.7} aria-hidden />}
                   size="sm"
                   onClick={() => onOpenProject()}
@@ -436,7 +432,7 @@ function SidebarImpl({
                 : sessionsFreshness.status === "ready"
                   ? "No projects yet."
                   : "Projects have not loaded yet."}</span>
-              {!query && sessionsFreshness.status === "ready" && onOpenProject ? (
+              {!query && onOpenProject ? (
                 <Button
                   size="sm"
                   onClick={() => onOpenProject()}
@@ -644,10 +640,6 @@ function SidebarImpl({
           nav icon column. */}
       <div className="sidebar-dock flex flex-col gap-0.5 px-3 pb-2 pt-2">
         <nav className="flex flex-col gap-0.5" aria-label="Workspace destinations">
-          <Button type="button" onClick={() => onOpenProject?.()} className="sidebar-nav-item w-full justify-start text-left">
-            <FolderOpen size={15} strokeWidth={1.7} className="shrink-0" />
-            <span className="truncate text-left">Open project</span>
-          </Button>
           <Button type="button" onClick={() => onDestination("agents")} aria-current={activeDestination === "agents" ? "page" : undefined} className={cn("sidebar-nav-item w-full justify-start text-left", activeDestination === "agents" && "is-active")}>
             <Bot size={15} strokeWidth={1.7} className="shrink-0" />
             <span className="truncate text-left">Agents</span>
@@ -834,7 +826,7 @@ function SessionTaskList({
           >
             <SidebarItem
               title={taskTitle(task)}
-              status={normalizeTaskStatus(task.status)}
+              status={lifecycleFromTask(task)}
               updatedAt={task.updated_at}
               selected={task.id === selectedTaskId}
               pinned={pinnedTaskIds.has(task.id)}
@@ -875,7 +867,7 @@ function SessionTaskList({
       >
         <SidebarItem
           title={taskTitle(task)}
-          status={normalizeTaskStatus(task.status)}
+          status={lifecycleFromTask(task)}
           updatedAt={task.updated_at}
           selected={task.id === selectedTaskId}
           pinned={pinnedTaskIds.has(task.id)}
@@ -960,17 +952,6 @@ function CompactSessionButton({
       </span>
     </Button>
   );
-}
-
-/** Derive a short task title from the contract objective or fall back to id. */
-export function taskTitle(task: Task): string {
-  const obj = task.contract?.objective?.trim();
-  if (obj && obj.length > 0) {
-    // First line, trimmed.
-    const firstLine = obj.split("\n")[0] ?? obj;
-    return firstLine.length > 80 ? `${firstLine.slice(0, 79)}…` : firstLine;
-  }
-  return task.id.slice(0, 8);
 }
 
 export const Sidebar = memo(SidebarImpl);

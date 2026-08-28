@@ -1,47 +1,20 @@
 /**
- * Session-first task workspace (R12, harness critical path).
+ * Session-first task workspace.
  *
- * The task-details surface previously defaulted to the governance views
- * (Mission Ledger / Effect Queue / Causal Replay / Fleet Budget) that encode
- * SPEC's org metaphors while no live-flow latency had ever been verified.
- * This module makes the live session the default and moves the governance
- * views behind an explicit opt-in flag, plus a first-token-latency tracker
- * so session responsiveness is measured instead of asserted.
+ * The workspace used to carry five extra "governance" tabs (Mission Ledger /
+ * Effect Queue / Causal Replay / Fleet Budget / Claim Evidence) behind a
+ * localStorage flag, encoding SPEC's organisation metaphors in surfaces no
+ * user reached. The flag and those views are gone. The data they read is not
+ * lost: effects, budget, claims and evidence are the inputs to the approvals
+ * surface, the usage meter and verification cards, and are surfaced there
+ * instead of in a parallel tab strip.
  */
 
-export const GOVERNANCE_VIEWS_KEY = "terminus-desktop.governance-views.enabled";
-
-export type TaskWorkspaceTab =
-  | "session"
-  | "changes"
-  | "overview"
-  | "activity"
-  | "replay"
-  | "usage"
-  | "evidence";
+export type TaskWorkspaceTab = "session" | "changes";
 
 export interface TabDefinition<TValue extends string = string> {
   readonly value: TValue;
   readonly label: string;
-}
-
-/** Governance views are off unless explicitly enabled in this browser. */
-export function readGovernanceViewsEnabled(storage: Storage | null): boolean {
-  if (storage === null) return false;
-  try {
-    return storage.getItem(GOVERNANCE_VIEWS_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-export function writeGovernanceViewsEnabled(storage: Storage | null, enabled: boolean): void {
-  if (storage === null) return;
-  try {
-    storage.setItem(GOVERNANCE_VIEWS_KEY, enabled ? "true" : "false");
-  } catch {
-    // Preference persistence is optional; the in-memory value still applies.
-  }
 }
 
 const SESSION_TABS: readonly TabDefinition<TaskWorkspaceTab>[] = [
@@ -49,32 +22,12 @@ const SESSION_TABS: readonly TabDefinition<TaskWorkspaceTab>[] = [
   { value: "changes", label: "Changes" },
 ];
 
-const GOVERNANCE_TABS: readonly TabDefinition<TaskWorkspaceTab>[] = [
-  { value: "overview", label: "Overview" },
-  { value: "activity", label: "Activity" },
-  { value: "replay", label: "Replay" },
-  { value: "usage", label: "Usage" },
-  { value: "evidence", label: "Evidence" },
-];
-
-/** Session-first tab order; governance tabs append only when enabled. */
-export function taskWorkspaceTabs(governanceEnabled: boolean): readonly TabDefinition<TaskWorkspaceTab>[] {
-  return governanceEnabled ? [...SESSION_TABS, ...GOVERNANCE_TABS] : SESSION_TABS;
+export function taskWorkspaceTabs(): readonly TabDefinition<TaskWorkspaceTab>[] {
+  return SESSION_TABS;
 }
 
 export function parseTaskWorkspaceTab(value: string): TaskWorkspaceTab | null {
-  switch (value) {
-    case "session":
-    case "changes":
-    case "overview":
-    case "activity":
-    case "replay":
-    case "usage":
-    case "evidence":
-      return value;
-    default:
-      return null;
-  }
+  return value === "session" || value === "changes" ? value : null;
 }
 
 // ────────────────────────── TTFT instrumentation ────────────────────────────
@@ -146,15 +99,5 @@ export class SessionLatencyTracker {
     if (values.length === 0) return null;
     const index = Math.min(values.length - 1, Math.max(0, Math.ceil(q * values.length) - 1));
     return values[index]!;
-  }
-}
-
-/** Custom event dispatched when the governance preference flips in-session. */
-export const GOVERNANCE_VIEWS_CHANGED_EVENT = "terminus:governance-views-changed";
-
-export function applyGovernanceViewsEnabled(storage: Storage | null, enabled: boolean): void {
-  writeGovernanceViewsEnabled(storage, enabled);
-  if (typeof window !== "undefined") {
-    window.dispatchEvent(new CustomEvent(GOVERNANCE_VIEWS_CHANGED_EVENT, { detail: enabled }));
   }
 }

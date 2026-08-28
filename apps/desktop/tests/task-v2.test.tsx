@@ -114,7 +114,10 @@ function eventEnvelope(overrides: Partial<ArpV2EventEnvelope> = {}): ArpV2EventE
     correlationId: "task-requested",
     causationId: null,
     idempotencyKey: null,
-    payload: task("task-requested", "Requested task"),
+    // A snapshot is a valid event payload; the envelope types the payload as
+    // an open record, which an interface without an index signature does not
+    // structurally satisfy without this widening.
+    payload: { ...task("task-requested", "Requested task") },
     artifactRefs: [],
     traceId: null,
     ...overrides,

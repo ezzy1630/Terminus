@@ -15,7 +15,7 @@
  * effects itself. Workspace effects and provider commands still cross the
  * Rust kernel, and no process handle is exposed through preload IPC.
  */
-import { app, BrowserWindow, Menu, nativeTheme, screen, ipcMain, dialog, Notification, session, net, protocol, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, globalShortcut, Menu, nativeTheme, screen, ipcMain, dialog, Notification, session, net, protocol, shell, type IpcMainInvokeEvent } from "electron";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -46,6 +46,7 @@ protocol.registerSchemesAsPrivileged([{
 app.setName("Terminus");
 
 let mainWindow: BrowserWindow | null = null;
+let settingsWindow: BrowserWindow | null = null;
 let runtimeSupervisor: StandaloneRuntimeSupervisor | null = null;
 let runtimeShutdownStarted = false;
 let runtimeAcceptingRequests = false;
@@ -90,7 +91,11 @@ function registerAuthenticatedTransport(): void {
   const allowedOrigin = configuredOrigin(terminusApiBase);
   if (allowedOrigin === null) throw new Error("Terminus API base is invalid");
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
-    if (details.webContentsId !== mainWindow?.webContents.id) {
+    // Settings reads and writes provider configuration, so it needs the same
+    // control capability the main window has — and nothing else does.
+    const terminusWindow = details.webContentsId === mainWindow?.webContents.id
+      || details.webContentsId === settingsWindow?.webContents.id;
+    if (!terminusWindow) {
       callback({ requestHeaders: details.requestHeaders });
       return;
     }
@@ -121,10 +126,11 @@ function registerAuthenticatedTransport(): void {
 function sealRendererRuntimeBoundary(): void {
   runtimeAcceptingRequests = false;
   terminusControlToken = "";
-  const window = mainWindow;
-  if (window && !window.isDestroyed()) {
-    window.hide();
-    window.destroy();
+  for (const window of [settingsWindow, mainWindow]) {
+    if (window && !window.isDestroyed()) {
+      window.hide();
+      window.destroy();
+    }
   }
 }
 
@@ -138,10 +144,25 @@ function handleDesktopFatal(title: string, error: unknown): void {
   app.quit();
 }
 
+/**
+ * macOS keeps preferences in their own window, not in a sheet over the
+ * document. Both windows load the identical renderer entry; which root gets
+ * mounted is carried by a preload argument rather than the URL, because the
+ * packaged `terminus://` protocol handler refuses any entry URL with a query
+ * or a fragment — a rule worth keeping.
+ */
+type RendererView = "main" | "settings";
+
+const RENDERER_VIEW_ARGUMENT = "--terminus-view=";
+const RENDERER_VIBRANCY_ARGUMENT = "--terminus-vibrancy=";
+
 function rendererEntryUrl(): string {
-  return isDev
-    ? "http://localhost:5173/?app=terminus"
-    : PACKAGED_RENDERER_ENTRY;
+  if (!isDev) return PACKAGED_RENDERER_ENTRY;
+  // `?mock=true` populates the renderer's design fixtures (src/lib/dev-mock.ts).
+  // Dev only, and opt-in through the environment, so no fabricated session can
+  // reach a real install.
+  const mock = process.env.TERMINUS_DESKTOP_MOCK === "1" ? "&mock=true" : "";
+  return `http://localhost:5173/?app=terminus${mock}`;
 }
 
 function isTrustedRendererUrl(value: string): boolean {
@@ -155,6 +176,11 @@ function isTrustedRendererUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isTerminusWindow(contents: Electron.WebContents | undefined): boolean {
+  if (!contents) return false;
+  return contents === mainWindow?.webContents || contents === settingsWindow?.webContents;
 }
 
 async function registerPackagedRendererProtocol(): Promise<void> {
@@ -183,8 +209,34 @@ async function registerPackagedRendererProtocol(): Promise<void> {
 
 function requireTrustedIpc(event: IpcMainInvokeEvent): void {
   const senderFrameUrl = event.senderFrame?.url;
-  if (event.sender !== mainWindow?.webContents || !senderFrameUrl || !isTrustedRendererUrl(senderFrameUrl)) {
+  if (!isTerminusWindow(event.sender) || !senderFrameUrl || !isTrustedRendererUrl(senderFrameUrl)) {
     throw new Error("desktop IPC rejected an untrusted renderer");
+  }
+}
+
+/** Task identifiers are UUIDs; nothing else may be routed from a notification. */
+const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SETTINGS_CATEGORY_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+/**
+ * System-wide "start a task without finding the window first".
+ *
+ * Registration can fail — another application may already own the
+ * combination — and that is not an error worth interrupting startup for. The
+ * in-app shortcut keeps working either way.
+ */
+const GLOBAL_NEW_TASK_ACCELERATOR = "Alt+Command+Space";
+
+function registerGlobalShortcuts(): void {
+  if (process.platform !== "darwin") return;
+  const registered = globalShortcut.register(GLOBAL_NEW_TASK_ACCELERATOR, () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    sendDesktopCommand("new-task");
+  });
+  if (!registered) {
+    console.log(`[terminus-desktop] global shortcut ${GLOBAL_NEW_TASK_ACCELERATOR} is already claimed; skipping`);
   }
 }
 
@@ -221,6 +273,10 @@ function buildApplicationMenu(): void {
       submenu: [
         { role: "about", label: `About ${app.name}` },
         { type: "separator" },
+        // macOS puts preferences under the app menu, at ⌘,. It was under View,
+        // which is not where anyone looks for it.
+        { label: "Settings…", accelerator: "CommandOrControl+,", click: () => openSettingsWindow() },
+        { type: "separator" },
         { role: "services", submenu: [] },
         { type: "separator" },
         { role: "hide" },
@@ -228,6 +284,17 @@ function buildApplicationMenu(): void {
         { role: "unhide" },
         { type: "separator" },
         { role: "quit" },
+      ],
+    },
+    {
+      // Every macOS app has a File menu. Its absence was one of the clearest
+      // signals that this window was not a native application.
+      label: "File",
+      submenu: [
+        command("New task", "new-task", "CommandOrControl+N"),
+        command("Open project…", "open-project", "CommandOrControl+O"),
+        { type: "separator" },
+        { role: "close" },
       ],
     },
     {
@@ -246,10 +313,6 @@ function buildApplicationMenu(): void {
       label: "View",
       submenu: [
         command("Command palette", "command-palette", "CommandOrControl+K"),
-        command("New task", "new-task", "CommandOrControl+N"),
-        command("Open project", "open-project", "CommandOrControl+O"),
-        command("Settings", "settings", "CommandOrControl+,"),
-        command("Keyboard shortcuts", "shortcut-reference", "CommandOrControl+/"),
         { type: "separator" },
         command("Show changes", "show-changes", "CommandOrControl+D"),
         command("Toggle inspector", "toggle-inspector", "CommandOrControl+RightBracket"),
@@ -267,10 +330,156 @@ function buildApplicationMenu(): void {
         { role: "minimize" },
         { role: "zoom" },
         { type: "separator" },
+        { label: "Terminus", accelerator: "CommandOrControl+1", click: () => { mainWindow?.show(); mainWindow?.focus(); } },
+        { label: "Settings", click: () => openSettingsWindow() },
+        { type: "separator" },
         { role: "front" },
       ],
     },
+    {
+      label: "Help",
+      role: "help",
+      submenu: [
+        command("Keyboard shortcuts", "shortcut-reference", "CommandOrControl+/"),
+        { type: "separator" },
+        {
+          label: "Terminus documentation",
+          click: () => { void shell.openExternal("https://github.com/terminus-dev/terminus#readme"); },
+        },
+        {
+          label: "Report an issue",
+          click: () => { void shell.openExternal("https://github.com/terminus-dev/terminus/issues/new"); },
+        },
+      ],
+    },
   ]));
+}
+
+/**
+ * Renderer privileges. Identical for every window this app opens: context
+ * isolation on, node integration off, sandbox on. `view` selects which root
+ * the shared bundle mounts and travels as a preload argument, because the
+ * packaged protocol handler refuses an entry URL carrying a query.
+ */
+function rendererPreferences(view: RendererView): Electron.WebPreferences {
+  return {
+    preload: join(__dirname, "preload.js"),
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true,
+    additionalArguments: [
+      `${RENDERER_VIEW_ARGUMENT}${view}`,
+      `${RENDERER_VIBRANCY_ARGUMENT}${vibrancyEnabled(view) ? "on" : "off"}`,
+    ],
+  };
+}
+
+/**
+ * Native window material.
+ *
+ * On macOS the window is vibrant and the renderer paints its chrome
+ * translucently over it, which is the single largest difference between "an
+ * app" and "a web page in a frame". Elsewhere vibrancy does not exist and a
+ * transparent background colour would produce a see-through window, so those
+ * platforms keep the opaque colour they had.
+ */
+function vibrancyEnabled(view: RendererView): boolean {
+  // Preferences are an ordinary opaque window; only the document window
+  // paints its chrome for a vibrant material. And macOS's "Reduce
+  // transparency" is an accessibility request, not a preference to override.
+  if (view !== "main" || process.platform !== "darwin") return false;
+  return !nativeTheme.prefersReducedTransparency;
+}
+
+function macChrome(view: RendererView): Pick<Electron.BrowserWindowConstructorOptions, "vibrancy" | "visualEffectState" | "backgroundColor"> {
+  if (!vibrancyEnabled(view)) {
+    return { backgroundColor: nativeTheme.shouldUseDarkColors ? "#181817" : "#f5f5f2" };
+  }
+  return {
+    vibrancy: "sidebar",
+    // Keep the material lit while the window is in the background; a chrome
+    // that greys out whenever focus moves reads as an inactive screenshot.
+    visualEffectState: "active",
+    backgroundColor: "#00000000",
+  };
+}
+
+/**
+ * Never open a renderer window. An http(s) link the user clicked goes to the
+ * system browser instead — a link in an agent's answer previously did nothing
+ * at all, because every window-open request was denied and there was no other
+ * path out. Every other scheme (file:, javascript:, custom handlers) is still
+ * refused outright: this content comes from a model, so the allowed set is
+ * stated positively rather than as a blocklist.
+ */
+function openExternalLink(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+  void shell.openExternal(parsed.toString());
+}
+
+/** Deny renderer-opened windows and untrusted navigation on every window. */
+function hardenWebContents(window: BrowserWindow): void {
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalLink(url);
+    return { action: "deny" };
+  });
+  window.webContents.on("will-navigate", (event, targetUrl) => {
+    if (!isTrustedRendererUrl(targetUrl)) event.preventDefault();
+  });
+  window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    console.log(`[terminus-desktop-renderer] [${level}] ${message} (${sourceId}:${line})`);
+  });
+}
+
+/**
+ * Open (or focus) the preferences window.
+ *
+ * Preferences used to be a full-window overlay inside the document window,
+ * which meant they could not be left open beside the work they describe and
+ * did not behave like anything else on the system: no ⌘W, no separate entry
+ * in Window, no independent position.
+ */
+function openSettingsWindow(category?: string): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.show();
+    settingsWindow.focus();
+    if (category) settingsWindow.webContents.send("terminus:settings-category", category);
+    return;
+  }
+  const window = new BrowserWindow({
+    width: 760,
+    height: 580,
+    minWidth: 620,
+    minHeight: 440,
+    title: "Terminus Settings",
+    titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 14, y: 14 },
+    ...macChrome("settings"),
+    show: false,
+    // Deliberately not a child window: a Preferences window on macOS is
+    // independent — it can be sent behind the document window and carries
+    // its own entry in Window. `parent` would pin it permanently on top.
+    webPreferences: rendererPreferences("settings"),
+  });
+  settingsWindow = window;
+  hardenWebContents(window);
+  window.once("ready-to-show", () => {
+    if (window.isDestroyed()) return;
+    window.show();
+    if (category) window.webContents.send("terminus:settings-category", category);
+  });
+  window.once("closed", () => {
+    if (settingsWindow === window) settingsWindow = null;
+  });
+  void window.loadURL(rendererEntryUrl()).catch((error: unknown) => {
+    handleDesktopFatal("Terminus settings could not load", error);
+  });
 }
 
 function createWindow(): void {
@@ -290,14 +499,9 @@ function createWindow(): void {
     minHeight: 600,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 18 },
-    backgroundColor: nativeTheme.shouldUseDarkColors ? "#181817" : "#f5f5f2",
+    ...macChrome("main"),
     show: false,
-    webPreferences: {
-      preload: join(__dirname, "preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
+    webPreferences: rendererPreferences("main"),
   });
   mainWindow = window;
 
@@ -316,13 +520,7 @@ function createWindow(): void {
   // For now, single window. Multiple windows can be added later.
 
   // No renderer-controlled window or top-level navigation may inherit preload.
-  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  window.webContents.on("will-navigate", (event, targetUrl) => {
-    if (!isTrustedRendererUrl(targetUrl)) event.preventDefault();
-  });
-  window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    console.log(`[terminus-desktop-renderer] [${level}] ${message} (${sourceId}:${line})`);
-  });
+  hardenWebContents(window);
 
   if (isDev) {
     // Keep the dev renderer from reusing a pre-migration Terminus document from
@@ -348,12 +546,37 @@ nativeTheme.themeSource = "system";
 
 function registerIpc(): void {
   // ── Terminus desktop bridge ──
-  ipcMain.handle("notify", (event, { title, body }: { title: string; body: string }) => {
+  ipcMain.handle("notify", (event, payload: { title: string; body: string; taskId?: unknown }) => {
     requireTrustedIpc(event);
-    if (Notification.isSupported() && !mainWindow?.isFocused()) {
-      new Notification({ title, body }).show();
-    }
+    if (!Notification.isSupported() || mainWindow?.isFocused()) return null;
+    const notification = new Notification({ title: payload.title, body: payload.body });
+    const taskId = typeof payload.taskId === "string" && TASK_ID_PATTERN.test(payload.taskId)
+      ? payload.taskId
+      : null;
+    // A notification that only makes noise is a worse version of a badge.
+    // Clicking one raises the window and opens the task it is about.
+    notification.on("click", () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+      if (taskId) mainWindow.webContents.send("terminus:open-task", taskId);
+    });
+    notification.show();
     return null;
+  });
+  ipcMain.handle("desktop:openSettings", (event, category: unknown) => {
+    requireTrustedIpc(event);
+    openSettingsWindow(typeof category === "string" && SETTINGS_CATEGORY_PATTERN.test(category) ? category : undefined);
+    return null;
+  });
+  ipcMain.handle("desktop:setAttentionCount", (event, value: unknown) => {
+    requireTrustedIpc(event);
+    // The Dock badge is the only part of this app visible when the window is
+    // not. Anything that needs a person should reach them there.
+    const count = typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+    app.setBadgeCount(count);
+    return count;
   });
   ipcMain.handle("window:minimize", (event) => {
     requireTrustedIpc(event);
@@ -478,6 +701,7 @@ async function launchDesktop(): Promise<void> {
   runtimeAcceptingRequests = true;
   createWindow();
   buildApplicationMenu();
+  registerGlobalShortcuts();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -496,6 +720,10 @@ if (!ownsSingleInstance) {
     handleDesktopFatal("Terminus could not start", error);
   });
 }
+
+app.on("will-quit", () => {
+  globalShortcut.unregisterAll();
+});
 
 app.on("before-quit", (event) => {
   if (runtimeShutdownStarted) return;

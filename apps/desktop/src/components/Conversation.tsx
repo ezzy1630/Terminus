@@ -39,13 +39,16 @@ import { ErrorState, errorPreset } from "./ErrorState";
 import { StatusIndicator } from "./StatusIndicator";
 import { ArrowDown, ShieldAlert, MessageCircle } from "lucide-react";
 import { cn } from "../lib/cn";
+import { turnInputPlaceholder, type TurnInputMap } from "../lib/turn-input";
+import { useTurnInputs } from "../hooks/use-turn-inputs";
+import { lifecycleFromTask } from "../lib/task-lifecycle";
 import {
   MAX_PRESENTATION_EVENT_CHARS,
   PRESENTATION_REJECTION_KEY,
-  normalizeTaskStatus,
   useSelectedTask,
   useSelectedTaskApprovals,
   useSelectedTaskEventHistory,
+  useSelectedTaskTranscript,
   useSelectedTaskEvents,
   useTerminusStore,
 } from "../hooks/use-terminus";
@@ -119,6 +122,130 @@ function presentationRejection(payload: Record<string, unknown>): PresentationRe
   return { reason, sourceEvent, characterCount, limit };
 }
 
+/**
+ * How a terminal turn event reads in the feed.
+ *
+ * `tone` separates a failure from an expected end. A run the user stopped, or
+ * one superseded by their own next message, is the result of something they
+ * just did — reporting it in red as an incident is wrong.
+ */
+interface TurnOutcome {
+  readonly title: string;
+  readonly metric: string;
+  readonly message: string;
+  readonly tone: "failed" | "neutral";
+}
+
+const TURN_OUTCOME_FALLBACK: TurnOutcome = {
+  title: "Turn ended",
+  metric: "Ended",
+  message: "This turn ended before Terminus could respond.",
+  tone: "failed",
+};
+
+const TURN_OUTCOMES: Record<string, TurnOutcome> = {
+  "turn.failed": {
+    title: "Turn failed",
+    metric: "Failed",
+    message: "This turn failed before Terminus could respond.",
+    tone: "failed",
+  },
+  "turn.aborted": {
+    title: "Turn stopped",
+    metric: "Stopped",
+    message: "You stopped this turn.",
+    tone: "neutral",
+  },
+  "turn.interrupted": {
+    title: "Turn interrupted",
+    metric: "Interrupted",
+    message: "This turn was interrupted before Terminus could respond.",
+    tone: "neutral",
+  },
+  "turn.superseded": {
+    title: "Turn superseded",
+    metric: "Superseded",
+    message: "A newer message replaced this turn.",
+    tone: "neutral",
+  },
+  "turn.blocked": {
+    title: "Turn blocked",
+    metric: "Action required",
+    message: "This turn is blocked and cannot continue on its own.",
+    tone: "failed",
+  },
+  "turn.needs_user_input": {
+    title: "Waiting for you",
+    metric: "Needs input",
+    message: "Terminus needs something from you before it can continue.",
+    tone: "failed",
+  },
+  "turn.budget_exhausted": {
+    title: "Budget exhausted",
+    metric: "Out of budget",
+    message: "This turn ran out of its step, token or cost budget.",
+    tone: "failed",
+  },
+  "turn.policy_denied": {
+    title: "Policy denied this turn",
+    metric: "Denied",
+    message: "Policy denied this turn before it could finish.",
+    tone: "failed",
+  },
+  "turn.recovery_failed": {
+    title: "Recovery failed",
+    metric: "Failed",
+    message: "Terminus could not recover this turn after an interruption.",
+    tone: "failed",
+  },
+  "turn.recovery_interrupted": {
+    title: "Recovery interrupted",
+    metric: "Interrupted",
+    message: "Recovery of this turn was interrupted.",
+    tone: "neutral",
+  },
+};
+
+/** The tool a payload names, across the snake_case and camelCase spellings. */
+function toolIdentity(p: Record<string, unknown>): string | null {
+  for (const key of ["tool_id", "toolId", "tool"] as const) {
+    const value = p[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
+/**
+ * The identity that every phase of one tool call shares. `provider_call_id` is
+ * the one the control plane puts on both the proposal and the settlement.
+ */
+function toolCallIdentity(p: Record<string, unknown>): string | null {
+  for (const key of ["provider_call_id", "providerCallId", "tool_call_id", "toolCallId"] as const) {
+    const value = p[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
+/** Push an entry, or the one-time notice that the group hit its cap. */
+function appendToolEntry(group: PendingToolGroup, entry: ActivityEntry, at: string): boolean {
+  if (group.entries.length < MAX_ACTIVITY_ENTRIES_PER_GROUP) {
+    group.entries.push(entry);
+    return true;
+  }
+  if (group.entries.length === MAX_ACTIVITY_ENTRIES_PER_GROUP) {
+    group.entries.push({
+      tool: "presentation",
+      summary: "Additional activity entries rejected from this group",
+      detail: `The group exceeded the ${MAX_ACTIVITY_ENTRIES_PER_GROUP}-entry presentation limit. Inspect the immutable task event artifact or continue from its event cursor.`,
+      at,
+      phase: "settled",
+      outcome: "unknown",
+    });
+  }
+  return false;
+}
+
 function artifactReference(p: Record<string, unknown>): string | null {
   const candidates = [p, recordFrom(p.result), recordFrom(p.output)];
   for (const candidate of candidates) {
@@ -150,21 +277,47 @@ function artifactReference(p: Record<string, unknown>): string | null {
  * Anything unrecognized is ignored (defensive). A `provider_running`
  * event with a `delta` field is appended to the streaming agent message.
  */
-/** Prefer the payload's own timestamp; fall back to the event, then the task. */
+/**
+ * When an event happened.
+ *
+ * Most control-plane payloads carry no timestamp at all, so this used to fall
+ * all the way through to the task's creation time — every step of a turn that
+ * ran for ten minutes was stamped with the moment the task was created, and
+ * the activity list read as if everything had happened at once. The SSE event
+ * id is `<16-digit-ms>-<8-digit-seq>` (see the control plane's `nextEventId`),
+ * so the wall-clock time is on the wire for every event; it just was not being
+ * read.
+ */
 function eventTimestamp(
   payload: Record<string, unknown>,
   event: TerminusSseEvent,
   fallback: string,
 ): string {
-  for (const key of ["at", "started_at", "occurred_at", "timestamp"] as const) {
+  for (const key of ["at", "started_at", "settled_at", "proposed_at", "occurred_at", "timestamp"] as const) {
     const value = payload[key];
     if (typeof value === "string" && value.length > 0) return value;
   }
   const eventAt = (event as { at?: unknown }).at;
-  return typeof eventAt === "string" && eventAt.length > 0 ? eventAt : fallback;
+  if (typeof eventAt === "string" && eventAt.length > 0) return eventAt;
+  return timestampFromEventId(event.id) ?? fallback;
 }
 
-export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): DecodedFeed {
+/** The millisecond prefix of a monotonic event id, as an ISO timestamp. */
+function timestampFromEventId(id: string | undefined): string | null {
+  if (typeof id !== "string") return null;
+  const separator = id.indexOf("-");
+  if (separator !== 16) return null;
+  const millis = Number(id.slice(0, 16));
+  if (!Number.isSafeInteger(millis) || millis <= 0) return null;
+  const at = new Date(millis);
+  return Number.isNaN(at.getTime()) ? null : at.toISOString();
+}
+
+export function decodeFeed(
+  events: TerminusSseEvent[],
+  taskCreatedAt: string,
+  turnInputs: TurnInputMap = new Map(),
+): DecodedFeed {
   const messages: ConversationMessage[] = [];
   const messageById = new Map<string, ConversationMessage>();
   const blocks: ActivityBlockData[] = [];
@@ -175,11 +328,45 @@ export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): D
   let pendingGroup: PendingToolGroup | null = null;
   let streamingMessageId: string | null = null;
   const rejectedStreamingMessages = new Set<string>();
+  /** Blocks built from tool groups, whose status/metric are derived at the end. */
+  const toolGroupBlocks: ActivityBlockData[] = [];
+  /**
+   * Open tool calls, keyed by the provider call id that every phase of a call
+   * carries. The control plane reports one tool call as `tool.proposed` (which
+   * names the tool) and later `tool.settled`/`tool.failed`/`tool.denied` (which
+   * carry the outcome and the human summary but *not* the tool id). Without
+   * this join the two halves landed as two rows named "tool" in two separate
+   * groups, which is why the transcript never showed a legible tool call.
+   */
+  const toolEntryByCallId = new Map<string, ActivityEntry>();
+  /** The reply this turn will produce, held until it has something to say. */
+  let pendingAgentMessage: { id: string; at: string } | null = null;
 
   const addMessage = (message: ConversationMessage): void => {
     messages.push(message);
     messageById.set(message.id, message);
     order.push({ kind: "message", id: message.id });
+  };
+
+  /**
+   * Open the current turn's reply at the point it first has content, closing
+   * any open tool group first so the reply reads below the work it describes.
+   */
+  const openAgentMessage = (): ConversationMessage | null => {
+    if (streamingMessageId) return messageById.get(streamingMessageId) ?? null;
+    if (!pendingAgentMessage) return null;
+    flushGroup();
+    const message: ConversationMessage = {
+      id: pendingAgentMessage.id,
+      role: "agent",
+      content: "",
+      createdAt: pendingAgentMessage.at,
+      streaming: true,
+    };
+    streamingMessageId = message.id;
+    pendingAgentMessage = null;
+    addMessage(message);
+    return message;
   };
 
   /** Record a turn phase. Repeats of the current phase are not new steps. */
@@ -196,39 +383,33 @@ export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): D
     openReasoning = null;
   };
 
-  const flushGroup = (at: string): void => {
+  /**
+   * Close the open tool group into a block.
+   *
+   * Status and metric are *not* computed here. A tool call is reported across
+   * several events, and settlement can land after the group has already been
+   * closed by an intervening turn event — computing at flush time froze every
+   * such block on "working" forever. The entries array is shared by reference
+   * with the block, so a late settlement still reaches it; `finalizeToolGroups`
+   * derives status and metric from the final entry states instead.
+   */
+  const flushGroup = (): void => {
     if (!pendingGroup) return;
-    const entries = pendingGroup.entries;
-    const operations = new Map<string, ActivityEntry>();
-    entries.forEach((entry, index) => {
-      operations.set(entry.operationId ?? `uncorrelated:${index}`, entry);
-    });
-    const states = Array.from(operations.values());
-    const anyFailed = states.some((entry) => entry.phase === "settled" && entry.outcome === "failed");
-    const allSettled = states.length > 0 && states.every((entry) => entry.phase === "settled");
-    const allSucceeded = allSettled && states.every((entry) => entry.outcome === "succeeded");
-    const status: ActivityBlockData["status"] = anyFailed
-      ? "failed"
-      : allSucceeded
-        ? "done"
-        : allSettled
-          ? "unknown"
-          : "working";
-    const metric = computeMetric(entries, pendingGroup.title);
     const block: ActivityBlockData = {
       id: `block-${pendingGroup.startedAt}-${blocks.length}`,
       title: pendingGroup.title,
-      metric,
-      status,
-      entries,
+      metric: "",
+      status: "working",
+      entries: pendingGroup.entries,
     };
     blocks.push(block);
+    toolGroupBlocks.push(block);
     order.push({ kind: "block", id: block.id });
     pendingGroup = null;
   };
 
   const addPresentationRejection = (ev: TerminusSseEvent, rejection: PresentationRejection): void => {
-    flushGroup(ev.id);
+    flushGroup();
     const block: ActivityBlockData = {
       id: `block-presentation-rejection-${ev.id}`,
       title: "Event omitted from presentation",
@@ -292,10 +473,17 @@ export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): D
     switch (ev.event) {
       case "turn.started": {
         // Flush any in-flight group, then open a new user message.
-        flushGroup(ev.id);
-        const userInput = typeof p.user_input === "string"
-          ? boundedText(p.user_input, "User input", MAX_MESSAGE_FIELD_CHARS)
-          : "";
+        flushGroup();
+        const resolvedInput = turnInputs.get(ev.id);
+        const userInput = resolvedInput?.status === "ready"
+          ? boundedText(
+              resolvedInput.truncated
+                ? `${resolvedInput.text}\n\n[Prompt truncated. Inspect the immutable artifact for the full text.]`
+                : resolvedInput.text,
+              "User input",
+              MAX_MESSAGE_FIELD_CHARS,
+            )
+          : turnInputPlaceholder(resolvedInput);
         const at = typeof p.started_at === "string" ? p.started_at : taskCreatedAt;
         const userMessage: ConversationMessage = {
           id: `user-${ev.id}`,
@@ -310,36 +498,46 @@ export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): D
         openReasoning = { id: `reasoning-${ev.id}`, phases: [], startedAt: at, endedAt: null };
         reasoning.push(openReasoning);
         order.push({ kind: "reasoning", id: openReasoning.id });
-        // Begin an empty agent message that we'll stream into.
-        streamingMessageId = `agent-${ev.id}`;
-        const agentMessage: ConversationMessage = {
-          id: streamingMessageId,
-          role: "agent",
-          content: "",
-          createdAt: at,
-          streaming: true,
-        };
-        addMessage(agentMessage);
+        // The agent's message is *not* opened here. The control plane does not
+        // stream provider deltas, so an empty message opened at turn start sat
+        // in the feed as a blank bubble with a blinking caret for the whole
+        // turn — the single loudest signal that the chat was broken. It is
+        // materialised at first content instead, which also puts it after the
+        // tool calls that produced it rather than above them.
+        pendingAgentMessage = { id: `agent-${ev.id}`, at };
+        streamingMessageId = null;
         break;
       }
       case "turn.completed": {
-        // The control plane's current adapter returns its concise final
-        // response on turn.completed rather than streaming deltas. Preserve
-        // streamed content when present, but never leave a completed turn
-        // with an empty assistant message.
-        if (streamingMessageId) {
-          const m = messageById.get(streamingMessageId);
-          const summary = typeof p.summary === "string"
-            ? boundedText(p.summary, "Completion summary", MAX_MESSAGE_FIELD_CHARS)
-            : null;
-          if (m) {
-            if (m.content.length === 0 && summary) m.content = summary;
-            m.streaming = false;
+        // The control plane does not stream provider deltas; it publishes the
+        // settled response on turn.completed. Preserve streamed content when
+        // some arrives, but never leave a completed turn with an empty
+        // assistant message.
+        const at = eventTimestamp(p, ev, taskCreatedAt);
+        const summary = typeof p.summary === "string"
+          ? boundedText(p.summary, "Completion summary", MAX_MESSAGE_FIELD_CHARS)
+          : null;
+        const m = openAgentMessage();
+        if (m) {
+          if (m.content.length === 0 && summary) m.content = summary;
+          if (m.content.length === 0) {
+            // A turn that completed with nothing to say still happened. Say so
+            // rather than leave an empty bubble with a live caret.
+            m.content = "Terminus finished this turn without a written response.";
           }
+          if (p.summary_truncated === true && typeof p.continuation === "string") {
+            m.content += `\n\n_Response truncated for display. Full text: ${p.continuation}_`;
+          }
+          m.streaming = false;
         }
         streamingMessageId = null;
-        closeReasoning(eventTimestamp(p, ev, taskCreatedAt));
-        flushGroup(ev.id);
+        // The provider's own reasoning, when it returned any. Attached to the
+        // trace that was already timing this turn rather than to a second row.
+        if (openReasoning && typeof p.reasoning === "string" && p.reasoning.trim().length > 0) {
+          openReasoning.text = boundedText(p.reasoning, "Reasoning", MAX_MESSAGE_FIELD_CHARS);
+        }
+        closeReasoning(at);
+        flushGroup();
         break;
       }
       case "turn.context_compiling": {
@@ -348,6 +546,74 @@ export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): D
       }
       case "turn.finalizing": {
         notePhase("finalizing", eventTimestamp(p, ev, taskCreatedAt));
+        break;
+      }
+      case "turn.tool_settlement": {
+        notePhase("tool_settlement", eventTimestamp(p, ev, taskCreatedAt));
+        break;
+      }
+      case "turn.verifying": {
+        notePhase("verifying", eventTimestamp(p, ev, taskCreatedAt));
+        break;
+      }
+      case "turn.repairing":
+      case "turn.repair_pending": {
+        notePhase("repairing", eventTimestamp(p, ev, taskCreatedAt));
+        break;
+      }
+      /*
+       * Every way a turn can end other than completing.
+       *
+       * These were all unhandled, which is the single biggest reason the feed
+       * looked broken: a turn that failed, was stopped, ran out of budget, was
+       * denied by policy or was waiting on the user left its assistant message
+       * pinned in the streaming state forever — a blinking caret under an empty
+       * response, with no indication that anything had happened.
+       */
+      case "turn.failed":
+      case "turn.aborted":
+      case "turn.interrupted":
+      case "turn.superseded":
+      case "turn.blocked":
+      case "turn.needs_user_input":
+      case "turn.budget_exhausted":
+      case "turn.policy_denied":
+      case "turn.recovery_failed":
+      case "turn.recovery_interrupted": {
+        const at = eventTimestamp(p, ev, taskCreatedAt);
+        closeReasoning(at);
+        flushGroup();
+        const outcome = TURN_OUTCOMES[ev.event] ?? TURN_OUTCOME_FALLBACK;
+        // Whatever the turn had already said stands; it just stops streaming.
+        if (streamingMessageId) {
+          const message = messageById.get(streamingMessageId);
+          if (message) message.streaming = false;
+          streamingMessageId = null;
+        }
+        pendingAgentMessage = null;
+        // Every non-completing end gets a row, carrying whatever reason the
+        // control plane gave — "it stopped" with no reason is what sends
+        // someone to a log file.
+        const reason = typeof p.reason === "string" ? p.reason : null;
+        const detail = [reason, typeof p.error === "string" ? p.error : null]
+          .filter((value): value is string => value !== null && value.length > 0)
+          .join(" — ");
+        const block: ActivityBlockData = {
+          id: `block-${ev.id}`,
+          title: outcome.title,
+          metric: outcome.metric,
+          status: outcome.tone === "failed" ? "failed" : "interrupted",
+          entries: [{
+            tool: "turn",
+            summary: outcome.message,
+            ...(detail ? { detail: boundedText(detail, "Turn outcome detail", MAX_ACTIVITY_DETAIL_CHARS) } : {}),
+            at,
+            phase: "settled",
+            outcome: outcome.tone === "failed" ? "failed" : "unknown",
+          }],
+        };
+        blocks.push(block);
+        order.push({ kind: "block", id: block.id });
         break;
       }
       case "turn.response_validating": {
@@ -360,94 +626,119 @@ export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): D
       case "turn.provider_running": {
         notePhase("provider_running", eventTimestamp(p, ev, taskCreatedAt));
         // Some payloads carry a `delta` text chunk or a `response` block.
-        if (streamingMessageId) {
-          const m = messageById.get(streamingMessageId);
-          if (m) {
-            const delta = typeof p.delta === "string" ? p.delta : null;
-            const response = typeof p.response === "string" ? p.response : null;
-            if (delta) appendStreamContent(m, delta);
-            else if (response && m.content.length === 0) appendStreamContent(m, response);
+        {
+          const delta = typeof p.delta === "string" ? p.delta : null;
+          const response = typeof p.response === "string" ? p.response : null;
+          if (delta || response) {
+            const m = openAgentMessage();
+            if (m) {
+              if (delta) appendStreamContent(m, delta);
+              else if (response && m.content.length === 0) appendStreamContent(m, response);
+            }
           }
         }
         break;
       }
-      case "tool.proposed":
+      // `tool.authorized` and `tool.started` are policy bookkeeping: they name
+      // no tool and report no result, so as rows they said "tool / authorized"
+      // and nothing else. The proposal and the settlement are the two events
+      // that carry meaning, and they are joined into one row below.
       case "tool.authorized":
+      case "tool.started":
+        break;
+      case "tool.proposed":
       case "tool.settled":
-      case "tool.failed": {
-        const tool = typeof p.tool === "string"
-          ? p.tool
-          : typeof p.toolId === "string"
-            ? p.toolId
-            : typeof p.tool_id === "string"
-              ? p.tool_id
-              : "tool";
-        const summary = summarizeToolPayload(ev.event, p);
-        const at = typeof p.settled_at === "string"
-          ? p.settled_at
-          : typeof p.proposed_at === "string"
-            ? p.proposed_at
-            : taskCreatedAt;
-        // Group consecutive tool events of the same tool family.
+      case "tool.failed":
+      case "tool.denied":
+      case "tool.cancelled":
+      case "tool.settlement_unknown": {
+        const at = eventTimestamp(p, ev, taskCreatedAt);
+        const callId = toolCallIdentity(p);
+        const existing = callId === null ? undefined : toolEntryByCallId.get(callId);
+
+        if (ev.event === "tool.proposed") {
+          const tool = toolIdentity(p) ?? "tool";
+          const groupTitle = groupTitleForTool(tool);
+          if (!pendingGroup || pendingGroup.title !== groupTitle) {
+            flushGroup();
+            pendingGroup = { title: groupTitle, entries: [], startedAt: at };
+          }
+          const entry: ActivityEntry = {
+            tool,
+            summary: proposedToolSummary(p, tool),
+            at,
+            phase: "proposed",
+            ...(callId ? { operationId: callId } : {}),
+          };
+          if (appendToolEntry(pendingGroup, entry, at) && callId) {
+            toolEntryByCallId.set(callId, entry);
+          }
+          break;
+        }
+
+        // A settlement. Fold it into the row its proposal already opened so a
+        // tool call reads as one line that resolves, not as two unrelated rows.
+        const outcome: ActivityEntry["outcome"] = ev.event === "tool.settled"
+          ? settlementOutcome(p)
+          : ev.event === "tool.settlement_unknown"
+            ? "unknown"
+            : "failed";
+        const summary = settledToolSummary(ev.event, p, existing?.summary);
+        const detail = detailForTool(p);
+        if (existing) {
+          existing.phase = "settled";
+          existing.outcome = outcome;
+          existing.summary = summary;
+          if (detail) existing.detail = detail;
+          break;
+        }
+        // No proposal in this window — the settlement stands on its own.
+        const tool = toolIdentity(p) ?? "tool";
         const groupTitle = groupTitleForTool(tool);
         if (!pendingGroup || pendingGroup.title !== groupTitle) {
-          flushGroup(ev.id);
+          flushGroup();
           pendingGroup = { title: groupTitle, entries: [], startedAt: at };
         }
-        const phase: ActivityEntry["phase"] = ev.event === "tool.proposed"
-          ? "proposed"
-          : ev.event === "tool.authorized"
-            ? "authorized"
-            : "settled";
-        const operationId = [p.toolCallId, p.tool_call_id, p.effect_id]
-          .find((value): value is string => typeof value === "string" && value.length > 0);
-        const entry: ActivityEntry = {
+        appendToolEntry(pendingGroup, {
           tool,
           summary,
           at,
-          detail: detailForTool(p),
-          phase,
-          ...(phase === "settled" ? { outcome: ev.event === "tool.failed" ? "failed" : settlementOutcome(p) } : {}),
-          ...(operationId ? { operationId } : {}),
-        };
-        if (pendingGroup.entries.length < MAX_ACTIVITY_ENTRIES_PER_GROUP) {
-          pendingGroup.entries.push(entry);
-        } else if (pendingGroup.entries.length === MAX_ACTIVITY_ENTRIES_PER_GROUP) {
-          pendingGroup.entries.push({
-            tool: "presentation",
-            summary: "Additional activity entries rejected from this group",
-            detail: `The group exceeded the ${MAX_ACTIVITY_ENTRIES_PER_GROUP}-entry presentation limit. Inspect the immutable task event artifact or continue from its event cursor.`,
-            at,
-            phase: "settled",
-            outcome: "unknown",
-          });
-        }
+          phase: "settled",
+          outcome,
+          ...(detail ? { detail } : {}),
+          ...(callId ? { operationId: callId } : {}),
+        }, at);
         break;
       }
       case "task.completed":
       case "task.failed":
-      case "task.interrupted": {
+      case "task.interrupted":
+      case "task.aborted":
+      case "task.cancelled": {
         closeReasoning(eventTimestamp(p, ev, taskCreatedAt));
-        flushGroup(ev.id);
+        flushGroup();
         if (streamingMessageId) {
           const m = messageById.get(streamingMessageId);
           if (m) {
             if (m.content.length === 0 && ev.event === "task.failed") {
               m.content = "The task stopped before Terminus could respond. Start a new task to try again.";
-            } else if (m.content.length === 0 && ev.event === "task.interrupted") {
+            } else if (m.content.length === 0 && ev.event !== "task.completed") {
               m.content = "The task was stopped before Terminus could respond.";
             }
             m.streaming = false;
           }
+          streamingMessageId = null;
         }
+        pendingAgentMessage = null;
         break;
       }
       case "task.blocked": {
-        flushGroup(ev.id);
+        flushGroup();
         if (streamingMessageId) {
           const message = messageById.get(streamingMessageId);
           if (message) message.streaming = false;
         }
+        pendingAgentMessage = null;
         const reason = typeof p.reason === "string" ? p.reason : "runtime_blocked";
         const error = typeof p.error === "string"
           ? boundedText(p.error, "Runtime error detail", MAX_ACTIVITY_DETAIL_CHARS)
@@ -480,40 +771,85 @@ export function decodeFeed(events: TerminusSseEvent[], taskCreatedAt: string): D
     }
   }
 
-  // If the conversation is empty, seed with the task objective so the
-  // surface isn't blank while the first turn kicks off.
-  if (messages.length === 0) {
-    return { messages, blocks, reasoning, order };
+  // Close whatever is still open. Nothing flushed the trailing group before,
+  // so a task with tool calls in flight showed no activity at all until its
+  // turn ended — the work was decoded and then dropped on the floor, which is
+  // the state a running task spends most of its time in.
+  flushGroup();
+
+  // Status and metric are derived once, from the final state of every entry,
+  // so a settlement that arrived after its group closed is still reflected.
+  for (const block of toolGroupBlocks) {
+    const operations = new Map<string, ActivityEntry>();
+    block.entries.forEach((entry, index) => {
+      operations.set(entry.operationId ?? `uncorrelated:${index}`, entry);
+    });
+    const states = Array.from(operations.values());
+    const anyFailed = states.some((entry) => entry.phase === "settled" && entry.outcome === "failed");
+    const allSettled = states.length > 0 && states.every((entry) => entry.phase === "settled");
+    const allSucceeded = allSettled && states.every((entry) => entry.outcome === "succeeded");
+    block.status = anyFailed
+      ? "failed"
+      : allSucceeded
+        ? "done"
+        : allSettled
+          ? "unknown"
+          : "working";
+    block.metric = computeMetric(block.entries, block.title);
   }
 
   return { messages, blocks, reasoning, order };
 }
 
-function summarizeToolPayload(eventName: string, p: Record<string, unknown>): string {
-  const args = p.args_summary ?? p.args;
+/**
+ * What a proposed tool call is about to do.
+ *
+ * Prefers whatever operand the control plane put on the wire — a path, a
+ * command, a URL. Falls back to the tool's own name, because "read" is still
+ * more use than the literal string "proposed", which is what this row used to
+ * say for every tool call in the transcript.
+ */
+function proposedToolSummary(p: Record<string, unknown>, tool: string): string {
+  const args = p.arguments_excerpt ?? p.args_summary ?? p.args;
+  if (typeof args === "string" && args.length > 0) {
+    return boundedText(args, "Tool arguments", MAX_ACTIVITY_SUMMARY_CHARS);
+  }
   if (args && typeof args === "object") {
     const a = args as Record<string, unknown>;
-    const path = typeof a.path === "string" ? a.path : null;
-    const program = typeof a.program === "string" ? a.program : null;
-    if (path) return boundedText(path, "Tool path", MAX_ACTIVITY_SUMMARY_CHARS);
-    if (program) return boundedText(program, "Tool program", MAX_ACTIVITY_SUMMARY_CHARS);
-  }
-  if (typeof args === "string") return boundedText(args, "Tool arguments", MAX_ACTIVITY_SUMMARY_CHARS);
-  switch (eventName) {
-    case "tool.proposed": return "proposed";
-    case "tool.authorized": return "authorized";
-    case "tool.settled": {
-      const summary = p.summary;
-      const status = p.result_status ?? p.status;
-      if (typeof summary === "string" && typeof status === "string") {
-        return boundedText(`${status}: ${summary}`, "Tool summary", MAX_ACTIVITY_SUMMARY_CHARS);
+    for (const key of ["path", "command", "program", "url", "pattern", "query"] as const) {
+      const value = a[key];
+      if (typeof value === "string" && value.length > 0) {
+        return boundedText(value, "Tool argument", MAX_ACTIVITY_SUMMARY_CHARS);
       }
-      if (typeof summary === "string") return boundedText(summary, "Tool summary", MAX_ACTIVITY_SUMMARY_CHARS);
-      return typeof status === "string"
-        ? boundedText(status, "Tool status", MAX_ACTIVITY_SUMMARY_CHARS)
-        : "settled";
     }
-    default: return eventName;
+  }
+  const resource = p.resource_uri;
+  if (typeof resource === "string" && resource.length > 0) {
+    return boundedText(resource, "Tool resource", MAX_ACTIVITY_SUMMARY_CHARS);
+  }
+  return `${tool}…`;
+}
+
+/**
+ * What a settled tool call did. The status is already carried by the row's
+ * glyph, so it is not repeated in the text — this used to read
+ * "success: Read 42 lines", which said the same thing twice.
+ */
+function settledToolSummary(
+  eventName: string,
+  p: Record<string, unknown>,
+  proposed: string | undefined,
+): string {
+  const summary = p.summary ?? p.explanation ?? p.reason ?? p.error;
+  if (typeof summary === "string" && summary.length > 0) {
+    return boundedText(summary, "Tool summary", MAX_ACTIVITY_SUMMARY_CHARS);
+  }
+  switch (eventName) {
+    case "tool.denied": return proposed ? `${proposed} — denied by policy` : "Denied by policy";
+    case "tool.cancelled": return proposed ? `${proposed} — cancelled` : "Cancelled before dispatch";
+    case "tool.settlement_unknown":
+      return proposed ? `${proposed} — outcome unknown` : "Outcome unknown; needs reconciliation";
+    default: return proposed ?? "Settled";
   }
 }
 
@@ -540,28 +876,52 @@ function detailForTool(p: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
+/**
+ * Which group a tool belongs to.
+ *
+ * The standalone tool set is `read`, `patch`, `exec`, `exec_poll`, `web_fetch`,
+ * `grep` and `glob` (see the control plane's `parseStandaloneToolCall`). Four of
+ * those were unlisted and fell through to "Tool activity", which also broke
+ * grouping: a `glob` and the `read` that followed it landed in two separate
+ * blocks because their titles differed.
+ */
 function groupTitleForTool(tool: string): string {
   const t = tool.toLowerCase();
-  if (t === "read" || t === "search" || t === "inspect") return "Explored codebase";
+  if (t === "read" || t === "search" || t === "inspect" || t === "grep" || t === "glob") {
+    return "Explored codebase";
+  }
   if (t === "patch" || t === "write" || t === "edit") return "Implemented changes";
-  if (t === "exec" || t === "job") return "Ran commands";
+  if (t === "exec" || t === "exec_poll" || t === "job") return "Ran commands";
   if (t === "verify" || t === "verification") return "Ran verification";
+  if (t === "web_fetch" || t === "fetch") return "Read the web";
   return "Tool activity";
 }
 
+function plural(count: number, singular: string, plural: string): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+/**
+ * The one number a collapsed group is worth showing.
+ *
+ * Counts come from the entries themselves. The file count used to be inferred
+ * by looking for a dot or a leading slash in the row's display text — which
+ * stopped being a path the moment the row settled and its text became the
+ * tool's result summary, so a settled group silently changed what it counted.
+ */
 function computeMetric(entries: ActivityEntry[], title: string): string {
-  if (title === "Explored codebase") {
-    const paths = new Set(entries.map((e) => e.summary).filter((s) => s.startsWith("/") || s.includes(".")));
-    return paths.size > 0 ? `${paths.size} ${paths.size === 1 ? "file" : "files"}` : `${entries.length} reads`;
+  const count = entries.length;
+  switch (title) {
+    case "Explored codebase": return plural(count, "file", "files");
+    case "Implemented changes": return plural(count, "edit", "edits");
+    case "Read the web": return plural(count, "page", "pages");
+    case "Ran commands":
+    case "Ran verification": {
+      const passed = entries.filter((entry) => entry.phase === "settled" && entry.outcome === "succeeded").length;
+      return passed === count ? `${plural(count, "run", "runs")} passed` : plural(count, "run", "runs");
+    }
+    default: return plural(count, "action", "actions");
   }
-  if (title === "Implemented changes") {
-    return `${entries.length} ${entries.length === 1 ? "edit" : "edits"}`;
-  }
-  if (title === "Ran commands") {
-    const passed = entries.filter((entry) => entry.phase === "settled" && entry.outcome === "succeeded").length;
-    return passed > 0 ? `${passed} passed` : `${entries.length} runs`;
-  }
-  return `${entries.length} actions`;
 }
 
 // ────────────────────────── Virtualization ───────────────────────────────────
@@ -642,15 +1002,20 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
   const acknowledgeApprovalResolution = useTerminusStore((state) => state.acknowledgeApprovalResolution);
   const loadMoreApprovals = useTerminusStore((state) => state.loadMoreApprovals);
   const lastEventId = events[events.length - 1]?.id;
+  const turnInputs = useTurnInputs(events, task?.id ?? null);
 
   const decoded = useMemo(() => {
     if (!task) return { messages: [], blocks: [], reasoning: [], order: [] } satisfies DecodedFeed;
-    return decodeFeed(events, task.created_at);
+    return decodeFeed(events, task.created_at, turnInputs);
     // Recompute when the events list grows OR the task changes. The last
-    // event id is included so streaming appends trigger a re-decode.
-  }, [events, task?.id, events.length, lastEventId]);
+    // event id is included so streaming appends trigger a re-decode, and
+    // turnInputs so a prompt re-renders once its artifact resolves.
+  }, [events, task?.id, events.length, lastEventId, turnInputs]);
   const approvalResource = useSelectedTaskApprovals();
   const eventHistory = useSelectedTaskEventHistory();
+  const transcript = useSelectedTaskTranscript();
+  const loadEarlierTranscript = useTerminusStore((s) => s.loadEarlierTranscript);
+  const hydrateTranscript = useTerminusStore((s) => s.hydrateTranscript);
   const approvals = approvalResource.approvals;
 
   // Build the flattened feed items list.
@@ -805,22 +1170,23 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
     );
   }
 
-  const normalizedStatus = normalizeTaskStatus(task.status);
+  const normalizedStatus = lifecycleFromTask(task);
   const blockedByProvider = task.status === "BLOCKED"
     && task.terminal_reason?.reason === "provider_transport_unavailable";
   const emptyState = (() => {
     switch (normalizedStatus) {
       case "queued": return { title: "Queued", description: "Work will begin when the runtime is ready." };
-      case "waiting": return blockedByProvider
+      case "planning": return { title: "Planning", description: "The agent is reading the codebase and deciding how to proceed." };
+      case "verifying": return { title: "Verifying", description: "Running the acceptance checks for this task." };
+      case "review": return { title: "Ready for review", description: "The changes are ready to read." };
+      case "needs_you": return blockedByProvider
         ? {
             title: "Provider transport unavailable",
             description: "Configure provider transport in the control plane, then send a follow-up to retry this task.",
           }
         : { title: "Waiting for input", description: "The task will continue as soon as the required input is available." };
-      case "needs_approval": return { title: "Approval required", description: "Review the pending approval before the task can continue." };
-      case "needs_review": return { title: "Review required", description: "Review the pending changes before the task can continue." };
       case "done": return { title: "Task complete", description: "The task completed without conversation items in this bounded view." };
-      case "interrupted": return { title: "Task stopped", description: "The task was aborted before producing conversation items." };
+      case "cancelled": return { title: "Task stopped", description: "The task was aborted before producing conversation items." };
       case "unknown": return { title: "Status unavailable", description: "Refresh the task snapshot before relying on this empty view." };
       case "failed": return null;
       case "working": return { title: "Preparing the first turn", description: "The conversation will appear here as the agent starts working." };
@@ -833,7 +1199,7 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
         ref={scrollRef}
         onScroll={onScroll}
         className="scrollable conversation-scroll h-full overflow-x-hidden overflow-y-auto"
-        style={{ padding: "16px 24px 48px" }}
+        style={{ padding: "20px 24px 24px" }}
       >
       {/* Polite live region — announces new messages for screen readers. */}
       <div aria-live="polite" aria-atomic="false" style={{ position: "absolute", left: -9999, width: 1, height: 1, overflow: "hidden" }}>
@@ -842,7 +1208,7 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
       {/* Reading column. Prose stays narrow; blocks expand wider.
           Per SPEC §9.1: comfortable centered reading column. */}
       <div
-        className="feed-column"
+        className={cn("feed-column", items.length === 0 && "is-empty")}
         style={{
           maxWidth: "var(--content-width)",
           margin: "0 auto",
@@ -863,6 +1229,40 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
                 : "Render every loaded conversation item for sequential assistive-technology navigation"}
             >
               {fullTranscript ? "Use windowed feed" : "Read all loaded items"}
+            </Button>
+          </div>
+        ) : null}
+
+        {/* Earlier history.
+
+            The conversation opens on its tail — where a reader starts — and
+            walks backwards on request. Before this, reopening a task that had
+            already run showed nothing at all: the SSE stream is a live tail,
+            so without a cursor it delivers only what happens next, and every
+            stored event went unread. */}
+        {task && transcript?.status === "error" ? (
+          <div className="mb-4 flex flex-wrap items-center gap-2 border-l-2 border-warning/55 px-3 py-1.5 text-xs text-secondary" role="status">
+            <span className="min-w-0 flex-1">
+              Earlier messages could not be loaded. {transcript.error} Live updates are still connected.
+            </span>
+            <Button
+              type="button"
+              onClick={() => void hydrateTranscript(task.id)}
+              className="font-medium text-primary hover:underline"
+            >
+              Retry
+            </Button>
+          </div>
+        ) : null}
+        {task && transcript?.earlierCursor !== null && transcript !== null ? (
+          <div className="mb-3 flex items-center justify-center gap-2 text-xs">
+            <Button
+              type="button"
+              onClick={() => void loadEarlierTranscript(task.id)}
+              disabled={transcript.loadingEarlier}
+              className="rounded-md border border-subtle px-2.5 py-1 text-secondary hover:bg-hover hover:text-primary disabled:opacity-45"
+            >
+              {transcript.loadingEarlier ? "Loading earlier messages…" : "Load earlier messages"}
             </Button>
           </div>
         ) : null}
@@ -914,7 +1314,7 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
         ) : null}
         {items.length === 0 && blockedByProvider ? (
           <div className="mb-4 flex items-start gap-3 border-b border-subtle py-4" role="status">
-            <StatusIndicator status="waiting" size={10} />
+            <StatusIndicator status="needs_you" size={10} />
             <div>
               <p className="text-sm font-medium text-primary">Provider transport unavailable</p>
               <p className="mt-1 text-sm text-secondary">Configure provider transport in the control plane, then send a follow-up to retry this task.</p>
@@ -927,6 +1327,10 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
             compact
             className="conversation-terminal-state"
           />
+        ) : items.length === 0 && transcript?.status === "loading" ? (
+          <div className="grid min-h-40 place-items-center text-center" role="status">
+            <p className="ui-body text-tertiary">Loading the conversation…</p>
+          </div>
         ) : items.length === 0 && emptyState ? (
           <div className="grid min-h-40 place-items-center text-center">
             <div className="max-w-sm">

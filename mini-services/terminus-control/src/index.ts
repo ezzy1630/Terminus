@@ -531,6 +531,24 @@ const DESKTOP_PARENT_PID = (() => {
 // R10: process-scoped scout utility ledger — scouts disable themselves for
 // the session after repeated zero-yield runs.
 const SCOUT_LEDGER = new ScoutUtilityLedger();
+/**
+ * How much of a turn's final response and reasoning travels in the
+ * `turn.completed` event.
+ *
+ * This was 200 code points, chosen when the event was a status ping rather
+ * than the way a client learns what the agent said. It is not: there is no
+ * provider-delta streaming, so `turn.completed` carries the *whole* visible
+ * answer, and 200 characters truncated every real response mid-sentence. The
+ * full text stays in the response artifact and `continuation` still points at
+ * it for anything longer; these limits only bound what a client can render
+ * without a second fetch, and both sit well under the 128 KiB presentation
+ * budget in @terminus/public-client.
+ */
+const TURN_RESPONSE_SUMMARY_MAX_CHARS = 16_384;
+/** Bound for the human-readable operand carried on `tool.proposed`. */
+const TOOL_ARGUMENTS_EXCERPT_MAX_CHARS = 240;
+const TURN_REASONING_SUMMARY_MAX_CHARS = 8_192;
+
 const DEV_MODE = process.env.TERMINUS_DEV === "1";
 const SHELL_MODE_ENABLED = resolveShellModeEnabled(process.env.TERMINUS_SHELL_MODE);
 function requireToken(envVar: string, devValue: string, label: string): string {
@@ -1345,6 +1363,30 @@ async function kernelTaskContext(scope: KernelTaskCapabilityScope): Promise<Requ
   });
 }
 
+/**
+ * A capability request the task's own contract does not authorize.
+ *
+ * Distinguished from an internal failure because it is neither: it is a
+ * caller-visible fact about the task, and the only remedy is a different
+ * contract. Reported as a 409 naming the contract, rather than the opaque
+ * `EXEC_FAILED` / `DIFF_FAILED` 500 these refusals used to produce — which
+ * read as a kernel or sandbox fault and sent debugging in the wrong
+ * direction entirely.
+ */
+class TaskScopeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TaskScopeError";
+  }
+}
+
+/** Answer a scope refusal honestly; returns false when `error` is something else. */
+function sendTaskScopeError(res: ServerResponse, error: unknown): boolean {
+  if (!(error instanceof TaskScopeError)) return false;
+  sendError(res, 409, "TASK_SCOPE_UNAUTHORIZED", error.message, "conflict");
+  return true;
+}
+
 async function kernelContextForTask(
   taskId: string,
   turnId: string,
@@ -1395,14 +1437,17 @@ async function kernelContextForTask(
       ? [...new Set([...contractAllowedPaths, ...PROJECT_INSTRUCTION_PATH_PATTERNS])]
       : contractAllowedPaths;
     if (allowedPaths.length === 0) {
-      throw new Error(`task ${taskId} contract grants no workspace paths for the requested operation`);
+      throw new TaskScopeError(
+        `task ${taskId} contract grants no workspace paths for the requested operation; `
+        + "the task was created without an allowed_scope and its contract may not expand",
+      );
     }
     if (workspacePaths === undefined) {
       boundedWorkspacePaths = allowedPaths;
     } else {
       const denied = workspacePaths.find((path) => !allowedPaths.some((pattern) => globMatch(pattern, path)));
       if (denied !== undefined) {
-        throw new Error(`task ${taskId} contract does not authorize workspace path ${denied}`);
+        throw new TaskScopeError(`task ${taskId} contract does not authorize workspace path ${denied}`);
       }
       boundedWorkspacePaths = workspacePaths;
     }
@@ -4060,6 +4105,21 @@ const checkpointSequenceStateSchema = z.object({
   }),
 }).strict();
 
+/**
+ * URL path segments carry a bare 64-hex digest; the kernel's artifact
+ * ownership index is keyed by the canonical `sha256:<hex>` CAS address.
+ *
+ * The kernel read path was asymmetric about this: `store.get` / `store.metadata`
+ * strip an optional prefix, but the `has_task_link` ownership gate that runs
+ * first requires the canonical form and rejects bare hex as `InvalidHash`,
+ * which surfaced to the client as an opaque 500. Normalize before the boundary
+ * so the two agree.
+ */
+function canonicalArtifactHash(raw: string): string | null {
+  const hex = raw.startsWith("sha256:") ? raw.slice("sha256:".length) : raw;
+  return /^[0-9a-f]{64}$/.test(hex) ? `sha256:${hex}` : null;
+}
+
 const routes: Route[] = [
   // ────────────────────────── /system ────────────────────────────────────
   route("GET", "/v1/system/health", async (_req, res) => {
@@ -5109,6 +5169,8 @@ const routes: Route[] = [
         turns: {
           select: {
             id: true,
+            state: true,
+            sequence: true,
             startedAt: true,
             completedAt: true,
             providerAttempts: {
@@ -5202,6 +5264,10 @@ const routes: Route[] = [
         startedAtMs: turn.startedAt?.getTime() ?? null,
         completedAtMs: turn.completedAt?.getTime() ?? null,
       }));
+    const activeTurnStates = new Set<string>([...V1_ACTIVE_TURN_STATES, "REPAIR_PENDING"]);
+    const activeTurn = t.turns
+      .filter((turn) => activeTurnStates.has(turn.state))
+      .sort((left, right) => right.sequence - left.sequence)[0] ?? null;
     const repairMetrics = deriveRepairMetrics({
       taskStatus: t.status,
       terminalReason: metricTerminalReason(t.terminalReasonJson),
@@ -5230,6 +5296,18 @@ const routes: Route[] = [
         ? null
         : safeParse<Record<string, unknown> | null>(t.terminalReasonJson, null),
       contract: taskContractWire(t.contractVersions[0]),
+      // The turn a client would interrupt to stop work without ending the
+      // task. Without this a client can only cancel the whole task, which is
+      // terminal, so "stop" and "abandon" collapse into one destructive
+      // action. Repair turns count: they are running work too.
+      active_turn: activeTurn === null
+        ? null
+        : {
+            id: activeTurn.id,
+            sequence: activeTurn.sequence,
+            state: activeTurn.state,
+            started_at: activeTurn.startedAt?.toISOString() ?? null,
+          },
       profile: evidenceBundle === null
         ? null
         : {
@@ -5409,6 +5487,7 @@ const routes: Route[] = [
         exit_code: diff.code,
       });
     } catch (err) {
+      if (sendTaskScopeError(res, err)) return;
       logInternalError("task diff failed", err);
       sendError(res, 500, "DIFF_FAILED", "task diff failed", "internal");
     }
@@ -5488,13 +5567,16 @@ const routes: Route[] = [
       operationClasses: [CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST],
     });
     const metas = await Promise.all(page.map(async (entry) => {
-      const bare = entry.hash.replace(/^sha256:/, "");
       let mediaType = "application/octet-stream";
       let sizeBytes: number | null = null;
       try {
+        // The kernel's ownership index is keyed by the canonical CAS address.
+        // Stripping the prefix here made every lookup fail into the catch
+        // below, which is why this inventory reported an unknown media type
+        // and a null size for every artifact it has ever listed.
         const meta = await requireKernelUds().artifacts.GetMetadata({
           context: artifactContext,
-          sha256: bare,
+          sha256: entry.hash,
         });
         if (meta.artifact) {
           if (meta.artifact.mediaType) mediaType = meta.artifact.mediaType;
@@ -5517,6 +5599,74 @@ const routes: Route[] = [
       artifacts: metas,
       total: all.length,
       next_cursor: nextSkip < all.length ? String(nextSkip) : null,
+    });
+  }),
+  /**
+   * Durable transcript for one task.
+   *
+   * `GET /v1/events` is a live tail: without a cursor it starts from "now", so
+   * a client that opens a task which already ran sees an empty conversation
+   * even though every event is still in `semantic_events`. This route reads
+   * that table directly and pages it forward, using the same task filter the
+   * SSE route applies, so a client can rebuild the transcript and then attach
+   * the stream at `next_cursor` without a gap or a duplicate.
+   *
+   * Frames match the SSE wire shape (`id` / `event` / `data`) so one decoder
+   * serves both paths.
+   */
+  route("GET", "/v1/tasks/:id/transcript", async (req, res, params) => {
+    const taskId = String(params.id);
+    const task = await db.task.findUnique({ where: { id: taskId }, select: { id: true } });
+    if (!task) return sendError(res, 404, "TASK_NOT_FOUND", "task not found", "not_found");
+    const url = new URL(req.url ?? "/", "http://x");
+    const limitRaw = Number(url.searchParams.get("limit") ?? 500);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 1_000) : 500;
+    const before = url.searchParams.get("before");
+    // Mirrors the /v1/events filter. Turn, provider, tool and verification
+    // events correlate on the task id; task events carry it as the aggregate;
+    // the payload scan catches the rest, which is what keeps the replayed
+    // transcript identical to what the live stream would have delivered.
+    const scope = {
+      schemaVersion: 1,
+      OR: [
+        { correlationId: taskId },
+        { aggregateType: "task", aggregateId: taskId },
+        { payloadJson: { contains: taskId } },
+      ],
+    };
+    const where = before === null || before.length === 0
+      ? scope
+      : { ...scope, eventId: { lt: before } };
+    // Newest first, then reversed: a conversation is read from its end, so the
+    // default page is the tail. Paging backwards with `before` walks toward the
+    // beginning, which is what "load earlier" means to a reader.
+    const [rows, total] = await Promise.all([
+      db.semanticEvent.findMany({
+        where,
+        orderBy: { eventId: "desc" },
+        take: limit + 1,
+        select: { eventId: true, eventType: true, payloadJson: true, occurredAt: true },
+      }),
+      db.semanticEvent.count({ where: scope }),
+    ]);
+    const hasEarlier = rows.length > limit;
+    const page = rows.slice(0, limit).reverse();
+    sendJson(res, 200, {
+      task_id: taskId,
+      events: page.map((row) => ({
+        id: row.eventId,
+        event: row.eventType,
+        data: row.payloadJson,
+        occurred_at: row.occurredAt.toISOString(),
+      })),
+      total,
+      // The cursor to attach the live stream at, so replay and tail meet
+      // exactly once. Null only when the task has produced no events at all,
+      // where attaching without a cursor is already correct.
+      next_cursor: page.at(-1)?.eventId ?? null,
+      // The cursor to request the previous page with.
+      earlier_cursor: hasEarlier ? page[0]?.eventId ?? null : null,
+      truncation: { occurred: hasEarlier, continuation: hasEarlier ? page[0]?.eventId ?? null : null },
     });
   }),
   route("GET", "/v1/sessions/:id/tasks", async (req, res, params) => {
@@ -5931,6 +6081,16 @@ const routes: Route[] = [
         "validation",
       );
     }
+    const hash = canonicalArtifactHash(String(params.hash));
+    if (hash === null) {
+      return sendError(
+        res,
+        400,
+        "ARTIFACT_HASH_INVALID",
+        "artifact hash must be 64 lowercase hex characters, optionally sha256:-prefixed",
+        "validation",
+      );
+    }
     try {
       const artifact = await requireKernelUds().artifacts.Get({
         context: await kernelContextForTask(
@@ -5938,7 +6098,7 @@ const routes: Route[] = [
           "artifact-read",
           [CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST],
         ),
-        sha256: String(params.hash),
+        sha256: hash,
       });
       const buf = artifact.content;
       res.writeHead(200, {
@@ -5964,6 +6124,16 @@ const routes: Route[] = [
         "validation",
       );
     }
+    const hash = canonicalArtifactHash(String(params.hash));
+    if (hash === null) {
+      return sendError(
+        res,
+        400,
+        "ARTIFACT_HASH_INVALID",
+        "artifact hash must be 64 lowercase hex characters, optionally sha256:-prefixed",
+        "validation",
+      );
+    }
     try {
       const meta = await requireKernelUds().artifacts.GetMetadata({
         context: await kernelContextForTask(
@@ -5971,9 +6141,9 @@ const routes: Route[] = [
           "artifact-metadata",
           [CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST],
         ),
-        sha256: String(params.hash),
+        sha256: hash,
       });
-      sendJson(res, 200, meta.artifact ?? { sha256: String(params.hash) });
+      sendJson(res, 200, meta.artifact ?? { sha256: hash });
     } catch (err) {
       logInternalError("artifact metadata fetch failed", err);
       sendError(res, 500, "ARTIFACT_METADATA_FAILED", "artifact metadata fetch failed", "internal");
@@ -6513,6 +6683,7 @@ const routes: Route[] = [
         : { process_id: "", job_id: "", resolved_executable: "" };
       sendJson(res, 200, r);
     } catch (err) {
+      if (sendTaskScopeError(res, err)) return;
       logInternalError("exec failed", err);
       sendError(res, 500, "EXEC_FAILED", "exec failed", "internal");
     }
@@ -9532,6 +9703,8 @@ interface TerminalTurnPublication extends CheckpointPublication {
   readonly responseArtifactUri: string;
   readonly summary: string;
   readonly summaryTruncated: boolean;
+  /** The provider's own reasoning for this turn, when it returned any. */
+  readonly reasoning?: string | null;
   readonly continuation: string | null;
   readonly recovered?: boolean;
 }
@@ -9577,6 +9750,7 @@ async function commitCheckpointAndTerminalTurn(
           summary: publication.summary,
           summary_truncated: publication.summaryTruncated,
           continuation: publication.continuation,
+          ...(publication.reasoning ? { reasoning: publication.reasoning } : {}),
           ...(publication.recovered === true ? { recovered: true } : {}),
         },
         artifactRefs: [publication.responseArtifactUri],
@@ -11822,6 +11996,7 @@ async function settleStandaloneProviderTool(
       provider_call_id: call.providerCallId,
       tool_id: call.toolId,
       tool_version: call.toolVersion,
+      arguments_excerpt: toolArgumentsExcerpt(call),
       normalized_operation_hash: operationHash,
     },
     artifactRefs: [argumentsArtifact.uri, callTranscriptArtifact.uri],
@@ -11936,6 +12111,7 @@ async function settleStandaloneProviderTool(
   await effectSettlementService.authorize({
     taskId: input.taskId,
     toolCallId,
+    toolId: call.toolId,
     sideEffectId,
     policyDecisionId,
     effectType: effect.effectType,
@@ -11948,6 +12124,7 @@ async function settleStandaloneProviderTool(
   await effectSettlementService.start({
     taskId: input.taskId,
     toolCallId,
+    toolId: call.toolId,
     sideEffectId,
     policyDecisionId,
     effectType: effect.effectType,
@@ -11962,6 +12139,7 @@ async function settleStandaloneProviderTool(
     await effectSettlementService.cancel({
       taskId: input.taskId,
       toolCallId,
+      toolId: call.toolId,
       sideEffectId,
       reason: "turn-cancelled-before-dispatch",
     });
@@ -11992,6 +12170,7 @@ async function settleStandaloneProviderTool(
       await effectSettlementService.cancel({
         taskId: input.taskId,
         toolCallId,
+        toolId: call.toolId,
         sideEffectId,
         reason: "turn-cancelled-before-dispatch",
       });
@@ -12060,6 +12239,8 @@ async function denyStandaloneTool(input: {
     aggregateId: input.toolCallId,
     correlationId: input.input.taskId,
     payload: {
+      tool_call_id: input.toolCallId,
+      tool_id: input.call.toolId,
       provider_call_id: input.call.providerCallId,
       policy_decision_id: policyDecisionId,
       rule_id: input.ruleId,
@@ -12086,6 +12267,44 @@ async function denyStandaloneTool(input: {
     });
   }));
   return policyDecisionId;
+}
+
+/**
+ * A short, human-readable operand for a proposed tool call — the path being
+ * read, the command being run, the pattern being searched for.
+ *
+ * The full arguments are already ingested as a linked artifact, but artifact
+ * refs do not travel on the v1 event stream, so without this a client can only
+ * say that *some* read happened. The excerpt is bounded and carries operands
+ * the model chose, never file contents: `patch` deliberately reports only its
+ * path, because its arguments hold whole file bodies.
+ */
+function toolArgumentsExcerpt(call: ParsedStandaloneToolCall): string {
+  const excerpt = ((): string => {
+    switch (call.toolId) {
+      case "read":
+      case "patch":
+        return call.arguments.path;
+      case "exec": {
+        const shell = call.arguments.shell;
+        if (shell !== undefined) return shell.script;
+        const program = call.arguments.program ?? "";
+        return [program, ...call.arguments.args].join(" ").trim();
+      }
+      case "exec_poll":
+        return call.arguments.background_id;
+      case "web_fetch":
+        return call.arguments.url;
+      case "grep":
+        return `${call.arguments.pattern} in ${call.arguments.path}`;
+      case "glob":
+        return call.arguments.pattern;
+    }
+  })();
+  const codePoints = Array.from(excerpt);
+  return codePoints.length <= TOOL_ARGUMENTS_EXCERPT_MAX_CHARS
+    ? excerpt
+    : `${codePoints.slice(0, TOOL_ARGUMENTS_EXCERPT_MAX_CHARS - 1).join("")}…`;
 }
 
 async function persistSettledToolResult(input: {
@@ -12145,6 +12364,7 @@ async function persistSettledToolResult(input: {
     turnId: input.input.turnId,
     providerAttemptId: input.input.providerAttemptId,
     toolCallId: input.toolCallId,
+    toolId: input.call.toolId,
     sideEffectId: input.sideEffectId,
     providerCallId: input.call.providerCallId,
     status: input.result.status,
@@ -14229,8 +14449,12 @@ async function agentLoop(turnId: string): Promise<void> {
       }
 
       const summaryCodePoints = Array.from(finalText);
-      const summaryTruncated = summaryCodePoints.length > 200;
-      const summary = summaryCodePoints.slice(0, 200).join("");
+      const summaryTruncated = summaryCodePoints.length > TURN_RESPONSE_SUMMARY_MAX_CHARS;
+      const summary = summaryCodePoints.slice(0, TURN_RESPONSE_SUMMARY_MAX_CHARS).join("");
+      const reasoningCodePoints = Array.from(currentProjected?.reasoning ?? "");
+      const reasoning = reasoningCodePoints.length === 0
+        ? null
+        : reasoningCodePoints.slice(0, TURN_REASONING_SUMMARY_MAX_CHARS).join("");
       if ("checkpoint" in checkpointOutcome) {
         await mutateAgentState(() => commitCheckpointAndTerminalTurn({
           ...checkpointOutcome.checkpoint,
@@ -14239,6 +14463,7 @@ async function agentLoop(turnId: string): Promise<void> {
           summary,
           summaryTruncated,
           continuation: summaryTruncated ? finalResponseArtifactUri : null,
+          reasoning,
         }));
         return;
       }
@@ -14251,6 +14476,7 @@ async function agentLoop(turnId: string): Promise<void> {
           summary,
           summary_truncated: summaryTruncated,
           continuation: summaryTruncated ? finalResponseArtifactUri : null,
+          ...(reasoning === null ? {} : { reasoning }),
         },
         artifactRefs: [finalResponseArtifactUri],
       }, async (tx) => {

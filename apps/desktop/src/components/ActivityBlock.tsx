@@ -23,6 +23,7 @@ import { StatusIndicator } from "./StatusIndicator";
 import { clockTimestamp } from "../lib/time";
 import type { ActivityBlock as ActivityBlockData, ActivityBlockStatus } from "../types";
 import { Button } from "../ui/Button";
+import type { TaskLifecycle } from "../lib/task-lifecycle";
 
 interface ActivityBlockProps {
   block: ActivityBlockData;
@@ -37,13 +38,17 @@ function renderedDetail(detail: string): string {
   return `[Activity detail rejected: ${detail.length} characters exceeds the ${MAX_RENDERED_ACTIVITY_DETAIL_CHARS}-character presentation limit. Inspect the immutable artifact or continuation reference.]`;
 }
 
-function statusKind(s: ActivityBlockStatus): import("../types").TaskStatusKind {
+/**
+ * An activity block is one tool run, not a task, but it reuses the task glyph
+ * so a row inside the transcript reads the same as a row in the sidebar.
+ */
+function statusKind(s: ActivityBlockStatus): TaskLifecycle {
   switch (s) {
     case "working": return "working";
     case "done": return "done";
     case "failed": return "failed";
-    case "waiting": return "waiting";
-    case "interrupted": return "interrupted";
+    case "waiting": return "needs_you";
+    case "interrupted": return "cancelled";
     case "unknown": return "unknown";
   }
 }
@@ -79,7 +84,10 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
   return (
     <div
       className={cn(
-        "activity-block selectable my-0.5 overflow-hidden border-b border-subtle",
+        // No divider. Consecutive blocks already share one continuous rail
+        // (.activity-block::before), so a rule under each one cut the timeline
+        // the rail exists to draw into a stack of table rows.
+        "activity-block selectable my-0.5 overflow-hidden",
         expanded && "is-expanded",
       )}
     >

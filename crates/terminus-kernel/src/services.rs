@@ -3576,6 +3576,19 @@ impl ArtifactIngestService {
     }
 
     fn validate_read_access(&self, ctx: &RequestContext, sha256: &str) -> KernelResult<()> {
+        // The ownership gate below keys on the canonical CAS address, while
+        // `store.get` / `store.metadata` accept a bare digest. A caller that
+        // sent bare hex therefore failed inside `has_task_link` and had its
+        // encoding mistake reported as an opaque `Internal`. Reject it here,
+        // truthfully, the same way `link` already does.
+        if !is_canonical_sha256(sha256) {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                "artifact hash must use the canonical sha256:<64 lowercase hex> encoding",
+                false,
+            ));
+        }
         if ctx.task_id == "control-maintenance" {
             return self.validate_maintenance(ctx);
         }
@@ -3987,6 +4000,62 @@ mod artifact_ingest_tests {
             collectable,
             Ok(hashes) if !hashes.contains(&command.sha256) && !hashes.contains(&output.sha256)
         ));
+    }
+
+    /// A caller that sends a bare digest instead of the canonical
+    /// `sha256:<hex>` address used to fail inside the `has_task_link`
+    /// ownership gate, whose `InvalidHash` was reported as `Internal`. The
+    /// control plane surfaced that as an opaque HTTP 500, so no turn input
+    /// artifact could ever be read back and every user prompt in the desktop
+    /// transcript rendered empty.
+    #[test]
+    fn non_canonical_artifact_hash_reads_are_rejected_as_invalid_argument() {
+        let directory = match tempfile::tempdir() {
+            Ok(directory) => directory,
+            Err(error) => panic!("test directory creation failed: {error}"),
+        };
+        let kernel = match KernelHandle::new(directory.path().to_path_buf()) {
+            Ok(kernel) => kernel,
+            Err(error) => panic!("test kernel creation failed: {error}"),
+        };
+        let owner = task_context(&kernel, "owner-task", "encoding-owner-token");
+        let artifact = match kernel.artifact_ingest.ingest(
+            &owner,
+            &Default::default(),
+            b"walk me through this repository",
+        ) {
+            Ok(artifact) => artifact,
+            Err(error) => panic!("artifact ingest failed: {error}"),
+        };
+        assert!(artifact.sha256.starts_with("sha256:"));
+        let bare = &artifact.sha256["sha256:".len()..];
+
+        // The canonical read still returns the bytes.
+        match kernel.artifact_ingest.get(&owner, &artifact.sha256) {
+            Ok(bytes) => assert_eq!(bytes, b"walk me through this repository"),
+            Err(error) => panic!("canonical artifact read failed: {error}"),
+        }
+        match kernel.artifact_ingest.metadata(&owner, &artifact.sha256) {
+            Ok(record) => assert_eq!(record.sha256, artifact.sha256),
+            Err(error) => panic!("canonical artifact metadata read failed: {error}"),
+        }
+
+        // The bare-hex read is a caller error, never an internal one.
+        for outcome in [
+            kernel.artifact_ingest.get(&owner, bare).err(),
+            kernel.artifact_ingest.metadata(&owner, bare).err(),
+        ] {
+            let error = match outcome {
+                Some(error) => error,
+                None => panic!("a non-canonical artifact hash was accepted"),
+            };
+            assert_ne!(
+                error.code(),
+                ErrorCode::Internal,
+                "caller encoding errors must not be reported as Internal: {error}"
+            );
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
+        }
     }
 
     #[test]

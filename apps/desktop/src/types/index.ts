@@ -193,15 +193,56 @@ export type TaskDomainStatus =
 
 export type TaskPhase = string;
 
+/**
+ * The workspace paths a task's contract authorizes. The control plane checks
+ * every kernel capability request against these, and the initial contract
+ * sets `mayExpandScope: false` — so a task created without a scope can never
+ * touch its workspace at all.
+ */
+export interface TaskAllowedScope {
+  read_paths: string[];
+  write_paths: string[];
+  external_systems: string[];
+}
+
 export interface TaskContract {
   version: number;
   objective: string;
   non_goals: string[];
-  allowed_scope: {
-    read_paths: string[];
-    write_paths: string[];
-    external_systems: string[];
-  };
+  allowed_scope: TaskAllowedScope;
+}
+
+/**
+ * The turn a client would interrupt to stop work without ending the task.
+ * Present only on the task detail route; list responses omit it.
+ */
+export interface TaskActiveTurn {
+  id: string;
+  sequence: number;
+  state: string;
+  started_at: string | null;
+}
+
+/**
+ * What this task has spent and how much room is left.
+ *
+ * Token and cost counters arrive as decimal strings because they exceed the
+ * safe integer range in the general case; they are parsed at the presentation
+ * boundary, not here.
+ */
+export interface TaskBudgetLedger {
+  steps_used: number;
+  max_steps: number;
+  tokens_used: string;
+  input_tokens: string;
+  output_tokens: string;
+  reasoning_tokens: string;
+  cached_input_tokens: string;
+  max_tokens: string | null;
+  cost_micros: string;
+  max_cost_micros: string | null;
+  /** Tokens still available in the model's context window, when known. */
+  context_headroom_tokens: string | null;
 }
 
 export interface Task {
@@ -217,6 +258,14 @@ export interface Task {
   completed_at: string | null;
   terminal_reason: Record<string, unknown> | null;
   contract: TaskContract | null;
+  /**
+   * `null` means the response reported no running turn; `undefined` means the
+   * response does not carry the field at all. The list route omits both of
+   * these, so the distinction is what keeps a list refresh from blanking what
+   * the detail route already established.
+   */
+  active_turn?: TaskActiveTurn | null;
+  budget_ledger?: TaskBudgetLedger | null;
 }
 
 export interface TaskListResponse {
@@ -372,6 +421,42 @@ export interface ArtifactSummary {
   size_bytes: number | null;
 }
 
+/**
+ * One page of a task's durable transcript.
+ *
+ * `events` carry the same `{id, event, data}` shape as the live SSE stream, so
+ * the same decoder serves replay and tail. The default page is the *tail* of
+ * the conversation, because that is where a reader starts; `earlier_cursor`
+ * walks backwards from there.
+ */
+export interface TaskTranscriptPage {
+  task_id: string;
+  events: TerminusSseEvent[];
+  total: number;
+  /** Attach the live stream here so replay and tail meet exactly once. */
+  next_cursor: string | null;
+  /** Request the preceding page with this; null once the start is reached. */
+  earlier_cursor: string | null;
+  truncation: { occurred: boolean; continuation: string | null };
+}
+
+/**
+ * The task's working tree against HEAD, produced by the kernel running git in
+ * the workspace (GET /v1/tasks/:id/diff). This is what the agent actually
+ * changed — as opposed to patch text scraped out of tool events, which is only
+ * what it *said* it changed, and only for the events still in the window.
+ */
+export interface TaskWorkspaceDiff {
+  task_id: string;
+  workspace_id: string;
+  /** False when the workspace is not a git repository; `diff` is then empty. */
+  git_available: boolean;
+  diff: string;
+  diff_truncated: boolean;
+  untracked_files: string[];
+  exit_code: number;
+}
+
 export interface TaskArtifactsPage {
   task_id: string;
   artifacts: ArtifactSummary[];
@@ -406,19 +491,13 @@ export interface EventEnvelope {
 // ────────────────────────── UI-facing status ───────────────────────────────
 
 /**
- * Per SPEC §7.2 — the eight minimal semantic task states used by the UI.
- * `unknown` covers statuses we don't recognize yet (defensive).
+ * The UI-facing task vocabulary now lives in `lib/task-lifecycle.ts` as
+ * `TaskLifecycle`, shared by the sidebar, the board, the palette and the title
+ * bar. It used to be duplicated here as `TaskStatusKind` under a citation of
+ * "SPEC §7.2", which is in fact "Core primitives" and defines no task states;
+ * the normative domain state machine is SPEC §28.3 and that is what
+ * `lifecycleFromDomainStatus()` reads.
  */
-export type TaskStatusKind =
-  | "working"
-  | "queued"
-  | "waiting"
-  | "needs_approval"
-  | "needs_review"
-  | "failed"
-  | "interrupted"
-  | "done"
-  | "unknown";
 
 // ────────────────────────── Composer ───────────────────────────────────────
 
@@ -456,7 +535,10 @@ export interface ConversationMessage {
 export type ReasoningPhaseKind =
   | "context_compiling"
   | "provider_running"
+  | "tool_settlement"
   | "response_validating"
+  | "verifying"
+  | "repairing"
   | "finalizing";
 
 export interface ReasoningPhase {
@@ -471,6 +553,12 @@ export interface ReasoningBlock {
   startedAt: string;
   /** Null while the turn is still running. */
   endedAt: string | null;
+  /**
+   * The model's own reasoning, when the provider returned any and the turn
+   * settled with it. Never synthesised — absent means the provider reported
+   * none, not that the UI dropped it.
+   */
+  text?: string;
 }
 
 export type ActivityBlockStatus =

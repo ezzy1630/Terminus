@@ -53,6 +53,21 @@ const TERMINUS_API_BASE = requireLocalOrigin(
 );
 const PLATFORM = process.platform;
 
+/**
+ * Which root the shared renderer bundle should mount.
+ *
+ * Carried as a launch argument rather than in the URL: the packaged
+ * `terminus://` protocol handler refuses an entry URL with a query or a
+ * fragment, and relaxing that to pass a view name would be a poor trade.
+ */
+function launchArgument(prefix: string): string | undefined {
+  return process.argv.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
+}
+
+const RENDERER_VIEW = launchArgument("--terminus-view=") === "settings" ? "settings" : "main";
+/** Whether this window is backed by a vibrant material the renderer may paint over. */
+const RENDERER_VIBRANCY = launchArgument("--terminus-vibrancy=") === "on";
+
 type WindowBounds = { x: number; y: number; width: number; height: number };
 type DesktopCommandId =
   | "command-palette"
@@ -70,10 +85,27 @@ contextBridge.exposeInMainWorld("terminusDesktop", {
   apiBase: TERMINUS_API_BASE,
   platform: PLATFORM,
   isMac: PLATFORM === "darwin",
+  view: RENDERER_VIEW,
+  vibrancy: RENDERER_VIBRANCY,
   // Native notification bridge (SPEC §5: "Use native notifications only when
-  // the app is unfocused or a task requires attention")
-  notify: (title: string, body: string): Promise<unknown> =>
-    ipcRenderer.invoke("notify", { title, body }),
+  // the app is unfocused or a task requires attention"). `taskId` makes the
+  // notification actionable: clicking it raises the window on that task.
+  notify: (title: string, body: string, taskId?: string): Promise<unknown> =>
+    ipcRenderer.invoke("notify", { title, body, taskId }),
+  openSettings: (category?: string): Promise<unknown> =>
+    ipcRenderer.invoke("desktop:openSettings", category),
+  setAttentionCount: (count: number): Promise<unknown> =>
+    ipcRenderer.invoke("desktop:setAttentionCount", count),
+  onOpenTask: (callback: (taskId: string) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, taskId: string): void => callback(taskId);
+    ipcRenderer.on("terminus:open-task", listener);
+    return () => ipcRenderer.removeListener("terminus:open-task", listener);
+  },
+  onSettingsCategory: (callback: (category: string) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, category: string): void => callback(category);
+    ipcRenderer.on("terminus:settings-category", listener);
+    return () => ipcRenderer.removeListener("terminus:settings-category", listener);
+  },
   // Window controls
   windowMinimize: (): Promise<unknown> => ipcRenderer.invoke("window:minimize"),
   windowMaximize: (): Promise<unknown> => ipcRenderer.invoke("window:maximize"),
