@@ -3,6 +3,7 @@ import { CodingTurnEngine } from "./coding-turn-engine.js";
 import { PolicyDeniedError } from "@terminus/domain";
 import type { ProviderToolCallChunk } from "@terminus/provider-core";
 import type { OperationObservation } from "./loop-contracts.js";
+import type { OperationEffectMetadata } from "./turn-budget.js";
 
 function toolCall(id: string, toolName: string): ProviderToolCallChunk {
   return {
@@ -15,6 +16,7 @@ function toolCall(id: string, toolName: string): ProviderToolCallChunk {
 interface HarnessOptions {
   readonly responses: ReadonlyArray<{ text?: string; calls?: ReadonlyArray<ProviderToolCallChunk> }>;
   readonly sideEffectClassOf?: (toolName: string) => string;
+  readonly effectMetadataOf?: (call: ProviderToolCallChunk) => OperationEffectMetadata;
   readonly failOnCallIds?: readonly string[];
   readonly afterToolsSettled?: () => Promise<void>;
   readonly onOperationObserved?: (observation: OperationObservation) => void | Promise<void>;
@@ -42,6 +44,7 @@ async function runHarness(options: HarnessOptions) {
       return () => `attempt-${(n += 1)}`;
     })(),
     sideEffectClassOf: options.sideEffectClassOf ?? ((name) => (name === "read" ? "read" : "workspace_write")),
+    ...(options.effectMetadataOf === undefined ? {} : { effectMetadataOf: options.effectMetadataOf }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     compileContext: async () => ({
       rendered: { providerId: "test", model: "test/model" as never, request: {} as never, predictedCachedTokens: 0n as never, body: {} },
@@ -199,6 +202,44 @@ describe("CodingTurnEngine", () => {
     });
     expect(order[0]).toBe("settle:patch:w1,settle:read:r3,settle:patch:w2");
     expect(stop.kind).toBe("completion_proposal");
+  });
+
+  test("effect metadata keeps external and process-affined reads serial", async () => {
+    const trace: string[] = [];
+    const { stop } = await runHarness({
+      responses: [
+        { calls: [toolCall("r1", "read"), toolCall("p1", "exec_poll"), toolCall("r2", "read")] },
+        { text: "done" },
+      ],
+      effectMetadataOf: (call) => call.toolName === "read"
+        ? {
+            sideEffectClass: "read",
+            workspaceSnapshot: "rev-a",
+            externalNetwork: false,
+            processAffinity: null,
+            consistency: "workspace_snapshot",
+            rateLimitGroup: null,
+            cacheable: true,
+            expectedLatencyMs: 30_000,
+            expectedOutputBytes: 32 * 1_024,
+          }
+        : {
+            sideEffectClass: "read",
+            workspaceSnapshot: null,
+            externalNetwork: false,
+            processAffinity: "job-1",
+            consistency: "live",
+            rateLimitGroup: null,
+            cacheable: false,
+            expectedLatencyMs: 30_000,
+            expectedOutputBytes: 32 * 1_024,
+          },
+      onOperationObserved: (observation) => { trace.push(observation.providerCallId); },
+    });
+    expect(stop.kind).toBe("completion_proposal");
+    // r1 is the only snapshot read before the live process poll; r2 cannot
+    // be coalesced across the process-affined operation.
+    expect(trace).toEqual(["r1", "p1", "r2"]);
   });
 
   test("budget exhaustion is reported, not thrown", async () => {

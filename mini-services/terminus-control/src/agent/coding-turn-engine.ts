@@ -12,7 +12,12 @@ import {
   type OperationObservation,
   type OperationStatus,
 } from "./loop-contracts.js";
-import { planToolBatches, TurnBudget, type TurnBudgetOptions } from "./turn-budget.js";
+import {
+  planToolExecution,
+  TurnBudget,
+  type OperationEffectMetadata,
+  type TurnBudgetOptions,
+} from "./turn-budget.js";
 
 /**
  * CodingTurnEngine (deep-audit Rank 1 / PR1 skeleton extraction).
@@ -103,6 +108,14 @@ export interface EngineDependencies {
   readonly afterToolsSettled?: () => Promise<void>;
   /** Classify a tool name's side-effect class ("read" = parallel-safe). */
   readonly sideEffectClassOf: (toolName: string) => string;
+  /**
+   * Return the complete effect contract for one call. When supplied, this
+   * governs batching and observation mutation classification; the legacy
+   * sideEffectClassOf callback remains required for compatibility.
+   */
+  readonly effectMetadataOf?: (
+    call: ProviderToolCallChunk,
+  ) => OperationEffectMetadata;
   /** Generate an opaque unique id for attempts. */
   readonly newId: () => string;
   readonly budget?: TurnBudgetOptions;
@@ -153,6 +166,12 @@ export interface CompletionClaim {
 export type CompletionSignal =
   | { readonly kind: "assistant_message" }
   | { readonly kind: "completion_proposal"; readonly claims: readonly CompletionClaim[] };
+
+interface ToolSettlementObservation {
+  readonly observation: OperationObservation;
+  readonly failed: boolean;
+  readonly error: unknown;
+}
 
 export interface CompletionProposal {
   readonly status: "PROPOSED";
@@ -308,60 +327,62 @@ export class CodingTurnEngine {
         this.consecutiveIdenticalCalls = 1;
       }
 
-      const isReadOnly = (call: ProviderToolCallChunk): boolean =>
-        this.dependencies.sideEffectClassOf(call.toolName) === "read";
-      const batches = planToolBatches(toolCalls, isReadOnly);
+      const effectMetadataOf = (call: ProviderToolCallChunk): OperationEffectMetadata =>
+        this.dependencies.effectMetadataOf?.(call) ?? {
+          sideEffectClass: this.dependencies.sideEffectClassOf(call.toolName),
+          workspaceSnapshot: this.dependencies.sideEffectClassOf(call.toolName) === "read"
+            ? "legacy-read"
+            : null,
+          externalNetwork: false,
+          processAffinity: null,
+          consistency: this.dependencies.sideEffectClassOf(call.toolName) === "read"
+            ? "workspace_snapshot"
+            : "live",
+          rateLimitGroup: null,
+          cacheable: this.dependencies.sideEffectClassOf(call.toolName) === "read",
+          expectedLatencyMs: this.dependencies.sideEffectClassOf(call.toolName) === "read" ? 250 : 30_000,
+          expectedOutputBytes: 32 * 1_024,
+        };
+      const batches = planToolExecution(toolCalls, effectMetadataOf);
       let operationIndex = 0;
       for (const batch of batches) {
         if (this.dependencies.signal?.aborted) {
           return { kind: "interrupted" };
         }
-        const allReadOnly = batch.every(isReadOnly);
-        try {
-          if (allReadOnly && batch.length > 1) {
-            // Concurrent reads, deterministic result order.
-            await Promise.all(
-              batch.map((call) =>
-                this.settleAndObserveToolCall({
-                  call,
-                  attemptNumber,
-                  attemptId,
-                }),
-              ),
-            );
-          } else {
-            for (const call of batch) {
-              await this.settleAndObserveToolCall({
+        const outcomes: ToolSettlementObservation[] = [];
+        if (batch.parallel && batch.calls.length > 1) {
+          // Settle concurrently, but record observations in provider order.
+          // This keeps the durable stagnation/recovery sequence deterministic
+          // even when one read returns faster than another.
+          outcomes.push(...await Promise.all(
+            batch.calls.map((call) =>
+              this.settleToolCallObservation({
                 call,
                 attemptNumber,
                 attemptId,
-              });
-            }
+              }),
+            ),
+          ));
+        } else {
+          for (const call of batch.calls) {
+            const outcome = await this.settleToolCallObservation({
+              call,
+              attemptNumber,
+              attemptId,
+            });
+            outcomes.push(outcome);
+            // A serial failure stops subsequent calls in provider order.
+            if (outcome.failed) break;
           }
-        } catch (error: unknown) {
-          const classified = classifyLoopError(error);
-          if (classified.kind === "policy_denied") {
-            await this.dependencies.onPolicyDenied?.(classified.envelope.message);
-            return { kind: "policy_stop", error: classified.envelope };
-          }
-          if (classified.kind === "budget_exhausted") {
-            return {
-              kind: "budget_stop",
-              reason: classified.envelope.code,
-              ledger: this.budget.ledger,
-            };
-          }
-          if (classified.kind === "needs_user_input") {
-            return {
-              kind: "needs_user_input",
-              question: classified.envelope.message,
-              error: classified.envelope,
-            };
-          }
-          if (classified.kind === "cancelled") return { kind: "interrupted" };
-          throw error;
         }
-        operationIndex += batch.length;
+        for (const outcome of outcomes) {
+          await this.observeOperation(outcome.observation);
+          if (!outcome.failed) continue;
+          const stop = await this.stopForToolError(outcome.error);
+          if (stop !== null) return stop;
+          throw outcome.error;
+        }
+        operationIndex += batch.calls.length;
       }
       if (operationIndex !== toolCalls.length) {
         return {
@@ -408,65 +429,101 @@ export class CodingTurnEngine {
     throw error;
   }
 
-  private async settleAndObserveToolCall(input: {
+  private async stopForToolError(error: unknown): Promise<EngineStop | null> {
+    const classified = classifyLoopError(error);
+    if (classified.kind === "policy_denied") {
+      await this.dependencies.onPolicyDenied?.(classified.envelope.message);
+      return { kind: "policy_stop", error: classified.envelope };
+    }
+    if (classified.kind === "budget_exhausted") {
+      return {
+        kind: "budget_stop",
+        reason: classified.envelope.code,
+        ledger: this.budget.ledger,
+      };
+    }
+    if (classified.kind === "needs_user_input") {
+      return {
+        kind: "needs_user_input",
+        question: classified.envelope.message,
+        error: classified.envelope,
+      };
+    }
+    if (classified.kind === "cancelled") return { kind: "interrupted" };
+    return null;
+  }
+
+  private async settleToolCallObservation(input: {
     readonly call: ProviderToolCallChunk;
     readonly attemptNumber: number;
     readonly attemptId: string;
-  }): Promise<void> {
-    let settlement: EngineToolSettlement | void;
+  }): Promise<ToolSettlementObservation> {
     try {
-      settlement = await this.dependencies.settleToolCall(input);
+      const settlement = await this.dependencies.settleToolCall(input);
+      const metadata = this.dependencies.operationContext?.(input);
+      const settlementRecord = settlement ?? null;
+      return {
+        failed: false,
+        error: undefined,
+        observation: buildOperationObservation({
+          taskId: this.dependencies.taskId,
+          contractVersion: this.dependencies.contractVersion,
+          attemptId: input.attemptId,
+          attemptNumber: input.attemptNumber,
+          providerCallId: input.call.toolCallId,
+          toolId: input.call.toolName,
+          toolVersion: metadata?.toolVersion ?? null,
+          status: settlementRecord?.status ?? "success",
+          resultHash: settlementRecord?.resultHash ?? null,
+          errorCode: settlementRecord?.errorCode ?? null,
+          errorClass: settlementRecord?.errorClass ?? null,
+          mutatesWorkspace: this.operationMutatesWorkspace(input.call),
+          workspaceRevisionBefore: settlementRecord?.workspaceRevisionBefore ?? metadata?.workspaceRevisionBefore ?? null,
+          workspaceRevisionAfter: settlementRecord?.workspaceRevisionAfter ?? metadata?.workspaceRevisionAfter ?? null,
+          verificationDelta: settlementRecord?.verificationDelta ?? metadata?.verificationDelta ?? null,
+          hypothesisId: settlementRecord?.hypothesisId ?? metadata?.hypothesisId ?? null,
+          criterionIds: settlementRecord?.criterionIds ?? metadata?.criterionIds,
+          objectiveStep: settlementRecord?.objectiveStep ?? metadata?.objectiveStep ?? null,
+          arguments: input.call.arguments,
+        }),
+      };
     } catch (error: unknown) {
       const classified = classifyLoopError(error);
       const metadata = this.dependencies.operationContext?.(input);
-      const observation = buildOperationObservation({
-        taskId: this.dependencies.taskId,
-        contractVersion: this.dependencies.contractVersion,
-        attemptId: input.attemptId,
-        attemptNumber: input.attemptNumber,
-        providerCallId: input.call.toolCallId,
-        toolId: input.call.toolName,
-        toolVersion: metadata?.toolVersion ?? null,
-        status: classified.kind === "policy_denied" ? "denied" : classified.kind === "budget_exhausted" ? "error" : "error",
-        errorCode: classified.envelope.code,
-        errorClass: classified.envelope.category,
-        mutatesWorkspace: this.dependencies.sideEffectClassOf(input.call.toolName) !== "read",
-        workspaceRevisionBefore: metadata?.workspaceRevisionBefore ?? null,
-        workspaceRevisionAfter: metadata?.workspaceRevisionAfter ?? null,
-        verificationDelta: metadata?.verificationDelta ?? null,
-        hypothesisId: metadata?.hypothesisId ?? null,
-        criterionIds: metadata?.criterionIds,
-        objectiveStep: metadata?.objectiveStep ?? null,
-        arguments: input.call.arguments,
-      });
-      this.budget.recordObservation(observation);
-      await this.dependencies.onOperationObserved?.(observation);
-      throw error;
+      return {
+        failed: true,
+        error,
+        observation: buildOperationObservation({
+          taskId: this.dependencies.taskId,
+          contractVersion: this.dependencies.contractVersion,
+          attemptId: input.attemptId,
+          attemptNumber: input.attemptNumber,
+          providerCallId: input.call.toolCallId,
+          toolId: input.call.toolName,
+          toolVersion: metadata?.toolVersion ?? null,
+          status: classified.kind === "policy_denied" ? "denied" : "error",
+          errorCode: classified.envelope.code,
+          errorClass: classified.envelope.category,
+          mutatesWorkspace: this.operationMutatesWorkspace(input.call),
+          workspaceRevisionBefore: metadata?.workspaceRevisionBefore ?? null,
+          workspaceRevisionAfter: metadata?.workspaceRevisionAfter ?? null,
+          verificationDelta: metadata?.verificationDelta ?? null,
+          hypothesisId: metadata?.hypothesisId ?? null,
+          criterionIds: metadata?.criterionIds,
+          objectiveStep: metadata?.objectiveStep ?? null,
+          arguments: input.call.arguments,
+        }),
+      };
     }
-    const metadata = this.dependencies.operationContext?.(input);
-    const settlementRecord = settlement ?? null;
-    const observation = buildOperationObservation({
-      taskId: this.dependencies.taskId,
-      contractVersion: this.dependencies.contractVersion,
-      attemptId: input.attemptId,
-      attemptNumber: input.attemptNumber,
-      providerCallId: input.call.toolCallId,
-      toolId: input.call.toolName,
-      toolVersion: metadata?.toolVersion ?? null,
-      status: settlementRecord?.status ?? "success",
-      resultHash: settlementRecord?.resultHash ?? null,
-      errorCode: settlementRecord?.errorCode ?? null,
-      errorClass: settlementRecord?.errorClass ?? null,
-      mutatesWorkspace: this.dependencies.sideEffectClassOf(input.call.toolName) !== "read",
-      workspaceRevisionBefore: settlementRecord?.workspaceRevisionBefore ?? metadata?.workspaceRevisionBefore ?? null,
-      workspaceRevisionAfter: settlementRecord?.workspaceRevisionAfter ?? metadata?.workspaceRevisionAfter ?? null,
-      verificationDelta: settlementRecord?.verificationDelta ?? metadata?.verificationDelta ?? null,
-      hypothesisId: settlementRecord?.hypothesisId ?? metadata?.hypothesisId ?? null,
-      criterionIds: settlementRecord?.criterionIds ?? metadata?.criterionIds,
-      objectiveStep: settlementRecord?.objectiveStep ?? metadata?.objectiveStep ?? null,
-      arguments: input.call.arguments,
-    });
+  }
+
+  private async observeOperation(observation: OperationObservation): Promise<void> {
     this.budget.recordObservation(observation);
     await this.dependencies.onOperationObserved?.(observation);
+  }
+
+  private operationMutatesWorkspace(call: ProviderToolCallChunk): boolean {
+    const metadata = this.dependencies.effectMetadataOf?.(call);
+    return (metadata?.sideEffectClass ?? this.dependencies.sideEffectClassOf(call.toolName)) !== "read";
   }
 }

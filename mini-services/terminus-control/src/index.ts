@@ -98,7 +98,9 @@ import {
 import { KernelGatewayClient } from "./gateway-kernel-client.js";
 import {
   MAX_TOOL_MODEL_RESULT_BYTES,
+  STANDALONE_TOOL_CAPABILITY_CARDS,
   STANDALONE_TOOL_SCHEMAS,
+  selectStandaloneToolSchemas,
   ObservedSourceTracker,
   executeStandaloneTool,
   normalizedToolOperationHash,
@@ -10233,34 +10235,41 @@ function ledgerProgressJson(progress: OperationProgressAnalysis | null): string 
   return progress === null ? null : canonicalJson(progress);
 }
 
+function turnBudgetLedgerData(
+  ledger: BudgetLedgerSnapshot,
+  contextBudgetJson?: string | null,
+) {
+  return {
+    schemaVersion: TURN_BUDGET_LEDGER_VERSION,
+    stepsUsed: ledger.stepsUsed,
+    maxSteps: ledger.maxSteps,
+    hardMaxSteps: ledger.hardMaxSteps,
+    tokensUsed: ledger.tokensUsed,
+    inputTokens: ledger.usage.inputTokens,
+    cachedInputTokens: ledger.usage.cachedInputTokens,
+    cacheWriteTokens: ledger.usage.cacheWriteTokens,
+    outputTokens: ledger.usage.outputTokens,
+    reasoningTokens: ledger.usage.reasoningTokens,
+    toolSchemaTokens: ledger.usage.toolSchemaTokens,
+    maxTokens: ledger.maxTokens,
+    costMicros: ledger.costMicros,
+    maxCostMicros: ledger.maxCostMicros,
+    contextHeadroomTokens: ledger.contextHeadroomTokens,
+    finalVerificationReserveTokens: ledger.finalVerificationReserveTokens,
+    finalVerificationReserveCostMicros: ledger.finalVerificationReserveCostMicros,
+    contextBudgetJson: contextBudgetJson ?? null,
+    evidenceJson: canonicalJson(ledger.evidence),
+    lastProgressJson: ledgerProgressJson(ledger.lastProgress),
+  };
+}
+
 async function persistTurnBudgetLedger(
   turnId: string,
   ledger: BudgetLedgerSnapshot,
   contextBudgetJson?: string | null,
 ): Promise<void> {
   await writerTransaction(async (tx) => {
-    const data = {
-      schemaVersion: TURN_BUDGET_LEDGER_VERSION,
-      stepsUsed: ledger.stepsUsed,
-      maxSteps: ledger.maxSteps,
-      hardMaxSteps: ledger.hardMaxSteps,
-      tokensUsed: ledger.tokensUsed,
-      inputTokens: ledger.usage.inputTokens,
-      cachedInputTokens: ledger.usage.cachedInputTokens,
-      cacheWriteTokens: ledger.usage.cacheWriteTokens,
-      outputTokens: ledger.usage.outputTokens,
-      reasoningTokens: ledger.usage.reasoningTokens,
-      toolSchemaTokens: ledger.usage.toolSchemaTokens,
-      maxTokens: ledger.maxTokens,
-      costMicros: ledger.costMicros,
-      maxCostMicros: ledger.maxCostMicros,
-      contextHeadroomTokens: ledger.contextHeadroomTokens,
-      finalVerificationReserveTokens: ledger.finalVerificationReserveTokens,
-      finalVerificationReserveCostMicros: ledger.finalVerificationReserveCostMicros,
-      contextBudgetJson: contextBudgetJson ?? null,
-      evidenceJson: canonicalJson(ledger.evidence),
-      lastProgressJson: ledgerProgressJson(ledger.lastProgress),
-    };
+    const data = turnBudgetLedgerData(ledger, contextBudgetJson);
     await tx.turnBudgetLedger.upsert({
       where: { turnId },
       create: { id: uuid(), turnId, ...data },
@@ -10274,6 +10283,15 @@ async function persistOperationObservation(
   observation: OperationObservation,
   progress: OperationProgressAnalysis | null,
 ): Promise<void> {
+  await writerTransaction((tx) => persistOperationObservationInTransaction(tx, turnId, observation, progress));
+}
+
+async function persistOperationObservationInTransaction(
+  tx: Prisma.TransactionClient,
+  turnId: string,
+  observation: OperationObservation,
+  progress: OperationProgressAnalysis | null,
+): Promise<void> {
   const analysis = progress ?? {
     progressed: false,
     noOp: false,
@@ -10283,53 +10301,70 @@ async function persistOperationObservation(
     recommendedRecovery: ["inspect_evidence"] as const,
     reason: "new_operation" as const,
   };
-  await writerTransaction(async (tx) => {
-    await tx.operationObservation.upsert({
-      where: {
-        turnId_observationHash: {
-          turnId,
-          observationHash: observation.observationHash,
-        },
-      },
-      create: {
-        id: uuid(),
+  await tx.operationObservation.upsert({
+    where: {
+      turnId_observationHash: {
         turnId,
-        providerAttemptId: observation.attemptId,
-        schemaVersion: observation.schemaVersion,
         observationHash: observation.observationHash,
-        semanticFingerprint: observation.semanticFingerprint,
-        attemptNumber: observation.attemptNumber,
-        providerCallId: observation.providerCallId,
-        toolId: observation.toolId,
-        toolVersion: observation.toolVersion,
-        status: observation.status,
-        resultHash: observation.resultHash,
-        errorCode: observation.errorCode,
-        errorClass: observation.errorClass,
-        mutatesWorkspace: observation.mutatesWorkspace,
-        workspaceRevisionBefore: observation.workspaceRevisionBefore,
-        workspaceRevisionAfter: observation.workspaceRevisionAfter,
-        verificationDelta: observation.verificationDelta,
-        hypothesisId: observation.hypothesisId,
-        criterionIdsJson: canonicalJson(observation.criterionIds),
-        objectiveStep: observation.objectiveStep,
-        progressed: analysis.progressed,
-        noOp: analysis.noOp,
-        repeatedFailure: analysis.repeatedFailure,
-        oscillating: analysis.oscillating,
-        failureClass: analysis.failureClass,
-        progressReason: analysis.reason,
-        recommendedRecoveryJson: canonicalJson(analysis.recommendedRecovery),
       },
-      update: {
-        progressed: analysis.progressed,
-        noOp: analysis.noOp,
-        repeatedFailure: analysis.repeatedFailure,
-        oscillating: analysis.oscillating,
-        failureClass: analysis.failureClass,
-        progressReason: analysis.reason,
-        recommendedRecoveryJson: canonicalJson(analysis.recommendedRecovery),
-      },
+    },
+    create: {
+      id: uuid(),
+      turnId,
+      providerAttemptId: observation.attemptId,
+      schemaVersion: observation.schemaVersion,
+      observationHash: observation.observationHash,
+      semanticFingerprint: observation.semanticFingerprint,
+      attemptNumber: observation.attemptNumber,
+      providerCallId: observation.providerCallId,
+      toolId: observation.toolId,
+      toolVersion: observation.toolVersion,
+      status: observation.status,
+      resultHash: observation.resultHash,
+      errorCode: observation.errorCode,
+      errorClass: observation.errorClass,
+      mutatesWorkspace: observation.mutatesWorkspace,
+      workspaceRevisionBefore: observation.workspaceRevisionBefore,
+      workspaceRevisionAfter: observation.workspaceRevisionAfter,
+      verificationDelta: observation.verificationDelta,
+      hypothesisId: observation.hypothesisId,
+      criterionIdsJson: canonicalJson(observation.criterionIds),
+      objectiveStep: observation.objectiveStep,
+      progressed: analysis.progressed,
+      noOp: analysis.noOp,
+      repeatedFailure: analysis.repeatedFailure,
+      oscillating: analysis.oscillating,
+      failureClass: analysis.failureClass,
+      progressReason: analysis.reason,
+      recommendedRecoveryJson: canonicalJson(analysis.recommendedRecovery),
+    },
+    update: {
+      progressed: analysis.progressed,
+      noOp: analysis.noOp,
+      repeatedFailure: analysis.repeatedFailure,
+      oscillating: analysis.oscillating,
+      failureClass: analysis.failureClass,
+      progressReason: analysis.reason,
+      recommendedRecoveryJson: canonicalJson(analysis.recommendedRecovery),
+    },
+  });
+}
+
+/** Persist the observation and its latest ledger snapshot under one writer transaction. */
+async function persistOperationObservationAndLedger(
+  turnId: string,
+  observation: OperationObservation,
+  progress: OperationProgressAnalysis | null,
+  ledger: BudgetLedgerSnapshot,
+  contextBudgetJson?: string | null,
+): Promise<void> {
+  await writerTransaction(async (tx) => {
+    await persistOperationObservationInTransaction(tx, turnId, observation, progress);
+    const data = turnBudgetLedgerData(ledger, contextBudgetJson);
+    await tx.turnBudgetLedger.upsert({
+      where: { turnId },
+      create: { id: uuid(), turnId, ...data },
+      update: data,
     });
   });
 }
@@ -11436,7 +11471,50 @@ interface StandaloneToolSettlementInput {
   readonly contractHash: string;
   readonly artifactClient: ArtifactClient;
   readonly observedSources: ObservedSourceTracker;
+  /** Read the authoritative workspace identity around the kernel effect. */
+  readonly workspaceRevision?: (() => Promise<string | null>) | undefined;
+  /** Current verifier/repair association, if this turn has one. */
+  readonly operationContext?: (() => {
+    readonly verificationDelta?: string | null | undefined;
+    readonly hypothesisId?: string | null | undefined;
+    readonly criterionIds?: readonly string[] | undefined;
+    readonly objectiveStep?: string | null | undefined;
+  }) | undefined;
   readonly signal?: AbortSignal | null;
+}
+
+interface StandaloneOperationMetadata {
+  readonly workspaceRevisionBefore: string | null;
+  readonly workspaceRevisionAfter: string | null;
+  readonly verificationDelta: string | null;
+  readonly hypothesisId: string | null;
+  readonly criterionIds: readonly string[] | undefined;
+  readonly objectiveStep: string | null;
+}
+
+async function readStandaloneWorkspaceRevision(
+  input: StandaloneToolSettlementInput,
+): Promise<string | null> {
+  if (input.workspaceRevision === undefined) return null;
+  try {
+    return await input.workspaceRevision();
+  } catch {
+    // A missing revision is explicit evidence of unavailable identity; it is
+    // never replaced with a guessed commit or timestamp.
+    return null;
+  }
+}
+
+function standaloneOperationContext(
+  input: StandaloneToolSettlementInput,
+): Omit<StandaloneOperationMetadata, "workspaceRevisionBefore" | "workspaceRevisionAfter"> {
+  const context = input.operationContext?.();
+  return {
+    verificationDelta: context?.verificationDelta ?? null,
+    hypothesisId: context?.hypothesisId ?? null,
+    criterionIds: context?.criterionIds,
+    objectiveStep: context?.objectiveStep ?? null,
+  };
 }
 
 async function settleStandaloneProviderTool(
@@ -11444,6 +11522,8 @@ async function settleStandaloneProviderTool(
 ): Promise<EngineToolSettlement> {
   if (input.signal?.aborted === true) throw new ToolAbortedError();
   const call = parseStandaloneToolCall(input.callChunk);
+  const workspaceRevisionBefore = await readStandaloneWorkspaceRevision(input);
+  const operationContext = standaloneOperationContext(input);
   const toolCallId = uuid();
   const operationHash = normalizedToolOperationHash({
     taskId: input.taskId,
@@ -11523,6 +11603,9 @@ async function settleStandaloneProviderTool(
       callTranscriptArtifactUri: callTranscriptArtifact.uri,
       sideEffectId: null,
       result,
+      workspaceRevisionBefore,
+      workspaceRevisionAfter: workspaceRevisionBefore,
+      ...operationContext,
     });
   }
 
@@ -11575,6 +11658,9 @@ async function settleStandaloneProviderTool(
       callTranscriptArtifactUri: callTranscriptArtifact.uri,
       sideEffectId: null,
       result,
+      workspaceRevisionBefore,
+      workspaceRevisionAfter: workspaceRevisionBefore,
+      ...operationContext,
     });
   }
 
@@ -11677,6 +11763,7 @@ async function settleStandaloneProviderTool(
     };
   }
 
+  const workspaceRevisionAfter = await readStandaloneWorkspaceRevision(input);
   return persistSettledToolResult({
     input,
     call,
@@ -11684,6 +11771,9 @@ async function settleStandaloneProviderTool(
     callTranscriptArtifactUri: callTranscriptArtifact.uri,
     sideEffectId,
     result,
+    workspaceRevisionBefore,
+    workspaceRevisionAfter,
+    ...operationContext,
   });
 }
 
@@ -11738,6 +11828,12 @@ async function persistSettledToolResult(input: {
   readonly callTranscriptArtifactUri: string;
   readonly sideEffectId: string | null;
   readonly result: ToolResult<unknown>;
+  readonly workspaceRevisionBefore?: string | null | undefined;
+  readonly workspaceRevisionAfter?: string | null | undefined;
+  readonly verificationDelta?: string | null | undefined;
+  readonly hypothesisId?: string | null | undefined;
+  readonly criterionIds?: readonly string[] | undefined;
+  readonly objectiveStep?: string | null | undefined;
 }): Promise<EngineToolSettlement> {
   const fullResultText = canonicalJson(input.result);
   const fullResultArtifact = await input.input.artifactClient.ingest(
@@ -11804,6 +11900,12 @@ async function persistSettledToolResult(input: {
     resultHash: fullResultArtifact.hash,
     errorCode: status === "success" || status === "partial" ? null : `TOOL_RESULT_${status.toUpperCase()}`,
     errorClass: status === "success" || status === "partial" ? null : status,
+    workspaceRevisionBefore: input.workspaceRevisionBefore ?? null,
+    workspaceRevisionAfter: input.workspaceRevisionAfter ?? null,
+    verificationDelta: input.verificationDelta ?? null,
+    hypothesisId: input.hypothesisId ?? null,
+    criterionIds: input.criterionIds,
+    objectiveStep: input.objectiveStep ?? null,
   };
 }
 
@@ -11867,6 +11969,7 @@ async function agentLoop(turnId: string): Promise<void> {
   activeTurnAbortControllers.set(turnId, abortController);
   let turnProfile: TerminusMinimalProfile | null = null;
   let turnBaseWorkspaceRevision = "unresolved";
+  let latestHypothesisId: string | null = null;
   let turnContextBudgetJson: string | null = null;
   let activeEngine: CodingTurnEngine | null = null;
   let persistEvidenceForCurrentTurn: (
@@ -11927,6 +12030,29 @@ async function agentLoop(turnId: string): Promise<void> {
     };
 
     const workspace = turn.thread.session.workspace;
+    const operationWorkspaceRevision = async (): Promise<string | null> => {
+      try {
+        const revisionContext = await kernelTaskContext({
+          sessionId: turn.thread.sessionId,
+          taskId: task.id,
+          turnId,
+          workspaceId: workspace.id,
+          operationClasses: [CapabilityOperationProto.CAPABILITY_OPERATION_EXEC],
+          workspacePaths: leastWorkspaceScope([
+            ...contract.allowedScope.readPaths,
+            ...contract.allowedScope.writePaths,
+          ]),
+        });
+        return await resolveWorkspaceRevision(
+          requireKernelUds(),
+          revisionContext,
+          workspace.id,
+          abortController.signal,
+        );
+      } catch {
+        return null;
+      }
+    };
     try {
       const baseRevisionContext = await kernelTaskContext({
         sessionId: turn.thread.sessionId,
@@ -12166,7 +12292,16 @@ async function agentLoop(turnId: string): Promise<void> {
       : gatewayModel === null
         ? (localProviderCommand?.toolsEnabled ?? false)
         : gatewayModel.toolCalling;
-    const activeToolSchemas = toolsEnabled ? STANDALONE_TOOL_SCHEMAS : [];
+    const activatedToolCapabilities = [...new Set(
+      (process.env.TERMINUS_ACTIVE_TOOL_CAPABILITIES ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0),
+    )];
+    const activeToolSchemas = selectStandaloneToolSchemas({
+      toolsEnabled,
+      activatedCapabilities: activatedToolCapabilities,
+    });
     const selectedProfile = createTerminusMinimalProfile({
       providerId: selectedProvider.providerId,
       modelKey: String(selectedModel.modelKey),
@@ -12174,7 +12309,7 @@ async function agentLoop(turnId: string): Promise<void> {
         transport: directConfiguration !== null ? "direct" : gatewayModel === null ? "local" : "gateway",
         provider_revision: gatewayProviderConfiguration?.revision ?? providerConfiguration?.revision ?? 0,
         tools_enabled: toolsEnabled,
-        tool_schema_hash: computeContentHash(canonicalJson(activeToolSchemas.map((tool) => ({ id: tool.id, version: tool.version })))),
+        tool_schema_hash: computeContentHash(canonicalJson(activeToolSchemas)),
         context_compatibility_key: selectedProvider.continuation.compatibilityKey,
         tested_safe_tokens: selectedProvider.context.testedSafeTokens,
       },
@@ -12208,6 +12343,8 @@ async function agentLoop(turnId: string): Promise<void> {
           subagents: !selectedProfile.subagentsEnabled,
         },
         context_budget_policy: contextBudgetSelection.breakdown.policyVersion,
+        active_tool_capabilities: activatedToolCapabilities,
+        discoverable_tool_cards: STANDALONE_TOOL_CAPABILITY_CARDS,
       },
     }));
     const threadSnapshot: ThreadSnapshot = {
@@ -12257,6 +12394,18 @@ async function agentLoop(turnId: string): Promise<void> {
         contractHash: toolInput.contractHash,
         artifactClient: toolInput.artifactClient,
         observedSources,
+        workspaceRevision: operationWorkspaceRevision,
+        operationContext: () => ({
+          verificationDelta: latestFailureSelectors.length === 0 && latestDiagnostics.length === 0
+            ? null
+            : computeContentHash(canonicalJson({
+                failure_selectors: [...latestFailureSelectors].sort(),
+                diagnostics: [...latestDiagnostics].sort(),
+              })),
+          hypothesisId: latestHypothesisId,
+          criterionIds: criteriaRows.map((criterion) => criterion.criterionId),
+          objectiveStep: turn.state === "REPAIRING" ? "verification_repair" : task.phase,
+        }),
         signal: abortController.signal,
       }).then((settlement) => {
         settlementByProviderCallId.set(toolInput.call.toolCallId, settlement);
@@ -12303,6 +12452,21 @@ async function agentLoop(turnId: string): Promise<void> {
       && storedRepairBudget.attempts_used >= 0
       ? storedRepairBudget.attempts_used
       : 0;
+    const repairAttemptForTurn = turn.state === "REPAIRING"
+      ? await db.repairAttempt.findUnique({
+          where: { repairTurnId: turnId },
+          select: { remainingBudgetJson: true },
+        })
+      : null;
+    const currentRepairBudget = repairAttemptForTurn === null
+      ? null
+      : safeParse<Record<string, unknown> | null>(repairAttemptForTurn.remainingBudgetJson, null);
+    const currentHypothesisId = typeof currentRepairBudget?.hypothesis_id === "string"
+      ? currentRepairBudget.hypothesis_id
+      : typeof storedRepairBudget.hypothesis_id === "string"
+        ? storedRepairBudget.hypothesis_id
+        : null;
+    latestHypothesisId = currentHypothesisId;
     const configuredRepairRaw = process.env.TERMINUS_MAX_REPAIR_ATTEMPTS?.trim() ?? "";
     const configuredRepairParsed = configuredRepairRaw === "" ? 2 : Number.parseInt(configuredRepairRaw, 10);
     const configuredMaxRepairs = Number.isInteger(configuredRepairParsed) && configuredRepairParsed >= 0
@@ -12504,6 +12668,10 @@ async function agentLoop(turnId: string): Promise<void> {
         sections: {
           ...worldState.sections,
           ...contextState.worldStateSections,
+          tool_capabilities: {
+            active: activeToolSchemas.map((tool) => ({ id: tool.id, version: tool.version })),
+            discoverable: STANDALONE_TOOL_CAPABILITY_CARDS,
+          },
           repository_signals: {
             repository_map: repositorySignals.repositoryMap === null
               ? { availability: "temporarily_unavailable" }
@@ -13091,6 +13259,28 @@ async function agentLoop(turnId: string): Promise<void> {
       },
       newId: uuid,
       sideEffectClassOf,
+      effectMetadataOf: (call) => {
+        try {
+          return toolEffectMetadata(parseStandaloneToolCall(call));
+        } catch {
+          // Invalid calls are settled through the typed policy/argument error
+          // path. Until that path runs, keep their execution serialized.
+          return {
+            sideEffectClass: sideEffectClassOf(call.toolName),
+            workspaceSnapshot: null,
+            externalNetwork: false,
+            processAffinity: null,
+            consistency: "live" as const,
+            rateLimitGroup: null,
+            cacheable: false,
+            expectedLatencyMs: 30_000,
+            expectedOutputBytes: 32 * 1_024,
+            effectType: "EXECUTE_LOCAL" as const,
+            resourceUri: "workspace://unknown",
+            reversibility: "unknown" as const,
+          };
+        }
+      },
       signal: abortController.signal,
       taskId: task.id,
       contractVersion: contractRow.version,
@@ -13103,13 +13293,16 @@ async function agentLoop(turnId: string): Promise<void> {
         }
       },
       onOperationObserved: async (observation) => {
-        await persistOperationObservation(
-          turnId,
-          observation,
-          activeEngine?.budget.latestProgress ?? null,
-        );
         if (activeEngine !== null) {
-          await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
+          await persistOperationObservationAndLedger(
+            turnId,
+            observation,
+            activeEngine.budget.latestProgress,
+            activeEngine.budget.ledger,
+            turnContextBudgetJson,
+          );
+        } else {
+          await persistOperationObservation(turnId, observation, null);
         }
       },
       onPolicyDenied: async (message) => {
@@ -13936,6 +14129,7 @@ async function agentLoop(turnId: string): Promise<void> {
             const directive = buildRepairContext({
               failures: normalizedFailures,
               changedFiles: latestChangedFiles,
+              hypothesisId: repairDecision.hypothesisId,
               previousAttemptSummary:
                 repairDecision.attemptNumber > 1
                   ? `Repair attempt ${repairDecision.attemptNumber - 1} changed the failure set; see verification results for plan ${plan.id}.`
@@ -13965,6 +14159,7 @@ async function agentLoop(turnId: string): Promise<void> {
                 attempts_used: repairDecision.attemptNumber,
                 remaining_attempts: repairDecision.maxAttempts - repairDecision.attemptNumber,
                 failure_signatures: normalizedFailures.map((failure) => failure.signatureHash),
+                hypothesis_id: repairDecision.hypothesisId,
                 source_revision: sourceRevision,
                 environment_digest: environmentDigest,
               }),
@@ -13978,6 +14173,7 @@ async function agentLoop(turnId: string): Promise<void> {
                 phase: "REPAIR_PENDING",
                 repair_attempt: repairDecision.attemptNumber,
                 repair_attempt_id: repairAttemptId,
+                hypothesis_id: repairDecision.hypothesisId,
                 directive_artifact: directiveArtifact.uri,
               },
               artifactRefs: [directiveArtifact.uri],

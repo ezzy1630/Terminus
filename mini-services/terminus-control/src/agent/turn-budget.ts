@@ -60,6 +60,42 @@ export interface TurnBudgetDecision {
   readonly reason: BudgetStopReason | null;
 }
 
+/**
+ * Effect facts needed before a provider batch can be executed safely.
+ *
+ * `sideEffectClass` is intentionally retained as a string: provider/tool
+ * contracts may introduce a narrower class without making the loop import a
+ * provider-specific union. The remaining fields describe concurrency and
+ * cache boundaries, not the tool's user-visible result.
+ */
+export type OperationConsistency = "workspace_snapshot" | "live" | "eventual";
+
+export interface OperationEffectMetadata {
+  readonly sideEffectClass: string;
+  /** A stable snapshot identity; null means that concurrent execution is unsafe. */
+  readonly workspaceSnapshot: string | null;
+  readonly externalNetwork: boolean;
+  /** Operations sharing an affinity key must remain ordered. */
+  readonly processAffinity: string | null;
+  readonly consistency: OperationConsistency;
+  readonly rateLimitGroup: string | null;
+  readonly cacheable: boolean;
+  /** Expected wall-clock latency used by schedulers and audit readers. */
+  readonly expectedLatencyMs: number;
+  /** Expected model-visible output size before projection. */
+  readonly expectedOutputBytes: number;
+}
+
+export interface ToolExecutionBatch {
+  readonly calls: readonly ProviderToolCallChunk[];
+  readonly parallel: boolean;
+  readonly consistency: OperationConsistency | null;
+  readonly reason:
+    | "read_snapshot"
+    | "read_serial"
+    | "effect_serial";
+}
+
 interface LegacyOperationRecord {
   hash: string;
   mutatesWorkspace: boolean;
@@ -153,32 +189,78 @@ export function toolCallIsReadOnly(
 export function planToolBatches(
   calls: readonly ProviderToolCallChunk[],
   isReadOnly: (call: ProviderToolCallChunk) => boolean,
+  effectMetadataOf?: (call: ProviderToolCallChunk) => OperationEffectMetadata,
 ): ReadonlyArray<ReadonlyArray<ProviderToolCallChunk>> {
-  const batches: ProviderToolCallChunk[][] = [];
-  let pendingWrites: ProviderToolCallChunk[] = [];
-  const flushWrites = (): void => {
-    if (pendingWrites.length > 0) {
-      // Writes execute one at a time, in provider order.
-      for (const write of pendingWrites) batches.push([write]);
-      pendingWrites = [];
-    }
+  return planToolExecution(calls, (call) => {
+    if (effectMetadataOf !== undefined) return effectMetadataOf(call);
+    return {
+      sideEffectClass: isReadOnly(call) ? "read" : "effect",
+      // The legacy callback carries no snapshot identity. Preserve the old
+      // behaviour for pure reads while keeping effects serial.
+      workspaceSnapshot: isReadOnly(call) ? "legacy-read" : null,
+      externalNetwork: false,
+      processAffinity: null,
+      consistency: isReadOnly(call) ? "workspace_snapshot" : "live",
+      rateLimitGroup: null,
+      cacheable: isReadOnly(call),
+      expectedLatencyMs: isReadOnly(call) ? 250 : 30_000,
+      expectedOutputBytes: 32 * 1_024,
+    };
+  }).map((batch) => batch.calls);
+}
+
+/**
+ * Produce an auditable execution plan. Parallelism is granted only to a
+ * contiguous group of pure reads against one known snapshot. All other calls
+ * are serialized in provider order, which is the safe default for unknown
+ * process, network, and consistency semantics.
+ */
+export function planToolExecution(
+  calls: readonly ProviderToolCallChunk[],
+  effectMetadataOf: (call: ProviderToolCallChunk) => OperationEffectMetadata,
+): readonly ToolExecutionBatch[] {
+  const batches: ToolExecutionBatch[] = [];
+  let pendingReads: { call: ProviderToolCallChunk; metadata: OperationEffectMetadata }[] = [];
+  const flushReads = (): void => {
+    if (pendingReads.length === 0) return;
+    const first = pendingReads[0]!.metadata;
+    const parallel = pendingReads.length > 1;
+    batches.push({
+      calls: pendingReads.map(({ call }) => call),
+      parallel,
+      consistency: first.consistency,
+      reason: parallel ? "read_snapshot" : "read_serial",
+    });
+    pendingReads = [];
   };
   for (const call of calls) {
-    if (isReadOnly(call)) {
-      flushWrites();
+    const metadata = effectMetadataOf(call);
+    const canShareSnapshot = metadata.sideEffectClass === "read"
+      && metadata.workspaceSnapshot !== null
+      && !metadata.externalNetwork
+      && metadata.processAffinity === null
+      && metadata.consistency === "workspace_snapshot";
+    if (canShareSnapshot) {
+      const previous = pendingReads[0]?.metadata;
       if (
-        batches.length === 0 ||
-        !batches[batches.length - 1]?.every((c) => isReadOnly(c))
+        previous !== undefined
+        && (previous.workspaceSnapshot !== metadata.workspaceSnapshot
+          || previous.consistency !== metadata.consistency)
       ) {
-        batches.push([call]);
-      } else {
-        batches[batches.length - 1]!.push(call);
+        flushReads();
       }
-    } else {
-      pendingWrites.push(call);
+      pendingReads.push({ call, metadata });
+      continue;
     }
+    flushReads();
+    batches.push({
+      calls: [call],
+      parallel: false,
+      consistency: metadata.consistency,
+      reason: "effect_serial",
+    });
   }
-  flushWrites();
+  flushReads();
   return batches;
 }
 
@@ -289,8 +371,8 @@ export class TurnBudget {
     const previous = this.observationHistory[this.observationHistory.length - 1] ?? null;
     const workspaceChanged = observation.workspaceRevisionBefore !== observation.workspaceRevisionAfter
       && (observation.workspaceRevisionBefore !== null || observation.workspaceRevisionAfter !== null);
-    const verificationChanged = observation.verificationDelta !== null
-      && observation.verificationDelta !== previous?.verificationDelta;
+    const verificationChanged = previous !== null
+      && observation.verificationDelta !== previous.verificationDelta;
     const resultChanged = previous !== null && observation.resultHash !== previous.resultHash;
     const sameSemantic = previous !== null
       && observation.semanticFingerprint === previous.semanticFingerprint;

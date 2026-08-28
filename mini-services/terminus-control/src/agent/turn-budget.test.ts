@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   HARD_MAX_STEPS,
+  planToolExecution,
   TurnBudget,
   planToolBatches,
 } from "./turn-budget.js";
@@ -73,6 +74,48 @@ describe("planToolBatches", () => {
 
   test("empty response produces no batches", () => {
     expect(planToolBatches([], isRead)).toEqual([]);
+  });
+
+  test("only same-snapshot pure reads share a parallel batch", () => {
+    const metadata = (c: ProviderToolCallChunk) => ({
+      sideEffectClass: c.toolName === "read" ? "read" : "external",
+      workspaceSnapshot: c.toolName === "read" ? "rev-a" : null,
+      externalNetwork: c.toolName !== "read",
+      processAffinity: null,
+      consistency: c.toolName === "read" ? "workspace_snapshot" as const : "live" as const,
+      rateLimitGroup: c.toolName === "web_fetch" ? "web-fetch" : null,
+      cacheable: c.toolName === "read",
+      expectedLatencyMs: c.toolName === "read" ? 250 : 30_000,
+      expectedOutputBytes: 32 * 1_024,
+    });
+    const batches = planToolExecution(
+      [call("1", "read"), call("2", "read"), call("3", "web_fetch"), call("4", "read")],
+      metadata,
+    );
+    expect(batches.map((batch) => ({ ids: batch.calls.map((c) => c.toolCallId), parallel: batch.parallel }))).toEqual([
+      { ids: ["1", "2"], parallel: true },
+      { ids: ["3"], parallel: false },
+      { ids: ["4"], parallel: false },
+    ]);
+  });
+
+  test("process-affined and live reads stay ordered", () => {
+    const batches = planToolExecution(
+      [call("1", "exec_poll"), call("2", "exec_poll")],
+      () => ({
+        sideEffectClass: "read",
+        workspaceSnapshot: null,
+        externalNetwork: false,
+        processAffinity: "job-1",
+        consistency: "live",
+        rateLimitGroup: null,
+        cacheable: false,
+        expectedLatencyMs: 30_000,
+        expectedOutputBytes: 32 * 1_024,
+      }),
+    );
+    expect(batches.map((batch) => batch.calls.map((c) => c.toolCallId))).toEqual([["1"], ["2"]]);
+    expect(batches.every((batch) => !batch.parallel && batch.reason === "effect_serial")).toBe(true);
   });
 });
 

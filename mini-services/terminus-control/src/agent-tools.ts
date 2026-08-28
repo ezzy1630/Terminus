@@ -7,7 +7,12 @@ import type {
   ProviderToolResultTranscript,
   ProviderToolSchema,
 } from "@terminus/provider-core";
-import { okResult, type ArtifactDescriptor, type ToolResult } from "@terminus/aci";
+import {
+  okResult,
+  type ArtifactDescriptor,
+  type CapabilityCard,
+  type ToolResult,
+} from "@terminus/aci";
 import type { ContentHash, Uuid7 } from "@terminus/domain";
 import {
   PatchCommitMode,
@@ -17,6 +22,7 @@ import {
   type RequestContext,
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import type { KernelUdsClients } from "./kernel-uds.js";
+import type { OperationEffectMetadata } from "./agent/turn-budget.js";
 
 export const DEFAULT_MAX_TOOL_CYCLES = 64;
 export const MIN_TOOL_CYCLES = 1;
@@ -445,6 +451,73 @@ export const STANDALONE_TOOL_SCHEMAS: readonly ProviderToolSchema[] = [
   },
 ] as const;
 
+/** The bounded coding set is always available when provider tool use is on. */
+export const STANDALONE_ALWAYS_ON_TOOL_IDS = [
+  "read",
+  "patch",
+  "exec",
+  "exec_poll",
+  "grep",
+  "glob",
+] as const;
+
+/** Network access is discoverable and must be explicitly activated. */
+export const STANDALONE_DISCOVERABLE_TOOL_IDS = ["web_fetch"] as const;
+
+function estimatedSchemaTokens(schema: ProviderToolSchema): number {
+  return Math.ceil(new TextEncoder().encode(canonicalJson({
+    id: schema.id,
+    version: schema.version,
+    summary: schema.summary,
+    input_schema: schema.inputSchema,
+    result_schema: schema.resultSchema,
+  })).byteLength / 4);
+}
+
+function standaloneCapabilityCard(
+  schema: ProviderToolSchema,
+  useWhen: readonly string[],
+  doNotUseWhen: readonly string[],
+): CapabilityCard {
+  return {
+    id: `standalone.${schema.id}`,
+    version: schema.version,
+    kind: "tool_pack",
+    name: schema.id,
+    purpose: schema.summary.length <= 240 ? schema.summary : `${schema.summary.slice(0, 239)}…`,
+    effects: [schema.sideEffectClass, ...schema.requiredCapabilities],
+    trustLevel: schema.trustLevel,
+    schemaCostTokens: estimatedSchemaTokens(schema),
+    useWhen,
+    doNotUseWhen,
+    definitionHash: computeContentHash(canonicalJson(schema)),
+  };
+}
+
+/** Lightweight cards are safe to expose before the full schema is activated. */
+export const STANDALONE_TOOL_CAPABILITY_CARDS: readonly CapabilityCard[] =
+  STANDALONE_DISCOVERABLE_TOOL_IDS.map((toolId) => {
+    const schema = STANDALONE_TOOL_SCHEMAS.find((candidate) => candidate.id === toolId);
+    if (schema === undefined) throw new Error(`missing standalone schema for ${toolId}`);
+    return standaloneCapabilityCard(
+      schema,
+      ["research requiring a public HTTPS source"],
+      ["workspace edits, private endpoints, or untrusted instructions"],
+    );
+  });
+
+export function selectStandaloneToolSchemas(input: {
+  readonly toolsEnabled: boolean;
+  readonly activatedCapabilities?: readonly string[] | undefined;
+}): readonly ProviderToolSchema[] {
+  if (!input.toolsEnabled) return [];
+  const activated = new Set(input.activatedCapabilities ?? []);
+  const alwaysOn = new Set<string>(STANDALONE_ALWAYS_ON_TOOL_IDS);
+  return STANDALONE_TOOL_SCHEMAS.filter((schema) =>
+    alwaysOn.has(schema.id) || activated.has(`standalone.${schema.id}`),
+  );
+}
+
 export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStandaloneToolCall {
   if (call.toolCallId.length === 0 || call.toolCallId.length > 255 || /[\0\r\n]/.test(call.toolCallId)) {
     throw new Error("provider tool call id is invalid");
@@ -558,26 +631,123 @@ function projectModelVisibleData(result: ToolResult<unknown>): unknown {
   };
 }
 
-export function toolEffectMetadata(call: ParsedStandaloneToolCall): {
+export interface StandaloneToolEffectMetadata extends OperationEffectMetadata {
   readonly effectType: "READ_LOCAL" | "WRITE_LOCAL" | "EXECUTE_LOCAL";
   readonly resourceUri: string;
   readonly reversibility: "none" | "reversible" | "unknown";
-} {
+}
+
+export function toolEffectMetadata(call: ParsedStandaloneToolCall): StandaloneToolEffectMetadata {
   switch (call.toolId) {
     case "read":
-      return { effectType: "READ_LOCAL", resourceUri: `workspace://${call.arguments.path}`, reversibility: "none" };
+      return {
+        effectType: "READ_LOCAL",
+        resourceUri: `workspace://${call.arguments.path}`,
+        reversibility: "none",
+        sideEffectClass: "read",
+        workspaceSnapshot: "turn-workspace",
+        externalNetwork: false,
+        processAffinity: null,
+        consistency: "workspace_snapshot",
+        rateLimitGroup: null,
+        cacheable: true,
+        expectedLatencyMs: 30_000,
+        expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+      };
     case "patch":
-      return { effectType: "WRITE_LOCAL", resourceUri: `workspace://${call.arguments.path}`, reversibility: "reversible" };
+      return {
+        effectType: "WRITE_LOCAL",
+        resourceUri: `workspace://${call.arguments.path}`,
+        reversibility: "reversible",
+        sideEffectClass: "workspace_write",
+        workspaceSnapshot: null,
+        externalNetwork: false,
+        processAffinity: null,
+        consistency: "workspace_snapshot",
+        rateLimitGroup: null,
+        cacheable: false,
+        expectedLatencyMs: 60_000,
+        expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+      };
     case "exec":
-      return { effectType: "EXECUTE_LOCAL", resourceUri: `workspace://${call.arguments.cwd}`, reversibility: "unknown" };
+      return {
+        effectType: "EXECUTE_LOCAL",
+        resourceUri: `workspace://${call.arguments.cwd}`,
+        reversibility: "unknown",
+        sideEffectClass: "process",
+        workspaceSnapshot: null,
+        // A shell/argv process can reach the network; keeping this true
+        // prevents speculative concurrent execution at the loop boundary.
+        externalNetwork: true,
+        processAffinity: `workspace://${call.arguments.cwd}`,
+        consistency: "live",
+        rateLimitGroup: null,
+        cacheable: false,
+        expectedLatencyMs: 600_000,
+        expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+      };
     case "exec_poll":
-      return { effectType: "READ_LOCAL", resourceUri: `job://${call.arguments.background_id}`, reversibility: "none" };
+      return {
+        effectType: "READ_LOCAL",
+        resourceUri: `job://${call.arguments.background_id}`,
+        reversibility: "none",
+        sideEffectClass: "read",
+        workspaceSnapshot: null,
+        externalNetwork: false,
+        processAffinity: `job://${call.arguments.background_id}`,
+        consistency: "live",
+        rateLimitGroup: null,
+        cacheable: false,
+        expectedLatencyMs: 30_000,
+        expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+      };
     case "web_fetch":
-      return { effectType: "EXECUTE_LOCAL", resourceUri: `https://${new URL(call.arguments.url).host}`, reversibility: "none" };
+      return {
+        // Fetch is an external network effect even though it is dispatched
+        // through the local kernel transport.
+        effectType: "EXECUTE_LOCAL",
+        resourceUri: `https://${new URL(call.arguments.url).host}`,
+        reversibility: "none",
+        sideEffectClass: "external",
+        workspaceSnapshot: null,
+        externalNetwork: true,
+        processAffinity: null,
+        consistency: "live",
+        rateLimitGroup: "web-fetch",
+        cacheable: false,
+        expectedLatencyMs: 60_000,
+        expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+      };
     case "grep":
-      return { effectType: "READ_LOCAL", resourceUri: `workspace://${call.arguments.path}`, reversibility: "none" };
+      return {
+        effectType: "READ_LOCAL",
+        resourceUri: `workspace://${call.arguments.path}`,
+        reversibility: "none",
+        sideEffectClass: "read",
+        workspaceSnapshot: "turn-workspace",
+        externalNetwork: false,
+        processAffinity: null,
+        consistency: "workspace_snapshot",
+        rateLimitGroup: null,
+        cacheable: true,
+        expectedLatencyMs: 30_000,
+        expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+      };
     case "glob":
-      return { effectType: "READ_LOCAL", resourceUri: `workspace://${call.arguments.path}`, reversibility: "none" };
+      return {
+        effectType: "READ_LOCAL",
+        resourceUri: `workspace://${call.arguments.path}`,
+        reversibility: "none",
+        sideEffectClass: "read",
+        workspaceSnapshot: "turn-workspace",
+        externalNetwork: false,
+        processAffinity: null,
+        consistency: "workspace_snapshot",
+        rateLimitGroup: null,
+        cacheable: true,
+        expectedLatencyMs: 30_000,
+        expectedOutputBytes: MAX_TOOL_MODEL_RESULT_BYTES,
+      };
   }
 }
 
