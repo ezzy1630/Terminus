@@ -16,20 +16,19 @@
  * event id, so streaming tokens that append to the last message don't
  * re-render earlier messages.
  *
- * Per SPEC §25.1: "Virtualize long conversations." We use
- * `@tanstack/react-virtual` to window the message + activity-block
- * list. Each row is dynamically measured (`measureElement`) so
- * expanded activity blocks and long agent messages can grow without
- * being clipped. Scroll position is sticky-at-bottom only when the
- * user is already at the bottom — new messages arriving while the
- * user is reading history don't yank them down.
+ * The message + activity-block list renders in normal document flow.
+ * Absolute-positioned virtual rows raced their runtime height
+ * measurements against streaming and self-expanding rows and painted
+ * on top of one another; a conversation is a bounded sequential read,
+ * so flow layout is both correct and simpler. Scroll position is
+ * sticky-at-bottom only when the user is already at the bottom — new
+ * messages arriving while the user reads history don't yank them down.
  *
  * The feed consumes raw SSE events from the control plane and decodes
  * them into messages + activity blocks. Decoding is intentionally
  * defensive — every payload is `unknown` until we shape it.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { Message } from "./Message";
 import { ActivityBlock } from "./ActivityBlock";
 import { ReasoningTrace } from "./ReasoningTrace";
@@ -260,30 +259,6 @@ function appendToolEntry(group: PendingToolGroup, entry: ActivityEntry, at: stri
   return false;
 }
 
-/** How much of a structured `details` payload a failure row may carry. */
-const MAX_FAILURE_DETAILS_CHARS = 4_000;
-
-/**
- * The structured `details` a terminal turn event carries.
- *
- * Rendered because it is the only place the actual cause survives — a stderr
- * tail, an HTTP status, the tool that refused. Bounded on its own budget so an
- * oversized payload cannot displace the reason lines above it.
- */
-function formatFailureDetails(value: unknown): string | null {
-  if (typeof value === "string") {
-    return value.length === 0 ? null : boundedText(value, "Failure details", MAX_FAILURE_DETAILS_CHARS);
-  }
-  if (value === null || value === undefined || typeof value !== "object") return null;
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(value, null, 2);
-  } catch {
-    return "Failure details could not be rendered: the payload is not serialisable.";
-  }
-  if (typeof serialized !== "string" || serialized === "{}" || serialized === "[]") return null;
-  return boundedText(serialized, "Failure details", MAX_FAILURE_DETAILS_CHARS);
-}
 
 function artifactReference(p: Record<string, unknown>): string | null {
   const candidates = [p, recordFrom(p.result), recordFrom(p.output)];
@@ -681,13 +656,23 @@ export function decodeFeed(
           "Turn outcome",
           MAX_ACTIVITY_SUMMARY_CHARS,
         );
-        const category = typeof p.category === "string" && p.category.length > 0 ? p.category : null;
         const retryable = p.retryable === true ? "yes" : p.retryable === false ? "no" : null;
+        /*
+         * The transcript shows the human failure, not the wire envelope. The
+         * full sentence is the summary; a couple of short qualifiers can help
+         * ("retryable", the mapped reason). The structured `details`
+         * (cause chains, gRPC codes) belong in logs and the inspector, not
+         * dumped as raw JSON into a reader's conversation — that was the wall
+         * of overlapping text on a failed turn.
+         */
         const detail = [
-          reason && reason !== failureMessage ? `Reason: ${reason}` : null,
-          category ? `Category: ${category}` : null,
-          retryable ? `Retryable: ${retryable}` : null,
-          formatFailureDetails(p.details),
+          // When the summary showed a mapped reason, surface the provider's
+          // own sentence underneath it. Otherwise the summary already is it.
+          knownReason !== undefined && failureMessage ? failureMessage : null,
+          // With neither a human sentence nor a mapped reason, the raw reason
+          // token is the only signal the reader has — keep it.
+          failureMessage === null && knownReason === undefined && reason ? `Reason: ${reason}` : null,
+          retryable === "no" ? "This error is not retryable." : null,
         ]
           .filter((value): value is string => value !== null && value.length > 0)
           .join("\n");
@@ -1112,27 +1097,6 @@ type FeedItem =
   | { kind: "block"; block: ActivityBlockData }
   | { kind: "reasoning"; reasoning: ReasoningBlock };
 
-/**
- * Estimate row heights for the virtualizer. The actual height is
- * measured at runtime via `measureElement`. We pick modest estimates
- * so the virtualizer's initial layout is in the right ballpark — over-
- * estimating wastes a bit of padding, under-estimating causes a brief
- * reflow when the row mounts. The defaults below match the typical
- * message (~80px) and collapsed activity block (~40px) sizes from
- * the design spec.
- */
-function estimateItemHeight(item: FeedItem): number {
-  // One quiet line collapsed, a short list expanded.
-  if (item.kind === "reasoning") return 26;
-  if (item.kind === "message") {
-    // User messages are short. Agent messages with code blocks are
-    // taller — 120 is a reasonable middle ground.
-    return item.message.role === "user" ? 80 : 120;
-  }
-  // Activity block collapsed header is 40px. Expanded can be 200px+.
-  return 40;
-}
-
 function lastItemGrowthKey(items: readonly FeedItem[]): string {
   const item = items[items.length - 1];
   if (!item) return "empty";
@@ -1276,21 +1240,14 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
   // TanStack Virtual exposes imperative functions by design; keep this
   // component outside React Compiler memoization rather than risking stale rows.
   // eslint-disable-next-line react-hooks/incompatible-library
-  const virtualizer = useVirtualizer({
-    count: items.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: (i) => {
-      const item = items[i];
-      return item ? estimateItemHeight(item) : 80;
-    },
-    overscan: 8,
-    // measureElement is what makes dynamic heights work — the virtualizer
-    // measures the actual DOM node and updates its layout.
-    measureElement:
-      typeof window !== "undefined" && navigator.userAgent.includes("Firefox")
-        ? undefined // Firefox has a bug with measureElement + transform
-        : (el) => el?.getBoundingClientRect().height ?? 80,
-  });
+  // Sticky-at-bottom scrolling for the flow feed. `scrollToBottom` is the
+  // single anchor the growth/reset effects and the "Latest" affordance share.
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto"): void => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (typeof el.scrollTo === "function") el.scrollTo({ top: el.scrollHeight, behavior });
+    else el.scrollTop = el.scrollHeight;
+  }, []);
 
   // Stick to bottom when the feed grows AND the user was at the bottom.
   // Content length is part of the key because streaming deltas mutate the
@@ -1302,7 +1259,7 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
     stickRef.current = true;
     setHasUnseenUpdates(false);
     lastGrowthKeyRef.current = growthKey;
-    if (items.length > 0) virtualizer.scrollToIndex(items.length - 1, { align: "end" });
+    if (items.length > 0) requestAnimationFrame(() => scrollToBottom());
     else if (scrollRef.current) scrollRef.current.scrollTop = 0;
     // This reset is intentionally keyed only to task identity. New events
     // must preserve a reader's current stick/scroll decision.
@@ -1319,17 +1276,9 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
       if (items.length > 0) setHasUnseenUpdates(true);
       return;
     }
-    const frame = window.requestAnimationFrame(() => {
-      if (fullTranscript) {
-        const element = scrollRef.current;
-        if (element) element.scrollTop = element.scrollHeight;
-      } else {
-        virtualizer.measure();
-        virtualizer.scrollToIndex(items.length - 1, { align: "end" });
-      }
-    });
+    const frame = window.requestAnimationFrame(() => scrollToBottom());
     return () => window.cancelAnimationFrame(frame);
-  }, [fullTranscript, growthKey, items.length, virtualizer]);
+  }, [fullTranscript, growthKey, items.length, scrollToBottom]);
 
   const onScroll = useCallback((): void => {
     const el = scrollRef.current;
@@ -1356,14 +1305,8 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
   const jumpToLatest = useCallback((): void => {
     stickRef.current = true;
     setHasUnseenUpdates(false);
-    if (fullTranscript) {
-      const element = scrollRef.current;
-      if (element) element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
-      return;
-    }
-    virtualizer.measure();
-    if (items.length > 0) virtualizer.scrollToIndex(items.length - 1, { align: "end", behavior: "smooth" });
-  }, [fullTranscript, items.length, virtualizer]);
+    scrollToBottom("smooth");
+  }, [scrollToBottom]);
 
   // Live region for screen readers — politely announces new messages
   // (SPEC §28 / accessibility — streaming updates should be announced).
@@ -1606,41 +1549,27 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
             </div>
           </div>
         ) : (
-          /* Windowed feed. Collection metadata preserves a row's position;
-             the full-transcript control above exposes all loaded rows to AT. */
+          /* Feed in normal document flow. A transcript is a bounded, mostly
+             sequential read; windowing it with absolute-positioned, runtime-
+             measured rows raced the measurements against streaming/growing
+             rows and painted them on top of each other. Flow layout is the
+             correct model for a conversation and cannot overlap. */
           <div
             role="list"
             aria-label={`Conversation feed (${items.length} loaded items)`}
             aria-busy={streamState === "connecting" || streamState === "reconnecting"}
-            style={{
-              height: virtualizer.getTotalSize(),
-              position: "relative",
-              width: "100%",
-            }}
+            className="flex flex-col"
           >
-            {virtualizer.getVirtualItems().map((vi) => {
-              const item = items[vi.index];
-              if (!item) return null;
-              return (
-                <div
-                  key={feedItemKey(item)}
-                  role="listitem"
-                  aria-posinset={vi.index + 1}
-                  aria-setsize={items.length}
-                  data-index={vi.index}
-                  ref={virtualizer.measureElement}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    transform: `translateY(${vi.start}px)`,
-                  }}
-                >
-                  <FeedItemView item={item} onRetry={retryTurn} />
-                </div>
-              );
-            })}
+            {items.map((item, index) => (
+              <div
+                key={feedItemKey(item)}
+                role="listitem"
+                aria-posinset={index + 1}
+                aria-setsize={items.length}
+              >
+                <FeedItemView item={item} onRetry={retryTurn} />
+              </div>
+            ))}
           </div>
         )}
 

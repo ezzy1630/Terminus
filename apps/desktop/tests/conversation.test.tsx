@@ -473,13 +473,27 @@ describe("turn failure reporting", () => {
     );
   });
 
-  test("carries the reason, category, retryability and structured details", () => {
+  test("keeps the wire envelope out of the reader's transcript", () => {
+    // A retryable provider failure reads as one clear sentence. The
+    // category, gRPC code, and structured details belong in logs and the
+    // inspector — not dumped as JSON into the conversation.
     const detail = decodeFeed(failureEvents, TASK_CREATED_AT).blocks[0]?.entries[0]?.detail ?? "";
-    expect(detail).toContain("Reason: agent_loop_error");
-    expect(detail).toContain("Category: provider");
-    expect(detail).toContain("Retryable: yes");
-    expect(detail).toContain("\"status\": 502");
-    expect(detail).toContain("gateway.invalid");
+    expect(detail).not.toContain("Category:");
+    expect(detail).not.toContain("\"status\": 502");
+    expect(detail).not.toContain("gateway.invalid");
+    expect(detail).not.toContain("Retryable:");
+  });
+
+  test("names a non-retryable failure as such", () => {
+    const detail = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("f1", "turn.failed", {
+        code: "PROVIDER_EXECUTION_FAILED",
+        message: "The model is unavailable.",
+        retryable: false,
+      }),
+    ], TASK_CREATED_AT).blocks[0]?.entries[0]?.detail ?? "";
+    expect(detail).toContain("This error is not retryable.");
   });
 
   test("falls back to `error` when the payload carries no message", () => {
@@ -490,13 +504,13 @@ describe("turn failure reporting", () => {
     expect(blocks[0]?.entries[0]?.summary).toBe("socket hang up");
   });
 
-  test("bounds an oversized details payload instead of rendering it", () => {
-    const detail = decodeFeed([
+  test("never dumps an oversized details payload into the transcript", () => {
+    const entry = decodeFeed([
       toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
       toolEvent("f1", "turn.failed", { message: "It failed.", details: "y".repeat(20_000) }),
-    ], TASK_CREATED_AT).blocks[0]?.entries[0]?.detail ?? "";
-    expect(detail).toContain("Failure details rejected");
-    expect(detail).not.toContain("yyyyyyyyyy");
+    ], TASK_CREATED_AT).blocks[0]?.entries[0];
+    expect(entry?.summary).toBe("It failed.");
+    expect(entry?.detail ?? "").not.toContain("yyyyyyyyyy");
   });
 
   test("renders a denied tool call as a denial, not as exploration", () => {
