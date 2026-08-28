@@ -6,11 +6,11 @@ This file records observed commands and artifacts. It does not turn source decla
 
 | Field | Observed value |
 | --- | --- |
-| Checkout | `/Volumes/Neural/Terminus` |
+| Checkout | `/Volumes/Workspace/Terminus` |
 | Branch | `main` |
 | HEAD | `5f68925062cc3579e94c8e5f9a56b8b5ec46bfb9` |
 | Worktree | clean at start |
-| Other worktrees | `/Volumes/Neural/Terminus-audit-fixes`, `/Volumes/Neural/Terminus/.worktrees/p0-coding-loop` |
+| Other worktrees | `/Volumes/Workspace/Terminus-audit-fixes`, `/Volumes/Workspace/Terminus/.worktrees/p0-coding-loop` |
 | Remote main | `5f68925062cc3579e94c8e5f9a56b8b5ec46bfb9` at initial inspection |
 
 ## Initial live-path observations

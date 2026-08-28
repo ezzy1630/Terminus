@@ -295,6 +295,7 @@ export interface Episode {
   readonly kind:
     | "user_message"
     | "model_message"
+    | "steering_message"
     | "tool_call"
     | "tool_result"
     | "side_effect"

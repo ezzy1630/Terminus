@@ -2,7 +2,7 @@
 
 ## D-001, work from the exact current checkout
 
-The current checkout is `/Volumes/Neural/Terminus`, branch `main`, at `5f68925062cc3579e94c8e5f9a56b8b5ec46bfb9`. It is clean. I will not reset it to the audit baseline or touch the other registered worktrees. This keeps the user's visible checkout and evidence aligned.
+The current checkout is `/Volumes/Workspace/Terminus`, branch `main`, at `5f68925062cc3579e94c8e5f9a56b8b5ec46bfb9`. It is clean. I will not reset it to the audit baseline or touch the other registered worktrees. This keeps the user's visible checkout and evidence aligned.
 
 ## D-002, preserve the existing kernel and durable stores
 

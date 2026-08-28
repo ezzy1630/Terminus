@@ -6,6 +6,7 @@ import type {
   ProviderResponseChunk,
   UsageRecord,
 } from "@terminus/provider-core";
+import { repairToolArgumentsJson } from "@terminus/provider-core";
 
 const MAX_EVENT_BYTES = 1024 * 1024;
 
@@ -183,10 +184,9 @@ function* flushTools(
       yield { kind: "error", errorCode: "INVALID_TOOL_CALL", errorMessage: "Anthropic tool call omitted id or name" };
       continue;
     }
-    let args: unknown;
-    try {
-      args = JSON.parse(tool.argumentsJson || "{}");
-    } catch {
+    const rawArgs = tool.argumentsJson || "{}";
+    const args: unknown = repairToolArgumentsJson(rawArgs);
+    if (args === null) {
       yield { kind: "error", errorCode: "INVALID_TOOL_ARGUMENTS", errorMessage: `Anthropic tool ${tool.name} emitted invalid JSON arguments` };
       continue;
     }

@@ -30,6 +30,8 @@ export interface NativeDirectExecutorOptions {
   readonly economics: ProviderEconomics;
   /** Per-epoch OpenAI prompt-cache routing key. */
   readonly promptCacheKey?: string | undefined;
+  /** Inline stream observer (client streaming); invoked as chunks arrive. */
+  readonly onChunk?: ((chunk: import("@terminus/provider-core").ProviderResponseChunk) => void | Promise<void>) | undefined;
 }
 
 export function createNativeDirectExecutor(options: NativeDirectExecutorOptions) {
@@ -71,6 +73,7 @@ export function createNativeDirectExecutor(options: NativeDirectExecutorOptions)
         rendered: execInput.rendered,
         signal: execInput.signal ?? execInput.rendered.request.signal,
         postSse,
+        ...(options.onChunk === undefined ? {} : { onChunk: options.onChunk }),
       });
     }
     return dispatchOpenAI({
@@ -81,6 +84,7 @@ export function createNativeDirectExecutor(options: NativeDirectExecutorOptions)
       protocol: options.configuration.protocol === "chat_completions" ? "chat_completions" : "responses",
       signal: execInput.signal ?? execInput.rendered.request.signal,
       postSse,
+      ...(options.onChunk === undefined ? {} : { onChunk: options.onChunk }),
     });
   };
 }

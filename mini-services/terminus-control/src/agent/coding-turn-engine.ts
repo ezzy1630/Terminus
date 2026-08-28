@@ -142,6 +142,16 @@ export interface EngineDependencies {
   };
   /** Receives the exact observation after it is added to the budget ledger. */
   readonly onOperationObserved?: (observation: OperationObservation) => void | Promise<void>;
+  /**
+   * Drain queued steering messages (mid-turn user guidance). Returns the
+   * messages queued since the previous drain, in order, and consumes them
+   * (durability and the cursor live behind the callback). When the drain
+   * yields at least one message at a would-be stop point, the loop continues
+   * so the next compiled context carries the steering input.
+   */
+  readonly drainSteering?: () => Promise<readonly string[]>;
+  /** Invoked after steering messages were drained, before the loop continues. */
+  readonly onSteeringDrained?: (messages: readonly string[]) => void | Promise<void>;
 }
 
 export interface EngineToolSettlement {
@@ -195,7 +205,13 @@ export type EngineStop =
   | { readonly kind: "budget_exhausted"; readonly reason: string }
   | { readonly kind: "policy_denied"; readonly message: string }
   | { readonly kind: "doom_loop"; readonly signature: string; readonly count: number }
-  | { readonly kind: "no_final_response" };
+  | { readonly kind: "no_final_response" }
+  /**
+   * The provider stopped with finishReason "length" while tool calls were
+   * still pending. Executing those calls would run arguments the model never
+   * finished emitting; the turn stops with this reason instead.
+   */
+  | { readonly kind: "truncated_tool_calls"; readonly toolCallCount: number };
 
 export const DOOM_LOOP_THRESHOLD = 3;
 
@@ -275,7 +291,26 @@ export class CodingTurnEngine {
       }
 
       const toolCalls = settled.projected.toolCalls;
+      // Length-stop guard: a response truncated by the output limit must not
+      // execute tool calls whose arguments were never fully emitted (pi's
+      // fail-don't-execute rule, adapted to the durable settlement boundary).
+      if (
+        settled.projected.finishReason === "length"
+        && toolCalls.length > 0
+      ) {
+        return { kind: "truncated_tool_calls", toolCallCount: toolCalls.length };
+      }
       if (toolCalls.length === 0) {
+        // Steering check at the stop boundary: guidance queued while the
+        // final response was in flight keeps the turn alive. The drained
+        // messages are durable steering episodes; the next compiled context
+        // carries them to the provider.
+        const steering = await this.drainSteering();
+        if (steering.length > 0) {
+          await this.dependencies.onSteeringDrained?.(steering);
+          if (this.dependencies.signal?.aborted) return { kind: "interrupted" };
+          continue;
+        }
         const responseArtifactUri = settled.responseArtifactUri ?? null;
         if (settled.completion?.kind === "completion_proposal") {
           return {
@@ -397,6 +432,11 @@ export class CodingTurnEngine {
         await this.dependencies.afterToolsSettled();
       }
     }
+  }
+
+  private async drainSteering(): Promise<readonly string[]> {
+    if (this.dependencies.drainSteering === undefined) return [];
+    return this.dependencies.drainSteering();
   }
 
   private stopForError(error: unknown): EngineStop {

@@ -31,11 +31,16 @@ export const ANTHROPIC_NATIVE_CONFIG: NativeRuntimeConfig = {
   extraHeaders: { "anthropic-version": "2023-06-01" },
 };
 
-export function anthropicTransportDeps(transport: NativeTransportDeps["postSse"], now?: () => number): NativeTransportDeps {
+export function anthropicTransportDeps(
+  transport: NativeTransportDeps["postSse"],
+  now?: () => number,
+  onChunk?: NativeTransportDeps["onChunk"],
+): NativeTransportDeps {
   return {
     postSse: transport,
     decode: (chunks) => decodeAnthropicStream(chunks),
     ...(now !== undefined ? { now } : {}),
+    ...(onChunk !== undefined ? { onChunk } : {}),
   };
 }
 
@@ -47,13 +52,15 @@ export async function dispatchAnthropic(
     /** Required kernel-brokered SSE transport; there is no default. */
     readonly postSse: NativeTransportDeps["postSse"];
     readonly now?: () => number;
+    /** Stream observer; invoked inline as chunks arrive. */
+    readonly onChunk?: NativeTransportDeps["onChunk"];
   },
 ): Promise<NativeStreamResult> {
-  const { postSse, now, canonicalRenderInput, rendered, ...rest } = input;
+  const { postSse, now, onChunk, canonicalRenderInput, rendered, ...rest } = input;
   const finalRendered =
     rendered ??
     (await renderRequest(canonicalRenderInput as Parameters<typeof renderRequest>[0]));
-  return dispatchNativeRequest(ANTHROPIC_NATIVE_CONFIG, anthropicTransportDeps(postSse, now), {
+  return dispatchNativeRequest(ANTHROPIC_NATIVE_CONFIG, anthropicTransportDeps(postSse, now, onChunk), {
     ...rest,
     rendered: finalRendered,
   });

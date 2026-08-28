@@ -4,7 +4,7 @@ Read this file, `STATUS.md`, and the current Git diff before resuming.
 
 ## Current position
 
-- Exact checkout: `/Volumes/Neural/Terminus`.
+- Exact checkout: `/Volumes/Workspace/Terminus`.
 - Branch: `main`. The current implementation head is `c56e245` (`Add trusted candidate merge receipt recovery`); the local branch is 57 commits ahead of `origin/main` and no push was performed.
 - Task-owned functional paths are clean at `c56e245`; `SPEC.md` retains a pre-existing user edit and must not be staged. Other registered worktrees remain untouched.
 - Durable ledger files live in `docs/implementation/terminus-overhaul/`.

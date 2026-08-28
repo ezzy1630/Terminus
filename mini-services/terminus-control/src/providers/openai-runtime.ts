@@ -33,11 +33,16 @@ export function openaiNativeConfig(protocol: "responses" | "chat_completions" = 
 /** Default config kept for existing call sites that use the Responses API. */
 export const OPENAI_NATIVE_CONFIG = openaiNativeConfig("responses");
 
-export function openaiTransportDeps(transport: NativeTransportDeps["postSse"], now?: () => number): NativeTransportDeps {
+export function openaiTransportDeps(
+  transport: NativeTransportDeps["postSse"],
+  now?: () => number,
+  onChunk?: NativeTransportDeps["onChunk"],
+): NativeTransportDeps {
   return {
     postSse: transport,
     decode: (chunks) => decodeOpenAiStream(chunks, "responses"),
     ...(now !== undefined ? { now } : {}),
+    ...(onChunk !== undefined ? { onChunk } : {}),
   };
 }
 
@@ -51,9 +56,11 @@ export async function dispatchOpenAI(
     /** Required kernel-brokered SSE transport; there is no default. */
     readonly postSse: NativeTransportDeps["postSse"];
     readonly now?: () => number;
+    /** Stream observer; invoked inline as chunks arrive. */
+    readonly onChunk?: NativeTransportDeps["onChunk"];
   },
 ): Promise<NativeStreamResult> {
-  const { postSse, now, canonicalRenderInput, rendered, protocol, promptCacheKey, ...rest } = input;
+  const { postSse, now, onChunk, canonicalRenderInput, rendered, protocol, promptCacheKey, ...rest } = input;
   const baseRendered =
     rendered ??
     (await renderRequest(canonicalRenderInput as Parameters<typeof renderRequest>[0]));
@@ -63,7 +70,7 @@ export async function dispatchOpenAI(
         ...baseRendered,
         body: { ...baseRendered.body, prompt_cache_key: promptCacheKey },
       };
-  return dispatchNativeRequest(openaiNativeConfig(protocol), openaiTransportDeps(postSse, now), {
+  return dispatchNativeRequest(openaiNativeConfig(protocol), openaiTransportDeps(postSse, now, onChunk), {
     ...rest,
     rendered: finalRendered,
   });

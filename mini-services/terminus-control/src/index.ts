@@ -5752,6 +5752,96 @@ const routes: Route[] = [
       completed_at: updated.completedAt?.toISOString() ?? null,
     });
   }),
+  // Mid-turn steering: queue a durable user message on an active turn without
+  // interrupting it. The episode is model-visible, so the next compiled
+  // context carries it; the engine drains queued steering at the stop
+  // boundary to keep the turn alive instead of ending on stale text.
+  route("POST", "/v1/turns/:id/steer", async (req, res, params) => {
+    const body = await jsonBody(req) as { message?: unknown };
+    if (typeof body.message !== "string" || body.message.trim().length === 0) {
+      return sendError(res, 400, "STEERING_INPUT_INVALID", "message is a required non-empty string", "validation");
+    }
+    const message = body.message.slice(0, 16_384);
+    const turn = await db.turn.findUnique({
+      where: { id: String(params.id) },
+      select: { id: true, taskId: true, state: true },
+    });
+    if (turn === null) {
+      return sendError(res, 404, "TURN_NOT_FOUND", "turn not found", "not_found");
+    }
+    if (turn.taskId === null) {
+      return sendError(res, 409, "TURN_STEERING_STATE_CONFLICT", "turn is not attached to a task", "conflict");
+    }
+    const task = await db.task.findUnique({
+      where: { id: turn.taskId },
+      select: { id: true, sessionId: true, session: { select: { workspaceId: true } } },
+    });
+    if (task === null) {
+      return sendError(res, 404, "TASK_NOT_FOUND", "task not found", "not_found");
+    }
+    if (!(V1_ACTIVE_TURN_STATES as readonly string[]).includes(turn.state)) {
+      return sendError(
+        res,
+        409,
+        "TURN_STEERING_STATE_CONFLICT",
+        `turn cannot be steered from ${turn.state}`,
+        "conflict",
+        { state: turn.state },
+      );
+    }
+    const episode = await mutateAgentState(async () => {
+      const latest = await db.episode.findFirst({
+        where: { turnId: turn.id },
+        orderBy: { sequence: "desc" },
+        select: { sequence: true },
+      });
+      const episodeId = uuid();
+      const steeringContext = await kernelTaskContext({
+        sessionId: task.sessionId,
+        taskId: task.id,
+        turnId: turn.id,
+        workspaceId: task.session.workspaceId,
+        operationClasses: [CapabilityOperationProto.CAPABILITY_OPERATION_ARTIFACT_INGEST],
+      });
+      const steeringArtifactClient = createKernelArtifactClient(requireKernelUds().artifacts, {
+        ...steeringContext,
+        idempotencyKey: `steering:${episodeId}`,
+      });
+      const artifact = await steeringArtifactClient.ingest(
+        new TextEncoder().encode(message),
+        { mediaType: "text/plain", custom: { purpose: "steering", turnId: turn.id } },
+      );
+      await steeringArtifactClient.link(artifact.hash, "episode", episodeId, "content");
+      return db.episode.create({
+        data: {
+          id: episodeId,
+          turnId: turn.id,
+          sequence: (latest?.sequence ?? 0) + 1,
+          kind: "steering_message",
+          modelVisible: true,
+          contentArtifact: artifact.uri,
+          sourceVersionsJson: JSON.stringify({ steering: artifact.hash }),
+        },
+      });
+    });
+    await emit({
+      eventType: "turn.steering_queued",
+      aggregateType: "turn",
+      aggregateId: turn.id,
+      correlationId: turn.taskId ?? undefined,
+      payload: {
+        episode_id: episode.id,
+        sequence: episode.sequence,
+        chars: message.length,
+      },
+    });
+    sendJson(res, 201, {
+      episode_id: episode.id,
+      sequence: episode.sequence,
+      turn_id: turn.id,
+      turn_state: turn.state,
+    });
+  }),
 
   // ────────────────────────── /events (SSE) ──────────────────────────────
   route("GET", "/v1/events", async (req, res) => {
@@ -10160,6 +10250,7 @@ async function executeGatewayProviderRequest(
   gateway: { readonly model: GatewayModel; readonly secretUri: string },
   context: RequestContext,
   signal: AbortSignal | null | undefined,
+  onChunk?: ProviderExecutionInput["onChunk"],
 ): Promise<ProviderResponse> {
   const transport = new GatewayTransport({
     credentialBindingId: gateway.secretUri,
@@ -10169,6 +10260,7 @@ async function executeGatewayProviderRequest(
   const chunks: ProviderResponseChunk[] = [];
   for await (const chunk of transport.stream(rendered.request, rendered.body, signal ?? rendered.request.signal)) {
     chunks.push(chunk);
+    await onChunk?.(chunk);
   }
   const providerError = chunks.find((chunk) => chunk.kind === "error");
   if (providerError?.kind === "error") {
@@ -10179,6 +10271,45 @@ async function executeGatewayProviderRequest(
     model: rendered.model,
     chunks,
     observedAt: now(),
+  };
+}
+
+/**
+ * Coalesces provider text deltas into durable, SSE-deliverable events.
+ *
+ * Client streaming without per-token event writes: text is buffered and
+ * flushed to the semantic event stream at ≥512 chars. The caller flushes
+ * the remainder when the provider attempt settles. Buffer state lives in
+ * the closure of the single per-turn stream consumer, so no extra locking
+ * beyond the agent-state mutation mutex is required.
+ */
+function createProviderTextDeltaEmitter(
+  turnId: string,
+  taskId: string,
+): {
+  readonly onChunk: (chunk: ProviderResponseChunk) => Promise<void>;
+  readonly flush: () => Promise<void>;
+} {
+  let buffer = "";
+  const flush = async (): Promise<void> => {
+    if (buffer.length === 0) return;
+    const text = buffer;
+    buffer = "";
+    await mutateAgentState(() => emit({
+      eventType: "turn.provider_text_delta",
+      aggregateType: "turn",
+      aggregateId: turnId,
+      correlationId: taskId,
+      payload: { text },
+    }));
+  };
+  return {
+    onChunk: async (chunk) => {
+      if (chunk.kind !== "text" || chunk.text === undefined) return;
+      buffer += chunk.text;
+      if (buffer.length >= 512) await flush();
+    },
+    flush,
   };
 }
 
@@ -10308,7 +10439,7 @@ const providerSessionService = new ProviderSessionService<Prisma.TransactionClie
   },
   executeGateway: async (input: ProviderExecutionInput) => {
     if (input.gateway === null) throw new ProviderExecutionUnavailableError(input.rendered.providerId);
-    return executeGatewayProviderRequest(input.rendered, input.gateway, input.context, input.signal);
+    return executeGatewayProviderRequest(input.rendered, input.gateway, input.context, input.signal, input.onChunk);
   },
 });
 
@@ -12108,6 +12239,12 @@ async function agentLoop(turnId: string): Promise<void> {
   let latestHypothesisId: string | null = null;
   let turnContextBudgetJson: string | null = null;
   let activeEngine: CodingTurnEngine | null = null;
+  // Steering cursor: highest steering_message sequence already handed to the
+  // engine. Episodes are append-only per turn, so the cursor only moves.
+  let lastSteeredSequence = 0;
+  // Compaction preflight cache: artifact URI → byte size, fetched from kernel
+  // artifact metadata at most once per artifact for the turn's lifetime.
+  const turnArtifactSizeCache = new Map<string, number>();
   let persistEvidenceForCurrentTurn: (
     terminalOutcome: EvidenceTerminalOutcome,
     options?: {
@@ -12150,6 +12287,8 @@ async function agentLoop(turnId: string): Promise<void> {
     if (task === null || contractRow === undefined) {
       throw new Error(`turn ${turnId} has no active task contract`);
     }
+    // Client streaming: durable text-delta emitter shared by all transports.
+    const providerTextDeltas = createProviderTextDeltaEmitter(turnId, task.id);
     const criteriaRows = await db.acceptanceCriterion.findMany({
       where: { taskId: task.id, contractVersion: contractRow.version },
       orderBy: { criterionId: "asc" },
@@ -12668,9 +12807,16 @@ async function agentLoop(turnId: string): Promise<void> {
         orderBy: { sequence: "asc" },
         select: { id: true, kind: true, sequence: true, toolCallId: true, contentArtifact: true },
       });
-      const sizeByUri = new Map<string, number>();
+      // Artifact sizes are immutable and episodes are append-only per turn,
+      // so this per-turn cache makes the compaction preflight O(new episodes)
+      // in kernel metadata RPCs instead of O(total episodes) per attempt.
+      // A cached 0 is a real "metadata unavailable" result, not a miss; the
+      // totalBytes re-check below stays conservative and re-reads content
+      // bytes when a compaction is actually triggered.
+      const sizeByUri = turnArtifactSizeCache;
       for (const row of fullEpisodeSizes) {
         if (row.contentArtifact === null) continue;
+        if (sizeByUri.has(row.contentArtifact)) continue;
         const hash = row.contentArtifact.startsWith("artifact://sha256/")
           ? `sha256:${row.contentArtifact.slice("artifact://sha256/".length)}`
           : null;
@@ -13008,6 +13154,7 @@ async function agentLoop(turnId: string): Promise<void> {
         requestBudgetMicros: budgetMicros,
         economics: selectedProvider.economics,
         promptCacheKey: contextEpoch.epochId,
+        onChunk: providerTextDeltas.onChunk,
       });
       return async (execInput) => {
         // Adapt the native stream result back into the transport-level
@@ -13574,6 +13721,29 @@ async function agentLoop(turnId: string): Promise<void> {
           },
         }));
       },
+      // Mid-turn steering gate: report steering messages queued since the
+      // last drain, oldest first. Content is read from the durable steering
+      // artifacts; cursor state lives in the agentLoop closure so a resume
+      // never re-drains acknowledged messages.
+      drainSteering: async () => {
+        const rows = await db.episode.findMany({
+          where: { turnId, kind: "steering_message", sequence: { gt: lastSteeredSequence } },
+          orderBy: { sequence: "asc" },
+          select: { sequence: true, contentArtifact: true },
+        });
+        if (rows.length === 0) return [];
+        lastSteeredSequence = rows[rows.length - 1]!.sequence;
+        const decoder = new TextDecoder("utf-8", { fatal: true });
+        const messages: string[] = [];
+        for (const row of rows) {
+          if (row.contentArtifact === null || !row.contentArtifact.startsWith("artifact://sha256/")) {
+            throw new Error(`steering episode ${row.sequence} has no readable content artifact`);
+          }
+          const hash = `sha256:${row.contentArtifact.slice("artifact://sha256/".length)}` as ContentHash;
+          messages.push(decoder.decode(await artifactClient.get(hash)));
+        }
+        return messages;
+      },
       compileContext: async () => {
         const { compiled, requestArtifact } = await compileProviderContext();
         const modelSnapshotHash = computeContentHash(canonicalJson({
@@ -13624,27 +13794,37 @@ async function agentLoop(turnId: string): Promise<void> {
         // R6: bounded retry/backoff for transient provider faults. The
         // native runtime settles partials explicitly; this is the recovery
         // layer it delegates to.
-        return withProviderRetry(
-          async () =>
-            providerSessionService.execute({
-              rendered: compiled.rendered,
-              command: localProviderCommand,
-              gateway: gatewayModel === null
-                ? null
-                : { model: gatewayModel, secretUri: gatewayBindingId },
-              direct: directConfiguration === null
-                ? null
-                : { vendor: directConfiguration.vendor },
-              ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
-              context: {
-                ...await buildProviderTaskContext(),
-                idempotencyKey: providerAttemptIdempotencyKey(attemptId),
-              },
-              workspaceId: workspace.id,
-              signal: abortController.signal,
-            }),
-          { maxAttempts: 3 },
-        );
+        try {
+          return await withProviderRetry(
+            async () =>
+              providerSessionService.execute({
+                rendered: compiled.rendered,
+                command: localProviderCommand,
+                gateway: gatewayModel === null
+                  ? null
+                  : { model: gatewayModel, secretUri: gatewayBindingId },
+                direct: directConfiguration === null
+                  ? null
+                  : { vendor: directConfiguration.vendor },
+                ...(directExecutor === undefined ? {} : { executeDirectRequest: directExecutor }),
+                // Client streaming: text deltas reach the event stream as
+                // they arrive (coalesced); the local PTY transport only
+                // exposes stdout after job completion and cannot stream.
+                ...(directConfiguration === null && gatewayModel === null
+                  ? {}
+                  : { onChunk: providerTextDeltas.onChunk }),
+                context: {
+                  ...await buildProviderTaskContext(),
+                  idempotencyKey: providerAttemptIdempotencyKey(attemptId),
+                },
+                workspaceId: workspace.id,
+                signal: abortController.signal,
+              }),
+            { maxAttempts: 3 },
+          );
+        } finally {
+          await providerTextDeltas.flush();
+        }
       },
       settleResponse: async ({ attemptId, response }) => {
         const midTurn = await db.turn.findUnique({ where: { id: turnId }, select: { state: true } });

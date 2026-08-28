@@ -80,17 +80,17 @@ describe("Onboarding production flow", () => {
   test("new user chooses a project and starts the first task", async () => {
     const user = userEvent.setup();
     const onComplete = vi.fn<(result: OnboardingResult) => void>();
-    const pickDirectory = vi.fn(async () => "/Volumes/Neural/Terminus");
+    const pickDirectory = vi.fn(async () => "/Volumes/Workspace/Terminus");
     render(<Onboarding onComplete={onComplete} pickDirectory={pickDirectory} />);
 
     await user.click(screen.getByRole("button", { name: "Browse" }));
-    expect(await screen.findByDisplayValue("/Volumes/Neural/Terminus")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("/Volumes/Workspace/Terminus")).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "First task prompt" }), "Audit the desktop UI.");
     await user.click(screen.getByRole("button", { name: "Open project" }));
 
     await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
     expect(api.openWorkspace).toHaveBeenCalledWith({
-      root_uri: "file:///Volumes/Neural/Terminus",
+      root_uri: "file:///Volumes/Workspace/Terminus",
       kind: "local_directory",
       trust: "untrusted",
     }, { idempotencyKey: expect.stringMatching(/^onboarding:/) });
@@ -116,7 +116,7 @@ describe("Onboarding production flow", () => {
 
   test("restores the exact workspace and objective after the renderer remounts", async () => {
     const user = userEvent.setup();
-    const first = render(<Onboarding onComplete={() => {}} pickDirectory={async () => "/Volumes/Neural/Terminus"} />);
+    const first = render(<Onboarding onComplete={() => {}} pickDirectory={async () => "/Volumes/Workspace/Terminus"} />);
 
     await user.click(screen.getByRole("button", { name: "Browse" }));
     await user.type(screen.getByRole("textbox", { name: "First task prompt" }), "Resume the exact operation.");
@@ -130,7 +130,7 @@ describe("Onboarding production flow", () => {
     const user = userEvent.setup();
     vi.mocked(api.startTurn).mockRejectedValueOnce(new TerminusApiError(0, "connection lost", null));
     const first = render(
-      <Onboarding onComplete={() => {}} pickDirectory={async () => "/Volumes/Neural/Terminus"} />,
+      <Onboarding onComplete={() => {}} pickDirectory={async () => "/Volumes/Workspace/Terminus"} />,
     );
 
     await user.click(screen.getByRole("button", { name: "Browse" }));
@@ -160,7 +160,7 @@ describe("Onboarding production flow", () => {
     vi.mocked(api.startTurn).mockRejectedValueOnce(new TerminusApiError(422, "objective rejected", null));
     const onComplete = vi.fn<(result: OnboardingResult) => void>();
     render(
-      <Onboarding onComplete={onComplete} pickDirectory={async () => "/Volumes/Neural/Terminus"} />,
+      <Onboarding onComplete={onComplete} pickDirectory={async () => "/Volumes/Workspace/Terminus"} />,
     );
 
     await user.click(screen.getByRole("button", { name: "Browse" }));

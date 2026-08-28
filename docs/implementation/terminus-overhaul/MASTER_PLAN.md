@@ -1,8 +1,8 @@
 # Terminus overhaul master plan
 
-Source: `/Users/ezzyrappeport/.codex/attachments/17506d6b-8510-4a0e-933c-16210b3c4263/pasted-text.txt`.
+Source: `user-supplied overhaul brief`.
 
-Baseline: `5f68925062cc3579e94c8e5f9a56b8b5ec46bfb9`, branch `main`, checkout `/Volumes/Neural/Terminus`.
+Baseline: `5f68925062cc3579e94c8e5f9a56b8b5ec46bfb9`, branch `main`, checkout `/Volumes/Workspace/Terminus`.
 
 This is the implementation ledger for the supplied overhaul brief. The brief is normative for this effort, while `Terminus — Research/SPEC.md` remains the repository contract. IDs below are stable and are used by `STATUS.md`, `EVIDENCE.md`, and commits.
 

@@ -14,7 +14,7 @@ function toolCall(id: string, toolName: string): ProviderToolCallChunk {
 }
 
 interface HarnessOptions {
-  readonly responses: ReadonlyArray<{ text?: string; calls?: ReadonlyArray<ProviderToolCallChunk> }>;
+  readonly responses: ReadonlyArray<{ text?: string; calls?: ReadonlyArray<ProviderToolCallChunk>; finishReason?: string }>;
   readonly sideEffectClassOf?: (toolName: string) => string;
   readonly effectMetadataOf?: (call: ProviderToolCallChunk) => OperationEffectMetadata;
   readonly failOnCallIds?: readonly string[];
@@ -22,6 +22,8 @@ interface HarnessOptions {
   readonly onOperationObserved?: (observation: OperationObservation) => void | Promise<void>;
   readonly omitCompletionSignal?: boolean;
   readonly signal?: AbortSignal | null;
+  readonly drainSteering?: () => Promise<readonly string[]>;
+  readonly onSteeringDrained?: (messages: readonly string[]) => void | Promise<void>;
 }
 
 /**
@@ -72,7 +74,9 @@ async function runHarness(options: HarnessOptions) {
           toolCalls: response.calls ?? [],
           reasoning: null,
           continuationId: null,
-          finishReason: (response.calls?.length ?? 0) > 0 ? ("tool_use" as const) : ("stop" as const),
+          finishReason: response.finishReason !== undefined
+            ? (response.finishReason as never)
+            : (response.calls?.length ?? 0) > 0 ? ("tool_use" as const) : ("stop" as const),
         },
         interrupted: false,
         ...(!options.omitCompletionSignal && (response.calls === undefined || response.calls.length === 0)
@@ -91,6 +95,8 @@ async function runHarness(options: HarnessOptions) {
     },
     ...(options.afterToolsSettled === undefined ? {} : { afterToolsSettled: options.afterToolsSettled }),
     ...(options.onOperationObserved === undefined ? {} : { onOperationObserved: options.onOperationObserved }),
+    ...(options.drainSteering === undefined ? {} : { drainSteering: options.drainSteering }),
+    ...(options.onSteeringDrained === undefined ? {} : { onSteeringDrained: options.onSteeringDrained }),
   });
   const stop = await engine.run();
   return { stop, trace, budget: engine.budget };
@@ -332,5 +338,54 @@ describe("CodingTurnEngine", () => {
       expect(stop.count).toBe(3);
       expect(stop.signature).toContain("read:");
     }
+  });
+
+  test("tool calls from a length-stopped response are never executed", async () => {
+    const { stop, trace } = await runHarness({
+      responses: [
+        { calls: [toolCall("t1", "exec")], finishReason: "length" },
+        { text: "never reached" },
+      ],
+    });
+    expect(trace.filter((t) => t.startsWith("settle:"))).toEqual([]);
+    expect(stop).toEqual({ kind: "truncated_tool_calls", toolCallCount: 1 });
+  });
+
+  test("length stop without pending tool calls still settles normally", async () => {
+    const { stop } = await runHarness({
+      responses: [{ text: "partial answer", finishReason: "length" }],
+    });
+    expect(stop.kind).toBe("completion_proposal");
+  });
+
+  test("steering drained at the stop boundary keeps the turn alive", async () => {
+    let drained = 0;
+    const steered: string[] = [];
+    const { stop, trace } = await runHarness({
+      responses: [
+        { calls: [toolCall("r1", "read")] },
+        { text: "done" },
+        { text: "adjusted after steering" },
+      ],
+      drainSteering: async () => {
+        // Messages appear exactly once: on the first stop-boundary drain
+        // (the "done" response is trying to end the turn).
+        drained += 1;
+        if (drained === 1) return ["stop editing config, focus on tests"];
+        return [];
+      },
+      onSteeringDrained: async (messages) => { steered.push(...messages); },
+    });
+    expect(steered).toEqual(["stop editing config, focus on tests"]);
+    expect(trace).toContain("begin:3");
+    expect(stop).toMatchObject({ kind: "completion_proposal" });
+  });
+
+  test("empty steering drain lets the turn stop", async () => {
+    const { stop } = await runHarness({
+      responses: [{ text: "all done" }],
+      drainSteering: async () => [],
+    });
+    expect(stop.kind).toBe("completion_proposal");
   });
 });

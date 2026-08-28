@@ -1,5 +1,6 @@
 import type {
   ProviderResponse,
+  ProviderResponseChunk,
   RenderedProviderRequest,
 } from "@terminus/provider-core";
 import type { GatewayModel } from "@terminus/provider-zen";
@@ -29,12 +30,16 @@ export interface ProviderExecutionInput {
   readonly command: LocalProviderCommand | null;
   readonly gateway: ProviderGatewayConfig | null;
   readonly direct?: ProviderDirectConfig | null;
-  /**
-   * Per-turn kernel-brokered executor for the direct transport. Bound by the
+  /** Per-turn kernel-brokered executor for the direct transport. Bound by the
    * caller so it can capture turn-scoped state (context epoch, workspace);
    * required whenever `direct` is set.
    */
   readonly executeDirectRequest?: (input: ProviderExecutionInput) => Promise<ProviderResponse>;
+  /**
+   * Observe provider stream chunks as they arrive (client streaming).
+   * Invoked inline with the stream; errors propagate to the caller.
+   */
+  readonly onChunk?: (chunk: ProviderResponseChunk) => void | Promise<void>;
   readonly context: RequestContext;
   readonly workspaceId: string;
   /** Caller-owned cancellation signal for the current turn/request. */

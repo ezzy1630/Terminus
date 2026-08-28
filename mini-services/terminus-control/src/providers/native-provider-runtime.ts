@@ -101,6 +101,11 @@ export interface NativeTransportDeps {
     readonly signal: AbortSignal | null;
   }) => Promise<ByteStream>;
   readonly decode: (chunks: ByteStream) => AsyncIterable<ProviderResponseChunk>;
+  /**
+   * Inline stream observer (client streaming). Receives every decoded chunk
+   * as it arrives, before durable settlement. Errors abort the stream.
+   */
+  readonly onChunk?: (chunk: ProviderResponseChunk) => void | Promise<void>;
   readonly now?: () => number;
 }
 
@@ -109,6 +114,7 @@ export async function collectChunks(
   stream: ByteStream,
   decode: NativeTransportDeps["decode"],
   signal?: AbortSignal | null,
+  onChunk?: NativeTransportDeps["onChunk"],
 ): Promise<{ readonly chunks: ProviderResponseChunk[]; readonly errorChunks: ProviderResponseChunk[] }> {
   const chunks: ProviderResponseChunk[] = [];
   const errorChunks: ProviderResponseChunk[] = [];
@@ -117,7 +123,10 @@ export async function collectChunks(
       throw new Error("native provider request was aborted");
     }
     if (chunk.kind === "error") errorChunks.push(chunk);
-    else chunks.push(chunk);
+    else {
+      chunks.push(chunk);
+      await onChunk?.(chunk);
+    }
   }
   return { chunks, errorChunks };
 }
@@ -197,7 +206,7 @@ export async function dispatchNativeRequest(
     body: rendered.body,
     signal: input.signal ?? null,
   });
-  const { chunks, errorChunks } = await collectChunks(byteStream, deps.decode, input.signal);
+  const { chunks, errorChunks } = await collectChunks(byteStream, deps.decode, input.signal, deps.onChunk);
   const wallMs = (deps.now?.() ?? Date.now()) - startedAt;
 
   // Explicit partial-stream settlement on error chunks.
