@@ -50,11 +50,19 @@ from .experiment_manifest import (
     ExperimentManifest,
     SamplePlan,
 )
+from .identity import EvaluationIdentity, LockedEvaluationIdentity
+from .paired_evaluation import (
+    PairedEvaluationEvidence,
+    PairIdentityBinding,
+    PairingIssue,
+    derive_paired_evidence,
+)
 from .promotion_gate import (
     Evaluation,
     GateStatus,
     PromotionDecision,
     PromotionGateResult,
+    evaluate_paired_promotion,
     evaluate_promotion,
 )
 from .run_record import (
@@ -89,6 +97,7 @@ __all__ = [
     "Decision",
     "Evaluation",
     "EvaluationActor",
+    "EvaluationIdentity",
     "EvaluationPartition",
     "EvaluationReceipt",
     "EvolutionCandidate",
@@ -96,7 +105,11 @@ __all__ = [
     "FailureAttribution",
     "GateStatus",
     "GraderResult",
+    "LockedEvaluationIdentity",
     "Outcome",
+    "PairIdentityBinding",
+    "PairedEvaluationEvidence",
+    "PairingIssue",
     "ParetoArchive",
     "ParetoPoint",
     "PartitionAccessError",
@@ -112,5 +125,7 @@ __all__ = [
     "assess_conformance",
     "baseline_by_id",
     "cohort_by_id",
+    "derive_paired_evidence",
+    "evaluate_paired_promotion",
     "evaluate_promotion",
 ]

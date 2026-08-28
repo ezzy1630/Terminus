@@ -24,6 +24,7 @@ from typing import Any
 
 import polars as pl
 
+from ..identity import EvaluationIdentity
 from ..run_record import CostBreakdown, GraderResult, Outcome, RunRecord
 
 __all__ = [
@@ -137,6 +138,7 @@ def records_to_dataframe(records: list[RunRecord]) -> pl.DataFrame:
     - ``duration_seconds`` (float).
     - ``input_tokens``, ``output_tokens``, ``cached_tokens`` (int).
     - ``provider_reported_usd``, ``computed_usd`` (float).
+    - ``evaluation_identity`` (JSON-safe object for model-fixed pairing).
     - ``cost_reconciliation_flagged`` (bool).
     """
     rows: list[dict[str, object]] = []
@@ -163,6 +165,7 @@ def records_to_dataframe(records: list[RunRecord]) -> pl.DataFrame:
             "artifacts": d["artifacts"],
             "context_manifests": d["context_manifests"],
             "trajectory": d["trajectory"],
+            "evaluation_identity": d["evaluation_identity"],
             "notes": r.notes,
         }
         if r.cost is not None:
@@ -263,6 +266,12 @@ def _row_to_record(row: dict[str, object]) -> RunRecord:
             reconciliation_flagged=bool(row.get("cost_reconciliation_flagged", False)),
         )
     graders = [GraderResult(**g) for g in graders_raw]
+    identity_raw = _json_value(row.get("evaluation_identity"))
+    evaluation_identity = (
+        EvaluationIdentity.from_dict(identity_raw)
+        if isinstance(identity_raw, dict)
+        else None
+    )
     start = _as_datetime(row.get("start"), "start")
     end = _as_datetime_or_none(row.get("end"), "end")
     return RunRecord(
@@ -285,6 +294,7 @@ def _row_to_record(row: dict[str, object]) -> RunRecord:
         context_manifests=_json_dict_list(row.get("context_manifests")),
         trajectory=_json_dict_list(row.get("trajectory")),
         notes=str(row.get("notes", "")),
+        evaluation_identity=evaluation_identity,
     )
 
 
@@ -333,9 +343,14 @@ def _as_float(value: object) -> float:
 
 
 def _as_datetime(value: object, field_name: str) -> datetime:
-    """Require a datetime cell from the canonical flattened schema."""
+    """Decode a datetime cell from either Polars or serialized Parquet form."""
     if isinstance(value, datetime):
         return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
     raise ValueError(f"invalid {field_name} in flattened run record")
 
 

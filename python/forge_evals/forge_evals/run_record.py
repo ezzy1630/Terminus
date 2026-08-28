@@ -22,8 +22,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from .identity import EvaluationIdentity
+
 __all__ = [
     "CostBreakdown",
+    "EvaluationIdentity",
     "GraderResult",
     "Outcome",
     "RunRecord",
@@ -122,6 +125,9 @@ class RunRecord:
     context_manifests: list[dict[str, Any]] = field(default_factory=list)
     trajectory: list[dict[str, Any]] = field(default_factory=list)
     notes: str = ""
+    # Required for model-fixed promotion; legacy/fixture records remain
+    # readable but are ineligible until this is supplied.
+    evaluation_identity: EvaluationIdentity | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -162,6 +168,7 @@ class RunRecord:
         d["end"] = self.end.isoformat() if self.end else None
         d["cost"] = asdict(self.cost) if self.cost else None
         d["grader_results"] = [asdict(g) for g in self.grader_results]
+        d["evaluation_identity"] = self.evaluation_identity.to_dict() if self.evaluation_identity else None
         return d
 
     def to_json(self, path: Path | str) -> Path:
@@ -197,6 +204,7 @@ class RunRecord:
             "artifacts",
             "context_manifests",
             "trajectory",
+            "evaluation_identity",
         ):
             d[col] = json.dumps(d.get(col) or [], sort_keys=True)
         if d.get("cost") is not None:
@@ -219,6 +227,7 @@ class RunRecord:
         random_seed: int,
         model_capability_snapshot: dict[str, Any] | None = None,
         budgets: dict[str, Any] | None = None,
+        evaluation_identity: EvaluationIdentity | None = None,
     ) -> RunRecord:
         """Create a fresh record with a generated ``run_id`` and ``start`` timestamp."""
         return cls(
@@ -231,6 +240,7 @@ class RunRecord:
             environment_digest=environment_digest,
             random_seed=random_seed,
             budgets=budgets or {},
+            evaluation_identity=evaluation_identity,
         )
 
     @classmethod
@@ -261,6 +271,11 @@ class RunRecord:
             context_manifests=d.get("context_manifests", []) or [],
             trajectory=d.get("trajectory", []) or [],
             notes=d.get("notes", ""),
+            evaluation_identity=(
+                EvaluationIdentity.from_dict(d["evaluation_identity"])
+                if d.get("evaluation_identity") is not None
+                else None
+            ),
         )
 
     @classmethod

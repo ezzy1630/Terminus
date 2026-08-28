@@ -17,10 +17,13 @@ import random
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ..run_record import RunRecord
 from .harness_runner import Budgets, Harness, HarnessRunner, ModelCapabilitySnapshot, RunRequest
+
+if TYPE_CHECKING:
+    from ..paired_evaluation import PairedEvaluationEvidence
 
 __all__ = [
     "CrossHarnessPlan",
@@ -114,6 +117,30 @@ class CrossHarnessResult:
             for i in range(len(pair_list) - 1):
                 pairs.append((pair_list[i], pair_list[i + 1]))
         return pairs
+
+    def derive_paired_evidence(
+        self,
+        baseline_harness: str,
+        candidate_harness: str,
+        **kwargs: Any,
+    ) -> PairedEvaluationEvidence:
+        """Derive identity-checked statistics for two named harnesses.
+
+        ``pairs()`` remains a presentation helper. Promotion callers should
+        use this method so incomplete or mismatched identity cannot become
+        release evidence by accident.
+        """
+        from ..paired_evaluation import derive_paired_evidence
+
+        baseline = [record for record in self.records if record.harness == baseline_harness]
+        candidate = [record for record in self.records if record.harness == candidate_harness]
+        return derive_paired_evidence(
+            baseline,
+            candidate,
+            baseline_harness=baseline_harness,
+            candidate_harness=candidate_harness,
+            **kwargs,
+        )
 
 
 class ProgressReporter(Protocol):

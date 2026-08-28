@@ -23,12 +23,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .paired_evaluation import PairedEvaluationEvidence
 
 __all__ = [
     "Evaluation",
     "GateStatus",
     "PromotionDecision",
     "PromotionGateResult",
+    "evaluate_paired_promotion",
     "evaluate_promotion",
 ]
 
@@ -416,3 +421,82 @@ def evaluate_promotion(ev: Evaluation) -> PromotionGateResult:
         "operations, maintainability).",
         gates=gates,
     )
+
+
+def evaluate_paired_promotion(
+    evidence: PairedEvaluationEvidence,
+    *,
+    min_effect_size: float,
+    security_guardrails: dict[str, bool],
+    pareto_improves: bool = False,
+    cost_delta_pct: float = 0.0,
+    latency_p50_delta_pct: float = 0.0,
+    latency_p95_delta_pct: float = 0.0,
+    noninferiority_margin: float = 0.0,
+    has_observability: bool = False,
+    has_rollback: bool = False,
+    has_documentation: bool = False,
+    has_migration_behavior: bool = False,
+    maintainability_within_budget: bool = False,
+    divergence_within_budget: bool = False,
+    satisfies_hard_security_need: bool = False,
+    satisfies_hard_reliability_need: bool = False,
+) -> PromotionGateResult:
+    """Apply the promotion gate to derived, identity-locked paired evidence.
+
+    Missing identity or insufficient pairs is a hard evidence block. The
+    wrapper deliberately defaults operational and Pareto claims to false so a
+    caller cannot promote from statistical output alone.
+    """
+    if not evidence.eligible:
+        detail = "paired evidence is not promotion eligible"
+        if evidence.issues:
+            detail += ": " + "; ".join(issue.reason for issue in evidence.issues)
+        verdict = GateVerdict(
+            name="paired_evidence",
+            status=GateStatus.BLOCKED,
+            detail=detail,
+            evidence={
+                "identity_locked": str(evidence.identity_locked),
+                "pairs": str(evidence.n),
+            },
+        )
+        return PromotionGateResult(
+            decision=PromotionDecision.RETAIN_EXPERIMENTAL,
+            reason="Promotion requires locked, complete model-fixed paired evidence.",
+            gates=[verdict],
+            blocking_gates=[verdict.name],
+        )
+
+    regression_cohorts: list[str] = []
+    if evidence.noninferiority is not None and not evidence.noninferiority.is_noninferior:
+        regression_cohorts.append(evidence.metric)
+    evaluation = Evaluation(
+        primary_cohort="paired_model_fixed",
+        primary_metric_delta=evidence.mean_delta,
+        primary_ci_low=evidence.ci_low,
+        primary_ci_high=evidence.ci_high,
+        primary_effect_size=evidence.effect_size,
+        primary_effect_size_ci_low=evidence.effect_size_ci_low,
+        primary_effect_size_ci_high=evidence.effect_size_ci_high,
+        min_effect_size=min_effect_size,
+        primary_confidence_level=evidence.confidence_level,
+        cost_delta_pct=cost_delta_pct,
+        latency_p50_delta_pct=latency_p50_delta_pct,
+        latency_p95_delta_pct=latency_p95_delta_pct,
+        pareto_improves=pareto_improves,
+        regression_cohorts=regression_cohorts,
+        noninferiority_margin=noninferiority_margin,
+        noninferiority_cohorts=[evidence.metric] if evidence.noninferiority is not None else [],
+        security_guardrails=security_guardrails,
+        security_guardrail_failed=any(not passed for passed in security_guardrails.values()),
+        has_observability=has_observability,
+        has_rollback=has_rollback,
+        has_documentation=has_documentation,
+        has_migration_behavior=has_migration_behavior,
+        maintainability_within_budget=maintainability_within_budget,
+        divergence_within_budget=divergence_within_budget,
+        satisfies_hard_security_need=satisfies_hard_security_need,
+        satisfies_hard_reliability_need=satisfies_hard_reliability_need,
+    )
+    return evaluate_promotion(evaluation)
