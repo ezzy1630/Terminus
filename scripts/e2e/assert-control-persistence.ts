@@ -178,15 +178,10 @@ try {
     const reconciliation = sideEffect?.reconciliationJson
       ? object(JSON.parse(sideEffect.reconciliationJson) as unknown, `side-effect reconciliation ${fixture.id}`)
       : null;
-    // Terminal quarantine keeps the effect reconciler's canonical `unknown`;
-    // generic active-turn interruption applies the legacy `unknown_settlement` marker.
-    const expectedToolResultStatus = fixture.state === "FINALIZING"
-      ? "unknown"
-      : "unknown_settlement";
     const effectRecoveryValid =
       turn?.toolCalls.length === 1
       && toolCall?.state === "UNKNOWN"
-      && toolCall.resultStatus === expectedToolResultStatus
+      && toolCall.resultStatus === "unknown"
       && toolCall.settledAt !== null
       && toolCall.sideEffects.length === 1
       && sideEffect?.state === "MANUAL_REVIEW"

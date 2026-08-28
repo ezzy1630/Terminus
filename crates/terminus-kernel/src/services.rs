@@ -3696,11 +3696,17 @@ impl ArtifactIngestService {
         }
         let is_checkpoint_content = owner_type == "checkpoint" && purpose == "content";
         let is_turn_initiating_input = owner_type == "turn" && purpose == "initiating-input";
-        if !is_checkpoint_content && !is_turn_initiating_input {
+        let is_task_evidence_bundle = owner_type == "task" && purpose == "evidence-bundle";
+        let is_turn_evidence_bundle = owner_type == "turn" && purpose == "evidence-bundle";
+        if !is_checkpoint_content
+            && !is_turn_initiating_input
+            && !is_task_evidence_bundle
+            && !is_turn_evidence_bundle
+        {
             return Err(KernelError::new(
                 terminus_kernel_protocol::ErrorCode::InvalidArgument,
                 terminus_kernel_protocol::ErrorCategory::Validation,
-                "the public artifact-link boundary admits only checkpoint content or turn initiating-input ownership",
+                "the public artifact-link boundary admits only checkpoint content, turn initiating-input, or evidence-bundle ownership",
                 false,
             ));
         }
@@ -3718,7 +3724,25 @@ impl ArtifactIngestService {
                 ));
             }
         }
-        if is_turn_initiating_input {
+        if is_task_evidence_bundle
+            && (ctx.task_id.contains('*') || owner_id.contains('*') || owner_task_id.contains('*'))
+        {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::InvalidArgument,
+                terminus_kernel_protocol::ErrorCategory::Validation,
+                "task evidence-bundle ownership requires concrete non-wildcard task identifiers",
+                false,
+            ));
+        }
+        if is_task_evidence_bundle && owner_id != ctx.task_id {
+            return Err(KernelError::new(
+                terminus_kernel_protocol::ErrorCode::PermissionDenied,
+                terminus_kernel_protocol::ErrorCategory::Permission,
+                "task evidence-bundle ownership must match the request task",
+                false,
+            ));
+        }
+        if is_turn_initiating_input || is_turn_evidence_bundle {
             if ctx.turn_id.is_empty()
                 || ctx.turn_id.contains('*')
                 || owner_id.contains('*')
@@ -3727,7 +3751,7 @@ impl ArtifactIngestService {
                 return Err(KernelError::new(
                     terminus_kernel_protocol::ErrorCode::InvalidArgument,
                     terminus_kernel_protocol::ErrorCategory::Validation,
-                    "turn initiating-input ownership requires concrete non-wildcard turn and task identifiers",
+                    "turn artifact ownership requires concrete non-wildcard turn and task identifiers",
                     false,
                 ));
             }
@@ -3735,7 +3759,7 @@ impl ArtifactIngestService {
                 return Err(KernelError::new(
                     terminus_kernel_protocol::ErrorCode::PermissionDenied,
                     terminus_kernel_protocol::ErrorCategory::Permission,
-                    "turn initiating-input ownership must match the request turn and a task-bound capability",
+                    "turn artifact ownership must match the request turn and a task-bound capability",
                     false,
                 ));
             }
@@ -3966,7 +3990,7 @@ mod artifact_ingest_tests {
     }
 
     #[test]
-    fn turn_initiating_input_links_are_concrete_and_task_bound() {
+    fn task_and_turn_artifact_links_are_concrete_and_task_bound() {
         let directory = match tempfile::tempdir() {
             Ok(directory) => directory,
             Err(error) => panic!("test directory creation failed: {error}"),
@@ -3995,6 +4019,30 @@ mod artifact_ingest_tests {
                 "turn",
                 "artifact-turn",
                 "initiating-input",
+                "owner-task",
+            )
+            .is_ok());
+        assert!(kernel
+            .artifact_ingest
+            .link(
+                &owner,
+                &Default::default(),
+                &artifact.sha256,
+                "task",
+                "owner-task",
+                "evidence-bundle",
+                "owner-task",
+            )
+            .is_ok());
+        assert!(kernel
+            .artifact_ingest
+            .link(
+                &owner,
+                &Default::default(),
+                &artifact.sha256,
+                "turn",
+                "artifact-turn",
+                "evidence-bundle",
                 "owner-task",
             )
             .is_ok());
@@ -4052,6 +4100,34 @@ mod artifact_ingest_tests {
         );
         assert!(matches!(
             wildcard_task_authority,
+            Err(error) if error.code() == ErrorCode::PermissionDenied
+        ));
+
+        let mismatched_task_evidence = kernel.artifact_ingest.link(
+            &owner,
+            &Default::default(),
+            &artifact.sha256,
+            "task",
+            "other-task",
+            "evidence-bundle",
+            "owner-task",
+        );
+        assert!(matches!(
+            mismatched_task_evidence,
+            Err(error) if error.code() == ErrorCode::PermissionDenied
+        ));
+
+        let mismatched_turn_evidence = kernel.artifact_ingest.link(
+            &owner,
+            &Default::default(),
+            &artifact.sha256,
+            "turn",
+            "other-turn",
+            "evidence-bundle",
+            "owner-task",
+        );
+        assert!(matches!(
+            mismatched_turn_evidence,
             Err(error) if error.code() == ErrorCode::PermissionDenied
         ));
     }
