@@ -34,6 +34,7 @@ import {
 } from "@terminus/provider-zen";
 import type { CredentialBoundGatewayClient } from "@terminus/provider-zen";
 import { getOfflineCatalogSnapshotJson } from "@terminus/provider-core";
+import { z } from "zod";
 
 const MODELS_DEV_HOST = "models.dev";
 const MODELS_DEV_URL = `https://${MODELS_DEV_HOST}/api.json`;
@@ -71,6 +72,78 @@ let catalogCache: {
   readonly catalog: ReturnType<typeof parseModelsDevCatalog>;
   readonly expiresAt: number;
 } | null = null;
+
+// ─────────────── Durable discovery (H4) ────────────────
+//
+// The in-memory cache above is warmed only by a live discovery. A restarted
+// control plane therefore knew nothing and failed every turn with "configured
+// gateway model <id> has no admitted discovery record". The last successful
+// result is persisted verbatim so a restart can serve it until it refreshes.
+
+const gatewayModelSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  deployment: z.enum(["zen", "go"]),
+  providerId: z.enum(["open_code_zen", "open_code_go"]),
+  baseUrl: z.string(),
+  protocol: z.enum(["chat_completions", "responses", "messages"]),
+  free: z.boolean(),
+  toolCalling: z.boolean(),
+  structuredOutput: z.boolean(),
+  imageInput: z.boolean(),
+  reasoning: z.boolean(),
+  contextTokens: z.number(),
+  outputTokens: z.number(),
+  inputMicrosPerMillion: z.number(),
+  cachedInputMicrosPerMillion: z.number(),
+  outputMicrosPerMillion: z.number(),
+  observedAt: z.string().min(1),
+});
+
+const providerModelsResultSchema = z.object({
+  deployment: z.enum(["zen", "go"]),
+  observedAt: z.string().min(1),
+  models: z.array(gatewayModelSchema),
+  rejected: z.array(z.object({ modelId: z.string(), reason: z.string() })),
+});
+
+/** Canonical JSON for the durable discovery row. Never contains credentials. */
+export function providerModelsResultJson(result: ProviderModelsResult): string {
+  return JSON.stringify({
+    deployment: result.deployment,
+    observedAt: result.observedAt,
+    models: result.models,
+    rejected: result.rejected,
+  });
+}
+
+/**
+ * Decode a persisted discovery row. A row that no longer matches the shape is
+ * rejected rather than partially trusted: routing decisions are made from it.
+ */
+export function parseProviderModelsResult(json: string): ProviderModelsResult | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  const parsed = providerModelsResultSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    deployment: parsed.data.deployment,
+    observedAt: parsed.data.observedAt,
+    models: parsed.data.models,
+    rejected: parsed.data.rejected,
+  };
+}
+
+/** Seed the process cache from a durable row without marking it fresh. */
+export function restoreProviderModels(result: ProviderModelsResult): void {
+  // `expiresAt` in the past: the record is usable for routing but a caller
+  // asking for a *fresh* list still triggers discovery.
+  cache = { deployment: result.deployment, result, expiresAt: 0 };
+}
 
 export function cachedProviderModels(deployment: GatewayDeployment, now: number): ProviderModelsResult | null {
   if (cache === null || cache.deployment !== deployment) return null;

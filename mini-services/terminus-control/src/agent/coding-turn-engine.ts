@@ -4,6 +4,7 @@ import type {
   ProjectedResponse,
   RenderedProviderRequest,
 } from "@terminus/provider-core";
+import { createHash } from "node:crypto";
 import { canonicalJson } from "@terminus/context-ir";
 import {
   buildOperationObservation,
@@ -215,11 +216,32 @@ export type EngineStop =
 
 export const DOOM_LOOP_THRESHOLD = 3;
 
+/**
+ * H11 progress guards.
+ *
+ * `EMPTY_COMPLETION_LIMIT`: a response with neither text nor tool calls is
+ * not an answer. The first one is retried — providers do drop a completion
+ * under load — and the second stops the turn with `no_final_response` rather
+ * than settling it as an empty assistant message the user cannot read.
+ *
+ * `VERBATIM_REPETITION_*`: a model that re-emits the same substantial block
+ * of prose while making no tool calls is stuck. Short texts ("Done.", "OK")
+ * legitimately repeat, so only blocks of at least
+ * `VERBATIM_REPETITION_MIN_CHARS` count, and only after
+ * `VERBATIM_REPETITION_LIMIT` identical emissions.
+ */
+export const EMPTY_COMPLETION_LIMIT = 2;
+export const VERBATIM_REPETITION_MIN_CHARS = 200;
+export const VERBATIM_REPETITION_LIMIT = 3;
+
 export class CodingTurnEngine {
   private readonly dependencies: EngineDependencies;
   readonly budget: TurnBudget;
   private lastToolSignature: string | null = null;
   private consecutiveIdenticalCalls = 0;
+  private consecutiveEmptyCompletions = 0;
+  private lastVerbatimText: string | null = null;
+  private verbatimRepeats = 0;
 
   constructor(dependencies: EngineDependencies) {
     this.dependencies = dependencies;
@@ -239,6 +261,17 @@ export class CodingTurnEngine {
     for (;;) {
       if (this.dependencies.signal?.aborted) {
         return { kind: "interrupted" };
+      }
+      // H11: steering is drained at the top of every iteration, not only at a
+      // would-be stop. Guidance sent while a tool batch was running used to
+      // wait until the model happened to stop calling tools, which on a long
+      // batch chain meant it was never applied to the turn it was meant for.
+      // The messages become durable steering episodes that the context
+      // compiled below carries to the provider.
+      const pendingSteering = await this.drainSteering();
+      if (pendingSteering.length > 0) {
+        await this.dependencies.onSteeringDrained?.(pendingSteering);
+        if (this.dependencies.signal?.aborted) return { kind: "interrupted" };
       }
       const decision = this.budget.canStartStep();
       if (!decision.allowed) {
@@ -290,6 +323,12 @@ export class CodingTurnEngine {
         }
       }
 
+      // H11: verbatim-repetition guard. A model repeating the same
+      // substantial block of prose is not making progress; without this the
+      // turn burned its whole step budget re-emitting the same paragraph.
+      const repetitionStop = this.recordVerbatimText(settled.projected.text);
+      if (repetitionStop !== null) return repetitionStop;
+
       const toolCalls = settled.projected.toolCalls;
       // Length-stop guard: a response truncated by the output limit must not
       // execute tool calls whose arguments were never fully emitted (pi's
@@ -311,6 +350,20 @@ export class CodingTurnEngine {
           if (this.dependencies.signal?.aborted) return { kind: "interrupted" };
           continue;
         }
+        // H11: empty-response guard. A completion with no text and no tool
+        // calls says nothing; settling on it produced a "completed" turn with
+        // a blank answer. Retry once, then stop with an explicit reason.
+        if (
+          settled.projected.text.trim().length === 0
+          && settled.completion?.kind !== "completion_proposal"
+        ) {
+          this.consecutiveEmptyCompletions += 1;
+          if (this.consecutiveEmptyCompletions >= EMPTY_COMPLETION_LIMIT) {
+            return { kind: "no_final_response" };
+          }
+          continue;
+        }
+        this.consecutiveEmptyCompletions = 0;
         const responseArtifactUri = settled.responseArtifactUri ?? null;
         if (settled.completion?.kind === "completion_proposal") {
           return {
@@ -324,14 +377,6 @@ export class CodingTurnEngine {
             },
           };
         }
-        if (settled.projected.text.trim().length === 0 || settled.completion?.kind === "assistant_message") {
-          return {
-            kind: "assistant_message",
-            text: settled.projected.text,
-            responseArtifactUri,
-            attemptId,
-          };
-        }
         // A response without an explicit completion signal is still an
         // assistant message. Completion is admitted by the verifier later.
         return {
@@ -341,6 +386,9 @@ export class CodingTurnEngine {
           attemptId,
         };
       }
+
+      // Tool calls are progress: the empty-response counter resets.
+      this.consecutiveEmptyCompletions = 0;
 
       // Doom-loop detection: repeated identical tool signatures across attempts
       const toolSignature = toolCalls
@@ -432,6 +480,38 @@ export class CodingTurnEngine {
         await this.dependencies.afterToolsSettled();
       }
     }
+  }
+
+  /**
+   * Track verbatim repetition of substantial response text (H11).
+   *
+   * Returns a doom-loop stop once the same block has been emitted
+   * `VERBATIM_REPETITION_LIMIT` times. Anything shorter than
+   * `VERBATIM_REPETITION_MIN_CHARS` resets the counter, so brief
+   * acknowledgements between tool batches never trip it.
+   */
+  private recordVerbatimText(text: string): EngineStop | null {
+    const normalized = text.trim();
+    if (normalized.length < VERBATIM_REPETITION_MIN_CHARS) {
+      this.lastVerbatimText = null;
+      this.verbatimRepeats = 0;
+      return null;
+    }
+    if (normalized === this.lastVerbatimText) {
+      this.verbatimRepeats += 1;
+    } else {
+      this.lastVerbatimText = normalized;
+      this.verbatimRepeats = 1;
+    }
+    if (this.verbatimRepeats < VERBATIM_REPETITION_LIMIT) return null;
+    // The signature identifies the repeated block without copying it into
+    // the durable stop record.
+    const digest = createHash("sha256").update(normalized).digest("hex").slice(0, 32);
+    return {
+      kind: "doom_loop",
+      signature: `verbatim:${normalized.length}:${digest}`,
+      count: this.verbatimRepeats,
+    };
   }
 
   private async drainSteering(): Promise<readonly string[]> {

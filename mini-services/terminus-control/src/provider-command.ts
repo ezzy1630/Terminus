@@ -144,6 +144,7 @@ export async function executeLocalProviderCommand(
       timeout: { seconds: input.command.timeoutSeconds, nanos: 0 },
       allocatePty: false,
       shell: undefined,
+      allowUnboundedTimeout: false,
     },
     sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
     outputPolicyId: "provider-response-bounded",

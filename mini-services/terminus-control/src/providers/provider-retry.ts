@@ -18,47 +18,140 @@ export interface RetryOptions {
   readonly maxDelayMs?: number;
   /** Deterministic jitter source for tests. */
   readonly jitter?: () => number;
-  readonly sleep?: (ms: number) => Promise<void>;
+  readonly sleep?: (ms: number, signal?: AbortSignal | null | undefined) => Promise<void>;
+  /** Turn cancellation: aborts the backoff sleep instead of stranding the turn. */
+  readonly signal?: AbortSignal | null | undefined;
 }
 
 export const DEFAULT_MAX_ATTEMPTS = 3;
 export const DEFAULT_BASE_DELAY_MS = 250;
 export const DEFAULT_MAX_DELAY_MS = 8_000;
 
-/** Extract the HTTP status from the direct-transport error message. */
+/**
+ * Provider fault codes that are transient by contract. The gateway reports
+ * upstream saturation as `server_error`; Anthropic reports it as
+ * `overloaded_error`. Both recover on retry.
+ */
+const RETRYABLE_PROVIDER_CODES: ReadonlySet<string> = new Set([
+  "server_error",
+  "overloaded",
+  "overloaded_error",
+  "service_unavailable",
+  "rate_limit_error",
+  "rate_limit_exceeded",
+  "api_error",
+]);
+
+/**
+ * Transport-level provider failure carrying the classification the message
+ * text can only hint at. Both the gateway path and the direct path raise this
+ * so {@link isRetryableProviderError} never has to guess from prose.
+ */
+export class ProviderTransportError extends Error {
+  readonly status: number | null;
+  readonly retryAfterMs: number | null;
+  readonly providerCode: string | null;
+
+  constructor(
+    message: string,
+    init: {
+      readonly status?: number | null | undefined;
+      readonly retryAfterMs?: number | null | undefined;
+      readonly providerCode?: string | null | undefined;
+      readonly cause?: unknown;
+    } = {},
+  ) {
+    super(message, init.cause === undefined ? undefined : { cause: init.cause });
+    this.name = "ProviderTransportError";
+    this.status = init.status ?? null;
+    this.retryAfterMs = init.retryAfterMs ?? null;
+    this.providerCode = init.providerCode ?? null;
+  }
+
+  /**
+   * Build the error a provider `error` chunk represents. The status is taken
+   * from the chunk when the decoder supplied one, otherwise from a `[502]`
+   * style marker the upstream embedded in the message.
+   */
+  static fromProviderErrorChunk(input: {
+    readonly errorCode?: string | undefined;
+    readonly errorMessage?: string | undefined;
+    readonly retryAfterMs?: number | undefined;
+    readonly status?: number | null | undefined;
+    readonly fallbackMessage: string;
+  }): ProviderTransportError {
+    const code = input.errorCode ?? "PROVIDER_ERROR";
+    const message = input.errorMessage ?? input.fallbackMessage;
+    return new ProviderTransportError(`${code}: ${message}`, {
+      status: input.status ?? bracketStatusFromText(message),
+      retryAfterMs: input.retryAfterMs ?? null,
+      providerCode: input.errorCode ?? null,
+    });
+  }
+}
+
+/**
+ * Upstreams frequently embed the origin status in the message body rather than
+ * the transport status, e.g. `Streaming response failed: [502] Upstream error`.
+ */
+function bracketStatusFromText(text: string): number | null {
+  const match = /\[(\d{3})\]/.exec(text);
+  if (match === null) return null;
+  const status = Number.parseInt(match[1]!, 10);
+  return status >= 100 && status <= 599 ? status : null;
+}
+
+/**
+ * Extract the HTTP status: structured first, then the direct-transport
+ * `HTTP 502` text, then a `[502]` marker embedded by an upstream proxy.
+ */
 export function statusFromProviderError(error: unknown): number | null {
+  if (error instanceof ProviderTransportError && error.status !== null) return error.status;
   if (!(error instanceof Error)) return null;
   const match = /HTTP (\d{3})/.exec(error.message);
   if (match !== null) return Number.parseInt(match[1]!, 10);
-  return null;
+  return bracketStatusFromText(error.message);
+}
+
+/** The structured provider fault code, when the thrower carried one. */
+export function providerCodeFromError(error: unknown): string | null {
+  if (error instanceof ProviderTransportError) return error.providerCode;
+  if (!(error instanceof Error)) return null;
+  const match = /^([a-z][a-z0-9_]*): /.exec(error.message);
+  return match === null ? null : match[1]!;
 }
 
 export function isRetryableProviderError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
+  const status = statusFromProviderError(error);
+  if (status !== null) {
+    return status === 408 || status === 429 || (status >= 500 && status <= 599);
+  }
+  const code = providerCodeFromError(error);
+  if (code !== null && RETRYABLE_PROVIDER_CODES.has(code.toLowerCase())) return true;
   const message = error.message.toLowerCase();
   // Grant expiry: the connector mint path re-runs per attempt, so a retry
   // with a fresh grant legitimately recovers.
   if (message.includes("grant")) return true;
-  if (
-    message.includes("econnreset")
+  return message.includes("econnreset")
+    || message.includes("econnrefused")
+    || message.includes("epipe")
+    || message.includes("etimedout")
     || message.includes("socket")
     || message.includes("timed out")
     || message.includes("timeout")
     || message.includes("network")
-    || message.includes("fetch failed")
-  ) {
-    return true;
-  }
-  const status = statusFromProviderError(error);
-  if (status === null) return false;
-  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+    || message.includes("fetch failed");
 }
 
-/** Honor a Retry-After hint embedded in the error message when present. */
+/** Honor a Retry-After hint: structured first, then embedded text. */
 export function retryAfterMsFromError(error: unknown): number | null {
+  if (error instanceof ProviderTransportError && error.retryAfterMs !== null) return error.retryAfterMs;
   if (!(error instanceof Error)) return null;
-  const match = /retry-after (\d+(?:\.\d+)?)s/i.exec(error.message);
-  if (match !== null) return Math.ceil(Number.parseFloat(match[1]!) * 1_000);
+  const seconds = /retry-after:?\s*(\d+(?:\.\d+)?)\s*s/i.exec(error.message);
+  if (seconds !== null) return Math.ceil(Number.parseFloat(seconds[1]!) * 1_000);
+  const bare = /retry-after:?\s*(\d+(?:\.\d+)?)\b/i.exec(error.message);
+  if (bare !== null) return Math.ceil(Number.parseFloat(bare[1]!) * 1_000);
   return null;
 }
 
@@ -78,19 +171,51 @@ export class RetryBudgetExhaustedError extends Error {
     readonly attempts: number,
     readonly lastError: unknown,
   ) {
-    super(`provider dispatch failed after ${attempts} attempt(s): ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+    super(
+      `provider dispatch failed after ${attempts} attempt(s): ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+      lastError === undefined ? undefined : { cause: lastError },
+    );
     this.name = "RetryBudgetExhaustedError";
   }
 }
 
-/** True when a fault class should be retried (exported for telemetry). */
+/** Raised when the turn is cancelled while the retry backoff is pending. */
+export class RetryAbortedError extends Error {
+  constructor(readonly lastError: unknown) {
+    super("provider retry was aborted before the next attempt");
+    this.name = "RetryAbortedError";
+  }
+}
+
+/**
+ * Backoff sleep that settles early when the turn is cancelled. A plain
+ * `setTimeout` here strands an interrupted turn for the full delay.
+ */
+export function abortableSleep(ms: number, signal?: AbortSignal | null | undefined): Promise<void> {
+  if (signal?.aborted === true) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 export async function withProviderRetry<T>(
   operation: () => Promise<T>,
   options: RetryOptions = {},
 ): Promise<T> {
   const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const sleep = options.sleep ?? abortableSleep;
+  const signal = options.signal ?? null;
+  // Read through a call so the compiler does not narrow `aborted` across the
+  // await: the whole point is that it can flip while the backoff is pending.
+  const aborted = (): boolean => signal?.aborted === true;
   let lastError: unknown;
   let attemptsUsed = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -101,11 +226,13 @@ export async function withProviderRetry<T>(
       lastError = error;
       if (attempt === maxAttempts) break;
       if (!isRetryableProviderError(error)) break;
+      if (aborted()) throw new RetryAbortedError(error);
       const hinted = retryAfterMsFromError(error);
       const delay = hinted !== null
         ? Math.min(hinted, options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS)
         : backoffDelayMs(attempt, options);
-      await sleep(delay);
+      await sleep(delay, signal);
+      if (aborted()) throw new RetryAbortedError(error);
     }
   }
   throw new RetryBudgetExhaustedError(attemptsUsed, lastError);

@@ -481,3 +481,81 @@ describe("M8 verification exit gate", () => {
     })).rejects.toThrow(/manual|false completion/i);
   });
 });
+
+describe("H3 runners report skips and receive the node's own timeout", () => {
+  test("a skipped predicate is recorded as skipped with its reason, never as a failure", async () => {
+    const runtime = makeRuntime({
+      async run() {
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          status: "skipped" as const,
+          reasonIfSkipped: "no test runner detected in this repository for 'unit_test'",
+        };
+      },
+    });
+    const criteria: AcceptanceCriterion[] = [
+      { id: "ac1", statement: "tests pass", verificationHint: null, required: true },
+    ];
+    const plan = await runtime.lifecycle.createPlan({
+      taskContractId: fakeUuid(31),
+      taskContractVersion: 1,
+      sourceRevision: "rev-skip",
+      criteria,
+      nodes: [criterionNode({ id: "n1", criterionId: "ac1", predicateType: "unit_test", paths: ["."], required: true })],
+      completionExpression: "n1",
+    });
+    const evaluation = await runtime.lifecycle.evaluate(plan.id, "rev-skip", "env:skip");
+    expect(evaluation.results[0]?.status).toBe("skipped");
+    expect(evaluation.results[0]?.exitCode).toBeNull();
+    expect(evaluation.results[0]?.reasonIfSkipped).toContain("no test runner detected");
+    // A skip is not a pass: the gate stays closed and the caller decides.
+    expect(evaluation.allRequiredPassed).toBe(false);
+  });
+
+  test("a skip without a reason is rejected rather than silently swallowed", async () => {
+    const runtime = makeRuntime({
+      async run() {
+        return { exitCode: 0, stdout: "", stderr: "", status: "skipped" as const };
+      },
+    });
+    const criteria: AcceptanceCriterion[] = [
+      { id: "ac1", statement: "tests pass", verificationHint: null, required: true },
+    ];
+    const plan = await runtime.lifecycle.createPlan({
+      taskContractId: fakeUuid(32),
+      taskContractVersion: 1,
+      sourceRevision: "rev-skip2",
+      criteria,
+      nodes: [criterionNode({ id: "n1", criterionId: "ac1", predicateType: "unit_test", paths: ["."], required: true })],
+      completionExpression: "n1",
+    });
+    const evaluation = await runtime.lifecycle.evaluate(plan.id, "rev-skip2", "env:skip");
+    expect(evaluation.results[0]?.status).toBe("error");
+  });
+
+  test("the runner receives the node's persisted timeout, not a hardcoded ceiling", async () => {
+    const observed: number[] = [];
+    const runtime = makeRuntime({
+      async run(request) {
+        observed.push(request.timeoutMs);
+        return { exitCode: 0, stdout: "ok", stderr: "" };
+      },
+    });
+    const criteria: AcceptanceCriterion[] = [
+      { id: "ac1", statement: "tests pass", verificationHint: null, required: true },
+    ];
+    const node = criterionNode({ id: "n1", criterionId: "ac1", predicateType: "unit_test", paths: ["."], required: true });
+    const plan = await runtime.lifecycle.createPlan({
+      taskContractId: fakeUuid(33),
+      taskContractVersion: 1,
+      sourceRevision: "rev-timeout",
+      criteria,
+      nodes: [{ ...node, timeout: 45_000 }],
+      completionExpression: "n1",
+    });
+    await runtime.lifecycle.evaluate(plan.id, "rev-timeout", "env:timeout");
+    expect(observed).toEqual([45_000]);
+  });
+});

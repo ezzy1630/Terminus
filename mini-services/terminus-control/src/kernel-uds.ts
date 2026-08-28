@@ -10,6 +10,7 @@ import {
   type CallOptions,
 } from "@grpc/grpc-js";
 import { Observable } from "rxjs";
+import { kernelDeadline } from "./kernel-deadlines.js";
 import {
   ArtifactIngestServiceClientImpl,
   CodeIntelligenceServiceClientImpl,
@@ -58,7 +59,14 @@ class UdsRpc implements GeneratedRpc {
         bufferToBytes as UnaryDeserialize,
         Buffer.from(data),
         this.metadata,
-        {} satisfies CallOptions,
+        // H10: without a deadline a kernel that accepts the connection and
+        // then stops answering leaves the turn waiting forever.
+        {
+          deadline: kernelDeadline({
+            qualifiedMethod: `${service}/${method}`,
+            streaming: false,
+          }),
+        } satisfies CallOptions,
         (error: Error | null, response?: Uint8Array) => {
           if (error) {
             reject(error);
@@ -84,6 +92,14 @@ class UdsRpc implements GeneratedRpc {
         bufferToBytes as UnaryDeserialize,
         Buffer.from(data),
         this.metadata,
+        // A streaming call may legitimately run for as long as the turn has
+        // left, bounded by MAX_STREAMING_KERNEL_DEADLINE_MS (H10).
+        {
+          deadline: kernelDeadline({
+            qualifiedMethod: `${service}/${method}`,
+            streaming: true,
+          }),
+        } satisfies CallOptions,
       );
       call.on("data", (value: Uint8Array) => subscriber.next(value));
       call.on("end", () => subscriber.complete());

@@ -568,6 +568,70 @@ export function normalizedToolOperationHash(input: {
   }));
 }
 
+/**
+ * Side-effect classes that observe state without changing it. Repeating one is
+ * never a semantic duplicate: the observation is only meaningful against the
+ * workspace as it exists *now*, so a read issued after a write must dispatch.
+ * `search`/`inspect`/`capability` are listed for forward compatibility with
+ * tool packs that classify observation more finely than the builtin set.
+ */
+export const READ_ONLY_SIDE_EFFECT_CLASSES: ReadonlySet<string> = new Set([
+  "read",
+  "search",
+  "inspect",
+  "capability",
+]);
+
+/** True when the tool only observes state and must never be deduplicated. */
+export function isReadOnlyToolCall(call: ParsedStandaloneToolCall): boolean {
+  return READ_ONLY_SIDE_EFFECT_CLASSES.has(toolEffectMetadata(call).sideEffectClass);
+}
+
+/**
+ * The semantic-idempotency gate protects against replaying a *mutation*. Reads
+ * are exempt (see {@link READ_ONLY_SIDE_EFFECT_CLASSES}).
+ */
+export function semanticIdempotencyGateApplies(call: ParsedStandaloneToolCall): boolean {
+  return !isReadOnlyToolCall(call);
+}
+
+/**
+ * The ledger key for the side effect row. Mutations key on the semantic
+ * operation hash so a replay collides with the original effect. Observations
+ * key on the hash *and* the tool call id so repeated identical reads each get
+ * their own effect row instead of colliding on the unique index.
+ */
+export function effectLedgerIdempotencyKey(input: {
+  readonly call: ParsedStandaloneToolCall;
+  readonly operationHash: string;
+  readonly toolCallId: string;
+}): string {
+  return isReadOnlyToolCall(input.call)
+    ? `${input.operationHash}:${input.toolCallId}`
+    : input.operationHash;
+}
+
+/**
+ * Denial text handed back to the model. It must say what was rejected *and*
+ * what to do next, otherwise the model retries the same call until a loop guard
+ * fires.
+ */
+export function duplicateOperationDenial(input: {
+  readonly call: ParsedStandaloneToolCall;
+  readonly effectId: string;
+  readonly effectState: string;
+}): string {
+  const target = input.call.toolId === "patch" || input.call.toolId === "read"
+    ? ` to '${input.call.arguments.path}'`
+    : "";
+  return [
+    `An identical ${input.call.toolId} operation${target} was already applied as effect ${input.effectId}`,
+    ` in state ${input.effectState}; Terminus did not run it again.`,
+    ` Do not retry the same call: re-read the file to see the current content,`,
+    ` then continue with the next step of the task.`,
+  ].join("");
+}
+
 export function providerToolCallTranscript(call: ParsedStandaloneToolCall): ProviderToolCallTranscript {
   return {
     protocol: "terminus.tool-call.v1",
@@ -1134,6 +1198,7 @@ export async function executeStandaloneTool(
             timeout: durationFromMilliseconds(input.call.arguments.timeout_ms),
             allocatePty: false,
             shell: shell === undefined ? undefined : { enabled: true, dialect: shell.dialect, script: shell.script },
+            allowUnboundedTimeout: false,
           },
           sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
           outputPolicyId: "tool-result-bounded",
@@ -1166,6 +1231,7 @@ export async function executeStandaloneTool(
           timeout: durationFromMilliseconds(input.call.arguments.timeout_ms),
           allocatePty: false,
           shell: shell === undefined ? undefined : { enabled: true, dialect: shell.dialect, script: shell.script },
+          allowUnboundedTimeout: false,
         },
         sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
         outputPolicyId: "tool-result-bounded",
@@ -1189,6 +1255,7 @@ export async function executeStandaloneTool(
           timeout: durationFromMilliseconds(30_000),
           allocatePty: false,
           shell: undefined,
+          allowUnboundedTimeout: false,
         },
         sandboxProfileId: input.devMode ? "degraded-local" : "secure-local-default",
         outputPolicyId: "tool-result-bounded",
@@ -1255,6 +1322,9 @@ async function executeWebFetch(
         method: "GET",
         pathClass: destination.pathWithQuery,
         effectId,
+        // web-fetch chooses its host per call, so the mint-time allowlist is
+        // exactly the destination this call resolved.
+        allowedHosts: [destination.host],
       },
       ttlSeconds: 60,
     }), input.signal);
@@ -1625,7 +1695,7 @@ function toolIntent(contractHash: string, effectClass: string) {
   };
 }
 
-function durationFromMilliseconds(milliseconds: number): { readonly seconds: number; readonly nanos: number } {
+export function durationFromMilliseconds(milliseconds: number): { readonly seconds: number; readonly nanos: number } {
   return {
     seconds: Math.floor(milliseconds / 1_000),
     nanos: (milliseconds % 1_000) * 1_000_000,

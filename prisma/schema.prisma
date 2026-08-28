@@ -57,6 +57,9 @@ model Session {
   status                   String // active | paused | archived | deleted
   defaultModelProfile      String    @map("default_model_profile")
   defaultPermissionProfile String    @map("default_permission_profile")
+  // Client-chosen defaults applied to turns that do not name their own (H7).
+  defaultModel             String?   @map("default_model")
+  defaultReasoningEffort   String?   @map("default_reasoning_effort")
   activeThreadId           String?   @map("active_thread_id")
   metadataJson             String    @default("{}") @map("metadata_json")
   createdAt                DateTime  @default(now()) @map("created_at")
@@ -199,6 +202,9 @@ model Turn {
   startedAt               DateTime? @map("started_at")
   completedAt             DateTime? @map("completed_at")
   terminalErrorJson       String?   @map("terminal_error_json")
+  // Per-turn model selection (H7). Null means "use the configured provider".
+  selectedModel           String?   @map("selected_model")
+  selectedReasoningEffort String?   @map("selected_reasoning_effort") // low|medium|high|max
 
   thread           Thread            @relation(fields: [threadId], references: [id])
   task             Task?             @relation(fields: [taskId], references: [id])
@@ -1039,6 +1045,18 @@ model GatewayProviderConfiguration {
   updatedAt             DateTime @updatedAt @map("updated_at")
 
   @@map("gateway_provider_configurations")
+}
+
+// Last successful gateway model discovery, per deployment (H4). Survives a
+// restart so a turn is never denied for a cold in-process cache.
+model ProviderModelDiscovery {
+  deployment String   @id
+  resultJson String   @map("result_json")
+  modelCount Int      @map("model_count")
+  observedAt String   @map("observed_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@map("provider_model_discoveries")
 }
 
 model SemanticEvent {

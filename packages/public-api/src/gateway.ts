@@ -12,6 +12,22 @@ import type { EventEnvelopeV2 } from "@terminus/runtime-protocol";
 import { generateUuid7, nowTimestamp, asContentHash } from "@terminus/domain";
 
 export class CompatibilityGateway {
+  /**
+   * Evidence a claim must carry. A task that cannot touch the workspace
+   * (no write paths) has no test to run: demanding `DETERMINISTIC_TEST` for a
+   * question or an explanation makes it permanently incompletable. Such a task
+   * settles on the recorded turn transcript instead.
+   */
+  static evidenceRequirementForScope(input: {
+    readonly writePaths?: readonly string[] | undefined;
+    readonly verificationHint?: string | null | undefined;
+  }): string {
+    if (input.verificationHint !== undefined && input.verificationHint !== null && input.verificationHint.length > 0) {
+      return input.verificationHint;
+    }
+    return (input.writePaths ?? []).length > 0 ? "DETERMINISTIC_TEST" : "RUNTIME_TRACE";
+  }
+
   /** Translates a legacy v1 CreateTask request into a canonical v2 TaskContract structure. */
   static translateV1CreateTaskToV2(v1Input: {
     sessionId: string;
@@ -28,16 +44,19 @@ export class CompatibilityGateway {
     v1Context: { sessionId: string; threadId: string };
     contract: TaskV2Snapshot["contract"];
   } {
-    const claims = (v1Input.acceptanceCriteria ?? []).map((ac) => ({
-      claimId: ac.id,
-      statement: ac.statement,
-      evidenceRequirement: ac.verificationHint ?? "DETERMINISTIC_TEST",
-    }));
     const pathScope = {
       readPaths: [...(v1Input.allowedScope?.readPaths ?? [])],
       writePaths: [...(v1Input.allowedScope?.writePaths ?? [])],
       externalSystems: [...(v1Input.allowedScope?.externalSystems ?? [])],
     };
+    const claims = (v1Input.acceptanceCriteria ?? []).map((ac) => ({
+      claimId: ac.id,
+      statement: ac.statement,
+      evidenceRequirement: CompatibilityGateway.evidenceRequirementForScope({
+        writePaths: pathScope.writePaths,
+        verificationHint: ac.verificationHint,
+      }),
+    }));
     const allowedEffectClasses = [
       ...(pathScope.readPaths.length > 0 ? ["LOCAL_FS_READ"] : []),
       ...(pathScope.writePaths.length > 0 ? ["LOCAL_FS_WRITE"] : []),
@@ -60,7 +79,9 @@ export class CompatibilityGateway {
         {
           claimId: "claim-default",
           statement: v1Input.objective,
-          evidenceRequirement: "DETERMINISTIC_TEST",
+          evidenceRequirement: CompatibilityGateway.evidenceRequirementForScope({
+            writePaths: pathScope.writePaths,
+          }),
         },
       ],
       constraints: {

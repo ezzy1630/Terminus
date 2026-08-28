@@ -11,6 +11,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   CanonicalRenderInput,
+  ReasoningEffort,
   CompatibilityResult,
   ContinuationInput,
   ContinuationDecision,
@@ -31,6 +32,7 @@ import type {
   RequestContext,
 } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
 import type { DirectProviderConfiguration } from "./direct-provider-config.js";
+import { ProviderTransportError } from "./providers/provider-retry.js";
 
 export const DIRECT_ENDPOINTS = {
   anthropic: { host: "api.anthropic.com", port: 443, connectorId: "anthropic-messages", path: "/v1/messages" },
@@ -95,6 +97,9 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
           method: input.method,
           pathClass: input.path,
           effectId,
+          // Exactly the endpoint this request dispatches to; the kernel
+          // re-checks it against the global egress union.
+          allowedHosts: [input.host],
         },
         ttlSeconds: 60,
       }),
@@ -132,8 +137,9 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
           const status = chunk.receipt.statusCode;
           const outcomeText = chunk.receipt.outcome ?? "";
           if (status === undefined || status < 200 || status > 299) {
-            throw new Error(
+            throw new ProviderTransportError(
               `direct provider returned HTTP ${status ?? 0}${outcomeText.length > 0 ? ` (${outcomeText})` : ""}`,
+              { status: status ?? null },
             );
           }
         }
@@ -166,7 +172,10 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
     if (status < 200 || status > 299) {
       // Connector receipts do not carry response headers yet; retry pacing
       // falls back to exponential backoff with jitter in provider-retry.ts.
-      throw new Error(`direct provider returned HTTP ${status}${providerErrorSuffix(response.body)}`);
+      throw new ProviderTransportError(
+        `direct provider returned HTTP ${status}${providerErrorSuffix(response.body)}`,
+        { status },
+      );
     }
     yield* splitSseChunks(response.body);
   }
@@ -207,6 +216,7 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
           scheme: "https",
           method: "POST",
           pathClass: input.path,
+          allowedHosts: [input.host],
           effectId,
         },
         ttlSeconds: 60,
@@ -257,7 +267,10 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
       );
       const status = response.receipt?.statusCode;
       if (status === undefined || status < 200 || status > 299) {
-        throw new Error(`direct provider returned HTTP ${status ?? 0}${providerErrorSuffix(response.body)}`);
+        throw new ProviderTransportError(
+          `direct provider returned HTTP ${status ?? 0}${providerErrorSuffix(response.body)}`,
+          { status: status ?? null },
+        );
       }
       yield* splitSseChunks(response.body);
       return;
@@ -266,7 +279,7 @@ export class KernelDirectConnectorClient implements DirectConnectorClient {
     if (!streamed) throw new Error("direct provider stream settled without response bytes");
     if (sawReceiptStatus === null) throw new Error("direct provider stream ended without a receipt");
     if (sawReceiptStatus < 200 || sawReceiptStatus > 299) {
-      throw new Error(`direct provider returned HTTP ${sawReceiptStatus}`);
+      throw new ProviderTransportError(`direct provider returned HTTP ${sawReceiptStatus}`, { status: sawReceiptStatus });
     }
   }
 }
@@ -310,9 +323,10 @@ function withAbortSignal<T>(
 }
 
 /** Minimal Observable→AsyncIterable bridge. */
-function observableToAsyncIterable<T>(
+export function observableToAsyncIterable<T>(
   source: import("rxjs").Observable<T>,
   signal?: AbortSignal | null,
+  abortMessage = "direct provider request was aborted",
 ): AsyncIterable<T> {
   return {
     [Symbol.asyncIterator](): AsyncIterator<T> {
@@ -330,7 +344,7 @@ function observableToAsyncIterable<T>(
       };
       const onAbort = (): void => {
         if (done) return;
-        failure = new Error("direct provider request was aborted");
+        failure = new Error(abortMessage);
         done = true;
         queue.length = 0;
         subscription?.unsubscribe();
@@ -386,7 +400,7 @@ function observableToAsyncIterable<T>(
 }
 
 /** grpc-js surfaces UNIMPLEMENTED as a details-bearing error string. */
-function isUnimplemented(error: unknown): boolean {
+export function isUnimplemented(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /unimplemented/i.test(message);
 }
@@ -501,7 +515,12 @@ export async function executeDirectProviderRequest(
   }
   const providerError = chunks.find((chunk) => chunk.kind === "error");
   if (providerError?.kind === "error") {
-    throw new Error(`${providerError.errorCode ?? "PROVIDER_ERROR"}: ${providerError.errorMessage ?? "direct provider failed"}`);
+    throw ProviderTransportError.fromProviderErrorChunk({
+      errorCode: providerError.errorCode,
+      errorMessage: providerError.errorMessage,
+      retryAfterMs: providerError.retryAfterMs,
+      fallbackMessage: "direct provider failed",
+    });
   }
   return {
     providerId: rendered.providerId,
@@ -516,15 +535,22 @@ export async function executeDirectProviderRequest(
  * Chat Completions map straight onto the vendor renderer; the OpenAI
  * Responses API reuses the chat rendering converted to Responses input items.
  */
-export function createDirectRenderer(configuration: DirectProviderConfiguration): ProviderRenderer {
+export function createDirectRenderer(
+  configuration: DirectProviderConfiguration,
+  options: { readonly reasoningEffort?: ReasoningEffort | null | undefined } = {},
+): ProviderRenderer {
+  // The Anthropic Messages renderer has no reasoning-depth control on this
+  // path; the effort is deliberately ignored rather than silently mapped.
   if (configuration.vendor === "anthropic") return new AnthropicRenderer();
-  if (configuration.protocol === "chat_completions") return new OpenAiRenderer();
-  const delegate = new OpenAiRenderer();
+  const rendererOptions = { reasoningEffort: options.reasoningEffort ?? null };
+  if (configuration.protocol === "chat_completions") return new OpenAiRenderer(rendererOptions);
+  const delegate = new OpenAiRenderer(rendererOptions);
   return {
     providerId: delegate.providerId,
     version: delegate.version,
     compatibility: (input: RenderCompatibilityInput): CompatibilityResult => delegate.compatibility(input),
-    render: async (input: CanonicalRenderInput): Promise<RenderedProviderRequest> => renderResponsesRequest(input),
+    render: async (input: CanonicalRenderInput): Promise<RenderedProviderRequest> =>
+      renderResponsesRequest(input, rendererOptions),
     projectResponse: (response: ProviderResponse) => delegate.projectResponse(response),
     extractUsage: (response: ProviderResponse): UsageRecord => delegate.extractUsage(response),
     continuationPolicy: (input: ContinuationInput): ContinuationDecision => delegate.continuationPolicy(input),

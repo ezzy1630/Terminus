@@ -148,8 +148,116 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
 }
 
+const MAX_MESSAGE_CHARS = 512;
+const MAX_CAUSE_DEPTH = 5;
+
 function boundedMessage(value: string): string {
-  return value.length <= 512 ? value : `${value.slice(0, 512)}…`;
+  return value.length <= MAX_MESSAGE_CHARS ? value : `${value.slice(0, MAX_MESSAGE_CHARS)}…`;
+}
+
+/**
+ * Bounded string that says so when it is bounded. Silent truncation in an
+ * error detail is how a root cause disappears.
+ */
+function boundedDetail(value: string): { readonly text: string; readonly truncated: boolean } {
+  return value.length <= MAX_MESSAGE_CHARS
+    ? { text: value, truncated: false }
+    : { text: value.slice(0, MAX_MESSAGE_CHARS), truncated: true };
+}
+
+/**
+ * grpc-js reports failures with a numeric `code` and no `name`, so the string
+ * guards below classified every kernel fault as INTERNAL with `details: {}`.
+ * This is the canonical grpc status mapping for the codes the kernel raises.
+ */
+const GRPC_STATUS: Readonly<Record<number, {
+  readonly name: string;
+  readonly category: string;
+  readonly kind: LoopErrorKind;
+  readonly retryable: boolean;
+}>> = {
+  1: { name: "CANCELLED", category: "cancelled", kind: "cancelled", retryable: false },
+  2: { name: "UNKNOWN", category: "internal", kind: "unknown", retryable: false },
+  3: { name: "INVALID_ARGUMENT", category: "validation", kind: "unknown", retryable: false },
+  4: { name: "DEADLINE_EXCEEDED", category: "timeout", kind: "provider", retryable: true },
+  5: { name: "NOT_FOUND", category: "not_found", kind: "unknown", retryable: false },
+  6: { name: "ALREADY_EXISTS", category: "conflict", kind: "unknown", retryable: false },
+  7: { name: "PERMISSION_DENIED", category: "policy_denied", kind: "policy_denied", retryable: false },
+  8: { name: "RESOURCE_EXHAUSTED", category: "budget_exhausted", kind: "budget_exhausted", retryable: false },
+  9: { name: "FAILED_PRECONDITION", category: "conflict", kind: "unknown", retryable: false },
+  10: { name: "ABORTED", category: "conflict", kind: "unknown", retryable: true },
+  11: { name: "OUT_OF_RANGE", category: "validation", kind: "unknown", retryable: false },
+  12: { name: "UNIMPLEMENTED", category: "unsupported", kind: "unknown", retryable: false },
+  13: { name: "INTERNAL", category: "internal", kind: "unknown", retryable: false },
+  14: { name: "UNAVAILABLE", category: "transport", kind: "provider", retryable: true },
+  15: { name: "DATA_LOSS", category: "internal", kind: "unknown", retryable: false },
+  16: { name: "UNAUTHENTICATED", category: "policy_denied", kind: "policy_denied", retryable: false },
+};
+
+interface CauseLink {
+  readonly name: string | null;
+  readonly message: string;
+  readonly code?: string | number | undefined;
+  readonly truncated?: true | undefined;
+}
+
+/**
+ * Walk the `cause` chain into a bounded, JSON-safe list. Losing the chain is
+ * what turned seven distinct failures into one `details: {}`.
+ */
+function causeChain(error: unknown): readonly CauseLink[] {
+  const chain: CauseLink[] = [];
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  while (current !== undefined && current !== null && chain.length < MAX_CAUSE_DEPTH) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const record = isRecord(current) ? current : null;
+    const message = current instanceof Error
+      ? current.message
+      : typeof current === "string"
+        ? current
+        : record === null
+          ? String(current)
+          : JSON.stringify(record);
+    const bounded = boundedDetail(message);
+    chain.push({
+      name: typeof record?.name === "string" ? record.name : null,
+      message: bounded.text,
+      ...(bounded.truncated ? { truncated: true as const } : {}),
+      ...(typeof record?.code === "string" || typeof record?.code === "number"
+        ? { code: record.code }
+        : {}),
+    });
+    current = record?.cause;
+  }
+  return chain;
+}
+
+/**
+ * The durable `details` for a non-ForgeError. Carries the originating error's
+ * identity and its cause chain; truncation is announced, never silent.
+ */
+function untypedErrorDetails(error: unknown): Readonly<Record<string, unknown>> {
+  const record = isRecord(error) ? error : null;
+  const chain = causeChain(error);
+  const grpcCode = typeof record?.code === "number" ? record.code : null;
+  const grpcDetails = typeof record?.details === "string" ? boundedDetail(record.details) : null;
+  return {
+    error_name: typeof record?.name === "string" ? record.name : null,
+    error_code: typeof record?.code === "string" || typeof record?.code === "number" ? record.code : null,
+    ...(grpcCode !== null && GRPC_STATUS[grpcCode] !== undefined
+      ? { grpc_status: GRPC_STATUS[grpcCode]?.name }
+      : {}),
+    ...(grpcDetails === null
+      ? {}
+      : {
+          transport_details: grpcDetails.text,
+          ...(grpcDetails.truncated ? { transport_details_truncated: true } : {}),
+        }),
+    cause_chain: chain,
+    ...(chain.length === MAX_CAUSE_DEPTH ? { cause_chain_truncated: true } : {}),
+  };
 }
 
 /**
@@ -174,6 +282,9 @@ export function classifyLoopError(error: unknown): ClassifiedLoopError {
           : providerFailure
             ? "provider"
             : "unknown";
+    // A ForgeError already carries structured detail, but not its cause: the
+    // chain is what identifies which kernel or transport fault produced it.
+    const chain = causeChain(error.cause);
     return {
       kind,
       envelope: {
@@ -182,13 +293,22 @@ export function classifyLoopError(error: unknown): ClassifiedLoopError {
         message: boundedMessage(error.message),
         retryable: error.retryable,
         suggestedAction: error.suggestedAction,
-        details: error.details,
+        details: chain.length === 0
+          ? error.details
+          : {
+              ...error.details,
+              cause_chain: chain,
+              ...(chain.length === MAX_CAUSE_DEPTH ? { cause_chain_truncated: true } : {}),
+            },
       },
     };
   }
   const record = isRecord(error) ? error : null;
   const name = typeof record?.name === "string" ? record.name : null;
   const code = typeof record?.code === "string" ? record.code : null;
+  // grpc-js failures carry a numeric status and no name; without this they all
+  // classified as INTERNAL/unknown and lost their category.
+  const grpc = typeof record?.code === "number" ? GRPC_STATUS[record.code] ?? null : null;
   const kind: LoopErrorKind = name === "ToolPolicyDeniedError" || code === "POLICY_DENIED"
     ? "policy_denied"
     : name === "ApprovalRequiredError" || code === "APPROVAL_REQUIRED"
@@ -199,23 +319,32 @@ export function classifyLoopError(error: unknown): ClassifiedLoopError {
         ? "cancelled"
         : name === "ProviderExecutionUnavailableError" || code === "PROVIDER_UNAVAILABLE"
           ? "provider"
-          : "unknown";
+          : grpc !== null
+            ? grpc.kind
+            : "unknown";
   const message = error instanceof Error
     ? error.message
-    : "Loop operation failed with an untyped error";
+    : typeof error === "string" && error.length > 0
+      ? error
+      : "Loop operation failed with an untyped error";
+  const category = kind === "policy_denied"
+    ? "policy_denied"
+    : kind === "budget_exhausted"
+      ? "budget_exhausted"
+      : kind === "cancelled"
+        ? "cancelled"
+        : grpc !== null
+          ? grpc.category
+          : kind === "provider"
+            ? "provider"
+            : "internal";
   return {
     kind,
     envelope: {
-      code: code ?? "INTERNAL",
-      category: kind === "policy_denied"
-        ? "policy_denied"
-        : kind === "budget_exhausted"
-          ? "budget_exhausted"
-          : kind === "provider"
-            ? "provider"
-            : "internal",
+      code: code ?? grpc?.name ?? "INTERNAL",
+      category,
       message: boundedMessage(message),
-      retryable: kind === "provider",
+      retryable: grpc?.retryable ?? (kind === "provider"),
       suggestedAction: kind === "policy_denied"
         ? "request a policy exception or change the operation"
         : kind === "needs_user_input"
@@ -225,7 +354,7 @@ export function classifyLoopError(error: unknown): ClassifiedLoopError {
             : kind === "provider"
               ? "retry with the same request only when the provider marks it retryable"
               : null,
-      details: {},
+      details: untypedErrorDetails(error),
     },
   };
 }

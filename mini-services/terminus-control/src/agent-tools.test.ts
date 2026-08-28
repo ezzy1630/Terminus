@@ -15,6 +15,10 @@ import {
   resolveMaxToolCycles,
   resolveShellModeEnabled,
   assertPublicHttpsUrl,
+  duplicateOperationDenial,
+  effectLedgerIdempotencyKey,
+  isReadOnlyToolCall,
+  semanticIdempotencyGateApplies,
   stripNumberedGuttersIfFullyNumbered,
   toolEffectMetadata,
   type ParsedStandaloneToolCall,
@@ -775,5 +779,88 @@ describe("R-cubic exec_poll exit-code contract", () => {
       call: parseStandaloneToolCall({ toolCallId: "py", toolName: "exec_poll", arguments: { background_id: "j", expected_exit_codes: [7] } }) as Extract<ParsedStandaloneToolCall, { toolId: "exec_poll" }>,
     });
     expect(result.status).toBe("success");
+  });
+});
+
+describe("H1 semantic idempotency exempts observations", () => {
+  const call = (name: string, args: Record<string, unknown>): ParsedStandaloneToolCall =>
+    parseStandaloneToolCall({ toolCallId: `c-${name}-${JSON.stringify(args)}`, toolName: name, arguments: args });
+
+  test("every read-class tool is exempt and every mutating tool is gated", () => {
+    const gated = new Map<string, boolean>([
+      ["read", false],
+      ["grep", false],
+      ["glob", false],
+      ["exec_poll", false],
+      ["patch", true],
+      ["exec", true],
+      ["web_fetch", true],
+    ]);
+    const args: Record<string, Record<string, unknown>> = {
+      read: { path: "src/a.ts" },
+      grep: { pattern: "x" },
+      glob: { pattern: "**/*.ts" },
+      exec_poll: { background_id: "j1" },
+      patch: { path: "src/a.ts", expected_utf8: "a", replacement_utf8: "b" },
+      exec: { program: "true", cwd: "." },
+      web_fetch: { url: "https://example.com/x" },
+    };
+    for (const [toolId, expected] of gated) {
+      const parsed = call(toolId, args[toolId] ?? {});
+      expect(`${toolId}:${String(semanticIdempotencyGateApplies(parsed))}`).toBe(`${toolId}:${String(expected)}`);
+      expect(isReadOnlyToolCall(parsed)).toBe(!expected);
+    }
+  });
+
+  test("read → patch → read all dispatch; a replayed patch is denied", () => {
+    // Simulates the index.ts gate: a store keyed by (effectType, ledger key).
+    const store = new Map<string, { readonly id: string; readonly state: string }>();
+    const dispatch = (parsed: ParsedStandaloneToolCall, toolCallId: string): "dispatched" | "denied" => {
+      const operationHash = normalizedToolOperationHash({ taskId: "t1", contractVersion: 1, call: parsed });
+      const effect = toolEffectMetadata(parsed);
+      const existing = semanticIdempotencyGateApplies(parsed)
+        ? store.get(`${effect.effectType}\u0000${operationHash}`)
+        : undefined;
+      if (existing !== undefined) return "denied";
+      const key = effectLedgerIdempotencyKey({ call: parsed, operationHash, toolCallId });
+      const ledgerKey = `${effect.effectType}\u0000${key}`;
+      if (store.has(ledgerKey)) throw new Error(`ledger key collision on ${ledgerKey}`);
+      store.set(ledgerKey, { id: `effect-${store.size + 1}`, state: "SETTLED" });
+      return "dispatched";
+    };
+
+    const read = () => call("read", { path: "src/a.ts" });
+    const patchCall = () => call("patch", { path: "src/a.ts", expected_utf8: "a", replacement_utf8: "b" });
+
+    expect(dispatch(read(), "tc-1")).toBe("dispatched");
+    expect(dispatch(patchCall(), "tc-2")).toBe("dispatched");
+    expect(dispatch(read(), "tc-3")).toBe("dispatched");
+    // The mutating gate still bites on a verbatim replay.
+    expect(dispatch(patchCall(), "tc-4")).toBe("denied");
+  });
+
+  test("identical reads never collide on the effect ledger unique index", () => {
+    const parsed = call("read", { path: "src/a.ts" });
+    const operationHash = normalizedToolOperationHash({ taskId: "t1", contractVersion: 1, call: parsed });
+    const first = effectLedgerIdempotencyKey({ call: parsed, operationHash, toolCallId: "tc-1" });
+    const second = effectLedgerIdempotencyKey({ call: parsed, operationHash, toolCallId: "tc-2" });
+    expect(first).not.toBe(second);
+    expect(first.startsWith(operationHash)).toBe(true);
+  });
+
+  test("mutating effects keep the semantic hash as their ledger key", () => {
+    const parsed = call("patch", { path: "src/a.ts", expected_utf8: "a", replacement_utf8: "b" });
+    const operationHash = normalizedToolOperationHash({ taskId: "t1", contractVersion: 1, call: parsed });
+    expect(effectLedgerIdempotencyKey({ call: parsed, operationHash, toolCallId: "tc-9" })).toBe(operationHash);
+  });
+
+  test("denial text tells the model what to do instead", () => {
+    const parsed = call("patch", { path: "src/a.ts", expected_utf8: "a", replacement_utf8: "b" });
+    const text = duplicateOperationDenial({ call: parsed, effectId: "eff-1", effectState: "SETTLED" });
+    expect(text).toContain("eff-1");
+    expect(text).toContain("SETTLED");
+    expect(text).toContain("src/a.ts");
+    expect(text).toContain("re-read the file");
+    expect(text).toContain("Do not retry");
   });
 });

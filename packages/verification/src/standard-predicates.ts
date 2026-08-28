@@ -23,6 +23,8 @@ export interface PredicateCommandRequest {
   readonly environmentImageDigest: string | null;
   readonly signal: AbortSignal | null;
   readonly observations: Readonly<Record<string, unknown>>;
+  /** The node's own budget in milliseconds; runners must not substitute one. */
+  readonly timeoutMs: number;
 }
 
 export interface PredicateCommandOutcome {
@@ -31,6 +33,13 @@ export interface PredicateCommandOutcome {
   readonly stderr: string;
   readonly observations?: Readonly<Record<string, unknown>> | undefined;
   readonly artifacts?: readonly ArtifactRef[] | undefined;
+  /**
+   * A runner that cannot implement the predicate in this repository reports
+   * `skipped` with a reason. Reporting `fail` instead would claim the
+   * repository is broken when only the harness lacks a command.
+   */
+  readonly status?: "pass" | "fail" | "skipped" | undefined;
+  readonly reasonIfSkipped?: string | undefined;
 }
 
 /** Injected runner — typically kernel Process/Job via the control plane. */
@@ -125,16 +134,21 @@ function makeExecutor(
         environmentImageDigest: input.environmentImageDigest,
         signal: input.signal,
         observations: spec.observations,
+        timeoutMs: input.node.timeout,
       });
+      const skipped = outcome.status === "skipped";
+      if (skipped && (outcome.reasonIfSkipped === undefined || outcome.reasonIfSkipped.length === 0)) {
+        throw new ValidationError("a skipped predicate outcome must carry reasonIfSkipped", { predicateType });
+      }
       return makeVerificationResult(input, deps, predicateType, command, spec.paths, {
-        status: outcome.exitCode === 0 ? "pass" : "fail",
-        exitCode: outcome.exitCode,
+        status: outcome.status ?? (outcome.exitCode === 0 ? "pass" : "fail"),
+        exitCode: skipped ? null : outcome.exitCode,
         stdout: outcome.stdout,
         stderr: outcome.stderr,
         observations: outcome.observations ?? {},
         artifacts: outcome.artifacts,
-        reasonIfSkipped: null,
-        attempts: 1,
+        reasonIfSkipped: outcome.reasonIfSkipped ?? null,
+        attempts: skipped ? 0 : 1,
       });
     },
   };

@@ -1,6 +1,73 @@
 import { describe, expect, test } from "bun:test";
+import { Observable } from "rxjs";
 import { KernelGatewayClient } from "./gateway-kernel-client.js";
-import type { RequestContext } from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
+import { isRetryableProviderError, ProviderTransportError } from "./providers/provider-retry.js";
+import type {
+  ConnectorChunk,
+  ConnectorReceiptMessage,
+  ConnectorService,
+  RequestContext,
+} from "../../../packages/terminus-kernel-client/src/generated-ts-proto/terminus/kernel/v1/kernel.js";
+
+type BufferedConnectors = Pick<ConnectorService, "MintGrant" | "Execute">;
+
+/**
+ * A kernel that predates ExecuteStream. The client must fall back to the
+ * buffered `Execute` for it, so the unary tests below keep exercising that
+ * path exactly as they did before H9.
+ */
+function withoutStreaming(partial: BufferedConnectors): ConnectorService {
+  return {
+    ...partial,
+    ExecuteStream: () =>
+      new Observable<ConnectorChunk>((subscriber) => {
+        subscriber.error(new Error("12 UNIMPLEMENTED: unknown method ExecuteStream"));
+      }),
+  };
+}
+
+function receipt(overrides: Partial<ConnectorReceiptMessage> = {}): ConnectorReceiptMessage {
+  return {
+    grantId: "grant", taskId: "task", effectId: "effect", connectorId: "opencode-gateway",
+    method: "POST", path: "/zen/v1/chat/completions", destination: "https://opencode.ai:443",
+    requestSha256: "a".repeat(64), statusCode: 200, responseSha256: "b".repeat(64),
+    responseRedactions: 0, outcome: "accepted", responseHeaders: [],
+    ...overrides,
+  };
+}
+
+/** A kernel that streams: body chunks first, then the terminal receipt. */
+function streamingConnectors(input: {
+  readonly chunks: readonly string[];
+  readonly receipt?: ConnectorReceiptMessage;
+  readonly delayMs?: number;
+  readonly onExecute?: () => void;
+}): ConnectorService {
+  return {
+    MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
+    Execute: async () => {
+      input.onExecute?.();
+      throw new Error("buffered Execute must not be used when ExecuteStream works");
+    },
+    ExecuteStream: () =>
+      new Observable<ConnectorChunk>((subscriber) => {
+        let cancelled = false;
+        void (async () => {
+          for (const chunk of input.chunks) {
+            if (cancelled) return;
+            if (input.delayMs !== undefined) {
+              await new Promise((resolve) => setTimeout(resolve, input.delayMs));
+            }
+            subscriber.next({ bytes: new TextEncoder().encode(chunk), receipt: undefined });
+          }
+          if (cancelled) return;
+          subscriber.next({ bytes: undefined, receipt: input.receipt ?? receipt() });
+          subscriber.complete();
+        })();
+        return () => { cancelled = true; };
+      }),
+  };
+}
 
 const context: RequestContext = {
   requestId: "request",
@@ -20,7 +87,7 @@ const context: RequestContext = {
 describe("KernelGatewayClient", () => {
   test("mints an exact grant and returns the scrubbed kernel body", async () => {
     const calls: unknown[] = [];
-    const client = new KernelGatewayClient({
+    const client = new KernelGatewayClient(withoutStreaming({
         MintGrant: async (request) => {
           calls.push(request);
           return { encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 };
@@ -32,13 +99,13 @@ describe("KernelGatewayClient", () => {
               grantId: "grant", taskId: "task", effectId: "effect", connectorId: "opencode-gateway",
               method: "POST", path: "/zen/v1/chat/completions", destination: "https://opencode.ai:443",
               requestSha256: "a".repeat(64), statusCode: 200, responseSha256: "b".repeat(64),
-              responseRedactions: 0, outcome: "accepted",
+              responseRedactions: 0, outcome: "accepted", responseHeaders: [],
             },
             body: new TextEncoder().encode("data: [DONE]\n\n"),
             contentType: "text/event-stream",
           };
         },
-    }, context);
+    }), context);
     const chunks: Uint8Array[] = [];
     for await (const chunk of client.stream({
       url: "https://opencode.ai/zen/v1/chat/completions",
@@ -56,7 +123,7 @@ describe("KernelGatewayClient", () => {
 
   test("selects the anonymous kernel connector for a public gateway binding", async () => {
     let connectorId: string | null = null;
-    const client = new KernelGatewayClient({
+    const client = new KernelGatewayClient(withoutStreaming({
       MintGrant: async (request) => {
         connectorId = request.binding?.connectorId ?? null;
         return { encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 };
@@ -66,12 +133,12 @@ describe("KernelGatewayClient", () => {
           grantId: "grant", taskId: "task", effectId: "effect", connectorId: "opencode-gateway-anonymous",
           method: "GET", path: "/zen/v1/models", destination: "https://opencode.ai:443",
           requestSha256: "a".repeat(64), statusCode: 200, responseSha256: "b".repeat(64),
-          responseRedactions: 0, outcome: "accepted",
+          responseRedactions: 0, outcome: "accepted", responseHeaders: [],
         },
         body: new TextEncoder().encode("{}"),
         contentType: "application/json",
       }),
-    }, context);
+    }), context);
 
     const chunks: Uint8Array[] = [];
     for await (const chunk of client.stream({
@@ -89,19 +156,19 @@ describe("KernelGatewayClient", () => {
 
   test("streams multiple SSE frames incrementally", async () => {
     const sseBody = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\ndata: [DONE]\n\n";
-    const client = new KernelGatewayClient({
+    const client = new KernelGatewayClient(withoutStreaming({
       MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
       Execute: async () => ({
         receipt: {
           grantId: "grant", taskId: "task", effectId: "effect", connectorId: "opencode-gateway",
           method: "POST", path: "/zen/v1/chat/completions", destination: "https://opencode.ai:443",
           requestSha256: "a".repeat(64), statusCode: 200, responseSha256: "b".repeat(64),
-          responseRedactions: 0, outcome: "accepted",
+          responseRedactions: 0, outcome: "accepted", responseHeaders: [],
         },
         body: new TextEncoder().encode(sseBody),
         contentType: "text/event-stream",
       }),
-    }, context);
+    }), context);
 
     const chunks: string[] = [];
     for await (const chunk of client.stream({
@@ -126,10 +193,10 @@ describe("KernelGatewayClient", () => {
     const controller = new AbortController();
     controller.abort();
 
-    const client = new KernelGatewayClient({
+    const client = new KernelGatewayClient(withoutStreaming({
       MintGrant: async () => { throw new Error("should not be called"); },
       Execute: async () => { throw new Error("should not be called"); },
-    }, context);
+    }), context);
 
     const consume = async (): Promise<void> => {
       for await (const _chunk of client.stream({
@@ -148,7 +215,7 @@ describe("KernelGatewayClient", () => {
 
   test("aborts immediately when signal triggers during Execute", async () => {
     const controller = new AbortController();
-    const client = new KernelGatewayClient({
+    const client = new KernelGatewayClient(withoutStreaming({
       MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
       Execute: async () => {
         // Trigger abort while Execute is in-flight
@@ -159,12 +226,12 @@ describe("KernelGatewayClient", () => {
             grantId: "grant", taskId: "task", effectId: "effect", connectorId: "opencode-gateway",
             method: "POST", path: "/zen/v1/chat/completions", destination: "https://opencode.ai:443",
             requestSha256: "a".repeat(64), statusCode: 200, responseSha256: "b".repeat(64),
-            responseRedactions: 0, outcome: "accepted",
+            responseRedactions: 0, outcome: "accepted", responseHeaders: [],
           },
           body: new TextEncoder().encode("data: [DONE]\n\n"),
         };
       },
-    }, context);
+    }), context);
 
     const consume = async (): Promise<void> => {
       for await (const _chunk of client.stream({
@@ -184,18 +251,18 @@ describe("KernelGatewayClient", () => {
   test("aborts mid-stream between yielded chunks", async () => {
     const controller = new AbortController();
     const sseBody = "data: chunk1\n\ndata: chunk2\n\ndata: chunk3\n\n";
-    const client = new KernelGatewayClient({
+    const client = new KernelGatewayClient(withoutStreaming({
       MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
       Execute: async () => ({
         receipt: {
           grantId: "grant", taskId: "task", effectId: "effect", connectorId: "opencode-gateway",
           method: "POST", path: "/zen/v1/chat/completions", destination: "https://opencode.ai:443",
           requestSha256: "a".repeat(64), statusCode: 200, responseSha256: "b".repeat(64),
-          responseRedactions: 0, outcome: "accepted",
+          responseRedactions: 0, outcome: "accepted", responseHeaders: [],
         },
         body: new TextEncoder().encode(sseBody),
       }),
-    }, context);
+    }), context);
 
     const yielded: string[] = [];
     const consume = async (): Promise<void> => {
@@ -221,10 +288,10 @@ describe("KernelGatewayClient", () => {
 
   test("rejects destination substitution before minting", async () => {
     let called = false;
-    const client = new KernelGatewayClient({
+    const client = new KernelGatewayClient(withoutStreaming({
       MintGrant: async () => { called = true; throw new Error("unexpected"); },
       Execute: async () => { called = true; throw new Error("unexpected"); },
-    }, context);
+    }), context);
     const consume = async (): Promise<void> => {
       for await (const _chunk of client.stream({
         url: "https://example.com/zen/v1/chat/completions",
@@ -234,5 +301,176 @@ describe("KernelGatewayClient", () => {
     };
     await expect(consume()).rejects.toThrow("outside the admitted");
     expect(called).toBe(false);
+  });
+});
+
+describe("H9 the gateway path streams", () => {
+  const inference = {
+    url: "https://opencode.ai/zen/v1/chat/completions",
+    method: "POST" as const,
+    headers: { accept: "text/event-stream", "content-type": "application/json" },
+    body: "{}",
+    credentialBindingId: "secret://opencode/zen",
+    authStyle: "bearer" as const,
+    signal: null,
+  };
+
+  test("delivers each kernel chunk before the stream terminates", async () => {
+    let bufferedExecuteCalls = 0;
+    const client = new KernelGatewayClient(
+      streamingConnectors({
+        chunks: ["data: one\n\n", "data: two\n\n", "data: [DONE]\n\n"],
+        delayMs: 5,
+        onExecute: () => { bufferedExecuteCalls += 1; },
+      }),
+      context,
+    );
+
+    const arrivals: number[] = [];
+    const started = Date.now();
+    const decoded: string[] = [];
+    for await (const chunk of client.stream(inference)) {
+      decoded.push(new TextDecoder().decode(chunk));
+      arrivals.push(Date.now() - started);
+    }
+
+    expect(decoded).toEqual(["data: one\n\n", "data: two\n\n", "data: [DONE]\n\n"]);
+    expect(bufferedExecuteCalls).toBe(0);
+    // The last chunk is only produced after the first two have been awaited,
+    // so a buffered implementation would have reported identical arrivals.
+    expect(arrivals.length).toBe(3);
+    expect(arrivals[2] ?? 0).toBeGreaterThan(arrivals[0] ?? 0);
+  });
+
+  test("re-slices a single buffered kernel chunk into its SSE frames", async () => {
+    // A credentialed grant still degrades to one scrubbed chunk inside the
+    // kernel, so the client must keep framing that chunk itself.
+    const client = new KernelGatewayClient(
+      streamingConnectors({ chunks: ["data: a\n\ndata: b\n\ndata: [DONE]\n\n"] }),
+      context,
+    );
+    const decoded: string[] = [];
+    for await (const chunk of client.stream(inference)) {
+      decoded.push(new TextDecoder().decode(chunk));
+    }
+    expect(decoded).toEqual(["data: a\n\n", "data: b\n\n", "data: [DONE]\n\n"]);
+  });
+
+  test("a non-2xx receipt raises a retryable ProviderTransportError with its status", async () => {
+    const client = new KernelGatewayClient(
+      streamingConnectors({
+        chunks: ['{"error":{"message":"upstream is overloaded"}}'],
+        receipt: receipt({ statusCode: 503, outcome: "accepted" }),
+      }),
+      context,
+    );
+    const consume = async (): Promise<void> => {
+      for await (const _chunk of client.stream(inference)) { /* drained */ }
+    };
+    let caught: unknown = null;
+    try { await consume(); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(ProviderTransportError);
+    const transport = caught as ProviderTransportError;
+    expect(transport.status).toBe(503);
+    expect(isRetryableProviderError(transport)).toBe(true);
+    expect(transport.message).toContain("upstream is overloaded");
+  });
+
+  test("a stream that ends without a receipt is an explicit failure", async () => {
+    const client = new KernelGatewayClient(
+      {
+        MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
+        Execute: async () => { throw new Error("buffered Execute must not be used"); },
+        ExecuteStream: () =>
+          new Observable<ConnectorChunk>((subscriber) => {
+            subscriber.next({ bytes: new TextEncoder().encode("data: partial\n\n"), receipt: undefined });
+            subscriber.complete();
+          }),
+      },
+      context,
+    );
+    const consume = async (): Promise<void> => {
+      for await (const _chunk of client.stream(inference)) { /* drained */ }
+    };
+    await expect(consume()).rejects.toThrow("did not settle");
+  });
+
+  test("falls back to buffered Execute only when the kernel lacks ExecuteStream", async () => {
+    let executed = 0;
+    const client = new KernelGatewayClient(
+      withoutStreaming({
+        MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
+        Execute: async () => {
+          executed += 1;
+          return { receipt: receipt(), body: new TextEncoder().encode("data: [DONE]\n\n"), contentType: "text/event-stream" };
+        },
+      }),
+      context,
+    );
+    const decoded: string[] = [];
+    for await (const chunk of client.stream(inference)) {
+      decoded.push(new TextDecoder().decode(chunk));
+    }
+    expect(executed).toBe(1);
+    expect(decoded).toEqual(["data: [DONE]\n\n"]);
+  });
+
+  test("a mid-stream kernel failure is never replayed against the buffered path", async () => {
+    let executed = 0;
+    const client = new KernelGatewayClient(
+      {
+        MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
+        Execute: async () => { executed += 1; throw new Error("unexpected replay"); },
+        ExecuteStream: () =>
+          new Observable<ConnectorChunk>((subscriber) => {
+            subscriber.next({ bytes: new TextEncoder().encode("data: one\n\n"), receipt: undefined });
+            subscriber.error(new Error("14 UNAVAILABLE: kernel socket closed"));
+          }),
+      },
+      context,
+    );
+    const decoded: string[] = [];
+    const consume = async (): Promise<void> => {
+      for await (const chunk of client.stream(inference)) {
+        decoded.push(new TextDecoder().decode(chunk));
+      }
+    };
+    await expect(consume()).rejects.toThrow("kernel socket closed");
+    expect(decoded).toEqual(["data: one\n\n"]);
+    expect(executed).toBe(0);
+  });
+
+  test("aborting mid-stream stops the kernel subscription and names the gateway", async () => {
+    const controller = new AbortController();
+    let unsubscribed = false;
+    const client = new KernelGatewayClient(
+      {
+        MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
+        Execute: async () => { throw new Error("buffered Execute must not be used"); },
+        ExecuteStream: () =>
+          new Observable<ConnectorChunk>((subscriber) => {
+            let cancelled = false;
+            void (async () => {
+              for (let index = 0; index < 20 && !cancelled; index += 1) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+                if (cancelled) return;
+                subscriber.next({ bytes: new TextEncoder().encode(`data: ${index}\n\n`), receipt: undefined });
+              }
+            })();
+            return () => { cancelled = true; unsubscribed = true; };
+          }),
+      },
+      context,
+    );
+    const decoded: string[] = [];
+    const consume = async (): Promise<void> => {
+      for await (const chunk of client.stream({ ...inference, signal: controller.signal })) {
+        decoded.push(new TextDecoder().decode(chunk));
+        controller.abort();
+      }
+    };
+    await expect(consume()).rejects.toThrow("gateway request was aborted");
+    expect(decoded).toEqual(["data: 0\n\n"]);
+    expect(unsubscribed).toBe(true);
   });
 });

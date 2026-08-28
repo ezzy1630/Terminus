@@ -100,8 +100,12 @@ import {
   describeConfiguredModel,
   discoverProviderModels,
   lastProviderModels,
+  parseProviderModelsResult,
+  providerModelsResultJson,
   providerModelsWire,
   rememberProviderModels,
+  restoreProviderModels,
+  type ProviderModelsResult,
 } from "./provider-models.js";
 import { KernelGatewayClient } from "./gateway-kernel-client.js";
 import {
@@ -109,6 +113,9 @@ import {
   STANDALONE_TOOL_SCHEMAS,
   selectStandaloneToolSchemas,
   ObservedSourceTracker,
+  duplicateOperationDenial,
+  durationFromMilliseconds,
+  effectLedgerIdempotencyKey,
   executeStandaloneTool,
   normalizedToolOperationHash,
   parseStandaloneToolCall,
@@ -116,7 +123,9 @@ import {
   providerToolCallTranscript,
   providerToolResultTranscript,
   resolveMaxToolCycles,
+  isReadOnlyToolCall,
   resolveShellModeEnabled,
+  semanticIdempotencyGateApplies,
   toolEffectMetadata,
   ToolAbortedError,
   type ParsedStandaloneToolCall,
@@ -274,7 +283,13 @@ import {
   LOCAL_MODEL_PROFILES,
   LocalRenderer,
 } from "@terminus/provider-local";
-import { GatewayRenderer, GatewayTransport, gatewayEndpoint, type GatewayModel } from "@terminus/provider-zen";
+import {
+  GatewayRenderer,
+  GatewayTransport,
+  gatewayEndpoint,
+  type GatewayDeployment,
+  type GatewayModel,
+} from "@terminus/provider-zen";
 import { ANTHROPIC_MODEL_PROFILES } from "@terminus/provider-anthropic";
 import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
 import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
@@ -294,8 +309,19 @@ import {
 } from "./agent/minimal-profile.js";
 import { classifyLoopError, type OperationObservation } from "./agent/loop-contracts.js";
 import { CacheRatioMonitor } from "./agent/cache-telemetry.js";
-import { withProviderRetry } from "./providers/provider-retry.js";
+import { ProviderTransportError, withProviderRetry } from "./providers/provider-retry.js";
 import { createNativeDirectExecutor } from "./providers/native-direct-executor.js";
+import {
+  DIRECT_EXEC_DEFAULT_TIMEOUT_MS,
+  DIRECT_JOB_DEFAULT_TIMEOUT_MS,
+  resolveCommandTimeoutMs,
+  withTurnDeadline,
+} from "./kernel-deadlines.js";
+import {
+  createTextDeltaCoalescer,
+  withMeasuredUsage,
+  type TextDeltaCoalescer,
+} from "./agent/provider-stream-coalescer.js";
 import {
   BYTES_PER_TOKEN_ESTIMATE,
   DEFAULT_COMPACT_THRESHOLD_TOKENS,
@@ -353,6 +379,12 @@ import {
   type RecentHistorySection,
 } from "./agent/turn-continuity.js";
 import {
+  STEERABLE_TASK_STATUSES,
+  restartedTaskDisposition,
+  restartedTurnSettlement,
+  turnFailureDisposition,
+} from "./agent/turn-failure-policy.js";
+import {
   hydrateSearchHit,
   buildRepositoryMapFragment,
   type SearchHit,
@@ -367,7 +399,9 @@ import {
 import {
   REPOSITORY_SIGNAL_PATHS,
   discoverNativeTestRecipes,
+  discoverVerificationRunners,
   type RepositoryFileObservation,
+  type VerificationRunnerCatalog,
 } from "./agent/repository-signals.js";
 import {
   readCompleteRepositoryMap,
@@ -390,8 +424,9 @@ import type {
   ProjectedResponse,
   RenderedProviderRequest,
   ConfidentialityPolicy,
+  ReasoningEffort,
 } from "@terminus/provider-core";
-import { computeCost } from "@terminus/provider-core";
+import { computeCost, parseReasoningEffort, REASONING_EFFORTS } from "@terminus/provider-core";
 import { deriveRepairMetrics, type RepositoryMapVerificationSignal } from "@terminus/verification";
 import {
   compileSkill,
@@ -511,6 +546,18 @@ const CONTROL_INSTANCE_NONCE = process.env.TERMINUS_CONTROL_INSTANCE_NONCE ?? ra
 if (!/^[A-Za-z0-9_-]{32,128}$/.test(CONTROL_INSTANCE_NONCE)) {
   throw new Error("TERMINUS_CONTROL_INSTANCE_NONCE must contain 32..128 base64url characters");
 }
+
+/**
+ * H5: the HTTP listener binds before startup recovery runs, so a desktop
+ * client can attach immediately instead of watching a dead socket. Readiness
+ * is what gates "state is reconciled", and a recovery failure degrades
+ * readiness instead of killing the process at module scope.
+ */
+const startupRecovery: {
+  status: "pending" | "running" | "complete" | "failed";
+  error: string | null;
+  completedAt: string | null;
+} = { status: "pending", error: null, completedAt: null };
 const DESKTOP_PARENT_PID = (() => {
   const configured = process.env.TERMINUS_DESKTOP_PARENT_PID;
   if (configured === undefined) return null;
@@ -2536,6 +2583,34 @@ function logInternalError(operation: string, error: unknown): void {
   console.error(`[terminus-control] ${operation}`, error);
 }
 
+/**
+ * H6: a 500 the caller can correlate. The response never echoes the error text
+ * (a Prisma dump discloses source paths and query shapes), but it carries the
+ * same `trace_id` the log line does, plus the error's own name/code so the
+ * caller can tell a transport fault from a bug without reading server logs.
+ */
+function sendInternalError(
+  res: ServerResponse,
+  code: string,
+  message: string,
+  operation: string,
+  error: unknown,
+): void {
+  const traceId = randomUUID();
+  console.error(`[terminus-control] ${operation} trace_id=${traceId}`, error);
+  const classified = classifyLoopError(error);
+  sendError(res, 500, code, message, "internal", {
+    trace_id: traceId,
+    cause: {
+      code: classified.envelope.code,
+      category: classified.envelope.category,
+      message: classified.envelope.message,
+      retryable: classified.envelope.retryable,
+      details: classified.envelope.details,
+    },
+  });
+}
+
 function sendError(
   res: ServerResponse,
   status: number,
@@ -3683,6 +3758,8 @@ const turnCoordinator = new TurnCoordinator<Prisma.TransactionClient>({
           state: "PENDING",
           initiatingActor: input.initiatingActor,
           initiatingInputArtifact: input.inputArtifactUri,
+          selectedModel: input.selectedModel ?? null,
+          selectedReasoningEffort: input.selectedReasoningEffort ?? null,
         },
       });
     },
@@ -4124,13 +4201,22 @@ const routes: Route[] = [
   // ────────────────────────── /system ────────────────────────────────────
   route("GET", "/v1/system/health", async (_req, res) => {
     const kernelHealth = await requireKernelUds().info.Health({});
+    const kernelOk = kernelHealth.state === "healthy" || kernelHealth.state === "ok";
+    // H5: the listener binds before startup recovery so a desktop client can
+    // connect immediately, but readiness stays false until reconciliation has
+    // finished. A caller that needs settled state waits on `ready`.
     sendJson(res, 200, {
-      status: kernelHealth.state === "healthy" || kernelHealth.state === "ok" ? "ok" : "degraded",
+      status: kernelOk ? "ok" : "degraded",
       version: CONTROL_BUILD_VERSION,
       build_commit: CONTROL_BUILD_COMMIT,
       instance_id: CONTROL_INSTANCE_NONCE,
       uptime_seconds: process.uptime(),
-      ready: kernelHealth.state === "healthy" || kernelHealth.state === "ok",
+      ready: kernelOk && startupRecovery.status === "complete",
+      recovery: {
+        status: startupRecovery.status,
+        error: startupRecovery.error,
+        completed_at: startupRecovery.completedAt,
+      },
       kernel: kernelHealth,
     });
   }),
@@ -4336,6 +4422,7 @@ const routes: Route[] = [
           timeout: { seconds: 15, nanos: 0 },
           allocatePty: false,
           shell: undefined,
+          allowUnboundedTimeout: false,
         },
         sandboxProfileId: DEV_MODE ? "degraded-local" : "secure-local-default",
         outputPolicyId: "tool-result-bounded",
@@ -4436,15 +4523,139 @@ const routes: Route[] = [
     });
   }),
   route("GET", "/v1/sessions/:id", async (_req, res, params) => {
-    const s = await db.session.findUnique({ where: { id: String(params.id) } });
+    const s = await db.session.findUnique({
+      where: { id: String(params.id) },
+      include: { workspace: { select: { rootUri: true } } },
+    });
     if (!s) return sendError(res, 404, "SESSION_NOT_FOUND", "session not found", "not_found");
     sendJson(res, 200, {
       id: s.id, workspace_id: s.workspaceId, owner_principal: s.ownerPrincipal,
+      workspace_root_uri: s.workspace.rootUri,
       title: s.title, status: s.status,
       default_model_profile: s.defaultModelProfile,
       default_permission_profile: s.defaultPermissionProfile,
+      default_model: s.defaultModel,
+      default_reasoning_effort: s.defaultReasoningEffort,
       active_thread_id: s.activeThreadId,
       created_at: s.createdAt.toISOString(), updated_at: s.updatedAt.toISOString(),
+    });
+  }),
+  /**
+   * H7: session-level defaults for per-turn model selection. A client that
+   * wants "this conversation uses big-pickle at high effort" sets it once
+   * instead of repeating it on every `POST /v1/turns`. An explicit per-turn
+   * value still wins. Sending `null` clears the default.
+   */
+  route("PATCH", "/v1/sessions/:id", async (req, res, params) => {
+    const body = await jsonBody(req) as {
+      default_model?: unknown;
+      default_reasoning_effort?: unknown;
+    };
+    const data: { defaultModel?: string | null; defaultReasoningEffort?: string | null } = {};
+    if ("default_model" in body) {
+      if (body.default_model === null) {
+        data.defaultModel = null;
+      } else if (
+        typeof body.default_model === "string"
+        && body.default_model.trim().length > 0
+        && body.default_model.length <= 256
+      ) {
+        data.defaultModel = body.default_model.trim();
+      } else {
+        return sendError(
+          res,
+          400,
+          "SESSION_DEFAULT_MODEL_INVALID",
+          "default_model must be null or a model id of 1..256 characters",
+          "validation",
+        );
+      }
+    }
+    if ("default_reasoning_effort" in body) {
+      if (body.default_reasoning_effort === null) {
+        data.defaultReasoningEffort = null;
+      } else {
+        const effort = parseReasoningEffort(body.default_reasoning_effort);
+        if (effort === null) {
+          return sendError(
+            res,
+            400,
+            "SESSION_DEFAULT_REASONING_EFFORT_INVALID",
+            `default_reasoning_effort must be null or one of ${REASONING_EFFORTS.join(", ")}`,
+            "validation",
+            { supplied: body.default_reasoning_effort },
+          );
+        }
+        data.defaultReasoningEffort = effort;
+      }
+    }
+    if (Object.keys(data).length === 0) {
+      return sendError(
+        res,
+        400,
+        "SESSION_UPDATE_EMPTY",
+        "supply default_model and/or default_reasoning_effort",
+        "validation",
+      );
+    }
+    // A named default must be admitted now, so the failure surfaces where the
+    // user chose it rather than on the next turn.
+    if (typeof data.defaultModel === "string") {
+      const gatewayRow = await db.gatewayProviderConfiguration.findUnique({
+        where: { id: GATEWAY_PROVIDER_CONFIGURATION_ID },
+      });
+      const credential = gatewayRow === null ? null : gatewayDiscoveryCredential(gatewayRow);
+      const admitted = credential === null
+        ? null
+        : await admittedGatewayModelRecord(credential, data.defaultModel);
+      if (admitted === null) {
+        return sendError(
+          res,
+          409,
+          "MODEL_NOT_ADMITTED",
+          `model '${data.defaultModel}' has no admitted discovery record for this gateway account`,
+          "conflict",
+          {
+            requested_model: data.defaultModel,
+            ...(credential === null
+              ? { discovered_models: [] }
+              : {
+                  deployment: credential.deployment,
+                  discovered_models: await admittedGatewayModelIds(credential),
+                }),
+          },
+        );
+      }
+    }
+    const updated = await writerTransaction(async (tx) => {
+      const current = await tx.session.findUnique({
+        where: { id: String(params.id) },
+        select: { id: true },
+      });
+      if (current === null) return null;
+      return tx.session.update({
+        where: { id: current.id },
+        data,
+        include: { workspace: { select: { rootUri: true } } },
+      });
+    });
+    if (updated === null) {
+      return sendError(res, 404, "SESSION_NOT_FOUND", "session not found", "not_found");
+    }
+    sendJson(res, 200, {
+      id: updated.id,
+      workspace_id: updated.workspaceId,
+      workspace_root_uri: updated.workspace.rootUri,
+      owner_principal: updated.ownerPrincipal,
+      title: updated.title,
+      status: updated.status,
+      default_model_profile: updated.defaultModelProfile,
+      default_permission_profile: updated.defaultPermissionProfile,
+      default_model: updated.defaultModel,
+      default_reasoning_effort: updated.defaultReasoningEffort,
+      active_thread_id: updated.activeThreadId,
+      created_at: updated.createdAt.toISOString(),
+      updated_at: updated.updatedAt.toISOString(),
     });
   }),
   route("GET", "/v1/sessions/:id/rollout", async (req, res, params) => {
@@ -4537,6 +4748,9 @@ const routes: Route[] = [
         orderBy: { id: "asc" },
         ...(page.cursor ? { cursor: { id: page.cursor }, skip: 1 } : {}),
         take: page.limit + 1,
+        // H7: the desktop shows which directory and model a session belongs to
+        // without a second round trip per row.
+        include: { workspace: { select: { rootUri: true } } },
       }),
       db.session.count({ where }),
     ]);
@@ -4544,9 +4758,12 @@ const routes: Route[] = [
     sendJson(res, 200, {
       sessions: sessions.map((s) => ({
         id: s.id, workspace_id: s.workspaceId, owner_principal: s.ownerPrincipal,
+        workspace_root_uri: s.workspace.rootUri,
         title: s.title, status: s.status,
         default_model_profile: s.defaultModelProfile,
         default_permission_profile: s.defaultPermissionProfile,
+        default_model: s.defaultModel,
+        default_reasoning_effort: s.defaultReasoningEffort,
         active_thread_id: s.activeThreadId,
         created_at: s.createdAt.toISOString(), updated_at: s.updatedAt.toISOString(),
       })),
@@ -5444,6 +5661,7 @@ const routes: Route[] = [
             timeout: { seconds: 30, nanos: 0 },
             allocatePty: false,
             shell: undefined,
+            allowUnboundedTimeout: false,
           },
           sandboxProfileId: DEV_MODE ? "degraded-local" : "secure-local-default",
           outputPolicyId: "tool-result-bounded",
@@ -5488,8 +5706,7 @@ const routes: Route[] = [
       });
     } catch (err) {
       if (sendTaskScopeError(res, err)) return;
-      logInternalError("task diff failed", err);
-      sendError(res, 500, "DIFF_FAILED", "task diff failed", "internal");
+      sendInternalError(res, "DIFF_FAILED", "task diff failed", "task diff failed", err);
     }
   }),
 
@@ -5684,6 +5901,20 @@ const routes: Route[] = [
       db.task.count({ where }),
     ]);
     const tasks = taskRows.slice(0, page.limit);
+    // H8: an ACTIVE task with no live turn is idle and steerable, not stuck.
+    // Clients need to tell those apart without polling every turn.
+    const liveTurnRows = tasks.length === 0
+      ? []
+      : await db.turn.findMany({
+        where: { taskId: { in: tasks.map((t) => t.id) }, state: { in: [...V1_ACTIVE_TURN_STATES] } },
+        orderBy: { sequence: "desc" },
+        select: { id: true, state: true, taskId: true },
+      });
+    const activeTurnByTask = new Map<string, { readonly id: string; readonly state: string }>();
+    for (const row of liveTurnRows) {
+      if (row.taskId === null || activeTurnByTask.has(row.taskId)) continue;
+      activeTurnByTask.set(row.taskId, { id: row.id, state: row.state });
+    }
     sendJson(res, 200, {
       tasks: tasks.map((t) => ({
         id: t.id, session_id: t.sessionId, thread_id: t.threadId,
@@ -5695,6 +5926,7 @@ const routes: Route[] = [
         terminal_reason: t.terminalReasonJson === null
           ? null
           : safeParse<Record<string, unknown> | null>(t.terminalReasonJson, null),
+        active_turn: activeTurnByTask.get(t.id) ?? null,
         contract: taskContractWire(t.contractVersions[0]),
       })),
       total,
@@ -5704,7 +5936,13 @@ const routes: Route[] = [
 
   // ────────────────────────── /turns ─────────────────────────────────────
   route("POST", "/v1/turns", async (req, res) => {
-    const body = await jsonBody(req) as { thread_id: string; task_id: string; user_input: string };
+    const body = await jsonBody(req) as {
+      thread_id: string;
+      task_id: string;
+      user_input: string;
+      model?: unknown;
+      reasoning_effort?: unknown;
+    };
     if (
       typeof body.thread_id !== "string"
       || typeof body.task_id !== "string"
@@ -5717,6 +5955,33 @@ const routes: Route[] = [
         "thread_id, task_id, and user_input are required strings",
         "validation",
       );
+    }
+    // H7: an optional per-turn model and reasoning depth. Both are bare
+    // identifiers as discovered (`big-pickle`), not provider-qualified keys.
+    if (body.model !== undefined && body.model !== null
+      && (typeof body.model !== "string" || body.model.trim().length === 0 || body.model.length > 256)) {
+      return sendError(
+        res,
+        400,
+        "TURN_MODEL_INVALID",
+        "model must be a non-empty model id of at most 256 characters",
+        "validation",
+      );
+    }
+    const requestedTurnModel = typeof body.model === "string" ? body.model.trim() : null;
+    let requestedReasoningEffort: ReasoningEffort | null = null;
+    if (body.reasoning_effort !== undefined && body.reasoning_effort !== null) {
+      requestedReasoningEffort = parseReasoningEffort(body.reasoning_effort);
+      if (requestedReasoningEffort === null) {
+        return sendError(
+          res,
+          400,
+          "TURN_REASONING_EFFORT_INVALID",
+          `reasoning_effort must be one of ${REASONING_EFFORTS.join(", ")}`,
+          "validation",
+          { supplied: body.reasoning_effort },
+        );
+      }
     }
     const id = uuid();
     // Perform cheap lineage/state checks before ingesting bytes. The same
@@ -5748,7 +6013,7 @@ const routes: Route[] = [
         },
       );
     }
-    if (!["ACTIVE", "NEEDS_USER_DECISION", "BLOCKED"].includes(inputTask.status)) {
+    if (!STEERABLE_TASK_STATUSES.includes(inputTask.status)) {
       return sendError(
         res,
         409,
@@ -5757,6 +6022,48 @@ const routes: Route[] = [
         "conflict",
         { task_id: body.task_id, status: inputTask.status },
       );
+    }
+    // H7: a named model must have an admitted discovery record for this
+    // gateway account before the turn is admitted. Rejecting here — rather
+    // than inside the loop — keeps the failure a client error with the list
+    // of models the account can actually use.
+    const sessionDefaults = await db.session.findUnique({
+      where: { id: inputTask.sessionId },
+      select: { defaultModel: true, defaultReasoningEffort: true },
+    });
+    const effectiveTurnModel = requestedTurnModel ?? sessionDefaults?.defaultModel ?? null;
+    const effectiveReasoningEffort = requestedReasoningEffort
+      ?? parseReasoningEffort(sessionDefaults?.defaultReasoningEffort);
+    if (effectiveTurnModel !== null) {
+      const gatewayRow = await db.gatewayProviderConfiguration.findUnique({
+        where: { id: GATEWAY_PROVIDER_CONFIGURATION_ID },
+      });
+      const credential = gatewayRow === null ? null : gatewayDiscoveryCredential(gatewayRow);
+      if (credential === null) {
+        return sendError(
+          res,
+          409,
+          "MODEL_NOT_ADMITTED",
+          "no usable OpenCode gateway account is configured, so a per-turn model cannot be selected",
+          "conflict",
+          { requested_model: effectiveTurnModel, discovered_models: [] },
+        );
+      }
+      const admitted = await admittedGatewayModelRecord(credential, effectiveTurnModel);
+      if (admitted === null) {
+        return sendError(
+          res,
+          409,
+          "MODEL_NOT_ADMITTED",
+          `model '${effectiveTurnModel}' has no admitted discovery record for this gateway account`,
+          "conflict",
+          {
+            requested_model: effectiveTurnModel,
+            deployment: credential.deployment,
+            discovered_models: await admittedGatewayModelIds(credential),
+          },
+        );
+      }
     }
     const inputContext = await kernelTaskContext({
       sessionId: inputTask.sessionId,
@@ -5800,6 +6107,8 @@ const routes: Route[] = [
         inputArtifactUri: inputArtifact.uri,
         inputArtifactHash: inputArtifact.hash,
         initiatingActor: SERVER_PRINCIPAL,
+        selectedModel: effectiveTurnModel,
+        selectedReasoningEffort: effectiveReasoningEffort,
       });
       turn = admitted.turn;
     } catch (error: unknown) {
@@ -5857,6 +6166,8 @@ const routes: Route[] = [
       initiating_actor: turn.initiatingActor,
       started_at: turn.startedAt?.toISOString() ?? null,
       completed_at: turn.completedAt?.toISOString() ?? null,
+      model: effectiveTurnModel,
+      reasoning_effort: effectiveReasoningEffort,
     });
   }),
   route("GET", "/v1/turns/:id", async (_req, res, params) => {
@@ -5868,6 +6179,8 @@ const routes: Route[] = [
       initiating_actor: turn.initiatingActor,
       started_at: turn.startedAt?.toISOString() ?? null,
       completed_at: turn.completedAt?.toISOString() ?? null,
+      model: turn.selectedModel,
+      reasoning_effort: turn.selectedReasoningEffort,
       terminal_error: turn.terminalErrorJson === null
         ? null
         : safeParse<unknown>(turn.terminalErrorJson, null),
@@ -6423,8 +6736,7 @@ const routes: Route[] = [
       });
       sendJson(res, 200, { ...r, jobId });
     } catch (err) {
-      logInternalError("job stop failed", err);
-      sendError(res, 500, "JOB_STOP_FAILED", "job stop failed", "internal");
+      sendInternalError(res, "JOB_STOP_FAILED", "job stop failed", "job stop failed", err);
     }
   }),
   // SPEC §32.2 — send input to a job's PTY. Forwards to the kernel
@@ -6449,8 +6761,7 @@ const routes: Route[] = [
       });
       sendJson(res, 200, { ...r, jobId });
     } catch (err) {
-      logInternalError("job input failed", err);
-      sendError(res, 500, "JOB_INPUT_FAILED", "job input failed", "internal");
+      sendInternalError(res, "JOB_INPUT_FAILED", "job input failed", "job input failed", err);
     }
   }),
 
@@ -6650,9 +6961,16 @@ const routes: Route[] = [
       args?: string[];
       cwd?: string;
       sandbox_profile_id?: string;
+      timeout_ms?: unknown;
     };
     if (!body.task_id || !body.workspace_id || !body.program) {
       return sendError(res, 400, "DIRECT_TOOL_SCOPE_REQUIRED", "task_id, workspace_id, and program are required", "validation");
+    }
+    // H10: an unbounded command had no wall limit at all, so a runaway child
+    // held its sandbox and its turn open indefinitely.
+    const execTimeout = resolveCommandTimeoutMs(body.timeout_ms, DIRECT_EXEC_DEFAULT_TIMEOUT_MS);
+    if (!execTimeout.ok) {
+      return sendError(res, 422, "COMMAND_TIMEOUT_INVALID", execTimeout.reason, "validation");
     }
     try {
       const context = await kernelContextForTask(
@@ -6671,8 +6989,12 @@ const routes: Route[] = [
           program: body.program,
           args: body.args ?? [],
           cwd: { workspaceId: body.workspace_id, relativePath: body.cwd ?? "." },
-          publicEnv: {}, secretCapabilityUris: [], timeout: undefined,
+          publicEnv: {}, secretCapabilityUris: [],
+          // H10: an explicit bound, so the kernel never has to fall back to
+          // its own class default and nothing ever runs unbounded.
+          timeout: durationFromMilliseconds(execTimeout.timeoutMs),
           allocatePty: false, shell: undefined,
+          allowUnboundedTimeout: false,
         },
         sandboxProfileId: body.sandbox_profile_id ?? "secure-local-default",
         outputPolicyId: "default",
@@ -6697,9 +7019,15 @@ const routes: Route[] = [
       cwd?: string;
       sandbox_profile_id?: string;
       durable?: boolean;
+      timeout_ms?: unknown;
     };
     if (!body.task_id || !body.workspace_id || !body.program) {
       return sendError(res, 400, "DIRECT_TOOL_SCOPE_REQUIRED", "task_id, workspace_id, and program are required", "validation");
+    }
+    // H10: a durable job gets the longer default, still bounded (30 minutes).
+    const jobTimeout = resolveCommandTimeoutMs(body.timeout_ms, DIRECT_JOB_DEFAULT_TIMEOUT_MS);
+    if (!jobTimeout.ok) {
+      return sendError(res, 422, "COMMAND_TIMEOUT_INVALID", jobTimeout.reason, "validation");
     }
     const controlJobId = uuid();
     let prepared = false;
@@ -6724,9 +7052,11 @@ const routes: Route[] = [
         cwd: { workspaceId: body.workspace_id, relativePath: body.cwd ?? "." },
         publicEnv: {},
         secretCapabilityUris: [],
-        timeout: undefined,
+        // H10: see /v1/tools/exec — a durable job is bounded too.
+        timeout: durationFromMilliseconds(jobTimeout.timeoutMs),
         allocatePty: false,
         shell: undefined,
+        allowUnboundedTimeout: false,
       };
       const artifacts = createKernelArtifactClient(requireKernelUds().artifacts, {
         ...context,
@@ -6986,30 +7316,21 @@ const routes: Route[] = [
     if (row === null) {
       return sendJson(res, 200, providerModelsWire(null, "No OpenCode gateway is configured."));
     }
-    const anonymousZenFree = row.deployment === "zen" && row.freeModel && !row.credentialConfigured;
-    if (!row.credentialConfigured && !anonymousZenFree) {
+    const credential = gatewayDiscoveryCredential(row);
+    if (credential === null) {
       return sendJson(res, 200, providerModelsWire(null, "The OpenCode gateway has no credential configured."));
     }
-    const deployment = row.deployment === "go" ? "go" as const : "zen" as const;
-
-    const fresh = cachedProviderModels(deployment, Date.now());
+    const fresh = cachedProviderModels(credential.deployment, Date.now());
     if (fresh !== null) return sendJson(res, 200, providerModelsWire(fresh, null));
 
     try {
-      const context = await kernelBrokerContext();
-      const result = await discoverProviderModels({
-        client: new KernelGatewayClient(requireKernelUds().connectors, context),
-        deployment,
-        secretUri: anonymousZenFree ? "" : gatewaySecretUri(deployment),
-        observedAt: now(),
-      });
-      rememberProviderModels(result, Date.now());
-      sendJson(res, 200, providerModelsWire(result, null));
+      sendJson(res, 200, providerModelsWire(await discoverAndPersistProviderModels(credential), null));
     } catch (error: unknown) {
       // A stale answer beats no answer: the set of reachable models changes
       // far more slowly than the gateway's availability.
       const message = error instanceof Error ? error.message : "model discovery failed";
-      const stale = lastProviderModels(deployment);
+      const stale = lastProviderModels(credential.deployment)
+        ?? await loadPersistedProviderModels(credential.deployment);
       sendJson(res, 200, providerModelsWire(stale, message));
     }
   }),
@@ -10432,43 +10753,44 @@ async function executeGatewayProviderRequest(
     client: new KernelGatewayClient(requireKernelUds().connectors, context),
   });
   const chunks: ProviderResponseChunk[] = [];
+  const dispatchedAt = Date.now();
+  let firstChunkAt: number | null = null;
   for await (const chunk of transport.stream(rendered.request, rendered.body, signal ?? rendered.request.signal)) {
+    if (firstChunkAt === null && (chunk.kind === "text" || chunk.kind === "tool_call")) {
+      firstChunkAt = Date.now();
+    }
     chunks.push(chunk);
     await onChunk?.(chunk);
   }
   const providerError = chunks.find((chunk) => chunk.kind === "error");
   if (providerError?.kind === "error") {
-    throw new Error(`${providerError.errorCode ?? "PROVIDER_ERROR"}: ${providerError.errorMessage ?? "gateway provider failed"}`);
+    // Structured, not prose: the retry classifier must not have to parse
+    // `server_error: Streaming response failed: [502] …` to learn it is 5xx.
+    throw ProviderTransportError.fromProviderErrorChunk({
+      errorCode: providerError.errorCode,
+      errorMessage: providerError.errorMessage,
+      retryAfterMs: providerError.retryAfterMs,
+      fallbackMessage: "gateway provider failed",
+    });
   }
   return {
     providerId: rendered.providerId,
     model: rendered.model,
-    chunks,
+    chunks: withMeasuredUsage(chunks, {
+      wallMs: Date.now() - dispatchedAt,
+      timeToFirstTokenMs: firstChunkAt === null ? null : firstChunkAt - dispatchedAt,
+    }),
     observedAt: now(),
   };
 }
 
 /**
- * Coalesces provider text deltas into durable, SSE-deliverable events.
- *
- * Client streaming without per-token event writes: text is buffered and
- * flushed to the semantic event stream at ≥512 chars. The caller flushes
- * the remainder when the provider attempt settles. Buffer state lives in
- * the closure of the single per-turn stream consumer, so no extra locking
- * beyond the agent-state mutation mutex is required.
+ * Binds the shared text-delta coalescer (H9) to this turn's event stream.
+ * Buffer state lives in the closure of the single per-turn stream consumer,
+ * so no locking beyond the agent-state mutation mutex is required.
  */
-function createProviderTextDeltaEmitter(
-  turnId: string,
-  taskId: string,
-): {
-  readonly onChunk: (chunk: ProviderResponseChunk) => Promise<void>;
-  readonly flush: () => Promise<void>;
-} {
-  let buffer = "";
-  const flush = async (): Promise<void> => {
-    if (buffer.length === 0) return;
-    const text = buffer;
-    buffer = "";
+function createProviderTextDeltaEmitter(turnId: string, taskId: string): TextDeltaCoalescer {
+  return createTextDeltaCoalescer(async (text) => {
     await mutateAgentState(() => emit({
       eventType: "turn.provider_text_delta",
       aggregateType: "turn",
@@ -10476,15 +10798,7 @@ function createProviderTextDeltaEmitter(
       correlationId: taskId,
       payload: { text },
     }));
-  };
-  return {
-    onChunk: async (chunk) => {
-      if (chunk.kind !== "text" || chunk.text === undefined) return;
-      buffer += chunk.text;
-      if (buffer.length >= 512) await flush();
-    },
-    flush,
-  };
+  });
 }
 
 function providerAttemptEndpoint(
@@ -11337,6 +11651,8 @@ interface RepositoryDiscoverySignals {
   readonly nativeRecipeSourceVersions: readonly string[];
   readonly observedConfigPaths: readonly string[];
   readonly unavailableConfigPaths: readonly string[];
+  /** Concrete command per verification runner role, derived from the reads. */
+  readonly verificationRunners: VerificationRunnerCatalog;
 }
 
 interface RepositorySignalDiscoveryInput {
@@ -11471,6 +11787,7 @@ async function discoverRepositorySignals(
     nativeRecipeSourceVersions: nativeRecipes.nativeRecipeSourceVersions,
     observedConfigPaths: observations.map((observation) => observation.path).sort(),
     unavailableConfigPaths: [...unavailableConfigPaths].sort(),
+    verificationRunners: discoverVerificationRunners(observations),
   };
 }
 
@@ -11766,6 +12083,158 @@ async function transitionAgentTask(input: AgentTaskTransition): Promise<boolean>
   });
 }
 
+// ───────────────── Gateway model discovery (H4) ─────────────────────────────
+//
+// Discovery used to live only in process memory, warmed only by
+// `GET /v1/provider-models`. A restarted control plane therefore denied every
+// turn with "configured gateway model <id> has no admitted discovery record"
+// until a client happened to open the model picker. Three changes fix that:
+// the last successful result is durable, the process warms it at startup, and
+// a turn that still finds nothing discovers once on demand rather than failing.
+
+interface GatewayDiscoveryCredential {
+  readonly deployment: GatewayDeployment;
+  /** Empty string means the explicitly anonymous free-Zen path. */
+  readonly secretUri: string;
+}
+
+/**
+ * The credential a discovery call must use, or null when the gateway is not
+ * usable at all. A free Zen model with no credential is a supported anonymous
+ * configuration, not a misconfiguration.
+ */
+function gatewayDiscoveryCredential(row: {
+  readonly deployment: string;
+  readonly freeModel: boolean;
+  readonly credentialConfigured: boolean;
+}): GatewayDiscoveryCredential | null {
+  const deployment: GatewayDeployment = row.deployment === "go" ? "go" : "zen";
+  const anonymousZenFree = deployment === "zen" && row.freeModel && !row.credentialConfigured;
+  if (!row.credentialConfigured && !anonymousZenFree) return null;
+  return { deployment, secretUri: anonymousZenFree ? "" : gatewaySecretUri(deployment) };
+}
+
+async function loadPersistedProviderModels(
+  deployment: GatewayDeployment,
+): Promise<ProviderModelsResult | null> {
+  const row = await db.providerModelDiscovery.findUnique({ where: { deployment } });
+  if (row === null) return null;
+  const parsed = parseProviderModelsResult(row.resultJson);
+  if (parsed === null) {
+    console.warn(`[terminus-control] persisted model discovery for ${deployment} is unreadable; ignoring it`);
+    return null;
+  }
+  restoreProviderModels(parsed);
+  return parsed;
+}
+
+async function discoverAndPersistProviderModels(
+  credential: GatewayDiscoveryCredential,
+  signal?: AbortSignal | null,
+): Promise<ProviderModelsResult> {
+  const context = await kernelBrokerContext();
+  const result = await discoverProviderModels({
+    client: new KernelGatewayClient(requireKernelUds().connectors, context),
+    deployment: credential.deployment,
+    secretUri: credential.secretUri,
+    observedAt: now(),
+    ...(signal === undefined || signal === null ? {} : { signal }),
+  });
+  rememberProviderModels(result, Date.now());
+  const resultJson = providerModelsResultJson(result);
+  await writerTransaction((tx) => tx.providerModelDiscovery.upsert({
+    where: { deployment: credential.deployment },
+    create: {
+      deployment: credential.deployment,
+      resultJson,
+      modelCount: result.models.length,
+      observedAt: result.observedAt,
+    },
+    update: { resultJson, modelCount: result.models.length, observedAt: result.observedAt },
+  }));
+  return result;
+}
+
+/** One on-demand discovery per deployment per process, so a turn cannot loop. */
+const onDemandDiscoveryAttempted = new Set<string>();
+
+/**
+ * Resolve the admitted discovery record for a gateway model without failing the
+ * turn for a cold cache: memory → durable row → one bounded live discovery.
+ * Returns null only when the model is genuinely not admitted.
+ */
+async function admittedGatewayModelRecord(
+  credential: GatewayDiscoveryCredential,
+  modelId: string,
+  signal?: AbortSignal | null,
+): Promise<GatewayModel | null> {
+  const fromCache = describeConfiguredModel(credential.deployment, modelId);
+  if (fromCache !== null) return fromCache;
+  const persisted = await loadPersistedProviderModels(credential.deployment);
+  const fromDisk = persisted?.models.find((model) => model.id === modelId) ?? null;
+  if (fromDisk !== null) return fromDisk;
+  const attemptKey = `${credential.deployment}:${modelId}`;
+  if (onDemandDiscoveryAttempted.has(attemptKey)) return null;
+  onDemandDiscoveryAttempted.add(attemptKey);
+  try {
+    const discovered = await discoverAndPersistProviderModels(credential, signal);
+    return discovered.models.find((model) => model.id === modelId) ?? null;
+  } catch (error: unknown) {
+    console.warn(
+      `[terminus-control] on-demand model discovery for ${modelId} failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
+/** The model ids this account may currently use, for a denial's details. */
+async function admittedGatewayModelIds(
+  credential: GatewayDiscoveryCredential,
+): Promise<readonly string[]> {
+  const known = lastProviderModels(credential.deployment)
+    ?? await loadPersistedProviderModels(credential.deployment);
+  return (known?.models ?? []).map((model) => model.id).sort();
+}
+
+/**
+ * Warm discovery after the listener binds. Bounded retries with backoff: a
+ * gateway that is briefly unreachable at boot must not leave the process
+ * permanently unable to route a turn.
+ */
+async function warmProviderModelDiscovery(): Promise<void> {
+  const row = await db.gatewayProviderConfiguration.findUnique({
+    where: { id: GATEWAY_PROVIDER_CONFIGURATION_ID },
+  });
+  if (row === null) return;
+  const credential = gatewayDiscoveryCredential(row);
+  if (credential === null) return;
+  const persisted = await loadPersistedProviderModels(credential.deployment);
+  if (persisted !== null) {
+    console.log(
+      `[terminus-control] restored ${persisted.models.length} discovered ${credential.deployment} model(s) observed at ${persisted.observedAt}`,
+    );
+  }
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const result = await discoverAndPersistProviderModels(credential);
+      console.log(
+        `[terminus-control] warmed model discovery: ${result.models.length} ${credential.deployment} model(s)`,
+      );
+      return;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt === attempts) {
+        console.warn(
+          `[terminus-control] model discovery warm-up failed after ${attempts} attempt(s): ${message}`,
+        );
+        return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 1_000 * 2 ** (attempt - 1)));
+    }
+  }
+}
+
 const verificationCoordinator = new VerificationCoordinator<Prisma.TransactionClient>({
   readTask: async (taskId) => db.task.findUnique({ where: { id: taskId }, select: { status: true } }),
   appendEvent: async (event, mutation): Promise<void> => {
@@ -12015,11 +12484,21 @@ async function settleStandaloneProviderTool(
     });
   }));
 
-  const existingEffect = await db.sideEffect.findUnique({
-    where: { effectType_idempotencyKey: { effectType: effect.effectType, idempotencyKey: operationHash } },
-    select: { id: true, state: true },
-  });
+  // Observations (sideEffectClass "read") are exempt from the semantic
+  // idempotency gate: the same read issued after a write must dispatch, or the
+  // model can never observe the result of its own edit.
+  const existingEffect = semanticIdempotencyGateApplies(call)
+    ? await db.sideEffect.findUnique({
+      where: { effectType_idempotencyKey: { effectType: effect.effectType, idempotencyKey: operationHash } },
+      select: { id: true, state: true },
+    })
+    : null;
   if (existingEffect !== null) {
+    const denialText = duplicateOperationDenial({
+      call,
+      effectId: existingEffect.id,
+      effectState: existingEffect.state,
+    });
     const policyDecisionId = await denyStandaloneTool({
       input,
       call,
@@ -12027,14 +12506,14 @@ async function settleStandaloneProviderTool(
       argumentsArtifactUri: argumentsArtifact.uri,
       effectType: effect.effectType,
       ruleId: "standalone.semantic-idempotency",
-      explanation: `Semantic operation already exists as effect ${existingEffect.id} in state ${existingEffect.state}`,
+      explanation: denialText,
     });
     const result = {
-      ...errorResult("Terminus rejected a duplicate semantic operation", {
+      ...errorResult(denialText, {
         toolCallId,
         traceId: input.turnId,
         status: "denied",
-        summary: "Duplicate semantic operation was not dispatched",
+        summary: `Duplicate ${call.toolId} was not dispatched; the earlier effect already applied it`,
       }),
       policyDecisionId,
     };
@@ -12050,6 +12529,7 @@ async function settleStandaloneProviderTool(
       ...operationContext,
     });
   }
+  const ledgerIdempotencyKey = effectLedgerIdempotencyKey({ call, operationHash, toolCallId });
 
   let context: RequestContext;
   try {
@@ -12118,7 +12598,7 @@ async function settleStandaloneProviderTool(
     argumentsArtifactUri: argumentsArtifact.uri,
     resourceUri: effect.resourceUri,
     reversibility: effect.reversibility,
-    idempotencyKey: operationHash,
+    idempotencyKey: ledgerIdempotencyKey,
     workspaceId: input.workspaceId,
   });
   await effectSettlementService.start({
@@ -12131,7 +12611,7 @@ async function settleStandaloneProviderTool(
     argumentsArtifactUri: argumentsArtifact.uri,
     resourceUri: effect.resourceUri,
     reversibility: effect.reversibility,
-    idempotencyKey: operationHash,
+    idempotencyKey: ledgerIdempotencyKey,
     workspaceId: input.workspaceId,
   });
 
@@ -12152,7 +12632,7 @@ async function settleStandaloneProviderTool(
     dispatched = true;
     result = await executeStandaloneTool({
       clients: requireKernelUds(),
-      context: { ...context, idempotencyKey: operationHash },
+      context: { ...context, idempotencyKey: ledgerIdempotencyKey },
       workspaceId: input.workspaceId,
       call,
       internalToolCallId: toolCallId,
@@ -12732,19 +13212,29 @@ async function agentLoop(turnId: string): Promise<void> {
     // material never appears in configuration or logs.
     const directConfiguration = parseDirectProviderConfiguration(process.env[DIRECT_PROVIDER_CONFIGURATION_ENV]);
     const directObservedAt = now();
+    // H7: a turn may name its own admitted model; H4: resolve the discovery
+    // record through memory, the durable row, and finally one bounded on-demand
+    // discovery, instead of failing the turn for a cold in-process cache.
+    const gatewayCredential = gatewayProviderConfiguration === null
+      ? null
+      : gatewayDiscoveryCredential(gatewayProviderConfiguration);
+    const requestedModelId = turn.selectedModel ?? gatewayProviderConfiguration?.model ?? null;
+    const discoveredGatewayRecord = directConfiguration !== null
+      || gatewayProviderConfiguration === null
+      || gatewayCredential === null
+      || requestedModelId === null
+      ? null
+      : await admittedGatewayModelRecord(gatewayCredential, requestedModelId, abortController.signal);
     const gatewayModel = directConfiguration !== null || gatewayProviderConfiguration === null
       ? null
       : configuredGatewayModel(
-          gatewayProviderConfiguration,
+          turn.selectedModel === null
+            ? gatewayProviderConfiguration
+            : { ...gatewayProviderConfiguration, model: turn.selectedModel },
           now(),
-          // Cache-only: the turn path never triggers discovery, so a cold
-          // cache costs accuracy on a metadata field rather than latency and
-          // a new failure mode on every turn.
-          describeConfiguredModel(
-            gatewayProviderConfiguration.deployment === "go" ? "go" : "zen",
-            gatewayProviderConfiguration.model,
-          ),
+          discoveredGatewayRecord,
         );
+    const turnReasoningEffort = parseReasoningEffort(turn.selectedReasoningEffort);
     const selectedProvider = directConfiguration !== null
       ? configuredDirectProviderSnapshot(directConfiguration, directObservedAt)
       : gatewayModel === null
@@ -12778,10 +13268,10 @@ async function agentLoop(turnId: string): Promise<void> {
           gatewayProviderConfiguration?.credentialConfigured === true,
         );
     const selectedRenderer = directConfiguration !== null
-      ? createDirectRenderer(directConfiguration)
+      ? createDirectRenderer(directConfiguration, { reasoningEffort: turnReasoningEffort })
       : gatewayModel === null
         ? new LocalRenderer()
-        : new GatewayRenderer([gatewayModel]);
+        : new GatewayRenderer([gatewayModel], { reasoningEffort: turnReasoningEffort });
     const toolsEnabled = directConfiguration !== null
       ? selectedProvider.context.toolCalling
       : gatewayModel === null
@@ -12988,6 +13478,10 @@ async function agentLoop(turnId: string): Promise<void> {
       priorFailureSignatures: [...new Set([...storedFailureSignatures, ...eventFailureSignatures])],
     });
     let latestChangedFiles: readonly string[] = [];
+    // H3: a turn that only observed the workspace has nothing to verify. Any
+    // non-read tool (patch, exec, web_fetch) is treated as a potential change,
+    // so verification is skipped only when the turn provably made none.
+    let turnMayHaveChangedWorkspace = false;
     let latestInstructionHashes: readonly string[] = [];
     let latestFailureSelectors: readonly string[] = [];
     let latestDiagnostics: readonly string[] = [];
@@ -13368,22 +13862,41 @@ async function agentLoop(turnId: string): Promise<void> {
       } catch {
         // Default budget stands when the stored task budget is unreadable.
       }
-      const nativeExecutor = createNativeDirectExecutor({
-        configuration: directConfiguration,
-        connectors: requireKernelUds().connectors,
-        requestBudgetMicros: budgetMicros,
-        economics: selectedProvider.economics,
-        promptCacheKey: contextEpoch.epochId,
-        onChunk: providerTextDeltas.onChunk,
-      });
       return async (execInput) => {
+        // H9: time-to-first-token is measured per dispatch, so the observer
+        // and the executor are built here rather than once per turn.
+        const dispatchedAt = Date.now();
+        let firstChunkAt: number | null = null;
+        const nativeExecutor = createNativeDirectExecutor({
+          configuration: directConfiguration,
+          connectors: requireKernelUds().connectors,
+          requestBudgetMicros: budgetMicros,
+          economics: selectedProvider.economics,
+          promptCacheKey: contextEpoch.epochId,
+          onChunk: async (chunk) => {
+            if (firstChunkAt === null && (chunk.kind === "text" || chunk.kind === "tool_call")) {
+              firstChunkAt = Date.now();
+            }
+            await providerTextDeltas.onChunk(chunk);
+          },
+        });
         // Adapt the native stream result back into the transport-level
-        // ProviderResponse the engine settles.
+        // ProviderResponse the engine settles. `nativeResult.usage` carries
+        // the runtime's measured wall latency; the engine reads usage off the
+        // chunks, so it is written back onto the terminal `done` chunk
+        // instead of being discarded (H9).
         const nativeResult = await nativeExecutor(execInput as Parameters<typeof nativeExecutor>[0]);
         return {
           providerId: execInput.rendered.providerId,
           model: execInput.rendered.model,
-          chunks: nativeResult.chunks,
+          chunks: withMeasuredUsage(
+            nativeResult.chunks,
+            {
+              wallMs: Date.now() - dispatchedAt,
+              timeToFirstTokenMs: firstChunkAt === null ? null : firstChunkAt - dispatchedAt,
+            },
+            nativeResult.usage,
+          ),
           observedAt: new Date().toISOString() as never,
         };
       };
@@ -14040,7 +14553,7 @@ async function agentLoop(turnId: string): Promise<void> {
                 workspaceId: workspace.id,
                 signal: abortController.signal,
               }),
-            { maxAttempts: 3 },
+            { maxAttempts: 3, signal: abortController.signal },
           );
         } finally {
           await providerTextDeltas.flush();
@@ -14241,7 +14754,14 @@ async function agentLoop(turnId: string): Promise<void> {
           contractHash: contractRow.contentHash,
           artifactClient,
         });
-        return settlementByProviderCallId.get(call.toolCallId);
+        const settlement = settlementByProviderCallId.get(call.toolCallId);
+        if (
+          !isReadOnlyToolCall(parsedCall)
+          && (settlement?.status === "success" || settlement?.status === "partial")
+        ) {
+          turnMayHaveChangedWorkspace = true;
+        }
+        return settlement;
       },
       afterToolsSettled: async () => {
         await mutateAgentState(() => emit({
@@ -14297,27 +14817,29 @@ async function agentLoop(turnId: string): Promise<void> {
       finalResponseArtifactUri = parsedResponseArtifact.data;
     } else {
       if (activeEngine === null) throw new Error("coding loop engine was not initialized");
-      const stop = await activeEngine.run();
+      // H10: every kernel RPC issued underneath the loop inherits a deadline no
+      // later than the turn's own wall-clock budget, so a kernel that stops
+      // answering fails the turn with DEADLINE_EXCEEDED instead of hanging it.
+      const engine = activeEngine;
+      const stop = await withTurnDeadline(ledgerBudget.wallClockMs, async () => engine.run());
       await persistTurnBudgetLedger(turnId, activeEngine.budget.ledger, turnContextBudgetJson);
       switch (stop.kind) {
         case "assistant_message":
-          // Ordinary assistant text is durable context, not a completion
-          // proposal. Stop in a recoverable blocked state until the provider
-          // supplies an explicit proposal that can enter verification.
-          throw new EngineTerminalStopError({
-            kind: "blocked",
-            reason: "assistant_message_requires_completion_proposal",
-            error: {
-              code: "COMPLETION_PROPOSAL_REQUIRED",
-              category: "verification",
-              message: "Provider returned an assistant message without an explicit completion proposal.",
-              retryable: true,
-              suggestedAction: "Resume the task with an explicit completion proposal after satisfying its acceptance criteria.",
-              details: {
-                response_artifact: stop.responseArtifactUri,
-              },
-            },
-          });
+          // H3: a final assistant message with no pending tool calls means the
+          // model is done. Settle the turn on it. When the turn changed the
+          // workspace the verification pass below still runs first; when it
+          // did not, there is nothing to verify.
+          if (stop.text.trim().length === 0) {
+            throw new EngineTerminalStopError({ kind: "no_final_response" });
+          }
+          finalText = stop.text;
+          finalResponseArtifactUri = stop.responseArtifactUri ?? lastResponseArtifactUri;
+          completionClaims = criteriaRows.map((criterion) => ({
+            criterionId: criterion.criterionId,
+            evidenceRefs: [],
+            changedArtifactRefs: [],
+          }));
+          break;
         case "completion_proposal":
           finalText = stop.proposal.text;
           finalResponseArtifactUri = stop.proposal.responseArtifactUri;
@@ -14515,6 +15037,27 @@ async function agentLoop(turnId: string): Promise<void> {
       const task = await db.task.findUnique({ where: { id: turn.taskId } });
       const enteringVerification = task?.status === "ACTIVE";
       const continuingVerification = task?.status === "VERIFYING" && resumeVerificationFromState;
+      if (task !== null && enteringVerification && !turnMayHaveChangedWorkspace) {
+        // H3: chat / question / explanation turn. There is no workspace change
+        // to verify, so demanding test evidence would make the turn
+        // permanently incompletable. The turn settles on the final message and
+        // the task stays ACTIVE so the user can keep steering it.
+        await mutateAgentState(() => emit({
+          eventType: "turn.verification_not_applicable",
+          aggregateType: "turn",
+          aggregateId: turnId,
+          correlationId: task.id,
+          payload: {
+            reason: "turn_made_no_workspace_changes",
+            detail: "No workspace-mutating tool settled in this turn; there is no change to verify.",
+            proposal_artifact: finalResponseArtifactUri,
+          },
+          artifactRefs: [finalResponseArtifactUri],
+        }));
+        await persistEvidenceForCurrentTurn("COMPLETED");
+        await finalizeTurn("RESPONSE_VALIDATING");
+        return;
+      }
       if (task && (enteringVerification || continuingVerification)) {
         if (enteringVerification) {
           await mutateAgentState(() => emit({
@@ -14572,7 +15115,14 @@ async function agentLoop(turnId: string): Promise<void> {
           },
         };
         const runtime = createVerificationRuntime(
-          createKernelPredicateRunner(verificationClients, verificationBaseContext, workspace.id),
+          createKernelPredicateRunner(
+            verificationClients,
+            verificationBaseContext,
+            workspace.id,
+            // H3: derive each predicate's command from what this repository
+            // actually ships instead of assuming `just <recipe>`.
+            () => latestRepositorySignals.value?.verificationRunners ?? {},
+          ),
           verificationArtifactWriter,
         );
         const contractRows = await db.acceptanceCriterion.findMany({
@@ -14729,6 +15279,22 @@ async function agentLoop(turnId: string): Promise<void> {
         const evidenceGraph = await runtime.store.getEvidenceGraph(plan.id);
         const allPassed =
           evaluation.allRequiredPassed && evaluation.completionExpressionSatisfied;
+        // H3: distinguish "the repository's checks failed" from "this
+        // repository has no check to run". The second is not a verification
+        // failure and must not burn repair attempts.
+        const resultByNodeId = new Map(evaluation.results.map((result) => [result.nodeId, result]));
+        const requiredNodeIds = plan.nodes.filter((node) => node.required).map((node) => node.id);
+        const skippedRequiredNodes = requiredNodeIds.filter(
+          (nodeId) => resultByNodeId.get(nodeId)?.status === "skipped",
+        );
+        const unsatisfiedRequiredNodes = requiredNodeIds.filter((nodeId) => {
+          const status = resultByNodeId.get(nodeId)?.status;
+          return status !== "pass" && status !== "skipped";
+        });
+        const noRunnableChecks = !allPassed
+          && unsatisfiedRequiredNodes.length === 0
+          && skippedRequiredNodes.length > 0
+          && evaluation.blocked.length === 0;
         const resumedNodeIds = new Set(resumedResults.map((result) => result.nodeId));
         const newlyEvaluatedResults = evaluation.results.filter((result) => !resumedNodeIds.has(result.nodeId));
         const existingPlanCompletedEvent = await db.semanticEvent.findFirst({
@@ -14762,10 +15328,60 @@ async function agentLoop(turnId: string): Promise<void> {
               aggregateType: "verification_plan",
               aggregateId: plan.id,
               correlationId: task.id,
-              payload: { status: allPassed ? "all_passed" : "failed" },
+              payload: {
+                status: allPassed
+                  ? "all_passed"
+                  : noRunnableChecks
+                    ? "no_runnable_checks"
+                    : "failed",
+              },
             });
           }
         });
+
+        if (noRunnableChecks) {
+          // Nothing in this repository implements the required predicates.
+          // Record why, settle the turn on the model's final message, and
+          // return the task to ACTIVE — a skipped check is not proof, so the
+          // completion gate is deliberately not entered.
+          const skipReasons = skippedRequiredNodes.map((nodeId) => ({
+            node_id: nodeId,
+            reason: resultByNodeId.get(nodeId)?.reasonIfSkipped ?? "no test runner detected",
+          }));
+          const skipEvidence = await ingestJsonArtifact(
+            artifactClient,
+            {
+              taskId: task.id,
+              planId: plan.id,
+              sourceRevision,
+              environmentDigest,
+              outcome: "no_runnable_checks",
+              skipped_nodes: skipReasons,
+              detected_runners: latestRepositorySignals.value?.verificationRunners ?? {},
+            },
+            "verification-no-runnable-checks",
+            { taskId: task.id, workspaceId: workspace.id },
+          );
+          await mutateAgentState(() => emit({
+            eventType: "verification.no_runnable_checks",
+            aggregateType: "turn",
+            aggregateId: turnId,
+            correlationId: task.id,
+            payload: { plan_id: plan.id, skipped_nodes: skipReasons },
+            artifactRefs: [skipEvidence.uri],
+          }));
+          await persistEvidenceForCurrentTurn("COMPLETED", {
+            finalWorkspaceRevision: sourceRevision,
+            proofBundleHash: skipEvidence.hash,
+          });
+          await verificationCoordinator.settleWithoutRunnableChecks(task.id, turnId, {
+            reason: "no_runnable_checks",
+            skipped_nodes: skipReasons.map((entry) => entry.node_id),
+            evidence_artifact: skipEvidence.uri,
+          });
+          await finalizeTurn("VERIFIED");
+          return;
+        }
 
         if (!allPassed) {
           // Rank 3: normalize failures into durable repair inputs and run
@@ -15150,15 +15766,9 @@ async function agentLoop(turnId: string): Promise<void> {
                 : stopKind === "failed_verification"
                   ? "failed_verification"
                   : "agent_loop_error";
-    const taskStatusForStop = terminalTurnState === "ABORTED"
-      ? "ABORTED"
-      : terminalTurnState === "BUDGET_EXHAUSTED"
-        ? "BUDGET_EXHAUSTED"
-        : terminalTurnState === "POLICY_DENIED"
-          ? "POLICY_DENIED"
-          : terminalTurnState === "BLOCKED" || terminalTurnState === "USER_ACTION_REQUIRED"
-          ? terminalTurnState === "USER_ACTION_REQUIRED" ? "NEEDS_USER_DECISION" : "BLOCKED"
-            : stopKind === "failed_verification" ? "FAILED_VERIFICATION" : null;
+    // H8: only a user cancellation or a hard budget/policy stop ends the task.
+    const disposition = turnFailureDisposition(terminalTurnState);
+    const taskStatusForStop = disposition.taskStatus;
     const terminalEvidenceOutcome: EvidenceTerminalOutcome | null = taskStatusForStop === "ABORTED"
       ? "ABORTED"
       : taskStatusForStop === "BUDGET_EXHAUSTED"
@@ -15188,6 +15798,43 @@ async function agentLoop(turnId: string): Promise<void> {
       "VERIFIED",
       "ABORTED",
     ] as const;
+    const failureErrorJson = JSON.stringify({
+      code: failureCode,
+      message: failureMessage,
+      category: stopEnvelope?.category ?? classified.envelope.category,
+      details: failureDetails,
+    });
+    const turnTerminalErrorJson = JSON.stringify({
+      code: failureCode,
+      message: failureMessage,
+      reason: failureReason,
+      details: failureDetails,
+    });
+    const turnFailurePayload = {
+      code: failureCode,
+      category: stopEnvelope?.category ?? classified.envelope.category,
+      message: failureMessage,
+      reason: failureReason,
+      retryable: stopEnvelope?.retryable ?? classified.envelope.retryable,
+      details: failureDetails,
+    };
+    const failProviderAttempts = async (tx: Prisma.TransactionClient): Promise<void> => {
+      await tx.providerAttempt.updateMany({
+        where: { turnId, status: "running" },
+        data: { status: "failed", completedAt: new Date(), errorJson: failureErrorJson },
+      });
+    };
+    const settleTurnRow = async (tx: Prisma.TransactionClient): Promise<void> => {
+      const update = await tx.turn.updateMany({
+        where: { id: turnId, state: { notIn: [...immutableTurnStates] } },
+        data: {
+          state: terminalTurnState,
+          completedAt: new Date(),
+          terminalErrorJson: turnTerminalErrorJson,
+        },
+      });
+      if (update.count !== 1) throw new Error(`turn ${turnId} changed during failure settlement`);
+    };
     await mutateAgentState(async () => {
       const currentTurn = await db.turn.findUnique({
         where: { id: turnId },
@@ -15195,112 +15842,125 @@ async function agentLoop(turnId: string): Promise<void> {
       });
       const mayFailTurn = currentTurn !== null
         && !immutableTurnStates.includes(currentTurn.state as (typeof immutableTurnStates)[number]);
-      if (mayFailTurn) {
-        await emit({
-          eventType: terminalTurnEvent,
-          aggregateType: "turn", aggregateId: turnId,
-          correlationId: turn.taskId ?? undefined,
-          payload: {
-            code: failureCode,
-            category: stopEnvelope?.category ?? classified.envelope.category,
-            message: failureMessage,
-            reason: failureReason,
-            retryable: stopEnvelope?.retryable ?? classified.envelope.retryable,
-            details: failureDetails,
-          },
-        }, async (tx) => {
-          await tx.providerAttempt.updateMany({
-            where: { turnId, status: "running" },
-            data: {
-              status: "failed",
-              completedAt: new Date(),
-              errorJson: JSON.stringify({
-                code: failureCode,
-                message: failureMessage,
-                category: stopEnvelope?.category ?? classified.envelope.category,
-                details: failureDetails,
-              }),
-            },
-          });
-          const update = await tx.turn.updateMany({
-            where: {
-              id: turnId,
-              state: { notIn: [...immutableTurnStates] },
-            },
-            data: {
-              state: terminalTurnState,
-              completedAt: new Date(),
-              terminalErrorJson: JSON.stringify({
-                code: failureCode,
-                message: failureMessage,
-                reason: failureReason,
-                details: failureDetails,
-              }),
-            },
-          });
-          if (update.count !== 1) throw new Error(`turn ${turnId} changed during failure settlement`);
-        });
-      } else {
-        await writerTransaction((tx) => tx.providerAttempt.updateMany({
-          where: { turnId, status: "running" },
-          data: {
-            status: "failed",
-            completedAt: new Date(),
-              errorJson: JSON.stringify({
-                code: failureCode,
-                message: failureMessage,
-                category: stopEnvelope?.category ?? classified.envelope.category,
-                details: failureDetails,
-              }),
-          },
-        }));
-      }
-
-      if (turn.taskId === null) return;
       const failedTaskId = turn.taskId;
-      const failedTask = await db.task.findUnique({
-        where: { id: failedTaskId },
-        select: { status: true },
-      });
-      if (failedTask?.status !== "ACTIVE" && failedTask?.status !== "VERIFYING") return;
-      const status = taskStatusForStop
-        ?? (failedTask.status === "VERIFYING" ? "FAILED_VERIFICATION" : "FAILED");
-      const eventType = status === "BLOCKED" ? "task.blocked" : "task.failed";
+      const failedTask = failedTaskId === null
+        ? null
+        : await db.task.findUnique({ where: { id: failedTaskId }, select: { status: true } });
+      const taskIsSettleable = failedTask !== null
+        && (failedTask.status === "ACTIVE" || failedTask.status === "VERIFYING");
+
+      // H8: a failed turn is not a failed task. Only a user cancellation or a
+      // hard budget/policy stop ends the task; every other failure leaves it
+      // ACTIVE with no live turn so the user can steer, retry, or redirect.
+      // `taskStatusForStop` is non-null exactly for those hard stops.
+      const taskTerminalStatus = taskStatusForStop;
+      const taskStaysActive = taskTerminalStatus === null;
+      const taskNeedsWrite = taskIsSettleable
+        && (!taskStaysActive || failedTask.status === "VERIFYING");
+      const taskEventType = disposition.taskEventType;
       const evidenceOutcome = terminalEvidenceOutcome
-        ?? (failedTask.status === "VERIFYING" ? "FAILED_VERIFICATION" : null);
-      await emit({
-        eventType,
-        aggregateType: "task",
-        aggregateId: failedTaskId,
-        correlationId: failedTaskId,
-        payload: {
-          status,
-          code: failureCode,
-          message: failureMessage,
-          reason: failureReason,
-          details: failureDetails,
-        },
-      }, async (tx) => {
+        ?? (failedTask?.status === "VERIFYING" && !taskStaysActive ? "FAILED_VERIFICATION" : null);
+      const taskFailurePayload = {
+        status: taskTerminalStatus ?? "ACTIVE",
+        active_turn: null,
+        code: failureCode,
+        message: failureMessage,
+        reason: failureReason,
+        details: failureDetails,
+      };
+      const writeTaskRow = async (tx: Prisma.TransactionClient): Promise<void> => {
+        if (failedTaskId === null || failedTask === null) return;
         const update = await tx.task.updateMany({
           where: { id: failedTaskId, status: failedTask.status },
-          data: {
-            status,
-            phase: failedTask.status === "VERIFYING" ? "VERIFY" : "IMPLEMENT",
-            completedAt: blockedError ? null : new Date(),
-            terminalReasonJson: JSON.stringify({
-              reason: failureReason,
-              code: failureCode,
-              message: failureMessage,
-              details: failureDetails,
-            }),
-          },
+          data: taskStaysActive
+            ? {
+                // Returned to the actor, not terminated: no completedAt and no
+                // terminal reason, or the task becomes unsteerable.
+                status: "ACTIVE",
+                phase: "IMPLEMENT",
+                completedAt: null,
+                terminalReasonJson: null,
+              }
+            : {
+                status: taskTerminalStatus,
+                phase: failedTask.status === "VERIFYING" ? "VERIFY" : "IMPLEMENT",
+                completedAt: blockedError ? null : new Date(),
+                terminalReasonJson: JSON.stringify({
+                  reason: failureReason,
+                  code: failureCode,
+                  message: failureMessage,
+                  details: failureDetails,
+                }),
+              },
         });
         if (update.count !== 1) throw new Error(`task ${failedTaskId} changed during failure settlement`);
-      });
+      };
+
+      // C10: the turn-terminal and task-terminal writes settle in one
+      // transaction so a crash can never leave a live task pointing at a
+      // dead turn (or the reverse).
+      if (mayFailTurn && taskNeedsWrite && failedTaskId !== null) {
+        await emitAtomicBatch([
+          {
+            eventType: terminalTurnEvent,
+            aggregateType: "turn",
+            aggregateId: turnId,
+            correlationId: failedTaskId,
+            payload: turnFailurePayload,
+          },
+          {
+            eventType: taskEventType,
+            aggregateType: "task",
+            aggregateId: failedTaskId,
+            correlationId: failedTaskId,
+            payload: taskFailurePayload,
+          },
+        ], async (tx) => {
+          await failProviderAttempts(tx);
+          await settleTurnRow(tx);
+          await writeTaskRow(tx);
+        });
+      } else if (mayFailTurn) {
+        await emit({
+          eventType: terminalTurnEvent,
+          aggregateType: "turn",
+          aggregateId: turnId,
+          correlationId: turn.taskId ?? undefined,
+          payload: turnFailurePayload,
+        }, async (tx) => {
+          await failProviderAttempts(tx);
+          await settleTurnRow(tx);
+        });
+      } else {
+        await writerTransaction(failProviderAttempts);
+        if (taskNeedsWrite && failedTaskId !== null) {
+          await emit({
+            eventType: taskEventType,
+            aggregateType: "task",
+            aggregateId: failedTaskId,
+            correlationId: failedTaskId,
+            payload: taskFailurePayload,
+          }, writeTaskRow);
+        }
+      }
+
+      if (failedTaskId === null || !taskIsSettleable) return;
+      // The task row is unchanged when it simply stays ACTIVE; the turn's own
+      // terminal event is the durable record. Still publish the observation so
+      // subscribers learn the active turn is gone.
+      if (taskStaysActive && !taskNeedsWrite) {
+        await emit({
+          eventType: taskEventType,
+          aggregateType: "task",
+          aggregateId: failedTaskId,
+          correlationId: failedTaskId,
+          payload: taskFailurePayload,
+        });
+      }
       if (evidenceOutcome !== null) {
         await persistEvidenceForCurrentTurn(evidenceOutcome);
       }
-      await synchronizeV1TaskProjection(failedTaskId, eventType);
+      await synchronizeV1TaskProjection(failedTaskId, taskEventType);
     });
   } finally {
     if (activeTurnAbortControllers.get(turnId) === abortController) {
@@ -16261,17 +16921,16 @@ async function recoverActiveAgentTurns(): Promise<number> {
           }
         }
         if (turn.taskId !== null) {
+          // H5/H8: the interrupted *turn* needs reconciliation; the task does
+          // not become the user's problem. It returns to ACTIVE with no live
+          // turn so the next message is accepted.
           await tx.task.updateMany({
             where: { id: turn.taskId, status: { in: ["ACTIVE", "VERIFYING"] } },
             data: {
-              status: "BLOCKED",
+              status: "ACTIVE",
               phase: "IMPLEMENT",
               completedAt: null,
-              terminalReasonJson: JSON.stringify({
-                reason: "startup_reconciliation_required",
-                turn_id: turn.id,
-                previous_turn_state: turn.state,
-              }),
+              terminalReasonJson: null,
             },
           });
         }
@@ -16357,9 +17016,113 @@ async function recoverActiveAgentTurns(): Promise<number> {
       });
       continue;
     }
-    await agentLoop(turn.id);
+    // H5: never re-drive a live turn after a restart. The provider attempt,
+    // tool settlements, and context epoch of the interrupted run are gone;
+    // replaying `agentLoop` would duplicate provider spend and re-propose
+    // effects. Settle the orphan terminally and say why.
+    await settleOrphanedTurnAfterRestart({ id: turn.id, taskId: turn.taskId, state: turn.state });
   }
   return active.length;
+}
+
+/**
+ * Terminal settlement for a turn the control plane was executing when it
+ * stopped. The turn is FAILED with an explicit cause; the task is left ACTIVE
+ * (H8) so the user can simply send the message again.
+ */
+async function settleOrphanedTurnAfterRestart(turn: {
+  readonly id: string;
+  readonly taskId: string | null;
+  readonly state: string;
+}): Promise<void> {
+  const settledAt = new Date();
+  const { turnState, ...terminalError } = restartedTurnSettlement(turn.state);
+  await mutateAgentState(async () => {
+    await emit({
+      eventType: "turn.failed",
+      aggregateType: "turn",
+      aggregateId: turn.id,
+      correlationId: turn.taskId ?? undefined,
+      payload: terminalError,
+    }, async (tx) => {
+      await tx.providerAttempt.updateMany({
+        where: { turnId: turn.id, status: "running" },
+        data: {
+          status: "failed",
+          completedAt: settledAt,
+          errorJson: JSON.stringify(terminalError),
+        },
+      });
+      const failed = await tx.turn.updateMany({
+        where: { id: turn.id, state: turn.state },
+        data: {
+          state: turnState,
+          completedAt: settledAt,
+          terminalErrorJson: JSON.stringify(terminalError),
+        },
+      });
+      if (failed.count !== 1) {
+        throw new Error(`turn ${turn.id} changed during restart settlement`);
+      }
+    });
+    if (turn.taskId === null) return;
+    // The task itself is untouched: it stays ACTIVE with no live turn.
+    await emit({
+      eventType: "task.turn_failed",
+      aggregateType: "task",
+      aggregateId: turn.taskId,
+      correlationId: turn.taskId,
+      payload: { status: "ACTIVE", active_turn: null, ...terminalError },
+    });
+    await synchronizeV1TaskProjection(turn.taskId, "task.turn_failed");
+  });
+}
+
+/**
+ * Tasks whose turn is gone. A task in VERIFYING with no live turn cannot make
+ * progress on its own and is not steerable; return it to ACTIVE. A task that
+ * is already ACTIVE with zero turns (created and started but never given a
+ * turn) is already correct and is left alone — recovery must tolerate that
+ * shape rather than treat it as corruption.
+ */
+async function reconcileOrphanedActiveTasks(): Promise<number> {
+  const stuck = await db.task.findMany({
+    where: { status: "VERIFYING" },
+    orderBy: { id: "asc" },
+    select: { id: true },
+  });
+  let returned = 0;
+  for (const task of stuck) {
+    const liveTurn = await db.turn.findFirst({
+      where: { taskId: task.id, state: { in: [...V1_NONTERMINAL_TURN_STATES] } },
+      select: { id: true },
+    });
+    const disposition = restartedTaskDisposition({ status: "VERIFYING", hasLiveTurn: liveTurn !== null });
+    if (disposition.nextStatus === null) continue;
+    await mutateAgentState(async () => {
+      await emit({
+        eventType: "task.turn_failed",
+        aggregateType: "task",
+        aggregateId: task.id,
+        correlationId: task.id,
+        payload: {
+          status: "ACTIVE",
+          active_turn: null,
+          reason: "control_plane_restarted",
+          message: "Verification was interrupted by a control-plane restart; the task is active again.",
+        },
+      }, async (tx) => {
+        const update = await tx.task.updateMany({
+          where: { id: task.id, status: "VERIFYING" },
+          data: { status: "ACTIVE", phase: "IMPLEMENT", completedAt: null, terminalReasonJson: null },
+        });
+        if (update.count !== 1) throw new Error(`task ${task.id} changed during orphan reconciliation`);
+      });
+      await synchronizeV1TaskProjection(task.id, "task.turn_failed");
+    });
+    returned += 1;
+  }
+  return returned;
 }
 
 /**
@@ -16671,13 +17434,20 @@ const server = createServer(async (req, res) => {
       const kernelHealth = await requireKernelUds().info.Health({});
       const writerReady = writerLeaseIsHealthy();
       const kernelReady = kernelHealth.state === "healthy" || kernelHealth.state === "ok";
+      const recovered = startupRecovery.status === "complete";
       sendJson(res, 200, {
         status: kernelReady && writerReady ? "ok" : "degraded",
         version: CONTROL_BUILD_VERSION,
         build_commit: CONTROL_BUILD_COMMIT,
         instance_id: CONTROL_INSTANCE_NONCE,
         uptime_seconds: process.uptime(),
-        ready: kernelReady && writerReady,
+        // H5: bound but not yet reconciled is a real, reportable state.
+        ready: kernelReady && writerReady && recovered,
+        recovery: {
+          status: startupRecovery.status,
+          error: startupRecovery.error,
+          completed_at: startupRecovery.completedAt,
+        },
         kernel: kernelHealth,
         writer: writerLease === null ? { healthy: false } : {
           healthy: writerReady,
@@ -16686,9 +17456,10 @@ const server = createServer(async (req, res) => {
         },
       });
     } catch (err) {
-      logInternalError("health handler failed", err);
       if (!res.headersSent) {
-        sendError(res, 500, "INTERNAL", "health check failed", "internal");
+        sendInternalError(res, "HEALTH_CHECK_FAILED", "health check failed", "health handler failed", err);
+      } else {
+        logInternalError("health handler failed", err);
       }
     }
     return;
@@ -16805,109 +17576,138 @@ await acquireControlWriterLease();
 writerLeaseHeartbeat = setInterval(() => {
   void renewControlWriterLease();
 }, Math.max(1_000, Math.floor(CONTROL_WRITER_LEASE_MS / 3)));
-const scopedDelegationRecovery = await scopedDelegationService.recoverAfterRestart();
-const reconciledIdempotencyReservations = await reconcilePendingIdempotencyReservations();
-await replayArpV2();
-const jobRecovery = await reconcileNonterminalJobs();
-const effectRecovery = await reconcileUnsettledSideEffects();
-const providerRecovery = await reconcileInFlightProviderAttempts();
-const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions(
-  false,
-  buildTrustedBranchReceiptReconciler() ?? undefined,
-);
-const repairedTaskProjections = await reconcileV1TaskProjections();
-const checkpointLinkRecovery = await reconcileCheckpointArtifactLinks();
-const checkpointAdmissionRecovery = await reconcilePreparedCheckpointAdmissions();
-const completionAdmissionRecovery = await reconcilePreparedCompletionRecords();
-const evidenceBundleRecovery = await reconcilePreparedEvidenceBundles();
-const recoveredActiveTurns = await recoverActiveAgentTurns();
-const recoveredDurableRepairAttempts = await recoverDurableRepairAttempts();
-const recoveredPendingRepairTurns = await recoverPendingRepairTurns();
-if (
-  effectRecovery.failed.length > 0
-  ||
-  providerRecovery.failed.length > 0
-  ||
-  candidateBranchRecovery.failed.length > 0
-  ||
-  checkpointLinkRecovery.failed.length > 0
-  || checkpointAdmissionRecovery.failed.length > 0
-  || completionAdmissionRecovery.failed.length > 0
-) {
-  throw new Error(
-    `startup recovery could not settle: ${effectRecovery.failed.length} effect failures, ${providerRecovery.failed.length} provider failures, ${candidateBranchRecovery.failed.length} candidate branch failures, ${checkpointLinkRecovery.failed.length} checkpoint link failures, ${checkpointAdmissionRecovery.failed.length} checkpoint admission failures, ${completionAdmissionRecovery.failed.length} completion admission failures`,
+/**
+ * Everything that reconciles durable state after a restart. Runs *after* the
+ * listener binds (H5) and never rethrows: a recovery failure degrades
+ * readiness so an operator can see it, instead of killing the process at
+ * module scope where the failure is invisible.
+ */
+async function runStartupRecovery(): Promise<void> {
+  startupRecovery.status = "running";
+  try {
+  const scopedDelegationRecovery = await scopedDelegationService.recoverAfterRestart();
+  const reconciledIdempotencyReservations = await reconcilePendingIdempotencyReservations();
+  await replayArpV2();
+  const jobRecovery = await reconcileNonterminalJobs();
+  const effectRecovery = await reconcileUnsettledSideEffects();
+  const providerRecovery = await reconcileInFlightProviderAttempts();
+  const candidateBranchRecovery = await reconcileInFlightCandidateBranchAdmissions(
+    false,
+    buildTrustedBranchReceiptReconciler() ?? undefined,
   );
-}
-if (repairedTaskProjections > 0) {
-  console.log(`[terminus-control] repaired ${repairedTaskProjections} v1/v2 task projections`);
-}
-if (reconciledIdempotencyReservations > 0) {
-  console.log(
-    `[terminus-control] reconciled ${reconciledIdempotencyReservations} unknown idempotency settlement(s)`,
-  );
-}
-if (scopedDelegationRecovery.length > 0) {
-  const recovered = scopedDelegationRecovery.filter((result) => result.outcome === "recovered").length;
-  const interrupted = scopedDelegationRecovery.filter((result) => result.outcome === "interrupted").length;
-  const manualReview = scopedDelegationRecovery.filter((result) => result.outcome === "manual_review").length;
-  console.log(
-    `[terminus-control] scoped delegation recovery: ${recovered} recovered, ${interrupted} interrupted, ${manualReview} manual review`,
-  );
-}
-if (jobRecovery.scanned > 0) {
-  console.log(
-    `[terminus-control] job recovery: ${jobRecovery.scanned} scanned, ${jobRecovery.lost} lost, ${jobRecovery.live} live, ${jobRecovery.exited} exited`,
-  );
-}
-if (effectRecovery.scanned > 0) {
-  console.log(
-    `[terminus-control] effect recovery: ${effectRecovery.manualReview.length} moved to manual review, ${effectRecovery.alreadyResolved.length} already resolved`,
-  );
-}
-if (providerRecovery.scanned > 0) {
-  console.log(
-    `[terminus-control] provider recovery: ${providerRecovery.interrupted.length} interrupted, ${providerRecovery.alreadyResolved.length} already resolved`,
-  );
-}
-if (candidateBranchRecovery.scanned > 0) {
-  console.log(
-    `[terminus-control] candidate branch recovery: ${candidateBranchRecovery.manualReview.length} manual review, ${candidateBranchRecovery.admitted.length} admitted from trusted receipts, ${candidateBranchRecovery.alreadyResolved.length} already resolved`,
-  );
-}
-if (checkpointAdmissionRecovery.prepared > 0) {
-  console.log(
-    `[terminus-control] checkpoint admission recovery: ${checkpointAdmissionRecovery.recovered.length} recovered, ${checkpointAdmissionRecovery.quarantined.length} quarantined, ${checkpointAdmissionRecovery.failed.length} pending`,
-  );
-}
-if (completionAdmissionRecovery.prepared > 0) {
-  console.log(
-    `[terminus-control] completion admission recovery: ${completionAdmissionRecovery.recovered.length} recovered, ${completionAdmissionRecovery.quarantined.length} quarantined, ${completionAdmissionRecovery.failed.length} pending`,
-  );
-}
-if (evidenceBundleRecovery.prepared > 0) {
-  console.log(
-    `[terminus-control] evidence bundle recovery: ${evidenceBundleRecovery.committed.length} committed, ${evidenceBundleRecovery.quarantined.length} quarantined`,
-  );
-}
-if (recoveredDurableRepairAttempts > 0 || recoveredPendingRepairTurns > 0) {
-  console.log(
-    `[terminus-control] repair recovery: ${recoveredDurableRepairAttempts} durable attempts, ${recoveredPendingRepairTurns} legacy pending turns`,
-  );
-}
-if (recoveredActiveTurns > 0) {
-  console.log(`[terminus-control] reconciled ${recoveredActiveTurns} active turn(s)`);
-}
-if (recoveredPendingRepairTurns > 0) {
-  console.log(`[terminus-control] reconciled ${recoveredPendingRepairTurns} pending repair turn(s)`);
-}
-if (
-  checkpointLinkRecovery.scanned > 0
-  || checkpointLinkRecovery.removedOrphans.length > 0
-  || checkpointLinkRecovery.requeued.length > 0
-) {
-  console.log(
-    `[terminus-control] checkpoint link recovery: ${checkpointLinkRecovery.scanned} scanned, ${checkpointLinkRecovery.removedOrphans.length} orphans removed, ${checkpointLinkRecovery.requeued.length} rows requeued, ${checkpointLinkRecovery.quarantined.length} quarantined`,
-  );
+  const repairedTaskProjections = await reconcileV1TaskProjections();
+  const checkpointLinkRecovery = await reconcileCheckpointArtifactLinks();
+  const checkpointAdmissionRecovery = await reconcilePreparedCheckpointAdmissions();
+  const completionAdmissionRecovery = await reconcilePreparedCompletionRecords();
+  const evidenceBundleRecovery = await reconcilePreparedEvidenceBundles();
+  const recoveredActiveTurns = await recoverActiveAgentTurns();
+  const recoveredDurableRepairAttempts = await recoverDurableRepairAttempts();
+  const recoveredPendingRepairTurns = await recoverPendingRepairTurns();
+  if (
+    effectRecovery.failed.length > 0
+    ||
+    providerRecovery.failed.length > 0
+    ||
+    candidateBranchRecovery.failed.length > 0
+    ||
+    checkpointLinkRecovery.failed.length > 0
+    || checkpointAdmissionRecovery.failed.length > 0
+    || completionAdmissionRecovery.failed.length > 0
+  ) {
+    throw new Error(
+      `startup recovery could not settle: ${effectRecovery.failed.length} effect failures, ${providerRecovery.failed.length} provider failures, ${candidateBranchRecovery.failed.length} candidate branch failures, ${checkpointLinkRecovery.failed.length} checkpoint link failures, ${checkpointAdmissionRecovery.failed.length} checkpoint admission failures, ${completionAdmissionRecovery.failed.length} completion admission failures`,
+    );
+  }
+  if (repairedTaskProjections > 0) {
+    console.log(`[terminus-control] repaired ${repairedTaskProjections} v1/v2 task projections`);
+  }
+  if (reconciledIdempotencyReservations > 0) {
+    console.log(
+      `[terminus-control] reconciled ${reconciledIdempotencyReservations} unknown idempotency settlement(s)`,
+    );
+  }
+  if (scopedDelegationRecovery.length > 0) {
+    const recovered = scopedDelegationRecovery.filter((result) => result.outcome === "recovered").length;
+    const interrupted = scopedDelegationRecovery.filter((result) => result.outcome === "interrupted").length;
+    const manualReview = scopedDelegationRecovery.filter((result) => result.outcome === "manual_review").length;
+    console.log(
+      `[terminus-control] scoped delegation recovery: ${recovered} recovered, ${interrupted} interrupted, ${manualReview} manual review`,
+    );
+  }
+  if (jobRecovery.scanned > 0) {
+    console.log(
+      `[terminus-control] job recovery: ${jobRecovery.scanned} scanned, ${jobRecovery.lost} lost, ${jobRecovery.live} live, ${jobRecovery.exited} exited`,
+    );
+  }
+  if (effectRecovery.scanned > 0) {
+    console.log(
+      `[terminus-control] effect recovery: ${effectRecovery.manualReview.length} moved to manual review, ${effectRecovery.alreadyResolved.length} already resolved`,
+    );
+  }
+  if (providerRecovery.scanned > 0) {
+    console.log(
+      `[terminus-control] provider recovery: ${providerRecovery.interrupted.length} interrupted, ${providerRecovery.alreadyResolved.length} already resolved`,
+    );
+  }
+  if (candidateBranchRecovery.scanned > 0) {
+    console.log(
+      `[terminus-control] candidate branch recovery: ${candidateBranchRecovery.manualReview.length} manual review, ${candidateBranchRecovery.admitted.length} admitted from trusted receipts, ${candidateBranchRecovery.alreadyResolved.length} already resolved`,
+    );
+  }
+  if (checkpointAdmissionRecovery.prepared > 0) {
+    console.log(
+      `[terminus-control] checkpoint admission recovery: ${checkpointAdmissionRecovery.recovered.length} recovered, ${checkpointAdmissionRecovery.quarantined.length} quarantined, ${checkpointAdmissionRecovery.failed.length} pending`,
+    );
+  }
+  if (completionAdmissionRecovery.prepared > 0) {
+    console.log(
+      `[terminus-control] completion admission recovery: ${completionAdmissionRecovery.recovered.length} recovered, ${completionAdmissionRecovery.quarantined.length} quarantined, ${completionAdmissionRecovery.failed.length} pending`,
+    );
+  }
+  if (evidenceBundleRecovery.prepared > 0) {
+    console.log(
+      `[terminus-control] evidence bundle recovery: ${evidenceBundleRecovery.committed.length} committed, ${evidenceBundleRecovery.quarantined.length} quarantined`,
+    );
+  }
+  if (recoveredDurableRepairAttempts > 0 || recoveredPendingRepairTurns > 0) {
+    console.log(
+      `[terminus-control] repair recovery: ${recoveredDurableRepairAttempts} durable attempts, ${recoveredPendingRepairTurns} legacy pending turns`,
+    );
+  }
+  if (recoveredActiveTurns > 0) {
+    console.log(`[terminus-control] reconciled ${recoveredActiveTurns} active turn(s)`);
+  }
+  if (recoveredPendingRepairTurns > 0) {
+    console.log(`[terminus-control] reconciled ${recoveredPendingRepairTurns} pending repair turn(s)`);
+  }
+  if (
+    checkpointLinkRecovery.scanned > 0
+    || checkpointLinkRecovery.removedOrphans.length > 0
+    || checkpointLinkRecovery.requeued.length > 0
+  ) {
+    console.log(
+      `[terminus-control] checkpoint link recovery: ${checkpointLinkRecovery.scanned} scanned, ${checkpointLinkRecovery.removedOrphans.length} orphans removed, ${checkpointLinkRecovery.requeued.length} rows requeued, ${checkpointLinkRecovery.quarantined.length} quarantined`,
+    );
+  }
+    // H4: warm gateway model discovery so the first turn after a restart is
+    // not denied for a cold cache. Failures are logged, not fatal: the durable
+    // record from a previous run still routes.
+    await warmProviderModelDiscovery();
+    const orphanedActiveTasks = await reconcileOrphanedActiveTasks();
+    if (orphanedActiveTasks > 0) {
+      console.log(`[terminus-control] returned ${orphanedActiveTasks} task(s) with no live turn to ACTIVE`);
+    }
+    startupRecovery.status = "complete";
+    startupRecovery.error = null;
+    startupRecovery.completedAt = new Date().toISOString();
+  } catch (error: unknown) {
+    startupRecovery.status = "failed";
+    startupRecovery.error = error instanceof Error
+      ? `${error.name}: ${error.message}`
+      : String(error);
+    startupRecovery.completedAt = new Date().toISOString();
+    console.error("[terminus-control] startup recovery failed; readiness stays false", error);
+  }
 }
 
 // The Electron preload and desktop documentation use the IPv4 loopback URL
@@ -16934,8 +17734,12 @@ server.listen(PORT, "127.0.0.1", () => {
     } catch (error: unknown) {
       console.error("[terminus-control] failed to report bound listener", error);
       void shutdownControl().finally(() => process.exit(1));
+      return;
     }
   }
+  // H5: recovery starts only after the socket is bound, and never blocks it.
+  // `GET /v1/system/health` reports `ready: false` until it settles.
+  void runStartupRecovery();
 });
 
 let shuttingDown = false;

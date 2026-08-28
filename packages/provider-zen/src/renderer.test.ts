@@ -158,3 +158,47 @@ describe("GatewayRenderer", () => {
     expect(bundle?.rendering.toolDialect).toBe("openai_chat_completions");
   });
 });
+
+describe("H7 per-turn reasoning effort", () => {
+  const reasoningInput = (model: GatewayModel): CanonicalRenderInput => ({
+    ...renderInput(model),
+    reasoningReserveTokens: 4_096n as TokenCount,
+  });
+
+  test("the requested effort reaches the Responses body", async () => {
+    const responses = gatewayModel("responses");
+    const renderer = new GatewayRenderer([responses], { reasoningEffort: "high" });
+    const body = (await renderer.render(reasoningInput(responses))).body;
+    expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
+  });
+
+  test("`max` saturates at the deepest level the vendor exposes", async () => {
+    const responses = gatewayModel("responses");
+    const renderer = new GatewayRenderer([responses], { reasoningEffort: "max" });
+    const body = (await renderer.render(reasoningInput(responses))).body;
+    expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
+  });
+
+  test("no requested effort keeps the previous default", async () => {
+    const responses = gatewayModel("responses");
+    const renderer = new GatewayRenderer([responses]);
+    const body = (await renderer.render(reasoningInput(responses))).body;
+    expect(body.reasoning).toEqual({ effort: "medium", summary: "auto" });
+  });
+
+  test("a model that does not reason is never sent a reasoning control", async () => {
+    const chat = gatewayModel("chat_completions");
+    expect(chat.reasoning).toBe(false);
+    const renderer = new GatewayRenderer([chat], { reasoningEffort: "high" });
+    const body = (await renderer.render(reasoningInput(chat))).body;
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.reasoning).toBeUndefined();
+  });
+
+  test("a reasoning chat_completions model keeps the flat field", async () => {
+    const chat = { ...gatewayModel("chat_completions"), reasoning: true };
+    const renderer = new GatewayRenderer([chat], { reasoningEffort: "low" });
+    const body = (await renderer.render(reasoningInput(chat))).body;
+    expect(body.reasoning_effort).toBe("low");
+  });
+});

@@ -1,15 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { CodingTurnEngine } from "./coding-turn-engine.js";
+import {
+  CodingTurnEngine,
+  EMPTY_COMPLETION_LIMIT,
+  VERBATIM_REPETITION_LIMIT,
+  VERBATIM_REPETITION_MIN_CHARS,
+} from "./coding-turn-engine.js";
 import { PolicyDeniedError } from "@terminus/domain";
 import type { ProviderToolCallChunk } from "@terminus/provider-core";
 import type { OperationObservation } from "./loop-contracts.js";
 import type { OperationEffectMetadata } from "./turn-budget.js";
 
-function toolCall(id: string, toolName: string): ProviderToolCallChunk {
+function toolCall(id: string, toolName: string, path = "a.ts"): ProviderToolCallChunk {
   return {
     toolCallId: id,
     toolName,
-    arguments: { path: "a.ts" },
+    arguments: { path },
   };
 }
 
@@ -368,10 +373,13 @@ describe("CodingTurnEngine", () => {
         { text: "adjusted after steering" },
       ],
       drainSteering: async () => {
-        // Messages appear exactly once: on the first stop-boundary drain
-        // (the "done" response is trying to end the turn).
+        // H11 drains at the top of every iteration AND again at the stop
+        // boundary, so for the three responses above the sequence is:
+        //   1 top(iter1)  2 top(iter2)  3 stop-boundary("done")
+        //   4 top(iter3)  5 stop-boundary("adjusted after steering")
+        // Queuing at 3 is what makes this the stop-boundary case.
         drained += 1;
-        if (drained === 1) return ["stop editing config, focus on tests"];
+        if (drained === 3) return ["stop editing config, focus on tests"];
         return [];
       },
       onSteeringDrained: async (messages) => { steered.push(...messages); },
@@ -387,5 +395,143 @@ describe("CodingTurnEngine", () => {
       drainSteering: async () => [],
     });
     expect(stop.kind).toBe("completion_proposal");
+  });
+});
+
+describe("H11 steering arrives between tool batches", () => {
+  test("guidance queued during a tool batch is applied to the next attempt", async () => {
+    const steered: string[] = [];
+    const beforeAttempt: string[][] = [];
+    let drained = 0;
+    const { stop, trace } = await runHarness({
+      responses: [
+        { calls: [toolCall("r1", "read")] },
+        { calls: [toolCall("w1", "write")] },
+        { text: "finished with the new instructions" },
+      ],
+      drainSteering: async () => {
+        drained += 1;
+        // Queued while the first tool batch was settling: the drain at the
+        // top of the SECOND iteration must pick it up. Before H11 this
+        // waited until the model happened to emit no tool calls.
+        if (drained === 2) return ["use the fixture, not the live database"];
+        return [];
+      },
+      onSteeringDrained: async (messages) => {
+        steered.push(...messages);
+        beforeAttempt.push([...messages]);
+      },
+    });
+
+    expect(steered).toEqual(["use the fixture, not the live database"]);
+    // The steering was consumed before the second provider attempt began.
+    expect(trace.indexOf("begin:2")).toBeGreaterThan(trace.indexOf("settle:read:r1"));
+    expect(trace).toContain("settle:write:w1");
+    expect(stop.kind).toBe("completion_proposal");
+  });
+
+  test("a mid-batch drain does not skip the attempt it was drained for", async () => {
+    const order: string[] = [];
+    let drained = 0;
+    await runHarness({
+      responses: [
+        { calls: [toolCall("r1", "read")] },
+        { text: "done" },
+      ],
+      drainSteering: async () => {
+        drained += 1;
+        order.push(`drain:${drained}`);
+        return drained === 2 ? ["keep going"] : [];
+      },
+      onSteeringDrained: async () => { order.push("steered"); },
+    });
+    // Draining at the top of the loop must not `continue`; the attempt that
+    // carries the steering still runs.
+    expect(order).toEqual(["drain:1", "drain:2", "steered", "drain:3"]);
+  });
+});
+
+describe("H11 the loop stops instead of spinning on nothing", () => {
+  test("a single empty completion is retried rather than settled", async () => {
+    const { stop, trace } = await runHarness({
+      responses: [
+        { text: "" },
+        { text: "the real answer" },
+      ],
+    });
+    expect(trace).toEqual(["begin:1", "response:0calls", "begin:2", "response:0calls"]);
+    expect(stop).toMatchObject({ kind: "completion_proposal" });
+  });
+
+  test("two consecutive empty completions stop the turn with a reason", async () => {
+    expect(EMPTY_COMPLETION_LIMIT).toBe(2);
+    const { stop, trace } = await runHarness({
+      responses: [{ text: "" }, { text: "   " }, { text: "unreachable" }],
+    });
+    expect(stop).toEqual({ kind: "no_final_response" });
+    expect(trace).toEqual(["begin:1", "response:0calls", "begin:2", "response:0calls"]);
+  });
+
+  test("tool calls between empty completions reset the guard", async () => {
+    const { stop } = await runHarness({
+      responses: [
+        { text: "" },
+        { calls: [toolCall("r1", "read")] },
+        { text: "" },
+        { text: "answered at last" },
+      ],
+    });
+    expect(stop).toMatchObject({ kind: "completion_proposal" });
+  });
+
+  test("the same long response three times stops the turn", async () => {
+    const repeated = "I will now inspect the configuration and apply the fix. ".repeat(6);
+    expect(repeated.length).toBeGreaterThanOrEqual(VERBATIM_REPETITION_MIN_CHARS);
+    const { stop } = await runHarness({
+      responses: [
+        // Distinct arguments so the identical-tool-signature doom loop cannot
+        // fire first; only the verbatim text repeats.
+        { text: repeated, calls: [toolCall("r1", "read", "a.ts")] },
+        { text: repeated, calls: [toolCall("r2", "read", "b.ts")] },
+        { text: repeated, calls: [toolCall("r3", "read", "c.ts")] },
+        { text: "unreachable" },
+      ],
+    });
+    expect(stop.kind).toBe("doom_loop");
+    expect(stop.kind === "doom_loop" ? stop.count : 0).toBe(VERBATIM_REPETITION_LIMIT);
+    expect(stop.kind === "doom_loop" ? stop.signature.startsWith("verbatim:") : false).toBe(true);
+    // The stop record identifies the block without embedding it.
+    expect(stop.kind === "doom_loop" ? stop.signature.includes("I will now inspect") : true).toBe(false);
+  });
+
+  test("short repeated acknowledgements never trip the repetition guard", async () => {
+    const short = "Working on it.";
+    expect(short.length).toBeLessThan(VERBATIM_REPETITION_MIN_CHARS);
+    const { stop } = await runHarness({
+      responses: [
+        // Distinct arguments, so only the repetition guard is under test and
+        // not the pre-existing identical-tool-signature doom loop.
+        { text: short, calls: [toolCall("r1", "read", "a.ts")] },
+        { text: short, calls: [toolCall("r2", "read", "b.ts")] },
+        { text: short, calls: [toolCall("r3", "read", "c.ts")] },
+        { text: "all done" },
+      ],
+    });
+    expect(stop).toMatchObject({ kind: "completion_proposal" });
+  });
+
+  test("a changed long response resets the repetition counter", async () => {
+    const first = "A".repeat(250);
+    const second = "B".repeat(250);
+    const { stop } = await runHarness({
+      responses: [
+        { text: first, calls: [toolCall("r1", "read", "a.ts")] },
+        { text: first, calls: [toolCall("r2", "read", "b.ts")] },
+        { text: second, calls: [toolCall("r3", "read", "c.ts")] },
+        { text: first, calls: [toolCall("r4", "read", "d.ts")] },
+        { text: "finished" },
+      ],
+    });
+    expect(stop).toMatchObject({ kind: "completion_proposal" });
   });
 });

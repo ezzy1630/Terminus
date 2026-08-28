@@ -321,3 +321,36 @@ describe("Public API v2 & Idempotency Controller", () => {
     }).success).toBe(true);
   });
 });
+
+describe("H3 evidence requirements match what a task can actually produce", () => {
+  test("a task with write paths still requires deterministic test evidence", () => {
+    const payload = CompatibilityGateway.translateV1CreateTaskToV2({
+      sessionId: "s", threadId: "t", objective: "Fix the parser",
+      allowedScope: { readPaths: ["src/**"], writePaths: ["src/**"] },
+    });
+    expect(payload.contract.acceptance[0]?.evidenceRequirement).toBe("DETERMINISTIC_TEST");
+  });
+
+  test("a read-only task settles on its recorded transcript, not on a test", () => {
+    const payload = CompatibilityGateway.translateV1CreateTaskToV2({
+      sessionId: "s", threadId: "t", objective: "Explain how the scheduler works",
+      allowedScope: { readPaths: ["src/**"] },
+    });
+    expect(payload.contract.acceptance[0]?.evidenceRequirement).toBe("RUNTIME_TRACE");
+  });
+
+  test("a task with no scope at all is not held to a test it can never run", () => {
+    const payload = CompatibilityGateway.translateV1CreateTaskToV2({
+      sessionId: "s", threadId: "t", objective: "What does this repository do?",
+    });
+    expect(payload.contract.acceptance[0]?.evidenceRequirement).toBe("RUNTIME_TRACE");
+  });
+
+  test("an explicit verification hint always wins", () => {
+    const payload = CompatibilityGateway.translateV1CreateTaskToV2({
+      sessionId: "s", threadId: "t", objective: "Explain",
+      acceptanceCriteria: [{ id: "ac-1", statement: "explained", verificationHint: "INDEPENDENT_REVIEW" }],
+    });
+    expect(payload.contract.acceptance[0]?.evidenceRequirement).toBe("INDEPENDENT_REVIEW");
+  });
+});

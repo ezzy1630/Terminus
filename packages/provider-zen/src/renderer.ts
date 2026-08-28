@@ -2,6 +2,7 @@ import { AnthropicRenderer } from "@terminus/provider-anthropic";
 import { OpenAiRenderer } from "@terminus/provider-openai";
 import type {
   CanonicalRenderInput,
+  ReasoningEffort,
   CompatibilityResult,
   ContinuationDecision,
   ContinuationInput,
@@ -15,15 +16,20 @@ import type {
 } from "@terminus/provider-core";
 import type { GatewayModel } from "./catalog.js";
 
+export interface GatewayRendererOptions {
+  /** Per-turn reasoning depth (H7); ignored by models that do not reason. */
+  readonly reasoningEffort?: ReasoningEffort | null | undefined;
+}
+
 export class GatewayRenderer implements ProviderRenderer {
   readonly providerId: GatewayModel["providerId"];
   readonly version = "1.0.0";
 
   private readonly models: ReadonlyMap<string, GatewayModel>;
-  private readonly openAi = new OpenAiRenderer();
+  private readonly openAi: OpenAiRenderer;
   private readonly anthropic = new AnthropicRenderer();
 
-  constructor(models: readonly GatewayModel[]) {
+  constructor(models: readonly GatewayModel[], options: GatewayRendererOptions = {}) {
     const first = models[0];
     if (first === undefined) throw new Error("gateway renderer requires at least one admitted model");
     if (models.some((model) => model.providerId !== first.providerId)) {
@@ -31,6 +37,7 @@ export class GatewayRenderer implements ProviderRenderer {
     }
     this.providerId = first.providerId;
     this.models = new Map(models.map((model) => [model.id, model]));
+    this.openAi = new OpenAiRenderer({ reasoningEffort: options.reasoningEffort ?? null });
   }
 
   compatibility(input: RenderCompatibilityInput): CompatibilityResult {
@@ -41,11 +48,16 @@ export class GatewayRenderer implements ProviderRenderer {
   async render(input: CanonicalRenderInput): Promise<RenderedProviderRequest> {
     const model = this.requireModel(input.model.modelKey);
     const rendered = await this.delegate(model).render(input);
+    // A model that does not advertise reasoning must not be sent a reasoning
+    // control: the gateway rejects the request instead of ignoring the field.
+    const delegateBody = model.reasoning
+      ? rendered.body
+      : withoutReasoningControls(rendered.body);
     const body = model.protocol === "responses"
-      ? toResponsesBody(rendered.body)
+      ? toResponsesBody(delegateBody)
       : model.protocol === "chat_completions"
-        ? toChatCompletionsBody(rendered.body)
-        : rendered.body;
+        ? toChatCompletionsBody(delegateBody)
+        : delegateBody;
     return {
       ...rendered,
       providerId: this.providerId,
@@ -138,6 +150,13 @@ function toChatCompletionsBody(body: Readonly<Record<string, unknown>>): Readonl
     ...chatBody,
     ...(maxOutputTokens !== undefined ? { max_tokens: maxOutputTokens } : {}),
   };
+}
+
+function withoutReasoningControls(
+  body: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const { reasoning_effort: _effort, reasoning: _reasoning, ...rest } = body;
+  return rest;
 }
 
 function asRecord(value: unknown): Readonly<Record<string, unknown>> {

@@ -352,6 +352,21 @@ export interface CanonicalRenderInput {
   readonly manifestId?: Uuid7 | string | undefined;
 }
 
+/**
+ * Requested reasoning depth for one turn. `max` is Terminus-level, not a
+ * vendor level: renderers map it onto the deepest setting the vendor exposes.
+ * A renderer whose protocol has no reasoning control ignores it explicitly.
+ */
+export type ReasoningEffort = "low" | "medium" | "high" | "max";
+
+export const REASONING_EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high", "max"];
+
+export function parseReasoningEffort(value: unknown): ReasoningEffort | null {
+  return typeof value === "string" && (REASONING_EFFORTS as readonly string[]).includes(value)
+    ? value as ReasoningEffort
+    : null;
+}
+
 export interface RenderedProviderRequest {
   readonly providerId: string;
   readonly model: ModelKey;

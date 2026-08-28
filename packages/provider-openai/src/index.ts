@@ -22,6 +22,7 @@ import type {
   ContinuationInput,
   ContinuationDecision,
   ProviderToolSchema,
+  ReasoningEffort,
 } from "@terminus/provider-core";
 import { BaseProviderRenderer } from "@terminus/provider-core";
 import type { TokenCount } from "@terminus/domain";
@@ -107,9 +108,38 @@ export interface OpenAiResponsesRequestBody {
 
 // ────────────────────────── Renderer ─────────────────────────────────────────
 
+/**
+ * Map the Terminus effort level onto OpenAI's scale. `max` has no separate
+ * OpenAI level, so it saturates at `high` rather than silently downgrading to
+ * the default.
+ */
+export function openAiReasoningEffort(
+  effort: ReasoningEffort | null | undefined,
+): "minimal" | "low" | "medium" | "high" {
+  switch (effort) {
+    case "low": return "low";
+    case "high": return "high";
+    case "max": return "high";
+    case "medium": return "medium";
+    default: return "medium";
+  }
+}
+
+export interface OpenAiRendererOptions {
+  /** Per-turn reasoning depth (H7). Absent keeps the previous `medium`. */
+  readonly reasoningEffort?: ReasoningEffort | null | undefined;
+}
+
 export class OpenAiRenderer extends BaseProviderRenderer {
   readonly providerId = "openai";
   readonly version = "1.0.0";
+
+  private readonly options: OpenAiRendererOptions;
+
+  constructor(options: OpenAiRendererOptions = {}) {
+    super();
+    this.options = options;
+  }
 
   override compatibility(input: RenderCompatibilityInput): CompatibilityResult {
     const base = super.compatibility(input);
@@ -143,7 +173,7 @@ export class OpenAiRenderer extends BaseProviderRenderer {
           ? { temperature: 0 }
           : {}),
       ...(input.reasoningReserveTokens > 0n
-        ? { reasoning_effort: "medium" as const }
+        ? { reasoning_effort: openAiReasoningEffort(this.options.reasoningEffort) }
         : {}),
       ...(input.provider.policy.retentionMode === "organization_zdr"
         ? { store: false }
@@ -399,8 +429,11 @@ export function renderRequest(input: CanonicalRenderInput): Promise<RenderedProv
 }
 
 /** Render a native OpenAI Responses API request body. */
-export async function renderResponsesRequest(input: CanonicalRenderInput): Promise<RenderedProviderRequest> {
-  const renderer = new OpenAiRenderer();
+export async function renderResponsesRequest(
+  input: CanonicalRenderInput,
+  options: OpenAiRendererOptions = {},
+): Promise<RenderedProviderRequest> {
+  const renderer = new OpenAiRenderer(options);
   const rendered = await renderer.render(input);
   const body = rendered.body as unknown as OpenAiRequestBody;
   const responsesBody: OpenAiResponsesRequestBody = {

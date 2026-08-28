@@ -34,6 +34,7 @@ import {
   buildVerificationPlan,
   createStandardPredicateRegistry,
   deriveVerificationNodes,
+  type PredicateCommandOutcome,
   type PredicateCommandRunner,
   type EvidenceArtifactWriter,
   type ClaimEvidenceGraph,
@@ -42,6 +43,11 @@ import {
   type VerificationPlanMode,
 } from "@terminus/verification";
 import type { KernelUdsClients } from "./kernel-uds.js";
+import {
+  REPOSITORY_SIGNAL_PATHS,
+  type VerificationRunnerCatalog,
+  type VerificationRunnerKind,
+} from "./agent/repository-signals.js";
 import { createKernelArtifactClient } from "./context-store.js";
 import type {
   ProcessEvent,
@@ -97,9 +103,15 @@ export function createKernelPredicateRunner(
   clients: KernelUdsClients,
   baseContext: RequestContext,
   workspaceId: string,
+  /**
+   * Repository-derived commands (H3). Read lazily so the runner picks up the
+   * signals discovered during the turn it is verifying. When it resolves to an
+   * empty catalog every derived predicate reports `skipped`, never `fail`.
+   */
+  runnerCatalog: () => VerificationRunnerCatalog = () => ({}),
 ): PredicateCommandRunner {
   return {
-    run: (request) => runKernelPredicate(clients, baseContext, workspaceId, request),
+    run: (request) => runKernelPredicate(clients, baseContext, workspaceId, request, runnerCatalog()),
   };
 }
 
@@ -138,48 +150,126 @@ async function runKernelPredicate(
   baseContext: RequestContext,
   workspaceId: string,
   request: Parameters<PredicateCommandRunner["run"]>[0],
-): Promise<KernelCommandOutcome> {
+  catalog: VerificationRunnerCatalog,
+): Promise<PredicateCommandOutcome> {
   if (request.signal?.aborted) {
     throw new Error("verification predicate aborted before kernel start");
   }
   const parsed = parseCommand(request.command);
-  const command = normalizePredicateCommand(request.predicateType, parsed.program, parsed.args, request.paths);
-  return runKernelCommand(clients, baseContext, workspaceId, command.program, command.args, request.signal);
+  const resolution = resolvePredicateCommand(request.predicateType, parsed.program, parsed.args, catalog);
+  if (resolution.kind === "skipped") {
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      status: "skipped",
+      reasonIfSkipped: resolution.reason,
+      observations: {
+        requestedPaths: [...request.paths],
+        detectedRunners: describeRunnerCatalog(catalog),
+      },
+    };
+  }
+  const outcome = await runKernelCommand(
+    clients,
+    baseContext,
+    workspaceId,
+    resolution.program,
+    resolution.args,
+    request.signal,
+    request.timeoutMs,
+  );
+  return {
+    ...outcome,
+    observations: {
+      // `paths` scope the node, not the runner: appending them as argv to a
+      // repository-owned recipe would change what the recipe means. They are
+      // recorded as evidence instead of silently dropped.
+      requestedPaths: [...request.paths],
+      resolvedCommand: [resolution.program, ...resolution.args].join(" "),
+      ...(resolution.source === null ? {} : { runnerSource: resolution.source }),
+      timeoutMs: request.timeoutMs,
+    },
+  };
 }
 
-function normalizePredicateCommand(
+/** Runner role that satisfies each derived predicate, in preference order. */
+const RUNNER_KINDS_BY_PREDICATE: Readonly<Record<string, readonly VerificationRunnerKind[]>> = {
+  file_parses: ["typecheck", "lint", "test"],
+  formatter_check: ["format", "lint"],
+  static_diagnostics: ["typecheck", "lint"],
+  unit_test: ["unit_test", "test"],
+  integration_test: ["integration_test", "test"],
+  property_test: ["test"],
+  fuzz_test: [],
+  security_scanner: ["security"],
+  schema_compatibility: ["codegen_check"],
+  migration_dry_run: [],
+  diff_policy: [],
+  performance_threshold: [],
+  e2e_test: ["e2e_test"],
+};
+
+type PredicateCommandResolution =
+  | { readonly kind: "command"; readonly program: string; readonly args: readonly string[]; readonly source: string | null }
+  | { readonly kind: "skipped"; readonly reason: string };
+
+function describeRunnerCatalog(catalog: VerificationRunnerCatalog): readonly string[] {
+  return Object.values(catalog)
+    .filter((runner): runner is NonNullable<typeof runner> => runner !== undefined)
+    .map((runner) => `${runner.kind}=${runner.command} (${runner.sourcePath})`)
+    .sort();
+}
+
+/**
+ * Turn a node's declared command into something the kernel can run.
+ *
+ * An explicit command from the node specification is honored verbatim. The
+ * `terminus-predicate <type>` placeholder is resolved against commands actually
+ * detected in this repository; when nothing implements the role, the predicate
+ * is `skipped` with the reason — a hardcoded `just <recipe>` fails every
+ * repository without a justfile.
+ */
+export function resolvePredicateCommand(
   predicateType: string,
   program: string,
   args: readonly string[],
-  paths: readonly string[],
-): { readonly program: string; readonly args: readonly string[] } {
+  catalog: VerificationRunnerCatalog,
+): PredicateCommandResolution {
   if (program !== "terminus-predicate") {
-    return { program, args };
+    return { kind: "command", program, args, source: null };
   }
   if (predicateType === "ui_e2e") {
-    throw new Error("governed UI verification requires a configured computer-use verifier; no kernel command is defined");
+    return {
+      kind: "skipped",
+      reason: "governed UI verification requires a configured computer-use verifier; no kernel command is defined",
+    };
   }
-  const recipeByPredicate: Readonly<Record<string, string>> = {
-    file_parses: "check",
-    formatter_check: "check",
-    static_diagnostics: "check",
-    unit_test: "unit",
-    integration_test: "integration",
-    property_test: "fuzz-smoke",
-    fuzz_test: "fuzz-smoke",
-    security_scanner: "security",
-    schema_compatibility: "codegen-check",
-    migration_dry_run: "check",
-    diff_policy: "check",
-    performance_threshold: "check",
-    e2e_test: "e2e",
+  const kinds = RUNNER_KINDS_BY_PREDICATE[predicateType];
+  if (kinds === undefined) {
+    return {
+      kind: "skipped",
+      reason: `predicate '${predicateType}' requires an external verifier; no repository command implements it`,
+    };
+  }
+  for (const kind of kinds) {
+    const runner = catalog[kind];
+    if (runner === undefined) continue;
+    const parsed = parseCommand(runner.command);
+    return {
+      kind: "command",
+      program: parsed.program,
+      args: parsed.args,
+      source: `${runner.kind}:${runner.sourcePath}`,
+    };
+  }
+  const detected = describeRunnerCatalog(catalog);
+  return {
+    kind: "skipped",
+    reason: detected.length === 0
+      ? `no test runner detected in this repository for '${predicateType}' (looked for ${[...REPOSITORY_SIGNAL_PATHS].join(", ")})`
+      : `no detected runner implements '${predicateType}' (needs one of ${kinds.join(", ")}; detected ${detected.join("; ")})`,
   };
-  const recipe = recipeByPredicate[predicateType];
-  if (recipe === undefined) {
-    throw new Error(`predicate '${predicateType}' requires an external verifier; no kernel command is defined`);
-  }
-  void paths;
-  return { program: "just", args: [recipe] };
 }
 
 function parseCommand(command: string): { readonly program: string; readonly args: readonly string[] } {
@@ -220,6 +310,8 @@ function parseCommand(command: string): { readonly program: string; readonly arg
   return { program, args };
 }
 
+const DEFAULT_PREDICATE_TIMEOUT_MS = 30 * 60 * 1_000;
+
 async function runKernelCommand(
   clients: KernelUdsClients,
   baseContext: RequestContext,
@@ -227,6 +319,7 @@ async function runKernelCommand(
   program: string,
   args: readonly string[],
   signal: AbortSignal | null,
+  timeoutMs: number = DEFAULT_PREDICATE_TIMEOUT_MS,
 ): Promise<KernelCommandOutcome> {
   if (signal?.aborted) throw new Error("verification command aborted before kernel start");
   const context: RequestContext = {
@@ -262,9 +355,14 @@ async function runKernelCommand(
         ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
       },
       secretCapabilityUris: [],
-      timeout: { seconds: 1800, nanos: 0 },
+      // The node's persisted budget, not a fixed 30-minute ceiling.
+      timeout: {
+        seconds: Math.max(1, Math.floor(timeoutMs / 1_000)),
+        nanos: Math.max(0, Math.floor(timeoutMs % 1_000)) * 1_000_000,
+      },
       allocatePty: false,
       shell: undefined,
+      allowUnboundedTimeout: false,
     },
     sandboxProfileId,
     outputPolicyId: "verification-bounded",

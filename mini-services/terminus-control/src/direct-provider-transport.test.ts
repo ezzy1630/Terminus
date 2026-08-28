@@ -309,6 +309,7 @@ function makeReceipt(statusCode: number) {
     responseSha256: "sha256:response",
     responseRedactions: 0,
     outcome: "ok",
+    responseHeaders: [],
   };
 }
 

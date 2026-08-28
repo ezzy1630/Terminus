@@ -43,6 +43,13 @@ export interface TurnAdmissionInput {
   readonly inputArtifactUri: string;
   readonly inputArtifactHash: string;
   readonly initiatingActor: string;
+  /**
+   * Per-turn model selection (H7). Recorded in the same transaction as the
+   * turn row so the selection can never be lost between admission and the
+   * first provider call. Null means "use the configured provider".
+   */
+  readonly selectedModel?: string | null | undefined;
+  readonly selectedReasoningEffort?: string | null | undefined;
 }
 
 export interface TurnCoordinatorTransaction {
@@ -115,6 +122,12 @@ export class TurnCoordinator<TTransaction> {
           sequence: input.sequence,
           input_artifact: input.inputArtifactUri,
           input_hash: input.inputArtifactHash,
+          ...(input.selectedModel === undefined || input.selectedModel === null
+            ? {}
+            : { model: input.selectedModel }),
+          ...(input.selectedReasoningEffort === undefined || input.selectedReasoningEffort === null
+            ? {}
+            : { reasoning_effort: input.selectedReasoningEffort }),
         },
         artifactRefs: [input.inputArtifactUri],
       },

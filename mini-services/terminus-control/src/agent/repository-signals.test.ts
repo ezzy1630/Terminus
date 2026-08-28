@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   discoverNativeTestRecipes,
+  discoverVerificationRunners,
   type RepositoryFileObservation,
 } from "./repository-signals.js";
 
@@ -65,5 +66,68 @@ describe("repository-native recipe discovery", () => {
     expect(result.nativeTestCommands).toHaveLength(12);
     expect(result.nativeTestCommands[0]).toBe("just test");
     expect(new Set(result.nativeTestCommands).size).toBe(12);
+  });
+});
+
+describe("H3 verification runner discovery", () => {
+  test("a plain npm repository yields test/lint/typecheck commands", () => {
+    const catalog = discoverVerificationRunners([
+      observation("package.json", JSON.stringify({
+        scripts: { test: "jest", lint: "eslint .", typecheck: "tsc --noEmit", build: "tsc" },
+      })),
+    ]);
+    expect(catalog.test?.command).toBe("npm run test");
+    expect(catalog.lint?.command).toBe("npm run lint");
+    expect(catalog.typecheck?.command).toBe("npm run typecheck");
+    expect(catalog.e2e_test).toBeUndefined();
+  });
+
+  test("the declared package manager is honored", () => {
+    const catalog = discoverVerificationRunners([
+      observation("package.json", JSON.stringify({
+        packageManager: "bun@1.2.3",
+        scripts: { test: "bun test", "test:e2e": "playwright test" },
+      })),
+    ]);
+    expect(catalog.test?.command).toBe("bun run test");
+    expect(catalog.e2e_test?.command).toBe("bun run test:e2e");
+  });
+
+  test("a justfile wins over the package script it wraps", () => {
+    const catalog = discoverVerificationRunners([
+      observation("package.json", JSON.stringify({ scripts: { test: "vitest" } })),
+      observation("justfile", "test:\n\tcargo test\ncheck:\n\tcargo check\n"),
+    ]);
+    expect(catalog.test?.command).toBe("just test");
+    expect(catalog.test?.sourcePath).toBe("justfile");
+    expect(catalog.typecheck?.command).toBe("just check");
+  });
+
+  test("cargo, pytest and go repositories are detected without any script file", () => {
+    expect(discoverVerificationRunners([observation("Cargo.toml", "[package]\nname = \"x\"\n")]).test?.command)
+      .toBe("cargo test");
+    expect(discoverVerificationRunners([
+      observation("pyproject.toml", "[project]\nname = \"x\"\n"),
+    ]).test?.command).toBe("python -m pytest");
+    expect(discoverVerificationRunners([
+      observation("pyproject.toml", "[project]\nname = \"x\"\n"),
+      observation("uv.lock", ""),
+    ]).test?.command).toBe("uv run pytest");
+    expect(discoverVerificationRunners([observation("go.mod", "module example.com/x\n")]).test?.command)
+      .toBe("go test ./...");
+  });
+
+  test("a repository with no runner yields an empty catalog", () => {
+    expect(discoverVerificationRunners([])).toEqual({});
+    expect(discoverVerificationRunners([observation("package.json", "{}")])).toEqual({});
+    expect(discoverVerificationRunners([observation("package.json", "not json")])).toEqual({});
+  });
+
+  test("only allow-listed recipe names are turned into commands", () => {
+    const catalog = discoverVerificationRunners([
+      observation("Makefile", "deploy-prod:\n\t./deploy.sh\ntest:\n\t./run-tests.sh\n"),
+    ]);
+    expect(catalog.test?.command).toBe("make test");
+    expect(Object.values(catalog).every((runner) => !runner.command.includes("deploy"))).toBe(true);
   });
 });

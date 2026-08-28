@@ -222,6 +222,48 @@ export class VerificationCoordinator<TTransaction> {
     await this.dependencies.projectTask(taskId, input.eventType);
   }
 
+  /**
+   * No required predicate could run in this repository (no detected test
+   * runner). The turn's work is finished and its evidence records *why*
+   * nothing ran, so the turn settles as VERIFIED; the task returns to ACTIVE
+   * because a skipped check is not proof of completion. Task and turn move in
+   * one transaction.
+   */
+  async settleWithoutRunnableChecks(
+    taskId: string,
+    turnId: string,
+    reason: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    const updateTaskAndTurn = this.dependencies.updateTaskAndTurn;
+    if (updateTaskAndTurn === undefined) {
+      throw new Error("atomic task/turn settlement is not configured");
+    }
+    const input: VerificationTransitionInput = {
+      taskId,
+      status: "ACTIVE",
+      phase: "EXECUTE",
+      completedAt: null,
+      terminalReasonJson: null,
+      eventType: "task.verification_not_runnable",
+      payload: { phase: "EXECUTE", status: "ACTIVE", ...reason },
+    };
+    await this.dependencies.mutate(async () => {
+      await this.dependencies.appendEvent(
+        {
+          eventType: input.eventType,
+          aggregateType: "task",
+          aggregateId: taskId,
+          correlationId: taskId,
+          payload: input.payload,
+        },
+        async (transaction) => {
+          await updateTaskAndTurn(transaction, input, ["VERIFYING"], turnId, "VERIFYING");
+        },
+      );
+    });
+    await this.dependencies.projectTask(taskId, input.eventType);
+  }
+
   private async transition(
     input: VerificationTransitionInput,
     expectedStatuses: readonly string[],

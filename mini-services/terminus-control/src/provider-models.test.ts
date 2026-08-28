@@ -1,12 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import {
+  cachedProviderModels,
   describeConfiguredModel,
+  lastProviderModels,
   discoverProviderModels,
   fetchAvailableModels,
   fetchModelsDevCatalog,
+  parseProviderModelsResult,
+  providerModelsResultJson,
   providerModelsWire,
   rememberProviderModels,
   resetProviderModelsCache,
+  restoreProviderModels,
+  type ProviderModelsResult,
 } from "./provider-models.js";
 import { configuredGatewayModel } from "./gateway-provider-config.js";
 import type { Rfc3339Timestamp } from "@terminus/domain";
@@ -272,5 +278,90 @@ describe("configured gateway model capabilities", () => {
       observedAt,
       describeConfiguredModel("zen", "something-else"),
     )).toThrow("has no admitted discovery record");
+  });
+});
+
+describe("H4 durable gateway model discovery", () => {
+  const model = (id: string) => ({
+    id,
+    name: id,
+    deployment: "zen" as const,
+    providerId: "open_code_zen" as const,
+    baseUrl: "https://opencode.ai/zen/v1",
+    protocol: "chat_completions" as const,
+    free: true,
+    toolCalling: true,
+    structuredOutput: true,
+    imageInput: false,
+    reasoning: false,
+    contextTokens: 100_000,
+    outputTokens: 8_000,
+    inputMicrosPerMillion: 0,
+    cachedInputMicrosPerMillion: 0,
+    outputMicrosPerMillion: 0,
+    observedAt: "2026-08-28T00:00:00Z",
+  });
+  const result: ProviderModelsResult = {
+    deployment: "zen",
+    observedAt: "2026-08-28T00:00:00Z",
+    models: [model("big-pickle")],
+    rejected: [{ modelId: "ghost", reason: "not in catalog" }],
+  };
+
+  test("a persisted discovery round-trips exactly", () => {
+    const decoded = parseProviderModelsResult(providerModelsResultJson(result));
+    expect(decoded).toEqual(result);
+  });
+
+  test("a restored record routes a turn without any network call", () => {
+    resetProviderModelsCache();
+    expect(describeConfiguredModel("zen", "big-pickle")).toBeNull();
+    const decoded = parseProviderModelsResult(providerModelsResultJson(result));
+    if (decoded === null) throw new Error("expected the persisted record to decode");
+    restoreProviderModels(decoded);
+    expect(describeConfiguredModel("zen", "big-pickle")?.id).toBe("big-pickle");
+    resetProviderModelsCache();
+  });
+
+  test("a restored record is usable but not fresh, so discovery still refreshes", () => {
+    resetProviderModelsCache();
+    const decoded = parseProviderModelsResult(providerModelsResultJson(result));
+    if (decoded === null) throw new Error("expected the persisted record to decode");
+    restoreProviderModels(decoded);
+    expect(cachedProviderModels("zen", Date.now())).toBeNull();
+    expect(lastProviderModels("zen")?.models.length).toBe(1);
+    resetProviderModelsCache();
+  });
+
+  test("an unreadable or stale-shaped row is rejected, never partially trusted", () => {
+    expect(parseProviderModelsResult("not json")).toBeNull();
+    expect(parseProviderModelsResult("{}")).toBeNull();
+    expect(parseProviderModelsResult(JSON.stringify({
+      deployment: "zen",
+      observedAt: "2026-08-28T00:00:00Z",
+      models: [{ id: "partial" }],
+      rejected: [],
+    }))).toBeNull();
+  });
+
+  test("a free Zen model with no credential still yields a runnable model", () => {
+    resetProviderModelsCache();
+    rememberProviderModels(result, Date.now());
+    const runnable = configuredGatewayModel(
+      {
+        ...configuredRow,
+        protocol: "chat_completions",
+        model: "big-pickle",
+        freeModel: true,
+        credentialConfigured: false,
+        privacyTermsAdmitted: true,
+        privacyTermsVersion: "2026-01-01",
+      },
+      observedAt,
+      describeConfiguredModel("zen", "big-pickle"),
+    );
+    expect(runnable.id).toBe("big-pickle");
+    expect(runnable.free).toBe(true);
+    resetProviderModelsCache();
   });
 });
