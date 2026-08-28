@@ -341,15 +341,30 @@ describeSpine("PR 7: Complete End-to-End Turn Integration Spine", () => {
     // Check source revision & environment digest
     const sourceRevision = stringField(taskPlan!, "source_revision", "verification plan");
     expect(sourceRevision.length).toBeGreaterThan(0);
-    expect(taskPlan?.completion_expression).toBe("ac_spine-criterion-1");
+
+    // Completion expressions reference the plan's namespaced node IDs. The
+    // plan ID source is intentionally unique per repair/admission plan, so a
+    // criterion ID is not a stable node ID across plans.
+    const completionExpression = stringField(taskPlan!, "completion_expression", "verification plan");
+    const planNodes = objectArrayField(taskPlan!, "nodes", "verification plan");
+    const planNodeIds = planNodes.map((node, index) => stringField(node, "id", `verification plan.nodes[${index}]`));
+    const completionNodeIds = completionExpression.split(/\s*&&\s*/).filter((id) => id.length > 0);
+    expect(completionNodeIds.length).toBeGreaterThan(0);
+    for (const nodeId of completionNodeIds) {
+      expect(planNodeIds).toContain(nodeId);
+    }
 
     // Check criteria and passing results
     const results = objectArrayField(taskPlan!, "results", "verification plan");
     expect(results.length).toBeGreaterThan(0);
+    const resultNodeIds: string[] = [];
     for (const result of results) {
       expect(result.status).toBe("pass");
-      expect(result.node_id).toBe("ac_spine-criterion-1");
+      const nodeId = stringField(result, "node_id", "verification result");
+      expect(planNodeIds).toContain(nodeId);
+      resultNodeIds.push(nodeId);
     }
+    expect(resultNodeIds).toEqual(expect.arrayContaining(completionNodeIds));
 
     // Verify task completion event references the verification plan
     const events = objectArrayField(exported, "events", "system export");
