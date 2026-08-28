@@ -34,6 +34,7 @@ import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { closeSync, writeSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Database } from "bun:sqlite";
 import {
   PrismaClient,
   type Approval as PrismaApproval,
@@ -44,7 +45,14 @@ import {
   type Prisma,
 } from "@prisma/client";
 import { firstValueFrom } from "rxjs";
-import { globMatch } from "@terminus/task-runtime";
+import {
+  DurableScopedDelegationService,
+  SqliteDatabaseAdapter,
+  SqliteDurableTaskRepository,
+  globMatch,
+  type ScopedDelegationKernelPort,
+  type SqliteValue,
+} from "@terminus/task-runtime";
 import { createKernelUdsClients, type KernelUdsClients } from "./kernel-uds.js";
 import { createKernelArtifactClient, PrismaContextStore } from "./context-store.js";
 import {
@@ -182,6 +190,7 @@ import {
   missionSchema,
   nowTimestamp,
   ForgeError as DomainForgeError,
+  SandboxUnavailableError,
   organizationSchema,
   departmentSchema,
   operatorAgentSchema,
@@ -409,6 +418,10 @@ import {
   ExternalConnectorLibrary,
   IncidentProfileRunner,
   ResearchProfileRunner,
+  GovernedComputerUseCoordinator,
+  type KernelReceiptVerifier,
+  type ObservationReceiptVerifier,
+  type PoolLeaseBackend,
 } from "@terminus/orchestration";
 import {
   ApprovalOperationV1,
@@ -561,6 +574,18 @@ function expandTildeDbUrl(url: string): string {
   return `${prefix}${process.env.HOME ?? process.cwd()}${rest.slice(1)}`;
 }
 const DATABASE_URL = expandTildeDbUrl(process.env.DATABASE_URL ?? DEFAULT_DB_PATH);
+
+function sqliteDatabasePath(url: string): string {
+  if (!url.startsWith("file:")) {
+    throw new Error("terminus-control scoped delegation storage requires a file: DATABASE_URL");
+  }
+  const path = url.slice("file:".length).split("?", 1)[0] ?? "";
+  if (path.length === 0 || path.startsWith("//")) {
+    throw new Error("terminus-control scoped delegation storage requires a local SQLite file path");
+  }
+  return path;
+}
+
 const SERVER_PRINCIPAL = "terminus-control-bearer";
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_REQUEST_BYTES = 1_048_576;
@@ -579,6 +604,56 @@ const SUPPORTED_CAPABILITIES = [
 
 const db = new PrismaClient({
   datasources: { db: { url: DATABASE_URL } },
+});
+
+const scopedDelegationDatabase = new Database(sqliteDatabasePath(DATABASE_URL));
+const scopedDelegationRepository = new SqliteDurableTaskRepository(
+  new SqliteDatabaseAdapter({
+    exec: (sql) => scopedDelegationDatabase.exec(sql),
+    query: (sql) => {
+      const statement = scopedDelegationDatabase.query(sql);
+      return {
+        get: (...parameters: SqliteValue[]) => statement.get(...parameters),
+        all: (...parameters: SqliteValue[]) => statement.all(...parameters),
+        run: (...parameters: SqliteValue[]) => ({ changes: statement.run(...parameters).changes }),
+      };
+    },
+    transaction: (operation) => {
+      scopedDelegationDatabase.exec("BEGIN IMMEDIATE");
+      try {
+        const result = operation();
+        scopedDelegationDatabase.exec("COMMIT");
+        return result;
+      } catch (error: unknown) {
+        scopedDelegationDatabase.exec("ROLLBACK");
+        throw error;
+      }
+    },
+  }),
+);
+
+/**
+ * A real kernel delegation adapter must provide identity-bound receipts. The
+ * current kernel UDS surface has no delegation dispatch RPC, so composition
+ * stays explicit and fail-closed instead of treating a process-local worker
+ * or a generic extension call as trusted execution.
+ */
+const trustedScopedDelegationKernel: ScopedDelegationKernelPort | null = null;
+const unavailableScopedDelegationKernel: ScopedDelegationKernelPort = {
+  start: async () => {
+    throw new SandboxUnavailableError(
+      "No trusted scoped-delegation kernel dispatcher is configured",
+    );
+  },
+  recover: async () => {
+    throw new SandboxUnavailableError(
+      "No trusted scoped-delegation recovery dispatcher is configured",
+    );
+  },
+};
+const scopedDelegationService = new DurableScopedDelegationService({
+  repo: scopedDelegationRepository,
+  kernel: trustedScopedDelegationKernel ?? unavailableScopedDelegationKernel,
 });
 
 const CONTROL_WRITER_LEASE_KEY = "terminus-control-writer";
@@ -1708,7 +1783,30 @@ const interventionManager = new InterventionManager();
 const causalReplayEngine = new CausalReplayEngine();
 
 // Phase 10 Subsystems (SPEC §25, §18.3, §17, §30)
-const poolManager = new BrowserDesktopPoolManager();
+interface TrustedComputerUseBackend {
+  readonly observationReceipts: ObservationReceiptVerifier;
+  readonly kernelReceipts: KernelReceiptVerifier;
+  readonly poolLeases: PoolLeaseBackend;
+}
+
+/**
+ * Browser/desktop execution is enabled only by one authenticated adapter that
+ * owns observation verification, settlement verification, and pool leases.
+ * A configured kernel socket alone is not sufficient evidence of that binding.
+ */
+function resolveTrustedComputerUseBackend(): TrustedComputerUseBackend | null {
+  return null;
+}
+
+const trustedComputerUseBackend = resolveTrustedComputerUseBackend();
+const governedComputerUseCoordinator: GovernedComputerUseCoordinator | null =
+  trustedComputerUseBackend === null
+    ? null
+    : new GovernedComputerUseCoordinator({
+      observationReceipts: trustedComputerUseBackend.observationReceipts,
+      kernelReceipts: trustedComputerUseBackend.kernelReceipts,
+    });
+const poolManager = new BrowserDesktopPoolManager(trustedComputerUseBackend?.poolLeases ?? null);
 const connectorLibrary = new ExternalConnectorLibrary();
 const incidentRunner = new IncidentProfileRunner();
 const researchRunner = new ResearchProfileRunner();
@@ -8838,6 +8936,16 @@ const routes: Route[] = [
   // trusted backend receipt.
   route("POST", "/v2/computer/observe", async (req, res) => {
     const input = V2_ENDPOINTS.CreateUiObservationV2.request.parse(await jsonBody(req));
+    if (governedComputerUseCoordinator !== null) {
+      return sendError(
+        res,
+        503,
+        "EXTERNAL_DEPENDENCY_FAILED",
+        "A trusted computer-use coordinator is configured, but no observation store adapter is exposed",
+        "external_dependency",
+        { taskId: input.taskId, supportLevel: "coordinator_only" },
+      );
+    }
     sendError(
       res,
       503,
@@ -8865,6 +8973,16 @@ const routes: Route[] = [
   }),
   route("POST", "/v2/computer/verify-target", async (req, res) => {
     const input = V2_ENDPOINTS.VerifyUiTargetV2.request.parse(await jsonBody(req));
+    if (governedComputerUseCoordinator !== null) {
+      return sendError(
+        res,
+        503,
+        "EXTERNAL_DEPENDENCY_FAILED",
+        "Semantic target verification requires an adapter-owned trusted observation store",
+        "external_dependency",
+        { observationId: input.observationId, actionId: input.action.actionId },
+      );
+    }
     sendError(
       res,
       503,
@@ -8876,6 +8994,16 @@ const routes: Route[] = [
   }),
   route("POST", "/v2/computer/action", async (req, res) => {
     const input = V2_ENDPOINTS.DispatchComputerActionV2.request.parse(await jsonBody(req));
+    if (governedComputerUseCoordinator !== null) {
+      return sendError(
+        res,
+        503,
+        "SANDBOX_UNAVAILABLE",
+        "A trusted coordinator is configured, but no kernel-backed computer-use dispatcher is exposed",
+        "sandbox_unavailable",
+        { actionId: input.action.actionId, observationId: input.observationId, supportLevel: "coordinator_only" },
+      );
+    }
     sendError(
       res,
       503,
@@ -16265,6 +16393,7 @@ await acquireControlWriterLease();
 writerLeaseHeartbeat = setInterval(() => {
   void renewControlWriterLease();
 }, Math.max(1_000, Math.floor(CONTROL_WRITER_LEASE_MS / 3)));
+const scopedDelegationRecovery = await scopedDelegationService.recoverAfterRestart();
 const reconciledIdempotencyReservations = await reconcilePendingIdempotencyReservations();
 await replayArpV2();
 const jobRecovery = await reconcileNonterminalJobs();
@@ -16303,6 +16432,14 @@ if (repairedTaskProjections > 0) {
 if (reconciledIdempotencyReservations > 0) {
   console.log(
     `[terminus-control] reconciled ${reconciledIdempotencyReservations} unknown idempotency settlement(s)`,
+  );
+}
+if (scopedDelegationRecovery.length > 0) {
+  const recovered = scopedDelegationRecovery.filter((result) => result.outcome === "recovered").length;
+  const interrupted = scopedDelegationRecovery.filter((result) => result.outcome === "interrupted").length;
+  const manualReview = scopedDelegationRecovery.filter((result) => result.outcome === "manual_review").length;
+  console.log(
+    `[terminus-control] scoped delegation recovery: ${recovered} recovered, ${interrupted} interrupted, ${manualReview} manual review`,
   );
 }
 if (jobRecovery.scanned > 0) {
@@ -16410,6 +16547,7 @@ async function shutdownControl(): Promise<void> {
     console.error("[terminus-control] failed to release writer lease", error);
   });
   await db.$disconnect();
+  scopedDelegationDatabase.close();
 }
 
 process.on("SIGINT", () => { void shutdownControl().finally(() => process.exit(0)); });
