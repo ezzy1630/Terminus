@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   micros,
   modelProfileSchema,
+  type TokenCount,
   type ModelProfile,
 } from "@terminus/domain";
 import {
@@ -15,6 +16,8 @@ import {
   ProfileRegistry,
   ProviderContinuationManager,
   StageRouter,
+  ShadowRoutingRecorder,
+  shadowRoutingObservationSchema,
 } from "./index.js";
 
 interface ProfileFixtureInput {
@@ -193,7 +196,7 @@ describe("PosteriorTracker", () => {
     });
 
     expect(updated.sampleCount).toBe(1);
-    expect(updated.toolCallAlpha).toBe(15);
+    expect(updated.toolCallAlpha).toBe(6);
     expect(updated.observedCostMicros).toBe(15_000n);
     expect(
       tracker.getExpectedMetrics(FAST_PROFILE.modelKey).expectedLatencyMs,
@@ -232,6 +235,54 @@ describe("StageRouter", () => {
         implementerModelFamilyRef: DEEP_PROFILE.modelFamilyRef,
       }).chosenProfileId,
     ).not.toBe(DEEP_PROFILE.id);
+  });
+
+  test("emits a shadow observation without changing the serving decision", () => {
+    const registry = new ProfileRegistry(INJECTED_PROFILES);
+    const tracker = new PosteriorTracker();
+    const router = new StageRouter(registry, tracker);
+    const serving = router.route({
+      stage: "implementer",
+      confidentiality: "workspace",
+      allowedAdapterRefs: ["adapter:remote-b"],
+      predictedInputTokens: 10_000n as TokenCount,
+      predictedOutputTokens: 2_000n as TokenCount,
+      predictedCacheReadTokens: 4_000n as TokenCount,
+    });
+    const observation = router.shadowRoute({
+      observationId: "shadow-1",
+      taskId: "task-1",
+      cohort: "tiny_bugfix",
+      featureVersion: "features-v1",
+      taskFeatures: { files_changed: 2, has_tests: true },
+      servingDecision: serving,
+      stage: "implementer",
+      confidentiality: "workspace",
+      allowedAdapterRefs: ["adapter:remote-b"],
+      predictedInputTokens: 10_000n as TokenCount,
+      predictedOutputTokens: 2_000n as TokenCount,
+      predictedCacheReadTokens: 4_000n as TokenCount,
+    });
+
+    expect(observation.schemaVersion).toBe("terminus.routing.shadow.v1");
+    expect(observation.servingModelKey).toBe(serving.chosenModelKey);
+    expect(observation.outcome).toBe("unobserved");
+    expect(observation.predictedCostMicros).toBe(16_000n);
+    expect(observation.candidateUncertainty[FAST_PROFILE.id]).toBe(1);
+    expect(shadowRoutingObservationSchema.safeParse(observation).success).toBe(true);
+    const recorder = new ShadowRoutingRecorder();
+    recorder.record(observation);
+    recorder.record(observation);
+    expect(recorder.all()).toHaveLength(1);
+    expect(() => recorder.record({ ...observation, predictedCostMicros: observation.predictedCostMicros + 1n })).toThrow(
+      "conflicts with an existing record",
+    );
+    expect(router.route({
+      stage: "implementer",
+      confidentiality: "workspace",
+      allowedAdapterRefs: ["adapter:remote-b"],
+    }).chosenModelKey)
+      .toBe(serving.chosenModelKey);
   });
 
   test("keys health controls by opaque adapter reference", () => {

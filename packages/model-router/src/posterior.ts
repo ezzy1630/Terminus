@@ -36,12 +36,14 @@ export class PosteriorTracker {
     if (!post) {
       post = {
         modelKey,
-        toolCallAlpha: 10.0, // Prior: ~90% tool call success expectation
+        // Unknown models start neutral, not optimistic. A model must earn
+        // routing confidence from verified observations.
+        toolCallAlpha: 1.0,
         toolCallBeta: 1.0,
-        structuredOutputAlpha: 10.0,
+        structuredOutputAlpha: 1.0,
         structuredOutputBeta: 1.0,
-        editCohortAlpha: 8.0, // Prior: ~80% edit cohort success
-        editCohortBeta: 2.0,
+        editCohortAlpha: 1.0,
+        editCohortBeta: 1.0,
         latencyLogMean: Math.log(1000), // Prior: 1000ms
         latencyLogVariance: 0.5,
         observedCostMicros: 0n,
@@ -115,22 +117,46 @@ export class PosteriorTracker {
     readonly expectedLatencyMs: number;
     readonly expectedCostMicros: bigint;
     readonly expectedCacheHitRate: number;
+    /** 1 for an unseen model; approaches zero as verified samples accumulate. */
+    readonly uncertainty: number;
   } {
     const p = this.getOrCreate(modelKey);
-    return {
-      expectedToolReliability: p.toolCallAlpha / (p.toolCallAlpha + p.toolCallBeta),
-      expectedStructuredSuccess: p.structuredOutputAlpha / (p.structuredOutputAlpha + p.structuredOutputBeta),
-      expectedEditSuccess: p.editCohortAlpha / (p.editCohortAlpha + p.editCohortBeta),
-      expectedLatencyMs: Math.exp(p.latencyLogMean + p.latencyLogVariance / 2),
-      expectedCostMicros: p.observedCostMicros,
-      expectedCacheHitRate: p.observedCacheHitRate,
-    };
+    return expectedMetrics(p);
   }
 
-  /**
-   * Export all recorded posteriors.
-   */
+  /** Read posterior metrics without creating state for an unseen model. */
+  getExpectedMetricsIfObserved(modelKey: string): ReturnType<PosteriorTracker["getExpectedMetrics"]> | null {
+    const p = this.posteriors.get(modelKey);
+    return p === undefined ? null : expectedMetrics(p);
+  }
+
+  /** Whether verified observations have been recorded for this model. */
+  hasObserved(modelKey: string): boolean {
+    return (this.posteriors.get(modelKey)?.sampleCount ?? 0) > 0;
+  }
+
+  /** Export all recorded posteriors. */
   exportAll(): readonly ModelCohortPosterior[] {
     return Array.from(this.posteriors.values());
   }
+}
+
+function expectedMetrics(p: ModelCohortPosterior): {
+  readonly expectedToolReliability: number;
+  readonly expectedStructuredSuccess: number;
+  readonly expectedEditSuccess: number;
+  readonly expectedLatencyMs: number;
+  readonly expectedCostMicros: bigint;
+  readonly expectedCacheHitRate: number;
+  readonly uncertainty: number;
+} {
+  return {
+    expectedToolReliability: p.toolCallAlpha / (p.toolCallAlpha + p.toolCallBeta),
+    expectedStructuredSuccess: p.structuredOutputAlpha / (p.structuredOutputAlpha + p.structuredOutputBeta),
+    expectedEditSuccess: p.editCohortAlpha / (p.editCohortAlpha + p.editCohortBeta),
+    expectedLatencyMs: Math.exp(p.latencyLogMean + p.latencyLogVariance / 2),
+    expectedCostMicros: p.observedCostMicros,
+    expectedCacheHitRate: p.observedCacheHitRate,
+    uncertainty: 1 / Math.sqrt(p.sampleCount + 1),
+  };
 }

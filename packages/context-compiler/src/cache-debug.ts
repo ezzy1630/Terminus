@@ -28,6 +28,10 @@ export interface StablePrefixDebugData {
   readonly fragmentCount: number;
   readonly tokenCount: number;
   readonly entries: readonly StablePrefixEntry[];
+  /** Whether the stable prefix follows the canonical cache-safe ordering. */
+  readonly canonicalOrderingValid: boolean;
+  /** First index that violates the canonical ordering, if any. */
+  readonly orderingViolationAt: number | null;
 }
 
 export interface CacheEpochDebugSnapshot {
@@ -44,6 +48,8 @@ export interface CacheEpochDebugSnapshot {
   readonly breakpoints: readonly number[];
   readonly predictedCachedTokens: number;
   readonly toolSchemaFingerprint: ContentHash | null;
+  readonly canonicalOrderingValid: boolean;
+  readonly orderingViolationAt: number | null;
 }
 
 export type CacheEpochDiagnosticCode =
@@ -61,7 +67,39 @@ export type CacheEpochDiagnosticCode =
   | "cache_mode_changed"
   | "tool_schema_changed"
   | "epoch_baseline_mismatch"
-  | "planned_hash_mismatch";
+  | "planned_hash_mismatch"
+  | "stable_prefix_order_invalid";
+
+/**
+ * Canonical stable-prefix order from SPEC §38.7. Lower numbers are emitted
+ * before higher numbers; ordering is checked, not silently repaired, because
+ * the hash must describe the bytes actually rendered.
+ */
+const STABLE_PREFIX_KIND_ORDER: Readonly<Record<ContextFragment["kind"], number>> = {
+  authority: 0,
+  tool_schema: 1,
+  project_rule: 2,
+  world_state: 3,
+  task_contract: 4,
+  checkpoint: 5,
+  recent_episode: 6,
+  tool_result: 7,
+  code: 8,
+  test: 8,
+  documentation: 8,
+  memory: 8,
+  user_attachment: 8,
+};
+
+function orderingViolationAt(fragments: readonly ContextFragment[]): number | null {
+  let previous = -1;
+  for (const [index, fragment] of fragments.entries()) {
+    const current = STABLE_PREFIX_KIND_ORDER[fragment.kind];
+    if (current < previous) return index;
+    previous = current;
+  }
+  return null;
+}
 
 export interface CacheEpochDiagnostic {
   readonly code: CacheEpochDiagnosticCode;
@@ -120,11 +158,14 @@ export function buildStablePrefixDebugData(
     estimatedTokens: fragment.estimatedTokens[modelKey] ?? 0,
     cacheBreakpoint: cachePlan.breakpoints.includes(index),
   }));
+  const violationAt = orderingViolationAt(prefix);
   return {
     hash: computeStablePrefixHash(prefix),
     fragmentCount: prefix.length,
     tokenCount: entries.reduce((sum, entry) => sum + entry.estimatedTokens, 0),
     entries,
+    canonicalOrderingValid: violationAt === null,
+    orderingViolationAt: violationAt,
   };
 }
 
@@ -148,6 +189,8 @@ export function snapshotCacheEpoch(input: CacheEpochDebugInput): CacheEpochDebug
     breakpoints: [...input.cachePlan.breakpoints],
     predictedCachedTokens: numberFromTokenCount(input.cachePlan.predictedCachedTokens),
     toolSchemaFingerprint: toolSchemaFingerprint(input.toolSchemas),
+    canonicalOrderingValid: stablePrefix.canonicalOrderingValid,
+    orderingViolationAt: stablePrefix.orderingViolationAt,
   };
 }
 
@@ -237,6 +280,13 @@ export function compareCacheEpochs(
   if (previous.toolSchemaFingerprint !== current.toolSchemaFingerprint) {
     add(diagnostic("tool_schema_changed", "warning", "tool schema fingerprint changed"));
   }
+  if (current.canonicalOrderingValid === false) {
+    add(diagnostic(
+      "stable_prefix_order_invalid",
+      "warning",
+      `stable prefix violates canonical ordering at index ${current.orderingViolationAt ?? "unknown"}`,
+    ));
+  }
 
   if (previous.stablePrefix.hash !== current.stablePrefix.hash) {
     add(diagnostic("stable_prefix_changed", "warning", "stable prefix hash changed"));
@@ -277,6 +327,13 @@ export function buildCacheEpochDebugData(
       "epoch_baseline_mismatch",
       "warning",
       "current stable prefix differs from the epoch baseline",
+    ));
+  }
+  if (current.canonicalOrderingValid === false) {
+    diagnostics.push(diagnostic(
+      "stable_prefix_order_invalid",
+      "warning",
+      `stable prefix violates canonical ordering at index ${current.orderingViolationAt ?? "unknown"}`,
     ));
   }
   if (previous === null) {

@@ -618,12 +618,61 @@ export function checkBudget(
 
 // ────────────────────────── Cache observation (§38.9) ────────────────────────
 
+export type CacheEventKind = "read" | "write" | "hit" | "miss";
+
+/** How a cache event was established. Unknown is deliberately not inferred. */
+export type CacheEventSource = "provider_event" | "provider_usage" | "inferred" | "unknown";
+
+/** Provider semantics for a usage field that reports cached input. */
+export type CacheUsageSemantics = "read_tokens" | "hit_tokens" | "read_and_hit_tokens" | "unknown";
+
+export type CacheMissReason =
+  | "prefix_changed"
+  | "below_minimum"
+  | "expired"
+  | "evicted"
+  | "provider_rejected"
+  | "unknown";
+
 export interface CacheEvent {
-  readonly kind: "read" | "write" | "hit" | "miss";
+  readonly kind: CacheEventKind;
   readonly tokens: TokenCount;
   readonly breakpointIndex: number | null;
   readonly stablePrefixHash: ContentHash | null;
   readonly occurredAt: string;
+  /** Provider event name, retained without interpreting vendor semantics. */
+  readonly providerEvent?: string | null;
+  readonly source?: CacheEventSource;
+  readonly missReason?: CacheMissReason | null;
+  readonly firstDifferingFragmentId?: string | null;
+}
+
+export interface CacheObservationOptions {
+  /** Total input tokens eligible for the provider cache, when reported. */
+  readonly eligibleInputTokens?: TokenCount | null;
+  /** Total request input tokens, when the provider reports it separately. */
+  readonly inputTokens?: TokenCount | null;
+  /** Whether cached usage means a read, hit, both, or is unknown. */
+  readonly usageSemantics?: CacheUsageSemantics;
+  /** Provider-reported total request cost, if available. */
+  readonly providerReportedCostMicros?: Micros | null;
+  /** Provider-reported cache savings, if the provider exposes it. */
+  readonly providerReportedCacheSavingsMicros?: Micros | null;
+  /** Independently computed total request cost, if available. */
+  readonly computedCostMicros?: Micros | null;
+  /** Effective time to first token for the request. */
+  readonly timeToFirstTokenMs?: number | null;
+  /** Explicit economics computed from provider-specific rates. */
+  readonly economics?: CacheEconomicsObservation | null;
+}
+
+/** Provider-specific cache economics after the rates are explicitly pinned. */
+export interface CacheEconomicsObservation {
+  readonly cacheReadCostMicros: Micros;
+  readonly cacheWriteCostMicros: Micros;
+  readonly uncachedInputCostMicros: Micros;
+  readonly effectiveInputCostMicros: Micros;
+  readonly cacheSavingsMicros: Micros;
 }
 
 export interface CacheObservationRecord {
@@ -635,6 +684,31 @@ export interface CacheObservationRecord {
   readonly observedCachedTokens: TokenCount;
   readonly cacheWriteTokensObserved: TokenCount;
   readonly cacheHitRate: number;
+  /** Total input tokens eligible for caching, or null when not reported. */
+  readonly eligibleInputTokens: TokenCount | null;
+  /** Total input tokens, or null when not reported. */
+  readonly inputTokens: TokenCount | null;
+  /** Provider cache reads, measured in tokens. */
+  readonly cacheReadTokens: TokenCount;
+  /** Explicit provider cache hits, measured in tokens. */
+  readonly cacheHitTokens: TokenCount;
+  /** Explicit provider cache misses, measured in tokens. */
+  readonly cacheMissTokens: TokenCount;
+  /** Token-weighted hit rate; null means no cache-eligible denominator. */
+  readonly tokenWeightedHitRate: number | null;
+  /** Cache reads divided by total request input, when both are known. */
+  readonly cacheReadRate: number | null;
+  readonly usageSemantics: CacheUsageSemantics;
+  readonly providerReportedCostMicros: Micros | null;
+  readonly providerReportedCacheSavingsMicros: Micros | null;
+  readonly computedCostMicros: Micros | null;
+  readonly timeToFirstTokenMs: number | null;
+  readonly economics: CacheEconomicsObservation | null;
+  /** First explicit miss reason, if a provider supplied one. */
+  readonly firstMissReason: CacheMissReason | null;
+  /** First fragment that caused a provider-reported prefix drift, if known. */
+  readonly firstDifferingFragmentId: string | null;
+  readonly firstDriftReason: CacheMissReason | null;
   readonly stablePrefixPreserved: boolean;
   readonly prefixDriftAt: number | null;
   readonly occurredAt: string;
@@ -646,17 +720,25 @@ export function computeCacheObservation(
   model: ModelKey,
   events: readonly CacheEvent[],
   predictedCachedTokens: TokenCount,
+  options: CacheObservationOptions = {},
 ): CacheObservationRecord {
   let observedCached = 0n as TokenCount;
+  let cacheReadTokens = 0n as TokenCount;
+  let cacheHitTokens = 0n as TokenCount;
+  let cacheMissTokens = 0n as TokenCount;
   let cacheWrites = 0n as TokenCount;
   let hits = 0;
   let misses = 0;
   let stablePrefixPreserved = true;
   let prefixDriftAt: number | null = null;
+  let firstMissReason: CacheMissReason | null = null;
+  let firstDifferingFragmentId: string | null = null;
+  let firstDriftReason: CacheMissReason | null = null;
   for (const e of events) {
     switch (e.kind) {
       case "hit":
         observedCached = (observedCached + e.tokens) as TokenCount;
+        cacheHitTokens = (cacheHitTokens + e.tokens) as TokenCount;
         hits++;
         break;
       case "write":
@@ -664,6 +746,16 @@ export function computeCacheObservation(
         break;
       case "miss":
         misses++;
+        cacheMissTokens = (cacheMissTokens + e.tokens) as TokenCount;
+        if (firstMissReason === null && e.missReason !== undefined && e.missReason !== null) {
+          firstMissReason = e.missReason;
+        }
+        if (firstDifferingFragmentId === null && e.firstDifferingFragmentId !== undefined) {
+          firstDifferingFragmentId = e.firstDifferingFragmentId;
+        }
+        if (firstDriftReason === null && e.missReason !== undefined && e.missReason !== null) {
+          firstDriftReason = e.missReason;
+        }
         if (stablePrefixPreserved && e.stablePrefixHash !== null) {
           stablePrefixPreserved = false;
           prefixDriftAt = e.breakpointIndex;
@@ -671,6 +763,7 @@ export function computeCacheObservation(
         break;
       case "read":
         observedCached = (observedCached + e.tokens) as TokenCount;
+        cacheReadTokens = (cacheReadTokens + e.tokens) as TokenCount;
         break;
       default: {
         const _exhaustive: never = e.kind;
@@ -681,6 +774,17 @@ export function computeCacheObservation(
   // Cache hit rate: hits / (hits + misses) among read-related events.
   const relevantEvents = hits + misses;
   const hitRate = relevantEvents > 0 ? hits / relevantEvents : 0;
+  const eligibleInputTokens = options.eligibleInputTokens ?? null;
+  const inputTokens = options.inputTokens ?? null;
+  const tokenWeightedDenominator = cacheHitTokens + cacheMissTokens;
+  const tokenWeightedHitRate = tokenWeightedDenominator > 0n
+    ? Number(cacheHitTokens) / Number(tokenWeightedDenominator)
+    : eligibleInputTokens !== null && eligibleInputTokens > 0n
+      ? Number(cacheHitTokens) / Number(eligibleInputTokens)
+      : null;
+  const cacheReadRate = inputTokens !== null && inputTokens > 0n
+    ? Number(cacheReadTokens + cacheHitTokens) / Number(inputTokens)
+    : null;
   return {
     manifestId,
     providerId,
@@ -690,6 +794,22 @@ export function computeCacheObservation(
     observedCachedTokens: observedCached,
     cacheWriteTokensObserved: cacheWrites,
     cacheHitRate: hitRate,
+    eligibleInputTokens,
+    inputTokens,
+    cacheReadTokens,
+    cacheHitTokens,
+    cacheMissTokens,
+    tokenWeightedHitRate,
+    cacheReadRate,
+    usageSemantics: options.usageSemantics ?? "unknown",
+    providerReportedCostMicros: options.providerReportedCostMicros ?? null,
+    providerReportedCacheSavingsMicros: options.providerReportedCacheSavingsMicros ?? null,
+    computedCostMicros: options.computedCostMicros ?? null,
+    timeToFirstTokenMs: options.timeToFirstTokenMs ?? null,
+    economics: options.economics ?? null,
+    firstMissReason,
+    firstDifferingFragmentId,
+    firstDriftReason,
     stablePrefixPreserved,
     prefixDriftAt,
     occurredAt: new Date().toISOString(),

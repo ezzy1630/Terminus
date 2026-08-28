@@ -144,4 +144,31 @@ describe("stable-prefix cache diagnostics", () => {
       expect.arrayContaining(["planned_hash_mismatch", "epoch_baseline_mismatch"]),
     );
   });
+
+  test("reports canonical stable-prefix ordering violations without repairing the hash", () => {
+    const fragments = [
+      fragment("contract", "objective"),
+      { ...fragment("authority", "policy"), kind: "authority" as const },
+    ];
+    const plan = cachePlan(fragments);
+    const debug = snapshotCacheEpoch({
+      providerId: "openai",
+      modelKey: MODEL,
+      epoch: null,
+      cachePlan: plan,
+      selectedFragments: fragments,
+    });
+
+    expect(debug.canonicalOrderingValid).toBe(false);
+    expect(debug.orderingViolationAt).toBe(1);
+    expect(debug.stablePrefix.hash).toBe(plan.stablePrefixHash);
+    const compared = buildCacheEpochDebugData({
+      providerId: "openai",
+      modelKey: MODEL,
+      epoch: null,
+      cachePlan: plan,
+      selectedFragments: fragments,
+    });
+    expect(compared.invalidationReasons).toContain("stable_prefix_order_invalid");
+  });
 });

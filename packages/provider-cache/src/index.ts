@@ -4,13 +4,31 @@
  * Records cache read/write/hit/miss events, detects stable-prefix drift,
  * computes cache hit rates. Pure functions — no network I/O.
  */
-import type { ModelKey, ContentHash, TokenCount, Rfc3339Timestamp } from "@terminus/domain";
+import type { ContentHash, Micros, ModelKey, Rfc3339Timestamp, TokenCount } from "@terminus/domain";
 import type { UsageRecord } from "@terminus/provider-core";
-import type { CacheEvent, CacheObservationRecord } from "@terminus/provider-core";
+import type {
+  CacheEconomicsObservation,
+  CacheEventKind,
+  CacheEventSource,
+  CacheEvent,
+  CacheMissReason,
+  CacheObservationOptions,
+  CacheObservationRecord,
+  CacheUsageSemantics,
+} from "@terminus/provider-core";
 import { computeCacheObservation } from "@terminus/provider-core";
 
 export { computeCacheObservation };
-export type { CacheEvent, CacheObservationRecord };
+export type {
+  CacheEconomicsObservation,
+  CacheEventKind,
+  CacheEventSource,
+  CacheEvent,
+  CacheMissReason,
+  CacheObservationOptions,
+  CacheObservationRecord,
+  CacheUsageSemantics,
+};
 
 // ────────────────────────── Cache recording pipeline ─────────────────────────
 
@@ -19,6 +37,14 @@ export interface CacheRecordingOpts {
   readonly providerId: string;
   readonly model: ModelKey;
   readonly predictedCachedTokens: TokenCount;
+  readonly eligibleInputTokens?: TokenCount | null;
+  readonly inputTokens?: TokenCount | null;
+  readonly usageSemantics?: CacheUsageSemantics;
+  readonly pricing?: CachePricing | null;
+  readonly providerReportedCostMicros?: Micros | null;
+  readonly providerReportedCacheSavingsMicros?: Micros | null;
+  readonly computedCostMicros?: Micros | null;
+  readonly timeToFirstTokenMs?: number | null;
 }
 
 /**
@@ -42,6 +68,7 @@ export class CacheRecorder {
       breakpointIndex: null,
       stablePrefixHash: null,
       occurredAt: new Date().toISOString(),
+      source: "provider_event",
     });
   }
 
@@ -53,6 +80,7 @@ export class CacheRecorder {
       breakpointIndex: null,
       stablePrefixHash: null,
       occurredAt: new Date().toISOString(),
+      source: "provider_event",
     });
   }
 
@@ -64,6 +92,7 @@ export class CacheRecorder {
       breakpointIndex: null,
       stablePrefixHash: null,
       occurredAt: new Date().toISOString(),
+      source: "provider_event",
     });
   }
 
@@ -71,25 +100,44 @@ export class CacheRecorder {
   recordMiss(
     breakpointIndex: number | null,
     stablePrefixHash: ContentHash | null,
+    tokens: TokenCount = 0n as TokenCount,
+    missReason: CacheMissReason = "unknown",
+    firstDifferingFragmentId: string | null = null,
   ): void {
     this.events.push({
       kind: "miss",
-      tokens: 0n as TokenCount,
+      tokens,
       breakpointIndex,
       stablePrefixHash,
       occurredAt: new Date().toISOString(),
+      missReason,
+      firstDifferingFragmentId,
+      source: "provider_event",
     });
   }
 
   /** Finalize and return the observation record. */
   finalize(): CacheObservationRecord {
-    return computeCacheObservation(
+    const observation = computeCacheObservation(
       this.opts.manifestId,
       this.opts.providerId,
       this.opts.model,
       this.events,
       this.opts.predictedCachedTokens,
+      {
+        eligibleInputTokens: this.opts.eligibleInputTokens ?? null,
+        inputTokens: this.opts.inputTokens ?? null,
+        usageSemantics: this.opts.usageSemantics ?? "unknown",
+        providerReportedCostMicros: this.opts.providerReportedCostMicros ?? null,
+        providerReportedCacheSavingsMicros: this.opts.providerReportedCacheSavingsMicros ?? null,
+        computedCostMicros: this.opts.computedCostMicros ?? null,
+        timeToFirstTokenMs: this.opts.timeToFirstTokenMs ?? null,
+      },
     );
+    const economics = this.opts.pricing === undefined || this.opts.pricing === null
+      ? null
+      : computeCacheEconomics(observation, this.opts.pricing);
+    return economics === null ? observation : { ...observation, economics };
   }
 
   /** Current event count (for testing). */
@@ -113,8 +161,15 @@ export interface CacheExperimentResult {
   readonly config: CacheExperimentConfig;
   readonly observations: readonly CacheObservationRecord[];
   readonly aggregateHitRate: number;
+  readonly aggregateTokenWeightedHitRate: number | null;
+  readonly aggregateCacheReadRate: number | null;
   readonly aggregateWriteTokens: TokenCount;
   readonly aggregateReadTokens: TokenCount;
+  readonly aggregateHitTokens: TokenCount;
+  readonly aggregateMissTokens: TokenCount;
+  readonly aggregateCacheSavingsMicros: Micros | null;
+  readonly aggregateEffectiveInputCostMicros: Micros | null;
+  readonly economicsComplete: boolean;
   readonly stablePrefixDriftCount: number;
   readonly recommendation: "promote" | "retain_experimental" | "rollback";
 }
@@ -133,8 +188,15 @@ export function analyzeCacheExperiment(
       config,
       observations: [],
       aggregateHitRate: 0,
+      aggregateTokenWeightedHitRate: null,
+      aggregateCacheReadRate: null,
       aggregateWriteTokens: 0n as TokenCount,
       aggregateReadTokens: 0n as TokenCount,
+      aggregateHitTokens: 0n as TokenCount,
+      aggregateMissTokens: 0n as TokenCount,
+      aggregateCacheSavingsMicros: null,
+      aggregateEffectiveInputCostMicros: null,
+      economicsComplete: false,
       stablePrefixDriftCount: 0,
       recommendation: "retain_experimental",
     };
@@ -143,41 +205,136 @@ export function analyzeCacheExperiment(
   let totalEvents = 0;
   let totalWrites = 0n as TokenCount;
   let totalReads = 0n as TokenCount;
+  let totalHitTokens = 0n as TokenCount;
+  let totalMissTokens = 0n as TokenCount;
+  let totalEligibleTokens = 0n as TokenCount;
+  let totalInputTokens = 0n as TokenCount;
+  let allEligibleKnown = true;
+  let allInputKnown = true;
   let driftCount = 0;
   for (const o of observations) {
     totalHits += o.events.filter((e) => e.kind === "hit").length;
     totalEvents += o.events.length;
     totalWrites = (totalWrites + o.cacheWriteTokensObserved) as TokenCount;
     totalReads = (totalReads + o.observedCachedTokens) as TokenCount;
+    totalHitTokens = (totalHitTokens + o.cacheHitTokens) as TokenCount;
+    totalMissTokens = (totalMissTokens + o.cacheMissTokens) as TokenCount;
+    if (o.eligibleInputTokens === null) allEligibleKnown = false;
+    else totalEligibleTokens = (totalEligibleTokens + o.eligibleInputTokens) as TokenCount;
+    if (o.inputTokens === null) allInputKnown = false;
+    else totalInputTokens = (totalInputTokens + o.inputTokens) as TokenCount;
     if (!o.stablePrefixPreserved) driftCount++;
   }
   const hitRate = totalEvents > 0 ? totalHits / totalEvents : 0;
+  const tokenDenominator = totalHitTokens + totalMissTokens;
+  const tokenWeightedHitRate = tokenDenominator > 0n
+    ? Number(totalHitTokens) / Number(tokenDenominator)
+    : allEligibleKnown && totalEligibleTokens > 0n
+      ? Number(totalHitTokens) / Number(totalEligibleTokens)
+      : null;
+  const cacheReadRate = allInputKnown && totalInputTokens > 0n
+    ? Number(totalReads) / Number(totalInputTokens)
+    : null;
+  const economics = observations.map((observation) => observation.economics);
+  const economicsComplete = economics.every((item) => item !== null);
+  const aggregateCacheSavingsMicros = economicsComplete
+    ? economics.reduce((sum, item) => (sum + (item?.cacheSavingsMicros ?? 0n)) as Micros, 0n as Micros)
+    : null;
+  const aggregateEffectiveInputCostMicros = economicsComplete
+    ? economics.reduce((sum, item) => (sum + (item?.effectiveInputCostMicros ?? 0n)) as Micros, 0n as Micros)
+    : null;
   const recommendation: CacheExperimentResult["recommendation"] =
-    hitRate >= 0.5 && driftCount <= observations.length * 0.1
+    economicsComplete
+      && tokenWeightedHitRate !== null
+      && tokenWeightedHitRate >= 0.5
+      && driftCount <= observations.length * 0.1
       ? "promote"
-      : hitRate >= 0.2
+      : tokenWeightedHitRate !== null && tokenWeightedHitRate >= 0.2
         ? "retain_experimental"
         : "rollback";
   return {
     config,
     observations,
     aggregateHitRate: hitRate,
+    aggregateTokenWeightedHitRate: tokenWeightedHitRate,
+    aggregateCacheReadRate: cacheReadRate,
     aggregateWriteTokens: totalWrites,
     aggregateReadTokens: totalReads,
+    aggregateHitTokens: totalHitTokens,
+    aggregateMissTokens: totalMissTokens,
+    aggregateCacheSavingsMicros,
+    aggregateEffectiveInputCostMicros,
+    economicsComplete,
     stablePrefixDriftCount: driftCount,
     recommendation,
   };
 }
 
 /** Extract cache metrics from a usage record for observation. */
-export function usageToCacheEvents(usage: UsageRecord): {
+export function usageToCacheEvents(
+  usage: UsageRecord,
+  usageSemantics: CacheUsageSemantics = "unknown",
+): {
   readonly cacheReads: TokenCount;
   readonly cacheWrites: TokenCount;
   readonly cacheHits: TokenCount;
+  readonly usageSemantics: CacheUsageSemantics;
 } {
   return {
-    cacheReads: usage.cachedInputTokens,
+    cacheReads: usageSemantics === "hit_tokens" ? 0n as TokenCount : usage.cachedInputTokens,
     cacheWrites: usage.cacheWriteTokens,
-    cacheHits: usage.cachedInputTokens, // Provider treats cached reads as hits.
+    // Usage alone does not establish that every cached token was a hit. The
+    // adapter must explicitly declare its semantics before recording hits.
+    cacheHits: usageSemantics === "hit_tokens" || usageSemantics === "read_and_hit_tokens"
+      ? usage.cachedInputTokens
+      : 0n as TokenCount,
+    usageSemantics,
+  };
+}
+
+/** Provider pricing used only for explicit cache-economics accounting. */
+export interface CachePricing {
+  readonly inputMicrosPerMillion: Micros;
+  readonly cachedInputMicrosPerMillion: Micros;
+  readonly cacheWriteMicrosPerMillion?: Micros;
+}
+
+export type CacheEconomicsResult = CacheEconomicsObservation;
+
+/**
+ * Compute provider-specific input economics from token-weighted observation
+ * fields. No savings are inferred when the provider did not report an input
+ * denominator or pricing was not supplied.
+ */
+export function computeCacheEconomics(
+  observation: CacheObservationRecord,
+  pricing: CachePricing,
+): CacheEconomicsResult | null {
+  if (observation.inputTokens === null) return null;
+  const million = 1_000_000n;
+  const uncachedTokens = observation.inputTokens > observation.observedCachedTokens
+    ? observation.inputTokens - observation.observedCachedTokens
+    : 0n;
+  const cacheReadCostMicros = (
+    observation.observedCachedTokens * pricing.cachedInputMicrosPerMillion + million / 2n
+  ) / million;
+  const cacheWriteCostMicros = (
+    observation.cacheWriteTokensObserved * (pricing.cacheWriteMicrosPerMillion ?? 0n) + million / 2n
+  ) / million;
+  const uncachedInputCostMicros = (
+    uncachedTokens * pricing.inputMicrosPerMillion + million / 2n
+  ) / million;
+  const effectiveInputCostMicros = (
+    uncachedInputCostMicros + cacheReadCostMicros + cacheWriteCostMicros
+  ) as Micros;
+  const baselineInputCostMicros = (
+    observation.inputTokens * pricing.inputMicrosPerMillion + million / 2n
+  ) / million;
+  return {
+    cacheReadCostMicros: cacheReadCostMicros as Micros,
+    cacheWriteCostMicros: cacheWriteCostMicros as Micros,
+    uncachedInputCostMicros: uncachedInputCostMicros as Micros,
+    effectiveInputCostMicros,
+    cacheSavingsMicros: (baselineInputCostMicros - effectiveInputCostMicros) as Micros,
   };
 }
