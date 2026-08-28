@@ -133,10 +133,10 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
           then read as floating rather than placed. */}
       <main className="scrollable flex h-full min-h-0 flex-col items-center justify-center overflow-y-auto px-6 pb-[max(48px,12vh)] pt-12">
         <section className="start-column" aria-labelledby="new-task-heading">
-          <h1 id="new-task-heading" className="ui-hero-title mb-2 text-center text-primary">
+          <h1 id="new-task-heading" className="ui-display-title mb-1.5 text-center text-primary">
             What do you want to work on?
           </h1>
-          <p className="mb-7 text-center text-sm text-tertiary">
+          <p className="mb-6 text-center text-[13px] text-tertiary">
             Terminus runs the task, shows its work, and stops for approval before anything risky.
           </p>
           <Composer
