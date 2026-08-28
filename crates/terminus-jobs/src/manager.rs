@@ -904,6 +904,18 @@ impl JobManager {
         self.jobs.lock().await.get(job_id).cloned()
     }
 
+    /// Find the durable job that owns a process identity. Process projections
+    /// expose the process id, while restart recovery indexes the durable job
+    /// record; keeping this lookup here avoids a process-local side map.
+    pub async fn find_by_process_id(&self, process_id: &str) -> Option<JobRecord> {
+        self.jobs
+            .lock()
+            .await
+            .values()
+            .find(|record| record.process_identity.as_deref() == Some(process_id))
+            .cloned()
+    }
+
     pub async fn state(&self, job_id: &str) -> Option<JobState> {
         self.jobs.lock().await.get(job_id).map(|r| r.state)
     }

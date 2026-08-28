@@ -118,27 +118,33 @@ impl GrpcKernel {
                 );
             }
         }
+        let lease_token = manager.get(&job_id).await.map(|record| record.lease_token);
         tasks.spawn(async move {
             let mut sequence = 0_u64;
             let mut saw_exit = false;
             while let Some(event) = receiver.recv().await {
+                let Some(lease_token) = lease_token.as_deref() else {
+                    let mut state = stream.state.lock().await;
+                    state.failure = Some(
+                        "job stream cannot be persisted because the durable job record is missing"
+                            .to_string(),
+                    );
+                    state.closed = true;
+                    drop(state);
+                    stream.changed.notify_waiters();
+                    break;
+                };
+                if let Err(error) = persist_job_event(&manager, &job_id, lease_token, &event).await
+                {
+                    let mut state = stream.state.lock().await;
+                    state.failure = Some(error);
+                    state.closed = true;
+                    drop(state);
+                    stream.changed.notify_waiters();
+                    break;
+                }
                 sequence = sequence.saturating_add(1);
                 let exited = matches!(event, terminus_kernel_protocol::ProcessEvent::Exited(_));
-                if exited {
-                    if let Some(record) = manager.get(&job_id).await {
-                        if !record.state.is_terminal() {
-                            if let Err(error) = manager.mark_exited(&job_id).await {
-                                tracing::error!(
-                                    target: "terminus_kernel_audit",
-                                    event = "job_exit_state_failed",
-                                    %job_id,
-                                    %error,
-                                    "process exited but durable job settlement failed"
-                                );
-                            }
-                        }
-                    }
-                }
                 let event = job_event(&job_id, sequence, event);
                 let event_bytes = job_event_size(&event);
                 {
@@ -185,6 +191,48 @@ impl GrpcKernel {
             }
         });
     }
+}
+
+/// Persist each process event before making it visible through the replay
+/// buffer. A bounded retry keeps a transient `SQLite` lock from losing output,
+/// while a persistent failure is surfaced to stream consumers instead of
+/// being mistaken for a clean process exit.
+async fn persist_job_event(
+    manager: &terminus_jobs::JobManager,
+    job_id: &str,
+    lease_token: &str,
+    event: &terminus_kernel_protocol::ProcessEvent,
+) -> Result<(), String> {
+    const MAX_DATABASE_RETRIES: usize = 5;
+    for attempt in 0..=MAX_DATABASE_RETRIES {
+        match manager
+            .record_event_with_lease(job_id, lease_token, event)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(terminus_jobs::JobError::Database(error))
+                if attempt < MAX_DATABASE_RETRIES =>
+            {
+                tracing::warn!(
+                    target: "terminus_kernel_audit",
+                    event = "job_event_persistence_retry",
+                    %job_id,
+                    attempt = attempt + 1,
+                    %error,
+                    "retrying durable job event persistence"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "durable job event persistence failed for {job_id}: {error}"
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "durable job event persistence exhausted retries for {job_id}"
+    ))
 }
 
 const DEFAULT_CONTROL_PRINCIPAL: &str = "terminus-control-bearer";
@@ -1955,50 +2003,60 @@ impl JobServiceRpc for GrpcKernel {
             .context
             .map(context)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
-        let _record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
+        let record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         let job_id = request.job_id;
         let retained = self
             .job_streams
             .lock()
             .await
             .get(&job_id)
-            .cloned()
-            .ok_or_else(|| {
-                Status::failed_precondition(
-                    "job has no replayable event stream in this kernel instance; reconcile its settlement before continuing",
-                )
-            })?;
+            .cloned();
         let from_sequence = request.from_sequence;
-        let stream = async_stream::try_stream! {
-            let mut cursor = from_sequence;
-            loop {
-                let notified = retained.changed.notified();
-                let (events, closed, failure) = {
-                    let state = retained.state.lock().await;
-                    (
-                        state
-                            .events
-                            .iter()
-                            .filter(|event| event.sequence > cursor)
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        state.closed,
-                        state.failure.clone(),
-                    )
-                };
-                for event in events {
-                    cursor = event.sequence;
-                    yield event;
+        if let Some(retained) = retained {
+            let stream = async_stream::try_stream! {
+                let mut cursor = from_sequence;
+                loop {
+                    let notified = retained.changed.notified();
+                    let (events, closed, failure) = {
+                        let state = retained.state.lock().await;
+                        (
+                            state
+                                .events
+                                .iter()
+                                .filter(|event| event.sequence > cursor)
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                            state.closed,
+                            state.failure.clone(),
+                        )
+                    };
+                    for event in events {
+                        cursor = event.sequence;
+                        yield event;
+                    }
+                    if let Some(message) = failure {
+                        Err(Status::resource_exhausted(message))?;
+                    }
+                    if closed {
+                        break;
+                    }
+                    notified.await;
                 }
-                if let Some(message) = failure {
-                    Err(Status::resource_exhausted(message))?;
-                }
-                if closed {
-                    break;
-                }
-                notified.await;
-            }
-        };
+            };
+            return Ok(Response::new(Box::pin(stream)));
+        }
+
+        // The process receiver is intentionally process-local, but the job
+        // record and output chunks survive a kernel restart. Reconstruct a
+        // terminal stream from those durable records instead of reporting a
+        // false "no stream" failure after every restart.
+        let events = replay_durable_job_stream(
+            self.kernel.jobs.manager(),
+            &record,
+            from_sequence,
+        )
+        .await?;
+        let stream = tokio_stream::iter(events.into_iter().map(Ok));
         Ok(Response::new(Box::pin(stream)))
     }
     async fn input(
@@ -2274,6 +2332,147 @@ fn timestamp(value: &str) -> Option<prost_types::Timestamp> {
         seconds: parsed.timestamp(),
         nanos: parsed.timestamp_subsec_nanos() as i32,
     })
+}
+
+async fn replay_durable_job_stream(
+    manager: &terminus_jobs::JobManager,
+    record: &terminus_jobs::JobRecord,
+    from_sequence: u64,
+) -> Result<Vec<protocol::JobEvent>, Status> {
+    use protocol::job_event::Event;
+
+    let mut events = Vec::new();
+    let mut sequence = 0_u64;
+    if let Some(process_id) = record.process_identity.as_deref() {
+        sequence = 1;
+        events.push(protocol::JobEvent {
+            sequence,
+            occurred_at: record.started_at.as_deref().and_then(timestamp),
+            event: Some(Event::Started(protocol::ProcessStarted {
+                process_id: process_id.to_string(),
+                job_id: record.id.clone(),
+                resolved_executable: record.resolved_executable.clone(),
+                started_at: record.started_at.as_deref().and_then(timestamp),
+            })),
+        });
+    }
+
+    let mut output = Vec::new();
+    for stream in ["stdout", "stderr"] {
+        let chunks = manager
+            .output_since(&record.id, stream, 0)
+            .await
+            .map_err(|error| durable_output_status(record, stream, error))?;
+        output.extend(chunks);
+    }
+    output.sort_by(|left, right| {
+        left.start_cursor
+            .cmp(&right.start_cursor)
+            .then_with(|| left.stream.cmp(&right.stream))
+            .then_with(|| left.end_cursor.cmp(&right.end_cursor))
+    });
+    for chunk in output {
+        sequence = sequence.saturating_add(1);
+        let event = if chunk.stream == "stdout" {
+            Event::Stdout(protocol::OutputChunk {
+                cursor: chunk.end_cursor,
+                bytes: chunk.bytes,
+                redacted: chunk.redacted,
+            })
+        } else {
+            Event::Stderr(protocol::OutputChunk {
+                cursor: chunk.end_cursor,
+                bytes: chunk.bytes,
+                redacted: chunk.redacted,
+            })
+        };
+        events.push(protocol::JobEvent {
+            sequence,
+            occurred_at: None,
+            event: Some(event),
+        });
+    }
+
+    match record.state {
+        terminus_jobs::JobState::Exited => {
+            sequence = sequence.saturating_add(1);
+            let (exit_code, signal) = termination_projection(record);
+            events.push(protocol::JobEvent {
+                sequence,
+                occurred_at: record.settled_at.as_deref().and_then(timestamp),
+                event: Some(Event::Exited(protocol::ProcessExited {
+                    exit_code,
+                    signal,
+                    exited_at: record.settled_at.as_deref().and_then(timestamp),
+                    stdout_artifact: artifact_ref_opt(&record.stdout_artifact),
+                    stderr_artifact: artifact_ref_opt(&record.stderr_artifact),
+                })),
+            });
+        }
+        state => {
+            sequence = sequence.saturating_add(1);
+            let (state, explanation) = if state == terminus_jobs::JobState::Running {
+                (
+                    "running",
+                    "kernel restarted after the process event channel was created; durable output is replayable, but live events cannot be reattached",
+                )
+            } else {
+                (
+                    "unknown-settlement",
+                    "kernel restarted before a durable process exit event was recorded",
+                )
+            };
+            events.push(protocol::JobEvent {
+                sequence,
+                occurred_at: None,
+                event: Some(Event::Reconciled(protocol::JobReconciled {
+                    state: state.to_string(),
+                    explanation: explanation.to_string(),
+                })),
+            });
+        }
+    }
+
+    Ok(events
+        .into_iter()
+        .filter(|event| event.sequence > from_sequence)
+        .collect())
+}
+
+fn durable_output_status(
+    record: &terminus_jobs::JobRecord,
+    stream: &str,
+    error: terminus_jobs::JobError,
+) -> Status {
+    match error {
+        terminus_jobs::JobError::OutputTruncated { available_from, .. } => {
+            let artifact = if stream == "stdout" {
+                record.stdout_artifact.as_deref()
+            } else {
+                record.stderr_artifact.as_deref()
+            };
+            let artifact_hint = artifact
+                .map(|value| format!("; retrieve artifact {value}"))
+                .unwrap_or_default();
+            Status::resource_exhausted(format!(
+                "durable {stream} output was compacted; continue from byte cursor {available_from}{artifact_hint}"
+            ))
+        }
+        other => Status::internal(format!("durable job output replay failed: {other}")),
+    }
+}
+
+fn termination_projection(record: &terminus_jobs::JobRecord) -> (i32, String) {
+    let Some(receipt) = record.termination_receipt.as_deref() else {
+        return (-1, String::new());
+    };
+    if let Some(code) = receipt.strip_prefix("exit:") {
+        return (code.parse::<i32>().unwrap_or(-1), String::new());
+    }
+    if let Some(signal) = receipt.strip_prefix("signal:") {
+        return (-1, signal.to_string());
+    }
+    (-1, receipt.to_string())
 }
 
 fn job_event(
@@ -4382,5 +4581,106 @@ mod tests {
 
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn durable_job_stream_replays_output_and_exit_after_reload() {
+        let dir = tempfile::tempdir().expect("durable stream test directory");
+        let artifacts = std::sync::Arc::new(
+            terminus_artifacts::ArtifactStore::open(dir.path().join("artifacts"))
+                .expect("artifact store"),
+        );
+        let process = std::sync::Arc::new(terminus_process::ProcessManager::new(artifacts));
+        let storage_path = dir.path().join("jobs.sqlite");
+        let manager = terminus_jobs::JobManager::with_storage(
+            std::sync::Arc::clone(&process),
+            &storage_path,
+        );
+        let job_id = terminus_kernel_protocol::new_id();
+        let process_id = "process-after-restart".to_string();
+        let mut record = terminus_jobs::JobRecord::new(
+            job_id.clone(),
+            "session",
+            "task",
+            "echo durable",
+        );
+        record.state = terminus_jobs::JobState::Running;
+        record.process_identity = Some(process_id.clone());
+        record.resolved_executable = "/bin/echo".to_string();
+        record.started_at = Some("2026-08-28T00:00:00.000000Z".to_string());
+        manager.create(record).await.expect("create durable job");
+        let lease = manager
+            .get(&job_id)
+            .await
+            .expect("durable job record")
+            .lease_token;
+        manager
+            .record_event_with_lease(
+                &job_id,
+                &lease,
+                &terminus_kernel_protocol::ProcessEvent::Started(
+                    terminus_kernel_protocol::ProcessStarted {
+                        process_id: process_id.clone(),
+                        job_id: job_id.clone(),
+                        resolved_executable: "/bin/echo".to_string(),
+                        started_at: "2026-08-28T00:00:00.000000Z".to_string(),
+                    },
+                ),
+            )
+            .await
+            .expect("persist started event");
+        manager
+            .record_event_with_lease(
+                &job_id,
+                &lease,
+                &terminus_kernel_protocol::ProcessEvent::Stdout(
+                    terminus_kernel_protocol::OutputChunk {
+                        cursor: 7,
+                        bytes: b"durable".to_vec(),
+                        redacted: false,
+                    },
+                ),
+            )
+            .await
+            .expect("persist output event");
+        manager
+            .record_event_with_lease(
+                &job_id,
+                &lease,
+                &terminus_kernel_protocol::ProcessEvent::Exited(
+                    terminus_kernel_protocol::ProcessExited {
+                        exit_code: 0,
+                        signal: String::new(),
+                        exited_at: "2026-08-28T00:00:01.000000Z".to_string(),
+                        stdout_artifact: None,
+                        stderr_artifact: None,
+                    },
+                ),
+            )
+            .await
+            .expect("persist exit event");
+
+        let reloaded = terminus_jobs::JobManager::with_storage(process, &storage_path);
+        assert_eq!(reloaded.load_persisted().await.expect("reload jobs"), 1);
+        let record = reloaded.get(&job_id).await.expect("reloaded job record");
+        let events = replay_durable_job_stream(&reloaded, &record, 0)
+            .await
+            .expect("replay durable job stream");
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].sequence, 1);
+        assert!(matches!(
+            events[0].event,
+            Some(protocol::job_event::Event::Started(_))
+        ));
+        assert!(matches!(
+            events[1].event,
+            Some(protocol::job_event::Event::Stdout(ref output))
+                if output.cursor == 7 && output.bytes == b"durable"
+        ));
+        assert!(matches!(
+            events[2].event,
+            Some(protocol::job_event::Event::Exited(ref exit))
+                if exit.exit_code == 0
+        ));
     }
 }
