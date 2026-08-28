@@ -173,15 +173,3 @@ components:
   # ---------------- External harness adapters ----------------
   - { id: adapter-fixture-agent, kind: adapter, path: adapters/fixture-agent, tier: fixture,
       basis: "Deterministic no-model test double; replays recorded trajectories" }
-  - { id: adapter-claude-code, kind: adapter, path: adapters/claude-code, tier: stub,
-      basis: "Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim" }
-  - { id: adapter-codex, kind: adapter, path: adapters/codex, tier: stub,
-      basis: "Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim" }
-  - { id: adapter-oh-my-pi, kind: adapter, path: adapters/oh-my-pi, tier: stub,
-      basis: "adapter.yaml declaration only; runner not implemented" }
-  - { id: adapter-omnigent, kind: adapter, path: adapters/omnigent, tier: stub,
-      basis: "adapter.yaml declaration only; runner not implemented" }
-  - { id: adapter-openhands, kind: adapter, path: adapters/openhands, tier: stub,
-      basis: "adapter.yaml declaration only; runner not implemented" }
-  - { id: adapter-pi, kind: adapter, path: adapters/pi, tier: stub,
-      basis: "Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim" }

@@ -34,8 +34,8 @@ import {
 import {
   independentlyVerifyHarnessResult,
   runCapabilityProbe,
-  createCodexAdapter,
-  CODEX_DECLARED_PROFILE,
+  createFixtureAgentAdapter,
+  FIXTURE_DECLARED_PROFILE,
   InMemoryAdapterRegistry,
   applyProbeToRegistry,
   runAdapterConformance,
@@ -406,18 +406,18 @@ describe("M9 exit gate", () => {
     expect(result.verifiedStatus).toBe("completed");
   });
 
-  test("Gate C: live capability probe can disable Codex on FS discrepancy", async () => {
+  test("Gate C: live capability probe can disable an adapter on FS discrepancy", async () => {
     const registry = new InMemoryAdapterRegistry();
     const port: AdapterProcessPort = {
       async spawn() {
         throw new Error("not used");
       },
     };
-    const adapter = createCodexAdapter(port, clock);
+    const adapter = createFixtureAgentAdapter(port, clock);
     await registry.register(adapter);
     const report = runCapabilityProbe(
-      "codex",
-      CODEX_DECLARED_PROFILE,
+      "fixture-agent",
+      FIXTURE_DECLARED_PROFILE,
       {
         exactContextVisibility: "partial",
         toolInterception: "partial",
@@ -435,7 +435,7 @@ describe("M9 exit gate", () => {
     );
     expect(report.disableRecommended).toBe(true);
     await applyProbeToRegistry(registry, report);
-    expect(await registry.get("codex")).toBeNull();
+    expect(await registry.get("fixture-agent")).toBeNull();
   });
 
   test("Gate C: adapter conformance for fixture profile", () => {
@@ -444,7 +444,7 @@ describe("M9 exit gate", () => {
         throw new Error("unused");
       },
     };
-    const adapter = createCodexAdapter(port, clock);
+    const adapter = createFixtureAgentAdapter(port, clock);
     const sample = {
       status: "completed",
       summary: "ok",

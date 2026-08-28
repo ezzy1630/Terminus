@@ -10,7 +10,7 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `production` | 0 |
 | `preview` | 11 |
 | `experimental` | 50 |
-| `stub` | 9 |
+| `stub` | 3 |
 | `fixture` | 5 |
 
 | Component | Kind | Path | Tier | Basis |
@@ -20,12 +20,6 @@ Tiers: `fixture` → `stub` → `experimental` → `preview` → `production`. `
 | `terminus-kernel-testkit` | rust-crate | `crates/terminus-kernel-testkit` | `fixture` | Fakes/builders/in-memory stores for tests only |
 | `provider-conformance` | ts-package | `packages/provider-conformance` | `fixture` | Conformance kit used to test provider renderers |
 | `testkit` | ts-package | `packages/testkit` | `fixture` | Explicit fixture-only provider/kernel builders with grant references; never a production success path |
-| `adapter-claude-code` | adapter | `adapters/claude-code` | `stub` | Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim |
-| `adapter-codex` | adapter | `adapters/codex` | `stub` | Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim |
-| `adapter-oh-my-pi` | adapter | `adapters/oh-my-pi` | `stub` | adapter.yaml declaration only; runner not implemented |
-| `adapter-omnigent` | adapter | `adapters/omnigent` | `stub` | adapter.yaml declaration only; runner not implemented |
-| `adapter-openhands` | adapter | `adapters/openhands` | `stub` | adapter.yaml declaration only; runner not implemented |
-| `adapter-pi` | adapter | `adapters/pi` | `stub` | Contract-stub runner emits adapter_unavailable and a blocked result; no inner harness launch or completion claim |
 | `terminus-extension-runtime` | rust-crate | `crates/terminus-extension-runtime` | `stub` | WASI execution is unavailable without Wasmtime; invocation fails closed with an unavailable error |
 | `terminus-sandbox-microvm` | rust-crate | `crates/terminus-sandbox-microvm` | `stub` | Configuration generation ONLY, execution Unsupported (deep-audit 2026-08-24): no guest agent / vsock command protocol, no digest-based image materialization, no workspace transport; re-enablement requires those plus teardown and latency evidence |
 | `terminus-sandbox-windows` | rust-crate | `crates/terminus-sandbox-windows` | `stub` | Native AppContainer intentionally absent (unsafe FFI needs dedicated ADR); fail-closed WSL2/container fallback only (ADR-0035 §5) |

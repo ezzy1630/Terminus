@@ -5,7 +5,7 @@ import {
   verifyAdapterCompletion,
   independentlyVerifyHarnessResult,
   runCapabilityProbe,
-  createPiAdapter,
+  createFixtureAgentAdapter,
   InMemoryAdapterRegistry,
   type AdapterCapabilityProfile,
   type AdapterProcessPort,
@@ -91,13 +91,13 @@ describe("Adapter SDK Unit Tests", () => {
     expect(res.verifiedStatus).toBe("failed");
   });
 
-  test("runCapabilityProbe surfaces Pi-style discrepancies", () => {
+  test("runCapabilityProbe surfaces filesystem-enforcement discrepancies", () => {
     const port: AdapterProcessPort = {
       async spawn() {
         throw new Error("unused");
       },
     };
-    const adapter = createPiAdapter(port, () => "2026-07-23T00:00:00Z" as Rfc3339Timestamp);
+    const adapter = createFixtureAgentAdapter(port, () => "2026-07-23T00:00:00Z" as Rfc3339Timestamp);
     const report = runCapabilityProbe(
       adapter.adapterId,
       adapter.capabilityProfile,

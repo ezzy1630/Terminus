@@ -81,7 +81,7 @@ terminus/
 │   ├── terminus-kernel/         # Rust kernel HTTP service (port 3040)
 │   └── terminus-control/        # TS control plane HTTP service (port 3050)
 ├── python/forge_evals/       # Python evaluation laboratory
-├── adapters/                 # External harness adapters (codex, claude-code, pi, ...)
+├── adapters/                 # Fixture harness adapter used by conformance tests
 ├── skills/                   # Agent Skills (builtin + fixtures)
 ├── capability-packs/         # Tool packs (web, github, database, debugger, ...)
 ├── policies/                 # Sandbox, command, network, secrets, organizations
