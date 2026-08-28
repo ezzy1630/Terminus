@@ -397,6 +397,8 @@ import {
 import {
   EffectSettlementService,
   EventSubscriptionService,
+  type EventCursorExpired,
+  type EventSubscriptionHandle,
   ProviderSessionService,
   parseAllowedScope as parseProjectionAllowedScope,
   scopeExpansionResources as projectionScopeExpansionResources,
@@ -1397,7 +1399,11 @@ class EventBus {
    */
   initializeFromHistory(events: readonly Pick<StoredEvent, "eventId" | "aggregateType" | "aggregateId" | "aggregateSequence">[]): void {
     if (this.initialized) throw new Error("event bus history was initialized more than once");
+    let previousEventId: string | null = null;
     for (const event of events) {
+      if (previousEventId !== null && event.eventId <= previousEventId) {
+        throw new Error(`semantic event IDs are not strictly increasing at ${event.eventId}`);
+      }
       const key = `${event.aggregateType}:${event.aggregateId}`;
       const previous = this.aggregateSequences.get(key) ?? 0;
       if (event.aggregateSequence <= previous) {
@@ -1415,6 +1421,7 @@ class EventBus {
           this.monotonicSeq = sequence + 1;
         }
       }
+      previousEventId = event.eventId;
     }
     this.initialized = true;
   }
@@ -1555,7 +1562,7 @@ class EventBus {
     sinceEventId: string,
     throughEventId: string,
     filter: (ev: StoredEvent) => boolean,
-    push: (ev: StoredEvent) => void,
+    push: (ev: StoredEvent) => void | Promise<void>,
   ): Promise<void> {
     let cursor = sinceEventId;
     for (;;) {
@@ -1565,7 +1572,7 @@ class EventBus {
         take: 1_000,
       }) as unknown as StoredEvent[];
       for (const event of rows) {
-        if (filter(event)) push(event);
+        if (filter(event)) await push(event);
       }
       if (rows.length < 1_000) return;
       const next = rows.at(-1)?.eventId;
@@ -3777,6 +3784,131 @@ function route(method: string, path: string, handler: Handler): Route {
   return { method, pattern: new RegExp(`^${pattern}$`), paramNames, handler };
 }
 
+const SSE_HEADERS = {
+  "content-type": "text/event-stream",
+  "cache-control": "no-cache",
+  "connection": "keep-alive",
+  "access-control-allow-origin": CONTROL_CORS_ORIGIN,
+  "access-control-allow-headers": CORS_ALLOW_HEADERS,
+  "x-accel-buffering": "no",
+} as const;
+
+function writeSseFrame(
+  response: ServerResponse,
+  frame: string,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted || response.destroyed || response.writableEnded) {
+    return Promise.reject(new Error("SSE response is closed"));
+  }
+  let accepted: boolean;
+  try {
+    accepted = response.write(frame);
+  } catch (error: unknown) {
+    return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+  }
+  if (accepted) return Promise.resolve();
+
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      response.off("drain", onDrain);
+      response.off("close", onClose);
+      response.off("error", onError);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const settle = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onDrain = (): void => settle();
+    const onClose = (): void => settle(new Error("SSE response closed before drain"));
+    const onError = (error: Error): void => settle(error);
+    const onAbort = (): void => settle(new Error("SSE response aborted before drain"));
+
+    response.once("drain", onDrain);
+    response.once("close", onClose);
+    response.once("error", onError);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (response.destroyed || response.writableEnded || signal.aborted) onClose();
+  });
+}
+
+interface EventStreamOptions {
+  readonly streamName: string;
+  readonly cursor: string | null;
+  readonly filter: (event: StoredEvent) => boolean;
+  readonly eventFrame: (event: StoredEvent) => string;
+  readonly cursorExpiredFrame: (expired: EventCursorExpired) => string;
+}
+
+/**
+ * Serve both public event versions through the same replay/live broker.
+ * Headers are flushed before replay so the caller can exercise the overlap
+ * boundary, but disconnect observation is installed before opening the broker.
+ */
+async function serveEventStream(
+  request: IncomingMessage,
+  response: ServerResponse,
+  options: EventStreamOptions,
+): Promise<void> {
+  const disconnect = new AbortController();
+  let subscription: EventSubscriptionHandle | null = null;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let cleanupPromise: Promise<void> | null = null;
+  let writeTail: Promise<void> = Promise.resolve();
+
+  const writeFrame = (frame: string): Promise<void> => {
+    const write = writeTail.then(() => writeSseFrame(response, frame, disconnect.signal));
+    writeTail = write.catch(() => undefined);
+    return write;
+  };
+
+  const cleanup = (): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise;
+    disconnect.abort();
+    if (heartbeat) clearInterval(heartbeat);
+    cleanupPromise = (subscription?.close() ?? Promise.resolve()).catch((error: unknown) => {
+      console.error("[terminus-control] failed to persist event stream cursor", error);
+    });
+    return cleanupPromise;
+  };
+
+  request.once("close", () => { void cleanup(); });
+  response.writeHead(200, SSE_HEADERS);
+  response.flushHeaders();
+
+  try {
+    subscription = await eventSubscriptionService.open({
+      streamName: options.streamName,
+      cursor: options.cursor,
+      filter: options.filter,
+      onEvent: (event) => writeFrame(options.eventFrame(event)),
+      onCursorExpired: (expired) => writeFrame(options.cursorExpiredFrame(expired)),
+      onError: (error) => {
+        if (!response.destroyed && !response.writableEnded) response.destroy(error);
+      },
+      signal: disconnect.signal,
+    });
+    if (disconnect.signal.aborted) {
+      await cleanup();
+      return;
+    }
+    heartbeat = setInterval(() => {
+      if (disconnect.signal.aborted || response.destroyed || response.writableEnded) return;
+      void writeFrame(`:heartbeat ${Date.now()}\n\n`).catch(() => { void cleanup(); });
+    }, 15_000);
+  } catch (error: unknown) {
+    await cleanup();
+    if (!response.destroyed && !response.writableEnded) response.end();
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`[terminus-control] event stream failed: ${detail}`);
+  }
+}
+
 const checkpointRequestSchema = z.object({
   session_id: z.string().uuid(),
   thread_id: z.string().uuid(),
@@ -5415,22 +5547,12 @@ const routes: Route[] = [
 
   // ────────────────────────── /events (SSE) ──────────────────────────────
   route("GET", "/v1/events", async (req, res) => {
-    res.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      "connection": "keep-alive",
-      "access-control-allow-origin": CONTROL_CORS_ORIGIN,
-      "access-control-allow-headers": CORS_ALLOW_HEADERS,
-      "x-accel-buffering": "no",
-    });
-    res.flushHeaders();
     const url = new URL(req.url ?? "", "http://x");
     const cursor = url.searchParams.get("cursor");
     const taskId = url.searchParams.get("task_id");
     const sessionId = url.searchParams.get("session_id");
 
     const streamName = taskId ? `task:${taskId}` : sessionId ? `session:${sessionId}` : "global";
-    const disconnect = new AbortController();
 
     const filter = (ev: StoredEvent) => {
       if (ev.schemaVersion !== 1) return false;
@@ -5447,14 +5569,12 @@ const routes: Route[] = [
       return true;
     };
 
-    const subscription = await eventSubscriptionService.open({
+    await serveEventStream(req, res, {
       streamName,
       cursor,
       filter,
-      onEvent: (event) => {
-        res.write(`id: ${event.eventId}\nevent: ${event.eventType}\ndata: ${event.payloadJson}\n\n`);
-      },
-      onCursorExpired: ({ requestedCursor, oldestRetainedEventId }) => {
+      eventFrame: (event) => `id: ${event.eventId}\nevent: ${event.eventType}\ndata: ${event.payloadJson}\n\n`,
+      cursorExpiredFrame: ({ requestedCursor, oldestRetainedEventId }) => {
         const snapshotUrl = taskId
           ? `/v1/tasks/${taskId}`
           : sessionId
@@ -5469,22 +5589,8 @@ const routes: Route[] = [
             "the requested cursor is older than the oldest retained event; " +
             "use the snapshot endpoint to reconcile state before resuming",
         });
-        res.write(`id: ${oldestRetainedEventId}\nevent: cursor_expired\ndata: ${expiredPayload}\n\n`);
+        return `id: ${oldestRetainedEventId}\nevent: cursor_expired\ndata: ${expiredPayload}\n\n`;
       },
-      signal: disconnect.signal,
-    });
-
-    // Heartbeat every 15s.
-    const heartbeat = setInterval(() => {
-      try { res.write(`:heartbeat ${Date.now()}\n\n`); } catch { /* ignore */ }
-    }, 15_000);
-
-    req.on("close", () => {
-      clearInterval(heartbeat);
-      disconnect.abort();
-      void subscription.close().catch((error: unknown) => {
-        console.error("[terminus-control] failed to persist event stream cursor", error);
-      });
     });
   }),
 
@@ -8825,15 +8931,6 @@ const routes: Route[] = [
     sendV2Response(res, 201, V2_ENDPOINTS.StartResearchTaskV2.response, record);
   }),
   route("GET", "/v2/events", async (req, res) => {
-    res.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      "connection": "keep-alive",
-      "access-control-allow-origin": CONTROL_CORS_ORIGIN,
-      "access-control-allow-headers": CORS_ALLOW_HEADERS,
-      "x-accel-buffering": "no",
-    });
-    res.flushHeaders();
     const url = new URL(req.url ?? "", "http://x");
     const cursor = url.searchParams.get("cursor");
     const taskId = url.searchParams.get("taskId");
@@ -8850,57 +8947,17 @@ const routes: Route[] = [
       return true;
     };
 
-    let lastEventId: string | null = cursor;
-    let lastSequence = 0;
-    let replaying = true;
-    const buffered = new Map<string, StoredEvent>();
-    const sent = new Set<string>();
-    const writeEvent = (ev: StoredEvent) => {
-      if (sent.has(ev.eventId)) return;
-      res.write(`id: ${ev.eventId}\nevent: ${ev.eventType}\ndata: ${JSON.stringify(storedEventToEnvelopeV2(ev))}\n\n`);
-      sent.add(ev.eventId);
-      lastEventId = ev.eventId;
-      lastSequence = ev.aggregateSequence;
-    };
-    const unsubscribe = bus.subscribe(filter, (ev) => {
-      if (replaying) buffered.set(ev.eventId, ev);
-      else writeEvent(ev);
-    });
-    const highWater = await bus.latestEventId();
-
-    if (cursor) {
-      const oldest = await bus.oldestEventId();
-      if (oldest && cursor < oldest) {
-        const payload = JSON.stringify({
-          type: "cursor_expired",
-          cursor,
-          oldestRetainedEventId: oldest,
-          snapshotUrl: taskId ? `/v2/tasks/${taskId}` : "/v2/tasks",
-        });
-        res.write(`id: ${oldest}\nevent: cursor_expired\ndata: ${payload}\n\n`);
-        lastEventId = oldest;
-      } else if (highWater) {
-        await bus.replay(cursor, highWater, filter, writeEvent);
-      }
-    }
-
-    for (const event of [...buffered.values()].sort((left, right) => left.eventId.localeCompare(right.eventId))) {
-      writeEvent(event);
-    }
-    buffered.clear();
-    replaying = false;
-
-    const heartbeat = setInterval(() => {
-      try { res.write(`:heartbeat ${Date.now()}\n\n`); } catch { /* ignore */ }
-    }, 15_000);
-
-    req.on("close", () => {
-      clearInterval(heartbeat);
-      unsubscribe();
-      if (lastEventId) {
-        const streamName = taskId ? `v2:task:${taskId}` : aggregateType ? `v2:aggregate:${aggregateType}` : "v2:global";
-        void bus.persistCursor(streamName, lastEventId, lastSequence);
-      }
+    await serveEventStream(req, res, {
+      streamName: taskId ? `v2:task:${taskId}` : aggregateType ? `v2:aggregate:${aggregateType}` : "v2:global",
+      cursor,
+      filter,
+      eventFrame: (event) => `id: ${event.eventId}\nevent: ${event.eventType}\ndata: ${JSON.stringify(storedEventToEnvelopeV2(event))}\n\n`,
+      cursorExpiredFrame: ({ requestedCursor, oldestRetainedEventId }) => `id: ${oldestRetainedEventId}\nevent: cursor_expired\ndata: ${JSON.stringify({
+        type: "cursor_expired",
+        cursor: requestedCursor,
+        oldestRetainedEventId,
+        snapshotUrl: taskId ? `/v2/tasks/${taskId}` : "/v2/tasks",
+      })}\n\n`,
     });
   }),
 ];

@@ -63,6 +63,135 @@ describe("control-plane service boundaries", () => {
     expect(persisted).toEqual(["0003"]);
   });
 
+  test("EventSubscriptionService keeps replay mode open while async buffered delivery yields", async () => {
+    type Event = EventCursorRecord & { readonly value: string };
+    const replayed: Event = { eventId: "0002", aggregateSequence: 2, value: "two" };
+    const received: string[] = [];
+    let livePush: ((event: Event) => void) | null = null;
+    let releaseThird: (() => void) | undefined;
+    const thirdDelivery = new Promise<void>((resolve) => { releaseThird = resolve; });
+    const service = new EventSubscriptionService<Event>({
+      subscribeLive: (_filter, push) => {
+        livePush = push;
+        return () => { livePush = null; };
+      },
+      latestEventId: async () => "0002",
+      oldestEventId: async () => "0001",
+      eventExists: async () => true,
+      replay: async (_since, _through, _filter, push) => {
+        await push(replayed);
+        livePush?.({ eventId: "0003", aggregateSequence: 3, value: "three" });
+      },
+      persistCursor: async () => undefined,
+    });
+
+    const open = service.open({
+      streamName: "task:1",
+      cursor: "0001",
+      filter: () => true,
+      onEvent: async (event) => {
+        received.push(event.value);
+        if (event.value === "three") {
+          livePush?.({ eventId: "0004", aggregateSequence: 4, value: "four" });
+          await thirdDelivery;
+        }
+      },
+    });
+    await Promise.resolve();
+    releaseThird?.();
+    await open;
+
+    expect(received).toEqual(["two", "three", "four"]);
+  });
+
+  test("EventSubscriptionService repeats every handoff boundary without loss or duplication", async () => {
+    type Event = EventCursorRecord & { readonly value: string };
+    const boundaryNames = ["watermark", "replay-start", "replay-page", "async-drain"] as const;
+
+    for (let iteration = 0; iteration < 100; iteration += 1) {
+      const boundary = boundaryNames[iteration % boundaryNames.length]!;
+      const received: Event[] = [];
+      let livePush: ((event: Event) => void) | null = null;
+      const service = new EventSubscriptionService<Event>({
+        subscribeLive: (_filter, push) => {
+          livePush = push;
+          return () => { livePush = null; };
+        },
+        latestEventId: async () => {
+          if (boundary === "watermark") livePush?.({ eventId: "0003", aggregateSequence: 3, value: "live" });
+          return "0002";
+        },
+        oldestEventId: async () => "0001",
+        eventExists: async () => true,
+        replay: async (_since, _through, _filter, push) => {
+          if (boundary === "replay-start") livePush?.({ eventId: "0003", aggregateSequence: 3, value: "live" });
+          await push({ eventId: "0002", aggregateSequence: 2, value: "replay" });
+          if (boundary === "replay-page") livePush?.({ eventId: "0003", aggregateSequence: 3, value: "live" });
+        },
+        persistCursor: async () => undefined,
+      });
+
+      const handle = await service.open({
+        streamName: `task:${iteration}`,
+        cursor: "0001",
+        filter: () => true,
+        onEvent: async (event) => {
+          received.push(event);
+          if (boundary === "async-drain" && event.eventId === "0002") {
+            livePush?.({ eventId: "0003", aggregateSequence: 3, value: "live" });
+            await Promise.resolve();
+          }
+        },
+      });
+      expect(received.map((event) => event.eventId)).toEqual(["0002", "0003"]);
+      expect(new Set(received.map((event) => event.eventId)).size).toBe(2);
+      await handle.close();
+    }
+  });
+
+  test("EventSubscriptionService fails closed when a slow live consumer exceeds its bound", async () => {
+    type Event = EventCursorRecord & { readonly value: string };
+    let livePush: ((event: Event) => void) | null = null;
+    let unsubscribed = false;
+    let releaseFirst: (() => void) | undefined;
+    const firstDelivery = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let overflow: Error | null = null;
+    let resolveOverflow: (() => void) | undefined;
+    const overflowObserved = new Promise<void>((resolve) => { resolveOverflow = resolve; });
+    const service = new EventSubscriptionService<Event>({
+      subscribeLive: (_filter, push) => {
+        livePush = push;
+        return () => { unsubscribed = true; livePush = null; };
+      },
+      latestEventId: async () => null,
+      oldestEventId: async () => null,
+      eventExists: async () => false,
+      replay: async () => undefined,
+      persistCursor: async () => undefined,
+    }, { maxPendingEvents: 2 });
+    const handle = await service.open({
+      streamName: "task:slow",
+      cursor: null,
+      filter: () => true,
+      onEvent: async () => { await firstDelivery; },
+      onError: (error: Error): void => {
+        overflow = error;
+        resolveOverflow?.();
+      },
+    });
+
+    livePush?.({ eventId: "0001", aggregateSequence: 1, value: "one" });
+    livePush?.({ eventId: "0002", aggregateSequence: 2, value: "two" });
+    livePush?.({ eventId: "0003", aggregateSequence: 3, value: "three" });
+    livePush?.({ eventId: "0004", aggregateSequence: 4, value: "four" });
+    await overflowObserved;
+    releaseFirst?.();
+
+    expect(overflow?.message).toMatch(/buffer exceeded/);
+    expect(unsubscribed).toBe(true);
+    await handle.close();
+  });
+
   test("TurnCoordinator repeats admission checks inside the event transaction", async () => {
     type Transaction = { readonly name: "turn" };
     const task: TurnTaskSnapshot = { id: "task-1", threadId: "thread-1", status: "BLOCKED" };
