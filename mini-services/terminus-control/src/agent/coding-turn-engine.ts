@@ -4,6 +4,14 @@ import type {
   ProjectedResponse,
   RenderedProviderRequest,
 } from "@terminus/provider-core";
+import { canonicalJson } from "@terminus/context-ir";
+import {
+  buildOperationObservation,
+  classifyLoopError,
+  type LoopErrorEnvelope,
+  type OperationObservation,
+  type OperationStatus,
+} from "./loop-contracts.js";
 import { planToolBatches, TurnBudget, type TurnBudgetOptions } from "./turn-budget.js";
 
 /**
@@ -66,6 +74,20 @@ export interface EngineDependencies {
     readonly projected: ProjectedResponse;
     /** Whether the turn was interrupted mid-flight. */
     readonly interrupted: boolean;
+    /** Artifact containing the exact provider response, when available. */
+    readonly responseArtifactUri?: string | null | undefined;
+    /** Provider usage is fed into the durable turn budget when supplied. */
+      readonly usage?: {
+        readonly inputTokens?: bigint | undefined;
+        readonly cachedInputTokens?: bigint | undefined;
+        readonly cacheWriteTokens?: bigint | undefined;
+        readonly outputTokens?: bigint | undefined;
+      readonly reasoningTokens?: bigint | undefined;
+      readonly toolSchemaTokens?: bigint | undefined;
+      readonly costMicros?: bigint | undefined;
+    } | undefined;
+    /** Explicitly distinguishes an answer from a completion proposal. */
+    readonly completion?: CompletionSignal | undefined;
   }>;
   /**
    * Settle ONE tool call durably (policy → dispatch → effect settlement).
@@ -76,7 +98,7 @@ export interface EngineDependencies {
     readonly call: ProviderToolCallChunk;
     readonly attemptNumber: number;
     readonly attemptId: string;
-  }) => Promise<void>;
+  }) => Promise<EngineToolSettlement | void>;
   /** Move the durable turn back to context compilation after all calls settle. */
   readonly afterToolsSettled?: () => Promise<void>;
   /** Classify a tool name's side-effect class ("read" = parallel-safe). */
@@ -88,11 +110,69 @@ export interface EngineDependencies {
   readonly signal?: AbortSignal | null;
   /** Invoked when a tool call was refused by policy; aborts the loop. */
   readonly onPolicyDenied?: (message: string) => void | Promise<void>;
+  /** Optional task identity used in operation observations. */
+  readonly taskId?: string | null | undefined;
+  readonly contractVersion?: number | null | undefined;
+  /** Supplies current repair hypothesis/objective state without provider coupling. */
+  readonly operationContext?: (input: {
+    readonly call: ProviderToolCallChunk;
+    readonly attemptId: string;
+    readonly attemptNumber: number;
+  }) => {
+    readonly toolVersion?: string | null | undefined;
+    readonly workspaceRevisionBefore?: string | null | undefined;
+    readonly workspaceRevisionAfter?: string | null | undefined;
+    readonly verificationDelta?: string | null | undefined;
+    readonly hypothesisId?: string | null | undefined;
+    readonly criterionIds?: readonly string[] | undefined;
+    readonly objectiveStep?: string | null | undefined;
+  };
+  /** Receives the exact observation after it is added to the budget ledger. */
+  readonly onOperationObserved?: (observation: OperationObservation) => void | Promise<void>;
+}
+
+export interface EngineToolSettlement {
+  readonly status?: OperationStatus | undefined;
+  readonly resultHash?: string | null | undefined;
+  readonly errorCode?: string | null | undefined;
+  readonly errorClass?: string | null | undefined;
+  readonly workspaceRevisionBefore?: string | null | undefined;
+  readonly workspaceRevisionAfter?: string | null | undefined;
+  readonly verificationDelta?: string | null | undefined;
+  readonly hypothesisId?: string | null | undefined;
+  readonly criterionIds?: readonly string[] | undefined;
+  readonly objectiveStep?: string | null | undefined;
+}
+
+export interface CompletionClaim {
+  readonly criterionId: string;
+  readonly evidenceRefs: readonly string[];
+  readonly changedArtifactRefs: readonly string[];
+}
+
+export type CompletionSignal =
+  | { readonly kind: "assistant_message" }
+  | { readonly kind: "completion_proposal"; readonly claims: readonly CompletionClaim[] };
+
+export interface CompletionProposal {
+  readonly status: "PROPOSED";
+  readonly attemptId: string;
+  readonly text: string;
+  readonly responseArtifactUri: string | null;
+  readonly claims: readonly CompletionClaim[];
 }
 
 export type EngineStop =
-  | { readonly kind: "final"; readonly text: string; readonly responseArtifactUri: string | null }
+  | { readonly kind: "assistant_message"; readonly text: string; readonly responseArtifactUri: string | null; readonly attemptId: string }
+  | { readonly kind: "completion_proposal"; readonly proposal: CompletionProposal }
   | { readonly kind: "interrupted" }
+  | { readonly kind: "budget_stop"; readonly reason: string; readonly ledger: TurnBudget["ledger"] }
+  | { readonly kind: "policy_stop"; readonly error: LoopErrorEnvelope }
+  | { readonly kind: "blocked"; readonly reason: string; readonly error: LoopErrorEnvelope | null }
+  | { readonly kind: "needs_user_input"; readonly question: string; readonly error: LoopErrorEnvelope | null }
+  | { readonly kind: "failed_verification"; readonly failures: readonly string[] }
+  /** Compatibility variants for the current composition root. */
+  | { readonly kind: "final"; readonly text: string; readonly responseArtifactUri: string | null }
   | { readonly kind: "budget_exhausted"; readonly reason: string }
   | { readonly kind: "policy_denied"; readonly message: string }
   | { readonly kind: "doom_loop"; readonly signature: string; readonly count: number }
@@ -111,8 +191,16 @@ export class CodingTurnEngine {
     this.budget = new TurnBudget(dependencies.budget ?? {});
   }
 
-  /** Run the bounded loop. Never throws budget/policy conditions — reports them. */
+  /** Run the bounded loop. Never throws typed budget/policy/provider conditions. */
   async run(): Promise<EngineStop> {
+    try {
+      return await this.runLoop();
+    } catch (error: unknown) {
+      return this.stopForError(error);
+    }
+  }
+
+  private async runLoop(): Promise<EngineStop> {
     for (;;) {
       if (this.dependencies.signal?.aborted) {
         return { kind: "interrupted" };
@@ -120,10 +208,18 @@ export class CodingTurnEngine {
       const decision = this.budget.canStartStep();
       if (!decision.allowed) {
         this.budget.recordStep();
-        return { kind: "budget_exhausted", reason: decision.reason ?? "steps_exhausted" };
+        return {
+          kind: "budget_stop",
+          reason: decision.reason ?? "steps_exhausted",
+          ledger: this.budget.ledger,
+        };
       }
       if (this.budget.isStagnant()) {
-        return { kind: "budget_exhausted", reason: "stagnation_detected" };
+        return {
+          kind: "budget_stop",
+          reason: "stagnation_detected",
+          ledger: this.budget.ledger,
+        };
       }
       const attemptNumber = this.budget.steps + 1;
       this.budget.recordStep();
@@ -152,22 +248,49 @@ export class CodingTurnEngine {
         response,
       });
       if (settled.interrupted) return { kind: "interrupted" };
+      if (settled.usage !== undefined) {
+        this.budget.recordUsage(settled.usage);
+        if (settled.usage.inputTokens !== undefined) {
+          this.budget.recordContextUsage(settled.usage.inputTokens);
+        }
+      }
 
       const toolCalls = settled.projected.toolCalls;
       if (toolCalls.length === 0) {
+        const responseArtifactUri = settled.responseArtifactUri ?? null;
+        if (settled.completion?.kind === "completion_proposal") {
+          return {
+            kind: "completion_proposal",
+            proposal: {
+              status: "PROPOSED",
+              attemptId,
+              text: settled.projected.text,
+              responseArtifactUri,
+              claims: settled.completion.claims,
+            },
+          };
+        }
+        if (settled.projected.text.trim().length === 0 || settled.completion?.kind === "assistant_message") {
+          return {
+            kind: "assistant_message",
+            text: settled.projected.text,
+            responseArtifactUri,
+            attemptId,
+          };
+        }
+        // A response without an explicit completion signal is still an
+        // assistant message. Completion is admitted by the verifier later.
         return {
-          kind: "final",
+          kind: "assistant_message",
           text: settled.projected.text,
-          // The caller already persisted the response artifact during
-          // settlement; engine surfaces null because it never touches
-          // artifacts directly.
-          responseArtifactUri: null,
+          responseArtifactUri,
+          attemptId,
         };
       }
 
       // Doom-loop detection: repeated identical tool signatures across attempts
       const toolSignature = toolCalls
-        .map((c) => `${c.toolName}:${JSON.stringify(c.arguments)}`)
+        .map((c) => `${c.toolName}:${canonicalJson(c.arguments)}`)
         .sort()
         .join(";");
 
@@ -199,7 +322,7 @@ export class CodingTurnEngine {
             // Concurrent reads, deterministic result order.
             await Promise.all(
               batch.map((call) =>
-                this.dependencies.settleToolCall({
+                this.settleAndObserveToolCall({
                   call,
                   attemptNumber,
                   attemptId,
@@ -208,7 +331,7 @@ export class CodingTurnEngine {
             );
           } else {
             for (const call of batch) {
-              await this.dependencies.settleToolCall({
+              await this.settleAndObserveToolCall({
                 call,
                 attemptNumber,
                 attemptId,
@@ -216,10 +339,26 @@ export class CodingTurnEngine {
             }
           }
         } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (/\b(policy|denied)\b/i.test(message)) {
-            await this.dependencies.onPolicyDenied?.(message);
+          const classified = classifyLoopError(error);
+          if (classified.kind === "policy_denied") {
+            await this.dependencies.onPolicyDenied?.(classified.envelope.message);
+            return { kind: "policy_stop", error: classified.envelope };
           }
+          if (classified.kind === "budget_exhausted") {
+            return {
+              kind: "budget_stop",
+              reason: classified.envelope.code,
+              ledger: this.budget.ledger,
+            };
+          }
+          if (classified.kind === "needs_user_input") {
+            return {
+              kind: "needs_user_input",
+              question: classified.envelope.message,
+              error: classified.envelope,
+            };
+          }
+          if (classified.kind === "cancelled") return { kind: "interrupted" };
           throw error;
         }
         operationIndex += batch.length;
@@ -237,5 +376,97 @@ export class CodingTurnEngine {
         await this.dependencies.afterToolsSettled();
       }
     }
+  }
+
+  private stopForError(error: unknown): EngineStop {
+    const classified = classifyLoopError(error);
+    if (classified.kind === "policy_denied") {
+      return { kind: "policy_stop", error: classified.envelope };
+    }
+    if (classified.kind === "budget_exhausted") {
+      return {
+        kind: "budget_stop",
+        reason: classified.envelope.code,
+        ledger: this.budget.ledger,
+      };
+    }
+    if (classified.kind === "needs_user_input") {
+      return {
+        kind: "needs_user_input",
+        question: classified.envelope.message,
+        error: classified.envelope,
+      };
+    }
+    if (classified.kind === "cancelled") return { kind: "interrupted" };
+    if (classified.kind === "provider") {
+      return {
+        kind: "blocked",
+        reason: classified.envelope.code,
+        error: classified.envelope,
+      };
+    }
+    throw error;
+  }
+
+  private async settleAndObserveToolCall(input: {
+    readonly call: ProviderToolCallChunk;
+    readonly attemptNumber: number;
+    readonly attemptId: string;
+  }): Promise<void> {
+    let settlement: EngineToolSettlement | void;
+    try {
+      settlement = await this.dependencies.settleToolCall(input);
+    } catch (error: unknown) {
+      const classified = classifyLoopError(error);
+      const metadata = this.dependencies.operationContext?.(input);
+      const observation = buildOperationObservation({
+        taskId: this.dependencies.taskId,
+        contractVersion: this.dependencies.contractVersion,
+        attemptId: input.attemptId,
+        attemptNumber: input.attemptNumber,
+        providerCallId: input.call.toolCallId,
+        toolId: input.call.toolName,
+        toolVersion: metadata?.toolVersion ?? null,
+        status: classified.kind === "policy_denied" ? "denied" : classified.kind === "budget_exhausted" ? "error" : "error",
+        errorCode: classified.envelope.code,
+        errorClass: classified.envelope.category,
+        mutatesWorkspace: this.dependencies.sideEffectClassOf(input.call.toolName) !== "read",
+        workspaceRevisionBefore: metadata?.workspaceRevisionBefore ?? null,
+        workspaceRevisionAfter: metadata?.workspaceRevisionAfter ?? null,
+        verificationDelta: metadata?.verificationDelta ?? null,
+        hypothesisId: metadata?.hypothesisId ?? null,
+        criterionIds: metadata?.criterionIds,
+        objectiveStep: metadata?.objectiveStep ?? null,
+        arguments: input.call.arguments,
+      });
+      this.budget.recordObservation(observation);
+      await this.dependencies.onOperationObserved?.(observation);
+      throw error;
+    }
+    const metadata = this.dependencies.operationContext?.(input);
+    const settlementRecord = settlement ?? null;
+    const observation = buildOperationObservation({
+      taskId: this.dependencies.taskId,
+      contractVersion: this.dependencies.contractVersion,
+      attemptId: input.attemptId,
+      attemptNumber: input.attemptNumber,
+      providerCallId: input.call.toolCallId,
+      toolId: input.call.toolName,
+      toolVersion: metadata?.toolVersion ?? null,
+      status: settlementRecord?.status ?? "success",
+      resultHash: settlementRecord?.resultHash ?? null,
+      errorCode: settlementRecord?.errorCode ?? null,
+      errorClass: settlementRecord?.errorClass ?? null,
+      mutatesWorkspace: this.dependencies.sideEffectClassOf(input.call.toolName) !== "read",
+      workspaceRevisionBefore: settlementRecord?.workspaceRevisionBefore ?? metadata?.workspaceRevisionBefore ?? null,
+      workspaceRevisionAfter: settlementRecord?.workspaceRevisionAfter ?? metadata?.workspaceRevisionAfter ?? null,
+      verificationDelta: settlementRecord?.verificationDelta ?? metadata?.verificationDelta ?? null,
+      hypothesisId: settlementRecord?.hypothesisId ?? metadata?.hypothesisId ?? null,
+      criterionIds: settlementRecord?.criterionIds ?? metadata?.criterionIds,
+      objectiveStep: settlementRecord?.objectiveStep ?? metadata?.objectiveStep ?? null,
+      arguments: input.call.arguments,
+    });
+    this.budget.recordObservation(observation);
+    await this.dependencies.onOperationObserved?.(observation);
   }
 }

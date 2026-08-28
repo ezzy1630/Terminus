@@ -5,12 +5,37 @@ import {
   planToolBatches,
 } from "./turn-budget.js";
 import type { ProviderToolCallChunk } from "@terminus/provider-core";
+import { buildOperationObservation } from "./loop-contracts.js";
 
 function call(id: string, toolName: string): ProviderToolCallChunk {
-  return { kind: "tool_call", toolCallId: id, toolName, arguments: {} };
+  return { toolCallId: id, toolName, arguments: {} };
 }
 
 const isRead = (c: ProviderToolCallChunk) => c.toolName === "read";
+
+function observation(input: {
+  readonly toolId?: string;
+  readonly arguments?: unknown;
+  readonly status?: "success" | "error";
+  readonly resultHash?: string | null;
+  readonly errorClass?: string | null;
+  readonly before?: string | null;
+  readonly after?: string | null;
+}) {
+  return buildOperationObservation({
+    attemptId: "attempt-1",
+    attemptNumber: 1,
+    providerCallId: "call-1",
+    toolId: input.toolId ?? "patch",
+    status: input.status ?? "success",
+    resultHash: input.resultHash === undefined ? "sha256:result" : input.resultHash,
+    errorClass: input.errorClass ?? null,
+    mutatesWorkspace: true,
+    workspaceRevisionBefore: input.before ?? "rev-a",
+    workspaceRevisionAfter: input.after ?? "rev-a",
+    arguments: input.arguments ?? { path: "src/a.ts" },
+  });
+}
 
 describe("planToolBatches", () => {
   test("groups consecutive reads and preserves provider order", () => {
@@ -108,5 +133,98 @@ describe("TurnBudget", () => {
     const decision = budget.canStartStep();
     expect(decision.allowed).toBe(false);
     expect(decision.reason).toBe("cancelled");
+  });
+
+  test("typed observations detect no-op writes and reset on a real revision change", () => {
+    const budget = new TurnBudget({ stagnationRepeatLimit: 2 });
+    const first = budget.recordObservation(observation({}));
+    const second = budget.recordObservation(observation({}));
+    expect(first.progressed).toBe(true);
+    expect(second).toMatchObject({
+      progressed: false,
+      noOp: true,
+      reason: "no_op",
+      recommendedRecovery: ["change_hypothesis", "inspect_evidence", "rollback", "stop"],
+    });
+    expect(budget.isStagnant()).toBe(false);
+    const third = budget.recordObservation(observation({}));
+    expect(third.progressed).toBe(false);
+    expect(budget.isStagnant()).toBe(true);
+
+    const changed = budget.recordObservation(observation({ before: "rev-a", after: "rev-b" }));
+    expect(changed).toMatchObject({ progressed: true, reason: "workspace_changed" });
+    expect(budget.isStagnant()).toBe(false);
+  });
+
+  test("typed observations detect a repeated failure class across different calls", () => {
+    const budget = new TurnBudget({ stagnationRepeatLimit: 2 });
+    budget.recordObservation(observation({
+      toolId: "read",
+      arguments: { path: "src/a.ts" },
+      status: "error",
+      resultHash: null,
+      errorClass: "verification_failure",
+    }));
+    const analysis = budget.recordObservation(observation({
+      toolId: "search",
+      arguments: { query: "same symbol" },
+      status: "error",
+      resultHash: null,
+      errorClass: "verification_failure",
+    }));
+    expect(analysis).toMatchObject({ progressed: false, repeatedFailure: true, reason: "repeated_failure" });
+  });
+
+  test("typed observations detect A-B-A-B oscillation", () => {
+    const budget = new TurnBudget();
+    const record = (toolId: string) => budget.recordObservation(observation({ toolId, arguments: { path: toolId } }));
+    record("patch-a");
+    record("patch-b");
+    record("patch-a");
+    const analysis = record("patch-b");
+    expect(analysis).toMatchObject({ progressed: false, oscillating: true, reason: "oscillation" });
+  });
+
+  test("ledger accounts usage, context headroom, evidence, and final reserves", () => {
+    const budget = new TurnBudget({
+      maxSteps: 4,
+      maxTokens: 100n,
+      maxCostMicros: 50n,
+      contextHeadroomTokens: 80n,
+      finalVerificationReserveTokens: 20n,
+      finalVerificationReserveCostMicros: 10n,
+      minExpectedValue: 0.5,
+    });
+    budget.recordUsage({ inputTokens: 40n, outputTokens: 10n, costMicros: 15n });
+    budget.recordContextUsage(65n);
+    budget.recordEvidence({
+      outstandingCriteria: 1,
+      verificationFailures: 1,
+      repairAttempts: 1,
+      expectedValue: 0.8,
+      reliability: 0.75,
+      providerReliability: 0.9,
+      toolReliability: 0.8,
+    });
+    expect(budget.ledger).toMatchObject({
+      tokensUsed: 50n,
+      costMicros: 15n,
+      contextHeadroomTokens: 15n,
+      finalVerificationReserveTokens: 20n,
+      finalVerificationReserveCostMicros: 10n,
+      evidence: {
+        outstandingCriteria: 1,
+        repairAttempts: 1,
+        expectedValue: 0.8,
+      },
+    });
+    expect(budget.canStartStep().allowed).toBe(false);
+    expect(budget.canStartStep().reason).toBe("context_headroom_exhausted");
+  });
+
+  test("evidence expected value can stop an otherwise available attempt", () => {
+    const budget = new TurnBudget({ maxSteps: 2, minExpectedValue: 0.6 });
+    budget.recordEvidence({ outstandingCriteria: 1, expectedValue: 0.2 });
+    expect(budget.canStartStep()).toEqual({ allowed: false, reason: "expected_value_too_low" });
   });
 });

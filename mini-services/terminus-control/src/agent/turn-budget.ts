@@ -1,4 +1,5 @@
 import type { ProviderToolCallChunk } from "@terminus/provider-core";
+import type { OperationObservation } from "./loop-contracts.js";
 
 /**
  * Adaptive turn budget (deep-audit Rank 2).
@@ -28,6 +29,18 @@ export interface TurnBudgetOptions {
    * with no workspace-changing call in between.
    */
   readonly stagnationRepeatLimit?: number;
+  /** Hard model-token budget for this turn, including all recorded usage. */
+  readonly maxTokens?: bigint;
+  /** Hard provider-cost budget for this turn. */
+  readonly maxCostMicros?: bigint;
+  /** Context tokens still available to the next attempt. */
+  readonly contextHeadroomTokens?: bigint;
+  /** Tokens reserved for the independent final verification request. */
+  readonly finalVerificationReserveTokens?: bigint;
+  /** Cost reserved for the independent final verification request. */
+  readonly finalVerificationReserveCostMicros?: bigint;
+  /** Minimum deterministic expected value for another attempt. */
+  readonly minExpectedValue?: number;
   readonly now?: () => number;
 }
 
@@ -36,16 +49,89 @@ export type BudgetStopReason =
   | "hard_max_exceeded"
   | "wall_clock_exceeded"
   | "stagnation_detected"
-  | "cancelled";
+  | "cancelled"
+  | "token_budget_exhausted"
+  | "cost_budget_exhausted"
+  | "context_headroom_exhausted"
+  | "expected_value_too_low";
 
 export interface TurnBudgetDecision {
   readonly allowed: boolean;
   readonly reason: BudgetStopReason | null;
 }
 
-interface OperationRecord {
+interface LegacyOperationRecord {
   hash: string;
   mutatesWorkspace: boolean;
+}
+
+export interface OperationProgressAnalysis {
+  readonly progressed: boolean;
+  readonly noOp: boolean;
+  readonly repeatedFailure: boolean;
+  readonly oscillating: boolean;
+  readonly failureClass: string | null;
+  readonly recommendedRecovery: readonly ProgressRecoveryAction[];
+  readonly reason:
+    | "new_operation"
+    | "workspace_changed"
+    | "verification_changed"
+    | "result_changed"
+    | "no_op"
+    | "repeated_failure"
+    | "oscillation";
+}
+
+export type ProgressRecoveryAction =
+  | "change_hypothesis"
+  | "inspect_evidence"
+  | "rollback"
+  | "stop";
+
+export interface BudgetUsage {
+  readonly inputTokens?: bigint | undefined;
+  readonly cachedInputTokens?: bigint | undefined;
+  readonly cacheWriteTokens?: bigint | undefined;
+  readonly outputTokens?: bigint | undefined;
+  readonly reasoningTokens?: bigint | undefined;
+  readonly toolSchemaTokens?: bigint | undefined;
+  readonly costMicros?: bigint | undefined;
+}
+
+export interface BudgetEvidenceState {
+  readonly outstandingCriteria: number;
+  readonly satisfiedCriteria: number;
+  readonly verificationFailures: number;
+  readonly repairAttempts: number;
+  readonly evidenceCoverage: number;
+  readonly expectedValue: number | null;
+  readonly reliability: number | null;
+  readonly providerReliability: number | null;
+  readonly toolReliability: number | null;
+}
+
+export interface BudgetLedgerSnapshot {
+  readonly stepsUsed: number;
+  readonly maxSteps: number;
+  readonly hardMaxSteps: number;
+  readonly tokensUsed: bigint;
+  /** Provider-reported dimensions are retained without folding cache reads into input twice. */
+  readonly usage: {
+    readonly inputTokens: bigint;
+    readonly cachedInputTokens: bigint;
+    readonly cacheWriteTokens: bigint;
+    readonly outputTokens: bigint;
+    readonly reasoningTokens: bigint;
+    readonly toolSchemaTokens: bigint;
+  };
+  readonly maxTokens: bigint | null;
+  readonly costMicros: bigint;
+  readonly maxCostMicros: bigint | null;
+  readonly contextHeadroomTokens: bigint | null;
+  readonly finalVerificationReserveTokens: bigint;
+  readonly finalVerificationReserveCostMicros: bigint;
+  readonly evidence: BudgetEvidenceState;
+  readonly lastProgress: OperationProgressAnalysis | null;
 }
 
 /** Classify whether a tool call can mutate the workspace or process state. */
@@ -98,13 +184,44 @@ export function planToolBatches(
 
 export class TurnBudget {
   private stepsUsed = 0;
-  private readonly operationHistory: OperationRecord[] = [];
+  private readonly operationHistory: LegacyOperationRecord[] = [];
+  private readonly observationHistory: OperationObservation[] = [];
   private readonly maxSteps: number;
   private readonly hardMaxSteps: number;
   private readonly startedAtMs: number;
   private readonly wallClockMs: number | null;
   private readonly stagnationRepeatLimit: number;
+  private readonly maxTokens: bigint | null;
+  private readonly maxCostMicros: bigint | null;
+  private readonly contextHeadroomTokens: bigint | null;
+  private readonly finalVerificationReserveTokens: bigint;
+  private readonly finalVerificationReserveCostMicros: bigint;
+  private readonly minExpectedValue: number | null;
   private readonly now: () => number;
+  private tokensUsed = 0n;
+  private usage = {
+    inputTokens: 0n,
+    cachedInputTokens: 0n,
+    cacheWriteTokens: 0n,
+    outputTokens: 0n,
+    reasoningTokens: 0n,
+    toolSchemaTokens: 0n,
+  };
+  private costMicros = 0n;
+  private contextHeadroomRemaining: bigint | null;
+  private evidence: BudgetEvidenceState = {
+    outstandingCriteria: 0,
+    satisfiedCriteria: 0,
+    verificationFailures: 0,
+    repairAttempts: 0,
+    evidenceCoverage: 0,
+    expectedValue: null,
+    reliability: null,
+    providerReliability: null,
+    toolReliability: null,
+  };
+  private nonProgressRun = 0;
+  private lastProgress: OperationProgressAnalysis | null = null;
   private cancelled = false;
 
   constructor(options: TurnBudgetOptions = {}) {
@@ -116,7 +233,32 @@ export class TurnBudget {
     );
     this.startedAtMs = this.now();
     this.wallClockMs = options.wallClockMs ?? null;
-    this.stagnationRepeatLimit = options.stagnationRepeatLimit ?? 2;
+    this.stagnationRepeatLimit = options.stagnationRepeatLimit ?? 3;
+    this.maxTokens = options.maxTokens ?? null;
+    this.maxCostMicros = options.maxCostMicros ?? null;
+    this.contextHeadroomTokens = options.contextHeadroomTokens ?? null;
+    this.contextHeadroomRemaining = this.contextHeadroomTokens;
+    this.finalVerificationReserveTokens = options.finalVerificationReserveTokens ?? 0n;
+    this.finalVerificationReserveCostMicros = options.finalVerificationReserveCostMicros ?? 0n;
+    this.minExpectedValue = options.minExpectedValue ?? null;
+    if (this.maxSteps < 0 || this.hardMaxSteps < 0 || this.maxSteps > this.hardMaxSteps) {
+      throw new Error("maxSteps must be non-negative and no greater than hardMaxSteps");
+    }
+    if (this.stagnationRepeatLimit < 1 || !Number.isInteger(this.stagnationRepeatLimit)) {
+      throw new Error("stagnationRepeatLimit must be a positive integer");
+    }
+    if (this.minExpectedValue !== null && (!Number.isFinite(this.minExpectedValue) || this.minExpectedValue < 0)) {
+      throw new Error("minExpectedValue must be a finite non-negative number");
+    }
+    for (const [label, value] of [
+      ["maxTokens", this.maxTokens],
+      ["maxCostMicros", this.maxCostMicros],
+      ["contextHeadroomTokens", this.contextHeadroomTokens],
+      ["finalVerificationReserveTokens", this.finalVerificationReserveTokens],
+      ["finalVerificationReserveCostMicros", this.finalVerificationReserveCostMicros],
+    ] as const) {
+      if (value !== null && value < 0n) throw new Error(`${label} must be non-negative`);
+    }
   }
 
   /** Record one provider attempt (a step). */
@@ -136,8 +278,154 @@ export class TurnBudget {
     if (this.operationHistory.length > 64) this.operationHistory.shift();
   }
 
+  /**
+   * Record the richer observation used by semantic progress detection. The
+   * legacy overload above remains for older composition roots; once a typed
+   * observation arrives it owns the stagnation stream and legacy entries no
+   * longer affect decisions.
+   */
+  recordObservation(observation: OperationObservation): OperationProgressAnalysis {
+    this.operationHistory.length = 0;
+    const previous = this.observationHistory[this.observationHistory.length - 1] ?? null;
+    const workspaceChanged = observation.workspaceRevisionBefore !== observation.workspaceRevisionAfter
+      && (observation.workspaceRevisionBefore !== null || observation.workspaceRevisionAfter !== null);
+    const verificationChanged = observation.verificationDelta !== null
+      && observation.verificationDelta !== previous?.verificationDelta;
+    const resultChanged = previous !== null && observation.resultHash !== previous.resultHash;
+    const sameSemantic = previous !== null
+      && observation.semanticFingerprint === previous.semanticFingerprint;
+    const failureClass = operationFailureClass(observation);
+    const repeatedFailure = previous !== null
+      && failureClass !== null
+      && failureClass === operationFailureClass(previous)
+      && !workspaceChanged
+      && !verificationChanged;
+    const historyLength = this.observationHistory.length;
+    const oscillating = historyLength >= 3
+      && this.observationHistory[historyLength - 3]!.semanticFingerprint === this.observationHistory[historyLength - 1]!.semanticFingerprint
+      && this.observationHistory[historyLength - 2]!.semanticFingerprint === observation.semanticFingerprint
+      && this.observationHistory[historyLength - 3]!.semanticFingerprint !== observation.semanticFingerprint
+      && !workspaceChanged
+      && !verificationChanged;
+    const noOp = sameSemantic && !workspaceChanged && !verificationChanged && !resultChanged;
+    const progressed = workspaceChanged || verificationChanged || (!noOp && !repeatedFailure && !oscillating);
+    const reason: OperationProgressAnalysis["reason"] = workspaceChanged
+      ? "workspace_changed"
+      : verificationChanged
+        ? "verification_changed"
+        : oscillating
+          ? "oscillation"
+          : repeatedFailure
+            ? "repeated_failure"
+            : noOp
+              ? "no_op"
+              : resultChanged
+                ? "result_changed"
+                : "new_operation";
+    const analysis: OperationProgressAnalysis = {
+      progressed,
+      noOp,
+      repeatedFailure,
+      oscillating,
+      failureClass,
+      recommendedRecovery: progressed
+        ? []
+        : ["change_hypothesis", "inspect_evidence", "rollback", "stop"],
+      reason,
+    };
+    this.lastProgress = analysis;
+    this.nonProgressRun = progressed ? 0 : this.nonProgressRun + 1;
+    this.observationHistory.push(observation);
+    if (this.observationHistory.length > 128) this.observationHistory.shift();
+    return analysis;
+  }
+
+  /** Record provider usage and cost without allowing negative accounting. */
+  recordUsage(usage: BudgetUsage): void {
+    const values = {
+      inputTokens: usage.inputTokens ?? 0n,
+      cachedInputTokens: usage.cachedInputTokens ?? 0n,
+      cacheWriteTokens: usage.cacheWriteTokens ?? 0n,
+      outputTokens: usage.outputTokens ?? 0n,
+      reasoningTokens: usage.reasoningTokens ?? 0n,
+      toolSchemaTokens: usage.toolSchemaTokens ?? 0n,
+    };
+    for (const value of Object.values(values)) {
+      if (value < 0n) throw new Error("budget token usage cannot be negative");
+    }
+    this.usage = {
+      inputTokens: this.usage.inputTokens + values.inputTokens,
+      cachedInputTokens: this.usage.cachedInputTokens + values.cachedInputTokens,
+      cacheWriteTokens: this.usage.cacheWriteTokens + values.cacheWriteTokens,
+      outputTokens: this.usage.outputTokens + values.outputTokens,
+      reasoningTokens: this.usage.reasoningTokens + values.reasoningTokens,
+      toolSchemaTokens: this.usage.toolSchemaTokens + values.toolSchemaTokens,
+    };
+    // inputTokens is already the provider's complete input dimension. A
+    // cached-input count is a subset for cost/accounting purposes, not an
+    // additional token stream. Cache writes are reported separately by some
+    // providers and therefore add to the total when present.
+    this.tokensUsed += values.inputTokens
+      + values.cacheWriteTokens
+      + values.outputTokens
+      + values.reasoningTokens
+      + values.toolSchemaTokens;
+    if (usage.costMicros !== undefined) {
+      if (usage.costMicros < 0n) throw new Error("budget cost cannot be negative");
+      this.costMicros += usage.costMicros;
+    }
+  }
+
+  /** Account for the input context consumed by an attempt. */
+  recordContextUsage(tokens: bigint): void {
+    if (tokens < 0n) throw new Error("context usage cannot be negative");
+    if (this.contextHeadroomRemaining === null) return;
+    this.contextHeadroomRemaining = tokens >= this.contextHeadroomRemaining
+      ? 0n
+      : this.contextHeadroomRemaining - tokens;
+  }
+
+  /** Record verifier state used for deterministic expected-value decisions. */
+  recordEvidence(state: Partial<BudgetEvidenceState>): void {
+    const next: BudgetEvidenceState = {
+      outstandingCriteria: state.outstandingCriteria ?? this.evidence.outstandingCriteria,
+      satisfiedCriteria: state.satisfiedCriteria ?? this.evidence.satisfiedCriteria,
+      verificationFailures: state.verificationFailures ?? this.evidence.verificationFailures,
+      repairAttempts: state.repairAttempts ?? this.evidence.repairAttempts,
+      evidenceCoverage: state.evidenceCoverage ?? this.evidence.evidenceCoverage,
+      expectedValue: state.expectedValue === undefined ? this.evidence.expectedValue : state.expectedValue,
+      reliability: state.reliability === undefined ? this.evidence.reliability : state.reliability,
+      providerReliability: state.providerReliability === undefined
+        ? this.evidence.providerReliability
+        : state.providerReliability,
+      toolReliability: state.toolReliability === undefined
+        ? this.evidence.toolReliability
+        : state.toolReliability,
+    };
+    if (next.outstandingCriteria < 0 || next.satisfiedCriteria < 0 || next.verificationFailures < 0) {
+      throw new Error("budget evidence counts cannot be negative");
+    }
+    if (next.evidenceCoverage < 0 || next.evidenceCoverage > 1) {
+      throw new Error("budget evidenceCoverage must be between 0 and 1");
+    }
+    if (next.expectedValue !== null && (!Number.isFinite(next.expectedValue) || next.expectedValue < 0)) {
+      throw new Error("budget expectedValue must be finite and non-negative");
+    }
+    if (next.reliability !== null && (!Number.isFinite(next.reliability) || next.reliability < 0 || next.reliability > 1)) {
+      throw new Error("budget reliability must be between 0 and 1");
+    }
+    if (next.providerReliability !== null && (!Number.isFinite(next.providerReliability) || next.providerReliability < 0 || next.providerReliability > 1)) {
+      throw new Error("budget providerReliability must be between 0 and 1");
+    }
+    if (next.toolReliability !== null && (!Number.isFinite(next.toolReliability) || next.toolReliability < 0 || next.toolReliability > 1)) {
+      throw new Error("budget toolReliability must be between 0 and 1");
+    }
+    this.evidence = next;
+  }
+
   /** Most repeated consecutive read-only operation count. */
   stagnationRun(): number {
+    if (this.observationHistory.length > 0) return this.nonProgressRun;
     if (this.operationHistory.length === 0) return 0;
     const last = this.operationHistory[this.operationHistory.length - 1]!;
     let run = 0;
@@ -160,6 +448,28 @@ export class TurnBudget {
     return this.stepsUsed;
   }
 
+  get ledger(): BudgetLedgerSnapshot {
+    return {
+      stepsUsed: this.stepsUsed,
+      maxSteps: this.maxSteps,
+      hardMaxSteps: this.hardMaxSteps,
+      tokensUsed: this.tokensUsed,
+      usage: this.usage,
+      maxTokens: this.maxTokens,
+      costMicros: this.costMicros,
+      maxCostMicros: this.maxCostMicros,
+      contextHeadroomTokens: this.contextHeadroomRemaining,
+      finalVerificationReserveTokens: this.finalVerificationReserveTokens,
+      finalVerificationReserveCostMicros: this.finalVerificationReserveCostMicros,
+      evidence: this.evidence,
+      lastProgress: this.lastProgress,
+    };
+  }
+
+  get latestProgress(): OperationProgressAnalysis | null {
+    return this.lastProgress;
+  }
+
   /** Whether another provider attempt may start now. */
   canStartStep(): TurnBudgetDecision {
     if (this.cancelled) return { allowed: false, reason: "cancelled" };
@@ -178,11 +488,38 @@ export class TurnBudget {
     ) {
       return { allowed: false, reason: "wall_clock_exceeded" };
     }
+    if (this.maxTokens !== null && this.tokensUsed + this.finalVerificationReserveTokens >= this.maxTokens) {
+      return { allowed: false, reason: "token_budget_exhausted" };
+    }
+    if (this.maxCostMicros !== null && this.costMicros + this.finalVerificationReserveCostMicros >= this.maxCostMicros) {
+      return { allowed: false, reason: "cost_budget_exhausted" };
+    }
+    if (
+      this.contextHeadroomRemaining !== null
+      && this.contextHeadroomRemaining <= this.finalVerificationReserveTokens
+    ) {
+      return { allowed: false, reason: "context_headroom_exhausted" };
+    }
+    if (
+      this.minExpectedValue !== null
+      && this.evidence.expectedValue !== null
+      && this.evidence.expectedValue < this.minExpectedValue
+      && this.evidence.outstandingCriteria > 0
+    ) {
+      return { allowed: false, reason: "expected_value_too_low" };
+    }
     return { allowed: true, reason: null };
   }
 
   /** Whether the current operation stream looks stagnant. */
   isStagnant(): boolean {
-    return this.stagnationRun() >= this.stagnationRepeatLimit;
+    return this.observationHistory.length > 0
+      ? this.nonProgressRun >= this.stagnationRepeatLimit
+      : this.stagnationRun() >= this.stagnationRepeatLimit;
   }
+}
+
+function operationFailureClass(observation: OperationObservation): string | null {
+  if (observation.status === "success" || observation.status === "partial") return null;
+  return observation.errorClass ?? observation.errorCode ?? observation.status;
 }

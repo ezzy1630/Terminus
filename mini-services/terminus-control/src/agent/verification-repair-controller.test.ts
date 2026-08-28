@@ -51,6 +51,21 @@ describe("normalizeFailure", () => {
     expect(first.artifactRefs).toEqual(["artifact://sha256/a", "artifact://sha256/b"]);
   });
 
+  test("binds failures to the verified source revision", () => {
+    const first = normalizeFailure({
+      ...rawFailure("n1", "same diagnostic"),
+      sourceRevision: "workspace:one",
+    });
+    const second = normalizeFailure({
+      ...rawFailure("n1", "same diagnostic"),
+      sourceRevision: "workspace:two",
+    });
+    expect(first.sourceRevision).toBe("workspace:one");
+    expect(second.sourceRevision).toBe("workspace:two");
+    expect(first.signatureHash).not.toBe(second.signatureHash);
+    expect(first.failureClass).toBe(second.failureClass);
+  });
+
   test("bounds huge outputs to the failing tail with an elision marker", () => {
     const huge = `${"x".repeat(10_000)}TAIL-MARKER`;
     const normalized = normalizeFailure(rawFailure("n1", huge));
@@ -198,6 +213,8 @@ describe("buildRepairContext", () => {
     expect(context).toContain("verify-tests");
     expect(context).toContain("expected 42");
     expect(context).toContain("src/calc.ts");
+    expect(context).toContain("source revision: unknown");
+    expect(context).toContain("artifact://sha256/abc");
     expect(context).toContain("change the hypothesis");
   });
 });

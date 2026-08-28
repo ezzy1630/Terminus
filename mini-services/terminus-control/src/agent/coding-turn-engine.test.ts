@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { CodingTurnEngine } from "./coding-turn-engine.js";
-import type { ProviderResponseChunk } from "@terminus/provider-core";
+import { PolicyDeniedError } from "@terminus/domain";
+import type { ProviderToolCallChunk } from "@terminus/provider-core";
+import type { OperationObservation } from "./loop-contracts.js";
 
-function toolCall(id: string, toolName: string): ProviderResponseChunk {
+function toolCall(id: string, toolName: string): ProviderToolCallChunk {
   return {
-    kind: "tool_call",
     toolCallId: id,
     toolName,
     arguments: { path: "a.ts" },
@@ -12,10 +13,12 @@ function toolCall(id: string, toolName: string): ProviderResponseChunk {
 }
 
 interface HarnessOptions {
-  readonly responses: ReadonlyArray<{ text?: string; calls?: ReadonlyArray<ProviderResponseChunk> }>;
+  readonly responses: ReadonlyArray<{ text?: string; calls?: ReadonlyArray<ProviderToolCallChunk> }>;
   readonly sideEffectClassOf?: (toolName: string) => string;
   readonly failOnCallIds?: readonly string[];
   readonly afterToolsSettled?: () => Promise<void>;
+  readonly onOperationObserved?: (observation: OperationObservation) => void | Promise<void>;
+  readonly omitCompletionSignal?: boolean;
   readonly signal?: AbortSignal | null;
 }
 
@@ -39,9 +42,9 @@ async function runHarness(options: HarnessOptions) {
       return () => `attempt-${(n += 1)}`;
     })(),
     sideEffectClassOf: options.sideEffectClassOf ?? ((name) => (name === "read" ? "read" : "workspace_write")),
-    signal: options.signal,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
     compileContext: async () => ({
-      rendered: { providerId: "test", model: "test/model", request: {} as never, predictedCachedTokens: 0n as never, body: {} },
+      rendered: { providerId: "test", model: "test/model" as never, request: {} as never, predictedCachedTokens: 0n as never, body: {} },
       requestArtifactUri: "artifact://sha256/request",
       requestArtifactHash: "sha256:request",
       contextManifestId: "manifest-1",
@@ -69,6 +72,13 @@ async function runHarness(options: HarnessOptions) {
           finishReason: (response.calls?.length ?? 0) > 0 ? ("tool_use" as const) : ("stop" as const),
         },
         interrupted: false,
+        ...(!options.omitCompletionSignal && (response.calls === undefined || response.calls.length === 0)
+          ? {
+              completion: response.text?.trim().length
+                ? { kind: "completion_proposal" as const, claims: [] }
+                : { kind: "assistant_message" as const },
+            }
+          : {}),
       };
     },
     settleToolCall: async ({ call }) => {
@@ -76,7 +86,8 @@ async function runHarness(options: HarnessOptions) {
       if (error !== undefined) throw error;
       trace.push(`settle:${call.toolName}:${call.toolCallId}`);
     },
-    afterToolsSettled: options.afterToolsSettled,
+    ...(options.afterToolsSettled === undefined ? {} : { afterToolsSettled: options.afterToolsSettled }),
+    ...(options.onOperationObserved === undefined ? {} : { onOperationObserved: options.onOperationObserved }),
   });
   const stop = await engine.run();
   return { stop, trace, budget: engine.budget };
@@ -88,7 +99,27 @@ describe("CodingTurnEngine", () => {
       responses: [{ text: "all done" }],
     });
     expect(trace).toEqual(["begin:1", "response:0calls"]);
-    expect(stop).toEqual({ kind: "final", text: "all done", responseArtifactUri: null });
+    expect(stop).toEqual({
+      kind: "completion_proposal",
+      proposal: {
+        status: "PROPOSED",
+        attemptId: "attempt-1",
+        text: "all done",
+        responseArtifactUri: null,
+        claims: [],
+      },
+    });
+  });
+
+  test("text without an explicit completion signal remains an assistant message", async () => {
+    const { stop } = await runHarness({
+      responses: [{ text: "I need more information before claiming completion." }],
+      omitCompletionSignal: true,
+    });
+    expect(stop).toMatchObject({
+      kind: "assistant_message",
+      text: "I need more information before claiming completion.",
+    });
   });
 
   test("multi-call responses are all settled before the next compile", async () => {
@@ -100,7 +131,7 @@ describe("CodingTurnEngine", () => {
     });
     expect(trace.filter((t) => t.startsWith("settle:")).length).toBe(2);
     expect(trace).toContain("begin:2");
-    expect(stop.kind).toBe("final");
+    expect(stop.kind).toBe("completion_proposal");
   });
 
   test("notifies once after the complete tool response settles", async () => {
@@ -113,7 +144,23 @@ describe("CodingTurnEngine", () => {
       afterToolsSettled: async () => { callbacks += 1; },
     });
     expect(callbacks).toBe(1);
-    expect(stop.kind).toBe("final");
+    expect(stop.kind).toBe("completion_proposal");
+  });
+
+  test("records a typed observation for every settled operation", async () => {
+    const observations: OperationObservation[] = [];
+    const { stop } = await runHarness({
+      responses: [
+        { calls: [toolCall("p1", "patch"), toolCall("p2", "patch")] },
+        { text: "done" },
+      ],
+      onOperationObserved: (observation) => { observations.push(observation); },
+    });
+    expect(stop.kind).toBe("completion_proposal");
+    expect(observations).toHaveLength(2);
+    expect(observations.map((entry) => entry.providerCallId)).toEqual(["p1", "p2"]);
+    expect(observations.every((entry) => entry.schemaVersion === "terminus.operation-observation.v1")).toBe(true);
+    expect(observations.every((entry) => entry.observationHash.startsWith("sha256:") && entry.semanticFingerprint.startsWith("sha256:"))).toBe(true);
   });
 
   test("stops before compiling another provider attempt after cancellation", async () => {
@@ -151,7 +198,7 @@ describe("CodingTurnEngine", () => {
       return result;
     });
     expect(order[0]).toBe("settle:patch:w1,settle:read:r3,settle:patch:w2");
-    expect(stop.kind).toBe("final");
+    expect(stop.kind).toBe("completion_proposal");
   });
 
   test("budget exhaustion is reported, not thrown", async () => {
@@ -179,7 +226,7 @@ describe("CodingTurnEngine", () => {
       settleToolCall: async () => undefined,
     });
     const stop = await engine.run();
-    expect(stop.kind).toBe("budget_exhausted");
+    expect(stop.kind).toBe("budget_stop");
   });
 
   test("settlement refusals propagate to the caller", async () => {
@@ -193,6 +240,41 @@ describe("CodingTurnEngine", () => {
     // A settlement refusal is never converted into a fake stop or final
     // response; it rejects out of run().
     await expect(result.then((r) => r.stop)).rejects.toThrow("settlement refused bad-call-id");
+  });
+
+  test("typed policy errors become a policy stop without message matching", async () => {
+    const engine = new CodingTurnEngine({
+      newId: () => "attempt-policy",
+      sideEffectClassOf: () => "workspace_write",
+      compileContext: async () => ({
+        rendered: {} as never,
+        requestArtifactUri: "",
+        requestArtifactHash: "",
+        contextManifestId: "",
+        providerCapabilityHash: "",
+        modelSnapshotHash: "",
+        providerEndpoint: "",
+        toolSchemaHash: "",
+        contextEpochId: "",
+      }),
+      beginAttempt: async () => true,
+      executeProvider: async () => ({}) as never,
+      settleResponse: async () => ({
+        projected: {
+          text: "",
+          toolCalls: [{ toolCallId: "policy-call", toolName: "patch", arguments: {} }],
+          reasoning: null,
+          continuationId: null,
+          finishReason: "tool_use",
+        },
+        interrupted: false,
+      }),
+      settleToolCall: async () => {
+        throw new PolicyDeniedError("provider text mentions policy but this is typed");
+      },
+    });
+    const stop = await engine.run();
+    expect(stop.kind).toBe("policy_stop");
   });
 
   test("aborts with doom_loop when identical tool calls repeat 3 times", async () => {
