@@ -382,9 +382,15 @@ export function setupDevMock(): void {
           data: JSON.stringify({ phase: "context_compiling" }),
         },
         {
+          id: mockEventId(1795),
+          event: "turn.profile_selected",
+          data: JSON.stringify({ provider_id: "open_code_zen", model_key: "ox-alpha" }),
+        },
+        {
+          // The real streaming event: coalesced provider text, keyed `text`.
           id: mockEventId(1794),
-          event: "turn.provider_running",
-          data: JSON.stringify({ provider: "open_code_zen", model: "ox-alpha" }),
+          event: "turn.provider_text_delta",
+          data: JSON.stringify({ text: "Reading the kernel socket accept loop first. " }),
         },
         {
           id: mockEventId(1788),
@@ -499,9 +505,14 @@ export function setupDevMock(): void {
           data: JSON.stringify({ phase: "context_compiling" }),
         },
         {
+          id: mockEventId(92),
+          event: "turn.profile_selected",
+          data: JSON.stringify({ provider_id: "open_code_zen", model_key: "ox-alpha" }),
+        },
+        {
           id: mockEventId(91),
-          event: "turn.provider_running",
-          data: JSON.stringify({ provider: "open_code_zen", model: "ox-alpha" }),
+          event: "turn.provider_text_delta",
+          data: JSON.stringify({ text: "Looking for the sidebar components that render project rows. " }),
         },
         {
           id: mockEventId(74),

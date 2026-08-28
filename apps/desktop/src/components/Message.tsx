@@ -370,6 +370,14 @@ function MessageImpl({ message }: MessageProps): JSX.Element {
           aria-label="Response in progress"
         />
       ) : null}
+      {/* What actually produced this reply. Reported by the control plane on
+          `turn.profile_selected`; absent when it did not report one, never
+          filled in from the composer's current pick. */}
+      {message.model ? (
+        <p className="mt-1.5 font-mono text-xs text-tertiary" data-testid="message-model">
+          {message.model}
+        </p>
+      ) : null}
     </div>
     </ContextMenu>
   );

@@ -40,7 +40,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "../lib/cn";
-import { api, TerminusApiError } from "../lib/api";
+import { api, createIdempotencyKey, TerminusApiError } from "../lib/api";
 import {
   draftByteLength,
   MAX_DRAFT_BYTES,
@@ -50,18 +50,60 @@ import {
 } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
-import { lifecycleFromDomainStatus, lifecycleFromTask, lifecycleIsTerminal } from "../lib/task-lifecycle";
+import { lifecycleIsTerminal, type TaskLifecycle } from "../lib/task-lifecycle";
 import { budgetMetrics, primaryBudgetMetric } from "../lib/task-budget";
-import { taskRunIsActive } from "../lib/turn-activity";
-import type { ComposerSendMode, Task } from "../types";
+import { displayLifecycle, taskRunIsActive } from "../lib/turn-activity";
+import type { ComposerSendMode, ReasoningEffort, Task } from "../types";
 import { FIXED_SHORTCUTS, matchesShortcut } from "../lib/shortcuts";
 import { sessionLatency } from "../lib/session-latency";
 import { Button } from "../ui/Button";
+import { ErrorState, errorPreset } from "./ErrorState";
 import { ModelPicker } from "./ModelPicker";
+import { ProjectMenu } from "./ProjectMenu";
 import { TurnSettings } from "./TurnSettings";
-import { useModelSelection } from "../lib/models";
+import { useModelSelection, type ModelSelectionWriter } from "../lib/models";
 import { useModelInventory } from "../hooks/use-model-inventory";
-import { useModelRouting } from "../hooks/use-model-routing";
+
+/**
+ * How long a queued message may wait before this client stops believing its own
+ * view of the run and says so.
+ */
+export const STALLED_STEER_MS = 30_000;
+
+/** How many discovered model ids to name before the list stops helping. */
+const MAX_LISTED_MODELS = 8;
+
+/**
+ * Say why a turn was refused, in enough detail to act on.
+ *
+ * `MODEL_NOT_ADMITTED` is the one worth expanding: the control plane already
+ * knows which models *are* admitted and returns them, and "model not admitted"
+ * on its own leaves the operator guessing at a list the server is holding.
+ */
+export function describeTurnFailure(error: unknown): string {
+  if (!(error instanceof TerminusApiError)) {
+    return error instanceof Error ? error.message : "Couldn't send the request.";
+  }
+  const envelope = error.envelope;
+  if (envelope?.code !== "MODEL_NOT_ADMITTED") return error.message;
+  const details = envelope.details ?? {};
+  const requested = typeof details.requested_model === "string" ? details.requested_model : null;
+  const deployment = typeof details.deployment === "string" ? details.deployment : null;
+  const discovered = Array.isArray(details.discovered_models)
+    ? details.discovered_models.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  const head = requested
+    ? `${requested} is not admitted${deployment ? ` on ${deployment}` : ""}.`
+    : envelope.message;
+  if (discovered.length === 0) {
+    return `${head} No model has been admitted for this deployment.`;
+  }
+  const listed = discovered.slice(0, MAX_LISTED_MODELS).join(", ");
+  const overflow = discovered.length > MAX_LISTED_MODELS
+    ? `, and ${discovered.length - MAX_LISTED_MODELS} more`
+    : "";
+  return `${head} Available: ${listed}${overflow}.`;
+}
 
 interface ComposerProps {
   className?: string;
@@ -71,30 +113,48 @@ interface ComposerProps {
    * objective into a real task.  A selected task continues to use the turn
    * APIs below; there is no second, look-alike input implementation.
    */
-  onCreateTask?: (objective: string) => Promise<void>;
+  onCreateTask?: (objective: string, routing: TurnRouting) => Promise<void>;
 }
 
-function computeSendMode(taskStatus: string | undefined, _hasStartedTurn: boolean): Extract<ComposerSendMode, "send" | "steer"> {
-  if (!taskStatus) return "send";
-  // A DRAFT task has been created but has not started its first turn yet.
-  // Keep Send available so onSubmit can call startTask before startTurn.
-  if (taskStatus === "DRAFT") return "send";
-  // Anything still in flight takes a steer; only terminal work starts a new
-  // exchange. `lifecycleIsTerminal` keeps this in step with the vocabulary
-  // instead of re-listing states that a future status would not appear in.
-  const lifecycle = lifecycleFromDomainStatus(taskStatus);
-  if (lifecycle === "unknown") return "send";
-  return lifecycleIsTerminal(lifecycle) ? "send" : "steer";
+/**
+ * How a turn should be routed. Carried explicitly rather than re-derived by
+ * each caller, so the model the composer *shows* is the model the turn *uses*.
+ */
+export interface TurnRouting {
+  model?: string;
+  reasoning_effort?: ReasoningEffort;
+}
+
+/**
+ * Send, or steer?
+ *
+ * Keyed on the *display* lifecycle, not the stored status. `ACTIVE` is the
+ * control plane's steady state, so reading it literally made the button say
+ * "Steer" for every task that had ever existed — including one sitting idle
+ * with nothing to steer. Only work actually in flight takes a steer.
+ */
+export function computeSendMode(
+  lifecycle: TaskLifecycle | null,
+): Extract<ComposerSendMode, "send" | "steer"> {
+  if (lifecycle === null) return "send";
+  switch (lifecycle) {
+    // Alive but doing nothing, never started, or over. All of these open a new
+    // exchange rather than redirecting one.
+    case "idle":
+    case "queued":
+    case "unknown":
+      return "send";
+    default:
+      return lifecycleIsTerminal(lifecycle) ? "send" : "steer";
+  }
 }
 
 function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProps): JSX.Element {
   const task = useSelectedTask();
   const events = useSelectedTaskEvents();
-  const modelInventory = useModelInventory();
-  const modelSelection = useModelSelection(modelInventory);
-  const modelRouting = useModelRouting();
   const selectedSessionId = useTerminusStore((s) => s.selectedSessionId);
   const sessions = useTerminusStore((s) => s.sessions);
+  const patchSessionDefaults = useTerminusStore((s) => s.patchSessionDefaults);
   const density = useThemeStore((s) => s.density);
   const draftsByTask = useTerminusStore((s) => s.draftsByTask);
   const sessionDraftsByTask = useTerminusStore((s) => s.sessionDraftsByTask);
@@ -106,8 +166,8 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   const resetDraftStorage = useTerminusStore((s) => s.resetDraftStorage);
   const taskId = task?.id ?? "__new__";
   const refreshTasks = useTerminusStore((s) => s.refreshTasks);
+  const refreshTask = useTerminusStore((s) => s.refreshTask);
   const stopTask = useTerminusStore((s) => s.stopTask);
-  const healthReady = useTerminusStore((s) => s.healthReady);
   const queueSteer = useTerminusStore((s) => s.queueSteer);
   const clearQueuedSteer = useTerminusStore((s) => s.clearQueuedSteer);
 
@@ -180,16 +240,18 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     }
   }, [cancelScheduledDraftWrite, flushPendingDraft, taskId]);
 
-  const hasStartedTurn = events.some((event) => event.event === "turn.started");
-  const sendMode = computeSendMode(task?.status, hasStartedTurn);
-  const taskStatusKind = task ? lifecycleFromTask(task) : null;
+  const taskStatusKind = task ? displayLifecycle(task, events) : null;
+  const sendMode = computeSendMode(taskStatusKind);
   const taskTerminal = taskStatusKind !== null && lifecycleIsTerminal(taskStatusKind);
   // Authoritative "is work in flight" — the live event tail where it has said
   // anything, the task snapshot otherwise. Three things read it: Stop, the
   // steer queue, and the send button's wording.
   const runIsActive = taskRunIsActive(task, events);
   const queuedSteer = useTerminusStore((s) => (task ? s.queuedSteerByTask[task.id] ?? null : null));
+  const queuedSteerAt = useTerminusStore((s) => (task ? s.queuedSteerAtByTask[task.id] ?? null : null));
   const flushingQueueRef = useRef(false);
+  /** The queue has been holding this message longer than anyone should wait. */
+  const [queueStalled, setQueueStalled] = useState(false);
   const budgetMetric = useMemo(() => primaryBudgetMetric(task?.budget_ledger), [task?.budget_ledger]);
   const budgetDetail = useMemo(
     () => budgetMetrics(task?.budget_ledger)
@@ -202,6 +264,28 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     () => sessions.find((session) => session.id === (task?.session_id ?? selectedSessionId)),
     [selectedSessionId, sessions, task?.session_id],
   );
+  const modelInventory = useModelInventory();
+  // A model choice belongs to the project, not to a global gateway row. The
+  // picker seeds from the session's stored default and writes back to it.
+  const persistSessionDefaults = useCallback<ModelSelectionWriter>(
+    (sessionId, patch) => patchSessionDefaults(sessionId, patch),
+    [patchSessionDefaults],
+  );
+  const modelSelection = useModelSelection(
+    modelInventory,
+    activeSession ?? null,
+    persistSessionDefaults,
+  );
+  /** What this composer's next turn routes to. */
+  const turnRouting: TurnRouting = useMemo(() => ({
+    ...(modelSelection.selected ? { model: modelSelection.selected.slug } : {}),
+    ...(modelSelection.effort ? { reasoning_effort: modelSelection.effort } : {}),
+  }), [modelSelection.effort, modelSelection.selected]);
+  // Effects that send later (a queued steer flushing, a Retry click) must use
+  // the choice as it stands at that moment, not the one captured when they were
+  // registered.
+  const turnRoutingRef = useRef<TurnRouting>(turnRouting);
+  turnRoutingRef.current = turnRouting;
   // Auto-resize the textarea up to the max height from the density token.
   useLayoutEffect(() => {
     const el = textareaRef.current;
@@ -333,6 +417,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   const submitTurn = useCallback(async (
     target: Task,
     text: string,
+    routing: TurnRouting,
   ): Promise<{ ok: true } | { ok: false; message: string; retryable: boolean }> => {
     let operationKey: string | null = null;
     let hasDurableStep = false;
@@ -356,6 +441,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
         thread_id: target.thread_id,
         task_id: target.id,
         user_input: text,
+        ...routing,
       }, { idempotencyKey: `${operationKey}:turn` });
       // R12: open a TTFT sample; the first streamed event for this task
       // closes it (see lib/session-view SessionLatencyTracker).
@@ -385,20 +471,46 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
       return {
         ok: false,
         retryable: alreadyActive,
-        message: err instanceof TerminusApiError || err instanceof Error ? err.message : "Couldn't send the request.",
+        message: describeTurnFailure(err),
       };
     }
   }, [refreshTasks, turnMutation]);
+
+  /**
+   * Hand a correction to a turn that is already running.
+   *
+   * A 409 means the turn settled between the render and the click. That is the
+   * only case the local queue still exists for: the text is kept and goes out
+   * as a fresh turn the moment the task is idle. Every other failure is the
+   * user's to see.
+   */
+  const deliverSteer = useCallback(async (
+    target: Task,
+    turnId: string,
+    text: string,
+  ): Promise<{ ok: true } | { ok: false; message: string }> => {
+    try {
+      await api.steerTurn(turnId, { message: text }, {
+        idempotencyKey: createIdempotencyKey(`steer:${turnId}:${text.length}`),
+      });
+      void refreshTask(target.id);
+      return { ok: true };
+    } catch (err: unknown) {
+      const settled = err instanceof TerminusApiError && err.status === 409;
+      if (settled) {
+        queueSteer(target.id, text);
+        void refreshTask(target.id);
+        return { ok: true };
+      }
+      return { ok: false, message: describeTurnFailure(err) };
+    }
+  }, [queueSteer, refreshTask]);
 
   const onSubmit = async (_mode: Extract<ComposerSendMode, "send" | "steer">): Promise<void> => {
     setError(null);
 
     const text = draft.trim();
     if (text.length === 0) return;
-    if (!healthReady) {
-      setError("Terminus is still starting up. Try again in a moment.");
-      return;
-    }
     if (taskTerminal) {
       setError("This task is finished. Create a new task to continue working.");
       return;
@@ -411,7 +523,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
           return;
         }
         try {
-          await onCreateTask(text);
+          await onCreateTask(text, turnRouting);
         } catch (err) {
           // The click handler's promise is not a place to leave a rejection.
           // The draft stays put, so the objective is not lost with it.
@@ -421,17 +533,29 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
         clearCurrentDraft();
         return;
       }
-      // The control plane refuses a second concurrent turn with
-      // TASK_TURN_ALREADY_ACTIVE, so steering during a run cannot be a send.
-      // Queue it instead of making the user watch for the run to finish and
-      // press the button again. The text leaves the composer either way — it
-      // is held by the task now, and the banner below says so.
+      // Steering a live turn is a request, not a queue. `POST /v1/turns` would
+      // be refused with TASK_TURN_ALREADY_ACTIVE, but the steer route appends a
+      // model-visible episode the running turn reads at its next stop boundary,
+      // so the correction lands during the work rather than after it.
+      const activeTurn = task.active_turn ?? null;
+      if (activeTurn && runIsActive) {
+        const outcome = await deliverSteer(task, activeTurn.id, text);
+        if (!outcome.ok) {
+          setError(outcome.message);
+          return;
+        }
+        clearCurrentDraft();
+        return;
+      }
+      // A run this client can see but whose turn id it does not have — the
+      // events arrived before the task detail did. Hold the text rather than
+      // open a second turn the control plane would refuse.
       if (runIsActive) {
         queueSteer(task.id, text);
         clearCurrentDraft();
         return;
       }
-      const outcome = await submitTurn(task, text);
+      const outcome = await submitTurn(task, text, turnRouting);
       if (!outcome.ok) {
         setError(outcome.message);
         return;
@@ -450,33 +574,127 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
    * back, rather than an effect silently rewriting what is in the composer.
    */
   useEffect(() => {
-    if (queuedSteer === null || !task || taskTerminal || runIsActive || !healthReady) return;
+    if (queuedSteer === null || !task || taskTerminal || runIsActive) return;
     if (flushingQueueRef.current) return;
     flushingQueueRef.current = true;
     const target = task;
     void (async () => {
-      const outcome = await submitTurn(target, queuedSteer);
+      const outcome = await submitTurn(target, queuedSteer, turnRoutingRef.current);
       flushingQueueRef.current = false;
       if (outcome.ok || !outcome.retryable) clearQueuedSteer(target.id);
       if (!outcome.ok && !outcome.retryable) setError(outcome.message);
     })();
-  }, [clearQueuedSteer, healthReady, queuedSteer, runIsActive, submitTurn, task, taskTerminal]);
+  }, [clearQueuedSteer, queuedSteer, runIsActive, submitTurn, task, taskTerminal]);
 
-  // Keyboard shortcuts.
+  /*
+   * A queue that stopped draining.
+   *
+   * The queue only fills when the control plane said the turn had already
+   * settled, so it should empty on the next event. If it has not after 30
+   * seconds this client's idea of the run is stale: re-read the task, and if
+   * that still does not release it, offer to send the message anyway rather
+   * than leave the user staring at "Queued".
+   */
+  useEffect(() => {
+    if (queuedSteer === null || queuedSteerAt === null || taskTerminal || !task) {
+      setQueueStalled(false);
+      return;
+    }
+    // Keyed on the id, not the task object: `refreshTask` replaces the object
+    // on every response, and depending on it would make this effect its own
+    // trigger.
+    const stalledTaskId = task.id;
+    const waited = Date.now() - queuedSteerAt;
+    const declareStalled = (): void => {
+      setQueueStalled(true);
+      void refreshTask(stalledTaskId);
+    };
+    if (waited >= STALLED_STEER_MS) {
+      declareStalled();
+      return;
+    }
+    setQueueStalled(false);
+    const timer = window.setTimeout(declareStalled, STALLED_STEER_MS - waited);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queuedSteer, queuedSteerAt, refreshTask, task?.id, taskTerminal]);
+
+  /** Send a stalled queued message as its own turn, on the user's say-so. */
+  const sendQueuedNow = useCallback((): void => {
+    if (!task || queuedSteer === null) return;
+    const target = task;
+    const text = queuedSteer;
+    setError(null);
+    setSending(true);
+    void submitTurn(target, text, turnRoutingRef.current)
+      .then((outcome) => {
+        if (outcome.ok) clearQueuedSteer(target.id);
+        else setError(outcome.message);
+      })
+      .finally(() => setSending(false));
+  }, [clearQueuedSteer, queuedSteer, submitTurn, task]);
+
+  /*
+   * Resend a failed turn's prompt, from the Retry button in the transcript.
+   *
+   * The conversation asks; the composer sends. There is exactly one
+   * `POST /v1/turns` call site in this app and this keeps it that way, so a
+   * retry gets the same idempotency ledger and the same failure reporting as
+   * anything the user types.
+   */
+  useEffect(() => {
+    const onRetryTurn = (event: Event): void => {
+      if (!(event instanceof CustomEvent)) return;
+      const detail = event.detail as unknown;
+      if (!detail || typeof detail !== "object" || Array.isArray(detail)) return;
+      const request = detail as { taskId?: unknown; text?: unknown };
+      if (typeof request.taskId !== "string" || typeof request.text !== "string") return;
+      const target = useTerminusStore.getState().taskById[request.taskId];
+      if (!target || request.taskId !== taskId) return;
+      const text = request.text.trim();
+      if (text.length === 0) return;
+      setError(null);
+      setSending(true);
+      void submitTurn(target, text, turnRoutingRef.current)
+        .then((outcome) => {
+          if (!outcome.ok) setError(outcome.message);
+        })
+        .finally(() => setSending(false));
+    };
+    window.addEventListener("terminus:retry-turn", onRetryTurn);
+    return () => window.removeEventListener("terminus:retry-turn", onRetryTurn);
+  }, [submitTurn, taskId]);
+
+  /*
+   * Composer keys.
+   *
+   *   ↵          send (or steer)
+   *   ⇧↵         newline
+   *   ⌘↵ / ⌃↵    send (or steer) — kept for muscle memory
+   *
+   * The IME guard comes first and covers both spellings. While a Japanese,
+   * Chinese or Korean input method has an active composition, Return commits
+   * the candidate: `isComposing` reports that, and Safari/WebKit reports the
+   * legacy `keyCode === 229` instead. Calling `preventDefault` in either case
+   * would eat the commit and send a half-typed word.
+   */
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
-    // Cmd/Ctrl + Enter → send (or steer).
-    if (matchesShortcut(e, FIXED_SHORTCUTS.send)) {
-      if (e.nativeEvent.isComposing) return;
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+    if (matchesShortcut(e, FIXED_SHORTCUTS.sendPlain) || matchesShortcut(e, FIXED_SHORTCUTS.send)) {
       e.preventDefault();
       void onSubmit(sendMode === "steer" ? "steer" : "send");
     }
   };
 
   // Send button content varies by mode. While a run is in flight the button
-  // says what will actually happen — the message is held, not delivered.
+  // says what will actually happen — the message reaches the running turn when
+  // this client knows which turn that is, and is held when it does not.
   const sendButtonContent: { icon: JSX.Element; label: string; mode: Extract<ComposerSendMode, "send" | "steer"> } = (() => {
     if (!task && onCreateTask) {
       return { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Create task", mode: "send" };
+    }
+    if (runIsActive && task?.active_turn) {
+      return { icon: <ArrowUp size={14} />, label: "Steer", mode: "steer" };
     }
     if (runIsActive) {
       return { icon: <Clock3 size={14} />, label: "Queue for the current run", mode: "steer" };
@@ -497,16 +715,22 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   // work it claimed to stop.
   const canStop = Boolean(task) && !taskTerminal && runIsActive;
 
-  const permissionProfile = activeSession?.default_permission_profile?.trim() || "Workspace policy";
-  const permissionLabel = permissionProfile === "secure-local-default" ? "Full access" : permissionProfile;
-  const sendDisabled = sending || draft.trim().length === 0 || !healthReady || taskTerminal;
+  // The profile's own name, not a marketing gloss on it. "Full access" was a
+  // rename of `secure-local-default` invented here: a chip that overstated the
+  // policy in the one place the operator looks to check it.
+  const permissionProfile = activeSession?.default_permission_profile?.trim() ?? "";
+  const permissionLabel = permissionProfile.length > 0 ? permissionProfile : "No profile reported";
+  // Send is not gated on the health probe. `/v1/system/health` reports writer
+  // state and stops answering while a turn holds the writer lease, so gating on
+  // it disabled the composer during exactly the runs the user most wants to
+  // steer — and it made this client, not the control plane, the one refusing.
+  // The request goes out; if it fails, the real HTTP error is what is shown.
+  const sendDisabled = sending || draft.trim().length === 0 || taskTerminal;
   const sendTitle = taskTerminal
     ? "Task is terminal; create a new task to continue"
-    : !healthReady
-      ? "Kernel not ready"
-      : runIsActive
-        ? "Held until the current run finishes, then sent · ⌘↵"
-        : `${sendButtonContent.label} · ⌘↵`;
+    : runIsActive
+      ? "Steer the current run · ↵"
+      : `${sendButtonContent.label} · ↵`;
 
   return (
     <div className={cn("relative", className)}>
@@ -542,6 +766,26 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
             style={{ maxHeight: "var(--composer-max-height)", caretColor: "var(--text-primary)" }}
           />
 
+          {/* No model, no turn. The picker used to hide itself when the
+              inventory was empty, so the composer looked ready and the send
+              failed at the control plane instead. */}
+          {modelInventory.status !== "loading" && modelInventory.models.length === 0 ? (
+            <ErrorState
+              {...errorPreset("missingModel")}
+              {...(modelInventory.error ? { detail: modelInventory.error } : {})}
+              action={{
+                label: "Open model settings",
+                onClick: () => window.dispatchEvent(
+                  new CustomEvent("terminus:open-settings", { detail: { category: "agents" } }),
+                ),
+              }}
+              secondaryAction={{ label: "Check again", onClick: () => modelInventory.refresh() }}
+              live="polite"
+              compact
+              className="mx-2.5 mb-1 rounded-md border border-subtle bg-elevated"
+            />
+          ) : null}
+
           {/* Control row — always visible. Reserved height so metadata
               appearing/disappearing never causes layout shift (SPEC §10). */}
           <div
@@ -551,19 +795,26 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
                 start surface, where it is still changeable; once a task exists
                 its project is fixed and repeating it is noise. */}
             {isStartSurface ? (
-              <Button
-                type="button"
-                onClick={onChangeProject}
-                className="composer-control mr-1 flex h-7 min-w-0 items-center justify-start gap-1.5 rounded-md border border-subtle bg-subtle px-2 text-xs text-secondary"
-                aria-label="Change project"
-                disabled={!onChangeProject}
-              >
-                <FolderGit2 size={13} strokeWidth={1.7} />
-                <span className="max-w-32 truncate">{activeSession?.title ?? "Choose project"}</span>
-              </Button>
+              // The same switcher as the sidebar header and the title bar.
+              // This chip used to open the sidebar's *task* filter, which
+              // changed no project at all.
+              <ProjectMenu
+                label="Change project"
+                {...(onChangeProject ? { onOpenProject: onChangeProject } : {})}
+                trigger={(
+                  <Button
+                    type="button"
+                    className="composer-control mr-1 flex h-7 min-w-0 items-center justify-start gap-1.5 rounded-md border border-subtle bg-subtle px-2 text-xs text-secondary"
+                    aria-label="Change project"
+                  >
+                    <FolderGit2 size={13} strokeWidth={1.7} />
+                    <span className="max-w-32 truncate">{activeSession?.title ?? "Choose project"}</span>
+                  </Button>
+                )}
+              />
             ) : null}
 
-            <ModelPicker selection={modelSelection} routing={modelRouting} className="mr-1" />
+            <ModelPicker selection={modelSelection} className="mr-1" />
             <TurnSettings selection={modelSelection} className="mr-1" />
 
             {/* Access is task context, not a start-surface choice: before a
@@ -571,7 +822,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
             {isStartSurface ? null : (
               <span
                 className="flex h-7 items-center gap-1.5 px-1 text-xs text-tertiary"
-                aria-label={`Permission profile: ${permissionProfile}`}
+                aria-label={`Permission profile: ${permissionLabel}`}
                 data-tooltip="Permission profile reported by the selected session"
               >
                 <ShieldCheck size={12} strokeWidth={1.8} aria-hidden />
@@ -600,18 +851,6 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
 
             {/* Right side — mode pill + send button. */}
             <div className="ml-auto flex items-center gap-2">
-              {error ? (
-                <span
-                  key={error}
-                  role="alert"
-                  aria-live="assertive"
-                  aria-atomic="true"
-                  className="max-w-48 truncate text-xs text-error"
-                  data-tooltip={error}
-                >
-                  {error}
-                </span>
-              ) : null}
               {canStop ? (
                 <Button
                   type="button"
@@ -642,6 +881,34 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
           </div>
         </div>
 
+        {/* Send failures wrap in full.
+
+            This used to be a 12rem truncating span wedged between the budget
+            meter and the send button, so "Terminus could not reach the
+            provider: connect ECONNREFUSED 127.0.0.1:4317" rendered as
+            "Terminus could not rea…" and the actual cause was only in a
+            tooltip. Errors here are the reason the message did not send; they
+            get the width. */}
+        {error ? (
+          <div
+            key={error}
+            role="alert"
+            aria-live="assertive"
+            aria-atomic="true"
+            className="mt-2 flex items-start gap-2 border-l-2 border-error/60 px-2.5 py-1.5 text-xs text-error"
+          >
+            <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{error}</span>
+            <Button
+              type="button"
+              onClick={() => setError(null)}
+              aria-label="Dismiss the error"
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-tertiary hover:bg-hover hover:text-primary"
+            >
+              <X size={12} aria-hidden />
+            </Button>
+          </div>
+        ) : null}
+
         {queuedSteer !== null && task ? (
           <div
             role="status"
@@ -653,14 +920,28 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
             <Clock3 size={12} strokeWidth={1.8} className="mt-0.5 shrink-0" aria-hidden />
             <span className="min-w-0 flex-1">
               <span className="font-medium text-primary">
-                {taskTerminal ? "Not sent — the task finished first." : "Queued."}
+                {taskTerminal
+                  ? "Not sent — the task finished first."
+                  : queueStalled ? "Still waiting." : "Queued."}
               </span>{" "}
               {taskTerminal
                 ? "Put it back in the composer to send it somewhere else."
-                : "It goes as soon as the current run finishes."}
+                : queueStalled
+                  ? "The run has not released it. Send it as its own turn, or put it back."
+                  : "The run had already ended, so this goes as a new turn."}
               <span className="mt-0.5 block truncate text-tertiary">{queuedSteer}</span>
             </span>
-            {taskTerminal ? (
+            {!taskTerminal && queueStalled ? (
+              <Button
+                type="button"
+                onClick={sendQueuedNow}
+                disabled={sending}
+                className="font-medium text-primary hover:underline disabled:opacity-50"
+              >
+                Send now
+              </Button>
+            ) : null}
+            {taskTerminal || queueStalled ? (
               <Button
                 type="button"
                 onClick={() => {
@@ -738,8 +1019,15 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
           </div>
         ) : null}
 
+        {/* Only a task the control plane will actually refuse a turn for.
+            A failed *turn* leaves the task ACTIVE and steerable, and telling
+            someone to start over at that point threw away the thread. */}
         {taskTerminal ? (
-          <p className="mt-2 px-1 text-xs text-tertiary">Task finished · create a new task to continue</p>
+          <p className="mt-2 px-1 text-xs text-tertiary">
+            {taskStatusKind === "failed"
+              ? "This task ended in failure · create a new task to continue"
+              : "Task finished · create a new task to continue"}
+          </p>
         ) : null}
       </div>
     </div>

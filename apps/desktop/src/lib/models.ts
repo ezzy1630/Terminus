@@ -14,7 +14,7 @@
  * `ProviderId` is an open string for the same reason — providers are
  * discovered, not enumerated at build time.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 export type ProviderId = string;
 
@@ -84,9 +84,7 @@ export const EMPTY_INVENTORY: ModelInventory = {
   refresh: () => undefined,
 };
 
-const SELECTED_KEY = "terminus-desktop.model.selected.v1";
 const FAVOURITES_KEY = "terminus-desktop.model.favourites.v1";
-const EFFORT_KEY = "terminus-desktop.model.effort.v1";
 /** Bounded so a stuck star cannot grow the stored list without limit. */
 const MAX_FAVOURITES = 12;
 
@@ -132,20 +130,53 @@ export interface ModelSelection {
   /** The selected model's context window, formatted. Read-only — models have one. */
   context: string | null;
   inventory: ModelInventory;
+  /** Why the choice could not be saved as the project's default, if it could not. */
+  persistError: string | null;
+  /** A write to the session default is in flight. */
+  persisting: boolean;
 }
+
+/**
+ * Where a model choice is stored, and who is told about it.
+ *
+ * The picker used to write the global gateway provider configuration row on
+ * every choice: one row, no session, no provider field. Choosing a model for
+ * one project changed it for every project and every run already in flight.
+ * The choice belongs to the session, so that is where it goes.
+ */
+export interface ModelSelectionSession {
+  readonly id: string;
+  readonly default_model?: string | null;
+  readonly default_reasoning_effort?: Effort | null;
+}
+
+export type ModelSelectionWriter = (
+  sessionId: string,
+  patch: { default_model?: string; default_reasoning_effort?: Effort },
+) => Promise<unknown>;
 
 /**
  * Per-turn model choice, resolved against whatever the inventory currently
  * reports.
  *
- * Preferences are stored by id, never as resolved objects: a provider can drop
- * a model between launches, and a stored object would keep the composer
- * pointing at something no adapter can route to. Anything the inventory no
- * longer lists is dropped on read.
+ * Resolution order: what the operator picked in this window for this session,
+ * then the session's stored default, then the first model the inventory
+ * reports. Nothing here is remembered in localStorage — a stored id survives
+ * the provider dropping the model, and the composer would then point at
+ * something no adapter can route to. The session is the durable store.
  */
-export function useModelSelection(inventory: ModelInventory): ModelSelection {
+export function useModelSelection(
+  inventory: ModelInventory,
+  session: ModelSelectionSession | null = null,
+  persist: ModelSelectionWriter | null = null,
+): ModelSelection {
   const { models } = inventory;
-  const [selectedId, setSelectedId] = useState<string | null>(() => readString(SELECTED_KEY));
+  /** What the operator picked in this window, before any server round trip. */
+  const [pending, setPending] = useState<{ sessionId: string | null; modelId: string | null; effort: Effort | null }>(
+    { sessionId: session?.id ?? null, modelId: null, effort: null },
+  );
+  const [persistError, setPersistError] = useState<string | null>(null);
+  const [persisting, setPersisting] = useState(false);
   const [favouriteIds, setFavouriteIds] = useState<readonly string[]>(() => {
     try {
       const parsed: unknown = JSON.parse(readString(FAVOURITES_KEY) ?? "[]");
@@ -154,24 +185,62 @@ export function useModelSelection(inventory: ModelInventory): ModelSelection {
       return [];
     }
   });
-  // The *preferred* depth, not the effective one. Storing the preference and
-  // clamping on read means switching to a shallower model and back restores
-  // what was asked for instead of leaving turns permanently downgraded.
-  const [preferredEffort, setPreferredEffort] = useState<Effort>(() => {
-    const raw = readString(EFFORT_KEY);
-    return isEffort(raw) ? raw : "medium";
-  });
 
+  const sessionId = session?.id ?? null;
   const byId = useMemo(() => new Map(models.map((model) => [model.id, model])), [models]);
+  // The server's default is a bare model id, which may be either spelling.
+  const sessionModel = useMemo(() => {
+    const wanted = session?.default_model?.trim();
+    if (!wanted) return null;
+    return models.find((model) => model.id === wanted || model.slug === wanted) ?? null;
+  }, [models, session?.default_model]);
 
-  // Falls back to the first reported model so a fresh install, or one whose
-  // stored model has disappeared, still has something to send with.
-  const selected = (selectedId ? byId.get(selectedId) : undefined) ?? models[0] ?? null;
+  // A pick belongs to the session it was made in. Switching projects must not
+  // carry one project's choice into another's turns.
+  const activePending = pending.sessionId === sessionId ? pending : null;
+
+  const selected = (activePending?.modelId ? byId.get(activePending.modelId) : undefined)
+    ?? sessionModel
+    ?? models[0]
+    ?? null;
+
+  const preferredEffort: Effort = activePending?.effort
+    ?? (isEffort(session?.default_reasoning_effort) ? session.default_reasoning_effort : "medium");
+
+  const write = useCallback((patch: { default_model?: string; default_reasoning_effort?: Effort }): void => {
+    if (!persist || sessionId === null) return;
+    setPersisting(true);
+    setPersistError(null);
+    void persist(sessionId, patch)
+      .then(() => setPersistError(null))
+      .catch((error: unknown) => {
+        // The local choice stands — the turn will still be routed with it —
+        // but the operator is told it did not become the project's default.
+        setPersistError(error instanceof Error
+          ? `Saved for this window only: ${error.message}`
+          : "The project default could not be saved.");
+      })
+      .finally(() => setPersisting(false));
+  }, [persist, sessionId]);
 
   const select = useCallback((id: string): void => {
-    setSelectedId(id);
-    writeString(SELECTED_KEY, id);
-  }, []);
+    setPending((previous) => ({
+      sessionId,
+      modelId: id,
+      effort: previous.sessionId === sessionId ? previous.effort : null,
+    }));
+    const model = byId.get(id);
+    if (model) write({ default_model: model.slug });
+  }, [byId, sessionId, write]);
+
+  const setEffort = useCallback((effort: Effort): void => {
+    setPending((previous) => ({
+      sessionId,
+      modelId: previous.sessionId === sessionId ? previous.modelId : null,
+      effort,
+    }));
+    write({ default_reasoning_effort: effort });
+  }, [sessionId, write]);
 
   const toggleFavourite = useCallback((id: string): void => {
     setFavouriteIds((previous) => {
@@ -190,8 +259,6 @@ export function useModelSelection(inventory: ModelInventory): ModelSelection {
     [byId, favouriteIds],
   );
 
-  useEffect(() => { writeString(EFFORT_KEY, preferredEffort); }, [preferredEffort]);
-
   return {
     selected,
     select,
@@ -200,8 +267,10 @@ export function useModelSelection(inventory: ModelInventory): ModelSelection {
     toggleFavourite,
     favouriteRank: useCallback((id: string) => favourites.findIndex((model) => model.id === id) + 1, [favourites]),
     effort: selected ? effortFor(selected, preferredEffort) : null,
-    setEffort: setPreferredEffort,
+    setEffort,
     context: selected ? formatContext(selected.contextTokens) : null,
     inventory,
+    persistError,
+    persisting,
   };
 }

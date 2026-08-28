@@ -171,6 +171,50 @@ describe("ActivityBlock", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("18 passed, 0 failed")).toBeInTheDocument();
   });
+
+  // A failure that hides its cause behind a disclosure triangle is a failure
+  // with no cause, as far as the reader is concerned.
+  test("opens a failed block and announces it", () => {
+    render(
+      <ActivityBlock
+        defaultExpanded
+        block={{
+          id: "fail-1",
+          title: "Turn failed",
+          metric: "Failed",
+          status: "failed",
+          entries: [{
+            tool: "turn",
+            summary: "PROVIDER_TRANSPORT_FAILED: the gateway refused the request",
+            detail: "Reason: agent_loop_error",
+            at: "2026-08-28T00:00:00.000Z",
+            phase: "settled",
+            outcome: "failed",
+          }],
+        }}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Turn failed/ })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Reason: agent_loop_error")).toBeInTheDocument();
+  });
+
+  test("leaves a succeeding block silent and collapsed", () => {
+    render(
+      <ActivityBlock
+        block={{
+          id: "ok-1",
+          title: "Explored codebase",
+          metric: "2 files",
+          status: "done",
+          entries: [{ tool: "read", summary: "a.ts", at: "2026-08-28T00:00:00.000Z", phase: "settled", outcome: "succeeded" }],
+        }}
+      />,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });
 
 // ────────────────────────── 3. ErrorState presets ───────────────────────────
@@ -903,10 +947,23 @@ describe("Composer — send-button mode switches based on task status", () => {
     });
   }
 
-  test("task.status=ACTIVE → button label is 'Steer'", () => {
+  // ACTIVE is the control plane's steady state, not "a turn is running". A
+  // task sitting idle in it has nothing to steer, and offering to steer it is
+  // what made every task in the app look busy forever.
+  test("task.status=ACTIVE with no run in flight → button label is 'Send'", () => {
     makeTask("ACTIVE");
     render(<Composer />);
-    expect(screen.getByRole("button", { name: /Steer/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Steer/ })).not.toBeInTheDocument();
+  });
+
+  test("task.status=ACTIVE with a running turn → the button steers", () => {
+    makeTask("ACTIVE");
+    useTerminusStore.setState({
+      eventsByTask: { "task-1": [{ id: "1", event: "turn.started", data: "{}" }] },
+    });
+    render(<Composer />);
+    expect(screen.getByRole("button", { name: /Queue for the current run|Steer/ })).toBeInTheDocument();
   });
 
   test("task.status=DRAFT → button label is 'Send' so the first turn can start", () => {
@@ -915,6 +972,8 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.getByRole("button", { name: /^Send/ })).toBeInTheDocument();
   });
 
+  // needs_you is a claim about the task, not about a turn: it stands whether or
+  // not one is running, and answering it is a steer.
   test("task.status=NEEDS_USER_DECISION → button label is 'Steer'", () => {
     makeTask("NEEDS_USER_DECISION");
     render(<Composer />);
@@ -1103,7 +1162,8 @@ describe("Composer — send-button mode switches based on task status", () => {
         status: "session_only",
         error: "Local draft storage is full.",
       });
-      expect(screen.getByRole("status")).toHaveTextContent("Draft not saved locally. Local draft storage is full.");
+      expect(screen.getByText(/Draft not saved locally\. Local draft storage is full\./))
+        .toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Copy draft" })).toBeInTheDocument();
     } finally {
@@ -1138,7 +1198,7 @@ describe("Composer — send-button mode switches based on task status", () => {
 
     act(() => useTerminusStore.setState({ selectedTaskId: "task-1" }));
     expect(composer).toHaveValue("First session-only draft");
-    expect(screen.getByRole("status")).toHaveTextContent("retained per task until this window closes");
+    expect(screen.getByText(/retained per task until this window closes/)).toBeInTheDocument();
   });
 
   test("rejects a multibyte draft above the byte limit without silent truncation", () => {
@@ -1244,7 +1304,11 @@ describe("Composer — send-button mode switches based on task status", () => {
   test("keeps task permission metadata read-only without a dead environment menu", () => {
     render(<Composer />);
 
-    expect(screen.getByLabelText("Permission profile: Workspace policy")).toBeInTheDocument();
+    // No profile on the session means the chip says so. It used to invent
+    // "Workspace policy", and to relabel `secure-local-default` as "Full
+    // access" — a claim about permissions the session never made.
+    expect(screen.getByLabelText("Permission profile: No profile reported")).toBeInTheDocument();
+    expect(screen.queryByText("Full access")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Environment details" })).not.toBeInTheDocument();
   });
 
@@ -1256,7 +1320,7 @@ describe("Composer — send-button mode switches based on task status", () => {
 
     const composer = screen.getByRole("textbox", { name: "Message composer" });
     await user.type(composer, "Keep this exact retry");
-    await user.click(screen.getByRole("button", { name: "Steer" }));
+    await user.click(screen.getByRole("button", { name: "Send" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("provider unavailable");
     expect(composer).toHaveValue("Keep this exact retry");
@@ -1278,7 +1342,8 @@ describe("Composer — send-button mode switches based on task status", () => {
     await user.type(screen.getByRole("textbox", { name: "Message composer" }), "Map this project");
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
-    expect(createTask).toHaveBeenCalledWith("Map this project");
+    // The routing the composer showed travels with the objective.
+    expect(createTask).toHaveBeenCalledWith("Map this project", expect.any(Object));
   });
 });
 
@@ -1305,6 +1370,16 @@ describe("NewTaskScreen — first turn lifecycle", () => {
       draftsByTask: {},
       eventsByTask: {},
     });
+  });
+
+  // Four generic prompt chips sat under the composer on every launch. Nobody
+  // wanted to run "Find a bug" against an unspecified file, and they were the
+  // only thing between the heading and the fold.
+  test("offers no canned starter prompts", () => {
+    render(<NewTaskScreen />);
+    for (const label of ["Explain this codebase", "Find a bug", "Add a test", "Review recent changes"]) {
+      expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
+    }
   });
 
   test("starts the task and submits the objective as its first turn", async () => {
@@ -1384,17 +1459,17 @@ describe("Sidebar — navigation destinations", () => {
     render(<Sidebar onNavigate={onNavigate} />);
 
     expect(screen.getByRole("button", { name: /^New (session|task)/ })).toBeInTheDocument();
-    for (const label of [/^(Kanban|Sessions)/, "Agents"]) {
-      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
-    }
+    expect(screen.getByRole("button", { name: /^(Kanban|Sessions)/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Needs attention" })).not.toBeInTheDocument();
-    for (const unsupported of ["Scheduled", "Plugins", "Pull requests", "Sites"]) {
+    // "Agents" joins this list: it rendered a directory of departments,
+    // operators and rooms that no route supplies.
+    for (const unsupported of ["Agents", "Scheduled", "Plugins", "Pull requests", "Sites"]) {
       expect(screen.queryByRole("button", { name: unsupported })).not.toBeInTheDocument();
     }
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Agents" }));
-    expect(onNavigate).toHaveBeenCalledWith("agents");
+    await user.click(screen.getByRole("button", { name: /^(Kanban|Sessions)/ }));
+    expect(onNavigate).toHaveBeenCalledWith("board");
   });
 
   test("routes Settings without adding a second Help destination", async () => {
@@ -1413,13 +1488,6 @@ describe("Sidebar — navigation destinations", () => {
     window.removeEventListener("terminus:open-settings", listener);
   });
 
-  test("keeps search, settings, and help reachable in compact rail mode", () => {
-    render(<Sidebar compact />);
-    expect(screen.getByRole("button", { name: "Search tasks and commands" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Help" })).toBeInTheDocument();
-  });
-
   test("opens global search from the primary row and keeps recent-task filtering separate", async () => {
     const openPalette = vi.fn();
     window.addEventListener("terminus:open-command-palette", openPalette);
@@ -1433,50 +1501,6 @@ describe("Sidebar — navigation destinations", () => {
     await user.click(screen.getByRole("button", { name: "Filter recent tasks" }));
     expect(screen.getByRole("textbox", { name: "Search tasks" })).toBeInTheDocument();
     window.removeEventListener("terminus:open-command-palette", openPalette);
-  });
-
-  test("announces cold and paginated task counts truthfully in the compact rail", () => {
-    const now = new Date().toISOString();
-    const cold = {
-      id: "session-rail-cold",
-      workspace_id: "workspace-rail-cold",
-      title: "Cold rail project",
-      status: "active" as const,
-      active_thread_id: null,
-      created_at: now,
-      updated_at: now,
-    };
-    const paginated = { ...cold, id: "session-rail-page", title: "Paged rail project" };
-    const loadedTask: Task = {
-      id: "task-rail-loaded",
-      session_id: paginated.id,
-      thread_id: "thread-rail-loaded",
-      status: "ACTIVE",
-      phase: "EXECUTING",
-      active_contract_version: 1,
-      risk_class: "normal",
-      created_at: now,
-      updated_at: now,
-      completed_at: null,
-      terminal_reason: null,
-      contract: null,
-    };
-    useTerminusStore.setState({
-      sessions: [cold, paginated],
-      tasksBySession: { [paginated.id]: [loadedTask] },
-      taskById: { [loadedTask.id]: loadedTask },
-      taskListFreshnessBySession: {
-        [paginated.id]: { status: "ready", error: null },
-      },
-      taskPagesBySession: {
-        [paginated.id]: { nextCursor: "next", total: 3, loadingMore: false, error: null },
-      },
-    });
-
-    render(<Sidebar compact />);
-
-    expect(screen.getByRole("button", { name: "Cold rail project, task count not loaded" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Paged rail project, 1 of 3 tasks loaded" })).toBeInTheDocument();
   });
 
   test("shows task matches without flooding results with every task in the project", async () => {
@@ -1520,7 +1544,7 @@ describe("Sidebar — navigation destinations", () => {
       pinnedTaskIds: new Set(),
     });
     const user = userEvent.setup();
-    render(<Sidebar compact={false} />);
+    render(<Sidebar />);
 
     await user.click(screen.getByRole("button", { name: "Filter recent tasks" }));
     await user.type(screen.getByRole("textbox", { name: "Search tasks" }), "needle");
@@ -1556,7 +1580,7 @@ describe("Sidebar — navigation destinations", () => {
       next_cursor: null,
       truncation: { occurred: false, continuation: null },
     });
-    render(<Sidebar compact={false} />);
+    render(<Sidebar />);
 
     await userEvent.click(screen.getByRole("button", { name: "Load more projects" }));
 
@@ -1576,7 +1600,7 @@ describe("Sidebar — navigation destinations", () => {
       healthStatus: "ready",
       refreshSessions,
     });
-    render(<Sidebar compact={false} />);
+    render(<Sidebar />);
 
     expect(screen.getByRole("alert")).toHaveTextContent("Projects could not be loaded.");
     expect(screen.queryByText("project catalog unavailable")).not.toBeInTheDocument();
@@ -1598,7 +1622,7 @@ describe("Sidebar — navigation destinations", () => {
       refreshAll,
     });
 
-    render(<Sidebar compact={false} />);
+    render(<Sidebar />);
 
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByText(/Failed to fetch/)).not.toBeInTheDocument();
@@ -1648,7 +1672,7 @@ describe("Sidebar — navigation destinations", () => {
         [session.id]: { nextCursor: "next-search-page", total: 2, loadingMore: false, error: null },
       },
     });
-    render(<Sidebar compact={false} />);
+    render(<Sidebar />);
 
     await userEvent.click(screen.getByRole("button", { name: "Filter recent tasks" }));
     await userEvent.type(screen.getByRole("textbox", { name: "Search tasks" }), "needle");
@@ -1692,7 +1716,7 @@ describe("Sidebar — navigation destinations", () => {
       refreshTasks,
     });
     try {
-      render(<Sidebar compact={false} />);
+      render(<Sidebar />);
       await userEvent.click(screen.getByRole("button", { name: "Filter recent tasks" }));
       await userEvent.type(screen.getByRole("textbox", { name: "Search tasks" }), "needle");
 
@@ -2021,7 +2045,7 @@ describe("Sidebar — navigation destinations", () => {
     vi.mocked(api.getTask).mockRejectedValueOnce(new TerminusApiError(503, "control plane unavailable", null));
     await useTerminusStore.getState().refreshTask("pin-retry");
     expect(useTerminusStore.getState().pinnedTaskIds.has("pin-retry")).toBe(true);
-    render(<Sidebar compact={false} />);
+    render(<Sidebar />);
     expect(screen.getByText("Pinned task pin-retry — unavailable")).toBeInTheDocument();
     expect(screen.getByText(/This task is unavailable/)).toBeInTheDocument();
     expect(screen.queryByText(/control plane unavailable/)).not.toBeInTheDocument();
@@ -2191,21 +2215,21 @@ describe("Sidebar — navigation destinations", () => {
     });
     try {
       const user = userEvent.setup();
-      render(<Sidebar compact={false} />);
+      render(<Sidebar />);
       await user.click(screen.getByRole("button", { name: "Filter recent tasks" }));
       await user.type(screen.getByRole("textbox", { name: "Search tasks" }), "virtual");
 
-      const first = screen.getByRole("button", { name: /Virtual task 1, status working/ });
+      const first = screen.getByRole("button", { name: /Virtual task 1, status Ready/ });
       expect(first.closest("[role='listitem']")).toHaveAttribute("aria-posinset", "1");
       expect(first.closest("[role='listitem']")).toHaveAttribute("aria-setsize", "60");
       act(() => first.focus());
       fireEvent.keyDown(first, { key: "End" });
-      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 60, status working/ })).toHaveFocus());
+      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 60, status Ready/ })).toHaveFocus());
 
       fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Home" });
-      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 1, status working/ })).toHaveFocus());
+      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 1, status Ready/ })).toHaveFocus());
       fireEvent.keyDown(document.activeElement as HTMLElement, { key: "ArrowDown" });
-      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 2, status working/ })).toHaveFocus());
+      await waitFor(() => expect(screen.getByRole("button", { name: /Virtual task 2, status Ready/ })).toHaveFocus());
     } finally {
       heightSpy.mockRestore();
       widthSpy.mockRestore();

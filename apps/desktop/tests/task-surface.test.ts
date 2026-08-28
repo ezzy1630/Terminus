@@ -133,7 +133,7 @@ describe("task surface event projections", () => {
         input_hash: `sha256:${promptHash}`,
         started_at: "2026-07-12T00:00:00.000Z",
       }),
-      event("2", "turn.provider_running", { provider: "fixture" }),
+      event("2", "turn.profile_selected", { provider_id: "fixture", model_key: "fixture-model" }),
       event("3", "turn.response_validating", { status: "completed" }),
       event("4", "tool.settled", { tool: "read", status: "success", summary: "Read 1 file (412 lines)." }),
       event("5", "turn.completed", { summary: "Acknowledged: Check the UI" }),
@@ -240,8 +240,8 @@ describe("task surface event projections", () => {
 
   test("explicitly rejects streaming content beyond the presentation budget", () => {
     const deltas = Array.from({ length: 270 }, (_, index) =>
-      event(`delta-${index}`, "turn.provider_running", {
-        delta: index === 269 ? "FINAL_PRIVATE_TAIL" : "x".repeat(1_000),
+      event(`delta-${index}`, "turn.provider_text_delta", {
+        text: index === 269 ? "FINAL_PRIVATE_TAIL" : "x".repeat(1_000),
       }));
     const feed = decodeFeed([
       event("start", "turn.started", { user_input: "Stream" }),

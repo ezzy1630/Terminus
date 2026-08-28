@@ -25,7 +25,12 @@ export const FIXED_SHORTCUTS = {
   toggleInspector: { id: "toggle-inspector", label: "Toggle inspector", scope: "global", display: "⌘]", settingValue: "Cmd+]", key: "]", modifier: "primary" },
   toggleSidebar: { id: "toggle-sidebar", label: "Toggle sidebar", scope: "global", display: "⌘\\", settingValue: "Cmd+\\", key: "\\", modifier: "primary" },
   taskSlot: { id: "task-slot", label: "Open task 1 through 9", scope: "global", display: "⌘1–9", settingValue: "Cmd+1–9", key: "1-9", modifier: "primary" },
-  send: { id: "send", label: "Send or steer message", scope: "composer", display: "⌘↵", settingValue: "Cmd+Enter", key: "Enter", modifier: "primary" },
+  // Enter sends. This is what every other agent client does, and its absence
+  // was the single most-reported thing about the composer: ⌘↵ was the only
+  // binding, so a plain Return silently inserted a newline into a finished
+  // message. `matchesShortcut` rejects Shift, so Shift+↵ stays a newline.
+  sendPlain: { id: "send-plain", label: "Send or steer message", scope: "composer", display: "↵", settingValue: "Enter", key: "Enter", modifier: "none" },
+  send: { id: "send", label: "Send or steer message (with modifier)", scope: "composer", display: "⌘↵", settingValue: "Cmd+Enter", key: "Enter", modifier: "primary" },
   stopRun: { id: "stop-run", label: "Stop the current run", scope: "global", display: "⌘.", settingValue: "Cmd+.", key: ".", modifier: "primary" },
   diffNextChange: { id: "diff-next-change", label: "Next change", scope: "diff", display: "J", settingValue: "J", key: "j", modifier: "none" },
   diffPreviousChange: { id: "diff-previous-change", label: "Previous change", scope: "diff", display: "K", settingValue: "K", key: "k", modifier: "none" },

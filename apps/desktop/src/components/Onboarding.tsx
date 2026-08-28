@@ -29,9 +29,18 @@ import {
 import { cn } from "../lib/cn";
 import { api, TerminusApiError } from "../lib/api";
 import { WORKSPACE_TASK_SCOPE } from "../lib/task-scope";
+import {
+  deriveProjectTitle,
+  isAbsoluteLocalPath,
+  noteRecentProject,
+  projectPathToUri,
+  sameProjectRoot,
+} from "../lib/projects";
+import { useModelInventory } from "../hooks/use-model-inventory";
+import { useModelSelection } from "../lib/models";
 import { useTerminusStore } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
-import type { Session } from "../types";
+import type { Session, WorkspaceKind, WorkspaceSnapshot } from "../types";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
 import { Input, Textarea } from "../ui/Input";
@@ -184,8 +193,11 @@ function OnboardingImpl({
   const selectSession = useTerminusStore((s) => s.selectSession);
   const selectTask = useTerminusStore((s) => s.selectTask);
   const setDraft = useTerminusStore((s) => s.setDraft);
-  const healthReady = useTerminusStore((s) => s.healthReady);
   const onboardingMutation = useLogicalMutation("onboarding");
+  // The first turn of a brand-new project is a turn like any other: it has to
+  // name the model it runs on. There is no session yet to carry a default, so
+  // the inventory's first available model is what it gets.
+  const modelSelection = useModelSelection(useModelInventory());
   const inFlightRecoveryRef = useRef<{ operationKey: string; session: Session | null } | null>(null);
   const [partialRecovery, setPartialRecovery] = useState<{ operationKey: string; session: Session } | null>(null);
 
@@ -253,9 +265,6 @@ function OnboardingImpl({
     session: Session;
     operationKey: string;
   }> => {
-    if (!healthReady) {
-      throw new Error("Terminus is still starting up. Try opening the project again in a moment.");
-    }
     if (!isAbsoluteLocalPath(projectPath)) {
       throw new Error("Choose an absolute local directory before opening the workspace.");
     }
@@ -265,20 +274,31 @@ function OnboardingImpl({
     if (admission.completedSteps.session_created && !admission.completedSteps.workspace_opened) {
       throw new Error("Setup stopped partway through. Recover the saved project before trying again.");
     }
+    const rootUri = projectPathToUri(projectPath);
+    // Opening a directory that is already a project selects it instead of
+    // creating a second session against the same workspace.
+    const alreadyOpenSession = useTerminusStore.getState().sessions
+      .find((candidate) => sameProjectRoot(candidate.workspace_root_uri, rootUri));
+    if (alreadyOpenSession) {
+      onboardingMutation.settle(operationKey);
+      inFlightRecoveryRef.current = null;
+      selectSession(alreadyOpenSession.id);
+      void noteRecentProject(projectPath);
+      return { session: alreadyOpenSession, operationKey };
+    }
     let workspaceId = admission.completedSteps.workspace_opened ?? null;
     if (!workspaceId) {
-      const workspace = await api.openWorkspace({
-        root_uri: projectPathToUri(projectPath),
-        kind: "local_directory",
-        trust: "untrusted",
-      }, { idempotencyKey: `${operationKey}:workspace` });
+      const workspace = await openWorkspaceForPath(projectPath, rootUri, operationKey);
       workspaceId = workspace.id;
       onboardingMutation.checkpoint(operationKey, "workspace_opened", workspace.id);
     }
     const sessionId = admission.completedSteps.session_created;
+    const openWorkspaceId = workspaceId;
+    const existingForWorkspace = useTerminusStore.getState().sessions
+      .find((candidate) => candidate.workspace_id === openWorkspaceId);
     const session = sessionId
       ? await api.getSession(sessionId)
-      : await api.createSession({
+      : existingForWorkspace ?? await api.createSession({
         workspace_id: workspaceId,
         title: deriveProjectTitle(projectPath) || "Untitled project",
       }, { idempotencyKey: `${operationKey}:session` });
@@ -286,8 +306,9 @@ function OnboardingImpl({
     inFlightRecoveryRef.current = { operationKey, session };
     await useTerminusStore.getState().refreshSessions();
     selectSession(session.id);
+    void noteRecentProject(projectPath);
     return { session, operationKey };
-  }, [healthReady, onboardingMutation, projectPath, selectSession]);
+  }, [onboardingMutation, projectPath, selectSession]);
 
   const finish = useCallback(async (): Promise<void> => {
     setCreating(true);
@@ -342,6 +363,8 @@ function OnboardingImpl({
             thread_id: task.thread_id,
             task_id: task.id,
             user_input: objective,
+            ...(modelSelection.selected ? { model: modelSelection.selected.slug } : {}),
+            ...(modelSelection.effort ? { reasoning_effort: modelSelection.effort } : {}),
           }, { idempotencyKey: `${operationKey}:turn` });
           onboardingMutation.checkpoint(operationKey, "turn_started", "done");
         }
@@ -376,7 +399,17 @@ function OnboardingImpl({
     } finally {
       setCreating(false);
     }
-  }, [clearCompletedDraft, createWorkspaceSession, initialPrompt, onComplete, onboardingMutation, projectPath, selectTask]);
+  }, [
+    clearCompletedDraft,
+    createWorkspaceSession,
+    initialPrompt,
+    modelSelection.effort,
+    modelSelection.selected,
+    onComplete,
+    onboardingMutation,
+    projectPath,
+    selectTask,
+  ]);
 
   const continueWithPartialProject = useCallback((): void => {
     if (!partialRecovery) return;
@@ -560,25 +593,45 @@ function OnboardingImpl({
 
 export const Onboarding = memo(OnboardingImpl);
 
+/**
+ * Open a directory as a workspace, choosing the right kind.
+ *
+ * Everything was opened as `local_directory`, so a repository lost its git
+ * identity and the tools that depend on it. The shell can stat the path; when
+ * it cannot, `local_git` is attempted first and a `WORKSPACE_IDENTITY_CONFLICT`
+ * is the control plane telling us which one it actually is.
+ */
+async function openWorkspaceForPath(
+  projectPath: string,
+  rootUri: string,
+  operationKey: string,
+): Promise<WorkspaceSnapshot> {
+  let kinds: readonly WorkspaceKind[] = ["local_git", "local_directory"];
+  const validate = window.terminusDesktop?.validateDirectory;
+  if (validate) {
+    const verdict = await validate(projectPath);
+    if (!verdict.ok) throw new Error(`${projectPath} is not a directory this app can open.`);
+    kinds = verdict.isGit ? ["local_git"] : ["local_directory"];
+  }
+  let lastError: unknown = null;
+  for (const kind of kinds) {
+    try {
+      return await api.openWorkspace(
+        { root_uri: rootUri, kind, trust: "untrusted" },
+        { idempotencyKey: `${operationKey}:workspace:${kind}` },
+      );
+    } catch (error: unknown) {
+      lastError = error;
+      const identityConflict = error instanceof TerminusApiError
+        && error.status === 409
+        && error.envelope?.code === "WORKSPACE_IDENTITY_CONFLICT";
+      if (!identityConflict) throw error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("The workspace could not be opened.");
+}
+
 // ────────────────────────── Helpers ─────────────────────────────────────────
-
-function deriveProjectTitle(path: string): string {
-  if (!path) return "";
-  const cleaned = path.replace(/\/+$/, "");
-  const parts = cleaned.split("/");
-  return parts[parts.length - 1] ?? cleaned;
-}
-
-/** Convert the native path collected by onboarding to the canonical URI the
- * control plane accepts. Keeping this at the renderer boundary avoids
- * smuggling path semantics into session creation. */
-function projectPathToUri(path: string): string {
-  // Encode path segments directly. `new URL(path, "file:///")` would treat
-  // valid filename characters such as `#` and `?` as URL syntax.
-  return `file://${path.split("/").map((segment) => encodeURIComponent(segment)).join("/")}`;
-}
-
-function isAbsoluteLocalPath(path: string): boolean {
-  const value = path.trim();
-  return value.startsWith("/") && !value.includes("\0") && !value.startsWith("//");
-}
+//
+// Path ⇄ URI conversion, the recents list and the "already open?" check live in
+// lib/projects: onboarding is no longer the only surface that opens a project.

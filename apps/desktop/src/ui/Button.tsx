@@ -13,7 +13,10 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "bare
 export type ControlSize = "sm" | "md" | "lg";
 
 const variantClasses: Record<Exclude<ButtonVariant, "bare">, string> = {
-  primary: "border-transparent bg-primary font-medium text-on-accent hover:brightness-105",
+  // Background, hover and pressed all live in CSS (.ui-button-primary): a
+  // brightness filter is not a state, and utilities outrank the components
+  // layer where a hover rule would otherwise go.
+  primary: "ui-button-primary border-transparent font-medium text-on-accent",
   secondary: "border-default bg-elevated font-medium text-primary hover:border-strong hover:bg-hover",
   ghost: "border-transparent bg-transparent font-normal text-secondary hover:bg-hover hover:text-primary",
   danger: "border-transparent bg-error font-medium text-white hover:brightness-105",

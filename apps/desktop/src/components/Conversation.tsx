@@ -41,7 +41,7 @@ import { ArrowDown, ShieldAlert, MessageCircle } from "lucide-react";
 import { cn } from "../lib/cn";
 import { turnInputPlaceholder, type TurnInputMap } from "../lib/turn-input";
 import { useTurnInputs } from "../hooks/use-turn-inputs";
-import { lifecycleFromTask } from "../lib/task-lifecycle";
+import { displayLifecycle } from "../lib/turn-activity";
 import {
   MAX_PRESENTATION_EVENT_CHARS,
   PRESENTATION_REJECTION_KEY,
@@ -144,6 +144,20 @@ const TURN_OUTCOME_FALLBACK: TurnOutcome = {
 };
 
 const TURN_OUTCOMES: Record<string, TurnOutcome> = {
+  /*
+   * A turn failed; the task did not.
+   *
+   * The control plane emits this at task level precisely to say the task is
+   * still ACTIVE and steerable. It carries the same failure payload as
+   * `turn.failed`, so it renders the same block — with Retry, and with the
+   * composer left alone.
+   */
+  "task.turn_failed": {
+    title: "Turn failed",
+    metric: "Failed",
+    message: "This turn failed. The task is still open — send another message or retry.",
+    tone: "failed",
+  },
   "turn.failed": {
     title: "Turn failed",
     metric: "Failed",
@@ -246,6 +260,31 @@ function appendToolEntry(group: PendingToolGroup, entry: ActivityEntry, at: stri
   return false;
 }
 
+/** How much of a structured `details` payload a failure row may carry. */
+const MAX_FAILURE_DETAILS_CHARS = 4_000;
+
+/**
+ * The structured `details` a terminal turn event carries.
+ *
+ * Rendered because it is the only place the actual cause survives — a stderr
+ * tail, an HTTP status, the tool that refused. Bounded on its own budget so an
+ * oversized payload cannot displace the reason lines above it.
+ */
+function formatFailureDetails(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value.length === 0 ? null : boundedText(value, "Failure details", MAX_FAILURE_DETAILS_CHARS);
+  }
+  if (value === null || value === undefined || typeof value !== "object") return null;
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value, null, 2);
+  } catch {
+    return "Failure details could not be rendered: the payload is not serialisable.";
+  }
+  if (typeof serialized !== "string" || serialized === "{}" || serialized === "[]") return null;
+  return boundedText(serialized, "Failure details", MAX_FAILURE_DETAILS_CHARS);
+}
+
 function artifactReference(p: Record<string, unknown>): string | null {
   const candidates = [p, recordFrom(p.result), recordFrom(p.output)];
   for (const candidate of candidates) {
@@ -270,12 +309,13 @@ function artifactReference(p: Record<string, unknown>): string | null {
  *   - tool.proposed       { tool, args_summary }
  *   - tool.authorized     { ... }
  *   - tool.settled        { tool, result_status }
- *   - turn.provider_running { ... }
+ *   - turn.provider_text_delta { text }
  *   - turn.response_validating { ... }
  *   - task.completed      { ... }
  *
- * Anything unrecognized is ignored (defensive). A `provider_running`
- * event with a `delta` field is appended to the streaming agent message.
+ * Anything unrecognized is ignored (defensive). `turn.provider_text_delta`
+ * carries a coalesced chunk of the provider's reply in `text`; the chunks are
+ * concatenated into the streaming agent message.
  */
 /**
  * When an event happened.
@@ -341,6 +381,13 @@ export function decodeFeed(
   const toolEntryByCallId = new Map<string, ActivityEntry>();
   /** The reply this turn will produce, held until it has something to say. */
   let pendingAgentMessage: { id: string; at: string } | null = null;
+  /** The model the runtime reported for the turn in flight, if it reported one. */
+  let pendingTurnModel: string | null = null;
+  /**
+   * The exact prompt of the turn in flight, when this client holds it in full.
+   * A failed turn offers to resend it; nothing else reads it.
+   */
+  let lastUserInput: string | null = null;
 
   const addMessage = (message: ConversationMessage): void => {
     messages.push(message);
@@ -362,6 +409,7 @@ export function decodeFeed(
       content: "",
       createdAt: pendingAgentMessage.at,
       streaming: true,
+      ...(pendingTurnModel ? { model: pendingTurnModel } : {}),
     };
     streamingMessageId = message.id;
     pendingAgentMessage = null;
@@ -498,21 +546,38 @@ export function decodeFeed(
         openReasoning = { id: `reasoning-${ev.id}`, phases: [], startedAt: at, endedAt: null };
         reasoning.push(openReasoning);
         order.push({ kind: "reasoning", id: openReasoning.id });
-        // The agent's message is *not* opened here. The control plane does not
-        // stream provider deltas, so an empty message opened at turn start sat
-        // in the feed as a blank bubble with a blinking caret for the whole
-        // turn — the single loudest signal that the chat was broken. It is
-        // materialised at first content instead, which also puts it after the
-        // tool calls that produced it rather than above them.
+        // The agent's message is *not* opened here. An empty message opened at
+        // turn start sat in the feed as a blank bubble with a blinking caret
+        // until the first delta arrived — and a turn that spends its first
+        // minute compiling context and running tools has no text for a long
+        // time. It is materialised at first content instead, which also puts
+        // it after the tool calls that produced it rather than above them.
+        lastUserInput = resolvedInput?.status === "ready" && !resolvedInput.truncated
+          ? resolvedInput.text
+          : null;
         pendingAgentMessage = { id: `agent-${ev.id}`, at };
+        // The runtime states what it routed to. `turn.profile_selected` may
+        // refine it later; until this landed the composer's choice and the
+        // model that actually ran were unrelated facts.
+        const startedModel = typeof p.model === "string" && p.model.length > 0 ? p.model : null;
+        const startedEffort = typeof p.reasoning_effort === "string" && p.reasoning_effort.length > 0
+          ? p.reasoning_effort
+          : null;
+        pendingTurnModel = startedModel === null
+          ? null
+          : boundedText(
+              startedEffort ? `${startedModel} · ${startedEffort}` : startedModel,
+              "Model",
+              MAX_ACTIVITY_SUMMARY_CHARS,
+            );
         streamingMessageId = null;
         break;
       }
       case "turn.completed": {
-        // The control plane does not stream provider deltas; it publishes the
-        // settled response on turn.completed. Preserve streamed content when
-        // some arrives, but never leave a completed turn with an empty
-        // assistant message.
+        // Streamed deltas have already built the reply; the settled summary is
+        // the fallback for a turn whose stream was never seen (a replayed
+        // transcript, an evicted window). Never leave a completed turn with an
+        // empty assistant message.
         const at = eventTimestamp(p, ev, taskCreatedAt);
         const summary = typeof p.summary === "string"
           ? boundedText(p.summary, "Completion summary", MAX_MESSAGE_FIELD_CHARS)
@@ -570,6 +635,7 @@ export function decodeFeed(
        * pinned in the streaming state forever — a blinking caret under an empty
        * response, with no indication that anything had happened.
        */
+      case "task.turn_failed":
       case "turn.failed":
       case "turn.aborted":
       case "turn.interrupted":
@@ -591,13 +657,40 @@ export function decodeFeed(
           streamingMessageId = null;
         }
         pendingAgentMessage = null;
-        // Every non-completing end gets a row, carrying whatever reason the
-        // control plane gave — "it stopped" with no reason is what sends
-        // someone to a log file.
-        const reason = typeof p.reason === "string" ? p.reason : null;
-        const detail = [reason, typeof p.error === "string" ? p.error : null]
+        /*
+         * Every non-completing end gets a row carrying what the control plane
+         * actually said.
+         *
+         * The payload is `{ code, category, message, reason, retryable,
+         * details }`. `message` is the human sentence; the client read only
+         * `reason` and `error`, so a failed turn rendered the single token
+         * `agent_loop_error` and sent the reader to a log file.
+         */
+        const failureCode = typeof p.code === "string" && p.code.length > 0 ? p.code : null;
+        const failureMessage = typeof p.message === "string" && p.message.length > 0
+          ? p.message
+          : typeof p.error === "string" && p.error.length > 0
+            ? p.error
+            : null;
+        const reason = typeof p.reason === "string" && p.reason.length > 0 ? p.reason : null;
+        const knownReason = reason === null ? undefined : TERMINAL_REASON_TEXT[reason];
+        const summary = boundedText(
+          [failureCode, knownReason ?? failureMessage ?? outcome.message]
+            .filter((value): value is string => value !== null)
+            .join(": "),
+          "Turn outcome",
+          MAX_ACTIVITY_SUMMARY_CHARS,
+        );
+        const category = typeof p.category === "string" && p.category.length > 0 ? p.category : null;
+        const retryable = p.retryable === true ? "yes" : p.retryable === false ? "no" : null;
+        const detail = [
+          reason && reason !== failureMessage ? `Reason: ${reason}` : null,
+          category ? `Category: ${category}` : null,
+          retryable ? `Retryable: ${retryable}` : null,
+          formatFailureDetails(p.details),
+        ]
           .filter((value): value is string => value !== null && value.length > 0)
-          .join(" — ");
+          .join("\n");
         const block: ActivityBlockData = {
           id: `block-${ev.id}`,
           title: outcome.title,
@@ -605,12 +698,18 @@ export function decodeFeed(
           status: outcome.tone === "failed" ? "failed" : "interrupted",
           entries: [{
             tool: "turn",
-            summary: outcome.message,
+            summary,
             ...(detail ? { detail: boundedText(detail, "Turn outcome detail", MAX_ACTIVITY_DETAIL_CHARS) } : {}),
             at,
             phase: "settled",
             outcome: outcome.tone === "failed" ? "failed" : "unknown",
           }],
+          // Offered only where retrying is the obvious next move and the exact
+          // prompt is in hand. A stopped or superseded turn ended because the
+          // user decided it should.
+          ...(outcome.tone === "failed" && lastUserInput !== null
+            ? { retryInput: lastUserInput }
+            : {}),
         };
         blocks.push(block);
         order.push({ kind: "block", id: block.id });
@@ -623,20 +722,74 @@ export function decodeFeed(
         // contract.
         break;
       }
-      case "turn.provider_running": {
-        notePhase("provider_running", eventTimestamp(p, ev, taskCreatedAt));
-        // Some payloads carry a `delta` text chunk or a `response` block.
-        {
-          const delta = typeof p.delta === "string" ? p.delta : null;
-          const response = typeof p.response === "string" ? p.response : null;
-          if (delta || response) {
-            const m = openAgentMessage();
-            if (m) {
-              if (delta) appendStreamContent(m, delta);
-              else if (response && m.content.length === 0) appendStreamContent(m, response);
-            }
-          }
+      /*
+       * Which model actually ran this turn.
+       *
+       * The composer offers a choice; this is the only place the runtime says
+       * what it did with it. Reported on the reply rather than beside the
+       * picker so a transcript read a week later still says what produced it.
+       */
+      case "turn.profile_selected": {
+        const model = typeof p.model_key === "string" && p.model_key.length > 0 ? p.model_key : null;
+        if (model === null) break;
+        pendingTurnModel = boundedText(model, "Model", MAX_ACTIVITY_SUMMARY_CHARS);
+        if (streamingMessageId) {
+          const message = messageById.get(streamingMessageId);
+          if (message) message.model = pendingTurnModel;
         }
+        break;
+      }
+      /*
+       * A steer accepted into the running turn.
+       *
+       * `POST /v1/turns/:id/steer` produces no new `turn.started`, so without
+       * this the steered instruction vanished from the transcript entirely and
+       * the reply that followed it had no visible cause. The payload carries
+       * the length, not the text — the text is a content-addressed artifact.
+       */
+      case "turn.steering_queued": {
+        const at = eventTimestamp(p, ev, taskCreatedAt);
+        flushGroup();
+        const chars = typeof p.chars === "number" && Number.isFinite(p.chars) ? p.chars : null;
+        const block: ActivityBlockData = {
+          id: `block-${ev.id}`,
+          title: "Steering delivered",
+          metric: chars === null ? "Queued" : plural(chars, "character", "characters"),
+          status: "done",
+          entries: [{
+            tool: "steer",
+            summary: "Your message was delivered into the running turn.",
+            at,
+            phase: "settled",
+            outcome: "succeeded",
+          }],
+        };
+        blocks.push(block);
+        order.push({ kind: "block", id: block.id });
+        break;
+      }
+      /*
+       * The provider's reply, streamed.
+       *
+       * This is the event the control plane actually emits
+       * (`createProviderTextDeltaEmitter`): text coalesced into chunks of at
+       * least 512 characters, each one a fragment of the same reply. The
+       * renderer used to listen for `turn.provider_running`, which nothing has
+       * ever published, so every streamed reply was discarded and the answer
+       * appeared in one lump at `turn.completed` — or not at all.
+       */
+      case "turn.provider_text_delta": {
+        const at = eventTimestamp(p, ev, taskCreatedAt);
+        notePhase("provider_running", at);
+        const text = typeof p.text === "string" ? p.text : null;
+        if (text === null || text.length === 0) break;
+        // A stream attached mid-turn has no `turn.started` in its window. The
+        // text still belongs to a reply, so open one rather than drop it.
+        if (streamingMessageId === null && pendingAgentMessage === null) {
+          pendingAgentMessage = { id: `agent-${ev.id}`, at };
+        }
+        const m = openAgentMessage();
+        if (m) appendStreamContent(m, text);
         break;
       }
       // `tool.authorized` and `tool.started` are policy bookkeeping: they name
@@ -680,9 +833,11 @@ export function decodeFeed(
         // tool call reads as one line that resolves, not as two unrelated rows.
         const outcome: ActivityEntry["outcome"] = ev.event === "tool.settled"
           ? settlementOutcome(p)
-          : ev.event === "tool.settlement_unknown"
-            ? "unknown"
-            : "failed";
+          : ev.event === "tool.denied"
+            ? "denied"
+            : ev.event === "tool.settlement_unknown"
+              ? "unknown"
+              : "failed";
         const summary = settledToolSummary(ev.event, p, existing?.summary);
         const detail = detailForTool(p);
         if (existing) {
@@ -785,9 +940,11 @@ export function decodeFeed(
       operations.set(entry.operationId ?? `uncorrelated:${index}`, entry);
     });
     const states = Array.from(operations.values());
-    const anyFailed = states.some((entry) => entry.phase === "settled" && entry.outcome === "failed");
+    const anyFailed = states.some((entry) => entry.phase === "settled"
+      && (entry.outcome === "failed" || entry.outcome === "denied"));
     const allSettled = states.length > 0 && states.every((entry) => entry.phase === "settled");
     const allSucceeded = allSettled && states.every((entry) => entry.outcome === "succeeded");
+    const allDenied = allSettled && states.every((entry) => entry.outcome === "denied");
     block.status = anyFailed
       ? "failed"
       : allSucceeded
@@ -795,6 +952,13 @@ export function decodeFeed(
         : allSettled
           ? "unknown"
           : "working";
+    // A group in which nothing ran did not explore anything. Retitle it so the
+    // collapsed row says what happened instead of what was attempted.
+    if (allDenied) {
+      block.title = "Denied by policy";
+      block.metric = plural(states.length, "denial", "denials");
+      continue;
+    }
     block.metric = computeMetric(block.entries, block.title);
   }
 
@@ -840,12 +1004,23 @@ function settledToolSummary(
   p: Record<string, unknown>,
   proposed: string | undefined,
 ): string {
+  // A denial leads with the word. Falling through to the generic path rendered
+  // the bare policy reason with no indication that anything had been refused,
+  // under a group still titled "Explored codebase".
+  if (eventName === "tool.denied") {
+    const why = [p.reason, p.explanation, p.summary, p.error]
+      .find((value): value is string => typeof value === "string" && value.length > 0);
+    return boundedText(
+      `Denied: ${why ?? proposed ?? "policy refused this tool call"}`,
+      "Tool denial",
+      MAX_ACTIVITY_SUMMARY_CHARS,
+    );
+  }
   const summary = p.summary ?? p.explanation ?? p.reason ?? p.error;
   if (typeof summary === "string" && summary.length > 0) {
     return boundedText(summary, "Tool summary", MAX_ACTIVITY_SUMMARY_CHARS);
   }
   switch (eventName) {
-    case "tool.denied": return proposed ? `${proposed} — denied by policy` : "Denied by policy";
     case "tool.cancelled": return proposed ? `${proposed} — cancelled` : "Cancelled before dispatch";
     case "tool.settlement_unknown":
       return proposed ? `${proposed} — outcome unknown` : "Outcome unknown; needs reconciliation";
@@ -980,18 +1155,56 @@ function feedItemKey(item: FeedItem): string {
   return `block:${item.block.id}`;
 }
 
-function FeedItemView({ item }: { item: FeedItem }): JSX.Element {
+function FeedItemView({ item, onRetry }: { item: FeedItem; onRetry?: (input: string) => void }): JSX.Element {
   if (item.kind === "reasoning") return <ReasoningTrace block={item.reasoning} />;
   return item.kind === "message" ? (
     <Message message={item.message} />
   ) : (
     <div style={{ maxWidth: "calc(var(--conversation-max-width) + 40px)" }}>
-      <ActivityBlock block={item.block} />
+      {/* A failure opens itself. Collapsed-by-default meant the one row that
+          explained why a turn stopped hid the explanation behind a click. */}
+      <ActivityBlock
+        block={item.block}
+        defaultExpanded={item.block.status === "failed"}
+        onRetry={onRetry}
+      />
     </div>
   );
 }
 
 const ACCESSIBLE_TRANSCRIPT_PAGE_SIZE = 100;
+
+/**
+ * The human sentence a task's `terminal_reason` carries.
+ *
+ * The control plane writes the same `{ code, message, reason }` shape it puts
+ * on a terminal turn event. `message` is the sentence; `reason` is the machine
+ * token that was previously the only thing shown anywhere.
+ */
+/**
+ * Reasons the control plane reports as codes, in the words a person needs.
+ *
+ * `control_plane_restarted` is the one that matters: the turn did not fail on
+ * its own terms, Terminus went away underneath it. "agent_loop_error" tells
+ * the reader to go and read a log; this tells them to press Retry.
+ */
+const TERMINAL_REASON_TEXT: Readonly<Record<string, string>> = {
+  control_plane_restarted: "Terminus restarted while this turn was running.",
+};
+
+export function terminalReasonText(reason: Record<string, unknown> | null): string | undefined {
+  if (!reason) return undefined;
+  const read = (key: string): string | null => {
+    const value = reason[key];
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  };
+  const known = TERMINAL_REASON_TEXT[read("reason") ?? ""];
+  if (known) return known;
+  const text = [read("code"), read("message") ?? read("reason") ?? read("error")]
+    .filter((value): value is string => value !== null)
+    .join(": ");
+  return text.length > 0 ? boundedText(text, "Terminal reason", MAX_ACTIVITY_SUMMARY_CHARS) : undefined;
+}
 
 function ConversationImpl({ className, events: eventsProp, onNewTask }: ConversationProps): JSX.Element {
   const task = useSelectedTask();
@@ -1126,6 +1339,20 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
     if (stickRef.current) setHasUnseenUpdates(false);
   }, []);
 
+  /*
+   * Resend a failed turn's prompt.
+   *
+   * Routed through the composer rather than posting a turn from here: the
+   * composer owns the only `POST /v1/turns` call site, with its idempotency
+   * ledger and its steer/queue rules. A second send path would drift from it.
+   */
+  const retryTurn = useCallback((input: string): void => {
+    if (!task) return;
+    window.dispatchEvent(new CustomEvent("terminus:retry-turn", {
+      detail: { taskId: task.id, text: input },
+    }));
+  }, [task]);
+
   const jumpToLatest = useCallback((): void => {
     stickRef.current = true;
     setHasUnseenUpdates(false);
@@ -1170,9 +1397,12 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
     );
   }
 
-  const normalizedStatus = lifecycleFromTask(task);
+  // What the task is *doing*, not what its row says. An ACTIVE task with no
+  // turn in flight is ready, not working — see lib/turn-activity.
+  const normalizedStatus = displayLifecycle(task, events);
   const blockedByProvider = task.status === "BLOCKED"
     && task.terminal_reason?.reason === "provider_transport_unavailable";
+  const terminalReasonDetail = terminalReasonText(task.terminal_reason);
   const emptyState = (() => {
     switch (normalizedStatus) {
       case "queued": return { title: "Queued", description: "Work will begin when the runtime is ready." };
@@ -1189,6 +1419,7 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
       case "cancelled": return { title: "Task stopped", description: "The task was aborted before producing conversation items." };
       case "unknown": return { title: "Status unavailable", description: "Refresh the task snapshot before relying on this empty view." };
       case "failed": return null;
+      case "idle": return { title: "Ready when you are", description: "Send a message to start this task." };
       case "working": return { title: "Preparing the first turn", description: "The conversation will appear here as the agent starts working." };
     }
   })();
@@ -1320,13 +1551,6 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
               <p className="mt-1 text-sm text-secondary">Configure provider transport in the control plane, then send a follow-up to retry this task.</p>
             </div>
           </div>
-        ) : items.length === 0 && normalizedStatus === "failed" ? (
-          <ErrorState
-            {...errorPreset("failedTask")}
-            action={onNewTask ? { label: "New task", onClick: onNewTask } : undefined}
-            compact
-            className="conversation-terminal-state"
-          />
         ) : items.length === 0 && transcript?.status === "loading" ? (
           <div className="grid min-h-40 place-items-center text-center" role="status">
             <p className="ui-body text-tertiary">Loading the conversation…</p>
@@ -1334,12 +1558,8 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
         ) : items.length === 0 && emptyState ? (
           <div className="grid min-h-40 place-items-center text-center">
             <div className="max-w-sm">
-              <h2 className="ui-page-title text-primary">
-                {normalizedStatus === "working" ? "Ready when you are" : emptyState.title}
-              </h2>
-              <p className="ui-body mt-1 text-tertiary">
-                {normalizedStatus === "working" ? "Send a message to start this task." : emptyState.description}
-              </p>
+              <h2 className="ui-page-title text-primary">{emptyState.title}</h2>
+              <p className="ui-body mt-1 text-tertiary">{emptyState.description}</p>
             </div>
           </div>
         ) : null}
@@ -1380,7 +1600,7 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
                   aria-posinset={transcriptStart + index + 1}
                   aria-setsize={items.length}
                 >
-                  <FeedItemView item={item} />
+                  <FeedItemView item={item} onRetry={retryTurn} />
                 </div>
               ))}
             </div>
@@ -1417,12 +1637,28 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
                     transform: `translateY(${vi.start}px)`,
                   }}
                 >
-                  <FeedItemView item={item} />
+                  <FeedItemView item={item} onRetry={retryTurn} />
                 </div>
               );
             })}
           </div>
         )}
+
+        {/* A failed task says so whether or not it produced a transcript.
+
+            This used to be gated on `items.length === 0`, so the one surface
+            that named the failure and offered a way forward was unreachable for
+            every task that had said anything at all — which is every task that
+            actually ran. */}
+        {normalizedStatus === "failed" ? (
+          <ErrorState
+            {...errorPreset("failedTask")}
+            {...(terminalReasonDetail ? { detail: terminalReasonDetail } : {})}
+            action={onNewTask ? { label: "New task", onClick: onNewTask } : undefined}
+            compact
+            className="conversation-terminal-state mt-4"
+          />
+        ) : null}
 
         {approvals.length > 0 ? (
           <PendingApprovalsBlock

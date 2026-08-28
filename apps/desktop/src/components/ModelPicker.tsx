@@ -26,7 +26,6 @@ import { Check, ChevronDown, Search, Star } from "lucide-react";
 import { cn } from "../lib/cn";
 import { Button } from "../ui/Button";
 import type { ModelOption, ModelSelection, Provider, ProviderId } from "../lib/models";
-import type { ModelRouting } from "../hooks/use-model-routing";
 
 type Filter = "all" | "favourites" | ProviderId;
 
@@ -35,8 +34,6 @@ const PANEL_MAX_HEIGHT = 420;
 
 interface ModelPickerProps {
   selection: ModelSelection;
-  /** Applies the choice to the runtime; without it the picker is display-only. */
-  routing?: ModelRouting;
   className?: string;
   disabled?: boolean;
 }
@@ -61,8 +58,18 @@ function matches(model: ModelOption, providerLabel: string, query: string): bool
   return `${model.label} ${model.slug} ${providerLabel} ${model.note ?? ""}`.toLowerCase().includes(query);
 }
 
-function ModelPickerImpl({ selection, routing, className, disabled = false }: ModelPickerProps): JSX.Element {
-  const { selected, select, favourites, favouriteRank, isFavourite, toggleFavourite, inventory } = selection;
+function ModelPickerImpl({ selection, className, disabled = false }: ModelPickerProps): JSX.Element {
+  const {
+    selected,
+    select,
+    favourites,
+    favouriteRank,
+    isFavourite,
+    toggleFavourite,
+    inventory,
+    persistError,
+    persisting,
+  } = selection;
   const { models, providers } = inventory;
   const providerById = useCallback(
     (id: ProviderId): Provider => providers.find((provider) => provider.id === id)
@@ -125,13 +132,12 @@ function ModelPickerImpl({ selection, routing, className, disabled = false }: Mo
 
   const choose = useCallback((model: ModelOption): void => {
     if (!providerById(model.provider).available) return;
-    // Local selection first so the trigger updates immediately; the write is
-    // what actually moves the next turn, and its failure is reported in the
-    // footer rather than silently reverting the row the operator just clicked.
+    // The choice takes effect for the next turn immediately; saving it as the
+    // project's default is a separate, slower thing whose failure is reported
+    // in the footer rather than silently reverting the row just clicked.
     select(model.id);
-    void routing?.apply(model);
     close();
-  }, [close, providerById, routing, select]);
+  }, [close, providerById, select]);
 
   useEffect(() => {
     if (!open) return;
@@ -231,7 +237,7 @@ function ModelPickerImpl({ selection, routing, className, disabled = false }: Mo
           role="dialog"
           aria-label="Choose a model"
           className={cn(
-            "ui-popover surface-enter absolute left-0 z-popover flex w-[340px] flex-col overflow-hidden rounded-xl border border-default shadow-lg",
+            "ui-popover model-picker-surface surface-enter absolute left-0 z-popover flex w-[340px] flex-col overflow-hidden rounded-xl border border-default shadow-lg",
             placement === "down" ? "top-[calc(100%+6px)]" : "bottom-[calc(100%+6px)]",
           )}
         >
@@ -360,14 +366,14 @@ function ModelPickerImpl({ selection, routing, className, disabled = false }: Mo
           <p
             className={cn(
               "border-t border-subtle px-3 py-1.5 text-xs",
-              routing?.status === "error" ? "text-error" : "text-tertiary",
+              persistError ? "text-error" : "text-tertiary",
             )}
-            role={routing?.status === "error" ? "alert" : undefined}
+            role={persistError ? "alert" : undefined}
           >
-            {routing?.status === "error" && routing.error
-              ? routing.error
-              : routing?.status === "applying"
-                ? "Applying…"
+            {persistError
+              ? persistError
+              : persisting
+                ? "Saving as the project default…"
                 : favourites.length > 0
                   ? "Press 1–9 to pick a favourite · ↑↓ to move"
                   : `Star a model to pin it here · ${selectedProvider.label} is active`}

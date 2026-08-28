@@ -23,38 +23,36 @@
  *
  * Per SPEC §7.2: selected state visible without bright saturated bg.
  *
- * Per SPEC §24: compact mode = icons only.
+ * The icons-only rail this file once carried was never mounted — `compact` had
+ * no caller and no breakpoint — so it has been removed rather than left as a
+ * second, silently diverging copy of the tree below.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Activity,
-  Bot,
   BellRing,
   ChevronDown,
   ChevronRight,
   Columns3,
   FolderOpen,
-  HelpCircle,
   Plus,
-  RefreshCw,
   Search,
   Settings,
-  SquarePen,
-  User,
 } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
-import { useTerminusStore, usePinnedTasks } from "../hooks/use-terminus";
-import { lifecycleFromTask, lifecycleNeedsAttention, taskTitle } from "../lib/task-lifecycle";
+import { useRunActivityByTask, useTerminusStore, usePinnedTasks } from "../hooks/use-terminus";
+import { lifecycleNeedsAttention, taskTitle, type TaskLifecycle } from "../lib/task-lifecycle";
+import { displayLifecycleWith } from "../lib/turn-activity";
+import type { TurnActivity } from "../lib/turn-activity";
 import { useThemeStore } from "../hooks/use-theme";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
 import { Skeleton, StatusDot } from "../ui/Status";
 import { SidebarItem } from "./SidebarItem";
+import { ProjectMenu, projectSubtitle } from "./ProjectMenu";
 import type { Session, Task } from "../types";
 
 interface SidebarProps {
-  compact?: boolean;
   activeDestination?: SidebarDestination;
   onNavigate?: (destination: SidebarDestination) => void;
   onOpenAttentionCenter?: () => void;
@@ -70,15 +68,12 @@ export type SidebarDestination =
   | "task_details";
 
 function SidebarImpl({
-  compact: compactProp,
   activeDestination = "new_task",
   onNavigate,
   onOpenAttentionCenter,
   onOpenProject,
   taskActionsEnabled = false,
 }: SidebarProps): JSX.Element {
-  const compact = compactProp ?? false;
-
   const sessions = useTerminusStore((s) => s.sessions);
   const tasksBySession = useTerminusStore((s) => s.tasksBySession);
   const taskById = useTerminusStore((s) => s.taskById);
@@ -105,7 +100,16 @@ function SidebarImpl({
   const loadMoreTasks = useTerminusStore((s) => s.loadMoreTasks);
   const refreshTask = useTerminusStore((s) => s.refreshTask);
 
+  const currentSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const pinnedTasks = usePinnedTasks();
+  // Every status glyph in this tree is derived from this map, not from the
+  // stored status: ACTIVE is the steady state, so reading it literally put a
+  // spinner on every task in the sidebar and left it there.
+  const runActivityByTask = useRunActivityByTask();
+  const rowLifecycle = useCallback(
+    (task: Task): TaskLifecycle => displayLifecycleWith(task, runActivityByTask[task.id] ?? "unknown"),
+    [runActivityByTask],
+  );
 
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -115,16 +119,12 @@ function SidebarImpl({
 
   useEffect(() => {
     const focusProjectSearch = (): void => {
-      if (compact) {
-        window.dispatchEvent(new Event("terminus:open-command-palette"));
-        return;
-      }
       setSearchOpen(true);
       window.requestAnimationFrame(() => searchInputRef.current?.focus());
     };
     window.addEventListener("terminus:focus-project-search", focusProjectSearch);
     return () => window.removeEventListener("terminus:focus-project-search", focusProjectSearch);
-  }, [compact]);
+  }, []);
 
   const normalizedQuery = query.trim().toLowerCase();
   const filteredSessions = useMemo<Array<{ session: Session; tasks: Task[]; searchIncomplete: boolean }>>(() => sessions.flatMap((session) => {
@@ -158,8 +158,8 @@ function SidebarImpl({
   }), [normalizedQuery, pinnedTaskIds, taskById]);
   const attentionCount = useMemo(() => Object.values(tasksBySession)
     .flat()
-    .filter((task) => lifecycleNeedsAttention(lifecycleFromTask(task)))
-    .length, [tasksBySession]);
+    .filter((task) => lifecycleNeedsAttention(displayLifecycleWith(task, runActivityByTask[task.id] ?? "unknown")))
+    .length, [runActivityByTask, tasksBySession]);
 
   const toggleCollapsed = (sessionId: string): void => {
     setCollapsedSessions((prev) => {
@@ -185,81 +185,6 @@ function SidebarImpl({
   const onDestination = (destination: SidebarDestination): void => {
     onNavigate?.(destination);
   };
-
-  if (compact) {
-    // Rail mode — icons only, no labels.
-    return (
-      <div className="flex h-full flex-col items-center gap-2 py-3">
-        <div className="flex h-7 w-7 items-center justify-center font-semibold text-secondary" aria-label="Workspace">T</div>
-        <IconButton
-          onClick={onNewTask}
-          label="New task"
-          icon={<Plus size={16} />}
-          size="lg"
-          data-tooltip="New task"
-          className="rounded-md bg-hover text-secondary hover:text-primary"
-        />
-        {onOpenProject ? (
-          <IconButton label="Open project" icon={<FolderOpen size={15} strokeWidth={1.7} />} size="lg" onClick={() => onOpenProject()} data-tooltip="Open project" className="rounded-md text-secondary hover:bg-hover" />
-        ) : null}
-        <IconButton label="Board" icon={<Columns3 size={15} strokeWidth={1.7} />} size="lg" onClick={() => onDestination("board")} data-tooltip="Board" aria-current={activeDestination === "board" ? "page" : undefined} className={cn("rounded-md", activeDestination === "board" ? "bg-selected text-primary" : "text-secondary hover:bg-hover")} />
-        {attentionCount > 0 ? <IconButton label="Needs attention" icon={<BellRing size={15} strokeWidth={1.7} />} size="lg" onClick={onOpenAttentionCenter} data-tooltip="Needs attention" className="rounded-md text-secondary hover:bg-hover" /> : null}
-        <IconButton label="Agents" icon={<Bot size={15} strokeWidth={1.7} />} size="lg" onClick={() => onDestination("agents")} data-tooltip="Agents" aria-current={activeDestination === "agents" ? "page" : undefined} className={cn("rounded-md", activeDestination === "agents" ? "bg-selected text-primary" : "text-secondary hover:bg-hover")} />
-        {taskActionsEnabled ? <IconButton label="Task details" icon={<Activity size={15} strokeWidth={1.7} />} size="lg" onClick={() => onDestination("task_details")} data-tooltip="Task details" className="rounded-md text-secondary hover:bg-hover" /> : null}
-        <div className="my-1 h-px w-6 bg-subtle" style={{ background: "var(--border-subtle)" }} />
-        <div className="flex flex-1 flex-col items-center gap-1 overflow-y-auto">
-          {sessions.map((s) => {
-            const sessionTasks = tasksBySession[s.id] ?? [];
-            const selectedSessionTask = sessionTasks.find((task) => task.id === selectedTaskId);
-            const targetTask = selectedSessionTask ?? sessionTasks[0] ?? null;
-            return (
-              <CompactSessionButton
-                key={s.id}
-                session={s}
-                taskCount={sessionTasks.length}
-                taskTotal={taskPagesBySession[s.id]?.total ?? null}
-                hasContinuation={Boolean(taskPagesBySession[s.id]?.nextCursor)}
-                freshness={taskListFreshnessBySession[s.id]?.status ?? "idle"}
-                selected={s.id === selectedSessionId}
-                onClick={() => {
-                  selectSession(s.id);
-                  if (targetTask) onSelectTask(targetTask.id);
-                  else onNewTask();
-                }}
-              />
-            );
-          })}
-          {sessionsPage.nextCursor ? (
-            <IconButton
-              onClick={() => void loadMoreSessions()}
-              disabled={sessionsPage.loadingMore}
-              label="Load more projects"
-              icon={<Plus size={14} aria-hidden />}
-              size="lg"
-              data-tooltip={sessionsPage.error ?? "Load more projects"}
-              className="rounded-md text-secondary hover:bg-hover hover:text-primary disabled:opacity-45"
-            />
-          ) : null}
-        </div>
-        <IconButton label="Search tasks and commands" icon={<Search size={15} strokeWidth={1.7} />} size="lg" onClick={() => window.dispatchEvent(new Event("terminus:open-command-palette"))} data-tooltip="Search tasks and commands" className="rounded-md text-secondary hover:bg-hover hover:text-primary" />
-        <IconButton label="Settings" icon={<Settings size={15} strokeWidth={1.7} />} size="lg" onClick={() => window.dispatchEvent(new CustomEvent("terminus:open-settings", { detail: { category: "appearance" } }))} data-tooltip="Settings" className="rounded-md text-secondary hover:bg-hover hover:text-primary" />
-        <IconButton label="Help" icon={<HelpCircle size={15} strokeWidth={1.7} />} size="lg" onClick={() => window.dispatchEvent(new CustomEvent("terminus:open-settings", { detail: { category: "shortcuts" } }))} data-tooltip="Help and shortcuts" className="rounded-md text-secondary hover:bg-hover hover:text-primary" />
-        {!healthReady ? (
-          <IconButton
-            label={healthStatus === "offline" ? "Retry connection" : "Retry startup check"}
-            icon={<RefreshCw size={14} aria-hidden />}
-            size="lg"
-            onClick={() => void refreshAll()}
-            data-tooltip={healthStatus === "offline" ? "Offline · retry" : "Starting · retry"}
-            className={cn("rounded-md", healthStatus === "offline" ? "text-error hover:bg-error/10" : "text-warning hover:bg-warning/10")}
-          />
-        ) : null}
-        <div className="flex h-8 w-8 items-center justify-center rounded-md text-tertiary">
-          <User size={16} />
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="flex h-full flex-col">
@@ -318,7 +243,7 @@ function SidebarImpl({
               <SidebarItem
                 key={`pin-${t.id}`}
                 title={taskTitle(t)}
-                status={lifecycleFromTask(t)}
+                status={rowLifecycle(t)}
                 updatedAt={t.updated_at}
                 selected={t.id === selectedTaskId}
                 pinned
@@ -359,9 +284,30 @@ function SidebarImpl({
           </SidebarSection>
         ) : null}
 
-        {/* Spaces section. */}
+        {/* Projects section. The header is the switcher: the current project is
+            named, and every other one is one click away. */}
         <SidebarSection
-          title="Spaces"
+          title={(
+            <ProjectMenu
+              onProjectSelected={() => {
+                onNavigate?.("new_task");
+                selectTask(null);
+              }}
+              {...(onOpenProject ? { onOpenProject } : {})}
+              trigger={(
+                <Button
+                  type="button"
+                  aria-label="Switch project"
+                  className="-ml-1 flex min-w-0 max-w-full items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-hover"
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {currentSession?.title ?? "Projects"}
+                  </span>
+                  <ChevronDown size={11} strokeWidth={2} className="shrink-0 text-tertiary" aria-hidden />
+                </Button>
+              )}
+            />
+          )}
           action={(
             <div className="flex items-center gap-0.5 text-tertiary">
               <IconButton
@@ -380,15 +326,25 @@ function SidebarImpl({
                 aria-pressed={searchOpen}
                 className={cn("h-5 w-5 rounded text-tertiary hover:bg-hover hover:text-primary", searchOpen && "bg-selected text-primary")}
               />
-              {onOpenProject && filteredSessions.length > 0 ? (
-                <IconButton
-                  label="Open project"
-                  icon={<Plus size={12} strokeWidth={1.7} aria-hidden />}
-                  size="sm"
-                  onClick={() => onOpenProject()}
-                  className="h-5 w-5 rounded text-tertiary hover:bg-hover hover:text-primary"
-                />
-              ) : null}
+              {/* Always present. Hiding "add a project" until a project exists
+                  is exactly backwards. */}
+              <ProjectMenu
+                align="end"
+                label="Add or switch project"
+                onProjectSelected={() => {
+                  onNavigate?.("new_task");
+                  selectTask(null);
+                }}
+                {...(onOpenProject ? { onOpenProject } : {})}
+                trigger={(
+                  <IconButton
+                    label="Add or switch project"
+                    icon={<Plus size={12} strokeWidth={1.7} aria-hidden />}
+                    size="sm"
+                    className="h-5 w-5 rounded text-tertiary hover:bg-hover hover:text-primary"
+                  />
+                )}
+              />
             </div>
           )}
         >
@@ -497,7 +453,10 @@ function SidebarImpl({
                       });
                     }}
                     className="flex min-w-0 flex-1 items-center justify-start gap-1.5 text-xs"
-                    data-tooltip={session.title}
+                    // Two projects can share a name; only the root tells them
+                    // apart, so it is on the row rather than three clicks away.
+                    data-tooltip={projectSubtitle(session) ?? session.title}
+                    title={projectSubtitle(session) ?? undefined}
                     aria-current={session.id === selectedSessionId ? "page" : undefined}
                   >
                     <span className="min-w-0 flex-1 truncate font-medium text-left">
@@ -536,6 +495,7 @@ function SidebarImpl({
                       tasks={visibleTasks}
                       selectedTaskId={selectedTaskId}
                       pinnedTaskIds={pinnedTaskIds}
+                      runActivityByTask={runActivityByTask}
                       onSelectTask={onSelectTask}
                       onTogglePin={togglePin}
                     />
@@ -639,12 +599,11 @@ function SidebarImpl({
           was a second 28px row carrying one word, and its dot sat 2px off the
           nav icon column. */}
       <div className="sidebar-dock flex flex-col gap-0.5 px-3 pb-2 pt-2">
-        <nav className="flex flex-col gap-0.5" aria-label="Workspace destinations">
-          <Button type="button" onClick={() => onDestination("agents")} aria-current={activeDestination === "agents" ? "page" : undefined} className={cn("sidebar-nav-item w-full justify-start text-left", activeDestination === "agents" && "is-active")}>
-            <Bot size={15} strokeWidth={1.7} className="shrink-0" />
-            <span className="truncate text-left">Agents</span>
-          </Button>
-        </nav>
+        {/* "Agents" is not shipped. It routed to a view built from a directory
+            of departments and operators that no control-plane route serves, so
+            the destination advertised a feature the app does not have. The
+            surface stays in the tree behind `activeDestination === "agents"`
+            until it has real data; nothing navigates to it. */}
         <Button
           type="button"
           onClick={() => window.dispatchEvent(new CustomEvent("terminus:open-settings", { detail: { category: "appearance" } }))}
@@ -684,7 +643,8 @@ function SidebarSection({
   action,
   children,
 }: {
-  title: string;
+  /** A node, not just a string: the projects header is itself a control. */
+  title: React.ReactNode;
   action?: React.ReactNode;
   children: React.ReactNode;
 }): JSX.Element {
@@ -693,7 +653,7 @@ function SidebarSection({
       <div
         className="ui-section-label flex min-h-6 items-center px-2"
       >
-        <span>{title}</span>
+        {typeof title === "string" ? <span>{title}</span> : title}
         {action ? <span className="ml-auto">{action}</span> : null}
       </div>
       {children}
@@ -730,6 +690,7 @@ function SessionTaskList({
   tasks,
   selectedTaskId,
   pinnedTaskIds,
+  runActivityByTask,
   onSelectTask,
   onTogglePin,
 }: {
@@ -737,6 +698,7 @@ function SessionTaskList({
   tasks: Task[];
   selectedTaskId: string | null;
   pinnedTaskIds: Set<string>;
+  runActivityByTask: Record<string, TurnActivity>;
   onSelectTask: (taskId: string) => void;
   onTogglePin: (taskId: string) => void;
 }): JSX.Element {
@@ -826,7 +788,7 @@ function SessionTaskList({
           >
             <SidebarItem
               title={taskTitle(task)}
-              status={lifecycleFromTask(task)}
+              status={displayLifecycleWith(task, runActivityByTask[task.id] ?? "unknown")}
               updatedAt={task.updated_at}
               selected={task.id === selectedTaskId}
               pinned={pinnedTaskIds.has(task.id)}
@@ -867,7 +829,7 @@ function SessionTaskList({
       >
         <SidebarItem
           title={taskTitle(task)}
-          status={lifecycleFromTask(task)}
+          status={displayLifecycleWith(task, runActivityByTask[task.id] ?? "unknown")}
           updatedAt={task.updated_at}
           selected={task.id === selectedTaskId}
           pinned={pinnedTaskIds.has(task.id)}
@@ -903,54 +865,6 @@ function SessionTaskList({
           : renderVirtualTask(effectiveActiveIndex, effectiveActiveIndex * rowHeight)}
       </div>
     </div>
-  );
-}
-
-function CompactSessionButton({
-  session,
-  taskCount,
-  taskTotal,
-  hasContinuation,
-  freshness,
-  selected,
-  onClick,
-}: {
-  session: Session;
-  taskCount: number;
-  taskTotal: number | null;
-  hasContinuation: boolean;
-  freshness: "idle" | "loading" | "ready" | "stale" | "error";
-  selected: boolean;
-  onClick: () => void;
-}): JSX.Element {
-  const taskCountLabel = (() => {
-    if (taskCount === 0 && freshness === "idle") return "task count not loaded";
-    if (taskCount === 0 && freshness === "loading") return "task count loading";
-    if (taskCount === 0 && freshness === "error") return "task count unavailable";
-    if (taskTotal !== null && taskCount < taskTotal) return `${taskCount} of ${taskTotal} tasks loaded`;
-    if (hasContinuation) return `${taskCount} tasks loaded, more available`;
-    const count = taskTotal ?? taskCount;
-    return `${count} ${count === 1 ? "task" : "tasks"}`;
-  })();
-  return (
-    <Button
-      type="button"
-      onClick={onClick}
-      data-tooltip={session.title}
-      aria-label={`${session.title}, ${taskCountLabel}`}
-      aria-pressed={selected}
-      className={cn(
-        "flex h-8 w-8 items-center justify-center rounded-md",
-        selected ? "bg-selected text-primary" : "text-secondary hover:bg-hover",
-      )}
-    >
-      <span
-        className="font-medium text-xs"
-
-      >
-        {session.title.slice(0, 1).toUpperCase()}
-      </span>
-    </Button>
   );
 }
 

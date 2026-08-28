@@ -147,6 +147,9 @@ export interface CollectionTruncation {
   continuation: string | null;
 }
 
+/** Reasoning depth, as the control plane spells it. */
+export type ReasoningEffort = "low" | "medium" | "high" | "max";
+
 export interface Session {
   id: string;
   workspace_id: string;
@@ -159,6 +162,23 @@ export interface Session {
   active_thread_id: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * The workspace this session opens, as a `file://` URI. The client had no
+   * path for a project at all, which is why the sidebar could show two rows
+   * called "Terminus" with nothing to tell them apart.
+   *
+   * Optional so the client works against a control plane that predates it.
+   */
+  workspace_root_uri?: string;
+  /** Bare model id the session routes turns to by default. */
+  default_model?: string | null;
+  default_reasoning_effort?: ReasoningEffort | null;
+}
+
+/** Fields `PATCH /v1/sessions/:id` accepts. */
+export interface SessionUpdateInput {
+  default_model?: string | null;
+  default_reasoning_effort?: ReasoningEffort | null;
 }
 
 export interface SessionListResponse {
@@ -214,13 +234,16 @@ export interface TaskContract {
 
 /**
  * The turn a client would interrupt to stop work without ending the task.
- * Present only on the task detail route; list responses omit it.
+ *
+ * The detail route reports all four fields. The list route reports a narrower
+ * `{ id, state }`, so `sequence` and `started_at` are optional: requiring them
+ * would make one narrow row reject the whole task list and empty the sidebar.
  */
 export interface TaskActiveTurn {
   id: string;
-  sequence: number;
+  sequence?: number;
   state: string;
-  started_at: string | null;
+  started_at?: string | null;
 }
 
 /**
@@ -318,6 +341,31 @@ export interface StartTurnInput {
   thread_id: string;
   task_id: string;
   user_input: string;
+  /**
+   * The model this turn routes to — a bare discovered model id, not a provider
+   * profile. Omitted when the composer has nothing selected, in which case the
+   * control plane falls back to the session default.
+   *
+   * Before this existed the picker wrote the *global* gateway configuration
+   * row on every choice, so changing the model for one turn changed it for
+   * every session and every concurrent run.
+   */
+  model?: string;
+  reasoning_effort?: ReasoningEffort;
+}
+
+/**
+ * What `POST /v1/turns/:id/steer` returns.
+ *
+ * Steering does not create a turn — it appends a model-visible episode the
+ * running turn picks up at its next stop boundary — so the receipt names the
+ * episode, not a new turn.
+ */
+export interface SteerReceipt {
+  episode_id: string;
+  sequence: number;
+  turn_id: string;
+  turn_state: string;
 }
 
 // ────────────────────────── /events (SSE) ──────────────────────────────────
@@ -525,6 +573,12 @@ export interface ConversationMessage {
   createdAt: string;
   /** Set on streaming agent messages. */
   streaming?: boolean;
+  /**
+   * The model the control plane reported for this turn (`turn.profile_selected`
+   * → `model_key`). Absent means the runtime did not say — never a guess from
+   * whatever the composer's picker happens to be showing now.
+   */
+  model?: string;
 }
 
 /**
@@ -580,8 +634,13 @@ export interface ActivityEntry {
   at: string;
   /** Authoritative protocol phase; never inferred from display text. */
   phase: "proposed" | "authorized" | "settled";
-  /** Structured terminal outcome, present only for settlement. */
-  outcome?: "succeeded" | "failed" | "unknown";
+  /**
+   * Structured terminal outcome, present only for settlement. `denied` is
+   * separate from `failed` because a policy refusal is a decision someone can
+   * act on, not a fault — and a group of them must not read as "Explored
+   * codebase".
+   */
+  outcome?: "succeeded" | "failed" | "denied" | "unknown";
   /** Durable operation identity used to correlate phases when supplied. */
   operationId?: string;
 }
@@ -594,21 +653,19 @@ export interface ActivityBlock {
   metric?: string;
   status: ActivityBlockStatus;
   entries: ActivityEntry[];
+  /**
+   * The prompt that produced this block, present only on a failed turn whose
+   * input the client actually holds. A failed turn now leaves the task ACTIVE
+   * and steerable, so "try that again" is one turn, not a new task — but only
+   * when there is something exact to resend. A paraphrase would be worse than
+   * no button.
+   */
+  retryInput?: string;
 }
 
 // ────────────────────────── Terminus Desktop bridge ───────────────────────────
-// Exposed by Electron preload (electron/preload.ts). The runtime `window`
-// augmentation lives in `src/types/global.d.ts`; the interface here is for
-// code that imports the typed shape directly.
-
-export interface TerminusDesktopBridge {
-  apiBase: string;
-  platform: string;
-  isMac: boolean;
-  notify: (title: string, body: string) => Promise<unknown>;
-  windowMinimize: () => Promise<unknown>;
-  windowMaximize: () => Promise<unknown>;
-  windowClose: () => Promise<unknown>;
-  getTheme: () => Promise<"system" | "light" | "dark">;
-  setTheme: (theme: Theme) => Promise<"system" | "light" | "dark">;
-}
+// The preload bridge is declared once, on `Window`, in `src/types/global.d.ts`.
+// A second hand-maintained copy lived here and had already drifted: it still
+// declared `platform`, `windowMinimize` and `windowMaximize` (all removed from
+// the preload) and typed `apiBase` as a plain string when the shell can fail
+// to resolve one. Two declarations of one contract is one too many.

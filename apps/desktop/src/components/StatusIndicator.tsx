@@ -5,7 +5,7 @@
  * lib/task-lifecycle.ts. No large colorful badges:
  *
  *   planning / working / verifying → tiny spinner (the agent is moving)
- *   queued / cancelled / done      → muted dot
+ *   idle / queued / cancelled / done → muted dot
  *   needs_you                      → warning dot
  *   review                         → success dot
  *   failed                         → error dot
@@ -74,6 +74,10 @@ function StatusGlyph({
     case "queued":
     case "cancelled":
       return <StatusDot size={size} color="var(--color-agent-queued)" label={status} />;
+    // Alive and steerable, doing nothing. A still dot, deliberately the same
+    // weight as "queued": nothing is happening, and nothing is wrong.
+    case "idle":
+      return <StatusDot size={size} color="var(--text-tertiary)" label="ready" />;
     case "needs_you":
       return <StatusDot size={size} color="var(--color-agent-waiting)" label="needs you" />;
     case "review":

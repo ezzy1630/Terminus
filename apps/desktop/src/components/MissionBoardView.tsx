@@ -7,8 +7,6 @@ import {
   CircleDashed,
   CircleDot,
   Columns3,
-  GitBranch,
-  GitPullRequest,
   List,
   MoreHorizontal,
   Pause,
@@ -16,7 +14,6 @@ import {
   Plus,
   RefreshCw,
   Search,
-  SlidersHorizontal,
   X,
 } from "lucide-react";
 import {
@@ -35,12 +32,15 @@ import { cn } from "../lib/cn";
 import {
   MISSION_BOARD_COLUMNS,
   boardColumnForStatus,
+  boardColumnForTaskLifecycle,
+  boardLifecycle,
   boardTransitionForDrop,
   directTaskActions,
   taskNeedsAttention,
   taskStatusLabel,
   type MissionBoardColumnId,
 } from "../lib/mission-board";
+import { lifecycleIsActive, lifecycleLabel, lifecycleTone, type TaskLifecycle } from "../lib/task-lifecycle";
 import { relativeTimestamp } from "../lib/time";
 import { Button } from "../ui/Button";
 import { DialogSurface } from "../ui/Dialog";
@@ -91,14 +91,6 @@ function writeBoardCursor(cursor: string): void {
   }
 }
 
-function statusTone(status: TaskV2Status): "neutral" | "info" | "warning" | "error" | "success" {
-  if (status === "COMPLETED") return "success";
-  if (status === "FAILED" || status === "CANCELLED" || status === "BLOCKED") return "error";
-  if (status === "WAITING_USER" || status === "WAITING_AUTH" || status === "WAITING_RESOURCE" || status === "PAUSED") return "warning";
-  if (status === "RUNNING" || status === "VERIFYING") return "info";
-  return "neutral";
-}
-
 function missionLabel(missionId: string | null): string {
   if (missionId === null) return "General";
   const readable = missionId.replace(/^mission[-_:]?/i, "").replace(/[-_]+/g, " ").trim();
@@ -117,8 +109,8 @@ function questionForTask(
   return questions.find((question) => question.taskId === taskId && question.status === "PENDING") ?? null;
 }
 
-function CardStatus({ task, needsAttention }: { task: TaskV2Snapshot; needsAttention: boolean }): JSX.Element {
-  const tone = statusTone(task.status);
+function CardStatus({ lifecycle, needsAttention }: { lifecycle: TaskLifecycle; needsAttention: boolean }): JSX.Element {
+  const tone = lifecycleTone(lifecycle);
   return (
     <span
       className={cn(
@@ -130,8 +122,8 @@ function CardStatus({ task, needsAttention }: { task: TaskV2Snapshot; needsAtten
         tone === "neutral" && "text-secondary",
       )}
     >
-      {needsAttention ? <CircleDot size={10} aria-hidden /> : task.status === "COMPLETED" ? <Check size={10} aria-hidden /> : null}
-      {taskStatusLabel(task.status)}
+      {needsAttention ? <CircleDot size={10} aria-hidden /> : lifecycle === "done" ? <Check size={10} aria-hidden /> : null}
+      {lifecycleLabel(lifecycle)}
     </span>
   );
 }
@@ -153,6 +145,7 @@ function columnIcon(id: MissionBoardColumnId): JSX.Element {
 
 function MissionBoardCard({
   task,
+  lifecycle,
   spaceName,
   questions,
   selected,
@@ -165,6 +158,7 @@ function MissionBoardCard({
   onTransition,
 }: {
   task: TaskV2Snapshot;
+  lifecycle: TaskLifecycle;
   spaceName: string;
   questions: readonly MaterialQuestionSnapshot[];
   selected: boolean;
@@ -179,8 +173,10 @@ function MissionBoardCard({
   const attention = taskNeedsAttention(task, questions);
   const pendingQuestion = questionForTask(task.id, questions);
   const actions = directTaskActions(task);
-  const isRunning = task.status === "RUNNING";
-  const isWaitingReview = task.status === "VERIFYING" || task.status === "WAITING_USER" || task.status === "WAITING_AUTH";
+  // "Running" means a turn is in flight, not that the task exists. The v2
+  // status says RUNNING for the whole life of a task.
+  const isRunning = lifecycleIsActive(lifecycle);
+  const isWaitingReview = lifecycle === "review" || lifecycle === "needs_you";
   const hasActiveDot = isRunning || isWaitingReview || attention;
 
   const menuItems: MenuItem[] = [
@@ -272,29 +268,15 @@ function MissionBoardCard({
               <CircleDot size={10} aria-hidden />
               <span>Needs input</span>
             </span>
-          ) : task.status === "VERIFYING" ? (
-            <span className="flex items-center gap-1 text-success font-medium text-xs">
-              <Check size={10} aria-hidden />
-              <span>PR ready</span>
-            </span>
           ) : (
             <span className="text-tertiary text-xs">
               {relativeTimestamp(task.updatedAt)}
             </span>
           )}
         </div>
-
-        {/* Git branch / PR icon chips */}
-        <div className="flex items-center gap-1 shrink-0 text-tertiary">
-          <span className="inline-flex items-center gap-0.5 rounded bg-subtle/60 px-1.5 py-0.5 text-xs font-mono text-tertiary hover:bg-hover hover:text-primary transition-colors" data-tooltip="Git Branch">
-            <GitBranch size={10} aria-hidden />
-          </span>
-          {task.status === "COMPLETED" || task.status === "VERIFYING" ? (
-            <span className="inline-flex items-center gap-0.5 rounded bg-success/10 border border-success/20 px-1.5 py-0.5 text-xs font-mono text-success hover:bg-success/20 transition-colors" data-tooltip="PR ready">
-              <GitPullRequest size={10} aria-hidden />
-            </span>
-          ) : null}
-        </div>
+        {/* No branch or pull-request chips. Terminus opens neither, and the
+            previous ones were drawn from the task status alone: every card
+            claimed a branch, and "PR ready" meant "verifying". */}
       </div>
     </article>
   );
@@ -310,6 +292,7 @@ function BoardColumn({
   pendingTaskId,
   draggingTask,
   projectNameForTask,
+  lifecycleFor,
   onSelectTask,
   onOpenTask,
   onInspectTask,
@@ -327,6 +310,7 @@ function BoardColumn({
   pendingTaskId: string | null;
   draggingTask: TaskV2Snapshot | null;
   projectNameForTask: (task: TaskV2Snapshot) => string;
+  lifecycleFor: (task: TaskV2Snapshot) => TaskLifecycle;
   onSelectTask: (taskId: string) => void;
   onOpenTask: (task: TaskV2Snapshot) => void;
   onInspectTask: (taskId: string) => void;
@@ -385,6 +369,7 @@ function BoardColumn({
           <MissionBoardCard
             key={task.id}
             task={task}
+            lifecycle={lifecycleFor(task)}
             spaceName={projectNameForTask(task)}
             questions={questions}
             selected={selectedTaskId === task.id}
@@ -404,6 +389,7 @@ function BoardColumn({
 
 function TaskQuickView({
   task,
+  lifecycle,
   questions,
   pending,
   onClose,
@@ -412,6 +398,7 @@ function TaskQuickView({
   onTransition,
 }: {
   task: TaskV2Snapshot;
+  lifecycle: TaskLifecycle;
   questions: readonly MaterialQuestionSnapshot[];
   pending: boolean;
   onClose: () => void;
@@ -426,7 +413,7 @@ function TaskQuickView({
     <aside aria-label="Task quick view" className="panel-enter flex h-full w-[300px] flex-shrink-0 flex-col border-l border-subtle bg-inspector">
       <header className="flex items-start gap-3 px-3 py-3">
         <div className="min-w-0 flex-1">
-          <CardStatus task={task} needsAttention={taskNeedsAttention(task, questions)} />
+          <CardStatus lifecycle={lifecycle} needsAttention={taskNeedsAttention(task, questions)} />
           <h2 className="ui-page-title mt-1.5 text-primary">{task.contract.mission}</h2>
         </div>
         <IconButton
@@ -529,6 +516,10 @@ function CancelTaskDialog({ task, pending, onCancel, onConfirm }: {
 export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardViewProps): JSX.Element {
   const sessions = useTerminusStore((state) => state.sessions);
   const cancelTask = useTerminusStore((state) => state.cancelTask);
+  // The v2 snapshot cannot say whether a run is in flight; the v1 record and
+  // its event tail can.
+  const taskById = useTerminusStore((state) => state.taskById);
+  const runActivityByTask = useTerminusStore((state) => state.runActivityByTask);
   const load = useCallback(async (signal: AbortSignal): Promise<MissionBoardData> => {
     const [tasks, questions] = await Promise.all([
       arpV2.listTasks(signal),
@@ -547,7 +538,6 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
   const [query, setQuery] = useState("");
   const [spaceFilter, setSpaceFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [prFilter, setPrFilter] = useState("all");
   const [attentionOnly, setAttentionOnly] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
@@ -618,6 +608,12 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     return sessions.find((session) => session.id === sessionId)?.title ?? missionLabel(task.missionId);
   }, [sessions]);
 
+  const lifecycleFor = useCallback(
+    (task: TaskV2Snapshot): TaskLifecycle =>
+      boardLifecycle(task, taskById[task.id], runActivityByTask[task.id] ?? "unknown"),
+    [runActivityByTask, taskById],
+  );
+
   const spaceOptions = useMemo(() => {
     const options = new Map<string, string>();
     for (const task of tasks) {
@@ -635,13 +631,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
       || (task.conversationContext?.sessionId ?? "general") === spaceFilter)
     .filter((task) => {
       if (statusFilter === "all") return true;
-      const placement = boardColumnForStatus(task.status);
-      return placement === statusFilter;
-    })
-    .filter((task) => {
-      if (prFilter === "all") return true;
-      if (prFilter === "ready") return task.status === "VERIFYING" || task.status === "COMPLETED";
-      return true;
+      return boardColumnForTaskLifecycle(lifecycleFor(task)) === statusFilter;
     })
     .filter((task) => !attentionOnly || taskNeedsAttention(task, questions))
     .filter((task) => normalizedQuery.length === 0
@@ -651,19 +641,18 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
       const attentionDifference = Number(taskNeedsAttention(right, questions)) - Number(taskNeedsAttention(left, questions));
       if (attentionDifference !== 0) return attentionDifference;
       return right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id);
-    }), [attentionOnly, normalizedQuery, prFilter, questions, spaceFilter, statusFilter, tasks]);
+    }), [attentionOnly, lifecycleFor, normalizedQuery, questions, spaceFilter, statusFilter, tasks]);
 
   const attentionCount = tasks.filter((task) => taskNeedsAttention(task, questions)).length;
   const selectedTask = visibleTasks.find((task) => task.id === selectedTaskId) ?? null;
   const draggingTask = tasks.find((task) => task.id === draggingTaskId) ?? null;
 
-  const hasActiveFilters = spaceFilter !== "all" || statusFilter !== "all" || prFilter !== "all" || attentionOnly || query.length > 0;
+  const hasActiveFilters = spaceFilter !== "all" || statusFilter !== "all" || attentionOnly || query.length > 0;
 
   const clearAllFilters = useCallback(() => {
     setQuery("");
     setSpaceFilter("all");
     setStatusFilter("all");
-    setPrFilter("all");
     setAttentionOnly(false);
   }, []);
 
@@ -767,11 +756,17 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
             {/* Status Filter Chip */}
             <Menu
               label="Status filter"
+              // The ids must be the board's own column ids: the filter compares
+              // against `boardColumnForTaskLifecycle`, so "running" and
+              // "waiting_for_review" matched nothing and emptied the board.
               items={[
-                { id: "all", label: "All statuses", onSelect: () => setStatusFilter("all") },
-                { id: "running", label: "Running", onSelect: () => setStatusFilter("running") },
-                { id: "waiting_for_review", label: "Waiting for review", onSelect: () => setStatusFilter("waiting_for_review") },
-                { id: "done", label: "Done", onSelect: () => setStatusFilter("done") },
+                { id: "all", label: "All statuses", selected: statusFilter === "all", onSelect: () => setStatusFilter("all") },
+                ...MISSION_BOARD_COLUMNS.map((column) => ({
+                  id: column.id,
+                  label: column.label,
+                  selected: statusFilter === column.id,
+                  onSelect: () => setStatusFilter(column.id),
+                })),
               ]}
               trigger={(
                 <Button
@@ -781,7 +776,12 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                     statusFilter !== "all" ? "border-info/40 bg-info/10 text-info" : "border-default bg-card text-secondary hover:bg-hover hover:text-primary",
                   )}
                 >
-                  <span>Status{statusFilter !== "all" ? `: ${statusFilter === "waiting_for_review" ? "Review" : statusFilter}` : ""}</span>
+                  <span>
+                    Status
+                    {statusFilter !== "all"
+                      ? `: ${MISSION_BOARD_COLUMNS.find((column) => column.id === statusFilter)?.label ?? statusFilter}`
+                      : ""}
+                  </span>
                   <ChevronDown size={10} aria-hidden />
                 </Button>
               )}
@@ -807,27 +807,6 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                   )}
                 >
                   <span>Space</span>
-                  <ChevronDown size={10} aria-hidden />
-                </Button>
-              )}
-            />
-
-            {/* Pull Request Filter Chip */}
-            <Menu
-              label="Pull request filter"
-              items={[
-                { id: "all", label: "All", onSelect: () => setPrFilter("all") },
-                { id: "ready", label: "PR Ready", onSelect: () => setPrFilter("ready") },
-              ]}
-              trigger={(
-                <Button
-                  variant="bare"
-                  className={cn(
-                    "flex h-6 items-center gap-1 rounded-md border px-2 text-xs font-normal transition-colors",
-                    prFilter !== "all" ? "border-info/40 bg-info/10 text-info" : "border-default bg-card text-secondary hover:bg-hover hover:text-primary",
-                  )}
-                >
-                  <span>Pull request</span>
                   <ChevronDown size={10} aria-hidden />
                 </Button>
               )}
@@ -895,16 +874,6 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
             </Button>
           </div>
 
-          {/* Display configuration dropdown */}
-          <Button
-            type="button"
-            className="flex h-7 items-center gap-1.5 rounded-md border border-default bg-card px-2.5 text-xs text-secondary hover:bg-hover hover:text-primary"
-          >
-            <SlidersHorizontal size={12} aria-hidden />
-            <span>Display</span>
-            <ChevronDown size={10} aria-hidden />
-          </Button>
-
           {attentionCount > 0 ? (
             <Button
               type="button"
@@ -963,8 +932,9 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                   <BoardColumn
                     key={column.id}
                     {...column}
-                    tasks={visibleTasks.filter((task) => boardColumnForStatus(task.status) === column.id)}
+                    tasks={visibleTasks.filter((task) => boardColumnForTaskLifecycle(lifecycleFor(task)) === column.id)}
                     questions={questions}
+                    lifecycleFor={lifecycleFor}
                     selectedTaskId={selectedTaskId}
                     pendingTaskId={pendingTaskId}
                     draggingTask={draggingTask}
@@ -1009,7 +979,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                 {visibleTasks.map((task) => (
                   <div key={task.id} role="row" aria-selected={selectedTaskId === task.id} className={cn("mission-board-list-row grid min-h-10 w-full items-center gap-3 px-4 text-left text-xs hover:bg-hover transition-colors", selectedTaskId === task.id && "bg-selected")}>
                     <span role="cell" className="min-w-0"><Button type="button" onClick={() => onOpenTask(task)} className="max-w-full justify-start truncate px-0 text-xs font-medium text-primary hover:text-accent hover:bg-transparent">{task.contract.mission}</Button></span>
-                    <span role="cell"><CardStatus task={task} needsAttention={taskNeedsAttention(task, questions)} /></span>
+                    <span role="cell"><CardStatus lifecycle={lifecycleFor(task)} needsAttention={taskNeedsAttention(task, questions)} /></span>
                     <span role="cell" className="mission-board-list-secondary truncate text-secondary">{projectNameForTask(task)}</span>
                     <span role="cell" className="mission-board-list-secondary text-tertiary">{relativeTimestamp(task.updatedAt)}</span>
                   </div>
@@ -1022,6 +992,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
         {selectedTask ? (
           <TaskQuickView
             task={selectedTask}
+            lifecycle={lifecycleFor(selectedTask)}
             questions={questions}
             pending={pendingTaskId === selectedTask.id}
             onClose={() => setSelectedTaskId(null)}

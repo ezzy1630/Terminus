@@ -21,8 +21,11 @@
  * task inspector and operator cockpit are split behind React.lazy boundaries.
  */
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { FolderClosed, MessageCircle, PanelLeft, PanelRight } from "lucide-react";
+import { ChevronDown, FolderClosed, MessageCircle, PanelLeft, PanelRight } from "lucide-react";
 import { Layout } from "./components/Layout";
+import { ConnectionBanner } from "./components/ConnectionBanner";
+import { ProjectMenu } from "./components/ProjectMenu";
+import { projectUriToPath } from "./lib/projects";
 import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
 import { Sidebar } from "./components/Sidebar";
 import { Composer } from "./components/Composer";
@@ -36,13 +39,39 @@ import {
   useSelectedTask,
   useSelectedTaskEventHistory,
   useSelectedTaskEvents,
+  useHealthMonitor,
+  useSelectedTaskRunActivity,
+  useTurnWatchdog,
 } from "./hooks/use-terminus";
 import { useThemeStore } from "./hooks/use-theme";
 import { useNativeAttention } from "./hooks/use-native-attention";
-import { lifecycleFromTask } from "./lib/task-lifecycle";
+import { displayLifecycleWith, taskRunIsActiveWith } from "./lib/turn-activity";
 import type { Theme } from "./types";
 import type { SidebarDestination } from "./components/Sidebar";
-import type { SettingCategoryId } from "./components/Settings";
+import { SETTING_CATEGORIES, type SettingCategoryId } from "./components/Settings";
+
+/**
+ * Resolve a requested settings category.
+ *
+ * Providers and models live under "Agents and Models", but every caller that
+ * wants them naturally asks for "providers" or "models" — and an unknown id
+ * silently opened Appearance instead, which is how "configure a provider"
+ * landed on the theme picker.
+ */
+const SETTINGS_CATEGORY_ALIASES: Readonly<Record<string, SettingCategoryId>> = {
+  providers: "agents",
+  provider: "agents",
+  models: "agents",
+  model: "agents",
+};
+
+export function settingsCategoryFor(requested: string | undefined): SettingCategoryId {
+  if (!requested) return "appearance";
+  const alias = SETTINGS_CATEGORY_ALIASES[requested];
+  if (alias) return alias;
+  const known = SETTING_CATEGORIES.find((category) => category.id === requested);
+  return known ? known.id : "appearance";
+}
 import type { TaskV2Snapshot } from "./types/v2";
 import { FIXED_SHORTCUTS, matchesShortcut, shortcutDisplay } from "./lib/shortcuts";
 import { restoreAppDialogFocusOrigin, setAppDialogFocusOrigin } from "./hooks/use-dialog-focus";
@@ -203,6 +232,7 @@ export function App(): JSX.Element {
   const selectedTaskPage = useTerminusStore((s) => s.selectedSessionId ? s.taskPagesBySession[s.selectedSessionId] : undefined);
   const loadMoreTasks = useTerminusStore((s) => s.loadMoreTasks);
   const selectTask = useTerminusStore((s) => s.selectTask);
+  const selectSession = useTerminusStore((s) => s.selectSession);
   const stopTask = useTerminusStore((s) => s.stopTask);
   const setDraft = useTerminusStore((s) => s.setDraft);
   const selectedTask = useSelectedTask();
@@ -211,6 +241,10 @@ export function App(): JSX.Element {
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
     [selectedSessionId, sessions],
   );
+  // The stored status says ACTIVE for as long as a task exists. What the title
+  // bar reports is what the run is actually doing.
+  const selectedRunActivity = useSelectedTaskRunActivity();
+  const selectedRunIsActive = taskRunIsActiveWith(selectedTask, selectedRunActivity);
 
   const cycleTheme = useThemeStore((s) => s.cycleTheme);
   const toggleDensity = useThemeStore((s) => s.toggleDensity);
@@ -301,6 +335,11 @@ export function App(): JSX.Element {
 
   // Dock badge and native notifications for tasks that want a human.
   useNativeAttention(openTaskById);
+  // Catch a run whose ending never reached this client.
+  useTurnWatchdog();
+  // The connection state is a fact about the whole window, so it is checked and
+  // shown here rather than inferred separately by each surface.
+  useHealthMonitor();
 
   const openSettings = useCallback((category: SettingCategoryId = "appearance"): void => {
     // Preferences belong in their own window on macOS. Fall back to the
@@ -356,9 +395,51 @@ export function App(): JSX.Element {
         case "toggle-sidebar":
           setSidebarVisible((visible) => !visible);
           break;
+        case "stop-run": {
+          // ⌘. from the native menu. The control plane answers whether there
+          // is anything to stop; this does not second-guess it.
+          const target = useTerminusStore.getState().selectedTaskId;
+          if (target) void useTerminusStore.getState().stopTask(target);
+          break;
+        }
       }
     });
   }, [goToNewTask, openProject, openSettings, selectedTaskId, toggleInspector]);
+
+  /**
+   * Where the native shell is asking the window to go.
+   *
+   * The menu bar, the Dock and deep links all route through one channel now:
+   * a task id, a session id, or a directory that may not be open yet.
+   */
+  useEffect(() => {
+    const subscribe = window.terminusDesktop?.onNavigate;
+    if (!subscribe) return;
+    return subscribe((target) => {
+      setOverlay(null);
+      if (target.kind === "task") {
+        selectTask(target.taskId);
+        openDestination("chat");
+        return;
+      }
+      if (target.kind === "project") {
+        selectSession(target.sessionId);
+        openDestination("new_task");
+        selectTask(null);
+        return;
+      }
+      void useTerminusStore.getState().openProjectPath(target.path)
+        .then(() => {
+          openDestination("new_task");
+          selectTask(null);
+        })
+        .catch(() => {
+          // The path could not be opened as it stands; let the operator see
+          // and correct it rather than failing silently.
+          openProject(target.path);
+        });
+    });
+  }, [openDestination, openProject, selectSession, selectTask]);
 
   useEffect(() => {
     const desktop = window.terminusDesktop;
@@ -381,7 +462,16 @@ export function App(): JSX.Element {
     // idle. Active task updates remain event-driven through SSE.
     const refreshOnFocus = (): void => {
       const state = useTerminusStore.getState();
-      void Promise.all([state.refreshSessions(), state.refreshPinnedTasks()]);
+      // The task on screen is the one whose staleness is visible, and it was
+      // the one thing this did not refresh: coming back to a window that had
+      // been behind something else for ten minutes left the open task showing
+      // whatever it was doing when you left.
+      void Promise.all([
+        state.refreshSessions(),
+        state.refreshPinnedTasks(),
+        state.selectedSessionId ? state.refreshTasks(state.selectedSessionId) : Promise.resolve(),
+        state.selectedTaskId ? state.refreshTask(state.selectedTaskId) : Promise.resolve(),
+      ]);
     };
     window.addEventListener("focus", refreshOnFocus);
     return () => window.removeEventListener("focus", refreshOnFocus);
@@ -447,9 +537,9 @@ export function App(): JSX.Element {
   useEffect(() => {
     const onOpenSettings = (event: Event): void => {
       const detail = event instanceof CustomEvent
-        ? event.detail as { category?: SettingCategoryId } | undefined
+        ? event.detail as { category?: string } | undefined
         : undefined;
-      openSettings(detail?.category ?? "appearance");
+      openSettings(settingsCategoryFor(detail?.category));
     };
     const openOnboarding = (): void => openProject();
     const openCommandPalette = (): void => setOverlay("palette");
@@ -469,13 +559,17 @@ export function App(): JSX.Element {
   // Stop applies to whichever task is on screen, including one selected only
   // on the board and therefore absent from the v1 selection.
   const stopTarget = selectedTaskId ?? selectedCanonicalTaskId;
+  // "Stop this run" offered against an idle task is a button that can only
+  // fail. The board-only selection has no event tail here, so it keeps the
+  // entry and lets the control plane answer.
+  const canStopRun = stopTarget !== null && (selectedTaskId === null || selectedRunIsActive);
 
   const commands = useMemo(
     () => [
       ...buildDefaultCommands({
         openProject,
         newTask: goToNewTask,
-        stopRun: stopTarget ? () => { void stopTask(stopTarget); } : undefined,
+        stopRun: canStopRun && stopTarget ? () => { void stopTask(stopTarget); } : undefined,
         showChanges: selectedTaskId ? () => setChangesOpen(true) : undefined,
         toggleInspector: selectedTaskId ? toggleInspector : undefined,
         toggleSidebar: () => setSidebarVisible((visible) => !visible),
@@ -485,8 +579,18 @@ export function App(): JSX.Element {
         openSettings,
         openMissionBoard: () => openDestination("board"),
         openAttentionCenter: () => setOverlay("attention"),
-        openAgents: () => openDestination("agents"),
         viewShortcuts: () => openSettings("shortcuts"),
+        projects: sessions.map((session) => ({
+          id: session.id,
+          title: session.title,
+          path: projectUriToPath(session.workspace_root_uri ?? null),
+          current: session.id === selectedSessionId,
+        })),
+        selectProject: (sessionId: string) => {
+          selectSession(sessionId);
+          openDestination("new_task");
+          selectTask(null);
+        },
       }),
       ...selectedSessionTasks.map((task) => ({
         id: `task.open.${task.id}`,
@@ -508,7 +612,7 @@ export function App(): JSX.Element {
         action: () => loadMoreTasks(selectedSessionId),
       }] : []),
     ],
-    [cycleTheme, goToNewTask, loadMoreTasks, openDestination, openProject, openSettings, openTaskWorkspace, selectTask, selectedSessionId, selectedSessionTasks, selectedTask, selectedTaskId, selectedTaskPage?.nextCursor, sidebarVisible, stopTarget, stopTask, taskCommandsEnabled, toggleDensity, toggleInspector],
+    [canStopRun, cycleTheme, goToNewTask, loadMoreTasks, openDestination, openProject, openSettings, openTaskWorkspace, selectSession, selectTask, selectedSessionId, selectedSessionTasks, selectedTask, selectedTaskId, selectedTaskPage?.nextCursor, sessions, sidebarVisible, stopTarget, stopTask, taskCommandsEnabled, toggleDensity, toggleInspector],
   );
 
   const showNewTask = selectedTaskId === null && activeDestination === "new_task";
@@ -543,6 +647,7 @@ export function App(): JSX.Element {
   return (
     <>
       <Layout
+        banner={<ConnectionBanner />}
         sidebarVisible={sidebarVisible}
         inspectorVisible={activeDestination === "chat" && inspectorVisible && durableTaskId !== null && !changesOpen}
         backgroundInert={overlay !== null}
@@ -552,7 +657,7 @@ export function App(): JSX.Element {
           <span className="flex min-w-0 max-w-2xl items-center gap-2.5 text-primary">
             <FolderClosed size={14} className="shrink-0 text-tertiary" aria-hidden />
             <span className="ui-page-title truncate">{selectedTask.contract?.objective ?? selectedTask.id}</span>
-            <TaskStatusPill status={lifecycleFromTask(selectedTask)} />
+            <TaskStatusPill status={displayLifecycleWith(selectedTask, selectedRunActivity)} />
           </span>
         ) : undefined}
         sidebar={
@@ -667,9 +772,23 @@ export function App(): JSX.Element {
                 column's first content sat 32px below the right column's,
                 which is what made the two columns read as misaligned. */}
             {selectedSession ? (
-              <span className="ui-label min-w-0 max-w-40 truncate text-secondary">
-                {selectedSession.title}
-              </span>
+              <ProjectMenu
+                onProjectSelected={() => {
+                  openDestination("new_task");
+                  selectTask(null);
+                }}
+                onOpenProject={openProject}
+                trigger={(
+                  <Button
+                    type="button"
+                    aria-label="Switch project"
+                    className="ui-label titlebar-no-drag flex min-w-0 max-w-48 items-center gap-1 truncate rounded px-1 py-0.5 text-secondary hover:bg-hover hover:text-primary"
+                  >
+                    <span className="min-w-0 truncate">{selectedSession.title}</span>
+                    <ChevronDown size={11} strokeWidth={2} className="shrink-0 text-tertiary" aria-hidden />
+                  </Button>
+                )}
+              />
             ) : null}
           </>
         }
@@ -722,6 +841,11 @@ export function App(): JSX.Element {
             isOpen
             onClose={() => setOverlay(null)}
             selectedTaskId={durableTaskId}
+            onOpenTask={(taskId) => {
+              setOverlay(null);
+              selectTask(taskId);
+              openDestination("chat");
+            }}
           />
         </Suspense>
       ) : null}

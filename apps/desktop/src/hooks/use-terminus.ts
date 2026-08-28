@@ -16,10 +16,18 @@
  * objects) happens in the component layer — see Conversation.tsx.
  */
 import { create } from "zustand";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { api, createIdempotencyKey, TerminusApiError, subscribeEvents, type TerminusEventStream } from "../lib/api";
 import { mergePendingApprovals, pendingApprovalFromServerRow, derivePendingApprovals, type PendingApproval } from "../lib/task-surface";
+import { TURN_SETTLED_EVENTS, turnActivityFromEvents, type TurnActivity } from "../lib/turn-activity";
 import { sessionLatency } from "../lib/session-latency";
+import {
+  deriveProjectTitle,
+  isAbsoluteLocalPath,
+  noteRecentProject,
+  projectPathToUri,
+  sameProjectRoot,
+} from "../lib/projects";
 import {
   boundPresentationEvent as boundClientPresentationEvent,
   DEFAULT_PRESENTATION_EVENT_MAX_CHARS,
@@ -35,7 +43,10 @@ import type {
   TerminusSseEvent,
   HealthResponse,
   Session,
+  SessionUpdateInput,
   Task,
+  WorkspaceKind,
+  WorkspaceSnapshot,
 } from "../types";
 
 const MAX_EVENTS_PER_TASK = 2000;
@@ -92,6 +103,43 @@ const pendingEventDropsByTask = new Map<string, { count: number; throughCursor: 
 const pendingApprovalRefreshTasks = new Set<string>();
 const eventIdsByTask = new Map<string, Set<string>>();
 let eventFlushScheduled = false;
+/**
+ * When this client last accepted an event for a task, in epoch milliseconds.
+ *
+ * The watchdog below reads it. A task whose snapshot claims a running turn but
+ * whose stream has said nothing for a minute is the shape of every phantom
+ * "Working" spinner in the app: the run ended and its terminal event was
+ * dropped by an eviction, a cursor expiry, or a control-plane restart.
+ */
+const lastEventAtByTask = new Map<string, number>();
+/** Pending debounced `refreshTask` calls, keyed by task. */
+const settledRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/**
+ * A terminal event and the snapshot that reflects it do not arrive together.
+ * Coalesce the burst of turn/task terminal events one run produces into a
+ * single detail fetch instead of one per event.
+ */
+const TURN_SETTLED_REFRESH_DEBOUNCE_MS = 400;
+/** How long a claimed-running turn may go silent before the client asks. */
+export const STUCK_TURN_SILENCE_MS = 60_000;
+/** How often the watchdog looks. Cheap: it only fires after the silence above. */
+export const STUCK_TURN_CHECK_MS = 15_000;
+/**
+ * Turn states the control plane treats as immutable — the run is over. Taken
+ * from its own `immutableTurnStates` list.
+ */
+const SETTLED_TURN_STATES = new Set([
+  "COMPLETED",
+  "INTERRUPTED",
+  "FAILED",
+  "BUDGET_EXHAUSTED",
+  "POLICY_DENIED",
+  "BLOCKED",
+  "USER_ACTION_REQUIRED",
+  "REPAIR_PENDING",
+  "VERIFIED",
+  "ABORTED",
+]);
 /** Exact retained UTF-8 presentation cost for one bounded SSE envelope. */
 export const presentationEventByteLength = eventByteLength;
 
@@ -239,6 +287,12 @@ function clearTaskRuntimeCaches(taskId: string): void {
   pendingApprovalRefreshTasks.delete(taskId);
   eventIdsByTask.delete(taskId);
   resumeCursorByTask.delete(taskId);
+  lastEventAtByTask.delete(taskId);
+  const settledTimer = settledRefreshTimers.get(taskId);
+  if (settledTimer) {
+    clearTimeout(settledTimer);
+    settledRefreshTimers.delete(taskId);
+  }
 }
 
 // ────────────────────────── Status normalization ───────────────────────────
@@ -248,11 +302,24 @@ export const normalizeTaskStatus = normalizeClientTaskStatus;
 // ────────────────────────── Pinned tasks ───────────────────────────────────
 
 const PINS_KEY = "terminus-desktop.pinned-tasks.v1";
+/**
+ * The project the operator was last in.
+ *
+ * Without this, every launch dropped into `sessions[0]` — the most recently
+ * updated project, which is not the same thing as the one you were working in
+ * and changes under you whenever a background run touches something else.
+ */
+const LAST_SESSION_KEY = "terminus-desktop.last-session.v1";
 const DRAFTS_KEY = "terminus-desktop.drafts.v1";
 const MAX_PINNED_TASKS = 50;
 const PIN_HYDRATION_CONCURRENCY = 4;
 /** How long the liveness probe may hang before the UI calls the plane degraded. */
 const HEALTH_PROBE_TIMEOUT_MS = 5_000;
+/** First retry delay after a failed probe. Doubles up to the ceiling below. */
+export const HEALTH_RETRY_MIN_MS = 1_000;
+export const HEALTH_RETRY_MAX_MS = 30_000;
+/** How often a healthy control plane is re-checked. */
+export const HEALTH_HEARTBEAT_MS = 60_000;
 const SESSION_TASK_HYDRATION_CONCURRENCY = 4;
 /** How many spaces get their tasks hydrated up front, most recent first. */
 const MAX_HYDRATED_SESSIONS = 12;
@@ -420,14 +487,23 @@ interface TerminusState {
   pinPersistenceError: string | null;
 
   /**
-   * Messages waiting for the current run to finish.
+   * Messages that could not be delivered to a running turn.
    *
-   * `POST /v1/turns` refuses a second concurrent turn with
-   * `TASK_TURN_ALREADY_ACTIVE`, so "steer while it works" cannot be a direct
-   * send. Holding the text here means the user types once and it goes as soon
-   * as the turn settles, instead of them watching for the run to end.
+   * Steering a live turn is a real request now (`POST /v1/turns/:id/steer`),
+   * so this is the fallback, not the normal path: it holds text the control
+   * plane refused because the turn settled mid-flight, and sends it as a new
+   * turn once the task is idle. Anything held here is a message the user
+   * believes they sent, so it is never dropped silently.
    */
   queuedSteerByTask: Record<string, string>;
+  /**
+   * When each queued message was accepted, in epoch milliseconds.
+   *
+   * A queue that never drains is indistinguishable from a delivered message
+   * unless someone is watching the clock. The composer watches this one and,
+   * past 30 seconds, re-reads the task and offers to send it anyway.
+   */
+  queuedSteerAtByTask: Record<string, number>;
 
   // Drafts per task (Composer spec: "Preserve drafts per task").
   draftsByTask: Record<string, string>;
@@ -445,6 +521,14 @@ interface TerminusState {
   eventLruClock: number;
   /** Latest accepted server cursor, independent of the presentation window. */
   resumeCursorByTask: Record<string, string>;
+  /**
+   * What each task's live event tail last said about a run, kept here rather
+   * than recomputed per render. The sidebar, the board and the Dock badge all
+   * ask "is this task actually working" for every loaded task; deriving it from
+   * `eventsByTask` would re-rank the whole navigation tree on every 50 ms SSE
+   * batch. This changes only when the answer does.
+   */
+  runActivityByTask: Record<string, TurnActivity>;
   /** Explicit boundary metadata for the bounded presentation event window. */
   eventHistoryByTask: Record<string, EventHistoryBoundary>;
   /**
@@ -475,6 +559,17 @@ interface TerminusState {
   refreshTasks: (sessionId: string) => Promise<void>;
   loadMoreTasks: (sessionId: string) => Promise<void>;
   refreshTask: (taskId: string) => Promise<void>;
+  /**
+   * Write a project's turn defaults. Applied locally first so the picker moves
+   * on click, reverted and rethrown when the control plane refuses.
+   */
+  patchSessionDefaults: (sessionId: string, patch: SessionUpdateInput) => Promise<void>;
+  /**
+   * Ask the control plane what a claimed-running turn is actually doing, and
+   * re-read the task when it turns out to have finished. The escape hatch for
+   * a terminal event this client never received.
+   */
+  reconcileActiveTurn: (taskId: string) => Promise<void>;
   /** Replay the durable transcript, then attach the live stream after it. */
   hydrateTranscript: (taskId: string) => Promise<void>;
   /** Fetch the page of events preceding what is already replayed. */
@@ -487,6 +582,14 @@ interface TerminusState {
   /** End the task outright. Resolves to an error message, or null on success. */
   cancelTask: (taskId: string) => Promise<string | null>;
   selectSession: (sessionId: string | null) => void;
+  /**
+   * Open a local directory as a project, or select the one already open on it.
+   *
+   * Resolves to the session id. Opening the same path twice used to create a
+   * second session against the same workspace, so the sidebar grew duplicate
+   * rows that could never be told apart.
+   */
+  openProjectPath: (path: string) => Promise<string>;
   selectTask: (taskId: string | null, cursor?: string | null) => void;
   refreshApprovals: (taskId: string) => Promise<void>;
   loadMoreApprovals: (taskId: string) => Promise<void>;
@@ -507,6 +610,24 @@ interface TerminusState {
   /** Returns false when the event id was already accepted for this task. */
   _appendEvent: (taskId: string, ev: TerminusSseEvent) => boolean;
   _updateTaskFromEvent: (ev: TerminusSseEvent, streamTaskId?: string) => void;
+}
+
+function readLastSessionId(): string | null {
+  try {
+    const value = window.localStorage.getItem(LAST_SESSION_KEY);
+    return value && value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastSessionId(sessionId: string | null): void {
+  try {
+    if (sessionId === null) window.localStorage.removeItem(LAST_SESSION_KEY);
+    else window.localStorage.setItem(LAST_SESSION_KEY, sessionId);
+  } catch {
+    // Blocked storage costs the restore, not the session.
+  }
 }
 
 type HealthSetter = (partial: Partial<TerminusState>) => void;
@@ -556,6 +677,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
   tasksBySession: {},
   taskById: {},
   queuedSteerByTask: {},
+  queuedSteerAtByTask: {},
   transcriptByTask: {},
   sessionsFreshness: { status: "idle", error: null },
   taskListFreshnessBySession: {},
@@ -578,6 +700,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
   eventLruTickByTask: {},
   eventLruClock: 0,
   resumeCursorByTask: {},
+  runActivityByTask: {},
   eventHistoryByTask: {},
   approvalsByTask: {},
   approvalFreshnessByTask: {},
@@ -699,10 +822,13 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         const selectedTaskSessionId = selectedTask && sessionIds.has(selectedTask.session_id)
           ? selectedTask.session_id
           : null;
+        const rememberedSessionId = readLastSessionId();
         const nextSelectedSessionId = selectedTaskSessionId
           ?? (state.selectedSessionId && sessionIds.has(state.selectedSessionId)
-          ? state.selectedSessionId
-          : sessions[0]?.id ?? null);
+            ? state.selectedSessionId
+            : rememberedSessionId && sessionIds.has(rememberedSessionId)
+              ? rememberedSessionId
+              : sessions[0]?.id ?? null);
         const tasksBySession = { ...state.tasksBySession };
         const taskById = { ...state.taskById };
         for (const previousSession of state.sessions) {
@@ -727,10 +853,12 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
           taskById,
           taskFreshnessById: omitTaskKeys(state.taskFreshnessById, removedTaskIds),
           queuedSteerByTask: omitTaskKeys(state.queuedSteerByTask, removedTaskIds),
+          queuedSteerAtByTask: omitTaskKeys(state.queuedSteerAtByTask, removedTaskIds),
           eventsByTask: omitTaskKeys(state.eventsByTask, removedTaskIds),
           eventBytesByTask: omitTaskKeys(state.eventBytesByTask, removedTaskIds),
           eventLruTickByTask: omitTaskKeys(state.eventLruTickByTask, removedTaskIds),
           resumeCursorByTask: omitTaskKeys(state.resumeCursorByTask, removedTaskIds),
+          runActivityByTask: omitTaskKeys(state.runActivityByTask, removedTaskIds),
           eventHistoryByTask: omitTaskKeys(state.eventHistoryByTask, removedTaskIds),
           approvalsByTask: omitTaskKeys(state.approvalsByTask, removedTaskIds),
           approvalFreshnessByTask: omitTaskKeys(state.approvalFreshnessByTask, removedTaskIds),
@@ -858,6 +986,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
           taskById,
           taskFreshnessById: omitTaskKeys(state.taskFreshnessById, removedTaskIds),
           queuedSteerByTask: omitTaskKeys(state.queuedSteerByTask, removedTaskIds),
+          queuedSteerAtByTask: omitTaskKeys(state.queuedSteerAtByTask, removedTaskIds),
           eventsByTask: omitTaskKeys(state.eventsByTask, removedTaskIds),
           eventBytesByTask: omitTaskKeys(state.eventBytesByTask, removedTaskIds),
           eventLruTickByTask: omitTaskKeys(state.eventLruTickByTask, removedTaskIds),
@@ -1167,7 +1296,10 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
   },
 
   queueSteer: (taskId: string, text: string) => {
-    set((state) => ({ queuedSteerByTask: { ...state.queuedSteerByTask, [taskId]: text } }));
+    set((state) => ({
+      queuedSteerByTask: { ...state.queuedSteerByTask, [taskId]: text },
+      queuedSteerAtByTask: { ...state.queuedSteerAtByTask, [taskId]: Date.now() },
+    }));
   },
 
   clearQueuedSteer: (taskId: string) => {
@@ -1175,7 +1307,9 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
       if (state.queuedSteerByTask[taskId] === undefined) return {};
       const queuedSteerByTask = { ...state.queuedSteerByTask };
       delete queuedSteerByTask[taskId];
-      return { queuedSteerByTask };
+      const queuedSteerAtByTask = { ...state.queuedSteerAtByTask };
+      delete queuedSteerAtByTask[taskId];
+      return { queuedSteerByTask, queuedSteerAtByTask };
     });
   },
 
@@ -1261,7 +1395,128 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     }
   },
 
+  /**
+   * Store a project's default model or reasoning depth.
+   *
+   * Applied locally first so the picker answers immediately, and rolled back if
+   * the control plane refuses — a picker showing a default the server does not
+   * hold is worse than one that admits the write failed.
+   */
+  patchSessionDefaults: async (sessionId: string, patch: SessionUpdateInput) => {
+    const previous = get().sessions.find((session) => session.id === sessionId);
+    if (!previous) throw new Error("That project is not loaded.");
+    const applyLocally = (next: Session): void => {
+      set((state) => ({
+        sessions: state.sessions.map((session) => session.id === sessionId ? next : session),
+      }));
+    };
+    applyLocally({ ...previous, ...patch });
+    try {
+      applyLocally(await api.updateSession(sessionId, patch, {
+        idempotencyKey: createIdempotencyKey(`session-defaults:${sessionId}`),
+      }));
+    } catch (error: unknown) {
+      // Leaving the optimistic value in place would make the picker claim a
+      // default the control plane does not hold.
+      applyLocally(previous);
+      throw error;
+    }
+  },
+
+  /**
+   * The escape hatch for a run whose ending never reached this client.
+   *
+   * Events are lost for ordinary reasons — the presentation window evicts, a
+   * cursor expires, the control plane restarts mid-turn — and every one of them
+   * leaves `active_turn` pointing at a turn that finished. Reading the turn is
+   * the cheapest authoritative answer; the task detail then clears the pointer.
+   */
+  reconcileActiveTurn: async (taskId: string) => {
+    const activeTurn = get().taskById[taskId]?.active_turn ?? null;
+    if (!activeTurn) return;
+    // Whatever happens next, do not ask again for another silence window.
+    lastEventAtByTask.set(taskId, Date.now());
+    try {
+      const turn = await api.getTurn(activeTurn.id);
+      if (!SETTLED_TURN_STATES.has(turn.state.toUpperCase())) return;
+    } catch (error: unknown) {
+      // A turn the control plane no longer has is settled by definition; any
+      // other failure is reported through the task refresh below.
+      if (!(error instanceof TerminusApiError) || error.status !== 404) {
+        set({ lastError: error instanceof Error ? error.message : "turn state check failed" });
+      }
+    }
+    await get().refreshTask(taskId);
+  },
+
+  openProjectPath: async (path: string) => {
+    const trimmed = path.trim();
+    if (!isAbsoluteLocalPath(trimmed)) {
+      throw new Error("Choose an absolute local directory.");
+    }
+    // The shell can stat the path; the renderer cannot. When it answers, its
+    // canonical path is the one used, so `/tmp` and `/private/tmp` do not
+    // become two projects.
+    let isGit: boolean | null = null;
+    let root = trimmed;
+    const validate = window.terminusDesktop?.validateDirectory;
+    if (validate) {
+      const verdict = await validate(trimmed);
+      if (!verdict.ok) throw new Error(`${trimmed} is not a directory this app can open.`);
+      if (verdict.canonicalPath) root = verdict.canonicalPath;
+      isGit = verdict.isGit;
+    }
+    const rootUri = projectPathToUri(root);
+
+    const existing = get().sessions.find((session) => sameProjectRoot(session.workspace_root_uri, rootUri));
+    if (existing) {
+      get().selectSession(existing.id);
+      void noteRecentProject(root);
+      return existing.id;
+    }
+
+    // A repository and a plain directory are different workspace kinds and the
+    // control plane refuses to re-identify one as the other. When the shell
+    // cannot say which it is, try the repository reading first and let the
+    // conflict correct it.
+    const kinds: readonly WorkspaceKind[] = isGit === null
+      ? ["local_git", "local_directory"]
+      : isGit ? ["local_git"] : ["local_directory"];
+    const operationKey = createIdempotencyKey(`open-project:${rootUri}`);
+    let workspace: WorkspaceSnapshot | null = null;
+    let lastError: unknown = null;
+    for (const kind of kinds) {
+      try {
+        workspace = await api.openWorkspace(
+          { root_uri: rootUri, kind, trust: "untrusted" },
+          { idempotencyKey: `${operationKey}:${kind}` },
+        );
+        break;
+      } catch (error: unknown) {
+        lastError = error;
+        const identityConflict = error instanceof TerminusApiError
+          && error.status === 409
+          && error.envelope?.code === "WORKSPACE_IDENTITY_CONFLICT";
+        if (!identityConflict) throw error;
+      }
+    }
+    if (!workspace) throw lastError instanceof Error ? lastError : new Error("The workspace could not be opened.");
+
+    await get().refreshSessions();
+    const openWorkspaceId = workspace.id;
+    const alreadyOpen = get().sessions.find((session) => session.workspace_id === openWorkspaceId);
+    const session = alreadyOpen ?? await api.createSession(
+      { workspace_id: openWorkspaceId, title: deriveProjectTitle(root) || "Untitled project" },
+      { idempotencyKey: `${operationKey}:session` },
+    );
+    if (!alreadyOpen) await get().refreshSessions();
+    get().selectSession(session.id);
+    void noteRecentProject(root);
+    return session.id;
+  },
+
   selectSession: (sessionId) => {
+    writeLastSessionId(sessionId);
     if (sessionId === get().selectedSessionId) {
       if (sessionId) void get().refreshTasks(sessionId);
       return;
@@ -1627,6 +1882,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     const identity = eventIdentity(presentationEvent);
     if (seen.has(identity)) return false;
     seen.add(identity);
+    lastEventAtByTask.set(taskId, Date.now());
     if (presentationEvent.id) {
       resumeCursorByTask.set(taskId, presentationEvent.id);
     }
@@ -1673,6 +1929,24 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
       pendingEventDropsByTask.clear();
       const approvalTasks = new Set(pendingApprovalRefreshTasks);
       pendingApprovalRefreshTasks.clear();
+      /*
+       * What this batch said about each task's run, and which tasks just
+       * settled one.
+       *
+       * A terminal turn event is the moment the snapshot behind it goes stale:
+       * `projectTaskEvent` ignores `turn.*` entirely, so `active_turn` was
+       * carried forward forever and the composer kept offering "Steer" for a
+       * run that had ended minutes earlier.
+       */
+      const batchActivity = new Map<string, TurnActivity>();
+      const settledTaskIds = new Set<string>();
+      for (const [queuedTaskId, batch] of batches) {
+        const activity = turnActivityFromEvents(batch.map((entry) => entry.event));
+        if (activity !== "unknown") batchActivity.set(queuedTaskId, activity);
+        if (batch.some((entry) => TURN_SETTLED_EVENTS.has(entry.event.event))) {
+          settledTaskIds.add(queuedTaskId);
+        }
+      }
       set((state) => {
         const eventsByTask = { ...state.eventsByTask };
         const eventBytesByTask = { ...state.eventBytesByTask };
@@ -1778,16 +2052,31 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
           if (eventHistoryByTask === state.eventHistoryByTask) eventHistoryByTask = { ...state.eventHistoryByTask };
           eventHistoryByTask[evictedTaskId] = boundary;
         }
+        let runActivityByTask = state.runActivityByTask;
+        for (const [activityTaskId, activity] of batchActivity) {
+          if (runActivityByTask[activityTaskId] === activity) continue;
+          if (runActivityByTask === state.runActivityByTask) runActivityByTask = { ...state.runActivityByTask };
+          runActivityByTask[activityTaskId] = activity;
+        }
         return {
           eventsByTask,
           eventBytesByTask,
           eventLruTickByTask,
           eventLruClock,
           resumeCursorByTask: retainedResumeCursorByTask,
+          runActivityByTask,
           eventHistoryByTask,
         };
       });
       for (const approvalTaskId of approvalTasks) void get().refreshApprovals(approvalTaskId);
+      for (const settledTaskId of settledTaskIds) {
+        const existingTimer = settledRefreshTimers.get(settledTaskId);
+        if (existingTimer) clearTimeout(existingTimer);
+        settledRefreshTimers.set(settledTaskId, setTimeout(() => {
+          settledRefreshTimers.delete(settledTaskId);
+          void get().refreshTask(settledTaskId);
+        }, TURN_SETTLED_REFRESH_DEBOUNCE_MS));
+      }
     };
     // SSE ingestion is not visual work. A bounded timer continues to make
     // progress when Electron throttles animation frames in the background.
@@ -1879,11 +2168,17 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
             const retainedResumeCursorByTask = { ...state.resumeCursorByTask };
             if (resumeCursor) retainedResumeCursorByTask[taskId] = resumeCursor;
             else delete retainedResumeCursorByTask[taskId];
+            const runActivityByTask = { ...state.runActivityByTask };
+            // The window was just emptied, so the tail no longer says anything
+            // about the run. The task snapshot fetched below is the authority
+            // again until the next event arrives.
+            delete runActivityByTask[taskId];
             return {
               eventsByTask: { ...state.eventsByTask, [taskId]: [] },
               eventBytesByTask: { ...state.eventBytesByTask, [taskId]: 0 },
               eventLruTickByTask,
               resumeCursorByTask: retainedResumeCursorByTask,
+              runActivityByTask,
               eventHistoryByTask: {
                 ...state.eventHistoryByTask,
                 [taskId]: cursorExpiry.boundary,
@@ -1911,7 +2206,16 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         if (generation !== streamGeneration || reconnectTimer) return;
         attempts += 1;
         const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.min(attempts - 1, 5));
-        set({ streamState: "reconnecting", lastError: "Live updates interrupted. Reconnecting…" });
+        // Keep the transport's own words. "Interrupted" alone told the user
+        // nothing they could act on; an HTTP status tells them whether to
+        // check credentials, the route, or whether the service is up at all.
+        const reason = stream.lastError;
+        set({
+          streamState: "reconnecting",
+          lastError: reason
+            ? `Live updates interrupted — ${reason}. Reconnecting…`
+            : "Live updates interrupted. Reconnecting…",
+        });
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
           connect();
@@ -1936,6 +2240,83 @@ export function useSelectedSessionTasks(): Task[] {
   const sessionId = useTerminusStore((s) => s.selectedSessionId);
   const tasks = useTerminusStore((s) => (sessionId ? s.tasksBySession[sessionId] : undefined) ?? EMPTY_TASKS);
   return tasks;
+}
+
+/**
+ * What each loaded task's event tail last said about a run.
+ *
+ * Pass a row's entry to `displayLifecycleWith` / `taskRunIsActiveWith`. This is
+ * the map, not the events, precisely so a streaming turn does not re-render
+ * every list that shows a status glyph.
+ */
+export function useRunActivityByTask(): Record<string, TurnActivity> {
+  return useTerminusStore((s) => s.runActivityByTask);
+}
+
+/** The selected task's run activity, for surfaces that only render one task. */
+export function useSelectedTaskRunActivity(): TurnActivity {
+  const id = useTerminusStore((s) => s.selectedTaskId);
+  return useTerminusStore((s) => (id ? s.runActivityByTask[id] : undefined) ?? "unknown");
+}
+
+/**
+ * Catch a run that ended without telling this client.
+ *
+ * Events are lost for ordinary reasons — window eviction, cursor expiry, a
+ * control-plane restart mid-turn — and every one of them strands a task on
+ * "Working" with a spinner that never stops. When a task claims a running turn
+ * and its stream has said nothing for a minute, ask what the turn is doing.
+ *
+ * Mounted once, by the app shell.
+ */
+export function useTurnWatchdog(): void {
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const state = useTerminusStore.getState();
+      const taskId = state.selectedTaskId;
+      if (taskId === null) return;
+      if (!state.taskById[taskId]?.active_turn) return;
+      const silentFor = Date.now() - (lastEventAtByTask.get(taskId) ?? 0);
+      if (silentFor < STUCK_TURN_SILENCE_MS) return;
+      void state.reconcileActiveTurn(taskId);
+    }, STUCK_TURN_CHECK_MS);
+    return () => clearInterval(timer);
+  }, []);
+}
+
+/**
+ * Keep asking whether the control plane is there.
+ *
+ * The probe used to run exactly once, inside `refreshSessions`. A client that
+ * started before the control plane did therefore said "Terminus is still
+ * starting" until something else happened to refresh — often forever. This
+ * retries quickly while it is down (1s, doubling to 30s) and settles into a
+ * one-minute heartbeat once it answers, so recovery is noticed without
+ * hammering a service that is already struggling.
+ *
+ * Mounted once, by the app shell.
+ */
+export function useHealthMonitor(): void {
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let backoff = HEALTH_RETRY_MIN_MS;
+    const isCurrent = (): boolean => !cancelled;
+    const tick = async (): Promise<void> => {
+      await probeHealth((partial) => useTerminusStore.setState(partial), isCurrent);
+      if (cancelled) return;
+      const ready = useTerminusStore.getState().healthStatus === "ready";
+      if (ready) backoff = HEALTH_RETRY_MIN_MS;
+      const delay = ready ? HEALTH_HEARTBEAT_MS : backoff;
+      if (!ready) backoff = Math.min(backoff * 2, HEALTH_RETRY_MAX_MS);
+      timer = setTimeout(() => void tick(), delay);
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, []);
 }
 
 /** Pinned tasks (resolved from ids → Task objects). */

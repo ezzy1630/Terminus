@@ -37,7 +37,22 @@ export interface DefaultCommandActions {
   readonly openMissionBoard?: () => void;
   readonly openAttentionCenter?: () => void;
   readonly openInterventions?: () => void;
-  readonly openAgents?: () => void;
+  /**
+   * Every open project, so switching to one is a search away.
+   *
+   * The palette could open a project but not change to one already open, which
+   * made the sidebar the only route between projects.
+   */
+  readonly projects?: readonly CommandProject[];
+  readonly selectProject?: (sessionId: string) => void;
+}
+
+export interface CommandProject {
+  readonly id: string;
+  readonly title: string;
+  /** The workspace root, matched on so a path fragment finds the project. */
+  readonly path: string | null;
+  readonly current: boolean;
 }
 
 /** Convert supported host actions into the provider-neutral command catalog. */
@@ -58,7 +73,6 @@ export function buildDefaultCommands(actions: DefaultCommandActions): Command[] 
   // "Needs attention" is the queue of work waiting on a human, so it leads.
   push("task.attention", "Needs attention", "Task", undefined, actions.openAttentionCenter, ["material questions", "consequence matrix", "approval", "blocked", "waiting"]);
   push("task.intervene", "Steer this task", "Task", undefined, actions.openInterventions, ["pause", "resume", "takeover", "rewind", "fork", "intervention"]);
-  push("nav.agents", "Open agents", "Navigation", undefined, actions.openAgents, ["departments", "operators", "rooms", "capabilities"]);
   push("project.open", "Open project", "Navigation", shortcutDisplay(FIXED_SHORTCUTS.openProject), actions.openProject, ["workspace", "folder", "onboarding"]);
   push("nav.mission-board", "Open mission board", "Navigation", undefined, actions.openMissionBoard, ["kanban", "tasks", "work", "status"]);
   push("task.new", "New task", "Task", shortcutDisplay(FIXED_SHORTCUTS.newTask), actions.newTask, ["create task"]);
@@ -77,5 +91,20 @@ export function buildDefaultCommands(actions: DefaultCommandActions): Command[] 
   push("appearance.switch-density", "Switch density", "Appearance", undefined, actions.switchDensity, ["compact spacious"]);
   push("help.open-settings", "Open settings", "Help", shortcutDisplay(FIXED_SHORTCUTS.settings), actions.openSettings, ["preferences config"]);
   push("help.view-shortcuts", "View shortcuts", "Help", shortcutDisplay(FIXED_SHORTCUTS.shortcutReference), actions.viewShortcuts, ["keyboard cheatsheet"]);
+  const selectProject = actions.selectProject;
+  if (selectProject) {
+    for (const project of actions.projects ?? []) {
+      if (project.current) continue;
+      commands.push({
+        id: `project.switch.${project.id}`,
+        label: `Switch to ${project.title}`,
+        group: "Navigation",
+        ...(project.path ? { description: project.path } : {}),
+        keywords: ["project", "workspace", "switch", project.title, ...(project.path ? [project.path] : [])],
+        action: () => selectProject(project.id),
+        available: true,
+      });
+    }
+  }
   return commands;
 }

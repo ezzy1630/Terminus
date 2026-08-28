@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import { Conversation, decodeFeed } from "../src/components/Conversation";
+import { Conversation, decodeFeed, terminalReasonText } from "../src/components/Conversation";
 import { ReasoningTrace } from "../src/components/ReasoningTrace";
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import type { Task, TerminusSseEvent } from "../src/types";
@@ -24,6 +24,10 @@ function task(): Task {
     terminal_reason: null,
     contract: null,
   };
+}
+
+function event(id: string, name: string, payload: Record<string, unknown>): TerminusSseEvent {
+  return { id, event: name, data: JSON.stringify(payload) };
 }
 
 function transcriptEvents(turnCount: number): TerminusSseEvent[] {
@@ -129,14 +133,14 @@ function reasoningEvents(settled: boolean): TerminusSseEvent[] {
     },
     {
       id: "turn-0-running",
-      event: "turn.provider_running",
-      data: JSON.stringify({ at: "2026-08-24T01:00:01.000Z" }),
+      event: "turn.provider_text_delta",
+      data: JSON.stringify({ text: "The kernel ", at: "2026-08-24T01:00:01.000Z" }),
     },
     // A repeat of the current phase is not a new step.
     {
       id: "turn-0-running-2",
-      event: "turn.provider_running",
-      data: JSON.stringify({ at: "2026-08-24T01:00:02.000Z" }),
+      event: "turn.provider_text_delta",
+      data: JSON.stringify({ text: "owns effects.", at: "2026-08-24T01:00:02.000Z" }),
     },
   ];
   if (settled) {
@@ -287,8 +291,8 @@ describe("tool activity decoding", () => {
 
     expect(blocks[0]?.status).toBe("failed");
     expect(blocks[0]?.entries[0]).toMatchObject({
-      summary: "Outside the task contract scope",
-      outcome: "failed",
+      summary: "Denied: Outside the task contract scope",
+      outcome: "denied",
     });
   });
 
@@ -323,7 +327,7 @@ describe("turn outcome decoding", () => {
   test("does not open a reply until the turn has something to say", () => {
     const { order, messages } = decodeFeed([
       toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
-      toolEvent("p1", "turn.provider_running", {}),
+      toolEvent("p1", "turn.context_compiling", {}),
     ], TASK_CREATED_AT);
 
     expect(order.map((entry) => entry.kind)).toEqual(["message", "reasoning"]);
@@ -379,5 +383,253 @@ describe("turn outcome decoding", () => {
     const reply = messages.find((message) => message.role === "agent");
     expect(reply?.streaming).toBe(false);
     expect(reply?.content).toBe("Terminus finished this turn without a written response.");
+  });
+});
+
+// ────────────────────────── Provider streaming ───────────────────────────────
+// `turn.provider_text_delta` is the only streaming event the control plane
+// emits (see `createProviderTextDeltaEmitter`). The renderer listened for
+// `turn.provider_running`, which nothing publishes, so every streamed reply was
+// discarded and the answer arrived in one lump — or not at all.
+
+describe("provider text streaming", () => {
+  test("concatenates deltas into one streaming reply before the turn completes", () => {
+    const { messages } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("d1", "turn.provider_text_delta", { text: "The kernel " }),
+      toolEvent("d2", "turn.provider_text_delta", { text: "owns every " }),
+      toolEvent("d3", "turn.provider_text_delta", { text: "effect." }),
+    ], TASK_CREATED_AT);
+
+    const replies = messages.filter((message) => message.role === "agent");
+    expect(replies).toHaveLength(1);
+    expect(replies[0]?.content).toBe("The kernel owns every effect.");
+    expect(replies[0]?.streaming).toBe(true);
+  });
+
+  test("keeps the streamed text when the turn completes with its own summary", () => {
+    const { messages } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("d1", "turn.provider_text_delta", { text: "Streamed answer." }),
+      toolEvent("c1", "turn.completed", { summary: "Settled summary." }),
+    ], TASK_CREATED_AT);
+
+    const reply = messages.find((message) => message.role === "agent");
+    expect(reply?.content).toBe("Streamed answer.");
+    expect(reply?.streaming).toBe(false);
+  });
+
+  test("opens a reply for deltas that arrive without a turn.started in the window", () => {
+    const { messages } = decodeFeed([
+      toolEvent("d1", "turn.provider_text_delta", { text: "Mid-turn attach." }),
+    ], TASK_CREATED_AT);
+
+    expect(messages.map((message) => message.content)).toEqual(["Mid-turn attach."]);
+  });
+
+  test("reports the model the runtime selected on the reply it produced", () => {
+    const { messages } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("p1", "turn.profile_selected", { provider_id: "open_code_zen", model_key: "ox-alpha" }),
+      toolEvent("d1", "turn.provider_text_delta", { text: "Answer." }),
+    ], TASK_CREATED_AT);
+
+    expect(messages.find((message) => message.role === "agent")?.model).toBe("ox-alpha");
+  });
+
+  test("records a delivered steer so the instruction is not invisible", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("q1", "turn.steering_queued", { episode_id: "e1", sequence: 2, chars: 24 }),
+    ], TASK_CREATED_AT);
+
+    expect(blocks[0]).toMatchObject({ title: "Steering delivered", metric: "24 characters", status: "done" });
+  });
+});
+
+// ────────────────────────── Failure visibility ───────────────────────────────
+// The control plane's terminal-turn payload is
+// `{ code, category, message, reason, retryable, details }`. The client read
+// `reason` and `error` only, so a failed turn rendered the single machine token
+// `agent_loop_error` inside a collapsed row.
+
+describe("turn failure reporting", () => {
+  const failureEvents = [
+    toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+    toolEvent("f1", "turn.failed", {
+      code: "PROVIDER_TRANSPORT_FAILED",
+      category: "provider",
+      message: "The provider refused the request after 3 attempts.",
+      reason: "agent_loop_error",
+      retryable: true,
+      details: { status: 502, endpoint: "https://gateway.invalid/v1/chat" },
+    }),
+  ];
+
+  test("leads with the human message, prefixed by the code", () => {
+    const { blocks } = decodeFeed(failureEvents, TASK_CREATED_AT);
+    expect(blocks[0]?.entries[0]?.summary).toBe(
+      "PROVIDER_TRANSPORT_FAILED: The provider refused the request after 3 attempts.",
+    );
+  });
+
+  test("carries the reason, category, retryability and structured details", () => {
+    const detail = decodeFeed(failureEvents, TASK_CREATED_AT).blocks[0]?.entries[0]?.detail ?? "";
+    expect(detail).toContain("Reason: agent_loop_error");
+    expect(detail).toContain("Category: provider");
+    expect(detail).toContain("Retryable: yes");
+    expect(detail).toContain("\"status\": 502");
+    expect(detail).toContain("gateway.invalid");
+  });
+
+  test("falls back to `error` when the payload carries no message", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("f1", "turn.failed", { error: "socket hang up" }),
+    ], TASK_CREATED_AT);
+    expect(blocks[0]?.entries[0]?.summary).toBe("socket hang up");
+  });
+
+  test("bounds an oversized details payload instead of rendering it", () => {
+    const detail = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("f1", "turn.failed", { message: "It failed.", details: "y".repeat(20_000) }),
+    ], TASK_CREATED_AT).blocks[0]?.entries[0]?.detail ?? "";
+    expect(detail).toContain("Failure details rejected");
+    expect(detail).not.toContain("yyyyyyyyyy");
+  });
+
+  test("renders a denied tool call as a denial, not as exploration", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("t1", "tool.proposed", { provider_call_id: "c1", tool_id: "read", arguments_excerpt: "/etc/passwd" }),
+      toolEvent("t2", "tool.denied", { provider_call_id: "c1", reason: "path outside the task's allowed scope" }),
+    ], TASK_CREATED_AT);
+
+    expect(blocks[0]?.title).toBe("Denied by policy");
+    expect(blocks[0]?.metric).toBe("1 denial");
+    expect(blocks[0]?.status).toBe("failed");
+    expect(blocks[0]?.entries[0]?.summary).toBe("Denied: path outside the task's allowed scope");
+  });
+});
+
+describe("terminalReasonText", () => {
+  test("prefers the human message over the machine reason", () => {
+    expect(terminalReasonText({ code: "BUDGET_EXHAUSTED", message: "Out of steps.", reason: "budget" }))
+      .toBe("BUDGET_EXHAUSTED: Out of steps.");
+  });
+
+  test("falls back to the reason token when no message was written", () => {
+    expect(terminalReasonText({ reason: "agent_loop_error" })).toBe("agent_loop_error");
+  });
+
+  test("reports nothing when the task carries no terminal reason", () => {
+    expect(terminalReasonText(null)).toBeUndefined();
+  });
+});
+
+describe("retry after a failed turn", () => {
+  test("offers the exact prompt back on the failed block", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("f1", "turn.failed", { message: "The provider timed out." }),
+    ], TASK_CREATED_AT, new Map([["s1", { status: "ready", text: "add the missing migration", truncated: false } as const]]));
+
+    expect(blocks[0]?.retryInput).toBe("add the missing migration");
+  });
+
+  test("offers nothing to retry when the turn was stopped on purpose", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("a1", "turn.aborted", {}),
+    ], TASK_CREATED_AT, new Map([["s1", { status: "ready", text: "do the thing", truncated: false } as const]]));
+
+    expect(blocks[0]?.retryInput).toBeUndefined();
+  });
+
+  // Resending a paraphrase would be worse than offering nothing.
+  test("offers nothing when the prompt was only available truncated", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("f1", "turn.failed", { message: "It failed." }),
+    ], TASK_CREATED_AT, new Map([["s1", { status: "ready", text: "a very long prom", truncated: true } as const]]));
+
+    expect(blocks[0]?.retryInput).toBeUndefined();
+  });
+});
+
+/**
+ * The final backend contract, as of the harness landing.
+ *
+ * A failed turn now leaves the task ACTIVE and steerable, and says so with a
+ * task-level event; `turn.started` names the model it routed to; and a turn
+ * orphaned by a control-plane restart reports that as its reason instead of a
+ * generic loop error.
+ */
+describe("final turn contract", () => {
+  test("a task-level turn failure renders a retryable block, not a dead task", () => {
+    const feed = decodeFeed(
+      [
+        event("1", "turn.started", { started_at: "2026-08-28T00:00:00.000Z", user_input: "add the migration" }),
+        event("2", "task.turn_failed", {
+          code: "AGENT_LOOP_ERROR",
+          category: "internal",
+          message: "the provider returned an unparseable tool call",
+          reason: "agent_loop_error",
+          retryable: true,
+        }),
+      ],
+      "2026-08-28T00:00:00.000Z",
+      new Map([["1", { status: "ready" as const, text: "add the migration", truncated: false }]]),
+    );
+
+    const block = feed.blocks.at(-1);
+    expect(block?.status).toBe("failed");
+    expect(block?.entries[0]?.summary).toContain("the provider returned an unparseable tool call");
+    // The exact prompt is in hand, so Retry is one turn rather than a new task.
+    expect(block?.retryInput).toBe("add the migration");
+  });
+
+  test("names the model the runtime actually routed to", () => {
+    const feed = decodeFeed(
+      [
+        event("1", "turn.started", {
+          started_at: "2026-08-28T00:00:00.000Z",
+          user_input: "go",
+          model: "claude-sonnet-4-6",
+          reasoning_effort: "high",
+        }),
+        event("2", "turn.provider_text_delta", { text: "Working on it." }),
+        event("3", "turn.completed", {}),
+      ],
+      "2026-08-28T00:00:00.000Z",
+      new Map(),
+    );
+
+    const reply = feed.messages.find((message) => message.role === "agent");
+    expect(reply?.model).toBe("claude-sonnet-4-6 · high");
+  });
+
+  test("says Terminus restarted rather than reporting a loop error", () => {
+    expect(terminalReasonText({
+      code: "TURN_ORPHANED",
+      message: "agent loop error",
+      reason: "control_plane_restarted",
+    })).toBe("Terminus restarted while this turn was running.");
+
+    const feed = decodeFeed(
+      [
+        event("1", "turn.started", { started_at: "2026-08-28T00:00:00.000Z", user_input: "go" }),
+        event("2", "turn.failed", {
+          code: "TURN_ORPHANED",
+          message: "agent loop error",
+          reason: "control_plane_restarted",
+        }),
+      ],
+      "2026-08-28T00:00:00.000Z",
+      new Map(),
+    );
+
+    expect(feed.blocks.at(-1)?.entries[0]?.summary)
+      .toContain("Terminus restarted while this turn was running.");
   });
 });

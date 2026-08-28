@@ -8,9 +8,9 @@
  *   - Only actionable project context
  *   - No dashboard, no statistics, no wall of recent activity
  *
- * Action suggestions must be functional and context-aware, not
- * decorative cards: clicking one pre-fills the composer with a
- * scaffolded prompt.
+ * No starter chips. Four generic prompts ("Explain this codebase",
+ * "Find a bug", …) occupied the space under the composer on every launch and
+ * were never what anyone wanted to run; the composer is the affordance.
  *
  * Per SPEC §8: "Opening a new task should focus the composer
  * immediately."
@@ -21,32 +21,8 @@ import { api } from "../lib/api";
 import { WORKSPACE_TASK_SCOPE } from "../lib/task-scope";
 import { useTerminusStore } from "../hooks/use-terminus";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
-import { Composer } from "./Composer";
-import { Button } from "../ui/Button";
+import { Composer, type TurnRouting } from "./Composer";
 import type { Session } from "../types";
-
-/**
- * Starters are scaffolds, not decoration: selecting one replaces the composer
- * draft and focuses it, so the next keystroke edits a real prompt.
- */
-const STARTERS: readonly { label: string; prompt: (project: string) => string }[] = [
-  {
-    label: "Explain this codebase",
-    prompt: (project) => `Walk me through how ${project} is structured — the main entry points, how the pieces talk to each other, and anything surprising.`,
-  },
-  {
-    label: "Find a bug",
-    prompt: (project) => `Look through ${project} for a correctness bug. Explain what breaks, under what input, and where.`,
-  },
-  {
-    label: "Add a test",
-    prompt: (project) => `Find something in ${project} that is under-tested, then write a test that would actually fail if the behaviour regressed.`,
-  },
-  {
-    label: "Review recent changes",
-    prompt: (project) => `Review the uncommitted changes in ${project}. Flag anything incorrect or needlessly complex.`,
-  },
-] as const;
 
 interface NewTaskScreenProps {
   className?: string;
@@ -60,19 +36,9 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
   const selectTask = useTerminusStore((s) => s.selectTask);
 
   const session: Session | undefined = sessions.find((s) => s.id === selectedSessionId);
-  const applyStarter = useCallback((text: string): void => {
-    window.dispatchEvent(new CustomEvent("terminus:replace-draft", {
-      detail: { taskId: "__new__", text },
-    }));
-  }, []);
   const [creating, setCreating] = useState(false);
   const taskMutation = useLogicalMutation(`new-task.${selectedSessionId ?? "no-project"}`);
-  const healthReady = useTerminusStore((state) => state.healthReady);
-
-  const createTask = useCallback(async (objective: string): Promise<void> => {
-    if (!healthReady) {
-      throw new Error("Terminus is still starting up. Try again in a moment.");
-    }
+  const createTask = useCallback(async (objective: string, routing: TurnRouting): Promise<void> => {
     if (!session) {
       throw new Error("Select or create a project first.");
     }
@@ -131,10 +97,13 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
       // creating the turn. If the turn finishes faster than the renderer can
       // subscribe, the cursor makes the control plane replay every event.
       await refreshTasks(session.id);
+      // The model the composer showed is the model this turn runs on. Before
+      // this the selection reached nothing at all.
       await api.startTurn({
         thread_id: task.thread_id,
         task_id: task.id,
         user_input: objective,
+        ...routing,
       }, { idempotencyKey: `${operationKey}:turn` });
       selectTask(task.id, startedEventCursor);
       taskMutation.settle(operationKey);
@@ -154,7 +123,7 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
     } finally {
       setCreating(false);
     }
-  }, [healthReady, session, refreshTasks, selectTask, taskMutation]);
+  }, [session, refreshTasks, selectTask, taskMutation]);
 
   return (
     <div className={cn("h-full w-full overflow-hidden bg-canvas", className)}>
@@ -172,32 +141,12 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
           </p>
           <Composer
             onCreateTask={createTask}
-            onChangeProject={() => {
-              if (session) window.dispatchEvent(new Event("terminus:focus-project-search"));
-              else onOpenProject?.();
-            }}
+            {...(onOpenProject ? { onChangeProject: onOpenProject } : {})}
             className="w-full"
           />
           {creating ? (
             <div className="mt-2 text-center text-xs text-tertiary" role="status">Starting task…</div>
           ) : null}
-
-          {/* Centred under the composer. Left-aligned, these ended well short
-              of the composer's right edge and made the whole column look
-              off-axis even though it was not. */}
-          <div className="mt-3.5 flex flex-wrap justify-center gap-1.5">
-            {STARTERS.map((starter) => (
-              <Button
-                key={starter.label}
-                type="button"
-                onClick={() => applyStarter(starter.prompt(session?.title ?? "this project"))}
-                className="h-7 rounded-md border border-default bg-card px-2.5 text-xs text-secondary hover:border-strong hover:bg-hover hover:text-primary"
-                data-tooltip="Fill the composer with this prompt"
-              >
-                {starter.label}
-              </Button>
-            ))}
-          </div>
         </section>
       </main>
     </div>

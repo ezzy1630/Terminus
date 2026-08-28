@@ -160,9 +160,12 @@ function SidebarItemImpl({
         tabIndex={primaryTabIndex}
         aria-pressed={selected}
         data-tooltip={title}
+        // The spoken label uses the human wording, not the lifecycle id: a
+        // screen reader announced "status needs_you" and now says "status
+        // Needs you", which is what the glyph beside it means.
         aria-label={
           status
-            ? `${title}, status ${status}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
+            ? `${title}, status ${lifecycleShortLabel(status)}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
             : `${title}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
         }
         className="flex w-full min-w-0 flex-1 flex-col items-start justify-center gap-0.5"

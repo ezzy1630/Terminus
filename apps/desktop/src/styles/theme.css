@@ -156,9 +156,18 @@
   --text-tertiary: #959ba6;
   --text-placeholder: #979da8;
   --text-inverse: #131417;
-  --text-on-accent: #0b1220;
+  --text-on-accent: #ffffff;
   --text-code: #eef1f5;
-  --accent: #79a6f6;
+  /* Apple system blue. The old #79a6f6 was a pastel of it — lighter than
+     anything macOS draws, so every accented control read as slightly washed
+     out against the charcoal base. Contrast on --bg-canvas (#131417) is
+     5.05:1, and 5.29:1 on the darker sidebar, so accent-coloured text clears
+     WCAG AA at body size. */
+  --accent: #0A84FF;
+  /* Pointer and press states, derived so a future accent change carries. */
+  --accent-hover: color-mix(in srgb, var(--accent) 82%, #ffffff);
+  --accent-pressed: color-mix(in srgb, var(--accent) 78%, #000000);
+  --accent-selection: color-mix(in srgb, var(--accent) 26%, transparent);
   --accent-dim: color-mix(in srgb, var(--accent) 62%, var(--bg-canvas));
   --accent-wash: color-mix(in srgb, var(--accent) 12%, transparent);
   --text-accent: var(--accent);
@@ -185,7 +194,7 @@
   --color-agent-waiting: var(--semantic-warning);
   --color-access-full: var(--semantic-success);
   --color-access-limited: var(--semantic-warning);
-  --focus-color: #79a6f6;
+  --focus-color: var(--accent);
   --focus-border: color-mix(in srgb, var(--focus-color) 72%, var(--border-strong));
   --focus-ring: 0 0 0 1px var(--bg-canvas), 0 0 0 3px color-mix(in srgb, var(--focus-color) 24%, transparent);
   /* The composer's focused border. Neutral on purpose — see the
@@ -221,7 +230,10 @@
     --text-inverse: #ffffff;
     --text-on-accent: #ffffff;
     --text-code: #ececea;
-    --accent: #356fd6;
+    --accent: #007AFF;
+    --accent-hover: color-mix(in srgb, var(--accent) 84%, #000000);
+    --accent-pressed: color-mix(in srgb, var(--accent) 70%, #000000);
+    --accent-selection: color-mix(in srgb, var(--accent) 18%, transparent);
     --border-subtle: #dde1e6;
     --border-default: #cbd1d9;
     --border-strong: #a8b0bb;
@@ -231,7 +243,7 @@
     --semantic-warning: #8a6200;
     --semantic-info: #2868b2;
     --action-primary: var(--accent);
-    --focus-color: #356fd6;
+    --focus-color: var(--accent);
   --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 40%, var(--border-strong));
     --elevation-sm: 0 1px 2px rgb(35 35 30 / 7%);
     --elevation-md: 0 8px 24px rgb(35 35 30 / 11%);
@@ -267,7 +279,10 @@
   --text-inverse: #ffffff;
   --text-on-accent: #ffffff;
   --text-code: #ececea;
-  --accent: #356fd6;
+  --accent: #007AFF;
+  --accent-hover: color-mix(in srgb, var(--accent) 84%, #000000);
+  --accent-pressed: color-mix(in srgb, var(--accent) 70%, #000000);
+  --accent-selection: color-mix(in srgb, var(--accent) 18%, transparent);
   --text-accent: var(--accent);
   --border-subtle: #dde1e6;
   --border-default: #cbd1d9;
@@ -278,7 +293,7 @@
   --semantic-warning: #8a6200;
   --semantic-info: #2868b2;
   --action-primary: var(--accent);
-  --focus-color: #356fd6;
+  --focus-color: var(--accent);
   --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 40%, var(--border-strong));
   --elevation-sm: 0 1px 2px rgb(35 35 30 / 7%);
   --elevation-md: 0 8px 24px rgb(35 35 30 / 11%);

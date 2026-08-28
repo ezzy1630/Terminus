@@ -14,7 +14,10 @@ import {
   lifecycleLabel,
   lifecycleNeedsAttention,
   type BoardColumnId,
+  type TaskLifecycle,
 } from "./task-lifecycle";
+import { displayLifecycleWith, type TurnActivity } from "./turn-activity";
+import type { Task } from "../types";
 import type {
   MaterialQuestionSnapshot,
   TaskV2Snapshot,
@@ -35,6 +38,29 @@ export type MissionBoardPlacement = MissionBoardColumnId;
 
 export function boardColumnForStatus(status: TaskV2Status): MissionBoardPlacement {
   return boardColumnForLifecycle(lifecycleFromV2Status(status));
+}
+
+/**
+ * What a board card should say a task is doing.
+ *
+ * The v2 snapshot has no notion of a turn, so `RUNNING` is what it reports for
+ * as long as the task is alive — every card on the board claimed to be working.
+ * The v1 record and its event tail know whether a run is actually in flight, so
+ * they win when the task is loaded; the v2 status is the fallback for a task the
+ * v1 store has not seen.
+ */
+export function boardLifecycle(
+  task: TaskV2Snapshot,
+  domainTask: Task | undefined,
+  activity: TurnActivity,
+): TaskLifecycle {
+  return domainTask === undefined
+    ? lifecycleFromV2Status(task.status)
+    : displayLifecycleWith(domainTask, activity);
+}
+
+export function boardColumnForTaskLifecycle(lifecycle: TaskLifecycle): MissionBoardPlacement {
+  return boardColumnForLifecycle(lifecycle);
 }
 
 /**

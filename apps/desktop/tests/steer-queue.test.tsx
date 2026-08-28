@@ -1,10 +1,11 @@
 /**
  * Steering while the agent is working, and the spend readout.
  *
- * `POST /v1/turns` refuses a second concurrent turn with
- * `TASK_TURN_ALREADY_ACTIVE`, so typing during a run used to fail with a raw
- * conflict error. The composer now holds the message and sends it the moment
- * the turn settles.
+ * Typing during a run first failed with a raw `TASK_TURN_ALREADY_ACTIVE`, then
+ * was held in a local queue and posted as a *new* turn once the run ended —
+ * which is not steering: the model finished the wrong work and only then read
+ * the correction. `POST /v1/turns/:id/steer` delivers it into the running turn.
+ * The queue survives only as the fallback for a turn that settled mid-click.
  *
  * The same surface gained a cost/context readout. Both numbers were already on
  * the wire in `budget_ledger`; the app displayed neither.
@@ -26,6 +27,8 @@ vi.mock("../src/lib/api", async () => {
       ...actual.api,
       startTask: vi.fn(async () => ({ task_id: "task-1", status: "ACTIVE", event_cursor: "cursor-1", links: { events: "", task: "" } })),
       startTurn: vi.fn(async () => ({})),
+      steerTurn: vi.fn(async () => ({ episode_id: "ep-1", sequence: 2, turn_id: "turn-1", turn_state: "PROVIDER_RUNNING" })),
+      getTask: vi.fn(async () => task()),
       listProviderModels: vi.fn(async () => ({ models: [], default_model: null })),
       getProviderConfig: vi.fn(async () => ({ configured: false, configuration: null })),
     },
@@ -63,6 +66,7 @@ function install(current: Task, events: TerminusSseEvent[] = []): void {
     tasksBySession: { [current.session_id]: [current] },
     eventsByTask: { [current.id]: events },
     queuedSteerByTask: {},
+    queuedSteerAtByTask: {},
     draftsByTask: {},
     sessionDraftsByTask: {},
     draftPersistenceByTask: {},
@@ -79,25 +83,72 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  useTerminusStore.setState({ queuedSteerByTask: {} });
+  useTerminusStore.setState({ queuedSteerByTask: {}, queuedSteerAtByTask: {} });
 });
 
-describe("steering while a run is in flight", () => {
-  test("holds the message instead of sending a request that can only conflict", async () => {
-    install(task({ active_turn: { id: "turn-1", sequence: 1, state: "PROVIDER_RUNNING", started_at: null } }));
+const RUNNING_TURN = { id: "turn-1", sequence: 1, state: "PROVIDER_RUNNING", started_at: null } as const;
+
+describe("steering a live turn", () => {
+  test("delivers the correction into the run instead of queueing it", async () => {
+    install(task({ active_turn: { ...RUNNING_TURN } }), [event("turn.started")]);
     const user = userEvent.setup();
     render(<Composer />);
 
     await user.type(screen.getByRole("textbox", { name: "Message composer" }), "actually use fetch");
-    await user.click(screen.getByRole("button", { name: /Queue for the current run/ }));
+    await user.click(screen.getByRole("button", { name: /^Steer/ }));
 
-    await waitFor(() => {
-      expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBe("actually use fetch");
-    });
+    await waitFor(() => expect(api.steerTurn).toHaveBeenCalledWith(
+      "turn-1",
+      { message: "actually use fetch" },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    ));
+    // Steering appends an episode to the running turn. Opening a second turn
+    // is exactly what the control plane refuses.
     expect(api.startTurn).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message composer" })).toHaveValue(""));
+    expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBeUndefined();
   });
 
-  test("says the message is held rather than delivered", async () => {
+  test("falls back to the queue only when the turn settled first", async () => {
+    install(task({ active_turn: { ...RUNNING_TURN } }), [event("turn.started")]);
+    vi.mocked(api.steerTurn).mockRejectedValueOnce(new TerminusApiError(409, "turn cannot be steered from COMPLETED", {
+      code: "TURN_STEERING_STATE_CONFLICT",
+      message: "turn cannot be steered from COMPLETED",
+      retryable: false,
+      category: "conflict",
+    }));
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    await user.type(screen.getByRole("textbox", { name: "Message composer" }), "too late");
+    await user.click(screen.getByRole("button", { name: /^Steer/ }));
+
+    await waitFor(() => expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBe("too late"));
+  });
+
+  test("surfaces a steer failure that is not a race, and does not hide it in the queue", async () => {
+    install(task({ active_turn: { ...RUNNING_TURN } }), [event("turn.started")]);
+    vi.mocked(api.steerTurn).mockRejectedValueOnce(new TerminusApiError(500, "kernel artifact ingest failed", {
+      code: "INTERNAL",
+      message: "kernel artifact ingest failed",
+      retryable: true,
+      category: "internal",
+    }));
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    await user.type(screen.getByRole("textbox", { name: "Message composer" }), "use the other adapter");
+    await user.click(screen.getByRole("button", { name: /^Steer/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("kernel artifact ingest failed");
+    expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBeUndefined();
+    // The text stays put so it is not lost with the failure.
+    expect(screen.getByRole("textbox", { name: "Message composer" })).toHaveValue("use the other adapter");
+  });
+});
+
+describe("steering while a run is in flight", () => {
+  test("holds the message when this client does not yet know the running turn", async () => {
     install(task(), [event("turn.started")]);
     const user = userEvent.setup();
     render(<Composer />);
@@ -106,8 +157,9 @@ describe("steering while a run is in flight", () => {
     await user.click(screen.getByRole("button", { name: /Queue for the current run/ }));
 
     await waitFor(() => expect(screen.getByText("Queued.")).toBeInTheDocument());
-    expect(screen.getByText(/goes as soon as the current run finishes/)).toBeInTheDocument();
+    expect(screen.getByText(/goes as a new turn/)).toBeInTheDocument();
     expect(screen.getByText("prefer the smaller change")).toBeInTheDocument();
+    expect(api.steerTurn).not.toHaveBeenCalled();
   });
 
   test("clears the composer, so the text lives in exactly one place", async () => {
@@ -181,6 +233,27 @@ describe("steering while a run is in flight", () => {
 
     expect(screen.getByRole("textbox", { name: "Message composer" })).toHaveValue("one more thing");
     expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBeUndefined();
+  });
+
+  test("stops claiming to be waiting once the wait is unreasonable", async () => {
+    install(task(), [event("turn.started")]);
+    const user = userEvent.setup();
+    render(<Composer />);
+    // Queued 31 seconds ago and still held: this client's view of the run is
+    // stale, and saying "queued" for another minute is a lie of omission.
+    useTerminusStore.setState({
+      queuedSteerByTask: { "task-1": "send it already" },
+      queuedSteerAtByTask: { "task-1": Date.now() - 31_000 },
+    });
+
+    expect(await screen.findByText("Still waiting.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Send now" }));
+
+    await waitFor(() => expect(api.startTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ task_id: "task-1", user_input: "send it already" }),
+      expect.anything(),
+    ));
+    await waitFor(() => expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBeUndefined());
   });
 
   test("can be discarded", async () => {

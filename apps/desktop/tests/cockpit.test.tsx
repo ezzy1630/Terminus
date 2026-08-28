@@ -375,7 +375,6 @@ describe("truthful operator cockpit", () => {
     const user = userEvent.setup();
     render(
       <Sidebar
-        compact={false}
         activeDestination="chat"
         onNavigate={onNavigate}
         taskActionsEnabled
@@ -384,11 +383,10 @@ describe("truthful operator cockpit", () => {
 
     expect(screen.getByRole("button", { name: /Sessions|Board|Kanban/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Mission Ledger" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Agents" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Sessions|Board|Kanban/ }));
-    await user.click(screen.getByRole("button", { name: "Agents" }));
 
     expect(onNavigate).toHaveBeenNthCalledWith(1, "board");
-    expect(onNavigate).toHaveBeenNthCalledWith(2, "agents");
     expect(useTerminusStore.getState().selectedTaskId).toBe("task-durable");
   });
 
@@ -639,15 +637,15 @@ describe("truthful operator cockpit", () => {
     expect(document.querySelector('[data-cockpit-state="task-required"]')).toBeInTheDocument();
   });
 
-  test("exposes the combined Agents workspace as one navigation command", () => {
-    const openAgents = vi.fn();
-    const commands = buildDefaultCommands({ openAgents });
+  // The Agents workspace is built from a directory of departments, operators
+  // and rooms that no control-plane route serves. Advertising a destination
+  // that can only show invented structure is worse than not offering it.
+  test("offers no Agents destination while the surface has no data behind it", () => {
+    const commands = buildDefaultCommands({ openMissionBoard: vi.fn() });
 
-    expect(commands.filter((command) => command.id === "nav.agents")).toHaveLength(1);
+    expect(commands.some((command) => command.id === "nav.agents")).toBe(false);
     expect(commands.some((command) => command.id === "cockpit.org-map")).toBe(false);
     expect(commands.some((command) => command.id === "cockpit.agent-rooms")).toBe(false);
-    commands.find((command) => command.id === "nav.agents")?.action();
-    expect(openAgents).toHaveBeenCalledTimes(1);
   });
 
   test("exposes no governance-view commands after the cockpit tabs were removed", () => {

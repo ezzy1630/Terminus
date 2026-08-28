@@ -139,7 +139,7 @@ function ConnectionBannerImpl(): JSX.Element | null {
       >
         <TriangleAlert size={13} className="flex-shrink-0" style={{ color: "var(--color-warning)" }} aria-hidden />
         <span className="min-w-0 flex-1 truncate text-secondary">
-          Live updates interrupted. Reconnecting.
+          {lastError ?? "Live updates interrupted. Reconnecting…"}
         </span>
       </div>
     );

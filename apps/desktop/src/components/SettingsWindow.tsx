@@ -25,7 +25,13 @@ function isCategoryId(value: string): value is SettingCategoryId {
 }
 
 function SettingsWindowImpl(): JSX.Element {
-  const [category, setCategory] = useState<SettingCategoryId>("appearance");
+  // The window is launched *on* a category — "Keyboard Shortcuts" from Help,
+  // "Agents and Models" from the composer's missing-model notice. Starting on
+  // Appearance and waiting for a follow-up message showed the wrong page first.
+  const [category, setCategory] = useState<SettingCategoryId>(() => {
+    const requested = window.terminusDesktop?.settingsCategory ?? null;
+    return requested !== null && isCategoryId(requested) ? requested : "appearance";
+  });
   const refreshSessions = useTerminusStore((state) => state.refreshSessions);
 
   // The Agents category lists the model profiles projects actually run on.

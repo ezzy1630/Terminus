@@ -29,6 +29,11 @@ interface ActivityBlockProps {
   block: ActivityBlockData;
   /** Default expanded state. */
   defaultExpanded?: boolean;
+  /**
+   * Resend the prompt this block reports a failure for. Absent on every block
+   * without a `retryInput`, so there is no button that can only apologise.
+   */
+  onRetry?: (input: string) => void;
 }
 
 const MAX_RENDERED_ACTIVITY_DETAIL_CHARS = 16_000;
@@ -77,12 +82,16 @@ function ToolIcon({ tool }: { tool: string | undefined }): JSX.Element | null {
   }
 }
 
-function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProps): JSX.Element {
+function ActivityBlockImpl({ block, defaultExpanded = false, onRetry }: ActivityBlockProps): JSX.Element {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const kind = statusKind(block.status);
 
+  const failed = block.status === "failed";
+
   return (
     <div
+      // A failure is announced, not just drawn. Everything else is quiet.
+      role={failed ? "alert" : undefined}
       className={cn(
         // No divider. Consecutive blocks already share one continuous rail
         // (.activity-block::before), so a rule under each one cut the timeline
@@ -121,6 +130,28 @@ function ActivityBlockImpl({ block, defaultExpanded = false }: ActivityBlockProp
           ) : null}
         </span>
       </Button>
+
+      {/* Retry.
+
+          A failed turn used to end the conversation: the task went terminal and
+          the composer said "create a new task to continue". It stays ACTIVE and
+          steerable now, so the same prompt can simply go again. */}
+      {block.retryInput && onRetry ? (
+        <div className="flex items-center gap-2 px-1.5 pb-1.5 pl-8">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => onRetry(block.retryInput as string)}
+            className="h-6 rounded-md px-2 text-xs"
+          >
+            Retry
+          </Button>
+          <span className="min-w-0 truncate text-xs text-tertiary">
+            Sends the same message again as a new turn.
+          </span>
+        </div>
+      ) : null}
 
       {/* Expanded details. */}
       {expanded && block.entries.length > 0 ? (

@@ -116,7 +116,7 @@ textarea::placeholder,
 
 ::selection {
   color: var(--text-primary);
-  background: color-mix(in srgb, var(--action-primary) 30%, transparent);
+  background: var(--accent-selection);
 }
 
 /* ────────────────────────── Focus ─────────────────────────────────────── */
@@ -980,4 +980,52 @@ pre {
   color: var(--text-tertiary);
   border-bottom: 1px solid var(--border-subtle);
 }
+}
+
+/* ────────────────────────── Opaque popover surfaces ─────────────────────── */
+/*
+   Deliberately unlayered.
+
+   Tailwind v4 orders `@layer components` *below* `@layer utilities`, so any
+   background utility that lands on a popover — directly, or through a
+   composed class on the trigger's subtree — outranks the `.ui-popover` rule in
+   the components layer above. The model picker was the visible casualty: a
+   floating panel you could read the transcript through, which makes the model
+   names ambiguous and the whole surface look unfinished.
+
+   These rules own the background outright. A menu is a modal-ish surface: it
+   is meant to sit on top of the page, not blend into it.
+*/
+.ui-popover,
+.model-picker-surface {
+  background-color: var(--bg-popover);
+  /* The window material must not show through a control that has to be read. */
+  backdrop-filter: none;
+}
+
+html[data-vibrancy="on"] .ui-popover,
+html[data-vibrancy="on"] .model-picker-surface {
+  background-color: var(--bg-popover);
+}
+
+/* ────────────────────────── Accented controls ──────────────────────────── */
+/*
+   Unlayered, for the same reason as the popover surfaces above: `bg-primary`
+   is a Tailwind utility, and a components-layer hover rule would lose to it.
+
+   The primary button used `hover:brightness-105`, which is a filter over
+   whatever colour happened to be underneath rather than a state of the accent.
+   Against the new system blue that is nearly invisible; these are real hover
+   and pressed colours derived from `--accent`.
+*/
+.ui-button-primary {
+  background-color: var(--action-primary);
+}
+
+.ui-button-primary:hover:not(:disabled) {
+  background-color: var(--accent-hover);
+}
+
+.ui-button-primary:active:not(:disabled) {
+  background-color: var(--accent-pressed);
 }

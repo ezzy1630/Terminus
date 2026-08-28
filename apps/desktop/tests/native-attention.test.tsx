@@ -178,6 +178,35 @@ describe("notifications", () => {
     expect(bridge.setAttentionCount).toHaveBeenLastCalledWith(1);
   });
 
+  // The successful ending was the one outcome the app never mentioned, which
+  // is the outcome the operator walked away waiting for.
+  test("announces a task that has just finished", () => {
+    const bridge = installBridge();
+    install([task("a", "ACTIVE")]);
+    render(<Probe />);
+
+    act(() => install([task("a", "COMPLETED", {
+      completed_at: "2026-08-28T01:00:00.000Z",
+      contract: {
+        version: 1,
+        objective: "Ship the parser fix",
+        non_goals: [],
+        allowed_scope: { read_paths: [], write_paths: [], external_systems: [] },
+      },
+    })]));
+
+    expect(bridge.notify).toHaveBeenCalledWith("Done", "Ship the parser fix", "a");
+  });
+
+  test("says nothing about tasks that were already finished at launch", () => {
+    const bridge = installBridge();
+    install([task("a", "COMPLETED", { completed_at: "2026-08-28T01:00:00.000Z" })]);
+
+    render(<Probe />);
+
+    expect(bridge.notify).not.toHaveBeenCalled();
+  });
+
   test("does not re-announce on the next change once the window is focused", () => {
     const bridge = installBridge();
     install([task("a", "ACTIVE")]);

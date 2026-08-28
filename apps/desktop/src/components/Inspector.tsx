@@ -20,9 +20,9 @@
  * transport exists. Runtime activity alone must not create a dead panel.
  */
 import { memo, useEffect, useMemo, useState } from "react";
-import { BadgeCheck, Check, ChevronDown, ChevronRight, Copy, FileDiff, GitBranch, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, UsersRound, Workflow } from "lucide-react";
+import { BadgeCheck, Boxes, Check, ChevronDown, ChevronRight, Copy, FileDiff, GitBranch, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, UsersRound, Workflow } from "lucide-react";
 import { cn } from "../lib/cn";
-import { lifecycleFromTask } from "../lib/task-lifecycle";
+import { displayLifecycle } from "../lib/turn-activity";
 import {
   useSelectedTask,
   useSelectedTaskApprovals,
@@ -38,7 +38,7 @@ import { api } from "../lib/api";
 import { Button } from "../ui/Button";
 
 const INSPECTOR_EVENT_PREVIEW_CHARS = 2_000;
-import type { SandboxReport, TerminusSseEvent } from "../types";
+import type { SandboxReport, TaskArtifactsPage, TerminusSseEvent } from "../types";
 
 /**
  * Canonical ARP v2 inspector section. Renders only when the selected task
@@ -295,6 +295,83 @@ function activityLabel(eventName: string): string {
   return labels[eventName] ?? eventName.replace(/[._]/g, " ");
 }
 
+/**
+ * The task's content-addressed artifacts.
+ *
+ * This list used to be the *fallback view of the Changes pane*: when the
+ * working-tree diff came back empty, ⌘D opened onto a column of sha256 hashes
+ * for a task that had really edited files. An index of what the kernel stored
+ * is reference material, so it lives here, behind a collapsed section, and
+ * Changes shows the diff.
+ */
+const ArtifactsSection = memo(function ArtifactsSection({ taskId }: { taskId: string }): JSX.Element | null {
+  const [state, setState] = useState<{
+    taskId: string;
+    page: TaskArtifactsPage | null;
+    error: string | null;
+  }>({ taskId, page: null, error: null });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ taskId, page: null, error: null });
+    void api.listTaskArtifacts(taskId, null, controller.signal)
+      .then((page) => {
+        if (controller.signal.aborted) return;
+        setState({ taskId, page, error: null });
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setState({
+          taskId,
+          page: null,
+          error: error instanceof Error ? error.message : "The artifact list could not be read.",
+        });
+      });
+    return () => controller.abort();
+  }, [taskId]);
+
+  if (state.taskId !== taskId) return null;
+  if (state.error !== null) {
+    return (
+      <InspectorSection title="Artifacts" icon={<Boxes size={12} />} summary="Unavailable" urgent defaultOpen={false}>
+        <p className="text-xs text-warning" role="status">{state.error}</p>
+      </InspectorSection>
+    );
+  }
+  const artifacts = state.page?.artifacts ?? [];
+  if (state.page === null || artifacts.length === 0) return null;
+
+  return (
+    <InspectorSection
+      title="Artifacts"
+      icon={<Boxes size={12} />}
+      summary={`${state.page.total}`}
+      defaultOpen={false}
+    >
+      <ul className="flex flex-col gap-1.5 text-xs" aria-label="Task artifacts">
+        {artifacts.map((artifact) => (
+          <li key={artifact.hash} className="flex min-w-0 items-center gap-2">
+            <span className="min-w-0 flex-1 truncate font-mono text-secondary" title={artifact.hash}>
+              {artifact.hash.replace(/^sha256:/, "").slice(0, 12)}…
+            </span>
+            <span className="shrink-0 truncate font-mono text-tertiary">{artifact.purpose}</span>
+            {artifact.size_bytes !== null ? (
+              <span className="shrink-0 font-mono text-tertiary tabular-nums">
+                {artifact.size_bytes.toLocaleString()} B
+              </span>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      {artifacts.length < state.page.total ? (
+        <p className="mt-2 text-xs text-tertiary">
+          Showing {artifacts.length} of {state.page.total}.
+        </p>
+      ) : null}
+    </InspectorSection>
+  );
+});
+
 function InspectorSection({
   title,
   icon,
@@ -397,7 +474,8 @@ function InspectorImpl({
     );
   }
 
-  const statusKind = lifecycleFromTask(task);
+  // ACTIVE is the steady state, not "working" — see lib/turn-activity.
+  const statusKind = displayLifecycle(task, events);
   const blockedByProvider = task.status === "BLOCKED"
     && task.terminal_reason?.reason === "provider_transport_unavailable";
 
@@ -451,29 +529,34 @@ function InspectorImpl({
       ) : null}
 
       {/* Environment Section */}
+      {/*
+        Every row here is read from the task or the session.
+
+        The previous version stated "Runtime: Local UDS" (a transport this
+        renderer cannot observe and does not choose), relabelled the permission
+        profile as "Full access", and defaulted the contract version to `v1`
+        and the risk class to "Standard" when the control plane had reported
+        neither. Four confident claims, none of them measurements.
+      */}
       <InspectorSection title="Environment" icon={<GitBranch size={12} />} summary={statusLabel(statusKind)} defaultOpen>
         <div className="flex flex-col gap-2 text-xs">
-          <div className="flex items-center justify-between">
-            <span className="text-tertiary">Runtime</span>
-            <span className="inline-flex items-center gap-1 rounded bg-subtle px-1.5 py-0.5 text-xs font-medium text-secondary">
-              Local UDS
-            </span>
+          {permissionProfileId ? (
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-tertiary">Permission profile</span>
+              <span className="inline-flex items-center gap-1 truncate rounded border border-info/20 bg-info/10 px-1.5 py-0.5 font-mono text-xs font-medium text-info">
+                {permissionProfileId}
+              </span>
+            </div>
+          ) : null}
+          {/* Both are required fields the decoder rejects when absent, so
+              these are the control plane's values, not stand-ins for them. */}
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-tertiary">Risk class</span>
+            <span className="text-secondary">{task.risk_class}</span>
           </div>
           <div className="flex items-center justify-between gap-2">
-            <span className="text-tertiary">Access</span>
-            <span className="inline-flex items-center gap-1 rounded bg-info/10 text-info border border-info/20 px-1.5 py-0.5 text-xs font-medium truncate">
-              {permissionProfileId === "secure-local-default" ? "Full access" : permissionProfileId ?? "Standard"}
-            </span>
-          </div>
-          <div className="grid grid-cols-2 gap-2 pt-1 border-t border-subtle/40 text-xs">
-            <div>
-              <span className="text-tertiary block">Contract</span>
-              <span className="font-mono text-secondary">v{task.active_contract_version ?? 1}</span>
-            </div>
-            <div>
-              <span className="text-tertiary block">Risk Profile</span>
-              <span className="text-secondary">{task.risk_class ?? "Standard"}</span>
-            </div>
+            <span className="text-tertiary">Contract</span>
+            <span className="font-mono text-secondary">v{task.active_contract_version}</span>
           </div>
         </div>
       </InspectorSection>
@@ -483,6 +566,9 @@ function InspectorImpl({
 
       {/* Sandbox Section */}
       <SandboxSection profileId={permissionProfileId} />
+
+      {/* Artifacts — reference material, not the review surface. */}
+      <ArtifactsSection taskId={task.id} />
 
       {/* Subagents Section */}
       {subagents.length > 0 ? (

@@ -590,6 +590,18 @@ const CATALOG = buildCatalog().flatMap((category): SettingCategory[] => {
 });
 const CATEGORIES = CATALOG;
 
+/**
+ * Extra search terms per category.
+ *
+ * Operators look for "provider", "api key" or "model" — none of which is the
+ * category's label ("Agents and Models") or its id.
+ */
+const CATEGORY_KEYWORDS: Partial<Record<SettingCategoryId, string>> = {
+  agents: "providers provider api key token gateway model models routing opencode zen go local command tools inference",
+  appearance: "theme dark light density spacing font",
+  shortcuts: "keyboard keys bindings hotkeys",
+};
+
 export function deriveRuntimeModelProfiles(sessions: Session[]): Array<{ id: string; projectCount: number }> {
   const counts = new Map<string, number>();
   for (const session of sessions) {
@@ -857,21 +869,30 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
     }
   }, [providerDraft]);
 
+  /**
+   * Search across categories, not only across rows.
+   *
+   * The provider category holds no `settings` descriptors — its controls are
+   * rendered directly — and the old filter dropped every category whose
+   * `settings` list came back empty. Searching "provider", "model" or "api
+   * key" therefore found nothing, in the one place those are configured.
+   */
   const filteredCategories = useMemo(() => {
     if (!query.trim()) return CATEGORIES;
     const q = query.toLowerCase();
-    return CATEGORIES.map((cat) => ({
-      ...cat,
-      settings: [cat.label, cat.description, cat.id, cat.id === "agents" ? "OpenCode Zen Go local provider command model tools" : ""]
-        .some((value) => value.toLowerCase().includes(q))
+    return CATEGORIES.map((cat) => {
+      const categoryMatches = [cat.label, cat.description, cat.id, CATEGORY_KEYWORDS[cat.id] ?? ""]
+        .some((value) => value.toLowerCase().includes(q));
+      const settings = categoryMatches
         ? cat.settings
         : cat.settings.filter(
             (s) =>
               s.label.toLowerCase().includes(q) ||
               (s.description?.toLowerCase().includes(q) ?? false) ||
               s.id.includes(q),
-          ),
-    })).filter((cat) => cat.settings.length > 0);
+          );
+      return { category: { ...cat, settings }, keep: categoryMatches || settings.length > 0 };
+    }).filter((entry) => entry.keep).map((entry) => entry.category);
   }, [query]);
 
   if (!open) return <></>;

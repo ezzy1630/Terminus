@@ -14,6 +14,18 @@ const DIFF = [
   "+export const answer = 42;",
 ].join("\n");
 
+/**
+ * Reveal the artifact index.
+ *
+ * Changes leads with the working-tree diff now. The content-addressed list is
+ * reference material behind an explicit click — it used to be what the pane
+ * fell back to whenever the diff came back empty, which is how a task with real
+ * edits ended up showing a column of sha256 hashes.
+ */
+async function browseArtifacts(): Promise<void> {
+  fireEvent.click(await screen.findByRole("button", { name: "Browse artifacts" }));
+}
+
 function patchEvent(): TerminusSseEvent {
   return {
     id: "patch-1",
@@ -54,6 +66,7 @@ describe("ReviewPane", () => {
       .mockImplementationOnce(() => new Promise((resolve) => { resolveNext = resolve; }));
 
     render(<ReviewPane taskId="task-1" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+    await browseArtifacts();
     const loadMore = await screen.findByRole("button", { name: "Load more" });
     fireEvent.click(loadMore);
     fireEvent.click(loadMore);
@@ -86,6 +99,7 @@ describe("ReviewPane", () => {
       });
 
     render(<ReviewPane taskId="task-retry" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+    await browseArtifacts();
     expect(await screen.findByRole("alert")).toHaveTextContent("inventory offline");
     expect(screen.queryByRole("heading", { name: "No reviewable changes yet" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry inventory" }));
@@ -104,6 +118,7 @@ describe("ReviewPane", () => {
       .mockResolvedValueOnce({ text: DIFF, truncated: false, totalBytes: DIFF.length });
 
     render(<ReviewPane taskId="task-preview-retry" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+    await browseArtifacts();
     fireEvent.click((await screen.findByText("sha256:preview-retry")).closest("button")!);
     expect(await screen.findByRole("alert")).toHaveTextContent("preview offline");
     fireEvent.click(screen.getByRole("button", { name: "Retry preview" }));
@@ -126,6 +141,7 @@ describe("ReviewPane", () => {
     const onDraftRevision = vi.fn();
 
     const first = render(<ReviewPane taskId="task-1" events={[]} onClose={vi.fn()} onDraftRevision={onDraftRevision} />);
+    await browseArtifacts();
     fireEvent.click((await screen.findByText("sha256:artifact-a")).closest("button")!);
     await screen.findByRole("region", { name: "Diff viewer" });
     fireEvent.click(screen.getAllByRole("button", { name: "Add comment" })[0]!);
@@ -140,6 +156,7 @@ describe("ReviewPane", () => {
 
     first.unmount();
     render(<ReviewPane taskId="task-1" events={[]} onClose={vi.fn()} onDraftRevision={onDraftRevision} />);
+    await browseArtifacts();
     fireEvent.click((await screen.findByText("sha256:artifact-a")).closest("button")!);
     expect(await screen.findByText("Keep this artifact-specific note.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Add to composer" }));
@@ -159,6 +176,7 @@ describe("ReviewPane", () => {
     vi.spyOn(api, "getArtifactText").mockResolvedValue({ text: DIFF, truncated: false, totalBytes: DIFF.length });
 
     render(<ReviewPane taskId="task-collision" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+    await browseArtifacts();
     fireEvent.click((await screen.findByText("sha256:collision")).closest("button")!);
     await screen.findByRole("region", { name: "Diff viewer" });
 
@@ -189,6 +207,7 @@ describe("ReviewPane", () => {
     vi.spyOn(api, "getArtifactText").mockResolvedValue({ text: DIFF, truncated: false, totalBytes: DIFF.length });
 
     const view = render(<ReviewPane taskId="task-a" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+    await browseArtifacts();
     fireEvent.click((await screen.findByText("sha256:task-a")).closest("button")!);
     fireEvent.click((await screen.findAllByRole("button", { name: "Add comment" }))[0]!);
     fireEvent.change(screen.getByRole("textbox", { name: "Comment draft" }), { target: { value: "Only task A" } });
@@ -196,6 +215,7 @@ describe("ReviewPane", () => {
     expect(await screen.findByText("Only task A")).toBeInTheDocument();
 
     view.rerender(<ReviewPane taskId="task-b" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+    await browseArtifacts();
     expect(await screen.findByText("sha256:task-b")).toBeInTheDocument();
     expect(screen.queryByText("Only task A")).not.toBeInTheDocument();
     await waitFor(() => expect(window.localStorage.getItem("terminus-desktop.review-notes.v2.task-a")).toContain("Only task A"));
@@ -364,7 +384,9 @@ describe("ReviewPane — working tree", () => {
 
     render(<ReviewPane taskId="task-1" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
 
-    expect(await screen.findByRole("heading", { name: "No reviewable changes yet" })).toBeInTheDocument();
+    // "No evidence" and "nothing changed" are different claims, and this is
+    // the second one.
+    expect(await screen.findByRole("heading", { name: "No changes in the working tree" })).toBeInTheDocument();
   });
 
   test("says so when the workspace is not a git repository", async () => {
@@ -374,6 +396,43 @@ describe("ReviewPane — working tree", () => {
 
     // Silence here reads as "the agent changed nothing", which is a lie.
     expect(await screen.findByText(/not a git repository/i)).toBeInTheDocument();
+  });
+
+  // The observed defect: ⌘D on a task that had really edited a file opened
+  // onto a column of sha256 artifact hashes. The pane fell back to the
+  // artifact index whenever it had no parsed diff files, and an artifact index
+  // is not a review.
+  test("never opens onto the artifact index in place of a diff", async () => {
+    vi.spyOn(api, "getTaskDiff").mockResolvedValue(diffResponse({ diff: "" }));
+    vi.spyOn(api, "listTaskArtifacts").mockResolvedValue({
+      task_id: "task-1",
+      artifacts: [{ hash: "sha256:opaque", purpose: "log", media_type: "text/plain", size_bytes: 12 }],
+      total: 1,
+      next_cursor: null,
+    });
+
+    render(<ReviewPane taskId="task-1" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+
+    expect(await screen.findByRole("heading", { name: "No changes in the working tree" })).toBeInTheDocument();
+    expect(screen.queryByText("sha256:opaque")).not.toBeInTheDocument();
+    // Still reachable, just not the default.
+    await browseArtifacts();
+    expect(await screen.findByText("sha256:opaque")).toBeInTheDocument();
+  });
+
+  test("shows the working-tree diff even when artifacts exist", async () => {
+    vi.spyOn(api, "getTaskDiff").mockResolvedValue(diffResponse());
+    vi.spyOn(api, "listTaskArtifacts").mockResolvedValue({
+      task_id: "task-1",
+      artifacts: [{ hash: "sha256:opaque", purpose: "log", media_type: "text/plain", size_bytes: 12 }],
+      total: 1,
+      next_cursor: null,
+    });
+
+    render(<ReviewPane taskId="task-1" events={[]} onClose={vi.fn()} onDraftRevision={vi.fn()} />);
+
+    expect(await screen.findByText("src/worktree.ts")).toBeInTheDocument();
+    expect(screen.queryByText("sha256:opaque")).not.toBeInTheDocument();
   });
 
   test("reports a truncated diff instead of presenting a partial one as whole", async () => {

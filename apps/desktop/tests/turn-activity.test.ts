@@ -8,7 +8,16 @@
  * queued message forever or offers a Stop that can only 409.
  */
 import { describe, expect, it } from "vitest";
-import { taskRunIsActive, turnActivityFromEvents } from "../src/lib/turn-activity";
+import { displayLifecycle, taskRunIsActive, turnActivityFromEvents } from "../src/lib/turn-activity";
+import {
+  lifecycleFromDomainStatus,
+  lifecycleFromTask,
+  lifecycleIsActive,
+  lifecycleIsTerminal,
+  lifecycleLabel,
+  lifecycleNeedsAttention,
+  lifecycleTone,
+} from "../src/lib/task-lifecycle";
 import type { Task, TerminusSseEvent } from "../src/types";
 
 function event(type: string, id = type): TerminusSseEvent {
@@ -124,5 +133,77 @@ describe("taskRunIsActive", () => {
   it("is false without a task", () => {
     expect(taskRunIsActive(null, [event("turn.started")])).toBe(false);
     expect(taskRunIsActive(undefined, [])).toBe(false);
+  });
+});
+
+// ────────────────────────── Display lifecycle ────────────────────────────────
+// `ACTIVE` is the control plane's steady state: a task sits in it for as long
+// as it exists, and it accepts new turns there. Rendering it as "Working" put
+// a spinner on every task in the sidebar, the title bar, the board and the
+// Dock badge, and left it there forever.
+
+describe("displayLifecycle", () => {
+  it("calls an ACTIVE task with no run in flight ready, not working", () => {
+    expect(lifecycleFromTask(task())).toBe("working");
+    expect(displayLifecycle(task(), [])).toBe("idle");
+  });
+
+  it("keeps working while a turn is actually running", () => {
+    expect(displayLifecycle(task(), [event("turn.started")])).toBe("working");
+    expect(displayLifecycle(task({ active_turn: runningTurn }), [])).toBe("working");
+  });
+
+  it("returns to ready as soon as the run settles", () => {
+    expect(displayLifecycle(task({ active_turn: runningTurn }), [
+      event("turn.started", "1"),
+      event("turn.completed", "2"),
+    ])).toBe("idle");
+  });
+
+  it("downgrades planning the same way", () => {
+    const planning = task({ phase: "PLAN" });
+    expect(lifecycleFromTask(planning)).toBe("planning");
+    expect(displayLifecycle(planning, [])).toBe("idle");
+    expect(displayLifecycle(planning, [event("turn.started")])).toBe("planning");
+  });
+
+  it("leaves every claim about the task itself alone", () => {
+    // These are statements about the task, not about a turn: they are true
+    // whether or not something is running.
+    for (const [status, expected] of [
+      ["NEEDS_USER_DECISION", "needs_you"],
+      ["FAILED", "failed"],
+      ["COMPLETED", "done"],
+      ["ABORTED", "cancelled"],
+      ["DRAFT", "queued"],
+    ] as const) {
+      expect(displayLifecycle(task({ status }), [])).toBe(expected);
+    }
+  });
+
+  it("reports nothing for no task", () => {
+    expect(displayLifecycle(null, [])).toBe("unknown");
+  });
+});
+
+describe("the idle lifecycle", () => {
+  it("reads as Ready, is quiet, and is not a reason to interrupt anyone", () => {
+    expect(lifecycleLabel("idle")).toBe("Ready");
+    expect(lifecycleTone("idle")).toBe("neutral");
+    expect(lifecycleIsActive("idle")).toBe(false);
+    expect(lifecycleIsTerminal("idle")).toBe(false);
+    expect(lifecycleNeedsAttention("idle")).toBe(false);
+  });
+
+  it("is never produced by the stored status alone", () => {
+    for (const status of ["DRAFT", "ACTIVE", "BLOCKED", "VERIFYING", "COMPLETED", "FAILED", "ABORTED"]) {
+      expect(lifecycleFromDomainStatus(status)).not.toBe("idle");
+    }
+  });
+});
+
+describe("provider streaming keeps a run alive", () => {
+  it("treats a text delta as evidence that the turn is running", () => {
+    expect(turnActivityFromEvents([event("turn.provider_text_delta")])).toBe("running");
   });
 });

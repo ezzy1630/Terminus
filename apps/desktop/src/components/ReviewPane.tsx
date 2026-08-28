@@ -554,7 +554,11 @@ function ReviewPaneImpl({
           : null;
 
   const selectedIsDiff = openArtifact ? isDiffArtifact(openArtifact.artifact) : false;
-  const hasEvidence = activeEventSource !== null || (artifactPage?.artifacts.length ?? 0) > 0;
+  // Evidence means a diff. A list of content-addressed blobs is an index of
+  // what the kernel stored, not a review surface — this pane opened straight
+  // onto that list whenever the working tree read came back empty, so a task
+  // that had really edited files showed a column of sha256 hashes.
+  const hasEvidence = activeEventSource !== null;
 
   // A selected immutable artifact is one evidence source. Never append
   // event-derived files under its hash: that would misattribute unrelated
@@ -605,11 +609,11 @@ function ReviewPaneImpl({
           </span>
         ) : (
           <span className="font-mono text-tertiary text-xs" >
-            {artifactsLoading
-              ? "loading immutable artifacts"
-              : hasEvidence
-              ? `${eventFileCount} event ${eventFileCount === 1 ? "file" : "files"} · ${artifactPage?.total ?? 0} artifacts`
-              : "waiting for patch evidence"}
+            {hasEvidence
+              ? `${eventFileCount} changed ${eventFileCount === 1 ? "file" : "files"}`
+              : workspaceDiff.loading
+                ? "reading the working tree"
+                : "no changes yet"}
           </span>
         )}
         <Button
@@ -655,7 +659,7 @@ function ReviewPaneImpl({
             compact
             className="m-3 rounded-md border border-subtle bg-elevated"
           />
-        ) : !openArtifact && artifactsError && !artifactPage && (browsingArtifacts || !activeEventSource) ? (
+        ) : !openArtifact && browsingArtifacts && artifactsError && !artifactPage ? (
           <ErrorState
             severity="warning"
             title="Artifact inventory unavailable"
@@ -664,17 +668,36 @@ function ReviewPaneImpl({
             compact
             className="m-3 rounded-md border border-subtle bg-elevated"
           />
-        ) : !openArtifact && artifactsLoading && (browsingArtifacts || !activeEventSource) ? (
+        ) : !openArtifact && browsingArtifacts && artifactsLoading ? (
           <div className="grid gap-2 px-4 py-6" role="status" aria-label="Loading task artifacts">
             <Skeleton className="h-4 w-40" />
             <Skeleton className="h-3 w-2/3" />
             <Skeleton className="h-24 w-full" />
           </div>
-        ) : !openArtifact && !hasEvidence ? (
+        ) : !openArtifact && !browsingArtifacts && workspaceDiff.loading ? (
+          <div className="grid gap-2 px-4 py-6" role="status" aria-label="Reading the working tree">
+            <Skeleton className="h-4 w-40" />
+            <Skeleton className="h-3 w-2/3" />
+            <Skeleton className="h-24 w-full" />
+          </div>
+        ) : !openArtifact && !browsingArtifacts && !hasEvidence ? (
           <EmptyState
             icon={<FileDiff size={17} />}
-            title="No reviewable changes yet"
-            description="Patch evidence will appear here as the agent updates the workspace."
+            title={!taskId
+              ? "No reviewable changes yet"
+              : workspaceDiff.error !== null
+                ? "The working tree could not be read"
+                : !workspaceDiff.gitAvailable
+                  ? "No working-tree diff available"
+                  : "No changes in the working tree"}
+            description={!taskId
+              ? "Patch evidence will appear here as the agent updates the workspace."
+              : workspaceDiff.error !== null
+                ? sentence(workspaceDiff.error)
+                : !workspaceDiff.gitAvailable
+                  ? "Terminus can only diff a git workspace. Patch evidence from tool events appears here when the agent reports it."
+                  : "Nothing has been modified yet. Edits appear here as the agent makes them."}
+            {...(taskId ? { action: { label: "Browse artifacts", onClick: () => setBrowsingArtifacts(true) } } : {})}
             compact
           />
         ) : openArtifact && !selectedIsDiff && !openArtifact.loading ? (

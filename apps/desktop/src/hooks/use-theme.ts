@@ -188,6 +188,29 @@ function adoptNativeTheme(): void {
 
 if (persistedAppearance === null) adoptNativeTheme();
 
+/**
+ * Follow the shell when the system appearance changes.
+ *
+ * `prefers-color-scheme` alone misses the case that matters most on macOS: the
+ * user choosing Light or Dark for *this app* from the menu. The shell reports
+ * both its `themeSource` and the resolved value, so the two windows and the
+ * native chrome cannot disagree.
+ */
+if (typeof window !== "undefined") {
+  window.terminusDesktop?.onNativeThemeChange?.((state) => {
+    const store = useThemeStore.getState();
+    if (state.themeSource !== store.theme) {
+      store.setTheme(state.themeSource);
+      return;
+    }
+    // Same source, different resolution: the system flipped under "system".
+    const resolved = state.shouldUseDarkColors ? "dark" : "light";
+    if (resolved === store.resolved) return;
+    applyAppearance(resolved, store.density);
+    useThemeStore.setState({ resolved });
+  });
+}
+
 /** Convenience selector hook. */
 export function useTheme(): {
   theme: Theme;

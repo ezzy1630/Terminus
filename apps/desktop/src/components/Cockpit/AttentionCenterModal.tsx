@@ -1,5 +1,7 @@
 import { X } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { attentionItems } from "../../hooks/use-native-attention";
+import { useTerminusStore } from "../../hooks/use-terminus";
 import { useDialogFocus } from "../../hooks/use-dialog-focus";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../../hooks/use-logical-mutation";
 import { arpV2 } from "../../lib/api-v2";
@@ -29,15 +31,33 @@ function urgencyTone(urgency: AttentionAssessmentSnapshot["urgency"]): SemanticT
   return "neutral";
 }
 
+/**
+ * What is waiting on a human.
+ *
+ * Two independent answers used to live here. The sidebar badge counted task
+ * lifecycles; this modal read `/v2/attention/questions`, whose writer is a
+ * hard 503, so the badge said "3" while the modal said "Nothing needs
+ * attention". The lifecycle list is the primary answer now — the same
+ * `attentionItems` the badge and the Dock count use — and material questions
+ * are shown underneath when the control plane actually has any.
+ */
 export function AttentionCenterModal({
   isOpen,
   onClose,
   selectedTaskId,
+  onOpenTask,
 }: {
   isOpen: boolean;
   onClose: () => void;
   selectedTaskId?: string | null;
+  onOpenTask?: (taskId: string) => void;
 }): JSX.Element | null {
+  const tasksBySession = useTerminusStore((state) => state.tasksBySession);
+  const runActivityByTask = useTerminusStore((state) => state.runActivityByTask);
+  const waiting = useMemo(
+    () => attentionItems(tasksBySession, runActivityByTask),
+    [runActivityByTask, tasksBySession],
+  );
   const [resolvingQuestionId, setResolvingQuestionId] = useState<string | null>(null);
   const [resolvedQuestionIds, setResolvedQuestionIds] = useState<Set<string>>(() => new Set());
   const [resolutionError, setResolutionError] = useState<string | null>(null);
@@ -133,6 +153,28 @@ export function AttentionCenterModal({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-3">
           <p className="sr-only" role="status" aria-live="polite">{resolutionAnnouncement}</p>
+          {waiting.length > 0 ? (
+            <section className="mb-4" aria-label="Tasks waiting on you">
+              <h3 className="ui-section-label pb-1.5">Waiting on you</h3>
+              <ul className="flex flex-col gap-1">
+                {waiting.map((item) => (
+                  <li key={item.id}>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => onOpenTask?.(item.id)}
+                      disabled={!onOpenTask}
+                      aria-label={`Open ${item.title}`}
+                      className="h-auto w-full justify-start gap-3 p-2.5 text-left"
+                    >
+                      <SemanticBadge tone="warning">{item.label}</SemanticBadge>
+                      <span className="min-w-0 flex-1 truncate text-sm text-primary">{item.title}</span>
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
           {resource.status === "loading" ? (
             <CockpitLoadingState label="material questions" />
           ) : resource.status === "error" && resource.error ? (
@@ -150,10 +192,12 @@ export function AttentionCenterModal({
               {resolutionError ? <p role="alert" className="text-xs text-error">{resolutionError}</p> : null}
 
               {currentQuestion === null ? (
-                <CockpitEmptyState
-                  title="Nothing needs attention"
-                  description="There are no pending questions in this scope."
-                />
+                waiting.length > 0 ? null : (
+                  <CockpitEmptyState
+                    title="Nothing needs attention"
+                    description="No task is blocked, failed, or waiting for review."
+                  />
+                )
               ) : (
                   <article key={currentQuestion.id} className="px-1 pb-1">
                     <div className="flex items-center justify-between gap-3">

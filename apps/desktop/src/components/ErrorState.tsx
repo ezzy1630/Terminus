@@ -60,6 +60,15 @@ export interface ErrorStateProps {
   className?: string;
   /** Compact vertical padding. */
   compact?: boolean;
+  /**
+   * How urgently a screen reader should announce this.
+   *
+   * "assertive" (the default) is right for something that just went wrong.
+   * A standing condition — "no provider has reported a model" — is a status:
+   * announcing it assertively interrupts, and every surface that renders one
+   * alongside a real failure ends up with two competing alerts.
+   */
+  live?: "assertive" | "polite";
 }
 
 function ErrorStateImpl({
@@ -72,13 +81,14 @@ function ErrorStateImpl({
   severity = "error",
   className,
   compact = false,
+  live = "assertive",
 }: ErrorStateProps): JSX.Element {
   const glyphColor = severity === "warning" ? "var(--color-warning)" : "var(--color-error)";
   const resolvedIcon = icon ?? <TriangleAlert size={15} strokeWidth={1.8} />;
   return (
     <div
-      role="alert"
-      aria-live="assertive"
+      role={live === "polite" ? "status" : "alert"}
+      aria-live={live}
       className={cn(
         "error-state flex w-full flex-col",
         compact ? "py-3" : "py-8",

@@ -59,8 +59,10 @@ import type {
   ProviderConfiguration,
   ProviderConfigurationResponse,
   ProviderConfigurationUpdate,
+  ReasoningEffort,
   Session,
   SessionListResponse,
+  SessionUpdateInput,
   StartTaskResponse,
   StartTurnInput,
   SubscribeEventsOptions,
@@ -72,6 +74,7 @@ import type {
   TaskListResponse,
   TaskTranscriptPage,
   TaskWorkspaceDiff,
+  SteerReceipt,
   Turn,
   WorkspaceSnapshot,
 } from "../types";
@@ -113,12 +116,36 @@ export function createIdempotencyKey(scope: string): string {
  * reusable bearer bytes never enter page JavaScript. Plain Vite development
  * may use an explicitly configured VITE_TERMINUS_TOKEN.
  */
-function resolveApiBase(): string {
-  if (typeof window !== "undefined" && window.terminusDesktop?.apiBase) {
-    return window.terminusDesktop.apiBase;
+/**
+ * Where the control plane is, and why we might not know.
+ *
+ * Inside Electron the shell resolves an approved control origin and hands it
+ * over; when it cannot, `apiBase` is null and `apiBaseError` says why. The old
+ * code fell through to `http://127.0.0.1:3050` in that case, so a shell that
+ * had explicitly refused to name an origin was silently second-guessed by the
+ * renderer — and the user saw connection failures against an address nobody
+ * chose instead of the reason the shell gave.
+ *
+ * The localhost fallback survives only for the plain-browser dev build, where
+ * there is no shell to ask.
+ */
+export interface ApiBaseResolution {
+  baseUrl: string;
+  error: string | null;
+}
+
+export function resolveApiBase(): ApiBaseResolution {
+  const bridge = typeof window !== "undefined" ? window.terminusDesktop : undefined;
+  if (bridge) {
+    if (bridge.apiBase) return { baseUrl: bridge.apiBase, error: null };
+    return {
+      baseUrl: "",
+      error: bridge.apiBaseError
+        ?? "The desktop shell could not resolve an approved control-plane address.",
+    };
   }
   const env = (import.meta.env.VITE_TERMINUS_API_BASE as string | undefined) ?? null;
-  return env ?? "http://127.0.0.1:3050";
+  return { baseUrl: env ?? "http://127.0.0.1:3050", error: null };
 }
 
 function resolveApiToken(): string {
@@ -317,6 +344,21 @@ function responseNonNegativeInteger(value: unknown, what: string): number {
   return value;
 }
 
+const REASONING_EFFORTS = ["low", "medium", "high", "max"] as const;
+
+/**
+ * Fields the control plane may or may not serve yet.
+ *
+ * `undefined` means "this response did not carry it"; `null` means "carried,
+ * and empty". Decoding them strictly would make a client that knows about them
+ * reject every response from a control plane that does not.
+ */
+function decodeOptionalEffort(value: unknown, what: string): ReasoningEffort | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return responseEnum(value, REASONING_EFFORTS, what);
+}
+
 function decodeSession(value: unknown): Session {
   const session = responseObject(value, "session");
   return {
@@ -330,6 +372,15 @@ function decodeSession(value: unknown): Session {
     active_thread_id: responseNullableString(session.active_thread_id, "session.active_thread_id"),
     created_at: responseTimestamp(session.created_at, "session.created_at"),
     updated_at: responseTimestamp(session.updated_at, "session.updated_at"),
+    ...(session.workspace_root_uri === undefined
+      ? {}
+      : { workspace_root_uri: responseString(session.workspace_root_uri, "session.workspace_root_uri") }),
+    ...(session.default_model === undefined
+      ? {}
+      : { default_model: responseNullableString(session.default_model, "session.default_model") }),
+    ...(session.default_reasoning_effort === undefined
+      ? {}
+      : { default_reasoning_effort: decodeOptionalEffort(session.default_reasoning_effort, "session.default_reasoning_effort") ?? null }),
   };
 }
 
@@ -456,11 +507,18 @@ function decodeTaskActiveTurn(value: unknown): TaskActiveTurn | null | undefined
   if (value === undefined) return undefined;
   if (value === null) return null;
   const turn = responseObject(value, "task.active_turn");
+  // The list route reports `{ id, state }` only. Demanding the detail route's
+  // full shape here would reject the entire page over a field the narrower
+  // response was never going to send.
   return {
     id: responseString(turn.id, "task.active_turn.id"),
-    sequence: responseNonNegativeInteger(turn.sequence, "task.active_turn.sequence"),
+    ...(turn.sequence === undefined || turn.sequence === null
+      ? {}
+      : { sequence: responseNonNegativeInteger(turn.sequence, "task.active_turn.sequence") }),
     state: responseString(turn.state, "task.active_turn.state"),
-    started_at: responseNullableTimestamp(turn.started_at ?? null, "task.active_turn.started_at"),
+    ...(turn.started_at === undefined
+      ? {}
+      : { started_at: responseNullableTimestamp(turn.started_at, "task.active_turn.started_at") }),
   };
 }
 
@@ -534,6 +592,16 @@ function decodeTurn(value: unknown): Turn {
     initiating_actor: responseString(turn.initiating_actor, "turn.initiating_actor"),
     started_at: responseNullableTimestamp(turn.started_at, "turn.started_at"),
     completed_at: responseNullableTimestamp(turn.completed_at, "turn.completed_at"),
+  };
+}
+
+function decodeSteerReceipt(value: unknown): SteerReceipt {
+  const receipt = responseObject(value, "steer receipt");
+  return {
+    episode_id: responseString(receipt.episode_id, "steer receipt.episode_id"),
+    sequence: responseNonNegativeInteger(receipt.sequence, "steer receipt.sequence"),
+    turn_id: responseString(receipt.turn_id, "steer receipt.turn_id"),
+    turn_state: responseString(receipt.turn_state, "steer receipt.turn_state"),
   };
 }
 
@@ -699,9 +767,31 @@ export class TerminusApiClient {
   private readonly baseUrl: string;
   private readonly token: string;
 
-  constructor(baseUrl: string = resolveApiBase(), token: string = resolveApiToken()) {
-    this.baseUrl = baseUrl.replace(/\/+$/, "");
+  /** Why there is no base URL, when there is none. Surfaced, never guessed. */
+  readonly baseUrlError: string | null;
+
+  constructor(baseUrl?: string, token: string = resolveApiToken()) {
+    const resolved = baseUrl === undefined ? resolveApiBase() : { baseUrl, error: null };
+    this.baseUrl = resolved.baseUrl.replace(/\/+$/, "");
+    this.baseUrlError = resolved.error;
     this.token = token;
+  }
+
+  /**
+   * Fail before touching the network when no address was ever resolved.
+   *
+   * Every path out of this client goes through here, including the SSE stream,
+   * so the shell's reason reaches the connection banner instead of a fetch
+   * error against an empty URL.
+   */
+  assertBaseUrl(): void {
+    if (this.baseUrlError === null) return;
+    throw new TerminusApiError(0, this.baseUrlError, {
+      code: "API_BASE_UNAVAILABLE",
+      message: this.baseUrlError,
+      retryable: false,
+      category: "configuration",
+    });
   }
 
   /** Construct a full URL with optional query parameters. */
@@ -744,6 +834,7 @@ export class TerminusApiClient {
       signal?: AbortSignal | null;
     } = {},
   ): Promise<T> {
+    this.assertBaseUrl();
     const headers = this.headers();
     if (requireIdempotency(method)) {
       const key = opts.idempotencyKey;
@@ -981,6 +1072,27 @@ export class TerminusApiClient {
     return assertScopedResponse(session, session.workspace_id, input.workspace_id, "session creation");
   }
 
+  /**
+   * Change a session's defaults.
+   *
+   * This is where a model choice lands. It used to be written to the *global*
+   * gateway provider configuration, a single row with no session and no
+   * provider field, so choosing a model in one project changed it for every
+   * project and every run already in flight.
+   */
+  async updateSession(
+    sessionId: string,
+    patch: SessionUpdateInput,
+    options: MutationRequestOptions,
+  ): Promise<Session> {
+    const session = decodeSession(await this.request<unknown>(
+      "PATCH",
+      `/v1/sessions/${encodeURIComponent(sessionId)}`,
+      { body: patch, ...options },
+    ));
+    return assertScopedResponse(session, session.id, sessionId, "session update");
+  }
+
   async getSession(sessionId: string, signal?: AbortSignal | null): Promise<Session> {
     const session = decodeSession(await this.request<unknown>(
       "GET",
@@ -1119,6 +1231,46 @@ export class TerminusApiClient {
     const turn = decodeTurn(await this.request<unknown>("POST", "/v1/turns", { body: input, ...options }));
     assertScopedResponse(turn, turn.thread_id, input.thread_id, "turn creation");
     return assertScopedResponse(turn, turn.task_id ?? "", input.task_id, "turn creation");
+  }
+
+  /**
+   * One turn's current state.
+   *
+   * Read when a task claims a running turn but the event stream has said
+   * nothing for a long time. That combination means either a genuinely slow
+   * provider call or a run that ended without its terminal event reaching this
+   * client, and only the turn record can tell the two apart.
+   */
+  async getTurn(turnId: string, signal?: AbortSignal | null): Promise<Turn> {
+    const turn = decodeTurn(await this.request<unknown>(
+      "GET",
+      `/v1/turns/${encodeURIComponent(turnId)}`,
+      { signal },
+    ));
+    return assertScopedResponse(turn, turn.id, turnId, "turn detail");
+  }
+
+  /**
+   * Steer a turn that is already running.
+   *
+   * The desktop client used to hold this text in a local queue and post it as
+   * a *new* turn once the current one ended, which is not steering: the model
+   * finished the wrong work first and only then read the correction. This
+   * appends a model-visible episode the running turn drains at its next stop
+   * boundary. A 409 means the turn settled in the meantime — the caller falls
+   * back to the queue then, and only then.
+   */
+  async steerTurn(
+    turnId: string,
+    input: { message: string },
+    options: MutationRequestOptions,
+  ): Promise<SteerReceipt> {
+    const receipt = decodeSteerReceipt(await this.request<unknown>(
+      "POST",
+      `/v1/turns/${encodeURIComponent(turnId)}/steer`,
+      { body: input, ...options },
+    ));
+    return assertScopedResponse(receipt, receipt.turn_id, turnId, "turn steering");
   }
 
   async interruptTurn(turnId: string, options: MutationRequestOptions, reason?: string | null): Promise<Turn> {
@@ -1336,11 +1488,20 @@ export interface TerminusEventStream {
   close(): void;
   /** Last received event id (durable cursor). */
   lastEventId: string | null;
+  /**
+   * Why the stream failed, in the words of whatever refused it.
+   *
+   * A `401` from an expired token and a DNS failure are different problems
+   * with different fixes; both used to reach the UI as "Live updates
+   * interrupted", which is a description of the symptom and nothing else.
+   */
+  readonly lastError: string | null;
 }
 
 class FetchEventStream implements TerminusEventStream {
   readyState: 0 | 1 | 2 | 3 = 0;
   lastEventId: string | null = null;
+  lastError: string | null = null;
   private readonly listeners = new Map<string, Set<TerminusEventStreamHandler | (() => void)>>();
   private readonly abort: AbortController;
   private readonly cursor: string | null;
@@ -1398,14 +1559,21 @@ class FetchEventStream implements TerminusEventStream {
     }
   }
 
-  private fail(): void {
+  private fail(reason?: string): void {
     if (this.closed || this.errorEmitted) return;
     this.errorEmitted = true;
     this.readyState = 3;
+    if (reason) this.lastError = reason;
     this.emit("error");
   }
 
   private async run(): Promise<void> {
+    try {
+      this.client.assertBaseUrl();
+    } catch (error: unknown) {
+      this.fail(error instanceof Error ? error.message : "no control-plane address is available");
+      return;
+    }
     const url = this.client.url("/v1/events", {
       cursor: this.cursor,
       task_id: this.taskId,
@@ -1421,12 +1589,18 @@ class FetchEventStream implements TerminusEventStream {
       });
     } catch (err) {
       if (this.closed) return;
-      this.fail();
+      this.fail(err instanceof Error ? err.message : "the event stream could not be opened");
       return;
     }
 
-    if (!res.ok || !res.body) {
-      this.fail();
+    if (!res.ok) {
+      // The status is the whole diagnosis: 401 means credentials, 404 means a
+      // route that moved, 503 means a control plane that has not started.
+      this.fail(`the event stream was refused with HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`);
+      return;
+    }
+    if (!res.body) {
+      this.fail("the event stream returned no body");
       return;
     }
 
@@ -1462,11 +1636,11 @@ class FetchEventStream implements TerminusEventStream {
       decoder.finish();
       // A server-side EOF without an owner close is a lost connection. The
       // consumer must reconnect from `lastEventId` rather than stay green.
-      this.fail();
-    } catch {
+      this.fail("the control plane closed the event stream");
+    } catch (err: unknown) {
       // Network interruption / abort. If aborted by user, readyState is
       // already 2 (closed). Otherwise it's an unexpected drop.
-      this.fail();
+      this.fail(err instanceof Error ? err.message : "the event stream dropped");
     } finally {
       try {
         reader.releaseLock();

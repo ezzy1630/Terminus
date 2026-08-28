@@ -77,6 +77,45 @@ describe("Onboarding production flow", () => {
     useTerminusStore.getState()._attachStream(null);
   });
 
+  // Opening a repository as `local_directory` throws away its git identity,
+  // and opening a plain directory as `local_git` is refused outright. The shell
+  // can tell them apart; when it cannot, the control plane's conflict does.
+  test("opens a plain directory as local_directory when the shell says it is not a repo", async () => {
+    (window as { terminusDesktop?: unknown }).terminusDesktop = {
+      validateDirectory: vi.fn(async () => ({ ok: true, isGit: false, canonicalPath: "/tmp/plain" })),
+    };
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} pickDirectory={async () => "/tmp/plain"} />);
+
+    await user.click(screen.getByRole("button", { name: "Browse" }));
+    await user.click(screen.getByRole("button", { name: "Open project" }));
+
+    await waitFor(() => expect(api.openWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "local_directory" }),
+      expect.anything(),
+    ));
+    delete (window as { terminusDesktop?: unknown }).terminusDesktop;
+  });
+
+  test("retries with the other workspace kind when the identity conflicts", async () => {
+    vi.mocked(api.openWorkspace)
+      .mockRejectedValueOnce(new TerminusApiError(409, "workspace identity conflict", {
+        code: "WORKSPACE_IDENTITY_CONFLICT",
+        message: "workspace identity conflict",
+        retryable: false,
+        category: "conflict",
+      }));
+    const user = userEvent.setup();
+    render(<Onboarding onComplete={vi.fn()} pickDirectory={async () => "/tmp/plain"} />);
+
+    await user.click(screen.getByRole("button", { name: "Browse" }));
+    await user.click(screen.getByRole("button", { name: "Open project" }));
+
+    await waitFor(() => expect(api.openWorkspace).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.openWorkspace).mock.calls.map(([input]) => input.kind))
+      .toEqual(["local_git", "local_directory"]);
+  });
+
   test("new user chooses a project and starts the first task", async () => {
     const user = userEvent.setup();
     const onComplete = vi.fn<(result: OnboardingResult) => void>();
@@ -91,7 +130,10 @@ describe("Onboarding production flow", () => {
     await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
     expect(api.openWorkspace).toHaveBeenCalledWith({
       root_uri: "file:///Volumes/Workspace/Terminus",
-      kind: "local_directory",
+      // Without a shell verdict the repository reading is tried first; a
+      // `WORKSPACE_IDENTITY_CONFLICT` is what corrects it. Opening everything
+      // as a plain directory stripped git identity from every repo.
+      kind: "local_git",
       trust: "untrusted",
     }, { idempotencyKey: expect.stringMatching(/^onboarding:/) });
     expect(api.createTask).toHaveBeenCalledWith(expect.objectContaining({
@@ -191,7 +233,10 @@ describe("Onboarding production flow", () => {
     await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
     expect(api.openWorkspace).toHaveBeenCalledWith({
       root_uri: rootUri,
-      kind: "local_directory",
+      // Without a shell verdict the repository reading is tried first; a
+      // `WORKSPACE_IDENTITY_CONFLICT` is what corrects it. Opening everything
+      // as a plain directory stripped git identity from every repo.
+      kind: "local_git",
       trust: "untrusted",
     }, { idempotencyKey: expect.stringMatching(/^onboarding:/) });
   });

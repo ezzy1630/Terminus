@@ -25,6 +25,7 @@
  */
 export const TASK_LIFECYCLE = [
   "queued",
+  "idle",
   "planning",
   "working",
   "needs_you",
@@ -37,6 +38,18 @@ export const TASK_LIFECYCLE = [
 ] as const;
 
 export type TaskLifecycle = (typeof TASK_LIFECYCLE)[number];
+
+/**
+ * `idle` is not a stored status. ACTIVE is the control plane's *steady* state —
+ * it accepts new turns, and a task sits in it for as long as it exists — so
+ * rendering every ACTIVE task as "Working" with a spinner meant every task in
+ * the app claimed to be running forever. `idle` is what an ACTIVE task with no
+ * turn in flight actually is: alive, steerable, and doing nothing.
+ *
+ * It is produced by `displayLifecycle()` in lib/turn-activity.ts, which is the
+ * only thing that knows whether a run is in flight. `lifecycleFromDomainStatus`
+ * never returns it, because the stored status cannot say.
+ */
 
 export type LifecycleTone = "neutral" | "info" | "warning" | "error" | "success";
 
@@ -134,6 +147,7 @@ export function lifecycleFromTask(
 export function lifecycleLabel(lifecycle: TaskLifecycle): string {
   switch (lifecycle) {
     case "queued": return "Queued";
+    case "idle": return "Ready";
     case "planning": return "Planning";
     case "working": return "Working";
     case "needs_you": return "Needs you";
@@ -167,6 +181,7 @@ export function lifecycleTone(lifecycle: TaskLifecycle): LifecycleTone {
     case "failed":
       return "error";
     case "queued":
+    case "idle":
     case "done":
     case "cancelled":
     case "unknown":
@@ -215,6 +230,7 @@ export type BoardColumnId = (typeof BOARD_COLUMNS)[number]["id"];
 export function boardColumnForLifecycle(lifecycle: TaskLifecycle): BoardColumnId {
   switch (lifecycle) {
     case "queued":
+    case "idle":
     case "unknown":
       return "queued";
     case "planning":
