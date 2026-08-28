@@ -1384,3 +1384,4 @@ export * from "./data_flow_policy.js";
 export * from "./ambiguous_submit_reconciler.js";
 export * from "./external_connector_library.js";
 export * from "./incident_research_profiles.js";
+export * from "./governed_computer_use.js";
