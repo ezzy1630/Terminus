@@ -30,4 +30,7 @@ mod spec;
 
 pub use error::ProcessError;
 pub use manager::{ManagedProcess, ProcessManager, SpawnLease};
-pub use spec::{NormalizedSpawn, SpawnOutcome};
+pub use spec::{
+    effective_timeout_ms, NormalizedSpawn, SpawnOutcome, DEFAULT_SPAWN_TIMEOUT_MS,
+    UNBOUNDED_TIMEOUT_MS,
+};

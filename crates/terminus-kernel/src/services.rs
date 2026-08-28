@@ -102,17 +102,14 @@ impl KernelHandle {
     /// Build a kernel with all defaults. `data_dir` is the on-disk root for
     /// artifacts, journals, state.
     pub fn new(data_dir: PathBuf) -> Result<Self, KernelAssemblyError> {
+        // The default L4 allowlist is derived from the registered connector
+        // table (§4(f)) so every connector the kernel offers is reachable and
+        // nothing else is.
         Self::new_with_egress_policy(
             data_dir,
-            terminus_egress::EgressPolicy {
-                default_deny: true,
-                destinations: vec![terminus_egress::DestinationPolicy {
-                    allowed_host_suffixes: vec!["opencode.ai".to_string()],
-                    allowed_ports: vec![443],
-                    allowed_schemes: vec!["https".to_string()],
-                }],
-                deny_private_ips: true,
-            },
+            crate::connectors::connector_egress_policy(
+                &crate::connectors::default_connector_registry(),
+            ),
             terminus_egress::RateLimit::default(),
         )
     }
@@ -178,6 +175,14 @@ impl KernelHandle {
             "opencode",
             Arc::new(terminus_secrets::KeyringSecretProvider::new()),
         );
+        // Connected provider accounts live in their own namespace and their
+        // own OS keychain service: `secret://provider-account/<uuid-v7>`.
+        // The legacy namespace above stays registered for the migration
+        // window; the two can never resolve to the same keychain entry.
+        secret_broker.register_writable_provider(
+            "provider-account",
+            Arc::new(terminus_secrets::KeyringSecretProvider::for_provider_accounts()),
+        );
         // SPEC §36.6: the capability-signing key must never be a known
         // constant — anyone who reads the public source could otherwise forge
         // admin tokens (HMAC-SHA256 with a public key). When the operator does
@@ -210,7 +215,12 @@ impl KernelHandle {
         let revocation = token_issuer.revocation_list();
         let _revoker = Arc::new(TokenRevoker::new(revocation));
         let extension_host = Arc::new(WasiExtensionHost::new());
-        let egress = Arc::new(EgressProxy::new(egress_policy, rate_limit));
+        // Registered connectors are a floor on the allowlist: a caller-
+        // supplied development policy narrows nothing the kernel itself needs.
+        let egress = Arc::new(EgressProxy::new(
+            crate::connectors::with_connector_egress_floor(egress_policy),
+            rate_limit,
+        ));
         let egress_broker_root = data_dir.join("egress-brokers");
         let workspaces = WorkspaceService::open(
             data_dir.join("state/workspaces.sqlite"),
@@ -273,36 +283,23 @@ impl KernelHandle {
                     data_dir.join("state").join("connector-grants.json"),
                 ));
                 let issuer = Arc::new(GrantIssuer::new(grant_key.to_vec()));
-                let broker = ConnectorBroker::builder(
+                let mut builder = ConnectorBroker::builder(
                     Arc::clone(&secret_broker),
                     Arc::clone(&grants),
                     Arc::clone(&egress),
                     grant_key.to_vec(),
-                )
-                .connector_with_timeout(
-                    "opencode-gateway",
-                    terminus_connector::AuthStyle::Bearer,
-                    Duration::from_secs(120),
-                )
-                .connector("openai-responses", terminus_connector::AuthStyle::Bearer)
-                .connector("openai-chat", terminus_connector::AuthStyle::Bearer)
-                .connector(
-                    "anthropic-messages",
-                    terminus_connector::AuthStyle::NamedHeader("x-api-key".into()),
-                )
-                .connector("web-fetch", terminus_connector::AuthStyle::None)
-                .connector_with_timeout(
-                    "opencode-gateway-anonymous",
-                    terminus_connector::AuthStyle::None,
-                    Duration::from_secs(120),
-                )
-                .build();
+                );
+                for (id, descriptor) in crate::connectors::default_connector_registry() {
+                    builder = builder.connector_descriptor(id, descriptor);
+                }
+                let broker = builder.build();
                 ConnectorService::new(
                     Arc::new(broker),
                     Arc::clone(&issuer),
                     grants,
                     Arc::clone(&secret_broker),
                     Arc::clone(&token_issuer),
+                    Arc::clone(&egress),
                     grant_key.to_vec(),
                 )
             },
@@ -446,6 +443,77 @@ pub fn validate_capability_for_op(
         }
     }
     Ok(token)
+}
+
+/// Server-side deadline budget by RPC shape (SPEC §31.3 step 9).
+///
+/// A caller that forgets `RequestContext.deadline` must not be able to pin a
+/// kernel worker forever, so the kernel supplies its own budget and clamps
+/// anything the caller asks for beyond the class ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcDeadlineClass {
+    /// Request/response calls: metadata, policy decisions, file reads.
+    Unary,
+    /// Streaming, tool, and process/job calls that legitimately run long.
+    LongRunning,
+}
+
+/// Budget applied when the caller supplied no deadline.
+pub const DEFAULT_UNARY_DEADLINE_MS: u64 = 30_000;
+/// Ceiling for every request, and the default for long-running calls.
+pub const MAX_LONG_RUNNING_DEADLINE_MS: u64 = 30 * 60 * 1_000;
+
+impl RpcDeadlineClass {
+    /// Budget used when the caller supplied no deadline.
+    pub fn default_budget(self) -> Duration {
+        match self {
+            Self::Unary => Duration::from_millis(DEFAULT_UNARY_DEADLINE_MS),
+            Self::LongRunning => Duration::from_millis(MAX_LONG_RUNNING_DEADLINE_MS),
+        }
+    }
+
+    /// Hard ceiling. A caller asking for more is clamped to this.
+    pub fn ceiling(self) -> Duration {
+        Duration::from_millis(MAX_LONG_RUNNING_DEADLINE_MS)
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Resolve the deadline the kernel will actually enforce for this request:
+/// the caller's when present and inside the class ceiling, otherwise the
+/// class default. Never returns 0, so downstream "0 means no deadline"
+/// handling cannot be reached from a filled context.
+pub fn resolve_deadline_unix_ms(ctx: &RequestContext, class: RpcDeadlineClass) -> u64 {
+    let now = now_unix_ms();
+    let ceiling = now.saturating_add(
+        u64::try_from(class.ceiling().as_millis()).unwrap_or(MAX_LONG_RUNNING_DEADLINE_MS),
+    );
+    if ctx.deadline_unix_ms == 0 {
+        return now.saturating_add(
+            u64::try_from(class.default_budget().as_millis()).unwrap_or(DEFAULT_UNARY_DEADLINE_MS),
+        );
+    }
+    ctx.deadline_unix_ms.min(ceiling)
+}
+
+/// Fill in the server-side deadline when the caller omitted one and clamp an
+/// over-long caller deadline. Called once per RPC at the transport boundary
+/// so every downstream check sees the same bound.
+pub fn apply_default_deadline(ctx: &mut RequestContext, class: RpcDeadlineClass) {
+    ctx.deadline_unix_ms = resolve_deadline_unix_ms(ctx, class);
+}
+
+/// Remaining wall-clock budget for a context whose deadline is already
+/// resolved. `Duration::ZERO` means the deadline has passed.
+pub fn remaining_budget(ctx: &RequestContext, class: RpcDeadlineClass) -> Duration {
+    let deadline = resolve_deadline_unix_ms(ctx, class);
+    Duration::from_millis(deadline.saturating_sub(now_unix_ms()))
 }
 
 /// Validate the 10-step request pipeline (SPEC §31.3):
@@ -2733,6 +2801,9 @@ pub struct ConnectorService {
     grants: Arc<GrantStore>,
     secret_broker: Arc<SecretBroker>,
     token_issuer: Arc<TokenIssuer>,
+    /// L4 allowlist. Minting a grant for a connector whose host comes from a
+    /// stored provider account admits that one destination here.
+    egress: Arc<EgressProxy>,
     signing_key: Vec<u8>,
 }
 
@@ -2752,6 +2823,7 @@ impl ConnectorService {
         grants: Arc<GrantStore>,
         secret_broker: Arc<SecretBroker>,
         token_issuer: Arc<TokenIssuer>,
+        egress: Arc<EgressProxy>,
         signing_key: Vec<u8>,
     ) -> Self {
         Self {
@@ -2760,6 +2832,7 @@ impl ConnectorService {
             grants,
             secret_broker,
             token_issuer,
+            egress,
             signing_key,
         }
     }
@@ -2772,14 +2845,21 @@ impl ConnectorService {
         id: impl Into<String>,
         auth: terminus_connector::AuthStyle,
     ) -> KernelResult<()> {
-        self.broker.register_connector(id, auth).map_err(|e| {
-            KernelError::new(
-                terminus_kernel_protocol::ErrorCode::InvalidRequest,
-                terminus_kernel_protocol::ErrorCategory::Validation,
-                format!("{e}"),
-                false,
-            )
-        })
+        self.broker
+            .register_connector(id, auth)
+            .map_err(connector_validation_error)
+    }
+
+    /// Register a fully specified descriptor at runtime (headers, bounds,
+    /// timeouts, host policy).
+    pub fn register_descriptor(
+        &self,
+        id: impl Into<String>,
+        descriptor: terminus_connector::ConnectorDescriptor,
+    ) -> KernelResult<()> {
+        self.broker
+            .register_descriptor(id, descriptor)
+            .map_err(connector_validation_error)
     }
 
     /// Decode + verify an encoded grant against the service's signing key.
@@ -2813,17 +2893,16 @@ impl ConnectorService {
         // time. Everything else requires Secret-class capability: a grant is
         // one step from raw use.
         let anonymous = uri.is_empty();
-        let connector_is_anonymous = self
+        let descriptor = self
             .broker
-            .is_anonymous_connector(&binding.connector_id)
-            .map_err(|e| {
-                KernelError::new(
-                    terminus_kernel_protocol::ErrorCode::InvalidRequest,
-                    terminus_kernel_protocol::ErrorCategory::Validation,
-                    format!("{e}"),
-                    false,
-                )
-            })?;
+            .descriptor(&binding.connector_id)
+            .map_err(connector_validation_error)?;
+        // §4(f) host authority. `Fixed` connectors may only be minted for the
+        // hosts they were registered with; `PerGrant` connectors take their
+        // host from the stored provider account, so the control plane must
+        // pin that account's allowlist here and the destination must be in it.
+        self.authorize_mint_destination(&descriptor, &binding)?;
+        let connector_is_anonymous = matches!(descriptor.auth, terminus_connector::AuthStyle::None);
         if anonymous != connector_is_anonymous {
             return Err(KernelError::new(
                 terminus_kernel_protocol::ErrorCode::PermissionDenied,
@@ -3042,9 +3121,116 @@ impl ConnectorService {
         Ok(response)
     }
 
+    /// Enforce the descriptor's host policy at mint time and, for accounts
+    /// whose host is chosen per grant, admit that exact destination to the
+    /// L4 egress allowlist. Widening egress is bounded, audited, and only
+    /// reachable after the Secret-class capability check above.
+    fn authorize_mint_destination(
+        &self,
+        descriptor: &terminus_connector::ConnectorDescriptor,
+        binding: &terminus_secrets::GrantBinding,
+    ) -> KernelResult<()> {
+        let host = binding.destination_host.as_str();
+        if host.is_empty() {
+            return Err(connector_permission_error(
+                "grant binding requires a destination host".to_string(),
+            ));
+        }
+        match &descriptor.hosts {
+            terminus_connector::HostPolicy::Fixed(hosts) if !hosts.is_empty() => {
+                if !hosts.iter().any(|pattern| host_matches(host, pattern)) {
+                    return Err(connector_permission_error(format!(
+                        "connector {} does not admit host {host}",
+                        binding.connector_id
+                    )));
+                }
+            }
+            terminus_connector::HostPolicy::Fixed(_) => {}
+            terminus_connector::HostPolicy::PerGrant => {
+                if binding.allowed_hosts.is_empty() {
+                    return Err(connector_permission_error(format!(
+                        "connector {} requires the account host allowlist (allowed_hosts) at \
+                         mint time",
+                        binding.connector_id
+                    )));
+                }
+            }
+        }
+        if !binding.allowed_hosts.is_empty()
+            && !binding
+                .allowed_hosts
+                .iter()
+                .any(|pattern| host_matches(host, pattern))
+        {
+            return Err(connector_permission_error(format!(
+                "destination host {host} is not in the account host allowlist"
+            )));
+        }
+        if matches!(descriptor.hosts, terminus_connector::HostPolicy::PerGrant) {
+            self.egress
+                .admit_destination(host, binding.destination_port, &binding.scheme)
+                .map_err(|e| connector_permission_error(format!("{e}")))?;
+            tracing::info!(
+                target: "terminus_kernel_audit",
+                event = "egress.destination_admitted",
+                connector_id = %binding.connector_id,
+                host = %host,
+                port = binding.destination_port,
+                scheme = %binding.scheme,
+                "provider-account destination admitted to the egress allowlist"
+            );
+        }
+        Ok(())
+    }
+
     pub fn consumed_grants(&self) -> usize {
         self.grants.consumed_count()
     }
+}
+
+/// Render a caller-supplied label into an error message without letting an
+/// oversized or control-character-bearing value through. Truncation is
+/// explicit: the marker states that the value was elided.
+fn bounded_label(value: &str) -> String {
+    const MAX: usize = 64;
+    let sanitized: String = value
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX)
+        .collect();
+    if sanitized.is_empty() {
+        return "<empty>".to_string();
+    }
+    if value.chars().filter(|c| !c.is_control()).count() > MAX {
+        return format!("{sanitized}… (elided)");
+    }
+    sanitized
+}
+
+fn connector_validation_error(error: terminus_connector::ConnectorError) -> KernelError {
+    KernelError::new(
+        terminus_kernel_protocol::ErrorCode::InvalidRequest,
+        terminus_kernel_protocol::ErrorCategory::Validation,
+        format!("{error}"),
+        false,
+    )
+}
+
+fn connector_permission_error(message: String) -> KernelError {
+    KernelError::new(
+        terminus_kernel_protocol::ErrorCode::PermissionDenied,
+        terminus_kernel_protocol::ErrorCategory::Permission,
+        message,
+        false,
+    )
+}
+
+/// Exact-or-dot-suffix host match; mirrors the L4 egress semantics.
+fn host_matches(host: &str, pattern: &str) -> bool {
+    host.eq_ignore_ascii_case(pattern)
+        || host
+            .to_ascii_lowercase()
+            .ends_with(&format!(".{}", pattern.to_ascii_lowercase()))
 }
 
 // ---------- NetworkService ----------
@@ -3732,12 +3918,24 @@ impl ArtifactIngestService {
             && !is_tool_call_artifact
             && !is_episode_content
         {
+            // Name the rejected pair: "not admitted" without the pair sent
+            // the control plane hunting through 14 call sites.
             return Err(KernelError::new(
                 terminus_kernel_protocol::ErrorCode::InvalidArgument,
                 terminus_kernel_protocol::ErrorCategory::Validation,
-                "the public artifact-link boundary admits only checkpoint content, turn initiating-input, evidence-bundle, tool-call, or episode-content ownership",
+                format!(
+                    "artifact-link ownership ({}, {}) is not admitted; the public boundary \
+                     admits only checkpoint content, turn initiating-input, evidence-bundle, \
+                     tool-call, or episode-content ownership",
+                    bounded_label(owner_type),
+                    bounded_label(purpose)
+                ),
                 false,
-            ));
+            )
+            .with_details(serde_json::json!({
+                "owner_type": bounded_label(owner_type),
+                "purpose": bounded_label(purpose),
+            })));
         }
         for (name, value, max_bytes) in [
             ("owner_type", owner_type, 64_usize),

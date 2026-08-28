@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod approvals;
+pub mod connectors;
 mod error;
 mod ledger;
 mod services;
@@ -19,13 +20,19 @@ pub use approvals::{
     operation_hash, ApprovalRecord, ApprovalRequest, ApprovalRisk, ApprovalScope, ApprovalStatus,
     ApprovalStore,
 };
+pub use connectors::{
+    connector_egress_policy, default_connector_registry, with_connector_egress_floor,
+    EGRESS_FLOOR_HOSTS,
+};
 pub use error::KernelAssemblyError;
 pub use ledger::{
     KernelAuthorizationInstance, KernelEffectLedger, KernelEffectRecord, KernelEffectState,
 };
 pub use services::{
-    validate_capability_for_op, validate_request_pipeline, ArtifactIngestService,
-    CodeIntelligenceService, ConnectorService, ExtensionRuntimeService, FileService, JobService,
-    KernelHandle, KernelInfoService, NetworkService, PatchService, PolicyService, ProcessService,
-    SandboxService, SecretService, WorkspaceEntry, WorkspaceService,
+    apply_default_deadline, remaining_budget, resolve_deadline_unix_ms, validate_capability_for_op,
+    validate_request_pipeline, ArtifactIngestService, CodeIntelligenceService, ConnectorService,
+    ExtensionRuntimeService, FileService, JobService, KernelHandle, KernelInfoService,
+    NetworkService, PatchService, PolicyService, ProcessService, RpcDeadlineClass, SandboxService,
+    SecretService, WorkspaceEntry, WorkspaceService, DEFAULT_UNARY_DEADLINE_MS,
+    MAX_LONG_RUNNING_DEADLINE_MS,
 };

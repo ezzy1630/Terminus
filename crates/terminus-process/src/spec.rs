@@ -4,8 +4,31 @@ use crate::error::ProcessError;
 use std::collections::BTreeMap;
 use terminus_kernel_protocol::CommandSpec;
 
+/// Sentinel for `timeout_ms` meaning "run without a wall-clock bound".
+/// Unbounded runtime is opt-in only: a caller must set
+/// `CommandSpec.allow_unbounded_timeout`, which the transport boundary
+/// translates into this value. A plain `0` is an ABSENT timeout and is
+/// replaced by a default, never treated as unbounded.
+pub const UNBOUNDED_TIMEOUT_MS: u64 = u64::MAX;
+
+/// Fallback wall-clock bound applied when a spawn arrives with no timeout
+/// and no unbounded opt-in. The transport boundary normally supplies a
+/// class-specific default (exec 120s, job 30min) before this is reached.
+pub const DEFAULT_SPAWN_TIMEOUT_MS: u64 = 60_000;
+
+/// Resolve the effective wall-clock bound for a spawn. Returns `None` for an
+/// explicitly requested unbounded run.
+pub fn effective_timeout_ms(timeout_ms: u64) -> Option<u64> {
+    match timeout_ms {
+        UNBOUNDED_TIMEOUT_MS => None,
+        0 => Some(DEFAULT_SPAWN_TIMEOUT_MS),
+        bounded => Some(bounded),
+    }
+}
+
 /// A normalized spawn request: an executable path, an argv, an explicit env,
-/// a working directory, and a timeout in milliseconds.
+/// a working directory, and a timeout in milliseconds
+/// ([`UNBOUNDED_TIMEOUT_MS`] for an explicitly unbounded run).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedSpawn {
     pub program: String,
@@ -47,11 +70,7 @@ impl NormalizedSpawn {
                 args: vec!["-c".to_string(), cmd.shell.script.clone()],
                 env: cmd.public_env.clone(),
                 working_dir: None,
-                timeout_ms: if cmd.timeout_ms == 0 {
-                    60_000
-                } else {
-                    cmd.timeout_ms
-                },
+                timeout_ms: normalize_spec_timeout(cmd.timeout_ms),
                 shell: true,
                 allocate_pty: cmd.allocate_pty,
             });
@@ -66,14 +85,21 @@ impl NormalizedSpawn {
             args: cmd.args.clone(),
             env: cmd.public_env.clone(),
             working_dir: None,
-            timeout_ms: if cmd.timeout_ms == 0 {
-                60_000
-            } else {
-                cmd.timeout_ms
-            },
+            timeout_ms: normalize_spec_timeout(cmd.timeout_ms),
             shell: false,
             allocate_pty: cmd.allocate_pty,
         })
+    }
+}
+
+/// An absent timeout on a `CommandSpec` becomes the crate default; the
+/// unbounded sentinel and any explicit value pass through untouched so the
+/// policy and sandbox clamps downstream still see the caller's intent.
+fn normalize_spec_timeout(timeout_ms: u64) -> u64 {
+    match timeout_ms {
+        UNBOUNDED_TIMEOUT_MS => UNBOUNDED_TIMEOUT_MS,
+        0 => DEFAULT_SPAWN_TIMEOUT_MS,
+        bounded => bounded,
     }
 }
 
@@ -101,6 +127,59 @@ fn validate_public_environment(environment: &BTreeMap<String, String>) -> Result
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_timeout_is_defaulted_and_never_unbounded() {
+        assert_eq!(effective_timeout_ms(0), Some(DEFAULT_SPAWN_TIMEOUT_MS));
+        assert_eq!(effective_timeout_ms(1), Some(1));
+        assert_eq!(effective_timeout_ms(250_000), Some(250_000));
+    }
+
+    #[test]
+    fn unbounded_requires_the_explicit_sentinel() {
+        assert_eq!(effective_timeout_ms(UNBOUNDED_TIMEOUT_MS), None);
+    }
+
+    #[test]
+    fn from_spec_defaults_absent_and_preserves_the_sentinel() {
+        let base = CommandSpec {
+            program: "echo".into(),
+            args: vec!["hi".into()],
+            cwd: terminus_kernel_protocol::WorkspacePath {
+                workspace_id: "ws".into(),
+                relative_path: ".".into(),
+            },
+            public_env: BTreeMap::new(),
+            secret_capability_uris: Vec::new(),
+            timeout_ms: 0,
+            allocate_pty: false,
+            shell: terminus_kernel_protocol::ShellSpec::default(),
+        };
+        assert_eq!(
+            NormalizedSpawn::from_spec(&base).unwrap().timeout_ms,
+            DEFAULT_SPAWN_TIMEOUT_MS
+        );
+
+        let unbounded = CommandSpec {
+            timeout_ms: UNBOUNDED_TIMEOUT_MS,
+            ..base.clone()
+        };
+        assert_eq!(
+            NormalizedSpawn::from_spec(&unbounded).unwrap().timeout_ms,
+            UNBOUNDED_TIMEOUT_MS
+        );
+
+        let explicit = CommandSpec {
+            timeout_ms: 7_500,
+            ..base
+        };
+        assert_eq!(
+            NormalizedSpawn::from_spec(&explicit).unwrap().timeout_ms,
+            7_500
+        );
+    }
+
     use super::NormalizedSpawn;
     use terminus_kernel_protocol::CommandSpec;
 

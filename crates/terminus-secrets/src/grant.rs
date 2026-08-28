@@ -54,6 +54,14 @@ pub struct GrantBinding {
     pub task_id: String,
     /// Effect-ledger record this use is attributed to.
     pub effect_id: String,
+    /// Destination hosts the provider account behind `secret_uri` may reach,
+    /// pinned by the control plane at mint time. Empty means "the connector's
+    /// own fixed hosts decide"; connectors whose host is chosen per account
+    /// (`HostPolicy::PerGrant`) require a non-empty list containing
+    /// `destination_host`. Signed with the rest of the claims, so a consumer
+    /// cannot widen it.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 /// Signed claims carried by a grant. No secret material — only digests.
@@ -481,6 +489,7 @@ mod tests {
             path_class: "/repos/o/r/pulls".into(),
             task_id: "task-1".into(),
             effect_id: "eff-1".into(),
+            allowed_hosts: Vec::new(),
         }
     }
 

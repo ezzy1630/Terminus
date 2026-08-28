@@ -147,6 +147,7 @@ fn binding_for(fx: &Fixture) -> GrantBinding {
         path_class: "/repos/{owner}/{repo}/pulls".into(),
         task_id: "canary-task".into(),
         effect_id: "eff-canary-1".into(),
+        allowed_hosts: Vec::new(),
     }
 }
 

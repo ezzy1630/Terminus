@@ -300,6 +300,11 @@ message CommandSpec {
   google.protobuf.Duration timeout = 6;
   bool allocate_pty = 7;
   ShellSpec shell = 8;
+  // Explicit opt-in for an unbounded runtime. When false (the default) an
+  // absent or zero `timeout` is replaced by the server-side class default
+  // (exec 120s, job 30min) instead of running forever. Policy and sandbox
+  // wall-clock constraints still clamp the effective value.
+  bool allow_unbounded_timeout = 9;
 }
 
 message StartProcessRequest {
@@ -717,6 +722,11 @@ message ConnectorGrantBindingMessage {
   string method = 5;
   string path_class = 6;
   string effect_id = 7;
+  // Per-account destination allowlist supplied by the control plane at mint
+  // time. Required for connectors whose host is chosen per account (e.g.
+  // `openai-compatible`); it must contain `destination_host`. Dispatch also
+  // re-checks the host against the kernel's global egress union.
+  repeated string allowed_hosts = 8;
 }
 
 message MintConnectorGrantRequest {
@@ -767,6 +777,10 @@ message ConnectorReceiptMessage {
   optional string response_sha256 = 10;
   uint64 response_redactions = 11;
   string outcome = 12;
+  // Response headers admitted by the connector descriptor's response-header
+  // allowlist (e.g. `x-codex-*`, `retry-after`, `x-ratelimit-*`). Bounded in
+  // count and value length; never carries credential material.
+  repeated ConnectorHeaderMessage response_headers = 13;
 }
 
 message ConnectorResponseMessage {

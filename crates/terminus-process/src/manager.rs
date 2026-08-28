@@ -308,12 +308,13 @@ impl ProcessManager {
                 None
             };
 
-            // Wait with timeout.
+            // Wait with timeout. An absent bound (`0`) is NOT unbounded: it
+            // resolves to the crate default. Only the explicit
+            // `UNBOUNDED_TIMEOUT_MS` sentinel runs without a wall clock.
             let wait_fut = child.wait();
-            let exit_result = if timeout_ms == 0 {
-                wait_fut.await
-            } else {
-                match time::timeout(std::time::Duration::from_millis(timeout_ms), wait_fut).await {
+            let effective_timeout_ms = crate::spec::effective_timeout_ms(timeout_ms);
+            let exit_result = if let Some(bound_ms) = effective_timeout_ms {
+                match time::timeout(std::time::Duration::from_millis(bound_ms), wait_fut).await {
                     Ok(r) => r,
                     Err(_) => {
                         // Timed out; kill the process group.
@@ -355,6 +356,8 @@ impl ProcessManager {
                         return;
                     }
                 }
+            } else {
+                wait_fut.await
             };
             let status = match exit_result {
                 Ok(s) => s,
@@ -1604,10 +1607,38 @@ mod tests {
             allocate_pty: false,
         };
         let (outcome, _rx) = mgr.spawn(spawn).await.unwrap();
-        assert!(mgr.is_running(&outcome.process_id).await);
+        // `spawn` returns as soon as the child is registered; the supervisor
+        // task that publishes the running state may not have been polled yet.
+        // Poll for the transition instead of asserting on a race.
+        assert!(
+            wait_until(|| mgr.is_running(&outcome.process_id)).await,
+            "process never reached the running state"
+        );
         let state = mgr.cancel(&outcome.process_id, "test").await.unwrap();
         assert_eq!(state, "cancelled");
-        assert!(!mgr.is_running(&outcome.process_id).await);
+        assert!(
+            wait_until(|| async { !mgr.is_running(&outcome.process_id).await }).await,
+            "process never left the running state after cancel"
+        );
+    }
+
+    /// Poll `condition` until it holds or a bounded deadline passes.
+    async fn wait_until<F, Fut>(mut condition: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        let start = time::Instant::now();
+        loop {
+            if condition().await {
+                return true;
+            }
+            if start.elapsed() >= DEADLINE {
+                return false;
+            }
+            time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     #[cfg(unix)]

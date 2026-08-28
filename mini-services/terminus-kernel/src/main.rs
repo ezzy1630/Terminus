@@ -8,6 +8,7 @@
 
 mod api;
 mod auth;
+mod deadline;
 mod error;
 mod grpc;
 mod handlers;

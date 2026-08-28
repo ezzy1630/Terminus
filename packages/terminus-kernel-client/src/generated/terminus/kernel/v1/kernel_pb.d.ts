@@ -1260,6 +1260,16 @@ export declare type CommandSpec = Message<"terminus.kernel.v1.CommandSpec"> & {
    * @generated from field: terminus.kernel.v1.ShellSpec shell = 8;
    */
   shell?: ShellSpec | undefined;
+
+  /**
+   * Explicit opt-in for an unbounded runtime. When false (the default) an
+   * absent or zero `timeout` is replaced by the server-side class default
+   * (exec 120s, job 30min) instead of running forever. Policy and sandbox
+   * wall-clock constraints still clamp the effective value.
+   *
+   * @generated from field: bool allow_unbounded_timeout = 9;
+   */
+  allowUnboundedTimeout: boolean;
 };
 
 /**
@@ -2610,6 +2620,16 @@ export declare type ConnectorGrantBindingMessage = Message<"terminus.kernel.v1.C
    * @generated from field: string effect_id = 7;
    */
   effectId: string;
+
+  /**
+   * Per-account destination allowlist supplied by the control plane at mint
+   * time. Required for connectors whose host is chosen per account (e.g.
+   * `openai-compatible`); it must contain `destination_host`. Dispatch also
+   * re-checks the host against the kernel's global egress union.
+   *
+   * @generated from field: repeated string allowed_hosts = 8;
+   */
+  allowedHosts: string[];
 };
 
 /**
@@ -2836,6 +2856,15 @@ export declare type ConnectorReceiptMessage = Message<"terminus.kernel.v1.Connec
    * @generated from field: string outcome = 12;
    */
   outcome: string;
+
+  /**
+   * Response headers admitted by the connector descriptor's response-header
+   * allowlist (e.g. `x-codex-*`, `retry-after`, `x-ratelimit-*`). Bounded in
+   * count and value length; never carries credential material.
+   *
+   * @generated from field: repeated terminus.kernel.v1.ConnectorHeaderMessage response_headers = 13;
+   */
+  responseHeaders: ConnectorHeaderMessage[];
 };
 
 /**

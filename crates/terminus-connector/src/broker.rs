@@ -69,10 +69,151 @@ impl DispatchSink<'_> {
     }
 }
 
+/// How a connector's destination host is decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostPolicy {
+    /// The connector always talks to this fixed set of hosts. Exact match or
+    /// dot-suffix match (`api.example.com` matches the suffix `example.com`).
+    Fixed(Vec<String>),
+    /// The host is chosen per stored provider account and pinned in the
+    /// grant's `allowed_hosts` at mint time. Dispatch admits only hosts
+    /// listed there, so one account never widens another account's reach.
+    PerGrant,
+}
+
+/// Bounded timeouts for one connector. Long model streams need a large total
+/// budget without letting a silent upstream hold the socket open, so the
+/// stream is additionally bounded by a gap (first-byte/idle) timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectorTimeouts {
+    /// Hard ceiling on the whole exchange.
+    pub total: Duration,
+    /// Maximum gap between response bytes, including the wait for the
+    /// response head. `None` keeps only the total-duration bound.
+    pub idle: Option<Duration>,
+}
+
+impl ConnectorTimeouts {
+    pub fn total(total: Duration) -> Self {
+        Self { total, idle: None }
+    }
+
+    pub fn with_idle(total: Duration, idle: Duration) -> Self {
+        Self {
+            total,
+            idle: Some(idle),
+        }
+    }
+}
+
+/// Per-connector capabilities and bounds (design §4(f)). Everything the
+/// broker will inject, admit, return, or refuse for one connector id.
 #[derive(Debug, Clone)]
-struct ConnectorDescriptor {
-    auth: AuthStyle,
-    timeout: Option<Duration>,
+pub struct ConnectorDescriptor {
+    /// How the resolved credential is presented.
+    pub auth: AuthStyle,
+    /// Timeouts; `None` uses the broker default.
+    pub timeouts: Option<ConnectorTimeouts>,
+    /// Extra request headers the CALLER may set, beyond the global
+    /// `accept`/`content-type`/`anthropic-version` allowlist.
+    pub allowed_request_headers: Vec<String>,
+    /// Headers injected by the broker. Callers can never set or override
+    /// these: a caller header with the same name is rejected.
+    pub static_headers: Vec<(String, String)>,
+    /// Response headers surfaced on the receipt. Exact names, or a trailing
+    /// `*` wildcard (`x-codex-*`). Everything else is dropped.
+    pub response_headers: Vec<String>,
+    /// Per-connector request-body ceiling; `None` uses the broker default.
+    pub max_request_bytes: Option<usize>,
+    /// Per-connector response-body ceiling; `None` uses the broker default.
+    pub max_response_bytes: Option<usize>,
+    /// Which destinations this connector may reach.
+    pub hosts: HostPolicy,
+}
+
+impl ConnectorDescriptor {
+    /// A descriptor with no extra capabilities: broker defaults for every
+    /// bound, no caller headers beyond the global allowlist, no injected
+    /// headers, no response headers surfaced.
+    pub fn new(auth: AuthStyle) -> Self {
+        Self {
+            auth,
+            timeouts: None,
+            allowed_request_headers: Vec::new(),
+            static_headers: Vec::new(),
+            response_headers: Vec::new(),
+            max_request_bytes: None,
+            max_response_bytes: None,
+            hosts: HostPolicy::Fixed(Vec::new()),
+        }
+    }
+
+    #[must_use]
+    pub fn with_timeouts(mut self, timeouts: ConnectorTimeouts) -> Self {
+        self.timeouts = Some(timeouts);
+        self
+    }
+
+    #[must_use]
+    pub fn with_allowed_request_headers<I, S>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_request_headers = headers
+            .into_iter()
+            .map(|h| h.into().to_ascii_lowercase())
+            .collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_static_headers<I, N, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (N, V)>,
+        N: Into<String>,
+        V: Into<String>,
+    {
+        self.static_headers = headers
+            .into_iter()
+            .map(|(n, v)| (n.into(), v.into()))
+            .collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_response_headers<I, S>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.response_headers = headers
+            .into_iter()
+            .map(|h| h.into().to_ascii_lowercase())
+            .collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_bounds(mut self, max_request_bytes: usize, max_response_bytes: usize) -> Self {
+        self.max_request_bytes = Some(max_request_bytes);
+        self.max_response_bytes = Some(max_response_bytes);
+        self
+    }
+
+    #[must_use]
+    pub fn with_hosts(mut self, hosts: HostPolicy) -> Self {
+        self.hosts = hosts;
+        self
+    }
+
+    /// Fixed hosts this connector may reach; empty for `PerGrant`.
+    pub fn fixed_hosts(&self) -> &[String] {
+        match &self.hosts {
+            HostPolicy::Fixed(hosts) => hosts.as_slice(),
+            HostPolicy::PerGrant => &[],
+        }
+    }
 }
 
 /// Default bounds. Every byte count is enforced; unbounded I/O is
@@ -81,6 +222,15 @@ const DEFAULT_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 const CONNECTOR_USER_AGENT: &str = concat!("terminus-connector/", env!("CARGO_PKG_VERSION"));
+
+/// Caller-supplied request headers are bounded in count and size so the
+/// header block cannot become an unmetered side channel.
+const MAX_REQUEST_HEADERS: usize = 32;
+const MAX_REQUEST_HEADER_VALUE_BYTES: usize = 4096;
+/// Receipt response-header bounds. Anything larger is dropped and audited
+/// rather than truncated.
+const MAX_RESPONSE_HEADERS: usize = 32;
+const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 1024;
 
 /// The L7 connector broker.
 pub struct ConnectorBroker {
@@ -129,33 +279,33 @@ impl std::fmt::Debug for ConnectorBrokerBuilder {
 
 impl ConnectorBrokerBuilder {
     /// Register a connector descriptor at build time.
-    pub fn connector(mut self, id: impl Into<String>, auth: AuthStyle) -> Self {
-        self.connectors.insert(
-            id.into(),
-            ConnectorDescriptor {
-                auth,
-                timeout: None,
-            },
-        );
-        self
+    pub fn connector(self, id: impl Into<String>, auth: AuthStyle) -> Self {
+        self.connector_descriptor(id, ConnectorDescriptor::new(auth))
     }
 
     /// Register a connector with a bounded timeout distinct from the broker
     /// default. Long-lived model streams need a larger bound than metadata
     /// lookups, while remaining explicitly finite and broker-owned.
     pub fn connector_with_timeout(
-        mut self,
+        self,
         id: impl Into<String>,
         auth: AuthStyle,
         timeout: Duration,
     ) -> Self {
-        self.connectors.insert(
-            id.into(),
-            ConnectorDescriptor {
-                auth,
-                timeout: Some(timeout),
-            },
-        );
+        self.connector_descriptor(
+            id,
+            ConnectorDescriptor::new(auth).with_timeouts(ConnectorTimeouts::total(timeout)),
+        )
+    }
+
+    /// Register a fully specified descriptor: headers, bounds, timeouts, and
+    /// host policy in one place.
+    pub fn connector_descriptor(
+        mut self,
+        id: impl Into<String>,
+        descriptor: ConnectorDescriptor,
+    ) -> Self {
+        self.connectors.insert(id.into(), descriptor);
         self
     }
 
@@ -214,7 +364,16 @@ impl ConnectorBroker {
         id: impl Into<String>,
         auth: AuthStyle,
     ) -> Result<(), ConnectorError> {
-        if let AuthStyle::NamedHeader(name) = &auth {
+        self.register_descriptor(id, ConnectorDescriptor::new(auth))
+    }
+
+    /// Register a fully specified descriptor at runtime.
+    pub fn register_descriptor(
+        &self,
+        id: impl Into<String>,
+        descriptor: ConnectorDescriptor,
+    ) -> Result<(), ConnectorError> {
+        if let AuthStyle::NamedHeader(name) = &descriptor.auth {
             let forbidden = ["authorization"];
             if name.is_empty() || forbidden.contains(&name.to_lowercase().as_str()) {
                 return Err(ConnectorError::Protocol(format!(
@@ -222,17 +381,43 @@ impl ConnectorBroker {
                 )));
             }
         }
+        for (name, value) in &descriptor.static_headers {
+            HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                ConnectorError::Protocol(format!("invalid static header name `{name}`"))
+            })?;
+            HeaderValue::from_str(value).map_err(|_| {
+                ConnectorError::Protocol(format!("invalid static header value for `{name}`"))
+            })?;
+        }
         self.connectors
             .write()
             .map_err(|_| ConnectorError::Protocol("connector registry poisoned".into()))?
-            .insert(
-                id.into(),
-                ConnectorDescriptor {
-                    auth,
-                    timeout: None,
-                },
-            );
+            .insert(id.into(), descriptor);
         Ok(())
+    }
+
+    /// Descriptor for a registered connector id.
+    pub fn descriptor(&self, id: &str) -> Result<ConnectorDescriptor, ConnectorError> {
+        self.connectors
+            .read()
+            .map_err(|_| ConnectorError::Protocol("connector registry poisoned".into()))?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ConnectorError::UnknownConnector(id.to_string()))
+    }
+
+    /// Union of every registered connector's fixed hosts. The kernel derives
+    /// its L4 egress allowlist from this so a registered connector is never
+    /// dead on arrival, and an unregistered host is never admitted.
+    pub fn registered_hosts(&self) -> Result<std::collections::BTreeSet<String>, ConnectorError> {
+        let registry = self
+            .connectors
+            .read()
+            .map_err(|_| ConnectorError::Protocol("connector registry poisoned".into()))?;
+        Ok(registry
+            .values()
+            .flat_map(|descriptor| descriptor.fixed_hosts().iter().cloned())
+            .collect())
     }
 
     /// Return whether a registered connector deliberately omits credentials.
@@ -291,7 +476,15 @@ impl ConnectorBroker {
             .get(&binding.connector_id)
             .cloned()
             .ok_or_else(|| ConnectorError::UnknownConnector(binding.connector_id.clone()))?;
-        let timeout = descriptor.timeout.unwrap_or(self.timeout);
+        let timeouts = descriptor
+            .timeouts
+            .unwrap_or_else(|| ConnectorTimeouts::total(self.timeout));
+        let max_request_bytes = descriptor
+            .max_request_bytes
+            .unwrap_or(self.max_request_bytes);
+        let max_response_bytes = descriptor
+            .max_response_bytes
+            .unwrap_or(self.max_response_bytes);
         // Exact-operation binding: destination must match the mint-time
         // pin before any DNS resolution, credential work, or consumption.
         if op.host != binding.destination_host
@@ -323,6 +516,12 @@ impl ConnectorBroker {
             )));
         }
 
+        // Descriptor host policy + per-account allowlist. `Fixed` connectors
+        // may only reach the hosts they were registered with; `PerGrant`
+        // connectors may only reach hosts the control plane pinned into this
+        // grant, so one provider account never widens another's reach.
+        authorize_host(&descriptor, binding, &op.host)?;
+
         // -- 2. Transport and caller-header safety -------------------------
         if !op.scheme.eq_ignore_ascii_case("http") && !op.scheme.eq_ignore_ascii_case("https") {
             return Err(ConnectorError::Protocol(format!(
@@ -330,7 +529,7 @@ impl ConnectorBroker {
                 op.scheme
             )));
         }
-        validate_headers(&op.headers)?;
+        validate_headers(&op.headers, &descriptor)?;
 
         // -- 3. Resolve credential inside the trusted boundary -----------
         // Anonymous connectors (`AuthStyle::None`) skip this step entirely;
@@ -359,9 +558,9 @@ impl ConnectorBroker {
         };
 
         // -- 4. Bounded body ---------------------------------------------
-        if op.body.len() > self.max_request_bytes {
+        if op.body.len() > max_request_bytes {
             return Err(ConnectorError::BodyTooLarge {
-                limit: self.max_request_bytes,
+                limit: max_request_bytes,
                 actual: op.body.len(),
             });
         }
@@ -390,20 +589,20 @@ impl ConnectorBroker {
 
         // -- 7. Dispatch the exact HTTP/1.1 request ------------------------
         let dispatch_sink = DispatchSink { inner: sink };
-        let dispatch = tokio::time::timeout(timeout, async {
+        let dispatch = tokio::time::timeout(timeouts.total, async {
             let ctx = DispatchContext {
                 op,
                 addresses,
                 egress: &self.egress,
-                max_response_bytes: self.max_response_bytes,
-                timeout,
+                max_response_bytes,
+                timeouts,
+                static_headers: &descriptor.static_headers,
+                response_header_allowlist: &descriptor.response_headers,
             };
             if op.scheme.eq_ignore_ascii_case("https") {
                 dispatch_https(ctx, &header_name, &header_value, dispatch_sink).await
             } else {
-                dispatch_http(ctx, &header_name, &header_value, dispatch_sink)
-                    .await
-                    .map(|(status, body)| (status, body, None))
+                dispatch_http(ctx, &header_name, &header_value, dispatch_sink).await
             }
         })
         .await;
@@ -417,16 +616,27 @@ impl ConnectorBroker {
             }
         }
 
-        let (status_code, response_bytes, content_type, wire_error) = match dispatch {
-            Ok(Ok((code, body, content_type))) => (Some(code), body, content_type, None),
-            Ok(Err(e)) => (None, Vec::new(), None, Some(e)),
-            Err(_elapsed) => (
-                None,
-                Vec::new(),
-                None,
-                Some(ConnectorError::Protocol("dispatch timed out".into())),
-            ),
-        };
+        let (status_code, response_bytes, content_type, response_headers, wire_error) =
+            match dispatch {
+                Ok(Ok(outcome)) => (
+                    Some(outcome.status_code),
+                    outcome.body,
+                    outcome.content_type,
+                    outcome.response_headers,
+                    None,
+                ),
+                Ok(Err(e)) => (None, Vec::new(), None, Vec::new(), Some(e)),
+                Err(_elapsed) => (
+                    None,
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                    Some(ConnectorError::Protocol(format!(
+                        "dispatch exceeded the connector total-duration bound of {}s",
+                        timeouts.total.as_secs()
+                    ))),
+                ),
+            };
         let (scrubbed, redactions) = redactor.redact(&response_bytes);
 
         let outcome = match (&wire_error, status_code.unwrap_or(0)) {
@@ -456,6 +666,7 @@ impl ConnectorBroker {
             response_bytes: scrubbed.len(),
             response_redactions: redactions,
             outcome,
+            response_headers,
         };
 
         if let Some(e) = wire_error {
@@ -499,13 +710,45 @@ impl ConnectorBroker {
     }
 }
 
-fn validate_headers(headers: &[(String, String)]) -> Result<(), ConnectorError> {
-    const ALLOWED: &[&str] = &["accept", "content-type", "anthropic-version"];
+/// Headers every connector's caller may set.
+const GLOBAL_ALLOWED_REQUEST_HEADERS: &[&str] = &["accept", "content-type", "anthropic-version"];
+
+fn validate_headers(
+    headers: &[(String, String)],
+    descriptor: &ConnectorDescriptor,
+) -> Result<(), ConnectorError> {
+    if headers.len() > MAX_REQUEST_HEADERS {
+        return Err(ConnectorError::Protocol(format!(
+            "request carries {} headers; the connector admits at most {MAX_REQUEST_HEADERS}",
+            headers.len()
+        )));
+    }
     for (name, value) in headers {
         let normalized = name.to_ascii_lowercase();
-        if !ALLOWED.contains(&normalized.as_str()) {
+        // Broker-injected headers are never caller-overridable: reject the
+        // name outright rather than letting a later insert decide.
+        if descriptor
+            .static_headers
+            .iter()
+            .any(|(static_name, _)| static_name.eq_ignore_ascii_case(&normalized))
+        {
+            return Err(ConnectorError::Protocol(format!(
+                "request header `{name}` is injected by the connector and cannot be set by the caller"
+            )));
+        }
+        let admitted = GLOBAL_ALLOWED_REQUEST_HEADERS.contains(&normalized.as_str())
+            || descriptor
+                .allowed_request_headers
+                .iter()
+                .any(|allowed| allowed == &normalized);
+        if !admitted {
             return Err(ConnectorError::Protocol(format!(
                 "request header `{name}` is not admitted"
+            )));
+        }
+        if value.len() > MAX_REQUEST_HEADER_VALUE_BYTES {
+            return Err(ConnectorError::Protocol(format!(
+                "request header `{name}` value exceeds {MAX_REQUEST_HEADER_VALUE_BYTES} bytes"
             )));
         }
         HeaderName::from_bytes(name.as_bytes())
@@ -516,13 +759,144 @@ fn validate_headers(headers: &[(String, String)]) -> Result<(), ConnectorError> 
     Ok(())
 }
 
+/// Exact-or-dot-suffix host match, matching the L4 egress semantics.
+fn host_matches(host: &str, pattern: &str) -> bool {
+    host.eq_ignore_ascii_case(pattern)
+        || host
+            .to_ascii_lowercase()
+            .ends_with(&format!(".{}", pattern.to_ascii_lowercase()))
+}
+
+/// Enforce the descriptor host policy and any per-grant account allowlist.
+fn authorize_host(
+    descriptor: &ConnectorDescriptor,
+    binding: &terminus_secrets::GrantBinding,
+    host: &str,
+) -> Result<(), ConnectorError> {
+    match &descriptor.hosts {
+        HostPolicy::Fixed(hosts) if !hosts.is_empty() => {
+            if !hosts.iter().any(|pattern| host_matches(host, pattern)) {
+                return Err(ConnectorError::BindingMismatch(format!(
+                    "connector {} does not admit host {host}",
+                    binding.connector_id
+                )));
+            }
+        }
+        HostPolicy::Fixed(_) => {}
+        HostPolicy::PerGrant => {
+            if binding.allowed_hosts.is_empty() {
+                return Err(ConnectorError::BindingMismatch(format!(
+                    "connector {} requires a per-account allowed_hosts list on the grant",
+                    binding.connector_id
+                )));
+            }
+        }
+    }
+    // A non-empty per-grant list narrows further for every host policy.
+    if !binding.allowed_hosts.is_empty()
+        && !binding
+            .allowed_hosts
+            .iter()
+            .any(|pattern| host_matches(host, pattern))
+    {
+        return Err(ConnectorError::BindingMismatch(format!(
+            "host {host} is not in the grant's account host allowlist"
+        )));
+    }
+    Ok(())
+}
+
+/// Does a response header name match an allowlist entry? Entries are exact
+/// lowercase names or a trailing-`*` prefix (`x-codex-*`).
+fn response_header_admitted(name: &str, allowlist: &[String]) -> bool {
+    allowlist
+        .iter()
+        .any(|pattern| match pattern.strip_suffix('*') {
+            Some(prefix) => name.starts_with(prefix),
+            None => name == pattern,
+        })
+}
+
+/// Project the upstream response headers onto the connector's allowlist.
+/// Values are bounded; anything oversized is dropped and audited rather than
+/// truncated into a misleading value.
+fn filter_response_headers(
+    headers: &reqwest::header::HeaderMap,
+    allowlist: &[String],
+) -> Vec<(String, String)> {
+    if allowlist.is_empty() {
+        return Vec::new();
+    }
+    let mut admitted = Vec::new();
+    for (name, value) in headers {
+        if admitted.len() >= MAX_RESPONSE_HEADERS {
+            tracing::warn!(
+                target: "terminus_connector_audit",
+                "response header allowlist matched more than {MAX_RESPONSE_HEADERS} headers; \
+                 the remainder were dropped"
+            );
+            break;
+        }
+        let lowered = name.as_str().to_ascii_lowercase();
+        if !response_header_admitted(&lowered, allowlist) {
+            continue;
+        }
+        let Ok(text) = value.to_str() else {
+            continue;
+        };
+        if text.len() > MAX_RESPONSE_HEADER_VALUE_BYTES {
+            tracing::warn!(
+                target: "terminus_connector_audit",
+                header = %lowered,
+                bytes = text.len(),
+                "dropped an allowlisted response header whose value exceeded the bound"
+            );
+            continue;
+        }
+        admitted.push((lowered, text.to_string()));
+    }
+    admitted
+}
+
+/// What one dispatch produced. Response headers are already filtered to the
+/// connector's allowlist.
+struct DispatchOutcome {
+    status_code: u16,
+    body: Vec<u8>,
+    content_type: Option<String>,
+    response_headers: Vec<(String, String)>,
+}
+
 /// Parameters shared by the HTTP/HTTPS dispatch paths (clippy arg budget).
 struct DispatchContext<'a> {
     op: &'a CanonicalOperation,
     addresses: Vec<std::net::SocketAddr>,
     egress: &'a EgressProxy,
     max_response_bytes: usize,
-    timeout: Duration,
+    timeouts: ConnectorTimeouts,
+    static_headers: &'a [(String, String)],
+    response_header_allowlist: &'a [String],
+}
+
+/// Bound one await by the connector's idle (gap) timeout when configured.
+async fn within_idle<T, F>(
+    timeouts: ConnectorTimeouts,
+    what: &str,
+    future: F,
+) -> Result<T, ConnectorError>
+where
+    F: std::future::Future<Output = Result<T, ConnectorError>>,
+{
+    match timeouts.idle {
+        Some(idle) => match tokio::time::timeout(idle, future).await {
+            Ok(result) => result,
+            Err(_) => Err(ConnectorError::Protocol(format!(
+                "{what} exceeded the connector idle bound of {}s",
+                idle.as_secs()
+            ))),
+        },
+        None => future.await,
+    }
 }
 
 async fn dispatch_https(
@@ -530,19 +904,25 @@ async fn dispatch_https(
     credential_header_name: &str,
     credential_header_value: &str,
     mut sink: DispatchSink<'_>,
-) -> Result<(u16, Vec<u8>, Option<String>), ConnectorError> {
+) -> Result<DispatchOutcome, ConnectorError> {
     let DispatchContext {
         op,
         addresses,
         egress,
         max_response_bytes,
-        timeout,
+        timeouts,
+        static_headers,
+        response_header_allowlist,
     } = ctx;
+    // The reqwest-level timeout stays the TOTAL bound. Streaming responses
+    // are additionally bounded per gap by `within_idle` below, so a silent
+    // upstream cannot hold the socket for the whole total budget.
+    let connect_timeout = timeouts.idle.unwrap_or(timeouts.total);
     let client = reqwest::Client::builder()
         .https_only(true)
         .no_proxy()
-        .connect_timeout(timeout)
-        .timeout(timeout)
+        .connect_timeout(connect_timeout)
+        .timeout(timeouts.total)
         .resolve_to_addrs(&op.host, &addresses)
         .build()
         .map_err(|error| ConnectorError::Protocol(format!("TLS client setup failed: {error}")))?;
@@ -567,26 +947,37 @@ async fn dispatch_https(
     let mut request = request.body(op.body.clone()).build().map_err(|error| {
         ConnectorError::Protocol(format!("HTTPS request setup failed: {error}"))
     })?;
+    // Broker-injected identity headers overwrite anything already present:
+    // caller headers with these names were rejected in `validate_headers`,
+    // so this insert is the single authority for their value.
+    inject_static_headers(request.headers_mut(), static_headers)?;
     ensure_request_defaults(&mut request);
     let request_bytes = serialized_request_bytes(&request, op.body.len())
         .map_err(|error| ConnectorError::RequestNotDispatched(error.to_string()))?;
     reserve_request_exact(egress, request_bytes)?;
-    let mut response = client
-        .execute(request)
-        .await
-        .map_err(|error| ConnectorError::Protocol(format!("HTTPS dispatch failed: {error}")))?;
+    let mut response = within_idle(timeouts, "waiting for the response head", async {
+        client
+            .execute(request)
+            .await
+            .map_err(|error| ConnectorError::Protocol(format!("HTTPS dispatch failed: {error}")))
+    })
+    .await?;
     let status = response.status().as_u16();
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(ToString::to_string);
+    let response_headers = filter_response_headers(response.headers(), response_header_allowlist);
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| ConnectorError::Protocol(format!("HTTPS response failed: {error}")))?
-    {
+    loop {
+        let chunk = within_idle(timeouts, "waiting for the next response chunk", async {
+            response.chunk().await.map_err(|error| {
+                ConnectorError::Protocol(format!("HTTPS response failed: {error}"))
+            })
+        })
+        .await?;
+        let Some(chunk) = chunk else { break };
         let next = body.len().saturating_add(chunk.len());
         if next > max_response_bytes {
             return Err(ConnectorError::ResponseTooLarge {
@@ -598,7 +989,28 @@ async fn dispatch_https(
         sink.send(&chunk).await?;
         body.extend_from_slice(&chunk);
     }
-    Ok((status, body, content_type))
+    Ok(DispatchOutcome {
+        status_code: status,
+        body,
+        content_type,
+        response_headers,
+    })
+}
+
+fn inject_static_headers(
+    headers: &mut reqwest::header::HeaderMap,
+    static_headers: &[(String, String)],
+) -> Result<(), ConnectorError> {
+    for (name, value) in static_headers {
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            ConnectorError::Protocol(format!("invalid static header name `{name}`"))
+        })?;
+        let value = HeaderValue::from_str(value).map_err(|_| {
+            ConnectorError::Protocol(format!("invalid static header value for `{name}`"))
+        })?;
+        headers.insert(name, value);
+    }
+    Ok(())
 }
 
 fn ensure_request_defaults(request: &mut reqwest::Request) {
@@ -695,13 +1107,15 @@ async fn dispatch_http(
     header_name: &str,
     header_value: &str,
     mut sink: DispatchSink<'_>,
-) -> Result<(u16, Vec<u8>), ConnectorError> {
+) -> Result<DispatchOutcome, ConnectorError> {
     let DispatchContext {
         op,
         addresses,
         egress,
         max_response_bytes,
-        ..
+        timeouts,
+        static_headers,
+        response_header_allowlist,
     } = ctx;
     // Connect to a kernel-authorized numeric address only.
     let mut remote = None;
@@ -739,6 +1153,12 @@ async fn dispatch_http(
         request.extend_from_slice(value.as_bytes());
         request.extend_from_slice(b"\r\n");
     }
+    for (name, value) in static_headers {
+        request.extend_from_slice(name.as_bytes());
+        request.extend_from_slice(b": ");
+        request.extend_from_slice(value.as_bytes());
+        request.extend_from_slice(b"\r\n");
+    }
     request.extend_from_slice(b"\r\n");
     request.extend_from_slice(&op.body);
 
@@ -753,7 +1173,10 @@ async fn dispatch_http(
     let mut emitted = 0usize;
     let mut body_started = false;
     loop {
-        let n = stream.read(&mut buf).await?;
+        let n = within_idle(timeouts, "waiting for the next response chunk", async {
+            stream.read(&mut buf).await.map_err(ConnectorError::from)
+        })
+        .await?;
         if n == 0 {
             break;
         }
@@ -789,8 +1212,47 @@ async fn dispatch_http(
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| ConnectorError::Protocol("missing HTTP status line".into()))?;
+    let response_headers = filter_head_response_headers(&head, response_header_allowlist);
 
-    Ok((status_code, body))
+    Ok(DispatchOutcome {
+        status_code,
+        body,
+        content_type: None,
+        response_headers,
+    })
+}
+
+/// Response-header projection for the plaintext path, which parses the head
+/// itself. Same allowlist and bounds as the HTTPS path.
+fn filter_head_response_headers(head: &str, allowlist: &[String]) -> Vec<(String, String)> {
+    if allowlist.is_empty() {
+        return Vec::new();
+    }
+    let mut admitted = Vec::new();
+    for line in head.lines().skip(1) {
+        if admitted.len() >= MAX_RESPONSE_HEADERS {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if !response_header_admitted(&name, allowlist) {
+            continue;
+        }
+        if value.len() > MAX_RESPONSE_HEADER_VALUE_BYTES {
+            tracing::warn!(
+                target: "terminus_connector_audit",
+                header = %name,
+                bytes = value.len(),
+                "dropped an allowlisted response header whose value exceeded the bound"
+            );
+            continue;
+        }
+        admitted.push((name, value.to_string()));
+    }
+    admitted
 }
 
 fn find_double_crlf(data: &[u8]) -> Option<usize> {

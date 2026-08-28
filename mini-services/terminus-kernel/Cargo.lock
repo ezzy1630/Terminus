@@ -2563,9 +2563,12 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "axum",
+ "bytes",
  "chrono",
  "futures-util",
  "hex",
+ "http",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",

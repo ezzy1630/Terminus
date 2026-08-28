@@ -951,7 +951,7 @@ impl ArtifactIngestRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let request_id = ctx.request_id.clone();
         let artifact = self
@@ -972,7 +972,7 @@ impl ArtifactIngestRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         if request.sha256.is_empty() {
             return Err(Status::invalid_argument("sha256 is required"));
@@ -1000,7 +1000,7 @@ impl ArtifactIngestRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         if request.sha256.is_empty() {
             return Err(Status::invalid_argument("sha256 is required"));
@@ -1022,7 +1022,7 @@ impl ArtifactIngestRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         self.kernel
             .artifact_ingest
@@ -1048,7 +1048,7 @@ impl ArtifactIngestRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let page_size = if request.page_size == 0 {
             100_usize
@@ -1096,7 +1096,7 @@ impl ArtifactIngestRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let unlinked = self
             .kernel
@@ -1123,7 +1123,7 @@ impl ExtensionRuntimeRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let report = self
             .kernel
@@ -1426,7 +1426,7 @@ impl ConnectorServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let binding = request
             .binding
@@ -1448,6 +1448,9 @@ impl ConnectorServiceRpc for GrpcKernel {
                     path_class: binding.path_class,
                     task_id: ctx.task_id.clone(),
                     effect_id: binding.effect_id,
+                    // Per-account host allowlist. Signed into the grant, so a
+                    // consumer cannot widen it after minting.
+                    allowed_hosts: binding.allowed_hosts,
                 },
                 request.ttl_seconds,
                 1,
@@ -1478,7 +1481,7 @@ impl ConnectorServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let operation = request
             .operation
@@ -1565,6 +1568,9 @@ impl ConnectorServiceRpc for GrpcKernel {
                                     response_redactions: u64::try_from(receipt.response_redactions)
                                         .unwrap_or(u64::MAX),
                                     outcome: connector_outcome(receipt.outcome).to_string(),
+                                    response_headers: connector_response_headers(
+                                        receipt.response_headers,
+                                    ),
                                 },
                             )),
                         }))
@@ -1587,7 +1593,7 @@ impl ConnectorServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let operation = request
             .operation
@@ -1638,11 +1644,24 @@ impl ConnectorServiceRpc for GrpcKernel {
                 response_redactions: u64::try_from(receipt.response_redactions)
                     .map_err(|_| Status::internal("response redaction count exceeds u64"))?,
                 outcome: connector_outcome(receipt.outcome).to_string(),
+                response_headers: connector_response_headers(receipt.response_headers),
             }),
             body: response.body,
             content_type: response.content_type,
         }))
     }
+}
+
+/// Project the broker's allowlisted response headers onto the wire message.
+/// The broker already filtered names and bounded values; this is a pure
+/// shape conversion.
+fn connector_response_headers(
+    headers: Vec<(String, String)>,
+) -> Vec<protocol::ConnectorHeaderMessage> {
+    headers
+        .into_iter()
+        .map(|(name, value)| protocol::ConnectorHeaderMessage { name, value })
+        .collect()
 }
 
 fn connector_outcome(outcome: terminus_connector::Outcome) -> &'static str {
@@ -1663,7 +1682,7 @@ impl CodeIntelligenceRpc for GrpcKernel {
         let request = request.into_inner();
         let mut ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         if request.query.is_empty() {
             return Err(Status::invalid_argument("query is required"));
@@ -1726,7 +1745,7 @@ impl CodeIntelligenceRpc for GrpcKernel {
         let request = request.into_inner();
         let mut ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let requested_workspace = request.workspace_id.trim();
         if requested_workspace.is_empty() {
@@ -1834,7 +1853,7 @@ impl PatchServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let intent = request.intent.map(intent).unwrap_or_default();
         let baseline = request
@@ -1881,7 +1900,7 @@ impl PatchServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         if request.transaction_id.is_empty() {
             return Err(Status::invalid_argument("transaction_id is required"));
@@ -1907,12 +1926,12 @@ impl ProcessServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let intent = request.intent.map(intent).unwrap_or_default();
         let command = request
             .command
-            .map(command)
+            .map(|spec| command(spec, DEFAULT_EXEC_TIMEOUT_MS))
             .transpose()?
             .ok_or_else(|| Status::invalid_argument("command is required"))?;
         let profile = if request.sandbox_profile_id.is_empty() {
@@ -1939,7 +1958,7 @@ impl ProcessServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let state = self
             .kernel
@@ -1962,12 +1981,12 @@ impl JobServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let intent = request.intent.map(intent).unwrap_or_default();
         let command = request
             .command
-            .map(command)
+            .map(|spec| command(spec, DEFAULT_JOB_TIMEOUT_MS))
             .transpose()?
             .ok_or_else(|| Status::invalid_argument("command is required"))?;
         let profile = if request.sandbox_profile_id.is_empty() {
@@ -1999,7 +2018,7 @@ impl JobServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         let job_id = request.job_id;
@@ -2055,7 +2074,7 @@ impl JobServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let _record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         let state = self
@@ -2073,7 +2092,7 @@ impl JobServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let _record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         let state = self
@@ -2091,7 +2110,7 @@ impl JobServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let _record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         let state = self
@@ -2109,7 +2128,7 @@ impl JobServiceRpc for GrpcKernel {
         let request = request.into_inner();
         let ctx = request
             .context
-            .map(context)
+            .map(context_long_running)
             .ok_or_else(|| Status::invalid_argument("context is required"))?;
         let record = authorize_job_control(&self.kernel, &ctx, &request.job_id).await?;
         Ok(Response::new(job_state_from_record(&record)))
@@ -2222,10 +2241,32 @@ fn log_kernel_rpc_error(
     status(error)
 }
 
+/// Convert a proto `RequestContext`. When the caller omitted a deadline the
+/// kernel substitutes its own (SPEC §31.3 step 9), so the pipeline check in
+/// `terminus_kernel::validate_request_pipeline` is live rather than dead
+/// code; the transport-level [`crate::deadline::DeadlineLayer`] enforces the
+/// same budget on the response and its body.
 fn context(value: ProtoContext) -> terminus_kernel_protocol::RequestContext {
+    context_for(value, terminus_kernel::RpcDeadlineClass::Unary)
+}
+
+/// Context conversion for RPCs whose work legitimately runs long: streams,
+/// model dispatch, process/job supervision, extensions, indexing, patches,
+/// and artifact ingest. Mirrors `crate::deadline::LONG_RUNNING_SERVICES`.
+fn context_long_running(value: ProtoContext) -> terminus_kernel_protocol::RequestContext {
+    context_for(value, terminus_kernel::RpcDeadlineClass::LongRunning)
+}
+
+fn context_for(
+    value: ProtoContext,
+    class: terminus_kernel::RpcDeadlineClass,
+) -> terminus_kernel_protocol::RequestContext {
     let deadline_unix_ms = value
         .deadline
-        .map(|t| (t.seconds as u64) * 1000 + (t.nanos as u64) / 1_000_000)
+        .map(|t| {
+            u64::try_from(t.seconds).unwrap_or(0).saturating_mul(1_000)
+                + u64::try_from(t.nanos.max(0)).unwrap_or(0) / 1_000_000
+        })
         .unwrap_or(0);
     let resource_budgets = value
         .resource_budgets
@@ -2236,7 +2277,7 @@ fn context(value: ProtoContext) -> terminus_kernel_protocol::RequestContext {
             max_wallclock_seconds: b.max_wallclock_seconds,
         })
         .unwrap_or_default();
-    terminus_kernel_protocol::RequestContext {
+    let mut ctx = terminus_kernel_protocol::RequestContext {
         request_id: value.request_id,
         idempotency_key: value.idempotency_key,
         session_id: value.session_id,
@@ -2249,7 +2290,9 @@ fn context(value: ProtoContext) -> terminus_kernel_protocol::RequestContext {
         deadline_unix_ms,
         resource_budgets,
         policy_version: value.policy_version,
-    }
+    };
+    terminus_kernel::apply_default_deadline(&mut ctx, class);
+    ctx
 }
 
 fn authorize_context(
@@ -2285,17 +2328,36 @@ fn path(value: protocol::WorkspacePath) -> terminus_kernel_protocol::WorkspacePa
         relative_path: value.relative_path,
     }
 }
-fn command(value: protocol::CommandSpec) -> Result<terminus_kernel_protocol::CommandSpec, Status> {
-    let timeout_ms = value
+/// Default wall-clock bound for a synchronous `Process.Start` when the
+/// caller sent no timeout. Interactive exec is expected to be short.
+const DEFAULT_EXEC_TIMEOUT_MS: u64 = 120_000;
+/// Default wall-clock bound for `Job.Start` when the caller sent no timeout.
+/// Jobs run builds and test suites, so the budget is much larger — but still
+/// finite.
+const DEFAULT_JOB_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
+
+/// Convert a proto `CommandSpec`. `default_timeout_ms` is applied when the
+/// caller sent no timeout; unbounded runtime requires the explicit
+/// `allow_unbounded_timeout` opt-in and is never inferred from an absent or
+/// zero duration.
+fn command(
+    value: protocol::CommandSpec,
+    default_timeout_ms: u64,
+) -> Result<terminus_kernel_protocol::CommandSpec, Status> {
+    let requested_ms = value
         .timeout
         .as_ref()
-        .map(|duration| {
+        .and_then(|duration| {
             let seconds = u64::try_from(duration.seconds).ok()?;
-            let millis = u64::from(duration.nanos.max(0) as u32) / 1_000_000;
+            let millis = u64::from(u32::try_from(duration.nanos.max(0)).unwrap_or(0)) / 1_000_000;
             Some(seconds.saturating_mul(1_000).saturating_add(millis))
         })
-        .flatten()
         .unwrap_or(0);
+    let timeout_ms = resolve_command_timeout_ms(
+        requested_ms,
+        value.allow_unbounded_timeout,
+        default_timeout_ms,
+    );
     let shell = value.shell.unwrap_or_default();
     Ok(terminus_kernel_protocol::CommandSpec {
         program: value.program,
@@ -2315,6 +2377,29 @@ fn command(value: protocol::CommandSpec) -> Result<terminus_kernel_protocol::Com
         },
     })
 }
+/// Timeout resolution for one command (SPEC §31.3 step 9 budget reservation).
+///
+/// - an explicit positive duration wins;
+/// - `allow_unbounded_timeout` maps to the process-manager sentinel, and is
+///   the ONLY way to run without a wall clock;
+/// - anything else falls back to the RPC class default.
+///
+/// Policy `max_runtime_ms` and the sandbox profile's wall clock clamp the
+/// result downstream exactly as before, including the unbounded case.
+fn resolve_command_timeout_ms(
+    requested_ms: u64,
+    allow_unbounded: bool,
+    default_timeout_ms: u64,
+) -> u64 {
+    if requested_ms > 0 {
+        return requested_ms;
+    }
+    if allow_unbounded {
+        return terminus_process::UNBOUNDED_TIMEOUT_MS;
+    }
+    default_timeout_ms
+}
+
 fn timestamp(value: &str) -> Option<prost_types::Timestamp> {
     let parsed = chrono::DateTime::parse_from_rfc3339(value).ok()?;
     Some(prost_types::Timestamp {
@@ -2815,7 +2900,19 @@ fn status(error: terminus_kernel_protocol::KernelError) -> Status {
         ErrorCode::TaintedByUntrustedSource => tonic::Code::PermissionDenied,
         ErrorCode::NotImplemented => tonic::Code::Unimplemented,
     };
-    let mut status = Status::new(code, "kernel request failed");
+    let terminus_kernel_protocol::KernelError::Structured {
+        message,
+        details,
+        suggested_action,
+        trace_id,
+        ..
+    } = &error;
+
+    // The message is the primary diagnostic: the HTTP path has always
+    // preserved it (`error.rs::ApiError::from_kernel`) while gRPC callers got
+    // the constant "kernel request failed" and had to guess. Both transports
+    // now carry the same text, scrubbed and bounded.
+    let mut status = Status::new(code, scrub_error_text(message, MAX_STATUS_MESSAGE_BYTES));
     let metadata = status.metadata_mut();
     if let Ok(value) = tonic::metadata::MetadataValue::try_from(error.code_name()) {
         metadata.insert("terminus-error-code", value);
@@ -2828,7 +2925,148 @@ fn status(error: terminus_kernel_protocol::KernelError) -> Status {
     {
         metadata.insert("terminus-error-retryable", value);
     }
+    // Structured payload mirroring the SPEC §30.4 HTTP envelope. Binary
+    // metadata so the JSON survives transport unmodified, and bounded so a
+    // large `details` object can never exceed the peer's header limit.
+    let envelope = error_envelope(
+        &error,
+        details,
+        suggested_action.as_deref(),
+        trace_id.as_deref(),
+    );
+    metadata.insert_bin(
+        TERMINUS_ERROR_METADATA_KEY,
+        tonic::metadata::BinaryMetadataValue::from_bytes(envelope.as_bytes()),
+    );
     status
+}
+
+/// Frame ceilings for `ConnectorService` only. They mirror the per-descriptor
+/// connector bounds plus protobuf framing overhead, so the byte limits the
+/// broker enforces are actually reachable over the wire instead of failing at
+/// the encoder. Every other service keeps the 8 MiB default.
+const MAX_CONNECTOR_REQUEST_MESSAGE_BYTES: usize = 12 * 1024 * 1024;
+const MAX_CONNECTOR_RESPONSE_MESSAGE_BYTES: usize = 40 * 1024 * 1024;
+
+/// Binary metadata key carrying the SPEC §30.4 error envelope as JSON.
+pub const TERMINUS_ERROR_METADATA_KEY: &str = "terminus-error-bin";
+/// gRPC implementations commonly cap total header bytes at 8 KiB; keep both
+/// the message and the envelope well inside that.
+const MAX_STATUS_MESSAGE_BYTES: usize = 2 * 1024;
+const MAX_ERROR_ENVELOPE_BYTES: usize = 4 * 1024;
+
+/// Build the bounded JSON envelope. When `details` would push the payload
+/// past the bound it is dropped and the omission is stated explicitly —
+/// never silently truncated (AGENTS.md "no silent truncation").
+fn error_envelope(
+    error: &terminus_kernel_protocol::KernelError,
+    details: &serde_json::Value,
+    suggested_action: Option<&str>,
+    trace_id: Option<&str>,
+) -> String {
+    let base = |details: serde_json::Value, details_omitted: bool| {
+        serde_json::json!({
+            "code": error.code_name(),
+            "category": error.category().as_str(),
+            "retryable": error.retryable(),
+            "message": scrub_error_text(&error.to_string(), MAX_STATUS_MESSAGE_BYTES),
+            "details": details,
+            "details_omitted": details_omitted,
+            "suggested_action": suggested_action.map(|a| scrub_error_text(a, 512)),
+            "trace_id": trace_id,
+        })
+    };
+    let scrubbed_details = scrub_json(details);
+    let full = base(scrubbed_details, false);
+    let rendered = serde_json::to_string(&full).unwrap_or_default();
+    if rendered.len() <= MAX_ERROR_ENVELOPE_BYTES && !rendered.is_empty() {
+        return rendered;
+    }
+    let reduced = base(serde_json::Value::Null, true);
+    serde_json::to_string(&reduced).unwrap_or_else(|_| {
+        format!(
+            r#"{{"code":"{}","details_omitted":true}}"#,
+            error.code_name()
+        )
+    })
+}
+
+/// Known credential shapes that must never reach a client, a log, or an
+/// artifact. Kernel error messages carry URIs and identifiers rather than
+/// secret values, but this is the last boundary before the wire, so it fails
+/// closed on anything token-shaped regardless of which layer produced it.
+const CREDENTIAL_PREFIXES: &[&str] = &[
+    "sk-",
+    "sk_",
+    "pk_",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "ghu_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "xapp-",
+    "AKIA",
+    "ASIA",
+    "eyJ", // JWT header
+];
+
+/// Replace token-shaped runs with a marker and bound the result. Splitting on
+/// characters that never occur inside a token keeps identifiers, paths, and
+/// host names readable.
+fn scrub_error_text(text: &str, max_bytes: usize) -> String {
+    fn is_separator(c: char) -> bool {
+        c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '(' | ')' | '<' | '>')
+    }
+    let mut out = String::with_capacity(text.len().min(max_bytes));
+    let mut redact_next = false;
+    for token in text.split_inclusive(is_separator) {
+        let (word, trailing) = match token.char_indices().next_back() {
+            Some((index, last)) if is_separator(last) => token.split_at(index),
+            _ => (token, ""),
+        };
+        let looks_secret = redact_next
+            || CREDENTIAL_PREFIXES
+                .iter()
+                .any(|prefix| word.starts_with(prefix));
+        // `Bearer <token>`: the value follows the scheme name.
+        redact_next = word.eq_ignore_ascii_case("bearer");
+        if looks_secret && !word.is_empty() {
+            out.push_str("[redacted]");
+        } else {
+            out.push_str(word);
+        }
+        out.push_str(trailing);
+    }
+    if out.len() > max_bytes {
+        const MARKER: &str = " … (truncated)";
+        let mut cut = max_bytes.saturating_sub(MARKER.len());
+        while cut > 0 && !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out.push_str(MARKER);
+    }
+    out
+}
+
+/// Apply [`scrub_error_text`] to every string in a details payload.
+fn scrub_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(scrub_error_text(text, MAX_STATUS_MESSAGE_BYTES))
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(scrub_json).collect())
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), scrub_json(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 fn string(value: &serde_json::Value, key: &str, fallback: &str) -> String {
@@ -2962,7 +3200,11 @@ pub async fn serve_grpc(
         let _ = shutdown_result_sender.send(result);
     };
     let service = GrpcKernel::new(kernel, control_bootstrap);
+    // SPEC §31.3 step 9: every RPC gets a server-side budget even when the
+    // caller sends no deadline, bounding both the response future and the
+    // response body so a wedged handler or stream cannot pin a worker.
     let result = Server::builder()
+        .layer(crate::deadline::DeadlineLayer)
         .add_service(
             KernelInfoServiceServer::new(service.clone())
                 .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
@@ -3014,9 +3256,13 @@ pub async fn serve_grpc(
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
         )
         .add_service(
+            // Model connectors carry compiled context in and a full streamed
+            // completion out (§4(f) bounds: 8 MiB request / 32 MiB response).
+            // Only THIS service gets the wider frame, and only the amounts
+            // the connector descriptors already enforce.
             ConnectorServiceServer::new(service.clone())
-                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
-                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+                .max_decoding_message_size(MAX_CONNECTOR_REQUEST_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_CONNECTOR_RESPONSE_MESSAGE_BYTES),
         )
         .add_service(
             CodeIntelligenceServiceServer::new(service.clone())
@@ -3096,7 +3342,11 @@ pub async fn serve_grpc_mtls(
         let _ = shutdown_result_sender.send(result);
     };
     let service = GrpcKernel::new(kernel, control_bootstrap);
+    // SPEC §31.3 step 9: every RPC gets a server-side budget even when the
+    // caller sends no deadline, bounding both the response future and the
+    // response body so a wedged handler or stream cannot pin a worker.
     let result = Server::builder()
+        .layer(crate::deadline::DeadlineLayer)
         .tls_config(tls)?
         .add_service(
             KernelInfoServiceServer::new(service.clone())
@@ -3149,9 +3399,13 @@ pub async fn serve_grpc_mtls(
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
         )
         .add_service(
+            // Model connectors carry compiled context in and a full streamed
+            // completion out (§4(f) bounds: 8 MiB request / 32 MiB response).
+            // Only THIS service gets the wider frame, and only the amounts
+            // the connector descriptors already enforce.
             ConnectorServiceServer::new(service.clone())
-                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
-                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+                .max_decoding_message_size(MAX_CONNECTOR_REQUEST_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_CONNECTOR_RESPONSE_MESSAGE_BYTES),
         )
         .add_service(
             CodeIntelligenceServiceServer::new(service.clone())
@@ -3363,6 +3617,298 @@ mod tests {
             secret_capabilities: Vec::new(),
             ttl_seconds: 120,
         }
+    }
+
+    // ---- K1: structured errors survive the gRPC boundary ---------------
+
+    /// Mint a capability bound to one task for the given operation classes.
+    fn task_bound_token(
+        kernel: &terminus_kernel::KernelHandle,
+        task_id: &str,
+        classes: Vec<OperationClass>,
+    ) -> String {
+        kernel
+            .token_issuer
+            .mint(
+                TokenBinder {
+                    principal: "terminus-control-test".to_string(),
+                    session_id: "session".to_string(),
+                    task_id: task_id.to_string(),
+                    workspace_id: "*".to_string(),
+                    kernel_instance_id: String::new(),
+                },
+                classes,
+                Scope::default(),
+                None,
+                format!("token-{task_id}"),
+            )
+            .and_then(|token| token.encode())
+            .unwrap_or_default()
+    }
+
+    fn error_envelope_of(status: &Status) -> serde_json::Value {
+        let raw = status
+            .metadata()
+            .get_bin(TERMINUS_ERROR_METADATA_KEY)
+            .and_then(|value| value.to_bytes().ok())
+            .unwrap_or_default();
+        serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null)
+    }
+
+    #[tokio::test]
+    async fn rejected_artifact_link_status_names_the_owner_type_and_purpose() {
+        let (_data_dir, kernel) = test_kernel();
+        let token = task_bound_token(&kernel, "task-1", vec![OperationClass::ArtifactIngest]);
+        let service = GrpcKernel::new(kernel, test_bootstrap_config(false));
+
+        let mut context = broker_context(token, "task-1");
+        context.request_id = "link-rejection".to_string();
+        // The capability binder pins the session; the context must match it
+        // or the request fails on permission before reaching the allowlist.
+        context.session_id = "session".to_string();
+        let status = ArtifactIngestRpc::link(
+            &service,
+            Request::new(protocol::LinkArtifactRequest {
+                context: Some(context),
+                sha256: format!("sha256:{}", "0".repeat(64)),
+                owner_type: "session".to_string(),
+                owner_id: "owner-1".to_string(),
+                purpose: "scratch".to_string(),
+                owner_task_id: "task-1".to_string(),
+            }),
+        )
+        .await
+        .expect_err("an unadmitted ownership pair must be rejected");
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        // The whole point of K1: the message is the real diagnostic, not the
+        // constant "kernel request failed".
+        assert_ne!(status.message(), "kernel request failed");
+        assert!(
+            status.message().contains("session") && status.message().contains("scratch"),
+            "status message must name the rejected pair: {}",
+            status.message()
+        );
+
+        let envelope = error_envelope_of(&status);
+        assert_eq!(envelope["code"], "INVALID_ARGUMENT");
+        assert_eq!(envelope["category"], "validation");
+        assert_eq!(envelope["retryable"], false);
+        assert_eq!(envelope["details"]["owner_type"], "session");
+        assert_eq!(envelope["details"]["purpose"], "scratch");
+        assert_eq!(envelope["details_omitted"], false);
+
+        // Legacy metadata keys stay populated for existing consumers.
+        assert_eq!(
+            status
+                .metadata()
+                .get("terminus-error-code")
+                .and_then(|v| v.to_str().ok()),
+            Some("INVALID_ARGUMENT")
+        );
+    }
+
+    #[test]
+    fn oversized_detail_strings_are_truncated_with_a_marker() {
+        let error = terminus_kernel_protocol::KernelError::new(
+            terminus_kernel_protocol::ErrorCode::Internal,
+            terminus_kernel_protocol::ErrorCategory::Internal,
+            "long detail",
+            false,
+        )
+        .with_details(serde_json::json!({ "blob": "x".repeat(8192) }));
+        let status = status(error);
+        let envelope = error_envelope_of(&status);
+        let blob = envelope["details"]["blob"].as_str().unwrap_or_default();
+        assert!(blob.len() <= MAX_STATUS_MESSAGE_BYTES, "{}", blob.len());
+        assert!(
+            blob.ends_with(" … (truncated)"),
+            "truncation must be stated"
+        );
+    }
+
+    #[test]
+    fn error_envelope_is_bounded_and_states_omission() {
+        // Many keys, each individually within the per-string bound, so only
+        // the aggregate exceeds the envelope budget.
+        let mut map = serde_json::Map::new();
+        for index in 0..64 {
+            map.insert(format!("key-{index}"), serde_json::json!("v".repeat(200)));
+        }
+        let details = serde_json::Value::Object(map);
+        let error = terminus_kernel_protocol::KernelError::new(
+            terminus_kernel_protocol::ErrorCode::Internal,
+            terminus_kernel_protocol::ErrorCategory::Internal,
+            "oversized details",
+            false,
+        )
+        .with_details(details);
+        let status = status(error);
+        let raw = status
+            .metadata()
+            .get_bin(TERMINUS_ERROR_METADATA_KEY)
+            .and_then(|value| value.to_bytes().ok())
+            .unwrap_or_default();
+        assert!(raw.len() <= MAX_ERROR_ENVELOPE_BYTES, "{}", raw.len());
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+        // Dropped, and explicitly reported as dropped — never silently cut.
+        assert_eq!(envelope["details_omitted"], true);
+        assert_eq!(envelope["details"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn error_text_scrubs_credential_shapes() {
+        let cases = [
+            ("Authorization: Bearer ghp_CANARY", "ghp_"),
+            ("token sk-proj-canary failed", "sk-"),
+            ("jwt eyJhbGciOiJSUzI1NiJ9.payload.sig rejected", "eyJ"),
+            ("aws key AKIA-CANARY denied", "AKIA"),
+        ];
+        for (input, marker) in cases {
+            let scrubbed = scrub_error_text(input, 2048);
+            assert!(
+                !scrubbed.contains(marker),
+                "credential shape survived scrubbing: {scrubbed}"
+            );
+            assert!(scrubbed.contains("[redacted]"), "{scrubbed}");
+        }
+        // Ordinary diagnostics survive intact.
+        let benign = "workspace ws-1 path src/main.rs not found (host api.openai.com)";
+        assert_eq!(scrub_error_text(benign, 2048), benign);
+    }
+
+    #[test]
+    fn error_text_truncation_is_announced() {
+        let long = "a".repeat(4096);
+        let scrubbed = scrub_error_text(&long, 128);
+        assert!(scrubbed.len() <= 128, "{}", scrubbed.len());
+        assert!(scrubbed.ends_with(" … (truncated)"), "{scrubbed}");
+    }
+
+    // ---- K2: exec/job timeouts are never unbounded by accident ----------
+
+    #[test]
+    fn absent_timeout_resolves_to_the_rpc_class_default() {
+        assert_eq!(
+            resolve_command_timeout_ms(0, false, DEFAULT_EXEC_TIMEOUT_MS),
+            120_000
+        );
+        assert_eq!(
+            resolve_command_timeout_ms(0, false, DEFAULT_JOB_TIMEOUT_MS),
+            1_800_000
+        );
+        // An explicit request always wins over the class default.
+        assert_eq!(
+            resolve_command_timeout_ms(5_000, false, DEFAULT_JOB_TIMEOUT_MS),
+            5_000
+        );
+    }
+
+    #[test]
+    fn unbounded_runtime_requires_the_explicit_opt_in() {
+        assert_eq!(
+            resolve_command_timeout_ms(0, true, DEFAULT_EXEC_TIMEOUT_MS),
+            terminus_process::UNBOUNDED_TIMEOUT_MS
+        );
+        // The opt-in never overrides a concrete request.
+        assert_eq!(
+            resolve_command_timeout_ms(2_500, true, DEFAULT_EXEC_TIMEOUT_MS),
+            2_500
+        );
+        // And the sentinel really is unbounded downstream.
+        assert_eq!(
+            terminus_process::effective_timeout_ms(terminus_process::UNBOUNDED_TIMEOUT_MS),
+            None
+        );
+        assert_eq!(
+            terminus_process::effective_timeout_ms(120_000),
+            Some(120_000)
+        );
+    }
+
+    #[test]
+    fn command_conversion_applies_the_class_default() {
+        let spec = |allow_unbounded: bool| protocol::CommandSpec {
+            program: "/bin/ls".to_string(),
+            args: Vec::new(),
+            cwd: Some(protocol::WorkspacePath {
+                workspace_id: "workspace".to_string(),
+                relative_path: ".".to_string(),
+            }),
+            public_env: Default::default(),
+            secret_capability_uris: Vec::new(),
+            timeout: None,
+            allocate_pty: false,
+            shell: None,
+            allow_unbounded_timeout: allow_unbounded,
+        };
+        let exec = command(spec(false), DEFAULT_EXEC_TIMEOUT_MS)
+            .map(|c| c.timeout_ms)
+            .unwrap_or_default();
+        assert_eq!(exec, DEFAULT_EXEC_TIMEOUT_MS);
+        let job = command(spec(false), DEFAULT_JOB_TIMEOUT_MS)
+            .map(|c| c.timeout_ms)
+            .unwrap_or_default();
+        assert_eq!(job, DEFAULT_JOB_TIMEOUT_MS);
+        let unbounded = command(spec(true), DEFAULT_EXEC_TIMEOUT_MS)
+            .map(|c| c.timeout_ms)
+            .unwrap_or_default();
+        assert_eq!(unbounded, terminus_process::UNBOUNDED_TIMEOUT_MS);
+    }
+
+    // ---- K7: server-side deadline defaults ------------------------------
+
+    #[test]
+    fn an_absent_caller_deadline_is_filled_in_per_rpc_class() {
+        let bare = protocol::RequestContext {
+            request_id: "no-deadline".to_string(),
+            ..Default::default()
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(0))
+            .unwrap_or(0);
+
+        let unary = context(bare.clone());
+        assert!(
+            unary.deadline_unix_ms > now_ms,
+            "unary deadline must be set"
+        );
+        assert!(
+            unary.deadline_unix_ms <= now_ms + 31_000,
+            "unary budget should be ~30s, got {}",
+            unary.deadline_unix_ms - now_ms
+        );
+
+        let long = context_long_running(bare);
+        assert!(
+            long.deadline_unix_ms > now_ms + 60_000,
+            "long-running budget must exceed a minute"
+        );
+        assert!(long.deadline_unix_ms <= now_ms + 1_801_000);
+    }
+
+    #[test]
+    fn an_over_long_caller_deadline_is_clamped_to_the_ceiling() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(0))
+            .unwrap_or(0);
+        let far_future = now_ms + 86_400_000;
+        let ctx = protocol::RequestContext {
+            request_id: "far-deadline".to_string(),
+            deadline: Some(prost_types::Timestamp {
+                seconds: i64::try_from(far_future / 1_000).unwrap_or(0),
+                nanos: 0,
+            }),
+            ..Default::default()
+        };
+        let resolved = context_long_running(ctx);
+        assert!(
+            resolved.deadline_unix_ms <= now_ms + 1_801_000,
+            "a caller deadline beyond the ceiling must be clamped"
+        );
     }
 
     #[tokio::test]
@@ -4137,6 +4683,7 @@ mod tests {
                     timeout: None,
                     allocate_pty: false,
                     shell: None,
+                    allow_unbounded_timeout: false,
                 }),
                 sandbox_profile_id: "degraded-local".to_string(),
                 output_policy_id: "default".to_string(),
@@ -4437,6 +4984,7 @@ mod tests {
                     timeout: None,
                     allocate_pty: false,
                     shell: None,
+                    allow_unbounded_timeout: false,
                 }),
                 sandbox_profile_id: "degraded-local".to_string(),
                 output_policy_id: "default".to_string(),

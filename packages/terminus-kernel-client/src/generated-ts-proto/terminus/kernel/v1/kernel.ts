@@ -381,7 +381,16 @@ export interface CommandSpec {
   secretCapabilityUris: string[];
   timeout: Duration | undefined;
   allocatePty: boolean;
-  shell: ShellSpec | undefined;
+  shell:
+    | ShellSpec
+    | undefined;
+  /**
+   * Explicit opt-in for an unbounded runtime. When false (the default) an
+   * absent or zero `timeout` is replaced by the server-side class default
+   * (exec 120s, job 30min) instead of running forever. Policy and sandbox
+   * wall-clock constraints still clamp the effective value.
+   */
+  allowUnboundedTimeout: boolean;
 }
 
 export interface CommandSpec_PublicEnvEntry {
@@ -725,6 +734,13 @@ export interface ConnectorGrantBindingMessage {
   method: string;
   pathClass: string;
   effectId: string;
+  /**
+   * Per-account destination allowlist supplied by the control plane at mint
+   * time. Required for connectors whose host is chosen per account (e.g.
+   * `openai-compatible`); it must contain `destination_host`. Dispatch also
+   * re-checks the host against the kernel's global egress union.
+   */
+  allowedHosts: string[];
 }
 
 export interface MintConnectorGrantRequest {
@@ -775,6 +791,12 @@ export interface ConnectorReceiptMessage {
   responseSha256?: string | undefined;
   responseRedactions: number;
   outcome: string;
+  /**
+   * Response headers admitted by the connector descriptor's response-header
+   * allowlist (e.g. `x-codex-*`, `retry-after`, `x-ratelimit-*`). Bounded in
+   * count and value length; never carries credential material.
+   */
+  responseHeaders: ConnectorHeaderMessage[];
 }
 
 export interface ConnectorResponseMessage {
@@ -3896,6 +3918,7 @@ function createBaseCommandSpec(): CommandSpec {
     timeout: undefined,
     allocatePty: false,
     shell: undefined,
+    allowUnboundedTimeout: false,
   };
 }
 
@@ -3924,6 +3947,9 @@ export const CommandSpec: MessageFns<CommandSpec> = {
     }
     if (message.shell !== undefined) {
       ShellSpec.encode(message.shell, writer.uint32(66).fork()).join();
+    }
+    if (message.allowUnboundedTimeout !== false) {
+      writer.uint32(72).bool(message.allowUnboundedTimeout);
     }
     return writer;
   },
@@ -4002,6 +4028,14 @@ export const CommandSpec: MessageFns<CommandSpec> = {
           message.shell = ShellSpec.decode(reader, reader.uint32());
           continue;
         }
+        case 9: {
+          if (tag !== 72) {
+            break;
+          }
+
+          message.allowUnboundedTimeout = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -4036,6 +4070,7 @@ export const CommandSpec: MessageFns<CommandSpec> = {
     message.shell = (object.shell !== undefined && object.shell !== null)
       ? ShellSpec.fromPartial(object.shell)
       : undefined;
+    message.allowUnboundedTimeout = object.allowUnboundedTimeout ?? false;
     return message;
   },
 };
@@ -7473,6 +7508,7 @@ function createBaseConnectorGrantBindingMessage(): ConnectorGrantBindingMessage 
     method: "",
     pathClass: "",
     effectId: "",
+    allowedHosts: [],
   };
 }
 
@@ -7498,6 +7534,9 @@ export const ConnectorGrantBindingMessage: MessageFns<ConnectorGrantBindingMessa
     }
     if (message.effectId !== "") {
       writer.uint32(58).string(message.effectId);
+    }
+    for (const v of message.allowedHosts) {
+      writer.uint32(66).string(v!);
     }
     return writer;
   },
@@ -7565,6 +7604,14 @@ export const ConnectorGrantBindingMessage: MessageFns<ConnectorGrantBindingMessa
           message.effectId = reader.string();
           continue;
         }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          message.allowedHosts.push(reader.string());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7586,6 +7633,7 @@ export const ConnectorGrantBindingMessage: MessageFns<ConnectorGrantBindingMessa
     message.method = object.method ?? "";
     message.pathClass = object.pathClass ?? "";
     message.effectId = object.effectId ?? "";
+    message.allowedHosts = object.allowedHosts?.map((e) => e) || [];
     return message;
   },
 };
@@ -8022,6 +8070,7 @@ function createBaseConnectorReceiptMessage(): ConnectorReceiptMessage {
     responseSha256: undefined,
     responseRedactions: 0,
     outcome: "",
+    responseHeaders: [],
   };
 }
 
@@ -8062,6 +8111,9 @@ export const ConnectorReceiptMessage: MessageFns<ConnectorReceiptMessage> = {
     }
     if (message.outcome !== "") {
       writer.uint32(98).string(message.outcome);
+    }
+    for (const v of message.responseHeaders) {
+      ConnectorHeaderMessage.encode(v!, writer.uint32(106).fork()).join();
     }
     return writer;
   },
@@ -8169,6 +8221,14 @@ export const ConnectorReceiptMessage: MessageFns<ConnectorReceiptMessage> = {
           message.outcome = reader.string();
           continue;
         }
+        case 13: {
+          if (tag !== 106) {
+            break;
+          }
+
+          message.responseHeaders.push(ConnectorHeaderMessage.decode(reader, reader.uint32()));
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8195,6 +8255,7 @@ export const ConnectorReceiptMessage: MessageFns<ConnectorReceiptMessage> = {
     message.responseSha256 = object.responseSha256 ?? undefined;
     message.responseRedactions = object.responseRedactions ?? 0;
     message.outcome = object.outcome ?? "";
+    message.responseHeaders = object.responseHeaders?.map((e) => ConnectorHeaderMessage.fromPartial(e)) || [];
     return message;
   },
 };

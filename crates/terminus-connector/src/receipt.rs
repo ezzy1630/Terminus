@@ -42,6 +42,12 @@ pub struct ConnectorReceipt {
     /// Number of credential-material redactions applied to the response.
     pub response_redactions: usize,
     pub outcome: Outcome,
+    /// Response headers admitted by the connector descriptor's allowlist
+    /// (lowercased names). Bounded in count and value length; credential
+    /// material is never admitted because no allowlist entry matches
+    /// `authorization` or a named credential header.
+    #[serde(default)]
+    pub response_headers: Vec<(String, String)>,
 }
 
 /// Bounded response returned to the trusted caller. `body` has already been

@@ -4,7 +4,9 @@
 
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use terminus_connector::{AuthStyle, CanonicalOperation, ConnectorBroker, Outcome};
+use terminus_connector::{
+    AuthStyle, CanonicalOperation, ConnectorBroker, ConnectorDescriptor, HostPolicy, Outcome,
+};
 use terminus_egress::{DestinationPolicy, EgressPolicy, EgressProxy, RateLimit};
 use terminus_secrets::{
     GrantBinding, GrantIssuer, GrantStore, InMemoryProvider, SecretBroker, WorkloadIdentity,
@@ -49,6 +51,7 @@ fn binding_for_scheme(port: u16, scheme: &str) -> GrantBinding {
         path_class: "/repos/{owner}/{repo}/pulls".into(),
         task_id: "task-1".into(),
         effect_id: "eff-1".into(),
+        allowed_hosts: Vec::new(),
     }
 }
 
@@ -137,6 +140,7 @@ async fn live_opencode_tls_canary_reaches_a_validated_http_response() {
         path_class: "/zen/v1/chat/completions".into(),
         task_id: "tls-canary".into(),
         effect_id: "tls-canary".into(),
+        allowed_hosts: Vec::new(),
     };
     let grant = GrantIssuer::new(KEY.to_vec())
         .mint(
@@ -506,4 +510,280 @@ async fn echoed_credential_redacted_from_response() {
         receipt.response_redactions >= 1,
         "echoed credential must be scrubbed before hashing/storage"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Connector descriptor capabilities (design §4(f)): caller-header allowlist,
+// broker-injected static headers, response-header projection, per-descriptor
+// byte bounds, and per-grant host allowlists.
+// ---------------------------------------------------------------------------
+
+/// Build a stack whose `fixture-api` connector carries `descriptor`.
+async fn descriptor_stack(descriptor: ConnectorDescriptor) -> (ConnectorBroker, u16, TcpListener) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let secret_broker = Arc::new(SecretBroker::new());
+    let provider = Arc::new(InMemoryProvider::new());
+    provider.register(SECRET_URI, CREDENTIAL.to_vec());
+    secret_broker.register_provider("github", provider);
+    let broker = ConnectorBroker::builder(
+        secret_broker,
+        Arc::new(GrantStore::new()),
+        Arc::new(egress_for_port_with_limit(port, 10_000_000)),
+        KEY,
+    )
+    .connector_descriptor("fixture-api", descriptor)
+    .build();
+    (broker, port, listener)
+}
+
+fn mint_with_binding(binding: GrantBinding) -> terminus_secrets::ConnectorGrant {
+    GrantIssuer::new(KEY.to_vec())
+        .mint(
+            WorkloadIdentity {
+                workload_id: "wl-1".into(),
+                principal: "agent-a".into(),
+                task_id: "task-1".into(),
+            },
+            SECRET_URI,
+            CREDENTIAL,
+            binding,
+            300,
+            1,
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn caller_header_outside_the_descriptor_allowlist_is_rejected() {
+    let descriptor =
+        ConnectorDescriptor::new(AuthStyle::Bearer).with_allowed_request_headers(["session-id"]);
+    let (broker, port, _listener) = descriptor_stack(descriptor).await;
+    let grant = mint_with_binding(binding(port));
+
+    // A header this connector never declared is rejected by name.
+    let mut denied = operation("/repos/acme/widget/pulls", port);
+    denied.headers = vec![("chatgpt-account-id".into(), "acct-1".into())];
+    let error = broker.execute(&denied, &grant).await.unwrap_err();
+    let text = error.to_string();
+    assert!(
+        text.contains("chatgpt-account-id") && text.contains("not admitted"),
+        "unexpected error: {text}"
+    );
+
+    // Rejection happens before consumption, so the grant is still usable for
+    // a header the descriptor does admit.
+    let mut allowed = operation("/repos/acme/widget/pulls", port);
+    allowed.headers = vec![("session-id".into(), "sess-1".into())];
+    let server = tokio::spawn(serve_once(
+        _listener,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+    ));
+    let response = broker.execute(&allowed, &grant).await.unwrap();
+    assert_eq!(response.receipt.status_code, Some(200));
+    let sent = String::from_utf8_lossy(&server.await.unwrap()).to_string();
+    assert!(sent.contains("session-id: sess-1"), "{sent}");
+}
+
+#[tokio::test]
+async fn static_headers_are_injected_and_are_not_caller_overridable() {
+    let descriptor = ConnectorDescriptor::new(AuthStyle::Bearer)
+        .with_static_headers([("originator", "terminus"), ("x-pinned", "kernel")]);
+    let (broker, port, listener) = descriptor_stack(descriptor).await;
+    let grant = mint_with_binding(binding(port));
+
+    // A caller trying to set a broker-injected header is refused outright.
+    let mut spoofed = operation("/repos/acme/widget/pulls", port);
+    spoofed.headers = vec![("Originator".into(), "attacker".into())];
+    let error = broker.execute(&spoofed, &grant).await.unwrap_err();
+    assert!(
+        error.to_string().contains("cannot be set by the caller"),
+        "unexpected error: {error}"
+    );
+
+    // And the injected values do reach the wire exactly once.
+    let server = tokio::spawn(serve_once(
+        listener,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+    ));
+    let response = broker
+        .execute(&operation("/repos/acme/widget/pulls", port), &grant)
+        .await
+        .unwrap();
+    assert_eq!(response.receipt.status_code, Some(200));
+    let sent = String::from_utf8_lossy(&server.await.unwrap()).to_string();
+    assert_eq!(sent.matches("originator: terminus").count(), 1, "{sent}");
+    assert!(sent.contains("x-pinned: kernel"), "{sent}");
+    assert!(!sent.contains("attacker"), "{sent}");
+}
+
+#[tokio::test]
+async fn response_headers_are_filtered_to_the_descriptor_allowlist() {
+    let descriptor = ConnectorDescriptor::new(AuthStyle::Bearer)
+        .with_response_headers(["x-codex-*", "retry-after"]);
+    let (broker, port, listener) = descriptor_stack(descriptor).await;
+    let grant = mint_with_binding(binding(port));
+
+    let server = tokio::spawn(serve_once(
+        listener,
+        b"HTTP/1.1 429 Too Many Requests\r\n\
+          Content-Length: 2\r\n\
+          Retry-After: 30\r\n\
+          X-Codex-Plan-Type: plus\r\n\
+          X-Codex-Primary-Used-Percent: 12\r\n\
+          Set-Cookie: session=supersecret\r\n\
+          X-Internal-Trace: leak-me\r\n\r\nok"
+            .to_vec(),
+    ));
+    let response = broker
+        .execute(&operation("/repos/acme/widget/pulls", port), &grant)
+        .await
+        .unwrap();
+    let _ = server.await.unwrap();
+
+    let names: Vec<&str> = response
+        .receipt
+        .response_headers
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(names.contains(&"retry-after"), "{names:?}");
+    assert!(names.contains(&"x-codex-plan-type"), "{names:?}");
+    assert!(names.contains(&"x-codex-primary-used-percent"), "{names:?}");
+    // Everything outside the allowlist is dropped, including cookies.
+    assert!(!names.contains(&"set-cookie"), "{names:?}");
+    assert!(!names.contains(&"x-internal-trace"), "{names:?}");
+    assert!(!names.contains(&"content-length"), "{names:?}");
+    assert_eq!(
+        response
+            .receipt
+            .response_headers
+            .iter()
+            .find(|(name, _)| name == "retry-after")
+            .map(|(_, value)| value.as_str()),
+        Some("30")
+    );
+}
+
+#[tokio::test]
+async fn a_connector_without_a_response_allowlist_surfaces_no_headers() {
+    let (broker, port, listener) =
+        descriptor_stack(ConnectorDescriptor::new(AuthStyle::Bearer)).await;
+    let grant = mint_with_binding(binding(port));
+    let server = tokio::spawn(serve_once(
+        listener,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nRetry-After: 5\r\n\r\nok".to_vec(),
+    ));
+    let response = broker
+        .execute(&operation("/repos/acme/widget/pulls", port), &grant)
+        .await
+        .unwrap();
+    let _ = server.await.unwrap();
+    assert!(response.receipt.response_headers.is_empty());
+}
+
+#[tokio::test]
+async fn per_descriptor_request_bound_is_enforced() {
+    let descriptor = ConnectorDescriptor::new(AuthStyle::Bearer).with_bounds(64, 1024);
+    let (broker, port, _listener) = descriptor_stack(descriptor).await;
+    let grant = mint_with_binding(binding(port));
+
+    let mut op = operation("/repos/acme/widget/pulls", port);
+    op.body = vec![b'x'; 65];
+    let error = broker.execute(&op, &grant).await.unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("64") && text.contains("65"), "{text}");
+}
+
+#[tokio::test]
+async fn per_descriptor_response_bound_is_enforced() {
+    let descriptor = ConnectorDescriptor::new(AuthStyle::Bearer).with_bounds(1024, 16);
+    let (broker, port, listener) = descriptor_stack(descriptor).await;
+    let grant = mint_with_binding(binding(port));
+
+    let mut response = b"HTTP/1.1 200 OK\r\nContent-Length: 512\r\n\r\n".to_vec();
+    response.extend(std::iter::repeat_n(b'y', 512));
+    let server = tokio::spawn(serve_once(listener, response));
+    let result = broker
+        .execute(&operation("/repos/acme/widget/pulls", port), &grant)
+        .await
+        .unwrap();
+    let _ = server.await;
+    // Oversized responses surface as an uncertain dispatch, never as a
+    // silently truncated body.
+    assert_eq!(result.receipt.outcome, Outcome::DispatchUncertain);
+    assert!(result.body.is_empty());
+}
+
+#[tokio::test]
+async fn per_grant_host_allowlist_admits_only_the_account_host() {
+    let descriptor = ConnectorDescriptor::new(AuthStyle::Bearer).with_hosts(HostPolicy::PerGrant);
+    let (broker, port, listener) = descriptor_stack(descriptor).await;
+
+    // A grant minted for this account admits its own host.
+    let mut admitted = binding(port);
+    admitted.allowed_hosts = vec!["localhost".to_string()];
+    let grant = mint_with_binding(admitted);
+    let server = tokio::spawn(serve_once(
+        listener,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+    ));
+    let response = broker
+        .execute(&operation("/repos/acme/widget/pulls", port), &grant)
+        .await
+        .unwrap();
+    let _ = server.await.unwrap();
+    assert_eq!(response.receipt.status_code, Some(200));
+
+    // A grant for a different account's host cannot reach this one.
+    let mut other = binding(port);
+    other.allowed_hosts = vec!["integrate.api.nvidia.com".to_string()];
+    let other_grant = mint_with_binding(other);
+    let error = broker
+        .execute(&operation("/repos/acme/widget/pulls", port), &other_grant)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("account host allowlist"),
+        "unexpected error: {error}"
+    );
+
+    // A `PerGrant` connector with no account allowlist at all is refused.
+    let bare_grant = mint_with_binding(binding(port));
+    let error = broker
+        .execute(&operation("/repos/acme/widget/pulls", port), &bare_grant)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("allowed_hosts"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_fixed_host_descriptor_refuses_other_destinations() {
+    let descriptor = ConnectorDescriptor::new(AuthStyle::Bearer)
+        .with_hosts(HostPolicy::Fixed(vec!["api.example.com".to_string()]));
+    let (broker, port, _listener) = descriptor_stack(descriptor).await;
+    let grant = mint_with_binding(binding(port));
+    let error = broker
+        .execute(&operation("/repos/acme/widget/pulls", port), &grant)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("does not admit host localhost"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn an_oversized_caller_header_value_is_rejected() {
+    let descriptor =
+        ConnectorDescriptor::new(AuthStyle::Bearer).with_allowed_request_headers(["session-id"]);
+    let (broker, port, _listener) = descriptor_stack(descriptor).await;
+    let grant = mint_with_binding(binding(port));
+    let mut op = operation("/repos/acme/widget/pulls", port);
+    op.headers = vec![("session-id".into(), "s".repeat(4097))];
+    let error = broker.execute(&op, &grant).await.unwrap_err();
+    assert!(error.to_string().contains("exceeds"), "{error}");
 }

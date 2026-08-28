@@ -484,6 +484,12 @@ pub struct CommandSpec {
     pub allocate_pty: bool,
     #[prost(message, optional, tag="8")]
     pub shell: ::core::option::Option<ShellSpec>,
+    /// Explicit opt-in for an unbounded runtime. When false (the default) an
+    /// absent or zero `timeout` is replaced by the server-side class default
+    /// (exec 120s, job 30min) instead of running forever. Policy and sandbox
+    /// wall-clock constraints still clamp the effective value.
+    #[prost(bool, tag="9")]
+    pub allow_unbounded_timeout: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StartProcessRequest {
@@ -1005,6 +1011,12 @@ pub struct ConnectorGrantBindingMessage {
     pub path_class: ::prost::alloc::string::String,
     #[prost(string, tag="7")]
     pub effect_id: ::prost::alloc::string::String,
+    /// Per-account destination allowlist supplied by the control plane at mint
+    /// time. Required for connectors whose host is chosen per account (e.g.
+    /// `openai-compatible`); it must contain `destination_host`. Dispatch also
+    /// re-checks the host against the kernel's global egress union.
+    #[prost(string, repeated, tag="8")]
+    pub allowed_hosts: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MintConnectorGrantRequest {
@@ -1061,7 +1073,7 @@ pub struct ExecuteConnectorRequest {
     #[prost(message, optional, tag="3")]
     pub operation: ::core::option::Option<ConnectorOperationMessage>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConnectorReceiptMessage {
     #[prost(string, tag="1")]
     pub grant_id: ::prost::alloc::string::String,
@@ -1087,8 +1099,13 @@ pub struct ConnectorReceiptMessage {
     pub response_redactions: u64,
     #[prost(string, tag="12")]
     pub outcome: ::prost::alloc::string::String,
+    /// Response headers admitted by the connector descriptor's response-header
+    /// allowlist (e.g. `x-codex-*`, `retry-after`, `x-ratelimit-*`). Bounded in
+    /// count and value length; never carries credential material.
+    #[prost(message, repeated, tag="13")]
+    pub response_headers: ::prost::alloc::vec::Vec<ConnectorHeaderMessage>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConnectorResponseMessage {
     #[prost(message, optional, tag="1")]
     pub receipt: ::core::option::Option<ConnectorReceiptMessage>,
@@ -1099,14 +1116,14 @@ pub struct ConnectorResponseMessage {
 }
 /// Chunk of a streamed connector response. Exactly one terminal frame carries
 /// the receipt; every prior frame is a body chunk.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConnectorChunk {
     #[prost(oneof="connector_chunk::Payload", tags="1, 2")]
     pub payload: ::core::option::Option<connector_chunk::Payload>,
 }
 /// Nested message and enum types in `ConnectorChunk`.
 pub mod connector_chunk {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Payload {
         #[prost(bytes, tag="1")]
         Bytes(::prost::alloc::vec::Vec<u8>),
