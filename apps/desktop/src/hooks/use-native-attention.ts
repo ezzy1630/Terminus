@@ -24,6 +24,7 @@ import { useEffect, useMemo, useRef } from "react";
 
 import { useTerminusStore } from "./use-terminus";
 import { useTaskReadStore } from "./use-task-read";
+import { subscribeEvents } from "../lib/api";
 import { subscribeEventsV2 } from "../lib/api-v2";
 import { attentionReason, countsTowardBadge, taskIsUnread } from "../lib/attention";
 import { lifecycleLabel, taskTitle } from "../lib/task-lifecycle";
@@ -35,8 +36,8 @@ const WORKSPACE_REFRESH_DELAY_MS = 200;
 const WORKSPACE_RECONNECT_BASE_MS = 500;
 const WORKSPACE_RECONNECT_MAX_MS = 30_000;
 
-/** Turn boundaries that can change whether a task belongs in Priority. */
-const WORKSPACE_TURN_ACTIVITY_EVENTS = new Set([
+/** V1 boundaries that can change whether a task belongs in Priority. */
+const WORKSPACE_ACTIVITY_EVENTS = new Set([
   "turn.started",
   "turn.completed",
   "turn.aborted",
@@ -50,28 +51,23 @@ const WORKSPACE_TURN_ACTIVITY_EVENTS = new Set([
   "turn.recovery_failed",
   "turn.recovery_interrupted",
   "turn.recovery_reconciled",
+  "task.turn_failed",
 ]);
 
 /**
  * Resolve the task whose sidebar projection may have changed.
  *
- * Task events identify it directly. Turn and question events identify their
- * own aggregate, so their task is carried in `correlationId` instead.
+ * Task events identify it directly. Question events identify their own
+ * aggregate, so their task is carried in `correlationId` instead.
  */
 export function workspaceTaskIdForEvent(event: ArpV2EventEnvelope): string | null {
   if (event.aggregateType === "task") return event.aggregateId || null;
-  if (
-    (event.aggregateType === "turn" && WORKSPACE_TURN_ACTIVITY_EVENTS.has(event.eventType))
-    || event.eventType.startsWith("question.")
-  ) {
-    return event.correlationId || null;
-  }
+  if (event.eventType.startsWith("question.")) return event.correlationId || null;
   return null;
 }
 
 function eventNeedsWorkspaceRefresh(event: ArpV2EventEnvelope): boolean {
   return event.aggregateType === "task"
-    || (event.aggregateType === "turn" && WORKSPACE_TURN_ACTIVITY_EVENTS.has(event.eventType))
     || event.eventType.startsWith("question.");
 }
 
@@ -79,25 +75,27 @@ function eventNeedsWorkspaceRefresh(event: ArpV2EventEnvelope): boolean {
  * Keep the portfolio current even when no task transcript is open.
  *
  * Transcript streams remain task-scoped because they carry high-volume turn
- * detail. This lightweight V2 stream observes only task, turn-lifecycle and
- * question boundaries, then reconciles the affected task through the ordinary
- * detail read. Provider deltas and tool events never trigger sidebar traffic.
+ * detail. V2 task/question events carry enough identity for a targeted detail
+ * read. Turn lifecycle is still emitted on V1, whose terminal payload does not
+ * carry a task id, so that low-volume boundary reconciles the bounded workspace
+ * snapshot. Provider deltas and tool events never trigger sidebar traffic.
  */
 export function useWorkspaceEventRefresh(): void {
   useEffect(() => {
     let disposed = false;
-    let reconnectAttempts = 0;
-    let cursor: string | null = null;
+    let v1ReconnectAttempts = 0;
+    let v2ReconnectAttempts = 0;
+    let v1Cursor: string | null = null;
+    let v2Cursor: string | null = null;
     let refreshTimer: number | null = null;
-    let reconnectTimer: number | null = null;
-    let stream: ReturnType<typeof subscribeEventsV2> | null = null;
+    let v1ReconnectTimer: number | null = null;
+    let v2ReconnectTimer: number | null = null;
+    let v1Stream: ReturnType<typeof subscribeEvents> | null = null;
+    let v2Stream: ReturnType<typeof subscribeEventsV2> | null = null;
     const pendingTaskIds = new Set<string>();
     let needsFullRefresh = false;
 
-    const scheduleRefresh = (event: ArpV2EventEnvelope): void => {
-      const taskId = workspaceTaskIdForEvent(event);
-      if (taskId === null) needsFullRefresh = true;
-      else pendingTaskIds.add(taskId);
+    const scheduleFlush = (): void => {
       if (refreshTimer !== null) return;
       refreshTimer = window.setTimeout(() => {
         refreshTimer = null;
@@ -113,38 +111,78 @@ export function useWorkspaceEventRefresh(): void {
       }, WORKSPACE_REFRESH_DELAY_MS);
     };
 
-    const connect = (): void => {
+    const scheduleTaskRefresh = (taskId: string | null): void => {
+      if (taskId === null) needsFullRefresh = true;
+      else pendingTaskIds.add(taskId);
+      scheduleFlush();
+    };
+
+    const scheduleFullRefresh = (): void => {
+      needsFullRefresh = true;
+      scheduleFlush();
+    };
+
+    const connectV2 = (): void => {
       if (disposed) return;
-      stream = subscribeEventsV2({ cursor });
-      stream.addEventListener("open", () => {
-        reconnectAttempts = 0;
+      v2Stream = subscribeEventsV2({ cursor: v2Cursor });
+      v2Stream.addEventListener("open", () => {
+        v2ReconnectAttempts = 0;
       });
-      stream.addEventListener("message", (event) => {
-        cursor = event.eventId;
-        if (eventNeedsWorkspaceRefresh(event)) scheduleRefresh(event);
+      v2Stream.addEventListener("message", (event) => {
+        v2Cursor = event.eventId;
+        if (eventNeedsWorkspaceRefresh(event)) scheduleTaskRefresh(workspaceTaskIdForEvent(event));
       });
-      stream.addEventListener("error", () => {
-        if (disposed || reconnectTimer !== null) return;
-        cursor = stream?.lastEventId ?? cursor;
-        stream?.close();
-        reconnectAttempts += 1;
+      v2Stream.addEventListener("error", () => {
+        if (disposed || v2ReconnectTimer !== null) return;
+        v2Cursor = v2Stream?.lastEventId ?? v2Cursor;
+        v2Stream?.close();
+        v2ReconnectAttempts += 1;
         const delay = Math.min(
           WORKSPACE_RECONNECT_MAX_MS,
-          WORKSPACE_RECONNECT_BASE_MS * 2 ** Math.min(reconnectAttempts - 1, 6),
+          WORKSPACE_RECONNECT_BASE_MS * 2 ** Math.min(v2ReconnectAttempts - 1, 6),
         );
-        reconnectTimer = window.setTimeout(() => {
-          reconnectTimer = null;
-          connect();
+        v2ReconnectTimer = window.setTimeout(() => {
+          v2ReconnectTimer = null;
+          connectV2();
         }, delay);
       });
     };
 
-    connect();
+    const connectV1 = (): void => {
+      if (disposed) return;
+      v1Stream = subscribeEvents({ cursor: v1Cursor });
+      v1Stream.addEventListener("open", () => {
+        v1ReconnectAttempts = 0;
+      });
+      v1Stream.addEventListener("message", (event) => {
+        v1Cursor = event.id || v1Cursor;
+        if (WORKSPACE_ACTIVITY_EVENTS.has(event.event)) scheduleFullRefresh();
+      });
+      v1Stream.addEventListener("error", () => {
+        if (disposed || v1ReconnectTimer !== null) return;
+        v1Cursor = v1Stream?.lastEventId ?? v1Cursor;
+        v1Stream?.close();
+        v1ReconnectAttempts += 1;
+        const delay = Math.min(
+          WORKSPACE_RECONNECT_MAX_MS,
+          WORKSPACE_RECONNECT_BASE_MS * 2 ** Math.min(v1ReconnectAttempts - 1, 6),
+        );
+        v1ReconnectTimer = window.setTimeout(() => {
+          v1ReconnectTimer = null;
+          connectV1();
+        }, delay);
+      });
+    };
+
+    connectV1();
+    connectV2();
     return () => {
       disposed = true;
-      stream?.close();
+      v1Stream?.close();
+      v2Stream?.close();
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
-      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (v1ReconnectTimer !== null) window.clearTimeout(v1ReconnectTimer);
+      if (v2ReconnectTimer !== null) window.clearTimeout(v2ReconnectTimer);
     };
   }, []);
 }

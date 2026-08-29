@@ -12,9 +12,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { useNativeAttention } from "../src/hooks/use-native-attention";
 import { useTerminusStore } from "../src/hooks/use-terminus";
+import * as apiModule from "../src/lib/api";
 import * as apiV2Module from "../src/lib/api-v2";
+import type { TerminusEventStream } from "../src/lib/api";
 import type { ArpV2EventStream } from "../src/lib/api-v2";
-import type { Task, TaskDomainStatus } from "../src/types";
+import type { Task, TaskDomainStatus, TerminusSseEvent } from "../src/types";
 import type { ArpV2EventEnvelope } from "../src/types/v2";
 
 function task(id: string, status: TaskDomainStatus, overrides: Partial<Task> = {}): Task {
@@ -89,6 +91,30 @@ function controlledStream(): {
   };
 }
 
+function controlledV1Stream(): {
+  stream: TerminusEventStream;
+  emit: (event: TerminusSseEvent) => void;
+} {
+  const handlers = new Map<string, Set<(event?: TerminusSseEvent) => void>>();
+  return {
+    stream: {
+      readyState: 1,
+      lastEventId: null,
+      lastError: null,
+      addEventListener(type, handler) {
+        const listeners = handlers.get(type) ?? new Set();
+        listeners.add(handler as (event?: TerminusSseEvent) => void);
+        handlers.set(type, listeners);
+        return () => listeners.delete(handler as (event?: TerminusSseEvent) => void);
+      },
+      close: vi.fn(),
+    },
+    emit(nextEvent) {
+      for (const handler of handlers.get("message") ?? []) handler(nextEvent);
+    },
+  };
+}
+
 function installBridge(): Bridge {
   const bridge: Bridge = {
     notify: vi.fn(async () => undefined),
@@ -119,6 +145,13 @@ function inertStream(): ArpV2EventStream {
 beforeEach(() => {
   cleanup();
   install([]);
+  vi.spyOn(apiModule, "subscribeEvents").mockReturnValue({
+    readyState: 1,
+    lastEventId: null,
+    lastError: null,
+    addEventListener: () => () => {},
+    close: vi.fn(),
+  });
   vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
   // The app is in the background: that is when these signals are for.
   vi.spyOn(document, "hasFocus").mockReturnValue(false);
@@ -150,64 +183,51 @@ describe("Dock badge", () => {
     expect(stream.close).toHaveBeenCalledOnce();
   });
 
-  test("refreshes a background task when its turn starts", () => {
+  test("refreshes the workspace when a background turn starts on the v1 stream", () => {
     vi.useFakeTimers();
-    const { stream, emit } = controlledStream();
-    vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(stream);
-    const refreshTask = vi.spyOn(useTerminusStore.getState(), "refreshTask").mockResolvedValue();
+    const { stream, emit } = controlledV1Stream();
+    vi.mocked(apiModule.subscribeEvents).mockReturnValue(stream);
+    const refreshAll = vi.spyOn(useTerminusStore.getState(), "refreshAll").mockResolvedValue();
     render(<Probe />);
 
     act(() => {
-      emit(event({
-        eventType: "turn.started",
-        aggregateType: "turn",
-        aggregateId: "turn-1",
-        correlationId: "task-background",
-      }));
+      emit({ id: "event-started", event: "turn.started", data: "{}" });
       vi.advanceTimersByTime(200);
     });
 
-    expect(refreshTask).toHaveBeenCalledOnce();
-    expect(refreshTask).toHaveBeenCalledWith("task-background");
+    expect(refreshAll).toHaveBeenCalledOnce();
   });
 
-  test("coalesces task and terminal turn events into one detail refresh", () => {
+  test("coalesces v2 task and v1 terminal events into one full refresh", () => {
     vi.useFakeTimers();
-    const { stream, emit } = controlledStream();
-    vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(stream);
-    const refreshTask = vi.spyOn(useTerminusStore.getState(), "refreshTask").mockResolvedValue();
-    render(<Probe />);
-
-    act(() => {
-      emit(event({
-        eventId: "event-completed",
-        eventType: "turn.completed",
-        aggregateType: "turn",
-        aggregateId: "turn-1",
-        correlationId: "task-1",
-      }));
-      emit(event({ eventId: "event-task", eventType: "task.completed" }));
-      vi.advanceTimersByTime(200);
-    });
-
-    expect(refreshTask).toHaveBeenCalledOnce();
-    expect(refreshTask).toHaveBeenCalledWith("task-1");
-  });
-
-  test("ignores high-volume provider deltas", () => {
-    vi.useFakeTimers();
-    const { stream, emit } = controlledStream();
-    vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(stream);
+    const v1 = controlledV1Stream();
+    const v2 = controlledStream();
+    vi.mocked(apiModule.subscribeEvents).mockReturnValue(v1.stream);
+    vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(v2.stream);
     const refreshTask = vi.spyOn(useTerminusStore.getState(), "refreshTask").mockResolvedValue();
     const refreshAll = vi.spyOn(useTerminusStore.getState(), "refreshAll").mockResolvedValue();
     render(<Probe />);
 
     act(() => {
-      emit(event({
-        eventType: "turn.provider_text_delta",
-        aggregateType: "turn",
-        aggregateId: "turn-1",
-      }));
+      v1.emit({ id: "event-completed", event: "turn.completed", data: "{}" });
+      v2.emit(event({ eventId: "event-task", eventType: "task.running" }));
+      vi.advanceTimersByTime(200);
+    });
+
+    expect(refreshAll).toHaveBeenCalledOnce();
+    expect(refreshTask).not.toHaveBeenCalled();
+  });
+
+  test("ignores high-volume provider deltas", () => {
+    vi.useFakeTimers();
+    const { stream, emit } = controlledV1Stream();
+    vi.mocked(apiModule.subscribeEvents).mockReturnValue(stream);
+    const refreshTask = vi.spyOn(useTerminusStore.getState(), "refreshTask").mockResolvedValue();
+    const refreshAll = vi.spyOn(useTerminusStore.getState(), "refreshAll").mockResolvedValue();
+    render(<Probe />);
+
+    act(() => {
+      emit({ id: "event-delta", event: "turn.provider_text_delta", data: "{}" });
       vi.advanceTimersByTime(200);
     });
 
@@ -215,7 +235,7 @@ describe("Dock badge", () => {
     expect(refreshAll).not.toHaveBeenCalled();
   });
 
-  test("falls back to a full refresh when a lifecycle event has no task id", () => {
+  test("falls back to a full refresh when a v2 question event has no task id", () => {
     vi.useFakeTimers();
     const { stream, emit } = controlledStream();
     vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(stream);
@@ -225,9 +245,9 @@ describe("Dock badge", () => {
 
     act(() => {
       emit(event({
-        eventType: "turn.failed",
-        aggregateType: "turn",
-        aggregateId: "turn-1",
+        eventType: "question.asked",
+        aggregateType: "question",
+        aggregateId: "question-1",
         correlationId: null,
       }));
       vi.advanceTimersByTime(200);
