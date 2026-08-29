@@ -45,6 +45,7 @@ import type {
   Session,
   SessionUpdateInput,
   Task,
+  Turn,
   WorkspaceKind,
   WorkspaceSnapshot,
 } from "../types";
@@ -250,6 +251,24 @@ function mergeTasks(current: readonly Task[], incoming: readonly Task[]): Task[]
   const byId = new Map(current.map((task) => [task.id, task]));
   for (const task of incoming) byId.set(task.id, reconcileTask(byId.get(task.id), task));
   return Array.from(byId.values()).sort(compareTasks);
+}
+
+/**
+ * Reconcile the compact run projection with a task detail response.
+ *
+ * List responses may omit `active_turn`, so absence preserves the live event
+ * projection. Detail responses use `null` deliberately; that is authoritative
+ * evidence that an old `turn.started` event must no longer keep the task in
+ * Priority.
+ */
+function reconcileRunActivity(
+  current: Record<string, TurnActivity>,
+  task: Task,
+): Record<string, TurnActivity> {
+  if (task.active_turn === undefined) return current;
+  const next: TurnActivity = task.active_turn === null ? "settled" : "running";
+  if (current[task.id] === next) return current;
+  return { ...current, [task.id]: next };
 }
 
 const compareApprovals = (left: PendingApproval, right: PendingApproval): number =>
@@ -559,6 +578,8 @@ interface TerminusState {
   refreshTasks: (sessionId: string) => Promise<void>;
   loadMoreTasks: (sessionId: string) => Promise<void>;
   refreshTask: (taskId: string) => Promise<void>;
+  /** Project an admitted turn immediately, before SSE or a follow-up read. */
+  recordStartedTurn: (taskId: string, turn: Turn) => void;
   /**
    * Write a project's turn defaults. Applied locally first so the picker moves
    * on click, reverted and rethrown when the control plane refuses.
@@ -1368,6 +1389,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
             ? mergeById(state.sessions, [ownerSession], compareSessions)
             : state.sessions,
           taskById: { ...state.taskById, [task.id]: reconcileTask(state.taskById[task.id], task) },
+          runActivityByTask: reconcileRunActivity(state.runActivityByTask, task),
           ...(state.selectedTaskId === task.id ? { selectedSessionId: task.session_id } : {}),
           tasksBySession: {
             ...state.tasksBySession,
@@ -1415,6 +1437,40 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         eventHistoryByTask: settleCursorBoundary(state.eventHistoryByTask, taskId, "error", msg),
       }));
     }
+  },
+
+  recordStartedTurn: (taskId, turn) => {
+    // Any detail request admitted before this turn is now stale even if its
+    // response arrives later. Advance the generation before publishing the
+    // local projection so that response cannot demote the new run.
+    nextKeyedGeneration(taskRequestGenerationById, taskId);
+    const projectedAt = turn.started_at ?? new Date().toISOString();
+    set((state) => {
+      const existing = state.taskById[taskId];
+      const runActivityByTask = state.runActivityByTask[taskId] === "running"
+        ? state.runActivityByTask
+        : { ...state.runActivityByTask, [taskId]: "running" as const };
+      if (!existing) return { runActivityByTask };
+      const updated: Task = {
+        ...existing,
+        status: "ACTIVE",
+        active_turn: {
+          id: turn.id,
+          sequence: turn.sequence,
+          state: turn.state,
+          started_at: turn.started_at,
+        },
+        updated_at: projectedAt,
+      };
+      return {
+        runActivityByTask,
+        taskById: { ...state.taskById, [taskId]: updated },
+        tasksBySession: {
+          ...state.tasksBySession,
+          [updated.session_id]: mergeTasks(state.tasksBySession[updated.session_id] ?? [], [updated]),
+        },
+      };
+    });
   },
 
   /**

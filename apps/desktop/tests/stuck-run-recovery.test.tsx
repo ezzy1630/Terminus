@@ -83,6 +83,26 @@ afterEach(() => {
 });
 
 describe("terminal turn events re-read the task", () => {
+  test("an admitted turn enters the shared running projection immediately", () => {
+    install(task({ status: "ACTIVE", active_turn: null }));
+
+    useTerminusStore.getState().recordStartedTurn("task-1", turn("PENDING"));
+
+    const state = useTerminusStore.getState();
+    expect(state.runActivityByTask["task-1"]).toBe("running");
+    expect(state.taskById["task-1"]?.active_turn).toMatchObject({ id: "turn-1", state: "PENDING" });
+    expect(state.tasksBySession["session-1"]?.[0]?.active_turn).toMatchObject({ id: "turn-1" });
+  });
+
+  test("an authoritative idle task detail clears stale running activity", async () => {
+    useTerminusStore.setState({ runActivityByTask: { "task-1": "running" } });
+    vi.spyOn(api, "getTask").mockResolvedValue(task({ active_turn: null }));
+
+    await useTerminusStore.getState().refreshTask("task-1");
+
+    expect(useTerminusStore.getState().runActivityByTask["task-1"]).toBe("settled");
+  });
+
   test("a settled turn schedules exactly one debounced refresh for its burst", async () => {
     vi.useFakeTimers();
     const refreshed = vi.spyOn(api, "getTask").mockResolvedValue(task({ active_turn: null }));

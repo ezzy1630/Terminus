@@ -138,7 +138,7 @@ function TaskQueueImpl({
         const updatedAt = task.updated_at || task.created_at;
         const unread = taskIsUnread(updatedAt, seenAtByTask[task.id]);
         const reason = attentionReason({ lifecycle, domainTask: task });
-        const shelf = taskShelf(lifecycle, reason);
+        const shelf = taskShelf(lifecycle, reason, unread);
         if (shelf === "settled") continue;
         const session = sessionsById.get(task.session_id);
         grouped[shelf].push({

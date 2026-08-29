@@ -276,6 +276,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   const taskId = task?.id ?? "__new__";
   const refreshTasks = useTerminusStore((s) => s.refreshTasks);
   const refreshTask = useTerminusStore((s) => s.refreshTask);
+  const recordStartedTurn = useTerminusStore((s) => s.recordStartedTurn);
   const stopTask = useTerminusStore((s) => s.stopTask);
   const queueSteer = useTerminusStore((s) => s.queueSteer);
   const clearQueuedSteer = useTerminusStore((s) => s.clearQueuedSteer);
@@ -630,12 +631,17 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
         );
         hasDurableStep = true;
       }
-      await api.startTurn({
+      const startedTurn = await api.startTurn({
         thread_id: target.thread_id,
         task_id: target.id,
         user_input: text,
         ...routing,
       }, { idempotencyKey: `${operationKey}:turn` });
+      // The successful admission is already authoritative. Publish it to the
+      // shared task projection now so Priority updates on this frame instead
+      // of waiting for an SSE reconnect or a list response that omits the
+      // active turn.
+      recordStartedTurn(target.id, startedTurn);
       // R12: open a TTFT sample; the first streamed event for this task
       // closes it (see lib/session-view SessionLatencyTracker).
       sessionLatency.markTurnSubmitted(target.id);
@@ -667,7 +673,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
         message: describeTurnFailure(err),
       };
     }
-  }, [refreshTasks, turnMutation]);
+  }, [recordStartedTurn, refreshTasks, turnMutation]);
 
   /**
    * Hand a correction to a turn that is already running.

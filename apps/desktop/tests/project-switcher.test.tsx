@@ -384,6 +384,26 @@ describe("the sidebar inbox", () => {
     await user.click(screen.getByRole("button", { name: /Mark Ship the release unread/ }));
     expect(row()).toHaveAccessibleName(expect.stringContaining("unread"));
   });
+
+  test("a read terminal failure leaves Priority and settles into recency", () => {
+    install([session("a", "Terminus")], "a");
+    const failed = {
+      ...task("t-failed", "Old failed request", localAt(28, 9)),
+      status: "BUDGET_EXHAUSTED" as const,
+    };
+    useTerminusStore.setState({
+      tasksBySession: { a: [failed] },
+      taskById: { "t-failed": failed },
+    });
+    useTaskReadStore.setState({ seenAtByTask: {} });
+    render(<Sidebar onOpenProject={() => undefined} />);
+
+    expect(screen.getByText("Priority")).toBeInTheDocument();
+    act(() => { useTaskReadStore.getState().markRead("t-failed", failed.updated_at); });
+
+    expect(screen.queryByText("Priority")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Old failed request/ })).toBeInTheDocument();
+  });
 });
 
 describe("opening a directory", () => {

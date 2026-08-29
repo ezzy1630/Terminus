@@ -45,6 +45,7 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
   const selectedSessionId = useTerminusStore((s) => s.selectedSessionId);
   const sessions = useTerminusStore((s) => s.sessions);
   const refreshTasks = useTerminusStore((s) => s.refreshTasks);
+  const recordStartedTurn = useTerminusStore((s) => s.recordStartedTurn);
   const selectTask = useTerminusStore((s) => s.selectTask);
 
   const session: Session | undefined = sessions.find((s) => s.id === selectedSessionId);
@@ -109,12 +110,13 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
       await refreshTasks(session.id);
       // The model the composer showed is the model this turn runs on. Before
       // this the selection reached nothing at all.
-      await api.startTurn({
+      const startedTurn = await api.startTurn({
         thread_id: task.thread_id,
         task_id: task.id,
         user_input: objective,
         ...routing,
       }, { idempotencyKey: `${operationKey}:turn` });
+      recordStartedTurn(task.id, startedTurn);
       selectTask(task.id, startedEventCursor);
       taskMutation.settle(operationKey);
     } catch (err) {
@@ -131,7 +133,7 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
       }
       throw err;
     }
-  }, [session, refreshTasks, selectTask, taskMutation]);
+  }, [session, recordStartedTurn, refreshTasks, selectTask, taskMutation]);
 
   const projectName = session?.title ?? null;
 

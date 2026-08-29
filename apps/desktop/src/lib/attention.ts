@@ -16,8 +16,9 @@
  * Two concepts live here, and they are deliberately different *kinds* of
  * thing — which is the distinction the old model got wrong in both directions:
  *
- *   - **Needs you** is a *state*. The task is blocked on a human, or it
- *     failed. Reading it changes nothing; only answering does.
+ *   - **Needs you** is a *state* while the task is blocked on a human.
+ *     Reading it changes nothing; only answering does. A terminal failure is
+ *     different: it is news to inspect once, then belongs in recency.
  *     `attentionReason()` says *why*, because "answer a question", "approve an
  *     effect", "raise the budget" and "read a stack trace" are four different
  *     instructions, and a list of identical dots collapses them into one.
@@ -212,11 +213,10 @@ export function pendingQuestionFor(
 /**
  * Which shelf a task belongs on: what the work is *doing*, and nothing else.
  *
- * Read-state is not part of this. A finished task that nobody has opened is
- * still a finished task — it belongs under the day it finished, wearing an
- * unread mark, not hoisted into a queue beside a policy denial. Sorting by
- * "has anyone looked at this" is what made the top of the rail unreadable:
- * the loudest region of the column filled with work that was merely new.
+ * Read-state only affects terminal failures. They enter Priority while new so
+ * an error is not missed, then settle into recency once inspected. Successful
+ * outcomes always belong under the day they finished, wearing an unread mark;
+ * blocking states stay in Priority until their underlying obligation clears.
  */
 export type TaskShelf = "needs_you" | "working" | "settled";
 
@@ -231,8 +231,12 @@ export function lifecycleIsOutcome(lifecycle: TaskLifecycle): boolean {
 export function taskShelf(
   lifecycle: TaskLifecycle,
   reason: AttentionReason | null,
+  unread: boolean,
 ): TaskShelf {
-  if (reason !== null) return "needs_you";
+  // A terminal failure is news until it has been read, not a permanent item
+  // in Priority. Blocking states remain there because reading them does not
+  // discharge the answer, approval, or resource the task still needs.
+  if (reason !== null && (!lifecycleIsOutcome(lifecycle) || unread)) return "needs_you";
   if (lifecycleIsActive(lifecycle)) return "working";
   return "settled";
 }
@@ -249,7 +253,7 @@ export function countsTowardBadge(
   reason: AttentionReason | null,
   unread: boolean,
 ): boolean {
-  if (reason !== null) return true;
+  if (reason !== null) return !lifecycleIsOutcome(lifecycle) || unread;
   return unread && lifecycleIsOutcome(lifecycle);
 }
 

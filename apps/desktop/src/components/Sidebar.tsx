@@ -224,7 +224,12 @@ function SidebarImpl({
   const selectedShelf = selectedTask
     ? (() => {
         const lifecycle = displayLifecycleWith(selectedTask, runActivityByTask[selectedTask.id] ?? "unknown");
-        return taskShelf(lifecycle, attentionReason({ lifecycle, domainTask: selectedTask }));
+        const updatedAt = selectedTask.updated_at || selectedTask.created_at;
+        return taskShelf(
+          lifecycle,
+          attentionReason({ lifecycle, domainTask: selectedTask }),
+          taskIsUnread(updatedAt, seenAtByTask[selectedTask.id]),
+        );
       })()
     : null;
   useKeepTaskInView(selectedTaskId, selectedShelf);
@@ -1022,7 +1027,12 @@ function RecentList({
       all,
       (task) => {
         const lifecycle = displayLifecycleWith(task, runActivityByTask[task.id] ?? "unknown");
-        return taskShelf(lifecycle, attentionReason({ lifecycle, domainTask: task })) === "settled";
+        const updatedAt = task.updated_at || task.created_at;
+        return taskShelf(
+          lifecycle,
+          attentionReason({ lifecycle, domainTask: task }),
+          taskIsUnread(updatedAt, seenAtByTask[task.id]),
+        ) === "settled";
       },
       now,
     );
