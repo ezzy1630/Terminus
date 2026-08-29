@@ -67,28 +67,32 @@ function ReasoningTraceImpl({ block }: { block: ReasoningBlock }): JSX.Element |
 
   if (running) {
     return (
-      <div className="my-1.5 flex items-center gap-2 px-1" role="status" aria-live="polite">
+      <div className="my-1.5 flex items-center gap-2 px-1.5" role="status" aria-live="polite">
         <span className="spinner-sm" aria-hidden />
-        <span className="ui-meta text-secondary">{label}</span>
-        <span className="ui-code text-tertiary tabular-nums">{formatDuration(elapsed)}</span>
+        <span className="ui-body text-secondary">{label}</span>
+        <span className="ui-meta tabular-nums">{formatDuration(elapsed)}</span>
       </div>
     );
   }
 
   return (
     <div className="my-1.5">
+      {/* Collapsed by default and set in the quietest text colour the theme
+          has. How long the model thought is context for the answer, not a
+          headline above it. */}
       <Button
         variant="bare"
         onClick={() => setExpanded((open) => !open)}
         aria-expanded={expanded}
-        className="flex items-center gap-1.5 rounded-md px-1 py-0.5 text-tertiary hover:text-secondary"
+        data-tooltip={expanded ? "Hide the phases of this turn" : "Show the phases of this turn"}
+        className="flex min-h-6 items-center gap-1.5 rounded-md px-1.5 text-tertiary hover:bg-hover hover:text-secondary"
       >
         <ChevronRight
           size={11}
           className={cn("transition-transform", expanded && "rotate-90")}
           aria-hidden
         />
-        <span className="ui-meta">{label}</span>
+        <span className="ui-body">{label}</span>
       </Button>
       {expanded ? (
         <div className="mt-1 ml-2 border-l border-subtle pl-3">

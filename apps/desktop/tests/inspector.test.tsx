@@ -43,11 +43,16 @@ describe("Inspector relevance", () => {
     vi.restoreAllMocks();
   });
 
-  test("omits task sections that have no supporting runtime evidence", () => {
+  test("omits task groups that have no supporting runtime evidence", () => {
     render(<Inspector />);
 
-    expect(screen.getByRole("button", { name: /^Environment,/ })).toBeInTheDocument();
-    for (const name of ["Changes", "Subagents", "Verification", "Activity", "Approvals", "Computer Use"]) {
+    // Context is the only group backed by fields the decoder requires, so it
+    // is the only group a bare task can justify. Everything else stays out.
+    expect(screen.getByRole("heading", { name: "Context" })).toBeInTheDocument();
+    for (const name of ["Environment", "Activity", "Approvals"]) {
+      expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
+    }
+    for (const name of ["Changes", "Subagents", "Verification", "Computer Use"]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
   });
@@ -72,13 +77,20 @@ describe("Inspector relevance", () => {
       />,
     );
 
-    for (const name of [/Subagents, 1 working/, "Verification, 1/1", "Activity, 4", "Approvals, 1 waiting"]) {
+    for (const name of [/Subagents, 1 working/, "Verification, 1/1"]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
-    expect(screen.getByRole("button", { name: "Open patch review" })).toBeInTheDocument();
+    for (const name of ["Environment", "Activity", "Approvals"]) {
+      expect(screen.getByRole("heading", { name })).toBeInTheDocument();
+    }
+    // The Changes row carries the +/- counts parsed off the proposed patch and
+    // is the panel's only route into the review surface.
+    const changes = screen.getByRole("button", { name: "Open patch review" });
+    expect(changes).toHaveTextContent("+1");
+    expect(changes).toHaveTextContent("−1");
     expect(screen.queryByRole("button", { name: "Computer Use" })).not.toBeInTheDocument();
 
-    await userEvent.setup().click(screen.getByRole("button", { name: "Open patch review" }));
+    await userEvent.setup().click(changes);
     expect(onShowChanges).toHaveBeenCalledTimes(1);
   });
 

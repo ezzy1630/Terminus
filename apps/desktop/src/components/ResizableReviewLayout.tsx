@@ -87,7 +87,7 @@ function ResizableReviewLayoutImpl({ conversation, review }: ResizableReviewLayo
       data-testid={compact ? "review-tabs" : "review-split"}
     >
       {compact ? (
-        <div className="flex flex-shrink-0 border-b border-default bg-elevated p-1" role="tablist" aria-label="Task and changes">
+        <div className="flex flex-shrink-0 border-b border-subtle bg-elevated p-1" role="tablist" aria-label="Task and changes">
           {(["conversation", "review"] as const).map((pane) => (
             <Button
               key={pane}

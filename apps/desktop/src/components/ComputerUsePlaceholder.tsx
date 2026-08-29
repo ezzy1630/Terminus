@@ -11,6 +11,7 @@
  */
 import { memo } from "react";
 import { Monitor } from "lucide-react";
+import { cn } from "../lib/cn";
 
 interface ComputerUsePlaceholderProps {
   /** Optional className override. */
@@ -25,43 +26,19 @@ function ComputerUsePlaceholderImpl({
 }: ComputerUsePlaceholderProps): JSX.Element {
   return (
     <div
-      className={className}
       role="status"
       aria-label="No computer-use session active"
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 8,
-        padding: compact ? "16px 12px" : "32px 24px",
-        textAlign: "center",
-      }}
+      className={cn(
+        "flex flex-col items-center justify-center gap-1.5 text-center",
+        compact ? "px-3 py-4" : "px-6 py-8",
+        className,
+      )}
     >
-      <div
-        aria-hidden
-        className="flex items-center justify-center text-tertiary"
-        style={{
-          width: compact ? 28 : 40,
-          height: compact ? 28 : 40,
-          borderRadius: "50%",
-          background: "var(--bg-hover)",
-        }}
-      >
-        <Monitor size={compact ? 14 : 20} />
-      </div>
-      <div
-        className="text-secondary text-sm"
-        style={{ fontWeight: 500 }}
-      >
-        No computer-use session
-      </div>
-      <div
-        className="text-tertiary text-xs"
-        style={{ maxWidth: 240, lineHeight: 1.4 }}
-      >
-        When the agent drives the desktop, a live preview will appear here in a floating, resizable picture-in-picture.
-      </div>
+      <Monitor size={compact ? 14 : 18} className="text-tertiary" aria-hidden />
+      <p className="ui-body font-medium text-secondary">No computer-use session</p>
+      <p className="ui-meta max-w-[34ch] leading-relaxed">
+        When the agent drives the desktop, a live preview appears here.
+      </p>
     </div>
   );
 }

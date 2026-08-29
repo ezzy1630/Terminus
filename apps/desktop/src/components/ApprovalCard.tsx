@@ -13,10 +13,11 @@
  *   - Whether permission persists     (allow once vs allow for this task)
  *   - Available choices: Allow once · Allow for this task · Deny
  *
- * The card surfaces as a subtle inline block in the conversation feed
- * (not a chat bubble, not a modal). A muted left border carries the
- * warning color when risk is elevated; otherwise the card uses the
- * standard elevated surface.
+ * The card surfaces as a quiet inline block in the conversation feed (not a
+ * chat bubble, not a modal): one hairline, a tight radius, and the same card
+ * surface the rest of the app floats things on. Risk is stated in words and
+ * only tinted when it is genuinely elevated — an oversized warning box around
+ * every routine permission check trains the reader to dismiss all of them.
  *
  * Per SPEC §17: "Avoid modal dialogs unless macOS itself requires one
  * or the action is impossible to contextualize inline."
@@ -34,6 +35,7 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, ShieldAlert, ShieldCheck, X } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, TerminusApiError } from "../lib/api";
+import { clockTimestamp } from "../lib/time";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
 import type { ApprovalDecision } from "../types";
 import { Button } from "../ui/Button";
@@ -214,23 +216,22 @@ function ApprovalCardImpl({
     [approvalMutation, decisionsEnabled, expiresAt, id, onExpired, operationHash, submitting, onResolved],
   );
 
-  // Esc cancels submission but doesn't auto-deny (per SPEC §17 — Deny is explicit).
-  useEffect(() => {
-    if (resolution) return;
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape" && submitting) {
-        // Ignore — the request is in-flight.
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [resolution, submitting]);
+  // Per SPEC §17, Deny is explicit — Escape must never resolve an approval. A
+  // window-level `keydown` listener used to be installed here to enforce that,
+  // with an empty body: it matched Escape and then did nothing. Not binding the
+  // key is the same behaviour without a listener on every mounted card.
 
   if (resolution) {
     return <ResolvedApprovalCard resolution={resolution} action={action} operation={operation} className={className} />;
   }
 
   const accent = RISK_COLOR[risk];
+  /*
+   * Colour is reserved for meaning. Painting every approval in its risk colour
+   * spends the reader's attention on the ones that do not need it, so only a
+   * high or critical request is tinted; the rest state their risk in words.
+   */
+  const riskIsElevated = risk === "high" || risk === "critical";
   const effectiveDecisionsEnabled = decisionsEnabled && !expired;
   const allowAuthorizationReady = authorizationReady && !expired;
   const supported = new Set(supportedDecisions);
@@ -317,35 +318,44 @@ function ApprovalCardImpl({
     <section
       role="group"
       aria-label={`Approval required: ${action}`}
-      className={cn("selectable border-y border-subtle bg-transparent", className)}
-      style={{
-        borderLeftWidth: 3,
-        borderLeftColor: accent,
-      }}
+      /*
+       * A quiet inline card: one hairline and a tight radius, on the same
+       * elevated surface every other floating thing in the app uses. It used
+       * to carry a 3px risk-coloured left rule across a full-bleed band, which
+       * turned a routine "may I read this file?" into an incident banner. Risk
+       * is stated in words instead, and only *coloured* when it is genuinely
+       * elevated.
+       */
+      className={cn("selectable rounded-lg border border-subtle bg-card", className)}
     >
-      <div className="flex items-start gap-2.5 px-3 py-2.5">
-        <ShieldAlert size={14} aria-hidden className="mt-0.5 flex-none" style={{ color: accent }} />
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-          <div className="flex items-start justify-between gap-2">
+      <div className="flex flex-col gap-2 px-3 py-2.5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-2">
+            <ShieldAlert
+              size={13}
+              aria-hidden
+              className={cn("mt-0.5 flex-none", !riskIsElevated && "text-tertiary")}
+              style={riskIsElevated ? { color: accent } : undefined}
+            />
             <div className="flex min-w-0 flex-col gap-0.5">
-              <span className="ui-meta">
-                Permission required
-              </span>
-              <h3 className="ui-label truncate text-primary" data-tooltip={action}>
+              <span className="ui-meta">Permission required</span>
+              <h3 className="ui-body truncate font-medium text-primary" data-tooltip={action}>
                 {action}
               </h3>
             </div>
-            <span
-              className="ui-meta flex-none"
-              style={{ color: accent, flexShrink: 0, marginTop: 2 }}
-            >
-              {RISK_LABEL[risk]}
-            </span>
           </div>
+          <span
+            className={cn("ui-meta mt-0.5 flex-none", !riskIsElevated && "text-tertiary")}
+            style={riskIsElevated ? { color: accent } : undefined}
+          >
+            {RISK_LABEL[risk]}
+          </span>
+        </div>
 
+        <div className="flex min-w-0 flex-col gap-1.5">
           {operation ? (
             <pre
-              className="selectable overflow-x-auto border-l border-subtle bg-terminal px-2 py-1.5 font-mono text-xs leading-5 text-primary"
+              className="selectable overflow-x-auto rounded-md border border-subtle bg-terminal px-2 py-1.5 font-mono text-xs leading-5 text-primary"
               style={{ margin: 0 }}
             >
               <code>{operation}</code>
@@ -371,7 +381,7 @@ function ApprovalCardImpl({
               Details
             </Button>
             {detailsOpen ? (
-              <dl className="surface-enter mt-1 grid border-t border-subtle pt-1.5 text-xs" style={{ gridTemplateColumns: "auto 1fr", gap: "3px 12px" }}>
+              <dl className="surface-enter mt-1 grid text-xs" style={{ gridTemplateColumns: "auto 1fr", gap: "3px 12px" }}>
                 {scope && scope.length > 0 ? (
                   <>
                     <dt className="text-tertiary">Scope</dt>
@@ -392,45 +402,42 @@ function ApprovalCardImpl({
             ) : null}
           </div>
 
+          {/* Why a choice is unavailable. These were three coloured, bordered
+              callouts stacked inside a card that is itself a callout; a
+              sentence in the theme's own quiet text says the same thing. */}
           {!authorizationReady ? (
-            <p
-              role="status"
-              className="border-l-2 border-default px-2 py-1 text-secondary text-xs"
-            >
+            <p role="status" className="ui-meta">
               Allow actions are disabled until the exact operation, scope, and recognized risk are bound to the server approval hash. Deny remains available.
             </p>
           ) : null}
 
           {!decisionsEnabled ? (
-            <p role="status" className="border-l-2 border-warning px-2 py-1 text-warning text-xs">
+            <p role="status" className="ui-meta text-warning">
               Decisions are disabled until pending state is reconciled with the control plane.
             </p>
           ) : null}
 
           {expired ? (
-            <p role="alert" className="border-l-2 border-warning px-2 py-1 text-warning text-xs">
+            <p role="alert" className="ui-meta text-warning">
               This approval expired. Decisions are disabled while Terminus reconciles pending state.
             </p>
           ) : null}
 
           {detailsOpen && visibleDecisions.length < decisions.length ? (
-            <p role="note" className="text-tertiary text-xs" >
+            <p role="note" className="ui-meta">
               Unsupported choices are hidden. Coordinator-backed choices: {visibleDecisions.map((decision) => decision.label).join(", ") || "none"}.
             </p>
           ) : null}
 
           {error ? (
-            <p
-              className="text-error text-xs"
-              role="alert"
-              style={{ marginTop: 2 }}
-            >
+            <p className="ui-meta text-error" role="alert">
               {error}
             </p>
           ) : null}
 
-          {/* Action row. */}
-          <div className="mt-1 flex flex-wrap items-center gap-2 border-t border-subtle pt-2">
+          {/* Action row. No rule above it — the card's own edge is enough
+              separation at this density. */}
+          <div className="mt-0.5 flex flex-wrap items-center gap-2">
             {recommendedDecision ? renderDecision(recommendedDecision) : null}
             {denyDecision ? renderDecision(denyDecision) : null}
             {secondaryDecisions.length > 0 ? (
@@ -445,17 +452,16 @@ function ApprovalCardImpl({
                 More
               </Button>
             ) : null}
+            {/* The wire timestamp is an ISO string; the reader wants a clock
+                time, with the exact value one hover away. */}
             {requestedAt ? (
-              <span
-                className="ml-auto font-mono text-tertiary text-xs"
-
-              >
-                {requestedAt}
+              <span className="ui-meta ml-auto tabular-nums" data-tooltip={requestedAt}>
+                {clockTimestamp(requestedAt)}
               </span>
             ) : null}
           </div>
           {moreOpen && secondaryDecisions.length > 0 ? (
-            <div className="surface-enter flex flex-wrap gap-2 border-t border-subtle pt-2">
+            <div className="surface-enter flex flex-wrap gap-2">
               {secondaryDecisions.map(renderDecision)}
             </div>
           ) : null}
@@ -493,43 +499,24 @@ function ResolvedApprovalCard({
   const label = labels[resolution];
   const Icon = isAllow ? Check : X;
 
+  // A settled approval is history, not an alert. It keeps only the glyph's
+  // colour so the outcome is scannable, and drops to a single line.
   return (
     <section
       aria-label={`Approval ${label.toLowerCase()}: ${action}`}
-      className={cn("border-b border-subtle bg-transparent", className)}
-      style={{
-        borderLeftWidth: 3,
-        borderLeftColor: accent,
-      }}
+      className={cn("rounded-lg border border-subtle bg-transparent", className)}
     >
-      <div className="flex items-center gap-2 px-3 py-2">
-        <div
-          aria-hidden
-          className="flex flex-shrink-0 items-center justify-center"
-          style={{ width: 20, height: 20, color: accent }}
-        >
-          <Icon size={13} />
-        </div>
+      <div className="flex items-center gap-2 px-3 py-1.5">
+        <Icon size={13} aria-hidden className="flex-shrink-0" style={{ color: accent }} />
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <span
-            className="ui-meta"
-            style={{ color: accent }}
-          >
+          <span className="ui-meta flex-none" style={{ color: accent }}>
             {label}
           </span>
-          <span
-            className="ui-label truncate text-secondary"
-
-            data-tooltip={action}
-          >
+          <span className="ui-body truncate text-secondary" data-tooltip={action}>
             {action}
           </span>
           {operation ? (
-            <code
-              className="truncate font-mono text-tertiary text-xs"
-
-              data-tooltip={operation}
-            >
+            <code className="ui-code truncate text-tertiary" data-tooltip={operation}>
               {operation}
             </code>
           ) : null}

@@ -4,23 +4,29 @@
  * Per SPEC §10: "The composer is one intelligent input surface. It
  * remains fully available while work is running."
  *
+ * The shape is Codex's: a context strip stating where this work happens, a
+ * soft rounded input box overlapping it, and one control row inside the box —
+ * what may be added on the left, what it will run as on the right.
+ *
  * Always-visible controls:
  *   - Effective access level
- *   - Send / steer
- *
- * Contextual controls (compact dropdown):
- *   - Branch / worktree
- *   - Computer use
- *   - Current environment
+ *   - Model and reasoning effort
+ *   - Send / steer, and Stop while a run is in flight
  *
  * Per SPEC §10: "Expand vertically within sensible limits" — max
  * 280px spacious / 224px compact (from theme.css).
  *
- * Attachment and routing controls remain absent until their selections can be
- * persisted in authoritative task contracts. Drafts and keyboard shortcuts
- * remain available. The composer clearly distinguishes send and steer. It remains
- * stable during streaming. Never jump because metadata appears or
- * disappears. Match the reading-column width."
+ * There is still no attachment control, because there is still no attachment
+ * API: `DraftAttachments` is a type with nothing behind it. The `+` button
+ * offers only the two things this app can actually do to a message — read the
+ * clipboard into it, and put a real directory path into it — and does not
+ * render at all when the host supports neither.
+ *
+ * Drafts and keyboard shortcuts remain available. The composer clearly
+ * distinguishes send and steer, and keeps Stop as its own control: steering a
+ * run and killing it must never be the same click. It remains stable during
+ * streaming and never jumps because metadata appeared or disappeared. It
+ * matches the reading-column width.
  *
  * Keyboard shortcuts:
  *   Cmd+Enter          → send (or steer if work is running)
@@ -28,14 +34,17 @@
  * Per SPEC §25.1: "Composer input must never lag during streaming."
  * The textarea updates local state synchronously. Draft persistence is
  * deferred and generation-guarded so streaming renders cannot revert input.
+ * Every control beside it either takes no store subscription (the model
+ * popover reads a prop) or is memoized behind stable callbacks, so a keystroke
+ * re-renders the textarea and nothing else of consequence.
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   Clock3,
-  FolderGit2,
-  Gauge,
-  ShieldCheck,
+  FolderOpen,
+  Plus,
+  ShieldAlert,
   Square,
   X,
 } from "lucide-react";
@@ -53,14 +62,22 @@ import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-lo
 import { lifecycleIsTerminal, type TaskLifecycle } from "../lib/task-lifecycle";
 import { budgetMetrics, primaryBudgetMetric } from "../lib/task-budget";
 import { displayLifecycle, taskRunIsActive } from "../lib/turn-activity";
-import type { ComposerSendMode, ReasoningEffort, Task } from "../types";
+import type { ComposerSendMode, PermissionProfileId, ReasoningEffort, Task } from "../types";
 import { FIXED_SHORTCUTS, matchesShortcut } from "../lib/shortcuts";
 import { sessionLatency } from "../lib/session-latency";
 import { Button } from "../ui/Button";
+import { Menu, type MenuItem } from "../ui/Menu";
+import {
+  DEFAULT_PERMISSION_PROFILE,
+  PERMISSION_PROFILES,
+  isKnownPermissionProfile,
+  permissionProfileIsCaution,
+  permissionProfileLabel,
+  resolvePermissionProfile,
+} from "../lib/permission-profiles";
 import { ErrorState, errorPreset } from "./ErrorState";
 import { ModelPicker } from "./ModelPicker";
 import { ProjectMenu } from "./ProjectMenu";
-import { TurnSettings } from "./TurnSettings";
 import { useModelSelection, type ModelSelectionWriter } from "../lib/models";
 import { useModelInventory } from "../hooks/use-model-inventory";
 
@@ -149,6 +166,92 @@ export function computeSendMode(
   }
 }
 
+/**
+ * The `+` menu.
+ *
+ * Memoized and given only stable callbacks, so the composer's most frequent
+ * re-render — a keystroke — does not walk this subtree. It is rendered by the
+ * caller only when it has at least one real action to offer.
+ */
+const ComposerAddMenu = memo(function ComposerAddMenu({ items }: { items: readonly MenuItem[] }): JSX.Element {
+  return (
+    <Menu
+      label="Add to this message"
+      items={items}
+      side="top"
+      align="start"
+      trigger={(
+        <Button
+          type="button"
+          variant="bare"
+          aria-label="Add to this message"
+          data-tooltip="Add to this message"
+          className="composer-control flex h-7 w-7 items-center justify-center rounded-full text-tertiary hover:bg-hover hover:text-secondary"
+        >
+          <Plus size={16} strokeWidth={1.75} aria-hidden />
+        </Button>
+      )}
+    />
+  );
+});
+
+/**
+ * The access level, as a control rather than a readout.
+ *
+ * It was a static chip: the app showed what a project would let an agent do
+ * and gave no way to change it short of the control plane's API. Since the
+ * level is the single most consequential thing about a run, it belongs where
+ * the run is started.
+ *
+ * The caution colour is spent only on full access. Auto and Ask are working as
+ * asked and are drawn as ordinary chrome; colouring all three would make the
+ * one state worth noticing indistinguishable from the two that are not.
+ */
+const PermissionProfilePicker = memo(function PermissionProfilePicker({
+  profile,
+  raw,
+  onSelect,
+}: {
+  profile: PermissionProfileId;
+  /** Exactly what the session stored, for the tooltip. */
+  raw: string;
+  onSelect: (next: PermissionProfileId) => void;
+}): JSX.Element {
+  const label = permissionProfileLabel(profile);
+  const caution = permissionProfileIsCaution(profile);
+  return (
+    <Menu
+      label="Change the access level"
+      side="top"
+      align="start"
+      items={PERMISSION_PROFILES.map((entry) => ({
+        id: `permission-${entry.id}`,
+        label: entry.label,
+        detail: entry.description,
+        selected: entry.id === profile,
+        onSelect: () => onSelect(entry.id),
+      }))}
+      trigger={(
+        <Button
+          type="button"
+          variant="bare"
+          aria-label={`Access level: ${label}. Change the access level`}
+          data-tooltip={raw.length > 0
+            ? `Access level · ${raw}`
+            : `Access level · not set, running as ${profile}`}
+          className={cn(
+            "composer-control flex h-7 min-w-0 items-center gap-1.5 rounded-md px-1.5 text-xs hover:bg-hover",
+            caution ? "text-warning" : "text-secondary hover:text-primary",
+          )}
+        >
+          <ShieldAlert size={13} strokeWidth={1.8} aria-hidden className="shrink-0" />
+          <span className="truncate">{label}</span>
+        </Button>
+      )}
+    />
+  );
+});
+
 function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProps): JSX.Element {
   const task = useSelectedTask();
   const events = useSelectedTaskEvents();
@@ -190,6 +293,10 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   const [stopping, setStopping] = useState(false);
   const draft = localDraft.taskId === taskId ? localDraft.text : storedDraft;
   const draftPersistence = draftPersistenceByTask[taskId];
+  // Read by the `+` menu's actions, which must stay stable across keystrokes:
+  // closing over `draft` itself would rebuild the menu on every character.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
 
   const cancelScheduledDraftWrite = useCallback((): void => {
     const handle = draftWriteHandleRef.current;
@@ -352,6 +459,83 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     setLocalDraft({ taskId, text });
     writeDraft(text);
   };
+
+  /**
+   * Put text into the draft from somewhere other than the keyboard.
+   *
+   * Appends rather than replaces — the message being written is the user's,
+   * and a menu item is not permission to discard it. Goes through the same
+   * byte ceiling as typing, so no path into the draft can exceed what storage
+   * will hold.
+   */
+  const appendToDraft = useCallback((addition: string): void => {
+    const trimmed = addition.trim();
+    if (trimmed.length === 0) return;
+    const current = draftRef.current;
+    const next = current.trim().length === 0 ? trimmed : `${current.replace(/\s+$/, "")}\n${trimmed}`;
+    if (draftByteLength(next) > MAX_DRAFT_BYTES) {
+      setDraftInputError(`Draft limit reached. That was not added because local drafts are limited to ${MAX_DRAFT_BYTES} bytes.`);
+      return;
+    }
+    setDraftInputError(null);
+    setCopyStatus(null);
+    setLocalDraft({ taskId, text: next });
+    writeDraft(next);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [taskId, writeDraft]);
+
+  const pasteFromClipboard = useCallback((): void => {
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.readText) return;
+    void clipboard.readText()
+      .then((text) => appendToDraft(text))
+      .catch(() => setDraftInputError("Terminus could not read the clipboard. Paste with ⌘V instead."));
+  }, [appendToDraft]);
+
+  /**
+   * The closest thing to an attachment this app can honestly offer: a real
+   * path, chosen from the real filesystem, put into the message as text the
+   * agent can then read. It claims nothing about upload, because nothing is
+   * uploaded.
+   */
+  const insertDirectoryPath = useCallback((): void => {
+    const pick = window.terminusDesktop?.pickDirectory;
+    if (!pick) return;
+    void pick()
+      .then((path) => { if (path) appendToDraft(path); })
+      .catch(() => setDraftInputError("The directory picker could not be opened."));
+  }, [appendToDraft]);
+
+  // Capability-gated, so the `+` never offers something the host cannot do —
+  // and never renders at all when the host can do neither.
+  const addMenuItems: MenuItem[] = useMemo(() => {
+    const items: MenuItem[] = [];
+    if (typeof navigator.clipboard?.readText === "function") {
+      items.push({ id: "composer-add-clipboard", label: "Paste from clipboard", onSelect: pasteFromClipboard });
+    }
+    if (typeof window.terminusDesktop?.pickDirectory === "function") {
+      items.push({ id: "composer-add-path", label: "Insert a folder path…", onSelect: insertDirectoryPath });
+    }
+    return items;
+  }, [insertDirectoryPath, pasteFromClipboard]);
+
+  /**
+   * Change the project's access level.
+   *
+   * `patchSessionDefaults` already applies the new value optimistically and
+   * puts the old one back if the control plane refuses, so the chip can never
+   * be left claiming a level the server did not accept. All this adds is
+   * saying why, through the composer's existing error line.
+   */
+  const changePermissionProfile = useCallback((next: PermissionProfileId): void => {
+    const sessionId = activeSession?.id;
+    if (sessionId === undefined) return;
+    setError(null);
+    void patchSessionDefaults(sessionId, { default_permission_profile: next })
+      .catch((err: unknown) => setError(err instanceof Error
+        ? `The access level could not be changed: ${err.message}`
+        : "The access level could not be changed."));
+  }, [activeSession?.id, patchSessionDefaults]);
 
   const clearCurrentDraft = (): void => {
     discardPendingDraft();
@@ -694,38 +878,55 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
       return { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Create task", mode: "send" };
     }
     if (runIsActive && task?.active_turn) {
-      return { icon: <ArrowUp size={14} />, label: "Steer", mode: "steer" };
+      return { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Steer", mode: "steer" };
     }
     if (runIsActive) {
-      return { icon: <Clock3 size={14} />, label: "Queue for the current run", mode: "steer" };
+      return { icon: <Clock3 size={14} strokeWidth={2} />, label: "Queue for the current run", mode: "steer" };
     }
     switch (sendMode) {
       case "steer":
-        return { icon: <ArrowUp size={14} />, label: "Steer", mode: "steer" };
+        return { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Steer", mode: "steer" };
       case "send":
       default:
-        return { icon: <ArrowUp size={14} />, label: "Send", mode: "send" };
+        return { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Send", mode: "send" };
     }
   })();
 
   // Stop is offered only while there is a run to stop. It is a separate
   // control rather than a mode of the send button, so steering and stopping
-  // are never the same click. `hasStartedTurn` was the old test and it stayed
-  // true forever once any turn had ever started, so the button outlived the
-  // work it claimed to stop.
+  // are never the same click — Codex can merge them because Codex has nothing
+  // to steer into. `hasStartedTurn` was the old test and it stayed true
+  // forever once any turn had ever started, so the button outlived the work it
+  // claimed to stop.
   const canStop = Boolean(task) && !taskTerminal && runIsActive;
 
-  // The profile's own name, not a marketing gloss on it. "Full access" was a
-  // rename of `secure-local-default` invented here: a chip that overstated the
-  // policy in the one place the operator looks to check it.
-  const permissionProfile = activeSession?.default_permission_profile?.trim() ?? "";
-  const permissionLabel = permissionProfile.length > 0 ? permissionProfile : "No profile reported";
+  // The access level belongs to the project, so it is shown and changed on
+  // both surfaces. A legacy id (`secure-local-default`) or anything this
+  // client does not recognise resolves to the level the control plane would
+  // itself apply, and the tooltip keeps the raw value so the label can always
+  // be checked against what is actually stored.
+  const storedPermission = activeSession?.default_permission_profile?.trim() ?? "";
+  const permissionProfileId = resolvePermissionProfile(storedPermission);
+  // With no project selected there is nothing to read a level from and nothing
+  // to write one to, so the chip stays away rather than claiming a level on
+  // behalf of a session that does not exist.
+  const showPermission = activeSession !== undefined;
+
+  // The start surface always offers the switcher, even with nothing selected —
+  // with no project there is no task to create, so "Choose project" is the
+  // most useful thing the strip can say. A task's project is fixed and already
+  // named in the chrome above the transcript, so the strip is start-only and
+  // the chat view's Environment panel states where that work runs.
+  const projectName = activeSession?.title ?? null;
   // Send is not gated on the health probe. `/v1/system/health` reports writer
   // state and stops answering while a turn holds the writer lease, so gating on
   // it disabled the composer during exactly the runs the user most wants to
   // steer — and it made this client, not the control plane, the one refusing.
   // The request goes out; if it fails, the real HTTP error is what is shown.
   const sendDisabled = sending || draft.trim().length === 0 || taskTerminal;
+  // Filled while a send is in flight as well as while one is possible, so the
+  // circle does not blink from accent to ghost for the duration of the request.
+  const sendLooksReady = !taskTerminal && (sending || draft.trim().length > 0);
   const sendTitle = taskTerminal
     ? "Task is terminal; create a new task to continue"
     : runIsActive
@@ -736,12 +937,43 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     <div className={cn("relative", className)}>
       {/* Reading-column-width container — matches Conversation. */}
       <div className={isStartSurface ? "start-column" : "content-column"}>
+        {/* Context strip. An attached tab the input box overlaps, stating
+            where this work happens before stating what it is. Only facts this
+            client actually holds appear here: there is no branch chip because
+            no route, event or preload call reports the workspace's branch, and
+            a chip that always said "main" would be decoration, not data. */}
+        {isStartSurface ? (
+          <div className="flex h-8 items-center gap-3 rounded-t-xl bg-elevated pb-1.5 pl-3 pr-3 text-xs text-secondary">
+            {/* The same switcher as the sidebar header and the title bar. */}
+            <ProjectMenu
+              label="Change project"
+              side="top"
+              {...(onChangeProject ? { onOpenProject: onChangeProject } : {})}
+              trigger={(
+                <Button
+                  type="button"
+                  variant="bare"
+                  className="composer-control -mx-1 flex h-6 min-w-0 items-center gap-1.5 rounded-md px-1 hover:text-primary"
+                  aria-label="Change project"
+                >
+                  <FolderOpen size={13} strokeWidth={1.7} aria-hidden className="shrink-0 text-tertiary" />
+                  <span className="max-w-40 truncate">{projectName ?? "Choose project"}</span>
+                </Button>
+              )}
+            />
+          </div>
+        ) : null}
+
         <div
           /* The border lives in .composer-surface, not in a utility: Tailwind's
              utilities layer outranks the components layer, so a `border-default`
              class here silently won over the focus rule and the composer's
-             focused state showed no border change at all. */
-          className="composer-surface flex flex-col rounded-xl bg-composer"
+             focused state showed no border change at all.
+
+             The 16px radius is the one soft corner in the app. Everything else
+             is ≤12px; this is the surface you type into and it is allowed to
+             read as a physical field. `-mt-1.5` laps it over the context tab. */
+          className="composer-surface relative z-[1] -mt-1.5 flex flex-col rounded-2xl bg-composer"
         >
           {/* Textarea. */}
           <textarea
@@ -751,7 +983,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
             onBlur={flushPendingDraft}
             onKeyDown={onKeyDown}
             rows={1}
-            placeholder={task ? "Send a message or steer the current work…" : isStartSurface ? "Describe a task or ask a question" : "Describe what you want to build…"}
+            placeholder={task ? "Reply or steer…" : isStartSurface ? "Do anything" : "Describe what you want to build…"}
             aria-label="Message composer"
             role="textbox"
             aria-multiline="true"
@@ -759,9 +991,8 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
             data-gramm="false"
             data-gramm_editor="false"
             className={cn(
-              "selectable w-full resize-none bg-transparent px-3 pt-2.5 text-primary placeholder:text-tertiary",
-              "font-sans text-base leading-5 focus:outline-none",
-              task ? "min-h-9" : isStartSurface ? "min-h-[52px]" : "min-h-12",
+              "selectable ui-prose min-h-11 w-full resize-none bg-transparent px-3.5 pt-3 text-primary placeholder:text-tertiary",
+              "font-sans focus:outline-none",
             )}
             style={{ maxHeight: "var(--composer-max-height)", caretColor: "var(--text-primary)" }}
           />
@@ -788,69 +1019,27 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
 
           {/* Control row — always visible. Reserved height so metadata
               appearing/disappearing never causes layout shift (SPEC §10). */}
-          <div
-            className="composer-controls flex min-h-8 items-center gap-0.5 px-2.5 pb-2"
-          >
-            {/* Left cluster — what this turn will run as. Project only on the
-                start surface, where it is still changeable; once a task exists
-                its project is fixed and repeating it is noise. */}
-            {isStartSurface ? (
-              // The same switcher as the sidebar header and the title bar.
-              // This chip used to open the sidebar's *task* filter, which
-              // changed no project at all.
-              <ProjectMenu
-                label="Change project"
-                {...(onChangeProject ? { onOpenProject: onChangeProject } : {})}
-                trigger={(
-                  <Button
-                    type="button"
-                    className="composer-control mr-1 flex h-7 min-w-0 items-center justify-start gap-1.5 rounded-md border border-subtle bg-subtle px-2 text-xs text-secondary"
-                    aria-label="Change project"
-                  >
-                    <FolderGit2 size={13} strokeWidth={1.7} />
-                    <span className="max-w-32 truncate">{activeSession?.title ?? "Choose project"}</span>
-                  </Button>
-                )}
+          <div className="composer-controls flex min-h-9 items-center gap-1 px-2 pb-2">
+            {addMenuItems.length > 0 ? <ComposerAddMenu items={addMenuItems} /> : null}
+
+            {showPermission ? (
+              <PermissionProfilePicker
+                profile={permissionProfileId}
+                raw={storedPermission}
+                onSelect={changePermissionProfile}
               />
             ) : null}
 
-            <ModelPicker selection={modelSelection} className="mr-1" />
-            <TurnSettings selection={modelSelection} className="mr-1" />
+            {/* Right side — what this turn runs as, then what to do with it.
+                Spend moved into the model popover's footer: it is a figure to
+                consult, and the control row is for things that get clicked. */}
+            <div className="ml-auto flex items-center gap-1.5">
+              <ModelPicker
+                selection={modelSelection}
+                {...(budgetMetric ? { meta: `${budgetMetric.label} ${budgetMetric.value}` } : {})}
+                {...(budgetDetail ? { metaDetail: budgetDetail } : {})}
+              />
 
-            {/* Access is task context, not a start-surface choice: before a
-                task exists there is no effective profile to report. */}
-            {isStartSurface ? null : (
-              <span
-                className="flex h-7 items-center gap-1.5 px-1 text-xs text-tertiary"
-                aria-label={`Permission profile: ${permissionLabel}`}
-                data-tooltip="Permission profile reported by the selected session"
-              >
-                <ShieldCheck size={12} strokeWidth={1.8} aria-hidden />
-                <span className="max-w-40 truncate">{permissionLabel}</span>
-              </span>
-            )}
-
-            {/* What this task has spent. Both numbers are already on the wire
-                in `budget_ledger`; before this the app displayed neither. */}
-            {budgetMetric ? (
-              <span
-                className={cn(
-                  "budget-meter flex h-7 items-center gap-1 px-1 text-xs tabular-nums",
-                  budgetMetric.tone === "critical" ? "text-error"
-                    : budgetMetric.tone === "warning" ? "text-warning"
-                      : "text-tertiary",
-                )}
-                role="status"
-                aria-label={`${budgetMetric.label} ${budgetMetric.value}${budgetMetric.detail ? `, ${budgetMetric.detail}` : ""}`}
-                data-tooltip={budgetDetail}
-              >
-                <Gauge size={12} strokeWidth={1.8} aria-hidden />
-                <span>{budgetMetric.value}</span>
-              </span>
-            ) : null}
-
-            {/* Right side — mode pill + send button. */}
-            <div className="ml-auto flex items-center gap-2">
               {canStop ? (
                 <Button
                   type="button"
@@ -859,22 +1048,25 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
                   aria-label="Stop"
                   data-tooltip={stopping ? "Stopping…" : "Stop this run · ⌘."}
                   variant="secondary"
-                  className="stop-control flex h-7 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-error"
+                  className="stop-control flex h-7 w-7 items-center justify-center rounded-full px-0"
                 >
-                  <Square size={11} strokeWidth={2.5} fill="currentColor" aria-hidden />
-                  {stopping ? "Stopping…" : "Stop"}
+                  <Square size={10} strokeWidth={2.5} fill="currentColor" aria-hidden />
+                  <span className="sr-only">Stop</span>
                 </Button>
               ) : null}
+
               <Button
                 type="button"
                 onClick={() => void onSubmit(sendButtonContent.mode)}
                 disabled={sendDisabled}
                 aria-label={sendButtonContent.label}
                 data-tooltip={sendTitle}
-                variant={sendDisabled ? "ghost" : "primary"}
-                className="send-control flex h-7 w-7 items-center justify-center rounded-full px-0 text-xs font-medium"
+                variant={sendLooksReady ? "primary" : "ghost"}
+                className="send-control flex h-7 w-7 items-center justify-center rounded-full px-0"
               >
-                {sendButtonContent.icon}
+                {sending
+                  ? <span className="spinner border-current/30 border-t-current" aria-hidden />
+                  : sendButtonContent.icon}
                 <span className="sr-only">{sendButtonContent.label}</span>
               </Button>
             </div>
@@ -895,7 +1087,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
             role="alert"
             aria-live="assertive"
             aria-atomic="true"
-            className="mt-2 flex items-start gap-2 border-l-2 border-error/60 px-2.5 py-1.5 text-xs text-error"
+            className="mt-2 flex items-start gap-2 px-1 text-xs text-error"
           >
             <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{error}</span>
             <Button
@@ -968,15 +1160,14 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
         ) : null}
 
         {draftInputError ? (
-          <div role="alert" className="mt-2 border-l-2 border-warning/55 px-2.5 py-1.5 text-xs text-warning" >
+          <div role="alert" className="mt-2 px-1 text-xs text-warning">
             {draftInputError}
           </div>
         ) : null}
         {draftPersistence?.status === "session_only" || draftPersistence?.status === "rejected" ? (
           <div
             role="status"
-            className="mt-2 flex flex-wrap items-center gap-2 border-l-2 border-warning/55 px-2.5 py-1.5 text-xs text-secondary"
-
+            className="mt-2 flex flex-wrap items-center gap-2 px-1 text-xs text-secondary"
           >
             <span className="min-w-0 flex-1">
               Draft not saved locally. {draftPersistence.error ?? draftStorageError ?? "It is available only in this window."}
@@ -993,8 +1184,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
         {draftStorageError && !draftPersistence ? (
           <div
             role="alert"
-            className="mt-2 flex flex-wrap items-center gap-2 border-l-2 border-warning/55 px-2.5 py-1.5 text-xs text-secondary"
-
+            className="mt-2 flex flex-wrap items-center gap-2 px-1 text-xs text-secondary"
           >
             <span className="min-w-0 flex-1">
               Saved draft recovery is unavailable. {draftStorageError}

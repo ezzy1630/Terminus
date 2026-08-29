@@ -1,10 +1,18 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { Conversation, decodeFeed, terminalReasonText } from "../src/components/Conversation";
+import {
+  Conversation,
+  decodeFeed,
+  sameFeedItem,
+  terminalReasonText,
+  type FeedItem,
+} from "../src/components/Conversation";
+import { Message } from "../src/components/Message";
 import { ReasoningTrace } from "../src/components/ReasoningTrace";
 import { useTerminusStore } from "../src/hooks/use-terminus";
-import type { Task, TerminusSseEvent } from "../src/types";
+import type { ConversationMessage, Task, TerminusSseEvent } from "../src/types";
 
 const TASK_ID = "task-accessible-transcript";
 
@@ -659,5 +667,172 @@ describe("final turn contract", () => {
 
     expect(feed.blocks.at(-1)?.entries[0]?.summary)
       .toContain("Terminus restarted while this turn was running.");
+  });
+});
+
+// ────────────────────────── Transcript surface ───────────────────────────────
+//
+// The transcript speaks Codex's language: an assistant reply is plain prose on
+// the canvas with a quiet action row underneath, and a user turn is a small
+// right-aligned pill. These pin the parts of that which are behaviour rather
+// than decoration — chiefly that every control in the row does something real.
+
+function reply(content: string, overrides: Partial<ConversationMessage> = {}): ConversationMessage {
+  return {
+    id: "message-reply",
+    role: "agent",
+    content,
+    createdAt: "2026-08-28T18:04:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("assistant reply surface", () => {
+  afterEach(() => cleanup());
+
+  test("copies the exact reply source, not the rendered markup", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+    render(<Message message={reply("## Result\n\nThe kernel owns every effect.")} isLast />);
+
+    await user.click(screen.getByRole("button", { name: "Copy reply" }));
+    expect(writeText).toHaveBeenCalledWith("## Result\n\nThe kernel owns every effect.");
+    expect(screen.getByRole("button", { name: "Reply copied" })).toBeInTheDocument();
+  });
+
+  /*
+   * Codex's action row also carries 👍 / 👎 and a branch-from-here control.
+   * Terminus's control plane exposes neither a feedback nor a fork endpoint
+   * (`src/lib/api.ts` has no such method), so shipping those icons would mean
+   * shipping three buttons where only one does anything.
+   */
+  test("offers no feedback or branch controls, because nothing is behind them", () => {
+    render(<Message message={reply("Done.")} isLast />);
+
+    const labels = screen.getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent ?? "");
+    expect(labels).toEqual(["Copy reply"]);
+    expect(labels.some((label) => /thumb|feedback|helpful|branch|fork/i.test(label))).toBe(false);
+  });
+
+  test("offers nothing to copy while the reply is still streaming", () => {
+    render(<Message message={reply("The kernel ", { streaming: true })} isLast />);
+
+    expect(screen.queryByRole("button", { name: "Copy reply" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Response in progress")).toBeInTheDocument();
+  });
+
+  test("names the model the runtime reported, and says nothing when it did not", () => {
+    const { rerender } = render(<Message message={reply("Done.", { model: "ox-alpha" })} />);
+    expect(screen.getByTestId("message-model")).toHaveTextContent("ox-alpha");
+
+    rerender(<Message message={reply("Done.")} />);
+    expect(screen.queryByTestId("message-model")).not.toBeInTheDocument();
+  });
+});
+
+describe("user turn surface", () => {
+  afterEach(() => cleanup());
+
+  test("keeps the send time in a tooltip rather than as a line of the transcript", () => {
+    render(<Message message={{
+      id: "message-user",
+      role: "user",
+      content: "add the missing migration",
+      createdAt: "2026-08-28T18:04:00.000Z",
+    }} />);
+
+    const pill = screen.getByText("add the missing migration").parentElement;
+    expect(pill).toHaveAttribute("data-tooltip");
+    // Nothing in the turn renders a clock time as readable text.
+    expect(screen.queryByText(/^\d{2}:\d{2}:\d{2}$/)).not.toBeInTheDocument();
+  });
+});
+
+describe("empty conversation", () => {
+  beforeEach(() => {
+    const selected = task();
+    useTerminusStore.setState({
+      taskById: { [selected.id]: selected },
+      tasksBySession: { [selected.session_id]: [selected] },
+      selectedSessionId: selected.session_id,
+      selectedTaskId: selected.id,
+      approvalsByTask: { [selected.id]: [] },
+      approvalFreshnessByTask: { [selected.id]: { status: "ready", error: null } },
+      eventHistoryByTask: {},
+    });
+  });
+
+  afterEach(() => cleanup());
+
+  test("is one quiet line, not a headline with a paragraph under it", () => {
+    render(<Conversation events={[]} />);
+
+    expect(screen.getByText("Send a message to start this task.")).toBeInTheDocument();
+    expect(screen.queryByRole("heading")).not.toBeInTheDocument();
+  });
+});
+
+// ────────────────────────── Streaming stability ──────────────────────────────
+//
+// `decodeFeed` is a fold over the whole event log and re-runs on every streamed
+// delta, so it returns new objects for turns that did not change. Without the
+// comparison below, `React.memo` on every row is inert and appending one token
+// re-renders and re-parses the entire transcript above it.
+
+function messageItem(content: string, streaming = false): FeedItem {
+  return { kind: "message", message: reply(content, { streaming }) };
+}
+
+describe("feed item stability", () => {
+  test("treats a turn whose text is unchanged as the same item", () => {
+    expect(sameFeedItem(messageItem("Answer."), messageItem("Answer."))).toBe(true);
+  });
+
+  test("sees an appended delta", () => {
+    expect(sameFeedItem(messageItem("The kernel "), messageItem("The kernel owns"))).toBe(false);
+  });
+
+  test("sees a reply settling, even when the text is identical", () => {
+    expect(sameFeedItem(messageItem("Answer.", true), messageItem("Answer.", false))).toBe(false);
+  });
+
+  test("sees an activity block settle underneath a stable title", () => {
+    const proposed: FeedItem = {
+      kind: "block",
+      block: {
+        id: "b1",
+        title: "Explored codebase",
+        metric: "1 file",
+        status: "working",
+        entries: [{ tool: "read", summary: "a.ts", at: TASK_CREATED_AT, phase: "proposed" }],
+      },
+    };
+    const settled: FeedItem = {
+      kind: "block",
+      block: {
+        ...proposed.kind === "block" ? proposed.block : {},
+        id: "b1",
+        title: "Explored codebase",
+        metric: "1 file",
+        status: "done",
+        entries: [{ tool: "read", summary: "Read a.ts", at: TASK_CREATED_AT, phase: "settled", outcome: "succeeded" }],
+      },
+    };
+    expect(sameFeedItem(proposed, settled)).toBe(false);
+    expect(sameFeedItem(settled, settled)).toBe(true);
+  });
+
+  test("sees a reasoning trace close", () => {
+    const running: FeedItem = {
+      kind: "reasoning",
+      reasoning: { id: "r1", phases: [], startedAt: TASK_CREATED_AT, endedAt: null },
+    };
+    const closed: FeedItem = {
+      kind: "reasoning",
+      reasoning: { id: "r1", phases: [], startedAt: TASK_CREATED_AT, endedAt: TASK_CREATED_AT },
+    };
+    expect(sameFeedItem(running, closed)).toBe(false);
   });
 });

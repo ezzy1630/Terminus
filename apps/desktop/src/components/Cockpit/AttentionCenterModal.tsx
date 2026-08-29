@@ -138,12 +138,12 @@ export function AttentionCenterModal({
         event.preventDefault();
         void resolveQuestion(currentQuestion.id, option);
       }}
-      className="dialog-panel fixed left-1/2 top-1/2 flex max-h-[calc(100%-32px)] w-[min(560px,calc(100%-32px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-[10px] border border-default bg-elevated text-primary shadow-lg"
+      className="dialog-panel fixed left-1/2 top-1/2 flex max-h-[calc(100%-32px)] w-[min(560px,calc(100%-32px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-default bg-elevated text-primary shadow-lg"
     >
         <header className="flex flex-shrink-0 items-start justify-between gap-4 px-5 pb-2 pt-5">
           <div>
-            <h2 id="attention-title" className="text-base font-semibold">Attention center</h2>
-            <p id="attention-description" className="mt-1 text-xs text-secondary">
+            <h2 id="attention-title" className="text-sm font-semibold text-primary">Attention center</h2>
+            <p id="attention-description" className="ui-meta mt-0.5">
               One decision at a time.
             </p>
             {selectedTaskId ? <span className="sr-only">Task {selectedTaskId}</span> : null}
@@ -153,22 +153,20 @@ export function AttentionCenterModal({
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-3">
           <p className="sr-only" role="status" aria-live="polite">{resolutionAnnouncement}</p>
-          {waiting.length > 0 ? (
+          {waiting.length > 0 && onOpenTask ? (
             <section className="mb-4" aria-label="Tasks waiting on you">
-              <h3 className="ui-section-label pb-1.5">Waiting on you</h3>
-              <ul className="flex flex-col gap-1">
+              <h3 className="ui-body pb-1 text-tertiary">Waiting on you</h3>
+              <ul className="flex flex-col">
                 {waiting.map((item) => (
                   <li key={item.id}>
                     <Button
-                      type="button"
-                      variant="secondary"
-                      onClick={() => onOpenTask?.(item.id)}
-                      disabled={!onOpenTask}
+                      variant="bare"
+                      onClick={() => onOpenTask(item.id)}
                       aria-label={`Open ${item.title}`}
-                      className="h-auto w-full justify-start gap-3 p-2.5 text-left"
+                      className="flex h-8 w-full items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-hover"
                     >
-                      <SemanticBadge tone="warning">{item.label}</SemanticBadge>
-                      <span className="min-w-0 flex-1 truncate text-sm text-primary">{item.title}</span>
+                      <span className="ui-body min-w-0 flex-1 truncate text-primary">{item.title}</span>
+                      <span className="ui-meta shrink-0 text-warning">{item.label}</span>
                     </Button>
                   </li>
                 ))}
@@ -183,7 +181,7 @@ export function AttentionCenterModal({
             <div className="space-y-4">
               {resource.status === "stale" && resource.error ? <StaleDataBanner error={resource.error} retry={resource.retry} /> : null}
               {resource.data.assessment ? (
-                <section className="flex items-start justify-between gap-3 rounded-md bg-subtle px-3 py-2.5" aria-label="Attention assessment">
+                <section className="flex items-start justify-between gap-3 rounded-lg border border-subtle px-3 py-2.5" aria-label="Attention assessment">
                     <p className="min-w-0 text-xs leading-5 text-secondary">{resource.data.assessment.reason}</p>
                     <SemanticBadge tone={urgencyTone(resource.data.assessment.urgency)}>{resource.data.assessment.urgency}</SemanticBadge>
                 </section>
@@ -204,7 +202,7 @@ export function AttentionCenterModal({
                       <SemanticBadge tone="warning">{currentQuestion.trigger}</SemanticBadge>
                       {pendingQuestions.length > 1 ? <span className="text-xs text-tertiary">1 of {pendingQuestions.length}</span> : null}
                     </div>
-                    <h3 className="mt-3 text-sm font-semibold leading-5 text-primary">{currentQuestion.questionText}</h3>
+                    <h3 className="mt-3 text-sm font-medium leading-5 text-primary">{currentQuestion.questionText}</h3>
 
                     <div className="mt-4 grid grid-cols-1 gap-2">
                       {currentQuestion.options.map((option, index) => (

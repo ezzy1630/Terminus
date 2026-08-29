@@ -11,7 +11,6 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { resolveApiBase, TerminusApiClient, TerminusApiError } from "../src/lib/api";
-import { SettingsWindow } from "../src/components/SettingsWindow";
 import { useThemeStore } from "../src/hooks/use-theme";
 
 type Bridge = NonNullable<Window["terminusDesktop"]>;
@@ -78,18 +77,6 @@ describe("the control-plane address", () => {
       expect((error as TerminusApiError).envelope?.code).toBe("API_BASE_UNAVAILABLE");
       expect((error as TerminusApiError).message).toBe("no approved control origin");
     }
-  });
-});
-
-describe("the preferences window", () => {
-  test("opens on the category the shell launched it for", async () => {
-    installBridge({ view: "settings", settingsCategory: "shortcuts" });
-
-    render(<SettingsWindow />);
-
-    // Waiting for a follow-up message showed Appearance first, every time.
-    await waitFor(() => expect(screen.getByRole("button", { name: /Shortcuts/ }))
-      .toHaveAttribute("aria-current", "true"));
   });
 });
 

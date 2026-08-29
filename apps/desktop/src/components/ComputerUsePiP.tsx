@@ -38,13 +38,13 @@ function ComputerUsePiPImpl({
         }}
         aria-label="Show computer-use availability"
         data-tooltip="Show computer-use availability"
-        className={[cn(
-          "fixed z-50 flex items-center gap-2 rounded-full border border-default bg-inspector px-3 py-2 shadow-lg",
+        className={cn(
+          "fixed z-50 flex h-7 items-center gap-2 rounded-full border border-subtle bg-[var(--bg-popover)] px-3 text-xs shadow-md",
           className,
-        ), "text-xs"].filter(Boolean).join(" ")}
+        )}
         style={{ right: 24, bottom: 80 }}
       >
-        <MonitorOff size={14} className="text-tertiary" aria-hidden />
+        <MonitorOff size={13} className="flex-none text-tertiary" aria-hidden />
         <span className="text-secondary">Computer use unavailable</span>
       </Button>
     );
@@ -55,28 +55,26 @@ function ComputerUsePiPImpl({
       role="region"
       aria-label="Computer-use availability"
       className={cn(
-        "flex flex-col overflow-hidden rounded-lg border border-default bg-inspector shadow-lg",
-        expanded ? "absolute inset-0" : "relative min-h-48 w-full",
+        "flex flex-col overflow-hidden rounded-md border border-subtle bg-inspector",
+        expanded ? "absolute inset-0" : "relative min-h-40 w-full",
         className,
       )}
     >
-      <header className="flex h-9 flex-shrink-0 items-center gap-2 border-b border-subtle px-3">
-        <MonitorOff size={13} className="text-tertiary" aria-hidden />
-        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-secondary">
+      <header className="flex h-8 flex-shrink-0 items-center gap-2 border-b border-subtle px-2.5">
+        <MonitorOff size={13} className="flex-none text-tertiary" aria-hidden />
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-secondary">
           Computer use
         </span>
-        <span className="rounded-sm border border-subtle px-1.5 py-0.5 font-mono text-xs text-tertiary">
-          unavailable
-        </span>
+        <span className="flex-none text-xs text-tertiary">unavailable</span>
         {onToggleExpanded ? (
           <Button
             type="button"
             onClick={() => onToggleExpanded(!expanded)}
             aria-label={expanded ? "Return computer-use status to inspector" : "Expand computer-use status"}
             data-tooltip={expanded ? "Return to inspector" : "Expand status"}
-            className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
+            className="icon-button flex h-6 w-6 flex-none items-center justify-center rounded-sm text-tertiary hover:bg-hover hover:text-primary"
           >
-            {expanded ? <Minimize2 size={13} aria-hidden /> : <Maximize2 size={13} aria-hidden />}
+            {expanded ? <Minimize2 size={12} aria-hidden /> : <Maximize2 size={12} aria-hidden />}
           </Button>
         ) : null}
         {onHide ? (
@@ -85,19 +83,17 @@ function ComputerUsePiPImpl({
             onClick={onHide}
             aria-label="Hide computer-use availability"
             data-tooltip="Hide status"
-            className="icon-button flex h-7 w-7 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
+            className="icon-button flex h-6 w-6 flex-none items-center justify-center rounded-sm text-tertiary hover:bg-hover hover:text-primary"
           >
-            <EyeOff size={13} aria-hidden />
+            <EyeOff size={12} aria-hidden />
           </Button>
         ) : null}
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-5 py-6 text-center">
-        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-hover text-tertiary" aria-hidden>
-          <MonitorOff size={19} />
-        </div>
-        <h3 className="text-sm font-medium text-primary">Trusted preview unavailable</h3>
-        <p className="max-w-sm text-xs leading-relaxed text-tertiary">
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1.5 px-5 py-6 text-center">
+        <MonitorOff size={18} className="text-tertiary" aria-hidden />
+        <h3 className="ui-body font-semibold text-primary">Trusted preview unavailable</h3>
+        <p className="ui-meta max-w-[42ch] leading-relaxed">
           A kernel-backed environment lease, fenced control session, and trusted preview stream are required. Terminus will not capture this Mac's display as a substitute.
         </p>
       </div>

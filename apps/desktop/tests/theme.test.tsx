@@ -66,8 +66,8 @@ beforeEach(resetStore);
 describe("CSS-first theme", () => {
   test("defines complete default tokens without renderer JavaScript", () => {
     expect(themeCss).toContain(":root {");
-    expect(themeCss).toContain("--bg-canvas: #151619");
-    expect(themeCss).toContain("--text-primary: #f0f1f4");
+    expect(themeCss).toContain("--bg-canvas: #0d0d0f");
+    expect(themeCss).toContain("--text-primary: #ededee");
     expect(themeCss).toContain("--font-size-base: 13px");
     expect(themeCss).toContain("--duration-normal: 180ms");
   });
@@ -89,7 +89,7 @@ describe("CSS-first theme", () => {
 
   test("keeps code text legible on the dark terminal surface in both themes", () => {
     expect(themeCss).toContain("--bg-terminal: #1b1b19");
-    expect(themeCss).toContain("--text-code: #eef1f5");
+    expect(themeCss).toContain("--text-code: #eaeaec");
     expect(themeCss.match(/--text-code: #ececea/g)).toHaveLength(2);
   });
 

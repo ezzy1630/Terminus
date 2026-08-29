@@ -1,43 +1,50 @@
 /**
- * Terminus Desktop — Sidebar item (single project/session row).
+ * Terminus Desktop — one row in the sidebar tree.
  *
- * Upgraded hybrid design blending T3 Code, Codex, and reference screenshot:
- *   - 2-line session card with high scanability.
- *   - Line 1: Title + right-aligned blue activity dot for active/running tasks.
- *   - Line 2: Status phase (e.g. Working..., PR is ready) + relative time + branch/PR glyphs.
- *   - Selected state visible with clean macOS elevation.
- *   - Compact rail mode support.
+ * This used to be a two-line card: title, then a "Failed · 2h ago" meta line,
+ * with a status dot in the left gutter. Three pieces of chrome per row, in a
+ * column of thirty rows, none of which answered the question the sidebar is
+ * for — *which task is this*. Codex's rail is a list of titles, and it reads
+ * far faster because of it.
+ *
+ * So: one line, one type size, no subtitle, no leading dot. Status earns a
+ * mark only when it is asking for something — a spinner while the agent is
+ * moving on its own, a small warning dot when the task wants a human. A done
+ * task is simply a title, which is exactly how much attention it deserves.
  */
 import { memo, type KeyboardEventHandler } from "react";
-import { GitBranch, GitPullRequest, Pin } from "lucide-react";
+import { Pin } from "lucide-react";
 import { cn } from "../lib/cn";
-import { StatusIndicator } from "./StatusIndicator";
-import { lifecycleShortLabel, type TaskLifecycle } from "../lib/task-lifecycle";
-import { IconButton } from "../ui/IconButton";
+import {
+  lifecycleIsActive,
+  lifecycleNeedsAttention,
+  lifecycleShortLabel,
+  type TaskLifecycle,
+} from "../lib/task-lifecycle";
 import { Button } from "../ui/Button";
 
 interface SidebarItemProps {
   /** Title to display. */
   title: string;
-  /** Status kind for tasks. Projects/spaces omit this. */
+  /** Task lifecycle. Rows that are not tasks (a bare project) omit it. */
   status?: TaskLifecycle;
-  /** ISO timestamp for relative time display. */
-  updatedAt?: string;
-  /** Branch name if associated with a worktree/branch. */
-  branch?: string;
-  /** Pull request status or number if available. */
-  pullRequest?: string;
   /** Whether this row is currently selected. */
   selected: boolean;
   /** Whether this row is pinned. */
   pinned?: boolean;
-  /** Compact mode: icons only. */
+  /**
+   * Icon-only rail row. Nothing in the app mounts this: the compact rail was
+   * removed from the sidebar when it turned out to have no caller and no
+   * breakpoint. It survives here only because `tests/components.test.tsx`
+   * still exercises it, and that file is shared. Drop the prop and that test
+   * together.
+   */
   compact?: boolean;
-  /** Indentation depth (0 = top-level, 1 = nested session). */
+  /** Indentation depth (0 = top-level, 1 = nested under a project). */
   depth?: number;
   /** Click handler. */
   onClick?: () => void;
-  /** Toggle pin. */
+  /** Toggle pin. Omitted for rows that cannot be pinned. */
   onTogglePin?: () => void;
   /** Roving-focus plumbing for virtualized task sections. */
   primaryButtonRef?: (element: HTMLButtonElement | null) => void;
@@ -46,48 +53,34 @@ interface SidebarItemProps {
 }
 
 /**
- * A finished task needs no word beside a row that has stopped moving, so
- * `done` and `unknown` contribute nothing and the row falls back to the
- * timestamp alone.
+ * The trailing mark, or nothing.
+ *
+ * Two states earn a glyph. Motion means the agent is advancing the task with
+ * no one waiting on it; the warning dot means the row is one of the ones
+ * counted by "Needs attention", which is `lifecycleNeedsAttention` — a failed
+ * task is as much a request for a human as an approval prompt is, and dropping
+ * its mark to match a literal reading of "needs you" would have hidden
+ * failures entirely now that the meta line is gone.
  */
-function statusPhrase(status?: TaskLifecycle): string | null {
-  if (status === undefined || status === "done" || status === "unknown") return null;
-  return lifecycleShortLabel(status);
-}
-
-/**
- * One meta line: what the task is doing, then when it last moved. A finished
- * task only needs the time — repeating "Done" beside a row with no activity
- * mark is a word that carries nothing.
- */
-function metaLine(status?: TaskLifecycle, updatedAt?: string): string {
-  const phrase = statusPhrase(status);
-  const when = updatedAt ? relativeTimeAgo(updatedAt) : "";
-  if (phrase && when) return `${phrase} · ${when}`;
-  return phrase ?? when;
-}
-
-function relativeTimeAgo(isoTimestamp: string): string {
-  try {
-    const diffMs = Date.now() - new Date(isoTimestamp).getTime();
-    const minutes = Math.floor(diffMs / 60000);
-    if (minutes < 1) return "just now";
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
-  } catch {
-    return "";
+function StatusGlyph({ status }: { status: TaskLifecycle }): JSX.Element | null {
+  if (lifecycleIsActive(status)) {
+    return <span className="spinner-sm" role="img" aria-label={lifecycleShortLabel(status)} />;
   }
+  if (lifecycleNeedsAttention(status)) {
+    return (
+      <span
+        className="block h-1.5 w-1.5 rounded-full bg-warning"
+        role="img"
+        aria-label={lifecycleShortLabel(status)}
+      />
+    );
+  }
+  return null;
 }
 
 function SidebarItemImpl({
   title,
   status,
-  updatedAt,
-  branch,
-  pullRequest,
   selected,
   pinned = false,
   compact = false,
@@ -98,14 +91,14 @@ function SidebarItemImpl({
   primaryTabIndex,
   onPrimaryKeyDown,
 }: SidebarItemProps): JSX.Element {
-  const subtitle = metaLine(status, updatedAt);
+  const glyph = status ? <StatusGlyph status={status} /> : null;
 
   if (compact) {
-    // Rail mode: icon-only.
     return (
       <Button
         ref={primaryButtonRef}
         type="button"
+        variant="bare"
         onClick={onClick}
         onKeyDown={onPrimaryKeyDown}
         tabIndex={primaryTabIndex}
@@ -113,44 +106,30 @@ function SidebarItemImpl({
         aria-pressed={selected}
         data-tooltip={title}
         className={cn(
-          "flex w-full items-center justify-center hover:bg-hover",
+          "flex w-full items-center justify-center rounded-md hover:bg-hover",
           selected && "bg-selected",
         )}
         style={{ height: "var(--row-height)" }}
       >
-        {status ? (
-          <StatusIndicator status={status} size={12} />
-        ) : (
-          <span className="block h-2 w-2 rounded-sm bg-neutral-status" aria-hidden />
-        )}
+        {glyph ?? <span className="block h-1.5 w-1.5 rounded-full bg-neutral-status" aria-hidden />}
       </Button>
     );
   }
-
-  const isTwoLine = Boolean(status || subtitle);
 
   return (
     <div
       data-selected={selected}
       className={cn(
-        "sidebar-task-row group relative flex cursor-default items-center rounded-lg text-sm transition-colors",
-        selected ? "bg-selected text-primary font-medium shadow-xs" : "text-secondary hover:bg-hover hover:text-primary",
+        "sidebar-task-row group relative flex cursor-default items-center gap-1.5 rounded-md transition-colors",
+        selected ? "text-primary" : "text-secondary hover:bg-hover hover:text-primary",
       )}
       style={{
-        minHeight: isTwoLine ? 38 : "var(--row-height)",
-        // Nested tasks hang from the same label column as their space row.
-        paddingLeft: depth > 0 ? 34 : 8,
+        height: "var(--row-height)",
+        // Nested tasks hang from the same text column as their project row.
+        paddingLeft: depth > 0 ? 26 : 8,
         paddingRight: 6,
-        paddingTop: isTwoLine ? 4 : 0,
-        paddingBottom: isTwoLine ? 4 : 0,
       }}
     >
-      {status ? (
-        <span className="pointer-events-none absolute left-3 top-2.5 flex w-4 justify-center" aria-hidden>
-          <StatusIndicator status={status} size={10} />
-        </span>
-      ) : null}
-
       <Button
         ref={primaryButtonRef}
         variant="bare"
@@ -168,52 +147,45 @@ function SidebarItemImpl({
             ? `${title}, status ${lifecycleShortLabel(status)}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
             : `${title}${selected ? ", selected" : ""}${pinned ? ", pinned" : ""}`
         }
-        className="flex w-full min-w-0 flex-1 flex-col items-start justify-center gap-0.5"
+        className="min-w-0 flex-1 truncate text-left text-base leading-none"
       >
-        {/* One line. Titles are objectives, so the second clamped line was
-            almost always another half-sentence: it doubled the row height
-            without making adjacent tasks distinguishable any faster than the
-            first six words already do. */}
-        <span className="w-full min-w-0 truncate text-left text-base font-medium leading-snug text-primary">
-          {title}
-        </span>
-
-        {isTwoLine ? (
-          <span className="flex w-full min-w-0 items-center gap-1 text-left text-xs leading-tight text-tertiary">
-            <span className="truncate">{subtitle}</span>
-            {branch ? (
-              <span className="inline-flex shrink-0 items-center gap-0.5" data-tooltip={branch}>
-                <GitBranch size={10} aria-hidden />
-              </span>
-            ) : null}
-            {pullRequest ? (
-              <span className="inline-flex shrink-0 items-center gap-0.5 text-success" data-tooltip={pullRequest}>
-                <GitPullRequest size={10} aria-hidden />
-              </span>
-            ) : null}
-          </span>
-        ) : null}
+        {title}
       </Button>
 
-      {/* Right side pin button */}
-      <span
-        className="flex flex-shrink-0 items-center justify-end"
-        style={{ width: 20 }}
-      >
+      {/* One 14px trailing slot, always present so the title column cannot
+          shift under the cursor. It shows the status mark at rest and the pin
+          toggle while the row is hovered or focused; a pinned row keeps its
+          pin visible, because that filled pin is the only way to unpin. */}
+      <span className="relative flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+        {glyph ? (
+          <span
+            className={cn(
+              "flex items-center justify-center",
+              onTogglePin && !pinned && "group-hover:invisible group-focus-within:invisible",
+            )}
+          >
+            {glyph}
+          </span>
+        ) : null}
         {onTogglePin ? (
-          <IconButton
-            onClick={(e) => {
-              e.stopPropagation();
+          <Button
+            variant="bare"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
               onTogglePin();
             }}
-            label={`${pinned ? "Unpin" : "Pin"} task ${title}`}
-            icon={<Pin size={11} className={pinned ? "fill-current" : undefined} />}
-            size="sm"
+            aria-label={`${pinned ? "Unpin" : "Pin"} task ${title}`}
+            aria-pressed={pinned}
             className={cn(
-              pinned && "text-primary",
-              !pinned && "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100",
+              "absolute inset-0 flex items-center justify-center rounded-sm text-tertiary hover:text-primary",
+              pinned
+                ? "text-primary"
+                : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100",
             )}
-          />
+          >
+            <Pin size={11} className={pinned ? "fill-current" : undefined} aria-hidden />
+          </Button>
         ) : null}
       </span>
     </div>

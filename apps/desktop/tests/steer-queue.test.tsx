@@ -10,7 +10,7 @@
  * The same surface gained a cost/context readout. Both numbers were already on
  * the wire in `budget_ledger`; the app displayed neither.
  */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -29,7 +29,15 @@ vi.mock("../src/lib/api", async () => {
       startTurn: vi.fn(async () => ({})),
       steerTurn: vi.fn(async () => ({ episode_id: "ep-1", sequence: 2, turn_id: "turn-1", turn_state: "PROVIDER_RUNNING" })),
       getTask: vi.fn(async () => task()),
-      listProviderModels: vi.fn(async () => ({ models: [], default_model: null })),
+      // A composer with no model at all is a degenerate case with its own
+      // empty state (see honest-surfaces). Steering and spend are exercised
+      // against a composer that can actually route a turn.
+      listProviderModels: vi.fn(async () => ({
+        providers: [{ id: "anthropic", label: "Anthropic", available: true }],
+        models: [
+          { id: "sonnet", provider: "anthropic", label: "Sonnet", slug: "claude-sonnet-4-6", reasoning: true, context_tokens: 200000 },
+        ],
+      })),
       getProviderConfig: vi.fn(async () => ({ configured: false, configuration: null })),
     },
   };
@@ -188,8 +196,17 @@ describe("steering while a run is in flight", () => {
       eventsByTask: { "task-1": [event("turn.started", "1"), event("turn.completed", "2")] },
     });
 
+    // A queued flush is a send like any other: it routes to the model the
+    // composer is showing at the moment it goes out, not to whatever the
+    // control plane would have defaulted to.
     await waitFor(() => expect(api.startTurn).toHaveBeenCalledWith(
-      { thread_id: "thread-1", task_id: "task-1", user_input: "now do the other thing" },
+      {
+        thread_id: "thread-1",
+        task_id: "task-1",
+        user_input: "now do the other thing",
+        model: "claude-sonnet-4-6",
+        reasoning_effort: "medium",
+      },
       { idempotencyKey: expect.stringMatching(/^composer-turn\.task-1:/) },
     ));
     await waitFor(() => expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBeUndefined());
@@ -299,22 +316,46 @@ describe("spend readout", () => {
     context_headroom_tokens: "150000",
   };
 
-  test("shows what the task has cost", () => {
+  /**
+   * Spend moved out of the composer's control row and into the footer of the
+   * model popover. The row is for things that get clicked; a running total is
+   * a figure to consult, and as a permanent chip it competed for attention
+   * with the send button on every single turn. Nothing about *what* is
+   * reported changed — it is still read from `budget_ledger`, still omitted
+   * entirely when the ledger cannot support it, and still never a zero
+   * standing in for an unknown.
+   */
+  async function openTurnSettings(): Promise<HTMLElement> {
+    await userEvent.setup().click(await screen.findByRole("button", { name: /^Change model and effort/ }));
+    return screen.getByRole("dialog", { name: "Turn settings" });
+  }
+
+  test("shows what the task has cost", async () => {
     install(task({ budget_ledger: ledger }));
     render(<Composer />);
-    expect(screen.getByRole("status", { name: "Cost $1.42" })).toBeInTheDocument();
+
+    // Not in the control row.
+    expect(screen.queryByText(/\$1\.42/)).not.toBeInTheDocument();
+    expect(within(await openTurnSettings()).getByText(/Cost \$1\.42/)).toBeInTheDocument();
   });
 
-  test("switches to context once the window is the pressing constraint", () => {
+  test("switches to context once the window is the pressing constraint", async () => {
     install(task({ budget_ledger: { ...ledger, context_headroom_tokens: "10000" } }));
     render(<Composer />);
-    expect(screen.getByRole("status", { name: /^Context 95%/ })).toBeInTheDocument();
+
+    expect(within(await openTurnSettings()).getByText(/Context 95%/)).toBeInTheDocument();
   });
 
-  test("shows nothing at all rather than zeroes when there is no ledger", () => {
+  test("shows nothing at all rather than zeroes when there is no ledger", async () => {
     install(task());
     render(<Composer />);
-    expect(screen.queryByRole("status", { name: /^Cost/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("status", { name: /^Context/ })).not.toBeInTheDocument();
+
+    const panel = await openTurnSettings();
+    expect(within(panel).queryByText(/\$/)).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/Context \d/)).not.toBeInTheDocument();
+    // The model's own window is still stated — that is the provider's fact,
+    // not the ledger's, and it does not depend on the task having spent
+    // anything.
+    expect(within(panel).getByText(/200K context window/)).toBeInTheDocument();
   });
 });

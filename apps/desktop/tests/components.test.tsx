@@ -1301,13 +1301,13 @@ describe("Composer — send-button mode switches based on task status", () => {
     expect(screen.queryByRole("button", { name: /provider/i })).not.toBeInTheDocument();
   });
 
-  test("keeps task permission metadata read-only without a dead environment menu", () => {
+  test("shows no access-level control until a project is selected", () => {
     render(<Composer />);
 
-    // No profile on the session means the chip says so. It used to invent
-    // "Workspace policy", and to relabel `secure-local-default` as "Full
-    // access" — a claim about permissions the session never made.
-    expect(screen.getByLabelText("Permission profile: No profile reported")).toBeInTheDocument();
+    // The access level is a session setting, so with no session there is
+    // nothing to change and nothing to claim: no chip, no invented "Full
+    // access", and no environment menu with nowhere to go.
+    expect(screen.queryByRole("button", { name: /^Access level:/ })).not.toBeInTheDocument();
     expect(screen.queryByText("Full access")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Environment details" })).not.toBeInTheDocument();
   });
@@ -1427,7 +1427,7 @@ describe("NewTaskScreen — first turn lifecycle", () => {
   test("keeps the start surface focused on project context and one composer", () => {
     render(<NewTaskScreen />);
 
-    expect(screen.getByRole("heading", { name: "What do you want to work on?" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What should we build in Terminus?" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change project" })).toHaveTextContent("Terminus");
     expect(screen.getAllByRole("textbox", { name: "Message composer" })).toHaveLength(1);
     expect(screen.queryByText("Map the codebase")).not.toBeInTheDocument();

@@ -12,10 +12,12 @@
  */
 import { describe, expect, test, beforeEach, afterEach } from "vitest";
 import { act, render, screen, fireEvent, cleanup } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 
 import { Layout } from "../src/components/Layout";
 import { ResizableReviewLayout } from "../src/components/ResizableReviewLayout";
+import { useNavHistory, type NavLocation } from "../src/hooks/use-nav-history";
+import type { SidebarDestination } from "../src/components/Sidebar";
 
 // ────────────────────────── Helpers ─────────────────────────────────────────
 
@@ -79,10 +81,31 @@ describe("Layout — three-region render", () => {
     expect(screen.getByTestId("inspector-content")).toBeInTheDocument();
   });
 
-  test("does not expose inert history controls", () => {
+  /**
+   * The shell invents no chrome of its own. Back and forward are real controls
+   * now, but they are App's — passed in through `left` and driven by
+   * `useNavHistory` — so a bare Layout still has none to offer, and cannot
+   * grow an inert pair by accident.
+   */
+  test("invents no history controls of its own", () => {
     renderLayout();
     expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Forward" })).not.toBeInTheDocument();
+  });
+
+  test("puts the left cluster in the drag-exempt region beside the traffic lights", () => {
+    render(
+      <Layout
+        sidebar={<div />}
+        main={<div />}
+        inspector={<div />}
+        left={<button type="button">Back</button>}
+      />,
+    );
+    const back = screen.getByRole("button", { name: "Back" });
+    // Electron only honours the computed app-region, so the control has to sit
+    // inside an ancestor that opts out of dragging or it cannot be clicked.
+    expect(back.closest(".titlebar-no-drag")).not.toBeNull();
   });
 
   test("keeps the titlebar center in the native drag region", () => {
@@ -92,6 +115,99 @@ describe("Layout — three-region render", () => {
     expect(center).toHaveTextContent("Task title");
   });
 
+});
+
+// ────────────────────────── Navigation history ──────────────────────────────
+
+/**
+ * A stand-in for App's two pieces of navigation state. The hook records the
+ * pair it is given and replays entries through `apply`, so the harness is the
+ * whole contract: move the state, and history follows.
+ */
+function NavHarness(): JSX.Element {
+  const [destination, setDestination] = useState<SidebarDestination>("new_task");
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const apply = useCallback((target: NavLocation): void => {
+    setDestination(target.destination);
+    setTaskId(target.taskId);
+  }, []);
+  const history = useNavHistory({ destination, taskId, apply });
+  const goTo = (next: SidebarDestination, task: string | null): void => {
+    setDestination(next);
+    setTaskId(task);
+  };
+  return (
+    <div>
+      <span data-testid="where">{`${destination}:${taskId ?? "-"}`}</span>
+      <button type="button" onClick={() => goTo("chat", "t1")}>Go t1</button>
+      <button type="button" onClick={() => goTo("chat", "t2")}>Go t2</button>
+      <button type="button" onClick={() => goTo("board", null)}>Go board</button>
+      <button type="button" onClick={history.goBack} disabled={!history.canGoBack}>Back</button>
+      <button type="button" onClick={history.goForward} disabled={!history.canGoForward}>Forward</button>
+    </div>
+  );
+}
+
+function where(): string {
+  return screen.getByTestId("where").textContent ?? "";
+}
+
+describe("useNavHistory", () => {
+  test("both ends are disabled until somewhere has been visited", () => {
+    render(<NavHarness />);
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Forward" })).toBeDisabled();
+  });
+
+  test("back returns to the previous place and forward replays it", () => {
+    render(<NavHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Go t1" }));
+    expect(where()).toBe("chat:t1");
+    expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(where()).toBe("new_task:-");
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Forward" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Forward" }));
+    expect(where()).toBe("chat:t1");
+    expect(screen.getByRole("button", { name: "Forward" })).toBeDisabled();
+  });
+
+  test("the task is part of the position, not just the destination", () => {
+    render(<NavHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Go t1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Go t2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    // Both entries are "chat"; only the task id distinguishes them, so a
+    // history keyed on the destination alone would have gone nowhere here.
+    expect(where()).toBe("chat:t1");
+  });
+
+  test("navigating after going back drops the entries stepped off", () => {
+    render(<NavHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Go t1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Go board" }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(where()).toBe("chat:t1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Go t2" }));
+    expect(screen.getByRole("button", { name: "Forward" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(where()).toBe("chat:t1");
+  });
+
+  test("re-selecting where you already are does not stack up entries", () => {
+    render(<NavHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Go t1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Go t1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Go t1" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(where()).toBe("new_task:-");
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+  });
 });
 
 // ────────────────────────── 2. Sidebar collapses at narrow widths ───────────
@@ -140,8 +256,8 @@ describe("Layout — docked inspector", () => {
     setViewport(1200, 900);
     renderLayout();
     expect(screen.getByTestId("inspector-dock")).toHaveAttribute("data-layout", "docked");
-    expect(screen.getByTestId("inspector-dock")).toHaveStyle({ width: "320px" });
-    expect(screen.getByRole("separator", { name: "Resize inspector" })).toHaveAttribute("aria-valuenow", "320");
+    expect(screen.getByTestId("inspector-dock")).toHaveStyle({ width: "280px" });
+    expect(screen.getByRole("separator", { name: "Resize inspector" })).toHaveAttribute("aria-valuenow", "280");
   });
 
   test("inspector supports keyboard resizing without an overlay", () => {
@@ -149,7 +265,7 @@ describe("Layout — docked inspector", () => {
     renderLayout();
     const separator = screen.getByRole("separator", { name: "Resize inspector" });
     fireEvent.keyDown(separator, { key: "ArrowLeft" });
-    expect(separator).toHaveAttribute("aria-valuenow", "328");
+    expect(separator).toHaveAttribute("aria-valuenow", "288");
     expect(screen.getByTestId("inspector-dock")).toHaveAttribute("data-layout", "docked");
   });
 

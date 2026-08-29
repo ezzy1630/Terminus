@@ -150,6 +150,17 @@ export interface CollectionTruncation {
 /** Reasoning depth, as the control plane spells it. */
 export type ReasoningEffort = "low" | "medium" | "high" | "max";
 
+/**
+ * How much a session's tasks may do without stopping to ask.
+ *
+ * Three levels, named by the control plane, not by this client. `Session`'s
+ * own field stays a plain `string` on purpose — a deployment may still be
+ * holding a legacy value such as `secure-local-default`, and a response that
+ * fails to decode is worse than one this client has to interpret. Writes are
+ * narrowed to the three ids because there is no reason to send anything else.
+ */
+export type PermissionProfileId = "full-access" | "auto" | "ask";
+
 export interface Session {
   id: string;
   workspace_id: string;
@@ -179,6 +190,7 @@ export interface Session {
 export interface SessionUpdateInput {
   default_model?: string | null;
   default_reasoning_effort?: ReasoningEffort | null;
+  default_permission_profile?: PermissionProfileId;
 }
 
 export interface SessionListResponse {

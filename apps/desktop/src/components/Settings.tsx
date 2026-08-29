@@ -1,91 +1,69 @@
 /**
  * Terminus Desktop — Settings.
  *
- * Per SPEC §20: a full-screen overlay (or separate route) organized
- * into clear categories. Search, clear descriptions, sensible
- * defaults, per-setting and per-category reset, validation, and
- * immediate preview for appearance settings (theme, density).
+ * The language here is macOS System Settings: a category rail on the left, a
+ * single scrolling pane on the right made of *groups* — a sentence-case title,
+ * then rows closed top and bottom by hairlines. A row is a label on the left
+ * and one control on the right. There are no boxed cards, because AppKit does
+ * not draw them and a card grid is what made this surface read as a web
+ * dashboard embedded in an app.
  *
- * Categories (SPEC §20 list, preserved verbatim):
- *   - General
- *   - Appearance
- *   - Editor
- *   - Agents and Models
- *   - Permissions
- *   - Git
- *   - Notifications
- *   - Keyboard Shortcuts
- *   - Performance
- *   - Integrations
- *   - Advanced
- *   - Diagnostics
+ * The catalog used to describe twelve categories and roughly forty settings,
+ * then discard nine of the categories one statement later — the shipping UI
+ * was three categories and three editable rows, with ~430 lines of unreachable
+ * descriptors, an unreachable shortcut recorder, and unreachable number/text
+ * controls behind it. Everything that could never render is gone. What remains
+ * is exactly what has somewhere to be written:
  *
- * Per design constraints: CSS variables, lucide-react icons,
- * accessible (keyboard nav, focus states, SR labels), restrained
- * motion, both themes polished equally.
+ *   - Appearance  → theme + density (useThemeStore, localStorage + native IPC)
+ *                   and reduce motion (useSettingsStore, localStorage).
+ *   - Agents      → the gateway provider and the local command provider, both
+ *                   of which round-trip through the control plane, plus the
+ *                   model profiles current sessions actually report.
+ *   - Shortcuts   → a read-only reference. These are fixed in this build, so
+ *                   they are rendered straight from the shortcut map and are
+ *                   deliberately *not* settings-store entries: seeding
+ *                   seventeen immutable values into a preferences store made
+ *                   them look editable to every reader of that store.
  *
- * The settings store is a small Zustand store persisted to
- * localStorage. Appearance settings (theme, density) also call into
- * the existing useThemeStore so the preview is immediate.
+ * Appearance previews immediately. The store also listens for `storage`
+ * events so a second Terminus window, if one is ever open, stays in step.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDialogFocus } from "../hooks/use-dialog-focus";
-import {
-  Bell,
-  Bug,
-  Cpu,
-  Folder,
-  GitBranch,
-  Keyboard,
-  Palette,
-  Plug,
-  Search,
-  Settings as SettingsIcon,
-  Shield,
-  Sliders,
-  Wand2,
-  X,
-  RotateCcw,
-} from "lucide-react";
+import { Keyboard, Palette, Search, Wand2, X, RotateCcw } from "lucide-react";
 import { create } from "zustand";
 import { cn } from "../lib/cn";
 import { useThemeStore } from "../hooks/use-theme";
 import { useTerminusStore } from "../hooks/use-terminus";
 import { SETTINGS_SHORTCUTS, shortcutSettingValue } from "../lib/shortcuts";
+import type { ShortcutScope } from "../lib/shortcuts";
 import { api, createIdempotencyKey } from "../lib/api";
 import type { Density, ProviderConfiguration, ProviderConfigurationResponse, Session, Theme } from "../types";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
-import { Input } from "../ui/Input";
+import { Input, Textarea } from "../ui/Input";
 import { Kbd } from "../ui/Kbd";
 import { Select } from "../ui/Select";
-import { Badge } from "../ui/Status";
 import { Switch } from "../ui/Switch";
 import { DialogSurface } from "../ui/Dialog";
 import { GatewayProviderSettings } from "./GatewayProviderSettings";
 
 // ────────────────────────── Setting model ───────────────────────────────────
 
-export type SettingCategoryId =
-  | "general"
-  | "appearance"
-  | "editor"
-  | "agents"
-  | "permissions"
-  | "git"
-  | "notifications"
-  | "shortcuts"
-  | "performance"
-  | "integrations"
-  | "advanced"
-  | "diagnostics";
+/**
+ * Only the categories that exist.
+ *
+ * The union used to name twelve, nine of which no code path could ever
+ * produce, so `settingsCategoryFor` in App.tsx could typecheck a request for a
+ * page that was not in the build.
+ */
+import type { SettingCategoryId } from "../lib/settings-categories";
+export type { SettingCategoryId };
 
 export type SettingControl =
   | { kind: "toggle" }
-  | { kind: "select"; options: Array<{ value: string; label: string }> }
-  | { kind: "text"; placeholder?: string }
-  | { kind: "number"; min?: number; max?: number; step?: number; unit?: string }
-  | { kind: "shortcut"; placeholder?: string };
+  | { kind: "select"; options: Array<{ value: string; label: string }> };
 
 export interface SettingDescriptor {
   id: string;
@@ -98,19 +76,16 @@ export interface SettingDescriptor {
   /** Default value (used by reset). */
   defaultValue: string | number | boolean;
   /**
-   * Whether a restart is required for changes to take effect.
-   * Per SPEC §20: "Restart labels only where actually necessary."
+   * Sentence-case group heading this row sits under, System Settings style.
+   * Rows sharing a heading are drawn as one hairline-separated run.
    */
-  restartRequired?: boolean;
-  /** Optional validation function returning an error message. */
-  validate?: (value: string | number | boolean) => string | null;
+  group: string;
   /**
-   * Side-effect hook called whenever the value changes. Use for
-   * appearance preview, density, etc.
+   * Side-effect hook called whenever the value changes. Use for appearance
+   * preview, density, motion. A descriptor without one has nowhere to write,
+   * which is why every surviving descriptor has one.
    */
-  apply?: (value: string | number | boolean) => void;
-  /** Render a truthful fixed-value reference instead of an editable preference. */
-  readOnly?: boolean;
+  apply: (value: string | number | boolean) => void;
 }
 
 export interface SettingCategory {
@@ -121,485 +96,92 @@ export interface SettingCategory {
   settings: SettingDescriptor[];
 }
 
-// ────────────────────────── Defaults catalog ────────────────────────────────
+// ────────────────────────── Catalog ─────────────────────────────────────────
 
-/**
- * Per SPEC §19 (Onboarding): "Default all settings for a base-model
- * 13-inch M4 MacBook Air: efficient compact density, system
- * appearance, dynamic inspector, terminal hidden, computer-use
- * preview paused while hidden, conservative notifications, reduced
- * background work, lightweight editor behavior, performance-conscious
- * animation, sensible default shortcuts, no unnecessary startup
- * destinations, no decorative animation."
- */
-function buildCatalog(): SettingCategory[] {
-  return [
-    {
-      id: "general",
-      label: "General",
-      description: "Startup, workspace, and recovery behavior.",
-      icon: <SettingsIcon size={14} />,
-      settings: [
-        {
-          id: "general.open-last-project",
-          label: "Reopen last project on launch",
-          description: "Skip the project picker and resume where you left off.",
-          control: { kind: "toggle" },
-          defaultValue: true,
+const CATEGORIES: SettingCategory[] = [
+  {
+    id: "appearance",
+    label: "Appearance",
+    description: "Theme, density, and motion. Changes apply immediately.",
+    icon: <Palette size={16} />,
+    settings: [
+      {
+        id: "appearance.theme",
+        label: "Theme",
+        description: "System follows your macOS appearance.",
+        group: "Theme",
+        control: {
+          kind: "select",
+          options: [
+            { value: "system", label: "System" },
+            { value: "light", label: "Light" },
+            { value: "dark", label: "Dark" },
+          ],
         },
-        {
-          id: "general.show-onboarding",
-          label: "Show onboarding",
-          description: "Run the first-launch flow again on next start.",
-          control: { kind: "toggle" },
-          defaultValue: false,
+        defaultValue: "system",
+        apply: (v) => useThemeStore.getState().setTheme(v as Theme),
+      },
+      {
+        id: "appearance.density",
+        label: "Density",
+        description: "Compact tightens rows and panel padding.",
+        group: "Theme",
+        control: {
+          kind: "select",
+          options: [
+            { value: "spacious", label: "Spacious" },
+            { value: "compact", label: "Compact" },
+          ],
         },
-        {
-          id: "general.crash-reports",
-          label: "Send crash reports",
-          description: "Anonymous diagnostics help us fix rare crashes.",
-          control: { kind: "toggle" },
-          defaultValue: false,
+        defaultValue: "compact",
+        apply: (v) => useThemeStore.getState().setDensity(v as Density),
+      },
+      {
+        id: "appearance.reduce-motion",
+        label: "Reduce motion",
+        description: "Disable non-essential animations.",
+        group: "Accessibility",
+        control: { kind: "toggle" },
+        defaultValue: false,
+        apply: (v) => {
+          document.documentElement.dataset.reduceMotion = Boolean(v) ? "true" : "false";
         },
-      ],
-    },
-    {
-      id: "appearance",
-      label: "Appearance",
-      description: "Theme, density, and motion. Changes apply immediately.",
-      icon: <Palette size={14} />,
-      settings: [
-        {
-          id: "appearance.theme",
-          label: "Theme",
-          description: "System follows your macOS appearance.",
-          control: {
-            kind: "select",
-            options: [
-              { value: "system", label: "System" },
-              { value: "light", label: "Light" },
-              { value: "dark", label: "Dark" },
-            ],
-          },
-          defaultValue: "system",
-          apply: (v) => useThemeStore.getState().setTheme(v as Theme),
-        },
-        {
-          id: "appearance.density",
-          label: "Density",
-          description: "Compact tightens rows and panel padding.",
-          control: {
-            kind: "select",
-            options: [
-              { value: "spacious", label: "Spacious" },
-              { value: "compact", label: "Compact" },
-            ],
-          },
-          defaultValue: "compact",
-          apply: (v) => useThemeStore.getState().setDensity(v as Density),
-        },
-        {
-          id: "appearance.reduce-motion",
-          label: "Reduce motion",
-          description: "Disable non-essential animations.",
-          control: { kind: "toggle" },
-          defaultValue: false,
-          apply: (v) => {
-            document.documentElement.dataset.reduceMotion = Boolean(v) ? "true" : "false";
-          },
-        },
-      ],
-    },
-    {
-      id: "editor",
-      label: "Editor",
-      description: "Lightweight inline editor behavior.",
-      icon: <Folder size={14} />,
-      settings: [
-        {
-          id: "editor.tab-size",
-          label: "Tab size",
-          description: "Spaces per indentation level in previews.",
-          control: { kind: "number", min: 1, max: 8, step: 1, unit: "spaces" },
-          defaultValue: 2,
-          validate: (v) => (typeof v === "number" && v >= 1 && v <= 8 ? null : "Tab size must be between 1 and 8."),
-        },
-        {
-          id: "editor.word-wrap",
-          label: "Word wrap",
-          description: "Wrap long lines in the file preview.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "editor.font-size",
-          label: "Font size",
-          description: "Code preview font size in pixels.",
-          control: { kind: "number", min: 10, max: 18, step: 1, unit: "px" },
-          defaultValue: 12,
-        },
-        {
-          id: "editor.external",
-          label: "External editor",
-          description: "Application used by Open in editor actions.",
-          control: {
-            kind: "select",
-            options: [
-              { value: "cursor", label: "Cursor" },
-              { value: "vscode", label: "VS Code" },
-              { value: "sublime", label: "Sublime Text" },
-              { value: "system", label: "System default" },
-            ],
-          },
-          defaultValue: "cursor",
-        },
-      ],
-    },
-    {
-      id: "agents",
-      label: "Agents and Models",
-      description: "Default agent, model profile, and provider routing.",
-      icon: <Wand2 size={14} />,
-      settings: [
-        {
-          id: "agents.default",
-          label: "Default model profile",
-          description: "Profile id supplied by a connected provider. Leave empty to use the session default.",
-          control: { kind: "text", placeholder: "Connected provider profile" },
-          defaultValue: "",
-        },
-        {
-          id: "agents.model",
-          label: "Provider connection",
-          description: "Connection id reported by the provider registry.",
-          control: { kind: "text", placeholder: "No provider connected" },
-          defaultValue: "",
-        },
-        {
-          id: "agents.auto-verify",
-          label: "Run verification automatically",
-          description: "Trigger verification after the agent completes a step.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "agents.max-concurrent",
-          label: "Max concurrent subagents",
-          description: "Hard cap on parallel subagent executions.",
-          control: { kind: "number", min: 1, max: 8, step: 1, unit: "agents" },
-          defaultValue: 2,
-        },
-      ],
-    },
-    {
-      id: "permissions",
-      label: "Permissions",
-      description: "Default access level and approval rules.",
-      icon: <Shield size={14} />,
-      settings: [
-        {
-          id: "permissions.default-access",
-          label: "Default permission profile",
-          description: "Policy profile id supplied by the selected workspace or session.",
-          control: { kind: "text", placeholder: "Workspace policy" },
-          defaultValue: "",
-        },
-        {
-          id: "permissions.approve-network",
-          label: "Approve network calls",
-          description: "Require approval before outbound network operations.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "permissions.approve-writes",
-          label: "Approve writes outside workspace",
-          description: "Require approval before any write outside the workspace root.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "permissions.approve-exec",
-          label: "Approve shell execution",
-          description: "Require approval before running shell commands.",
-          control: { kind: "toggle" },
-          defaultValue: false,
-        },
-      ],
-    },
-    {
-      id: "git",
-      label: "Git",
-      description: "Branch, commit, and pull request defaults.",
-      icon: <GitBranch size={14} />,
-      settings: [
-        {
-          id: "git.auto-stage",
-          label: "Auto-stage reviewed changes",
-          description: "Stage accepted hunks automatically when committing.",
-          control: { kind: "toggle" },
-          defaultValue: false,
-        },
-        {
-          id: "git.default-branch",
-          label: "Default branch name",
-          description: "Used when creating new branches.",
-          control: { kind: "text", placeholder: "main" },
-          defaultValue: "main",
-        },
-        {
-          id: "git.sign-commits",
-          label: "Sign commits",
-          description: "GPG-sign commits when a signing key is configured.",
-          control: { kind: "toggle" },
-          defaultValue: false,
-        },
-        {
-          id: "git.pr-base",
-          label: "Default PR base branch",
-          description: "Default target branch for new pull requests.",
-          control: { kind: "text", placeholder: "main" },
-          defaultValue: "main",
-        },
-      ],
-    },
-    {
-      id: "notifications",
-      label: "Notifications",
-      description: "Conservative defaults to keep you focused.",
-      icon: <Bell size={14} />,
-      settings: [
-        {
-          id: "notifications.task-completed",
-          label: "Task completed",
-          description: "Notify when a task finishes while the app is unfocused.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "notifications.task-failed",
-          label: "Task failed",
-          description: "Notify when a task fails.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "notifications.approval-required",
-          label: "Approval required",
-          description: "Notify when the agent requests permission.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "notifications.subagent-done",
-          label: "Subagent finished",
-          description: "Notify when a delegated subagent completes.",
-          control: { kind: "toggle" },
-          defaultValue: false,
-        },
-        {
-          id: "notifications.dock-badge",
-          label: "Dock badge for pending approvals",
-          description: "Show the count of pending approvals on the dock icon.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-      ],
-    },
-    {
-      id: "shortcuts",
-      label: "Keyboard Shortcuts",
-      description: "Customize global and contextual shortcuts.",
-      icon: <Keyboard size={14} />,
-      settings: SETTINGS_SHORTCUTS.map((shortcut) => ({
-        id: `shortcuts.${shortcut.id}`,
-        label: shortcut.label,
-        description: shortcut.scope === "global"
-          ? "Available across the task workspace."
-          : shortcut.scope === "composer"
-            ? "Available while the message composer is focused."
-            : "Available while the diff viewer is focused.",
-        control: { kind: "shortcut" as const },
-        defaultValue: shortcutSettingValue(shortcut),
-      })),
-    },
-    {
-      id: "performance",
-      label: "Performance",
-      description: "Tune for the base-model 13-inch MacBook Air.",
-      icon: <Cpu size={14} />,
-      settings: [
-        {
-          id: "performance.virtualize-conversations",
-          label: "Virtualize long conversations",
-          description: "Window messages outside the viewport for smoother scrolling.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "performance.virtualize-diffs",
-          label: "Virtualize large diffs",
-          description: "Render only visible hunks in the diff viewer.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "performance.background-polling",
-          label: "Reduced background polling",
-          description: "Slow the reconciliation poll when SSE is healthy.",
-          control: { kind: "toggle" },
-          defaultValue: true,
-        },
-        {
-          id: "performance.max-events-per-task",
-          label: "Max events per task",
-          description: "Cap on events retained in memory per task.",
-          control: { kind: "number", min: 200, max: 10000, step: 100, unit: "events" },
-          defaultValue: 2000,
-        },
-      ],
-    },
-    {
-      id: "integrations",
-      label: "Integrations",
-      description: "External editors, terminals, and version control hosts.",
-      icon: <Plug size={14} />,
-      settings: [
-        {
-          id: "integrations.cursor-path",
-          label: "Cursor path",
-          description: "Override the auto-detected Cursor binary location.",
-          control: { kind: "text", placeholder: "/Applications/Cursor.app" },
-          defaultValue: "",
-        },
-        {
-          id: "integrations.vscode-path",
-          label: "VS Code path",
-          description: "Override the VS Code CLI path.",
-          control: { kind: "text", placeholder: "code" },
-          defaultValue: "",
-        },
-        {
-          id: "integrations.git-path",
-          label: "Git path",
-          description: "Override the auto-detected git binary.",
-          control: { kind: "text", placeholder: "/usr/bin/git" },
-          defaultValue: "",
-        },
-        {
-          id: "integrations.github-host",
-          label: "GitHub host",
-          description: "Use github.com or a GitHub Enterprise hostname.",
-          control: { kind: "text", placeholder: "github.com" },
-          defaultValue: "github.com",
-        },
-      ],
-    },
-    {
-      id: "advanced",
-      label: "Advanced",
-      description: "Low-level behavior. Change with care.",
-      icon: <Sliders size={14} />,
-      settings: [
-        {
-          id: "advanced.api-base",
-          label: "Control plane URL",
-          description: "Base URL of the Terminus control plane service.",
-          control: { kind: "text", placeholder: "http://127.0.0.1:3050" },
-          defaultValue: "http://127.0.0.1:3050",
-          restartRequired: true,
-          validate: (v) => {
-            if (typeof v !== "string") return null;
-            try {
-              new URL(v);
-              return null;
-            } catch {
-              return "Enter a valid URL.";
-            }
-          },
-        },
-        {
-          id: "advanced.debug-logging",
-          label: "Debug logging",
-          description: "Write verbose logs to the diagnostics console.",
-          control: { kind: "toggle" },
-          defaultValue: false,
-        },
-        {
-          id: "advanced.experimental-features",
-          label: "Experimental features",
-          description: "Enable unreleased capabilities for testing.",
-          control: { kind: "toggle" },
-          defaultValue: false,
-        },
-      ],
-    },
-    {
-      id: "diagnostics",
-      label: "Diagnostics",
-      description: "Inspect logs, runtime status, and cache.",
-      icon: <Bug size={14} />,
-      settings: [
-        {
-          id: "diagnostics.open-logs",
-          label: "Log directory",
-          description: "Where Terminus writes session and error logs.",
-          control: { kind: "text", placeholder: "~/Library/Logs/Terminus" },
-          defaultValue: "~/Library/Logs/Terminus",
-        },
-        {
-          id: "diagnostics.cache-size",
-          label: "Artifact cache size",
-          description: "Maximum disk space used for cached artifacts.",
-          control: { kind: "number", min: 100, max: 10000, step: 100, unit: "MB" },
-          defaultValue: 1024,
-        },
-        {
-          id: "diagnostics.clear-cache-on-quit",
-          label: "Clear cache on quit",
-          description: "Delete cached artifacts when Terminus exits.",
-          control: { kind: "toggle" },
-          defaultValue: false,
-        },
-      ],
-    },
-  ];
-}
+      },
+    ],
+  },
+  {
+    id: "agents",
+    label: "Agents and Models",
+    description: "Providers that can route a turn, and the profiles projects report.",
+    icon: <Wand2 size={16} />,
+    settings: [],
+  },
+  {
+    id: "shortcuts",
+    label: "Keyboard Shortcuts",
+    description: "Fixed in this build. Custom bindings are not available yet.",
+    icon: <Keyboard size={16} />,
+    settings: [],
+  },
+];
 
-// Only surface settings with real behavior. Runtime policy, provider,
-// notification, Git, and integration controls remain absent until typed
-// control-plane contracts exist; renderer-local values must never masquerade
-// as authoritative configuration.
-const CATALOG = buildCatalog().flatMap((category): SettingCategory[] => {
-  if (category.id === "appearance") return [category];
-  if (category.id === "agents") {
-    return [{
-      ...category,
-      description: "Read-only model profiles reported by current control-plane sessions.",
-      settings: [],
-    }];
-  }
-  if (category.id === "shortcuts") {
-    return [{
-      ...category,
-      description: "Current fixed shortcuts. Custom bindings are not available yet.",
-      settings: category.settings.map((descriptor) => ({ ...descriptor, readOnly: true })),
-    }];
-  }
-  return [];
-});
-const CATEGORIES = CATALOG;
+const SHORTCUT_GROUPS: ReadonlyArray<{ scope: ShortcutScope; title: string }> = [
+  { scope: "global", title: "Anywhere in the app" },
+  { scope: "composer", title: "While the composer is focused" },
+  { scope: "diff", title: "While the diff viewer is focused" },
+];
 
 /**
  * Extra search terms per category.
  *
  * Operators look for "provider", "api key" or "model" — none of which is the
- * category's label ("Agents and Models") or its id.
+ * category's label ("Agents and Models") or its id. Shortcut labels are folded
+ * in so searching "command palette" reaches the reference that lists it.
  */
-const CATEGORY_KEYWORDS: Partial<Record<SettingCategoryId, string>> = {
+const CATEGORY_KEYWORDS: Record<SettingCategoryId, string> = {
   agents: "providers provider api key token gateway model models routing opencode zen go local command tools inference",
-  appearance: "theme dark light density spacing font",
-  shortcuts: "keyboard keys bindings hotkeys",
+  appearance: "theme dark light density spacing font motion animation accessibility",
+  shortcuts: `keyboard keys bindings hotkeys ${SETTINGS_SHORTCUTS.map((s) => s.label).join(" ")}`.toLowerCase(),
 };
 
 export function deriveRuntimeModelProfiles(sessions: Session[]): Array<{ id: string; projectCount: number }> {
@@ -650,7 +232,7 @@ function writePersisted(values: SettingValueMap): void {
 
 function defaultValues(): SettingValueMap {
   const out: SettingValueMap = {};
-  for (const cat of CATALOG) {
+  for (const cat of CATEGORIES) {
     for (const s of cat.settings) {
       out[s.id] = s.defaultValue;
     }
@@ -658,21 +240,22 @@ function defaultValues(): SettingValueMap {
   return out;
 }
 
+function findDescriptor(id: string): SettingDescriptor | undefined {
+  for (const cat of CATEGORIES) {
+    const s = cat.settings.find((x) => x.id === id);
+    if (s) return s;
+  }
+  return undefined;
+}
+
 function normalizeSettingValue(id: string, value: unknown): SettingValue {
   const descriptor = findDescriptor(id);
   if (!descriptor) return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : "";
   const control = descriptor.control;
   if (control.kind === "toggle") return typeof value === "boolean" ? value : descriptor.defaultValue;
-  if (control.kind === "select") {
-    return typeof value === "string" && control.options.some((option) => option.value === value)
-      ? value
-      : descriptor.defaultValue;
-  }
-  if (control.kind === "number") {
-    if (typeof value !== "number" || !Number.isFinite(value)) return descriptor.defaultValue;
-    return Math.min(control.max ?? Number.POSITIVE_INFINITY, Math.max(control.min ?? Number.NEGATIVE_INFINITY, value));
-  }
-  return typeof value === "string" ? value : descriptor.defaultValue;
+  return typeof value === "string" && control.options.some((option) => option.value === value)
+    ? value
+    : descriptor.defaultValue;
 }
 
 function normalizedPersistedValues(raw: SettingValueMap): SettingValueMap {
@@ -690,7 +273,6 @@ interface SettingsState {
   set: (id: string, value: SettingValue) => void;
   reset: (id: string) => void;
   resetCategory: (categoryId: SettingCategoryId) => void;
-  resetAll: () => void;
 }
 
 const persisted = readPersisted();
@@ -705,9 +287,8 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       writePersisted(next);
       return { values: next };
     });
-    // Apply side-effects (theme/density live preview).
-    const descriptor = findDescriptor(id);
-    descriptor?.apply?.(normalized);
+    // Apply side-effects (theme/density/motion live preview).
+    findDescriptor(id)?.apply(normalized);
   },
   reset: (id) => {
     const descriptor = findDescriptor(id);
@@ -715,31 +296,20 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     get().set(id, descriptor.defaultValue);
   },
   resetCategory: (categoryId) => {
-    const cat = CATALOG.find((c) => c.id === categoryId);
+    const cat = CATEGORIES.find((c) => c.id === categoryId);
     if (!cat) return;
     for (const s of cat.settings) {
       get().set(s.id, s.defaultValue);
     }
   },
-  resetAll: () => {
-    const next = defaultValues();
-    writePersisted(next);
-    set({ values: next });
-    // Apply side-effects for every setting that has one.
-    for (const cat of CATALOG) {
-      for (const s of cat.settings) {
-        s.apply?.(s.defaultValue);
-      }
-    }
-  },
 }));
 
 /**
- * Preferences are edited in their own window (see SettingsWindow), so this
- * store is live in two renderers. A `storage` event means the other window
+ * Settings are a sheet inside the document window, but localStorage is shared
+ * by every renderer of this app. A `storage` event means another window
  * saved: re-read what it wrote and re-apply the live side effects, so a
- * change to motion or transparency takes hold here too. Adopting the written
- * value without writing it back keeps the two windows from echoing.
+ * change to motion takes hold here too. Adopting the written value without
+ * writing it back keeps two windows from echoing.
  */
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
@@ -753,28 +323,66 @@ if (typeof window !== "undefined") {
     useSettingsStore.setState({ values: next });
     for (const [id, value] of Object.entries(next)) {
       if (previous[id] === value) continue;
-      findDescriptor(id)?.apply?.(value);
+      findDescriptor(id)?.apply(value);
     }
   });
 }
 
-// Install every live preference once at module load so persisted motion,
-// transparency, theme, and density choices are true before Settings opens.
-for (const category of CATALOG) {
+// Install every live preference once at module load so a persisted motion
+// choice is true before Settings is ever opened. Theme and density are owned
+// by useThemeStore, which installs itself.
+for (const category of CATEGORIES) {
   for (const descriptor of category.settings) {
-    if (!descriptor.apply) continue;
     if (descriptor.id === "appearance.theme" || descriptor.id === "appearance.density") continue;
-    const value = useSettingsStore.getState().get(descriptor.id) ?? descriptor.defaultValue;
-    descriptor.apply(value);
+    descriptor.apply(useSettingsStore.getState().get(descriptor.id) ?? descriptor.defaultValue);
   }
 }
 
-function findDescriptor(id: string): SettingDescriptor | undefined {
-  for (const cat of CATALOG) {
-    const s = cat.settings.find((x) => x.id === id);
-    if (s) return s;
-  }
-  return undefined;
+// ────────────────────────── Layout primitives ───────────────────────────────
+
+/**
+ * A System Settings group: sentence-case title, then a hairline-closed run of
+ * rows. Top and bottom rules give the run its edges without drawing a card.
+ */
+function SettingGroup({ title, children }: { title: string; children: React.ReactNode }): JSX.Element {
+  return (
+    <section className="mb-6">
+      <h2 className="mb-1.5 text-sm text-tertiary">{title}</h2>
+      <div className="divide-y divide-[var(--border-subtle)] border-y border-subtle">{children}</div>
+    </section>
+  );
+}
+
+/**
+ * One row: label (and optional sub-label) left, one control right, 40px tall.
+ * `htmlFor` is honoured because every control below accepts an `id` — the
+ * labels used to point at nothing, so clicking one did nothing and screen
+ * readers fell back to the control's own `aria-label`.
+ */
+function Row({
+  controlId,
+  label,
+  description,
+  children,
+}: {
+  controlId?: string;
+  label: string;
+  description?: string;
+  children: React.ReactNode;
+}): JSX.Element {
+  return (
+    <div className="flex min-h-10 items-center gap-4 py-1.5">
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        {controlId ? (
+          <label htmlFor={controlId} className="ui-body text-primary">{label}</label>
+        ) : (
+          <span className="ui-body text-primary">{label}</span>
+        )}
+        {description ? <p className="ui-meta">{description}</p> : null}
+      </div>
+      <div className="flex flex-shrink-0 items-center gap-1.5">{children}</div>
+    </div>
+  );
 }
 
 // ────────────────────────── Component ───────────────────────────────────────
@@ -881,7 +489,7 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
     if (!query.trim()) return CATEGORIES;
     const q = query.toLowerCase();
     return CATEGORIES.map((cat) => {
-      const categoryMatches = [cat.label, cat.description, cat.id, CATEGORY_KEYWORDS[cat.id] ?? ""]
+      const categoryMatches = [cat.label, cat.description, cat.id, CATEGORY_KEYWORDS[cat.id]]
         .some((value) => value.toLowerCase().includes(q));
       const settings = categoryMatches
         ? cat.settings
@@ -898,7 +506,13 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
   if (!open) return <></>;
 
   const activeCategory = filteredCategories.find((c) => c.id === activeCat) ?? filteredCategories[0] ?? null;
-  const activeCategoryHasLiveSettings = activeCategory?.settings.some((descriptor) => typeof descriptor.apply === "function") ?? false;
+  // Grouped in declaration order so a group's rows stay adjacent.
+  const groupedSettings: Array<{ title: string; rows: SettingDescriptor[] }> = [];
+  for (const descriptor of activeCategory?.settings ?? []) {
+    const bucket = groupedSettings.find((g) => g.title === descriptor.group);
+    if (bucket) bucket.rows.push(descriptor);
+    else groupedSettings.push({ title: descriptor.group, rows: [descriptor] });
+  }
 
   return (
     <DialogSurface
@@ -908,39 +522,40 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
         if (!nextOpen) onClose();
       }}
       accessibleTitle="Settings"
-      overlayClassName="bg-canvas"
-      className="settings-dialog fixed inset-0 flex flex-col bg-canvas data-[state=open]:animate-fade-in"
+      overlayClassName="bg-black/40"
+      className={cn(
+        "settings-dialog dialog-panel fixed left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-subtle bg-elevated text-primary shadow-lg",
+        className,
+      )}
+      style={{
+        width: "min(760px, calc(100vw - 64px))",
+        height: "min(560px, calc(100vh - 64px))",
+      }}
     >
-      {/* Header. */}
-      <div
-        className="settings-titlebar titlebar-drag flex h-10 flex-shrink-0 items-center gap-2 border-b border-subtle px-3 pl-20"
-      >
-        <span className="ui-page-title text-primary">
-          Settings
-        </span>
-        <div className="titlebar-no-drag ml-auto flex items-center gap-2">
-          <IconButton
-            onClick={onClose}
-            label="Close settings"
-            icon={<X size={14} aria-hidden />}
-          />
+      {/* Sheet header. No traffic-light inset and no drag region: this floats
+          inside the app window, so it is not that window's titlebar. */}
+      <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-subtle px-4">
+        <span className="ui-body font-semibold text-primary">Settings</span>
+        <div className="ml-auto flex items-center gap-2">
+          <IconButton onClick={onClose} label="Close settings" icon={<X size={14} aria-hidden />} />
         </div>
       </div>
       <div className="settings-body flex min-h-0 flex-1">
-        {/* Sidebar — category list + search. */}
-        <aside
-          className="settings-sidebar flex h-full w-52 flex-shrink-0 flex-col border-r border-subtle bg-sidebar"
-        >
-          <div className="border-b border-subtle p-2">
-            <div className="settings-search flex h-7 items-center gap-2 rounded-md bg-canvas px-2">
-              <Search size={14} className="text-tertiary" />
+        {/* Category rail. */}
+        {/* The raw token, not `bg-sidebar`: that resolves to --sidebar-material,
+            which window vibrancy makes 62% transparent. A floating sheet has to
+            be opaque or the dimmed app shows through its rail. */}
+        <aside className="settings-sidebar flex h-full w-[204px] flex-shrink-0 flex-col border-r border-subtle bg-[var(--bg-sidebar)]">
+          <div className="px-2 py-2">
+            <div className="relative flex items-center">
+              <Search size={13} className="pointer-events-none absolute left-2 text-tertiary" aria-hidden />
               <Input
                 ref={inputRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search settings"
+                placeholder="Search"
                 aria-label="Search settings"
-                className="h-7 flex-1 border-0 bg-transparent px-0 text-xs shadow-none"
+                className={cn("pl-7", query && "pr-7")}
               />
               {query ? (
                 <IconButton
@@ -948,14 +563,12 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
                   label="Clear search"
                   icon={<X size={11} aria-hidden />}
                   size="sm"
+                  className="absolute right-0.5"
                 />
               ) : null}
             </div>
           </div>
-          <nav
-            className="min-h-0 flex-1 overflow-y-auto py-1"
-            aria-label="Settings categories"
-          >
+          <nav className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2" aria-label="Settings categories">
             {filteredCategories.map((cat) => {
               const isSel = cat.id === activeCategory?.id;
               return (
@@ -964,13 +577,12 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
                   onClick={() => setActiveCat(cat.id)}
                   aria-current={isSel}
                   variant="ghost"
-                  size="md"
                   className={cn(
-                    "settings-category w-full justify-start rounded-none px-3 text-left",
+                    "h-7 w-full justify-start gap-2 rounded-md px-2 text-left text-base font-normal",
                     isSel ? "bg-selected text-primary" : "text-secondary",
                   )}
                 >
-                  <span className="flex-shrink-0 text-tertiary" aria-hidden>
+                  <span className={cn("flex-shrink-0", isSel ? "text-secondary" : "text-tertiary")} aria-hidden>
                     {cat.icon}
                   </span>
                   <span className="flex-1 truncate">{cat.label}</span>
@@ -978,149 +590,194 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
               );
             })}
             {filteredCategories.length === 0 ? (
-              <div className="px-3 py-4 text-center text-tertiary text-xs" >
-                No settings match "{query}".
-              </div>
+              <p className="px-2 py-4 text-center text-xs text-tertiary">No settings match “{query}”.</p>
             ) : null}
           </nav>
         </aside>
-        {/* Main pane. */}
-        <main className="flex min-w-0 flex-1 flex-col">
-          <div className="flex min-h-0 flex-1 overflow-y-auto">
-            <div className="settings-content mx-auto w-full max-w-[640px] p-4">
-              {activeCategory ? (
-                <>
-                  <div className="mb-3 flex items-start justify-between gap-4">
-                    <div>
-                      <h1 className="ui-page-title text-primary">
-                        {activeCategory.label}
-                      </h1>
-                      <p className="ui-body mt-0.5 text-secondary" >
-                        {activeCategory.description}
-                      </p>
-                    </div>
-                    {activeCategoryHasLiveSettings ? (
-                      <Button
-                        onClick={() => useSettingsStore.getState().resetCategory(activeCategory.id)}
-                        variant="ghost"
-                        size="sm"
-                        leading={<RotateCcw size={11} aria-hidden />}
-                      >
-                        <span>Reset category</span>
-                      </Button>
-                    ) : null}
-                  </div>
-                    {activeCategory.settings.length > 0 ? (
-                      <div className="settings-panel flex flex-col divide-y divide-[var(--border-subtle)]">
-                        {activeCategory.settings.map((s) => (
-                          <SettingRow key={s.id} descriptor={s} />
-                        ))}
-                      </div>
-                    ) : null}
+        {/* Detail pane. */}
+        <main className="scrollable min-w-0 flex-1 overflow-y-auto">
+          <div className="settings-content mx-auto w-full max-w-[560px] px-6 py-5">
+            {activeCategory ? (
+              <>
+                <header className="mb-5">
+                  <h1 className="ui-page-title text-primary">{activeCategory.label}</h1>
+                  <p className="ui-meta mt-1">{activeCategory.description}</p>
+                </header>
 
-                    {activeCategory.id === "agents" ? (
-                      <>
-                      <GatewayProviderSettings />
-                      <section className="mb-4 border-t border-subtle pt-4" aria-label="Local provider configuration">
-                        <div className="flex items-start gap-3">
-                          <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center text-secondary"><Plug size={14} /></div>
-                          <div className="min-w-0 flex-1">
-                            <div className="ui-section-title flex items-center gap-2 text-primary">
-                              Local provider
-                              <Badge tone={providerConfiguration?.configured === true ? "success" : "neutral"}>
-                                {providerLoading ? "Loading" : providerConfiguration?.configured === true ? "Configured" : "Unconfigured"}
-                              </Badge>
-                            </div>
-                            <p className="ui-meta mt-0.5">
-                              Local command for model requests. Arguments are passed directly without a shell.
-                            </p>
-                          </div>
-                        </div>
-                        {providerDraft ? (
-                          <div className="mt-3 grid gap-2.5">
-                            <label className="ui-label grid gap-1 text-secondary">
-                              Program
-                              <Input aria-label="Local provider program" value={providerDraft.program} onChange={(event) => setProviderDraft({ ...providerDraft, program: event.target.value })} />
-                            </label>
-                            <label className="ui-label grid gap-1 text-secondary">
-                              Model
-                              <Input aria-label="Local provider model" value={providerDraft.model} onChange={(event) => setProviderDraft({ ...providerDraft, model: event.target.value })} />
-                            </label>
-                            <label className="ui-label grid gap-1 text-secondary">
-                              Arguments (one argv entry per line)
-                              <textarea aria-label="Local provider arguments" className="min-h-20 rounded-md border border-subtle bg-canvas px-2 py-1.5 font-mono text-xs text-primary" value={providerDraft.args.join("\n")} onChange={(event) => setProviderDraft({ ...providerDraft, args: event.target.value.length === 0 ? [] : event.target.value.split("\n") })} />
-                            </label>
-                            <label className="ui-label grid gap-1 text-secondary">
-                              Timeout (seconds)
-                              <Input aria-label="Local provider timeout" type="number" min={1} max={3600} step={1} value={providerDraft.timeout_seconds} onChange={(event) => setProviderDraft({ ...providerDraft, timeout_seconds: Number(event.target.value) })} />
-                            </label>
-                            <div className="flex items-start justify-between gap-4 border-y border-subtle py-2.5">
-                              <div>
-                                <div className="ui-label text-secondary">Allow standalone tools</div>
-                                <p className="ui-meta mt-0.5">Expose read, exact patch, and bounded exec for this task.</p>
-                              </div>
-                              <Switch checked={providerDraft.tools_enabled} onCheckedChange={(checked) => setProviderDraft({ ...providerDraft, tools_enabled: checked })} label="Allow standalone provider tools" />
-                            </div>
-                            {providerError ? <p className="text-error text-xs" role="alert">{providerError}</p> : null}
-                            <div><Button onClick={() => void saveProviderConfiguration()} disabled={providerSaving || providerLoading} variant="secondary" size="sm">{providerSaving ? "Saving…" : "Save provider configuration"}</Button></div>
-                          </div>
-                        ) : (
-                          <div className="mt-4 text-tertiary text-xs">{providerError ?? "No local provider command is configured."}</div>
-                        )}
-                      </section>
-                      <section className="mb-4 border-t border-subtle pt-4" aria-label="Runtime model profiles">
-                        <div className="flex items-start gap-3">
-                          <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center text-secondary">
-                            <Plug size={14} />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="ui-section-title text-primary">Available model profiles</div>
-                            <p className="ui-meta mt-0.5">
-                              Profiles reported by current projects.
-                            </p>
-                          </div>
-                          <span className="ui-meta tabular-nums" >
-                            {runtimeProfiles.length}
-                          </span>
-                        </div>
-                        {runtimeProfiles.length > 0 ? (
-                          <ul className="mt-2 divide-y divide-[var(--border-subtle)] border-y border-subtle">
-                            {runtimeProfiles.map((profile) => (
-                              <li key={profile.id} className="flex min-h-8 items-center justify-between px-1 py-1.5">
-                                <span className="min-w-0 truncate font-mono text-primary text-xs" >{profile.id}</span>
-                                <span className="ml-3 flex-shrink-0 text-tertiary text-xs" >{profile.projectCount} project{profile.projectCount === 1 ? "" : "s"}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <div className="mt-3 px-1 py-2 text-tertiary text-xs" >
-                            No provider-backed model profile has been reported by the control plane.
-                          </div>
-                        )}
-                      </section>
-                      </>
-                    ) : null}
-                </>
-              ) : (
-                <div className="flex min-h-64 flex-col items-center justify-center text-center">
-                  <Search size={18} className="text-tertiary" aria-hidden />
-                  <h1 className="ui-page-title mt-2 text-primary">
-                    No matching settings
-                  </h1>
-                  <p className="ui-body mt-1 max-w-xs text-secondary" >
-                    Nothing matches “{query}”. Try another search or clear it to browse every category.
-                  </p>
+                {groupedSettings.map((group) => (
+                  <SettingGroup key={group.title} title={group.title}>
+                    {group.rows.map((s) => <SettingRow key={s.id} descriptor={s} />)}
+                  </SettingGroup>
+                ))}
+
+                {activeCategory.id === "appearance" && groupedSettings.length > 0 ? (
                   <Button
-                    onClick={() => setQuery("")}
-                    className="mt-4"
-                    variant="secondary"
-                    size="md"
+                    onClick={() => useSettingsStore.getState().resetCategory("appearance")}
+                    variant="ghost"
+                    size="sm"
+                    leading={<RotateCcw size={11} aria-hidden />}
                   >
-                    Clear search
+                    Reset appearance to defaults
                   </Button>
-                </div>
-              )}
-            </div>
+                ) : null}
+
+                {activeCategory.id === "agents" ? (
+                  <>
+                    <GatewayProviderSettings />
+
+                    <SettingGroup title="Local command provider">
+                      <Row
+                        label="Status"
+                        description="A local program Terminus runs for model requests. Arguments are passed directly, without a shell."
+                      >
+                        <span
+                          className={cn(
+                            "ui-body",
+                            providerConfiguration?.configured === true ? "text-primary" : "text-tertiary",
+                          )}
+                        >
+                          {providerLoading
+                            ? "Checking…"
+                            : providerConfiguration?.configured === true
+                              ? "Configured"
+                              : "Not configured"}
+                        </span>
+                      </Row>
+                      {providerDraft ? (
+                        <>
+                          <Row controlId="local-provider-program" label="Program">
+                            <Input
+                              id="local-provider-program"
+                              aria-label="Local provider program"
+                              value={providerDraft.program}
+                              onChange={(event) => setProviderDraft({ ...providerDraft, program: event.target.value })}
+                              className="w-56 font-mono"
+                            />
+                          </Row>
+                          <Row controlId="local-provider-model" label="Model">
+                            <Input
+                              id="local-provider-model"
+                              aria-label="Local provider model"
+                              value={providerDraft.model}
+                              onChange={(event) => setProviderDraft({ ...providerDraft, model: event.target.value })}
+                              className="w-56 font-mono"
+                            />
+                          </Row>
+                          <Row controlId="local-provider-timeout" label="Timeout" description="Seconds before a request is abandoned.">
+                            <Input
+                              id="local-provider-timeout"
+                              aria-label="Local provider timeout"
+                              type="number"
+                              min={1}
+                              max={3600}
+                              step={1}
+                              value={providerDraft.timeout_seconds}
+                              onChange={(event) => setProviderDraft({ ...providerDraft, timeout_seconds: Number(event.target.value) })}
+                              className="w-20 tabular-nums"
+                            />
+                          </Row>
+                          <Row
+                            controlId="local-provider-tools"
+                            label="Allow standalone tools"
+                            description="Expose read, exact patch, and bounded exec for this task."
+                          >
+                            <Switch
+                              id="local-provider-tools"
+                              checked={providerDraft.tools_enabled}
+                              onCheckedChange={(checked) => setProviderDraft({ ...providerDraft, tools_enabled: checked })}
+                              label="Allow standalone provider tools"
+                            />
+                          </Row>
+                          <div className="flex flex-col gap-2 py-2.5">
+                            <label htmlFor="local-provider-args" className="ui-body text-primary">
+                              Arguments
+                              <span className="ui-meta ml-1.5">one argv entry per line</span>
+                            </label>
+                            <Textarea
+                              id="local-provider-args"
+                              aria-label="Local provider arguments"
+                              className="min-h-16 font-mono"
+                              value={providerDraft.args.join("\n")}
+                              onChange={(event) => setProviderDraft({
+                                ...providerDraft,
+                                args: event.target.value.length === 0 ? [] : event.target.value.split("\n"),
+                              })}
+                            />
+                            {providerError ? <p className="text-xs text-error" role="alert">{providerError}</p> : null}
+                            <div>
+                              <Button
+                                onClick={() => void saveProviderConfiguration()}
+                                disabled={providerSaving || providerLoading}
+                                variant="secondary"
+                                size="sm"
+                              >
+                                {providerSaving ? "Saving…" : "Save"}
+                              </Button>
+                            </div>
+                          </div>
+                        </>
+                      ) : (
+                        <Row label="Status">
+                          <span className="ui-body text-tertiary">
+                            {providerError ?? "No local provider command is configured."}
+                          </span>
+                        </Row>
+                      )}
+                    </SettingGroup>
+
+                    <SettingGroup title="Model profiles reported by open projects">
+                      {runtimeProfiles.length > 0 ? (
+                        runtimeProfiles.map((profile) => (
+                          <Row key={profile.id} label={profile.id}>
+                            <span className="ui-meta tabular-nums">
+                              {profile.projectCount} project{profile.projectCount === 1 ? "" : "s"}
+                            </span>
+                          </Row>
+                        ))
+                      ) : (
+                        <div className="py-2.5">
+                          <p className="ui-meta">
+                            No provider-backed model profile has been reported by the control plane.
+                          </p>
+                        </div>
+                      )}
+                    </SettingGroup>
+                  </>
+                ) : null}
+
+                {activeCategory.id === "shortcuts"
+                  ? SHORTCUT_GROUPS.map(({ scope, title }) => {
+                      const rows = SETTINGS_SHORTCUTS.filter((shortcut) => shortcut.scope === scope);
+                      if (rows.length === 0) return null;
+                      return (
+                        <SettingGroup key={scope} title={title}>
+                          {rows.map((shortcut) => (
+                            <Row key={shortcut.id} label={shortcut.label}>
+                              <output
+                                aria-label={`Shortcut for ${shortcut.label}`}
+                                title={shortcutSettingValue(shortcut)}
+                              >
+                                <Kbd>{shortcut.display}</Kbd>
+                              </output>
+                            </Row>
+                          ))}
+                        </SettingGroup>
+                      );
+                    })
+                  : null}
+              </>
+            ) : (
+              <div className="flex min-h-64 flex-col items-center justify-center text-center">
+                <Search size={18} className="text-tertiary" aria-hidden />
+                <h1 className="ui-page-title mt-2 text-primary">No matching settings</h1>
+                <p className="ui-body mt-1 max-w-xs text-secondary">
+                  Nothing matches “{query}”. Try another search or clear it to browse every category.
+                </p>
+                <Button onClick={() => setQuery("")} className="mt-4" variant="secondary">
+                  Clear search
+                </Button>
+              </div>
+            )}
           </div>
         </main>
       </div>
@@ -1140,26 +797,17 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
   const density = useThemeStore((state) => state.density);
   const setTheme = useThemeStore((state) => state.setTheme);
   const setDensity = useThemeStore((state) => state.setDensity);
-  const [error, setError] = useState<string | null>(null);
-  const [draftText, setDraftText] = useState<string | null>(null);
 
+  // Theme and density read from their canonical store, not from this one.
   const current: SettingValue = descriptor.id === "appearance.theme"
     ? theme
     : descriptor.id === "appearance.density"
       ? density
       : value ?? descriptor.defaultValue;
-  const available = typeof descriptor.apply === "function";
+  const controlId = `setting-${descriptor.id}`;
 
   const commit = useCallback(
     (next: SettingValue): void => {
-      if (descriptor.validate) {
-        const msg = descriptor.validate(next);
-        if (msg) {
-          setError(msg);
-          return;
-        }
-      }
-      setError(null);
       if (descriptor.id === "appearance.theme") setTheme(next as Theme);
       else if (descriptor.id === "appearance.density") setDensity(next as Density);
       else set(descriptor.id, next);
@@ -1168,251 +816,37 @@ function SettingRow({ descriptor }: { descriptor: SettingDescriptor }): JSX.Elem
   );
 
   return (
-    <div
-      className={cn(
-        "settings-row flex min-h-10 items-center gap-4 px-0 py-2",
-        available && "hover:bg-hover",
-        !available && !descriptor.readOnly && "is-unavailable",
-      )}
-    >
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <div className="flex items-center gap-2">
-          <label
-            htmlFor={`setting-${descriptor.id}`}
-            className="ui-label text-primary"
-          >
-            {descriptor.label}
-          </label>
-          {descriptor.restartRequired ? (
-            <Badge tone="warning">Restart</Badge>
-          ) : null}
-          {!available && !descriptor.readOnly ? (
-            <Badge tone="neutral" aria-label={descriptor.readOnly ? "This shortcut is fixed in the current build" : "This control is not connected yet"}>
-              Unavailable
-            </Badge>
-          ) : null}
-        </div>
-        {descriptor.description ? (
-          <p className="ui-meta text-secondary">
-            {descriptor.description}
-          </p>
-        ) : null}
-        {error ? (
-          <p className="mt-0.5 text-xs text-error" role="alert">
-            {error}
-          </p>
-        ) : null}
-      </div>
-      <div className="settings-control flex flex-shrink-0 items-center gap-2">
-        <SettingControlView
-          descriptor={descriptor}
-          value={current}
-          onChange={commit}
-          draftText={draftText}
-          onDraftText={setDraftText}
-          disabled={!available}
+    <Row controlId={controlId} label={descriptor.label} description={descriptor.description}>
+      {descriptor.control.kind === "toggle" ? (
+        <Switch
+          id={controlId}
+          checked={Boolean(current)}
+          onCheckedChange={commit}
+          label={descriptor.label}
         />
-        {available && current !== descriptor.defaultValue ? <IconButton
+      ) : (
+        <Select
+          id={controlId}
+          value={String(current)}
+          onValueChange={commit}
+          label={descriptor.label}
+          options={descriptor.control.options}
+        />
+      )}
+      {current !== descriptor.defaultValue ? (
+        <IconButton
           onClick={() => {
-            setError(null);
             if (descriptor.id === "appearance.theme") setTheme(descriptor.defaultValue as Theme);
             else if (descriptor.id === "appearance.density") setDensity(descriptor.defaultValue as Density);
             else reset(descriptor.id);
           }}
           label={`Reset ${descriptor.label} to default`}
           icon={<RotateCcw size={12} aria-hidden />}
-          size="md"
-        /> : null}
-      </div>
-    </div>
-  );
-}
-
-function SettingControlView({
-  descriptor,
-  value,
-  onChange,
-  draftText,
-  onDraftText,
-  disabled,
-}: {
-  descriptor: SettingDescriptor;
-  value: SettingValue;
-  onChange: (v: SettingValue) => void;
-  draftText: string | null;
-  onDraftText: (v: string | null) => void;
-  disabled: boolean;
-}): JSX.Element {
-  const c = descriptor.control;
-  const isModified = value !== descriptor.defaultValue;
-
-  if (c.kind === "toggle") {
-    const checked = Boolean(value);
-    return (
-      <Switch
-        checked={checked}
-        onCheckedChange={(next) => onChange(next)}
-        label={descriptor.label}
-        disabled={disabled}
-      />
-    );
-  }
-
-  if (c.kind === "select") {
-    return (
-      <Select
-        value={String(value)}
-        onValueChange={(next) => onChange(next)}
-        label={descriptor.label}
-        disabled={disabled}
-        options={c.options}
-        className="min-w-32"
-      />
-    );
-  }
-
-  if (c.kind === "number") {
-    const num = typeof value === "number" ? value : Number(value) || 0;
-    return (
-      <div className="flex items-center gap-1">
-        <Input
-          id={`setting-${descriptor.id}`}
-          type="number"
-          value={Number.isFinite(num) ? num : 0}
-          min={c.min}
-          max={c.max}
-          step={c.step}
-          onChange={(e) => {
-            const n = Number(e.target.value);
-            onChange(Number.isFinite(n) ? n : 0);
-          }}
-          aria-label={descriptor.label}
-          disabled={disabled}
-          className="w-[88px] tabular-nums"
+          size="sm"
         />
-        {c.unit ? (
-          <span className="text-tertiary text-xs" >
-            {c.unit}
-          </span>
-        ) : null}
-      </div>
-    );
-  }
-
-  if (c.kind === "text") {
-    const text = draftText ?? (typeof value === "string" ? value : String(value));
-    return (
-      <Input
-        id={`setting-${descriptor.id}`}
-        type="text"
-        value={text}
-        placeholder={c.placeholder}
-        onChange={(e) => onDraftText(e.target.value)}
-        onBlur={() => {
-          if (draftText !== null) {
-            onChange(draftText);
-            onDraftText(null);
-          }
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && draftText !== null) {
-            e.preventDefault();
-            onChange(draftText);
-            onDraftText(null);
-          } else if (e.key === "Escape" && draftText !== null) {
-            e.preventDefault();
-            e.stopPropagation();
-            onDraftText(null);
-          }
-        }}
-        aria-label={descriptor.label}
-        disabled={disabled}
-        className={cn("settings-text-control min-w-[min(200px,100%)]", isModified && "border-strong")}
-      />
-    );
-  }
-
-  // shortcut
-  return (
-    <ShortcutControl
-      label={descriptor.label}
-      value={String(value)}
-      onChange={onChange}
-      disabled={disabled}
-    />
+      ) : null}
+    </Row>
   );
-}
-
-function ShortcutControl({
-  label,
-  value,
-  onChange,
-  disabled,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  disabled: boolean;
-}): JSX.Element {
-  const [recording, setRecording] = useState(false);
-  useEffect(() => {
-    if (!recording) return;
-    const onKey = (e: KeyboardEvent): void => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.key === "Escape") {
-        setRecording(false);
-        return;
-      }
-      const parts: string[] = [];
-      if (e.metaKey) parts.push("Cmd");
-      if (e.ctrlKey) parts.push("Ctrl");
-      if (e.altKey) parts.push("Alt");
-      if (e.shiftKey) parts.push("Shift");
-      let key = e.key;
-      if (key === " ") key = "Space";
-      if (key.length === 1) key = key.toUpperCase();
-      parts.push(key);
-      onChange(parts.join("+"));
-      setRecording(false);
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [recording, onChange]);
-  if (disabled) {
-    return (
-      <output
-        aria-label={`Shortcut for ${label}`}
-        className="flex min-w-32 items-center justify-end gap-1 font-mono text-xs text-primary"
-      >
-        <Kbd>{value}</Kbd>
-      </output>
-    );
-  }
-  return (
-    <Button
-      disabled={disabled}
-      onClick={() => setRecording(true)}
-      aria-label={`Edit shortcut for ${label}`}
-      variant="secondary"
-      size="md"
-      className={cn(
-        "min-w-36 justify-start font-mono",
-        recording && "ring-1 ring-inset",
-      )}
-    >
-      <Keyboard size={11} className="text-tertiary" />
-      <span>{recording ? "Press keys…" : value}</span>
-    </Button>
-  );
-}
-
-// ────────────────────────── Hook ────────────────────────────────────────────
-
-/** Convenience hook: read a setting value with type. */
-export function useSetting<T extends SettingValue>(id: string, fallback: T): T {
-  const v = useSettingsStore((s) => s.values[id]);
-  return (v as T) ?? fallback;
 }
 
 // Re-export catalog for tests / external validation.

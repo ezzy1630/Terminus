@@ -22,6 +22,14 @@ export interface EmptyStateProps {
   compact?: boolean;
 }
 
+/**
+ * A panel's "nothing here yet", kept quiet.
+ *
+ * This renders inside inspectors and side panes, so it is never the large
+ * element on screen — that slot belongs to the start-screen hero. The title
+ * sits at chrome size and the description at meta size, which keeps an empty
+ * inspector from out-shouting the transcript beside it.
+ */
 export function EmptyState({
   icon,
   title,
@@ -44,9 +52,9 @@ export function EmptyState({
         className,
       )}
     >
-      {icon ? <div className="mb-2 flex h-6 w-6 items-center justify-center text-tertiary" aria-hidden>{icon}</div> : null}
-      <h2 className="ui-page-title text-primary">{title}</h2>
-      {description ? <p className="ui-body mt-1 max-w-xs text-secondary">{description}</p> : null}
+      {icon ? <div className="mb-2 flex h-5 w-5 items-center justify-center text-tertiary" aria-hidden>{icon}</div> : null}
+      <h2 className="ui-body font-semibold text-primary">{title}</h2>
+      {description ? <p className="ui-meta mt-1 max-w-[34ch] leading-relaxed">{description}</p> : null}
       {children ? <div className="mt-3 w-full">{children}</div> : null}
       {action || secondaryAction ? (
         <div className={cn("mt-3 flex flex-wrap gap-2", align === "center" && "justify-center")}>

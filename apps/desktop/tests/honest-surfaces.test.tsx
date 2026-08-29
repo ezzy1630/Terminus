@@ -29,6 +29,9 @@ vi.mock("../src/lib/api", async () => {
       listProviderModels: vi.fn(async () => ({ providers: [], models: [] })),
       listTaskArtifacts: vi.fn(async () => ({ task_id: "task-1", artifacts: [], total: 0, next_cursor: null })),
       getSandboxReport: vi.fn(async () => { throw new Error("no sandbox report"); }),
+      // The inspector asks for a working-tree diff and swallows the failure;
+      // these tests are about the environment read-out, not the diff.
+      getTaskDiff: vi.fn(async () => { throw new Error("no task diff"); }),
       startTurn: vi.fn(async () => ({})),
       getGatewayProviderConfiguration: vi.fn(async () => ({ configuration: null })),
     },

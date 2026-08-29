@@ -36,7 +36,6 @@ export interface DefaultCommandActions {
   readonly viewShortcuts?: () => void;
   readonly openMissionBoard?: () => void;
   readonly openAttentionCenter?: () => void;
-  readonly openInterventions?: () => void;
   /**
    * Every open project, so switching to one is a search away.
    *
@@ -72,7 +71,6 @@ export function buildDefaultCommands(actions: DefaultCommandActions): Command[] 
 
   // "Needs attention" is the queue of work waiting on a human, so it leads.
   push("task.attention", "Needs attention", "Task", undefined, actions.openAttentionCenter, ["material questions", "consequence matrix", "approval", "blocked", "waiting"]);
-  push("task.intervene", "Steer this task", "Task", undefined, actions.openInterventions, ["pause", "resume", "takeover", "rewind", "fork", "intervention"]);
   push("project.open", "Open project", "Navigation", shortcutDisplay(FIXED_SHORTCUTS.openProject), actions.openProject, ["workspace", "folder", "onboarding"]);
   push("nav.mission-board", "Open mission board", "Navigation", undefined, actions.openMissionBoard, ["kanban", "tasks", "work", "status"]);
   push("task.new", "New task", "Task", shortcutDisplay(FIXED_SHORTCUTS.newTask), actions.newTask, ["create task"]);

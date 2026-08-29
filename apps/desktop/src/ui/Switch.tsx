@@ -7,20 +7,32 @@ export interface SwitchProps {
   label: string;
   disabled?: boolean;
   className?: string;
+  /** Lets a visible <label htmlFor> point at the control instead of dangling. */
+  id?: string;
 }
-export function Switch({ checked, onCheckedChange, label, disabled, className }: SwitchProps): JSX.Element {
+
+/**
+ * AppKit switch proportions: a 26×15 pill with a 13px white knob.
+ *
+ * The previous 36×20 track was a web toggle — half again as tall as anything
+ * macOS draws, which made every settings row read as a form on a page. The
+ * knob stays white in both states because that is what AppKit paints; the
+ * track carries the state (neutral fill off, accent on).
+ */
+export function Switch({ checked, onCheckedChange, label, disabled, className, id }: SwitchProps): JSX.Element {
   return (
     <SwitchPrimitive.Root
+      id={id}
       checked={checked}
       onCheckedChange={onCheckedChange}
       aria-label={label}
       disabled={disabled}
       className={cn(
-        "relative h-5 w-9 rounded-full border border-default bg-subtle transition-colors data-[state=checked]:border-accent data-[state=checked]:bg-accent disabled:opacity-45",
+        "relative h-[15px] w-[26px] flex-none rounded-full bg-selected transition-colors data-[state=checked]:bg-accent disabled:opacity-45",
         className,
       )}
     >
-      <SwitchPrimitive.Thumb className="block h-4 w-4 translate-x-0.5 rounded-full bg-elevated shadow-sm transition-transform data-[state=checked]:translate-x-[17px]" />
+      <SwitchPrimitive.Thumb className="block h-[13px] w-[13px] translate-x-px rounded-full bg-on-accent shadow-sm transition-transform data-[state=checked]:translate-x-[12px]" />
     </SwitchPrimitive.Root>
   );
 }

@@ -30,11 +30,20 @@ interface TaskV2PanelProps {
 const EFFECT_TERMINAL = new Set(["COMMITTED", "DENIED", "CANCELLED", "COMPENSATED"]);
 const INITIAL_CATALOG_COUNT = 8;
 
-function statusTone(status: string): string {
-  if (status === "COMPLETED") return "var(--color-success)";
-  if (status === "FAILED" || status === "CANCELLED" || status === "DENIED") return "var(--color-error)";
-  if (status === "BLOCKED" || status.startsWith("WAITING")) return "var(--color-warning)";
-  return "var(--color-info)";
+/**
+ * Status colour is meaning, never decoration.
+ *
+ * The previous version painted every non-terminal status with `--color-info`,
+ * so a task simply being in flight rendered as blue — the accent the design
+ * spec reserves for interactive affordances. Only outcomes and blocked states
+ * earn a tint now; the running majority reads as ordinary secondary text,
+ * which is what the label already says.
+ */
+function statusToneClass(status: string): string {
+  if (status === "COMPLETED") return "text-success";
+  if (status === "FAILED" || status === "CANCELLED" || status === "DENIED") return "text-error";
+  if (status === "BLOCKED" || status.startsWith("WAITING")) return "text-warning";
+  return "text-secondary";
 }
 
 const TaskV2Panel = memo(function TaskV2Panel({ className, taskId: boundTaskId }: TaskV2PanelProps) {
@@ -75,18 +84,20 @@ const TaskV2Panel = memo(function TaskV2Panel({ className, taskId: boundTaskId }
 
   return (
     <div className={cn("flex flex-col gap-2.5 text-xs", className)} data-testid="task-v2-panel">
+      {/* The inspector row that wraps this panel already names it, so the
+          header carries only the one control that does something. */}
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5 font-medium text-secondary">
+        <span className="flex items-center gap-1.5 text-tertiary">
           <BadgeCheck className="h-3.5 w-3.5" aria-hidden />
-          Task snapshot
-        </div>
+          Snapshot
+        </span>
         <Button
-          type="button"
+          variant="bare"
           onClick={() => {
             if (selectedId) void refresh();
             if (!boundTaskId) void loadCatalog();
           }}
-          className="flex h-6 items-center gap-1 rounded px-1.5 text-xs text-tertiary hover:bg-hover"
+          className="flex h-6 items-center gap-1 rounded-md px-1.5 text-xs text-tertiary transition-colors hover:bg-hover hover:text-primary"
           aria-label="Refresh canonical task"
         >
           <RefreshCw className="h-3 w-3" aria-hidden />
@@ -138,19 +149,19 @@ const TaskV2Panel = memo(function TaskV2Panel({ className, taskId: boundTaskId }
           {catalog.slice(0, visibleCatalogCount).map((candidate) => (
             <Button
               key={candidate.id}
-              type="button"
+              variant="bare"
               onClick={() => setPickedId(candidate.id)}
-              className="flex items-center justify-between rounded px-2 py-1.5 text-left hover:bg-hover"
+              className="flex h-8 items-center justify-between gap-2 rounded-md px-2 text-left transition-colors hover:bg-hover"
             >
-              <span className="truncate">{candidate.contract.mission}</span>
-              <span className="ml-2 shrink-0 text-xs" style={{ color: statusTone(candidate.status) }}>{candidate.status}</span>
+              <span className="min-w-0 flex-1 truncate text-primary">{candidate.contract.mission}</span>
+              <span className={cn("shrink-0 text-xs", statusToneClass(candidate.status))}>{candidate.status}</span>
             </Button>
           ))}
           {visibleCatalogCount < catalog.length ? (
             <Button
               type="button"
               onClick={() => setVisibleCatalogCount((count) => Math.min(catalog.length, count + INITIAL_CATALOG_COUNT))}
-              className="mt-1 h-7 justify-start rounded border border-default px-2 text-left text-xs font-medium text-secondary hover:bg-hover"
+              className="mt-1 flex h-8 items-center rounded-md px-2 text-left text-xs text-tertiary transition-colors hover:bg-hover hover:text-primary"
             >
               Show more tasks ({visibleCatalogCount} of {catalog.length})
             </Button>
@@ -170,21 +181,26 @@ const TaskV2Panel = memo(function TaskV2Panel({ className, taskId: boundTaskId }
           <div className="flex flex-col gap-1 border-y border-subtle py-2">
             <div className="flex items-center justify-between gap-2">
               <span className="truncate font-medium">{task.contract.mission}</span>
-              <span className="shrink-0 text-xs font-medium" style={{ color: statusTone(task.status) }}>
+              <span className={cn("shrink-0 text-xs font-medium", statusToneClass(task.status))}>
                 {task.status}
               </span>
             </div>
-            <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs text-tertiary">
-              <dt>Version</dt><dd className="tabular-nums">{task.version}</dd>
-              <dt>Mode</dt><dd>{task.contract.mode}</dd>
-              <dt>Budget</dt><dd className="tabular-nums">{task.contract.constraints.costMicros} µ$, {task.contract.constraints.timeoutSeconds}s</dd>
-              <dt>Authority</dt><dd>{task.contract.authorityCeiling.join(", ") || "None"}</dd>
-              <dt>Updates</dt>
-              <dd>
-                <span className={cn(streamState === "connected" && "text-success", streamState === "reconnecting" && "text-warning")}>
-                  {streamState}
-                </span>
-              </dd>
+            {/* Label left, value right — the same row language as the rest of
+                the inspector, so this panel does not read as a nested table. */}
+            <dl className="flex flex-col gap-0.5 text-xs">
+              <SnapshotRow label="Version" value={task.version} mono />
+              <SnapshotRow label="Mode" value={task.contract.mode} />
+              <SnapshotRow
+                label="Budget"
+                value={`${task.contract.constraints.costMicros} \u00b5$, ${task.contract.constraints.timeoutSeconds}s`}
+                mono
+              />
+              <SnapshotRow label="Authority" value={task.contract.authorityCeiling.join(", ") || "None"} />
+              <SnapshotRow
+                label="Updates"
+                value={streamState}
+                tone={streamState === "reconnecting" ? "text-warning" : undefined}
+              />
             </dl>
           </div>
 
@@ -196,7 +212,7 @@ const TaskV2Panel = memo(function TaskV2Panel({ className, taskId: boundTaskId }
             <div className="divide-y divide-[var(--border-subtle)]">
             {task.contract.acceptance.map((criterion) => (
               <div key={criterion.claimId} className="flex items-start gap-1.5 py-1.5">
-                <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-info" aria-hidden />
+                <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-tertiary" aria-hidden />
                 <span>
                   {criterion.statement}
                   <span className="ml-1 text-xs text-tertiary">({criterion.evidenceRequirement})</span>
@@ -227,6 +243,21 @@ const TaskV2Panel = memo(function TaskV2Panel({ className, taskId: boundTaskId }
   );
 });
 
+/** One label/value line in the snapshot summary. */
+function SnapshotRow({ label, value, mono = false, tone }: {
+  label: string;
+  value: string | number;
+  mono?: boolean;
+  tone?: string;
+}): JSX.Element {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <dt className="shrink-0 text-tertiary">{label}</dt>
+      <dd className={cn("min-w-0 truncate text-right text-secondary", mono && "tabular-nums", tone)}>{value}</dd>
+    </div>
+  );
+}
+
 function EffectRow({ effect }: {
   effect: EffectSnapshot;
 }): React.ReactNode {
@@ -238,7 +269,7 @@ function EffectRow({ effect }: {
           {effect.intentType}
           <span className="ml-1.5 text-xs font-normal text-tertiary">{effect.effectClass}</span>
         </div>
-        <div className="text-xs" style={{ color: statusTone(effect.state) }}>
+        <div className={cn("text-xs", statusToneClass(effect.state))}>
           {effect.state}
           {effect.settledAt ? `, ${effect.settledAt}` : ""}
         </div>

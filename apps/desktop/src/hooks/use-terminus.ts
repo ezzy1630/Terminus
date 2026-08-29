@@ -16,7 +16,7 @@
  * objects) happens in the component layer — see Conversation.tsx.
  */
 import { create } from "zustand";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { api, createIdempotencyKey, TerminusApiError, subscribeEvents, type TerminusEventStream } from "../lib/api";
 import { mergePendingApprovals, pendingApprovalFromServerRow, derivePendingApprovals, type PendingApproval } from "../lib/task-surface";
 import { TURN_SETTLED_EVENTS, turnActivityFromEvents, type TurnActivity } from "../lib/turn-activity";
@@ -712,16 +712,38 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
   _stream: null,
 
   refreshAll: async () => {
-    await get().refreshSessions();
-    const sessId = get().selectedSessionId;
-    if (sessId) await get().refreshTasks(sessId);
-    // Work started in another space has to be visible without clicking into it,
-    // otherwise the sidebar counts and the attention badge only ever describe
-    // whichever space happens to be open.
-    await get().refreshVisibleSessionTasks();
-    await get().refreshPinnedTasks();
-    const taskId = get().selectedTaskId;
-    if (taskId) await Promise.all([get().refreshTask(taskId), get().refreshApprovals(taskId)]);
+    /*
+     * Boot used to be five round trips end to end, each waiting on the one
+     * before it, so the window stayed empty for the sum of every request
+     * rather than the slowest one.
+     *
+     * Only two of them actually depend on anything. The pinned tasks and the
+     * selected task are addressed by id from state we restored before any
+     * request went out, so they can leave immediately. The session-derived
+     * work is the only part that has to wait for the session list, and once
+     * it has it the two halves fan out together: `refreshVisibleSessionTasks`
+     * deliberately skips the selected space, so it never races the call that
+     * loads it. Each of these already reports its own failure into freshness
+     * state rather than throwing, so one slow space cannot strand the rest.
+     */
+    const selectedTaskId = get().selectedTaskId;
+    const pending: Promise<unknown>[] = [get().refreshPinnedTasks()];
+    if (selectedTaskId) {
+      pending.push(get().refreshTask(selectedTaskId), get().refreshApprovals(selectedTaskId));
+    }
+    pending.push(get().refreshSessions().then(async () => {
+      // Read the selection *after* the list settles: an empty selection is
+      // resolved to a real space while the sessions request is in flight.
+      const sessId = get().selectedSessionId;
+      await Promise.all([
+        sessId ? get().refreshTasks(sessId) : Promise.resolve(),
+        // Work started in another space has to be visible without clicking
+        // into it, otherwise the sidebar counts and the attention badge only
+        // ever describe whichever space happens to be open.
+        get().refreshVisibleSessionTasks(),
+      ]);
+    }));
+    await Promise.all(pending);
   },
 
   refreshVisibleSessionTasks: async () => {
@@ -1962,7 +1984,19 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
               events: existing,
               eventBytes: eventBytesByTask[queuedTaskId]
                 ?? existing.reduce((total, event) => total + presentationEventByteLength(event), 0),
-              seenEventIds: new Set(existing.map((event) => event.id || `${event.event}:${event.data}`)),
+              /*
+               * Derived from the retained window itself, deliberately, and not
+               * from the `eventIdsByTask` set that `_appendEvent` maintains.
+               *
+               * That set is not authoritative: `hydrateTranscript` and cursor
+               * reconciliation both replace `eventsByTask` wholesale without
+               * touching it. Reusing it saves one walk of the window per flush
+               * and costs correctness — stale identities make genuinely new
+               * events look like duplicates and the transcript silently stays
+               * empty. Rebuilding here is what re-syncs the two, and at ~0.03ms
+               * per flush it is 4% of what measuring the window used to cost.
+               */
+              seenEventIds: new Set(existing.map(eventIdentity)),
               cursor: state.resumeCursorByTask[queuedTaskId] ?? null,
               boundary: prior,
             },
@@ -1973,11 +2007,16 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
               snapshotUrl: `/v1/tasks/${encodeURIComponent(queuedTaskId)}`,
             },
           );
-          const next = [...retained.events];
-          const dropped = [...retained.dropped];
+          // `retainEventWindow` already returns freshly sliced arrays and a set
+          // it built for this call, so copying them again was three more walks
+          // of the whole window per flush for no isolation we did not have.
+          // When nothing was accepted it returns the *same* events array, and
+          // adopting it keeps the reference stable so subscribers see no change.
+          const next = retained.events as TerminusSseEvent[];
+          const dropped = retained.dropped;
           eventsByTask[queuedTaskId] = next;
           eventBytesByTask[queuedTaskId] = retained.eventBytes;
-          eventIdsByTask.set(queuedTaskId, new Set(retained.seenEventIds));
+          eventIdsByTask.set(queuedTaskId, retained.seenEventIds as Set<string>);
           eventLruClock += 1;
           eventLruTickByTask[queuedTaskId] = eventLruClock;
           const resumeCursor = resumeCursorByTask.get(queuedTaskId);
@@ -2090,12 +2129,29 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
     const { taskId, status, phase, terminalReason } = projection;
     set((state) => {
       const existing = state.taskById[taskId];
-      if (!existing) return {};
+      // Returning a fresh `{}` here still counts as a state change to zustand,
+      // which then wakes every subscriber in the app to re-run its selector for
+      // an event about a task we are not even holding. Returning the current
+      // state is identity-equal, so the notification is skipped entirely.
+      if (!existing) return state;
+      const nextStatus = status ?? existing.status;
+      const nextPhase = phase ?? existing.phase;
+      const nextTerminalReason = terminalReason ?? existing.terminal_reason;
+      // A stream re-announcing the state a task is already in must not clone
+      // `taskById` and re-map the session's task array: those new identities
+      // re-render every task list and header for no visible difference.
+      if (
+        nextStatus === existing.status
+        && nextPhase === existing.phase
+        && nextTerminalReason === existing.terminal_reason
+      ) {
+        return state;
+      }
       const updated: Task = {
         ...existing,
-        status: status ?? existing.status,
-        phase: phase ?? existing.phase,
-        terminal_reason: terminalReason ?? existing.terminal_reason,
+        status: nextStatus,
+        phase: nextPhase,
+        terminal_reason: nextTerminalReason,
         updated_at: new Date().toISOString(),
       };
       const tasks = state.tasksBySession[updated.session_id] ?? [];
@@ -2320,15 +2376,40 @@ export function useHealthMonitor(): void {
 }
 
 /** Pinned tasks (resolved from ids → Task objects). */
+/**
+ * Hold a list's identity steady while its members are unchanged.
+ *
+ * `taskById` gets a new identity whenever any task anywhere is refreshed, so a
+ * list derived from it was rebuilt — and handed back as a new array — on every
+ * unrelated task update. Downstream that array is a `useMemo` dependency and a
+ * prop to memoised rows, so a new identity re-renders the whole list for data
+ * that did not move. Comparing members is O(pins) and turns "something changed
+ * somewhere" back into "these pins changed".
+ */
+function useStableList<T>(next: readonly T[]): T[] {
+  const held = useRef<readonly T[]>(next);
+  const previous = held.current;
+  if (
+    previous !== next
+    && (previous.length !== next.length || next.some((value, index) => previous[index] !== value))
+  ) {
+    held.current = next;
+  }
+  return held.current as T[];
+}
+
 export function usePinnedTasks(): Task[] {
   const pins = useTerminusStore((s) => s.pinnedTaskIds);
   const taskById = useTerminusStore((s) => s.taskById);
-  const out: Task[] = [];
-  for (const id of pins) {
-    const t = taskById[id];
-    if (t) out.push(t);
-  }
-  return out;
+  const pinned = useMemo(() => {
+    const out: Task[] = [];
+    for (const id of pins) {
+      const t = taskById[id];
+      if (t) out.push(t);
+    }
+    return out;
+  }, [pins, taskById]);
+  return useStableList(pinned);
 }
 
 /** Currently selected task object. */
@@ -2358,6 +2439,8 @@ export function useSelectedTaskEventHistory(): EventHistoryBoundary | null {
 }
 
 const EMPTY_APPROVALS: PendingApproval[] = [];
+/** Shared "no page loaded yet" value, so the empty case keeps one identity. */
+const EMPTY_COLLECTION_PAGE: CollectionPageState = Object.freeze(initialCollectionPage());
 
 /**
  * Merged pending approvals for the selected task: server snapshot ∪
@@ -2380,10 +2463,16 @@ export function useSelectedTaskApprovals(): {
       : mergePendingApprovals(stored, derivePendingApprovals(events)),
     [events, freshness?.status, stored],
   );
-  return {
-    approvals,
-    status: freshness?.status ?? "loading",
-    error: freshness?.error ?? null,
-    page: page ?? initialCollectionPage(),
-  };
+  // Both the object literal and `initialCollectionPage()` minted a new identity
+  // on every render, so two consumers (Conversation and Inspector) re-rendered
+  // on every 50ms flush even when no approval had changed.
+  return useMemo(
+    () => ({
+      approvals,
+      status: freshness?.status ?? "loading",
+      error: freshness?.error ?? null,
+      page: page ?? EMPTY_COLLECTION_PAGE,
+    }),
+    [approvals, freshness?.status, freshness?.error, page],
+  );
 }

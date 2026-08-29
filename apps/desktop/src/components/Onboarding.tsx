@@ -24,6 +24,7 @@ import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-lo
 import {
   Folder,
   FolderOpen,
+  TriangleAlert,
   X,
 } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -468,6 +469,9 @@ function OnboardingImpl({
   }, [changeProjectPath, pickDirectory]);
 
   const canOpen = isAbsoluteLocalPath(projectPath) && !creating;
+  // Only complain once there is something to complain about — an empty field
+  // on first paint is not a mistake the operator has made yet.
+  const showsPathError = projectPath.length > 0 && !isAbsoluteLocalPath(projectPath);
 
   return (
     <DialogSurface
@@ -505,74 +509,85 @@ function OnboardingImpl({
         />
       )}
       <div className={cn("scrollable flex min-h-0 flex-1 items-center justify-center px-4", projectOnly ? "py-4" : "py-8")}>
-        <div className={cn("w-full p-4", projectOnly ? "max-w-none" : "max-w-[480px]")}>
+        <div className={cn("w-full", projectOnly ? "max-w-none p-4" : "max-w-[420px] p-4")}>
           <header className="mb-4">
             <h1 className="ui-page-title text-primary">
               {projectOnly ? "Open a project" : "Open your first project"}
             </h1>
-            <p className="ui-body mt-1 text-secondary">
+            <p className="ui-meta mt-1">
               {projectOnly
-                ? "Choose a local project to open in its own workspace."
-                : "Choose a project and optionally describe the first task."}
+                ? "Choose a local folder to open in its own workspace."
+                : "Choose a local folder. You can describe the first task now or later."}
             </p>
           </header>
 
-          <section aria-labelledby="setup-project-heading">
-            <h2 id="setup-project-heading" className="mb-2 text-xs font-medium text-primary">Project</h2>
-            <div className="flex gap-2">
-              <div className="relative min-w-0 flex-1">
-                <Folder className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-tertiary" size={14} />
-                <Input
-                  value={projectPath}
-                  onChange={(event) => changeProjectPath(event.target.value)}
-                  readOnly={Boolean(pickDirectory)}
-                  placeholder="/path/to/project"
-                  aria-label="Project path"
-                  aria-invalid={projectPath.length > 0 && !isAbsoluteLocalPath(projectPath)}
-                  className="pl-8 font-mono"
-                  autoFocus
-                />
-              </div>
-              {pickDirectory ? (
-                <Button variant="secondary" onClick={() => void onPick()}>
-                  <FolderOpen size={14} /> Browse
-                </Button>
-              ) : null}
+          <div className="flex gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Folder className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-tertiary" size={13} aria-hidden />
+              <Input
+                value={projectPath}
+                onChange={(event) => changeProjectPath(event.target.value)}
+                readOnly={Boolean(pickDirectory)}
+                placeholder="/path/to/project"
+                aria-label="Project path"
+                aria-invalid={showsPathError}
+                aria-describedby={showsPathError ? "onboarding-path-error" : undefined}
+                invalid={showsPathError}
+                className="h-7 pl-7 font-mono"
+                autoFocus
+              />
             </div>
-            <p className="mt-1.5 text-xs text-tertiary">Terminus verifies the directory before opening it.</p>
-          </section>
-
-          {!projectOnly ? (
-              <section className="mt-4" aria-labelledby="setup-task-heading">
-                <h2 id="setup-task-heading" className="mb-2 text-xs font-medium text-primary">First task <span className="font-normal text-tertiary">(optional)</span></h2>
-                <Textarea
-                  value={initialPrompt}
-                  onChange={(event) => changeInitialPrompt(event.target.value)}
-                  placeholder="Describe the result you want"
-                  aria-label="First task prompt"
-                  rows={3}
-                />
-              </section>
+            {pickDirectory ? (
+              <Button variant="secondary" onClick={() => void onPick()}>
+                <FolderOpen size={13} aria-hidden /> Choose…
+              </Button>
+            ) : null}
+          </div>
+          {showsPathError ? (
+            <p id="onboarding-path-error" className="ui-meta mt-1.5 text-secondary">
+              Enter an absolute path, starting with “/”.
+            </p>
           ) : null}
 
-          {error ? <p className="mt-3 border-l-2 border-error px-2 text-xs text-danger" role="alert">{error}</p> : null}
-            {partialRecovery ? (
-              <div className="mt-3 border-l-2 border-warning/55 px-2.5 py-1" role="status">
-                <p className="text-xs text-secondary">
-                  The project opened, but the first task did not. Continue and the request will remain in your draft.
-                </p>
-                <Button className="mt-2" variant="primary" onClick={continueWithPartialProject}>
-                  Continue with created project
-                </Button>
-              </div>
-            ) : null}
-            {draftStorageError ? (
-              <p className="mt-3 text-xs text-tertiary" role="status">
-                {draftStorageError}
-              </p>
-            ) : null}
+          {!projectOnly ? (
+            <section className="mt-4" aria-labelledby="setup-task-heading">
+              <h2 id="setup-task-heading" className="ui-body mb-1.5 text-primary">
+                First task <span className="ui-meta">optional</span>
+              </h2>
+              <Textarea
+                value={initialPrompt}
+                onChange={(event) => changeInitialPrompt(event.target.value)}
+                placeholder="Describe the result you want"
+                aria-label="First task prompt"
+                rows={3}
+              />
+            </section>
+          ) : null}
 
-          <footer className="mt-4 flex items-center justify-between border-t border-subtle pt-3">
+          {error ? (
+            <p className="mt-3 flex items-start gap-2 text-xs text-secondary" role="alert">
+              <TriangleAlert size={13} className="mt-px flex-none text-error" aria-hidden />
+              <span className="min-w-0">{error}</span>
+            </p>
+          ) : null}
+          {partialRecovery ? (
+            <div className="mt-3" role="status">
+              <p className="flex items-start gap-2 text-xs text-secondary">
+                <TriangleAlert size={13} className="mt-px flex-none text-warning" aria-hidden />
+                <span className="min-w-0">
+                  The project opened, but the first task did not. Continue and the request will remain in your draft.
+                </span>
+              </p>
+              <Button className="ml-[21px] mt-2" variant="secondary" onClick={continueWithPartialProject}>
+                Continue with created project
+              </Button>
+            </div>
+          ) : null}
+          {draftStorageError ? (
+            <p className="ui-meta mt-3" role="status">{draftStorageError}</p>
+          ) : null}
+
+          <footer className="mt-5 flex items-center justify-end gap-2 border-t border-subtle pt-3">
             <Button variant="ghost" onClick={skip} disabled={creating}>
               {projectOnly ? "Cancel" : "Not now"}
             </Button>
@@ -582,7 +597,7 @@ function OnboardingImpl({
               disabled={!canOpen}
               aria-busy={creating || undefined}
             >
-              {creating ? "Opening…" : "Open project"}
+              {creating ? "Opening…" : "Open"}
             </Button>
           </footer>
         </div>

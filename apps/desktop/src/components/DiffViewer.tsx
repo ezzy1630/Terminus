@@ -10,10 +10,17 @@
  *   - Hunk headers
  *   - Inline comments (click on a line to add a comment)
  *   - Draft a revision request for selected code
- *   - Accept / Reject per logical change group (hunk)
- *   - Restore file / Restore hunk
- *   - Copy code, open in external editor, reveal in Finder
+ *   - Copy the file path
  *   - Jump between changes (prev/next)
+ *
+ * Accept/reject-per-hunk, restore, "open in editor/terminal" and "reveal in
+ * Finder" used to be listed here and half-built. None of them can exist yet:
+ * the control plane has no endpoint that writes a review decision or restores
+ * a file, and the Electron preload bridge (src/types/global.d.ts) exposes no
+ * shell-reveal or open-external method. The callbacks were optional, no
+ * caller ever supplied one, and the result was a right-click menu of three
+ * permanently greyed-out items on every hunk. They are gone rather than
+ * disabled — a control that can never enable is not a control.
  *   - Monospace, tight rows, stronger separators (Cursor precision)
  *
  * The component is data-driven: callers pass an array of DiffFile
@@ -37,14 +44,11 @@ import {
   Check,
   ChevronDown,
   Clipboard,
-  Ellipsis,
   FileText,
-  Folder,
   MessageSquarePlus,
   Minus,
   Plus,
   RefreshCw,
-  RotateCcw,
   Search,
   X,
 } from "lucide-react";
@@ -52,7 +56,6 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
-import { ContextMenu, Menu, type MenuItem } from "../ui/Menu";
 import { Select } from "../ui/Select";
 import { FIXED_SHORTCUTS, matchesShortcut } from "../lib/shortcuts";
 import { EmptyState } from "../ui/EmptyState";
@@ -137,16 +140,6 @@ export interface DiffViewerProps {
   onAddComment?: (filePath: string, lineNo: number, anchor: DiffCommentAnchor, body: string) => void;
   /** Optional callback when a revision request is drafted. */
   onAskAgentRevise?: (filePath: string, lineStart: number, lineEnd: number) => void;
-  /** Optional callback when a hunk is accepted or rejected. */
-  onHunkResolve?: (filePath: string, hunkKey: string, decision: "accept" | "reject") => void;
-  /** Optional callback when "Restore file" / "Restore hunk" is clicked. */
-  onRestore?: (target: { kind: "file" | "hunk"; filePath: string; hunkKey?: string }) => void;
-  /** Optional callback for opening in external editor. */
-  onOpenInEditor?: (filePath: string) => void;
-  /** Optional callback for opening in terminal at the file's directory. */
-  onOpenInTerminal?: (filePath: string) => void;
-  /** Optional callback for revealing in Finder. */
-  onRevealInFinder?: (filePath: string) => void;
   /** Optional className. */
   className?: string;
   /** Optional initial selected file path. Defaults to first file. */
@@ -326,7 +319,6 @@ function countChanges(file: DiffFile): { additions: number; deletions: number } 
 }
 
 const VIEW_MODE_STORAGE = "terminus-desktop.diff.view-mode.v1";
-const NO_RESOLVED_HUNKS: Record<string, "accept" | "reject"> = {};
 
 function readStoredViewMode(): DiffViewMode | null {
   if (typeof window === "undefined") return null;
@@ -354,11 +346,6 @@ function DiffViewerImpl({
   comments = [],
   onAddComment,
   onAskAgentRevise,
-  onHunkResolve,
-  onRestore,
-  onOpenInEditor,
-  onOpenInTerminal,
-  onRevealInFinder,
   className,
   initialSelectedPath,
   initialViewMode,
@@ -373,7 +360,6 @@ function DiffViewerImpl({
   const [query, setQuery] = useState("");
   const [fullDiff, setFullDiff] = useState(false);
   const [commentDraft, setCommentDraft] = useState<{ path: string; lineNo: number; anchor: DiffCommentAnchor; text: string } | null>(null);
-  const [resolvedHunks, setResolvedHunks] = useState<Record<string, "accept" | "reject">>({});
   const [focusIndex, setFocusIndex] = useState(0);
   const viewerRef = useRef<HTMLDivElement | null>(null);
   const viewerResizeObserverRef = useRef<ResizeObserver | null>(null);
@@ -383,8 +369,6 @@ function DiffViewerImpl({
   const commentFocusFrameRef = useRef<number | null>(null);
   const commentReturnFocusRef = useRef<HTMLElement | null>(null);
   const changeLineRefs = useRef<Array<HTMLDivElement | null>>([]);
-  const resolutionEnabled = typeof onHunkResolve === "function";
-  const activeResolvedHunks = resolutionEnabled ? resolvedHunks : NO_RESOLVED_HUNKS;
   const compactViewer = viewerWidth < 760;
   const effectiveViewMode: DiffViewMode = compactViewer ? "unified" : viewMode;
 
@@ -418,9 +402,8 @@ function DiffViewerImpl({
 
   const changeCount = useMemo(() => {
     if (!selectedFile) return 0;
-    const path = selectedFile.displayPath ?? selectedFile.newPath;
-    return buildDiffRows(selectedFile, effectiveViewMode, path, activeResolvedHunks).changeRowIndices.length;
-  }, [activeResolvedHunks, effectiveViewMode, selectedFile]);
+    return buildDiffRows(selectedFile, effectiveViewMode).changeRowIndices.length;
+  }, [effectiveViewMode, selectedFile]);
   const effectiveFocusIndex = changeCount === 0 ? 0 : Math.min(focusIndex, changeCount - 1);
 
   const activateFile = useCallback((path: string): void => {
@@ -594,10 +577,6 @@ function DiffViewerImpl({
           viewMode={effectiveViewMode}
           onViewModeChange={setViewMode}
           onFileSelect={activateFile}
-          onOpenInEditor={onOpenInEditor}
-          onOpenInTerminal={onOpenInTerminal}
-          onRevealInFinder={onRevealInFinder}
-          onRestore={onRestore}
           focusIndex={effectiveFocusIndex}
           changeCount={changeCount}
           onFocusIndexChange={updateFocusIndex}
@@ -617,21 +596,6 @@ function DiffViewerImpl({
             onSubmitComment={submitComment}
             onCancelComment={closeCommentDraft}
             onAskAgentRevise={onAskAgentRevise}
-            onHunkResolve={(hunkKey, decision) => {
-              if (!selectedFile || !onHunkResolve) return;
-              const key = `${selectedFile.displayPath ?? selectedFile.newPath}:${hunkKey}`;
-              setResolvedHunks((prev) => ({ ...prev, [key]: decision }));
-              onHunkResolve(selectedFile.displayPath ?? selectedFile.newPath, hunkKey, decision);
-            }}
-            onRestore={(hunkKey) =>
-              onRestore?.({
-                kind: "hunk",
-                filePath: selectedFile.displayPath ?? selectedFile.newPath,
-                hunkKey,
-              })
-            }
-            resolutionEnabled={resolutionEnabled}
-            resolvedHunks={activeResolvedHunks}
             registerChangeLine={registerChangeLine}
             focusIndex={effectiveFocusIndex}
             fullDiff={fullDiff}
@@ -677,7 +641,7 @@ function FileNav({
 
   return (
     <aside
-      className="diff-file-nav flex h-full flex-shrink-0 flex-col border-r border-default bg-elevated"
+      className="diff-file-nav flex h-full flex-shrink-0 flex-col border-r border-subtle bg-elevated"
       aria-label="Changed files"
     >
       <div className="border-b border-subtle px-2 py-2">
@@ -705,12 +669,9 @@ function FileNav({
       <div className="selectable min-h-0 flex-1 overflow-y-auto py-1">
         {groups.map(([groupName, groupFiles]) => (
           <div key={groupName} className="px-1">
-            <div
-              className="px-2 py-1 text-tertiary text-xs"
-              style={{ fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}
-            >
-              {groupName}
-            </div>
+            {groups.length > 1 ? (
+              <div className="px-2 py-1 text-xs text-tertiary">{groupName}</div>
+            ) : null}
             {groupFiles.map((f) => {
               const path = f.displayPath ?? f.newPath;
               const isSel = path === selectedPath;
@@ -730,9 +691,9 @@ function FileNav({
 
                   >
                     {f.status === "added" ? (
-                      <Plus size={11} className="flex-shrink-0 text-success" />
+                      <Plus size={11} className="flex-shrink-0 text-addition" />
                     ) : f.status === "deleted" ? (
-                      <Minus size={11} className="flex-shrink-0 text-error" />
+                      <Minus size={11} className="flex-shrink-0 text-deletion" />
                     ) : f.status === "renamed" ? (
                       <ArrowUp size={11} className="flex-shrink-0 text-secondary" />
                     ) : (
@@ -751,17 +712,12 @@ function FileNav({
                         </span>
                       ) : null}
                     </span>
-                    <span className="flex flex-shrink-0 items-center gap-1 font-mono">
-                      {additions > 0 ? (
-                        <span className="text-success text-xs" >
-                          +{additions}
-                        </span>
-                      ) : null}
-                      {deletions > 0 ? (
-                        <span className="text-error text-xs" >
-                          -{deletions}
-                        </span>
-                      ) : null}
+                    {/* `text-addition` / `text-deletion` are the diff tokens;
+                        `text-success` / `text-error` are status colours that
+                        happen to be the same hue today. */}
+                    <span className="flex flex-shrink-0 items-center gap-1 font-mono tabular-nums">
+                      {additions > 0 ? <span className="text-addition text-xs">+{additions}</span> : null}
+                      {deletions > 0 ? <span className="text-deletion text-xs">&minus;{deletions}</span> : null}
                     </span>
                 </Button>
               );
@@ -787,10 +743,6 @@ function DiffHeader({
   viewMode,
   onViewModeChange,
   onFileSelect,
-  onOpenInEditor,
-  onOpenInTerminal,
-  onRevealInFinder,
-  onRestore,
   focusIndex,
   changeCount,
   onFocusIndexChange,
@@ -803,10 +755,6 @@ function DiffHeader({
   viewMode: DiffViewMode;
   onViewModeChange: (m: DiffViewMode) => void;
   onFileSelect: (path: string) => void;
-  onOpenInEditor?: (p: string) => void;
-  onOpenInTerminal?: (p: string) => void;
-  onRevealInFinder?: (p: string) => void;
-  onRestore?: (target: { kind: "file" | "hunk"; filePath: string; hunkKey?: string }) => void;
   focusIndex: number;
   changeCount: number;
   onFocusIndexChange: (i: number) => void;
@@ -826,18 +774,11 @@ function DiffHeader({
       () => setPathCopyState("failed"),
     ).finally(() => window.setTimeout(() => setPathCopyState("idle"), 1600));
   };
-  const fileActions: MenuItem[] = [];
-  if (file) fileActions.push({ id: "copy-path", label: pathCopyState === "copied" ? "Path copied" : pathCopyState === "failed" ? "Copy failed — try again" : "Copy file path", onSelect: copyPath });
-  if (file && onOpenInEditor) fileActions.push({ id: "open-editor", label: "Open in editor", onSelect: () => onOpenInEditor(path) });
-  if (file && onOpenInTerminal) fileActions.push({ id: "open-terminal", label: "Open in terminal", onSelect: () => onOpenInTerminal(path) });
-  if (file && onRevealInFinder) fileActions.push({ id: "reveal", label: "Reveal in Finder", onSelect: () => onRevealInFinder(path) });
-  if (file && onRestore) fileActions.push({ id: "restore", label: "Restore file", danger: true, onSelect: () => onRestore({ kind: "file", filePath: path }) });
   return (
     <div
-      className="flex flex-shrink-0 items-center gap-2 overflow-hidden border-b border-default bg-elevated px-3 py-2"
+      className="flex flex-shrink-0 items-center gap-2 overflow-hidden border-b border-subtle bg-elevated px-3"
       style={{ height: 40 }}
     >
-      <Folder size={12} className="text-tertiary" />
       {compact ? (
         <Select
           label="Changed file"
@@ -898,12 +839,20 @@ function DiffHeader({
               <ViewModeButton label="Unified" active={viewMode === "unified"} onClick={() => onViewModeChange("unified")} />
               <ViewModeButton label="Split" active={viewMode === "split"} onClick={() => onViewModeChange("split")} />
             </div>
-            {fileActions.length > 0 ? (
-              <Menu
-                label="File actions"
-                align="end"
-                items={fileActions}
-                trigger={<IconButton label="File actions" icon={<Ellipsis size={14} aria-hidden />} size="sm" />}
+            {/* Copy path was the only entry this menu ever had — the other
+                four required callbacks no caller supplies. A one-item menu is
+                a button with an extra click in front of it. */}
+            {file ? (
+              <IconButton
+                label={pathCopyState === "copied"
+                  ? "File path copied"
+                  : pathCopyState === "failed"
+                    ? "Could not copy the file path"
+                    : "Copy file path"}
+                icon={pathCopyState === "copied" ? <Check size={13} aria-hidden /> : <Clipboard size={13} aria-hidden />}
+                size="sm"
+                onClick={copyPath}
+                className="text-tertiary hover:bg-hover hover:text-primary"
               />
             ) : null}
           </>
@@ -942,12 +891,11 @@ function ViewModeButton({
 
 /**
  * Flattened row representation for the virtualized diff body. Each row is
- * either a hunk header (with resolution banner + controls) or a single
- * diff line (unified view) or a paired left/right row (split view).
+ * either a hunk header, a single diff line (unified view), or a paired
+ * left/right row (split view).
  */
 type DiffRow =
-  | { kind: "hunk-header"; hunk: DiffHunk; resolution: "accept" | "reject" | undefined }
-  | { kind: "hunk-resolution"; hunk: DiffHunk; resolution: "accept" | "reject" }
+  | { kind: "hunk-header"; hunk: DiffHunk }
   | {
       kind: "unified-line";
       hunk: DiffHunk;
@@ -992,18 +940,12 @@ function splitRowAccessibleLabel(left: DiffLine | null, right: DiffLine | null):
 function buildDiffRows(
   file: DiffFile,
   viewMode: DiffViewMode,
-  path: string,
-  resolvedHunks: Record<string, "accept" | "reject">,
 ): { rows: DiffRow[]; changeRowIndices: number[] } {
   const rows: DiffRow[] = [];
   const changeRowIndices: number[] = [];
   let changeIdx = 0;
   for (const hunk of file.hunks) {
-    const resolution = resolvedHunks[`${path}:${hunk.key}`];
-    rows.push({ kind: "hunk-header", hunk, resolution });
-    if (resolution) {
-      rows.push({ kind: "hunk-resolution", hunk, resolution });
-    }
+    rows.push({ kind: "hunk-header", hunk });
     if (viewMode === "unified") {
       for (const line of hunk.lines) {
         const isChange = line.kind === "add" || line.kind === "del";
@@ -1063,10 +1005,6 @@ function DiffBody({
   onSubmitComment,
   onCancelComment,
   onAskAgentRevise,
-  onHunkResolve,
-  onRestore,
-  resolutionEnabled,
-  resolvedHunks,
   registerChangeLine,
   focusIndex,
   fullDiff,
@@ -1080,10 +1018,6 @@ function DiffBody({
   onSubmitComment: () => void;
   onCancelComment: () => void;
   onAskAgentRevise?: (filePath: string, lineStart: number, lineEnd: number) => void;
-  onHunkResolve: (hunkKey: string, decision: "accept" | "reject") => void;
-  onRestore?: (hunkKey: string) => void;
-  resolutionEnabled: boolean;
-  resolvedHunks: Record<string, "accept" | "reject">;
   registerChangeLine: (index: number, element: HTMLDivElement | null) => void;
   focusIndex: number;
   fullDiff: boolean;
@@ -1093,8 +1027,8 @@ function DiffBody({
   const [accessiblePage, setAccessiblePage] = useState(0);
 
   const { rows, changeRowIndices } = useMemo(
-    () => buildDiffRows(file, viewMode, path, resolvedHunks),
-    [file, viewMode, path, resolvedHunks],
+    () => buildDiffRows(file, viewMode),
+    [file, viewMode],
   );
   const accessiblePageCount = Math.max(1, Math.ceil(rows.length / ACCESSIBLE_DIFF_PAGE_SIZE));
   const accessibleStart = Math.min(
@@ -1115,7 +1049,7 @@ function DiffBody({
   const estimateRowSize = useCallback((index: number): number => {
     const row = rows[index];
     if (!row) return 24;
-    if (row.kind === "hunk-header" || row.kind === "hunk-resolution") return 28;
+    if (row.kind === "hunk-header") return 28;
     return 20;
   }, [rows]);
 
@@ -1163,7 +1097,7 @@ function DiffBody({
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-diff font-mono">
       {fullDiff ? (
-        <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-default px-3 py-2 text-xs text-secondary" aria-label="Loaded diff page controls">
+        <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-subtle px-3 py-2 text-xs text-secondary" aria-label="Loaded diff page controls">
           <Button
             type="button"
             onClick={() => setAccessiblePage((page) => Math.max(0, page - 1))}
@@ -1212,9 +1146,6 @@ function DiffBody({
               onSubmitComment={onSubmitComment}
               onCancelComment={onCancelComment}
               onAskAgentRevise={onAskAgentRevise}
-              onHunkResolve={onHunkResolve}
-              onRestore={onRestore}
-              resolutionEnabled={resolutionEnabled}
               focusIndex={focusIndex}
               registerChangeLine={registerChangeLine}
             />
@@ -1258,9 +1189,6 @@ function DiffBody({
                   onSubmitComment={onSubmitComment}
                   onCancelComment={onCancelComment}
                   onAskAgentRevise={onAskAgentRevise}
-                  onHunkResolve={onHunkResolve}
-                  onRestore={onRestore}
-                  resolutionEnabled={resolutionEnabled}
                   focusIndex={focusIndex}
                   registerChangeLine={registerChangeLine}
                 />
@@ -1286,9 +1214,6 @@ function DiffRowView({
   onSubmitComment,
   onCancelComment,
   onAskAgentRevise,
-  onHunkResolve,
-  onRestore,
-  resolutionEnabled,
   focusIndex,
   registerChangeLine,
 }: {
@@ -1301,106 +1226,24 @@ function DiffRowView({
   onSubmitComment: () => void;
   onCancelComment: () => void;
   onAskAgentRevise?: (filePath: string, lineStart: number, lineEnd: number) => void;
-  onHunkResolve: (hunkKey: string, decision: "accept" | "reject") => void;
-  onRestore?: (hunkKey: string) => void;
-  resolutionEnabled: boolean;
   focusIndex: number;
   registerChangeLine: (index: number, element: HTMLDivElement | null) => void;
 }): JSX.Element {
   if (row.kind === "hunk-header") {
     const hunk = row.hunk;
-    return (
-      <ContextMenu items={[
-        { id: "restore", label: "Restore hunk", disabled: !onRestore, onSelect: () => onRestore?.(hunk.key) },
-        { id: "reject", label: "Reject change", disabled: !resolutionEnabled || row.resolution === "reject", danger: true, onSelect: () => onHunkResolve(hunk.key, "reject") },
-        { id: "accept", label: "Accept change", disabled: !resolutionEnabled || row.resolution === "accept", onSelect: () => onHunkResolve(hunk.key, "accept") },
-      ]}>
-      <div className="border-b border-subtle" role="group" aria-label={`Hunk ${hunk.header}${hunk.group ? `, ${hunk.group}` : ""}`}>
-        <div
-          className="diff-line diff-hunk-header flex items-center gap-2 text-xs"
-          style={{ padding: "4px 12px", background: "var(--bg-diff)" }}
-        >
-          <span className="text-secondary">{hunk.header}</span>
-          {hunk.group ? (
-            <span
-              className="rounded-sm bg-hover px-1.5 py-0.5 text-tertiary text-xs"
-
-            >
-              {hunk.group}
-            </span>
-          ) : null}
-          <div className="ml-auto flex items-center gap-1">
-            {/* Restore hunk. */}
-            {onRestore ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onRestore(hunk.key)}
-                className="h-6 px-1.5 text-xs text-tertiary"
-                aria-label={`Restore hunk ${hunk.header}`}
-              >
-                <RotateCcw size={10} />
-                <span>Restore</span>
-              </Button>
-            ) : null}
-            {/* Reject. */}
-            {resolutionEnabled ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onHunkResolve(hunk.key, "reject")}
-                disabled={row.resolution === "reject"}
-                className="h-6 px-1.5 text-xs text-tertiary hover:text-error"
-                aria-label={`Reject hunk ${hunk.header}`}
-              >
-                <X size={10} />
-                <span>Reject</span>
-              </Button>
-            ) : null}
-            {/* Accept. */}
-            {resolutionEnabled ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onHunkResolve(hunk.key, "accept")}
-                disabled={row.resolution === "accept"}
-                className="h-6 px-1.5 text-xs text-tertiary hover:text-success"
-                aria-label={`Accept hunk ${hunk.header}`}
-              >
-                <Check size={10} />
-                <span>Accept</span>
-              </Button>
-            ) : null}
-          </div>
-        </div>
-      </div>
-      </ContextMenu>
-    );
-  }
-  if (row.kind === "hunk-resolution") {
-    const resolution = row.resolution;
+    // A hairline and the coordinates, nothing else. The action row that used
+    // to sit on the right (Restore / Reject / Accept) required callbacks no
+    // caller supplies, so it never rendered; the right-click menu did render,
+    // permanently disabled.
     return (
       <div
-        role="status"
-        aria-label={`${resolution === "accept" ? "Accepted" : "Rejected"} hunk ${row.hunk.header}`}
-        className="flex items-center gap-2 px-3 py-1 text-xs"
-        style={{ color: resolution === "accept" ? "var(--color-success)" : "var(--color-error)", background:
-            resolution === "accept"
-              ? "color-mix(in srgb, var(--color-success) 6%, transparent)"
-              : "color-mix(in srgb, var(--color-error) 6%, transparent)" }}
+        className="diff-line diff-hunk-header flex items-center gap-2 border-b border-subtle text-xs"
+        style={{ padding: "4px 12px" }}
+        role="group"
+        aria-label={`Hunk ${hunk.header}${hunk.group ? `, ${hunk.group}` : ""}`}
       >
-        <Check size={10} />
-        <span>{resolution === "accept" ? "Accepted" : "Rejected"}</span>
-        {resolutionEnabled ? (
-          <Button
-            type="button"
-            onClick={() => onHunkResolve(row.hunk.key, resolution === "accept" ? "reject" : "accept")}
-            className="ml-auto text-tertiary hover:text-primary text-xs"
-
-          >
-            Undo
-          </Button>
-        ) : null}
+        <span className="text-tertiary">{hunk.header}</span>
+        {hunk.group ? <span className="text-tertiary">{hunk.group}</span> : null}
       </div>
     );
   }

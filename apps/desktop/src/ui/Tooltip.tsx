@@ -27,7 +27,7 @@ export function Tooltip({
           <TooltipPrimitive.Content
             side={side}
             sideOffset={6}
-            className="ui-popover z-tooltip max-w-72 rounded-md border border-default px-2 py-1 text-xs text-primary shadow-md"
+            className="ui-popover z-tooltip max-w-72 rounded-md border border-subtle px-2 py-[3px] text-xs text-secondary shadow-md"
           >
             {content}
           </TooltipPrimitive.Content>
@@ -135,7 +135,7 @@ export function TooltipLayer(): JSX.Element | null {
     <div
       id={descriptionId}
       role="tooltip"
-      className="surface-enter z-tooltip pointer-events-none fixed max-w-72 -translate-x-1/2 -translate-y-full rounded-md border border-default bg-[var(--bg-popover)] px-2 py-1 text-xs text-primary shadow-md"
+      className="surface-enter z-tooltip pointer-events-none fixed max-w-72 -translate-x-1/2 -translate-y-full rounded-md border border-subtle bg-[var(--bg-popover)] px-2 py-[3px] text-xs text-secondary shadow-md"
       style={{ left: tooltip.left, top: tooltip.top }}
     >
       {tooltip.text}

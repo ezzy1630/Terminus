@@ -62,18 +62,12 @@ declare global {
       /** Why `apiBase` is null. Surface it; do not fall back to a guess. */
       apiBaseError: string | null;
       isMac: boolean;
-      /** "settings" when this window is the preferences window. */
-      view?: "main" | "settings";
       /** True when the native window is a vibrant material the renderer paints over. */
       vibrancy?: boolean;
-      /** The settings category this window was launched on, if any. */
-      settingsCategory?: string | null;
       notify: (title: string, body: string, taskId?: string) => Promise<unknown>;
-      openSettings?: (category?: string) => Promise<unknown>;
       setAttentionCount?: (count: number) => Promise<unknown>;
       onNavigate?: (callback: (target: TerminusNavigationTarget) => void) => () => void;
       onOpenTask?: (callback: (taskId: string) => void) => () => void;
-      onSettingsCategory?: (callback: (category: string) => void) => () => void;
       onNativeThemeChange?: (callback: (state: TerminusNativeThemeState) => void) => () => void;
       /** Closes the window that called it, not always the main window. */
       windowClose: () => Promise<unknown>;

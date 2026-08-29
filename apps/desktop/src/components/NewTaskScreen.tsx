@@ -3,30 +3,85 @@
  *
  * Per SPEC §8: focused Codex-style start screen. When a project is
  * selected (or when "New Task" is clicked), show:
- *   - A contextual heading such as "What should we build?"
+ *   - A contextual heading such as "What should we build in <project>?"
  *   - The main composer (focuses immediately)
  *   - Only actionable project context
  *   - No dashboard, no statistics, no wall of recent activity
+ *
+ * The composer is docked at the bottom of the window rather than sitting under
+ * the heading, and the heading group centres in the space left above it. A
+ * centred composer reads as a floating widget on a wide screen; a docked one
+ * reads as the base of the surface, and it lands in the same place the chat
+ * view's composer will be, so starting a task does not move the input.
  *
  * No starter chips. Four generic prompts ("Explain this codebase",
  * "Find a bug", …) occupied the space under the composer on every launch and
  * were never what anyone wanted to run; the composer is the affordance.
  *
+ * No "Starting task…" line either. It appeared below the composer, pushed
+ * everything up at the exact moment the user had committed, and duplicated
+ * state the send button is already the natural home for — the button shows a
+ * spinner in place of its arrow while the first turn is being created.
+ *
  * Per SPEC §8: "Opening a new task should focus the composer
  * immediately."
  */
-import { memo, useCallback, useState } from "react";
+import { memo, useCallback } from "react";
 import { cn } from "../lib/cn";
 import { api } from "../lib/api";
 import { WORKSPACE_TASK_SCOPE } from "../lib/task-scope";
 import { useTerminusStore } from "../hooks/use-terminus";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
+import { Button } from "../ui/Button";
 import { Composer, type TurnRouting } from "./Composer";
+import { ProjectMenu } from "./ProjectMenu";
 import type { Session } from "../types";
 
 interface NewTaskScreenProps {
   className?: string;
   onOpenProject?: () => void;
+}
+
+/**
+ * The empty state's one piece of ornament: a terminal prompt inside a
+ * squircle.
+ *
+ * Drawn rather than imported so it can be a single hairline weight at 56px —
+ * an icon-set glyph scaled up here goes chunky, and this is the only large
+ * element on the screen. The outline is a circle whose Bézier handles are
+ * pushed out to 0.72 of the radius, which flattens the sides into a squircle
+ * without the hard tangent breaks of a rounded rectangle.
+ */
+function TerminalGlyph(): JSX.Element {
+  return (
+    <svg
+      width="56"
+      height="56"
+      viewBox="0 0 56 56"
+      fill="none"
+      aria-hidden
+      className="mb-7 text-tertiary"
+    >
+      <path
+        d="M28 4C45.28 4 52 10.72 52 28C52 45.28 45.28 52 28 52C10.72 52 4 45.28 4 28C4 10.72 10.72 4 28 4Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+      <path
+        d="M21 23.5L26 28L21 32.5"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M29 33H35"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
 }
 
 function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JSX.Element {
@@ -36,7 +91,6 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
   const selectTask = useTerminusStore((s) => s.selectTask);
 
   const session: Session | undefined = sessions.find((s) => s.id === selectedSessionId);
-  const [creating, setCreating] = useState(false);
   const taskMutation = useLogicalMutation(`new-task.${selectedSessionId ?? "no-project"}`);
   const createTask = useCallback(async (objective: string, routing: TurnRouting): Promise<void> => {
     if (!session) {
@@ -46,7 +100,6 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
     if (!threadId) {
       throw new Error("This project is not ready yet. Reopen it from the sidebar and try again.");
     }
-    setCreating(true);
     let operationKey: string | null = null;
     let createdTaskId: string | null = null;
     let startedEventCursor: string | null = null;
@@ -120,35 +173,76 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
         }
       }
       throw err;
-    } finally {
-      setCreating(false);
     }
   }, [session, refreshTasks, selectTask, taskMutation]);
 
+  const projectName = session?.title ?? null;
+
   return (
-    <div className={cn("h-full w-full overflow-hidden bg-canvas", className)}>
-      {/* The start column is centred on both axes, biased slightly above the
-          optical centre. It used to be pinned to 14vh from the top, which left
-          the whole lower two-thirds of the window empty under a composer that
-          then read as floating rather than placed. */}
-      <main className="scrollable flex h-full min-h-0 flex-col items-center justify-center overflow-y-auto px-6 pb-[max(48px,12vh)] pt-12">
-        <section className="start-column" aria-labelledby="new-task-heading">
-          <h1 id="new-task-heading" className="ui-display-title mb-1.5 text-center text-primary">
-            What do you want to work on?
-          </h1>
-          <p className="mb-5 text-center text-base text-tertiary">
-            Terminus runs the task, shows its work, and stops for approval before anything risky.
-          </p>
-          <Composer
-            onCreateTask={createTask}
-            {...(onOpenProject ? { onChangeProject: onOpenProject } : {})}
-            className="w-full"
-          />
-          {creating ? (
-            <div className="mt-2 text-center text-xs text-tertiary" role="status">Starting task…</div>
-          ) : null}
-        </section>
+    <div className={cn("flex h-full w-full flex-col overflow-hidden bg-canvas", className)}>
+      {/* The heading group centres in whatever is left above the composer,
+          which puts it near the optical centre of the window at any height and
+          leaves no dead band anywhere. */}
+      <main className="scrollable flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-8 py-10">
+        <TerminalGlyph />
+        <h1
+          id="new-task-heading"
+          /* Named explicitly because the project name inside it is a menu
+             trigger, and Radix labels that trigger "Switch project" — an
+             accessible name on a descendant *replaces* its text when the
+             heading's name is computed from contents, so the heading would
+             otherwise announce as "What should we build in Switch project?".
+             The label is character-for-character the visible sentence. */
+          {...(projectName === null ? {} : { "aria-label": `What should we build in ${projectName}?` })}
+          className="max-w-[36ch] text-balance text-center text-[27px] font-semibold leading-[34px] tracking-[-0.02em] text-primary"
+        >
+          {projectName === null ? "What should we build?" : (
+            <>
+              {"What should we build in "}
+              {/* The project name is the switcher, as it is in Codex — the one
+                  place the answer to "in what?" is also the way to change it.
+                  It carries no `aria-label`. An accessible name on a
+                  descendant *replaces* that descendant's text when the
+                  heading's own name is computed from its contents, so
+                  labelling this button rewrote the heading as "What should we
+                  build in Project: Terminus. Switch project?". Its name is
+                  therefore its text, which also keeps it distinct from the
+                  composer's "Change project" chip — two buttons answering to
+                  one name would make either unaddressable. The affordance is
+                  carried by the dotted underline and the tooltip. */}
+              <ProjectMenu
+                label="Switch project"
+                align="center"
+                {...(onOpenProject ? { onOpenProject } : {})}
+                trigger={(
+                  <Button
+                    type="button"
+                    variant="bare"
+                    data-tooltip="Switch project"
+                    className="rounded underline decoration-dotted decoration-[1.5px] underline-offset-[7px]"
+                    style={{ textDecorationColor: "var(--text-tertiary)" }}
+                  >
+                    {projectName}
+                  </Button>
+                )}
+              />
+              {"?"}
+            </>
+          )}
+        </h1>
       </main>
+
+      {/* Docked with the same padding as the chat view's composer (App.tsx),
+          not just the same inline axis: sending the first message swaps this
+          screen for the conversation, and the input the user is looking at
+          must not move a pixel when it does. */}
+      <div className="composer-dock shrink-0 pb-3 pt-2">
+        <Composer
+          onCreateTask={createTask}
+          {...(onOpenProject ? { onChangeProject: onOpenProject } : {})}
+          className="w-full"
+        />
+      </div>
     </div>
   );
 }

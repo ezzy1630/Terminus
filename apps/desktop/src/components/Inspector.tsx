@@ -1,26 +1,51 @@
 /**
- * Terminus Desktop — Dynamic right inspector.
+ * Terminus Desktop — task context panel.
  *
- * Per SPEC §11: "The inspector must not be a fixed list of empty
- * sections. Sections appear only after relevant information exists."
+ * Modelled on the Codex "Environment" card: a flat list of 32px rows, label
+ * left, value right, hairline separators between groups only. There are no
+ * section boxes, no uppercase micro-labels and no badge pills — a stack of
+ * bordered cards reads as a web dashboard, and this is a docked native
+ * inspector. The wrapping Layout owns the surface (`.inspector-card`,
+ * `bg-inspector`) and the hairline left seam; this file owns the contents.
  *
- * For the primary slice we surface four sections conditionally:
- *   - Environment (when a task is selected)
- *   - Activity (when the selected task has emitted events)
- *   - Approvals (when an approval event has been observed)
+ * Per SPEC §11: "The inspector must not be a fixed list of empty sections.
+ * Sections appear only after relevant information exists." That is enforced
+ * literally here — a row is rendered only when the control plane actually
+ * reported the value behind it. Nothing renders an em-dash placeholder,
+ * because a placeholder is itself a claim (that the field exists and is
+ * empty) and for most of these it is neither.
  *
- * Each section is independently collapsible. The inspector pins by
- * default and never reorders sections while the user is reading.
- *
- * Per SPEC §11.1: floating rounded card, lightweight, restrained
- * maximum width. The wrapping Layout provides the card chrome — the
- * inspector itself is just scrollable content.
+ * Deliberately absent, because nothing on the wire carries them:
+ *   - git branch and worktree path. No task, session, workspace or ARP v2
+ *     snapshot has a branch field, and SPEC §7.1 forbids promoting worktrees
+ *     to a hierarchy level.
+ *   - "Commit or push" and "Compare branch". Codex shows both; Terminus
+ *     exposes no endpoint for either, and a button that does nothing is
+ *     worse than an absent one.
+ *   - "Reveal in Finder". The preload bridge (src/types/global.d.ts) exposes
+ *     no shell-reveal method, so the Local row copies the path instead.
  *
  * Computer-use preview is intentionally absent until a trusted preview
  * transport exists. Runtime activity alone must not create a dead panel.
  */
 import { memo, useEffect, useMemo, useState } from "react";
-import { BadgeCheck, Boxes, Check, ChevronDown, ChevronRight, Copy, FileDiff, GitBranch, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, UsersRound, Workflow } from "lucide-react";
+import {
+  BadgeCheck,
+  Boxes,
+  ChevronRight,
+  Cpu,
+  FileDiff,
+  Gauge,
+  Hash,
+  Laptop,
+  RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
+  Sparkles,
+  Terminal,
+  UsersRound,
+  Workflow,
+} from "lucide-react";
 import { cn } from "../lib/cn";
 import { displayLifecycle } from "../lib/turn-activity";
 import {
@@ -30,15 +55,240 @@ import {
   useSelectedTaskEvents,
   useTerminusStore,
 } from "../hooks/use-terminus";
+import { deriveProjectTitle, projectUriToPath } from "../lib/projects";
 import { deriveSubagentActivity, deriveVerificationActivity, extractUnifiedDiffs } from "../lib/task-surface";
-import { statusLabel, StatusIndicator } from "./StatusIndicator";
+import { StatusIndicator } from "./StatusIndicator";
 import TaskV2Panel from "./TaskV2Panel";
 import { arpV2 } from "../lib/api-v2";
 import { api } from "../lib/api";
 import { Button } from "../ui/Button";
 
-const INSPECTOR_EVENT_PREVIEW_CHARS = 2_000;
 import type { SandboxReport, TaskArtifactsPage, TerminusSseEvent } from "../types";
+
+/** Codex row geometry: 32px tall, 16px icon, 13px label, right-aligned value. */
+const ROW = "flex h-8 w-full items-center gap-2.5 rounded-md px-2 text-left";
+const ROW_INTERACTIVE = "transition-colors hover:bg-hover";
+const ICON_SIZE = 16;
+
+interface InspectorRowProps {
+  icon?: React.ReactNode;
+  label: string;
+  /** Right-aligned value. Omit the row entirely rather than passing a dash. */
+  value?: React.ReactNode;
+  /** Present only when the row does something real. */
+  onClick?: () => void;
+  /** Overrides the accessible name when the visible label is not enough. */
+  ariaLabel?: string;
+  /** Native tooltip for values the column is too narrow to show in full. */
+  title?: string;
+}
+
+/**
+ * One environment row. Non-interactive rows render as plain divs so the
+ * panel does not advertise affordances it cannot honour — principle 4 of the
+ * design spec is that every control does something real.
+ */
+function InspectorRow({ icon, label, value, onClick, ariaLabel, title }: InspectorRowProps): JSX.Element {
+  const body = (
+    <>
+      {icon ? <span className="shrink-0 text-secondary">{icon}</span> : null}
+      <span className="ui-body min-w-0 flex-1 truncate text-primary">{label}</span>
+      {value !== undefined && value !== null ? (
+        <span className="ui-body min-w-0 shrink-0 truncate text-secondary">{value}</span>
+      ) : null}
+    </>
+  );
+  if (!onClick) {
+    return <div className={ROW} title={title}>{body}</div>;
+  }
+  return (
+    <Button
+      variant="bare"
+      onClick={onClick}
+      aria-label={ariaLabel ?? label}
+      title={title}
+      className={cn(ROW, ROW_INTERACTIVE)}
+    >
+      {body}
+    </Button>
+  );
+}
+
+interface InspectorDisclosureProps {
+  icon?: React.ReactNode;
+  label: string;
+  /** Rendered right-aligned, and folded into the accessible name. */
+  value?: string;
+  /** Tints the value for a genuine warning. Colour is meaning, never decor. */
+  tone?: "default" | "warning";
+  defaultOpen?: boolean;
+  /** Forces the row open and keeps it open — for states the user must see. */
+  urgent?: boolean;
+  children: React.ReactNode;
+}
+
+/**
+ * A row that expands. Reserved for detail the panel should not spend 32px on
+ * until asked: sandbox diagnostics, the canonical task record, subagent and
+ * verification lists.
+ */
+function InspectorDisclosure({
+  icon,
+  label,
+  value,
+  tone = "default",
+  defaultOpen = false,
+  urgent = false,
+  children,
+}: InspectorDisclosureProps): JSX.Element {
+  const [open, setOpen] = useState(defaultOpen);
+  const effectiveOpen = urgent || open;
+  return (
+    <div>
+      <Button
+        variant="bare"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={effectiveOpen}
+        aria-label={value ? `${label}, ${value}` : label}
+        className={cn(ROW, ROW_INTERACTIVE)}
+      >
+        {icon ? (
+          <span className={cn("shrink-0", tone === "warning" ? "text-warning" : "text-secondary")}>{icon}</span>
+        ) : null}
+        <span className="ui-body min-w-0 flex-1 truncate text-primary">{label}</span>
+        {value ? (
+          <span className={cn("ui-body shrink-0 truncate", tone === "warning" ? "text-warning" : "text-secondary")}>
+            {value}
+          </span>
+        ) : null}
+        <ChevronRight
+          size={14}
+          aria-hidden
+          className={cn("shrink-0 text-tertiary transition-transform", effectiveOpen && "rotate-90")}
+        />
+      </Button>
+      {effectiveOpen ? <div className="px-2 pb-2.5 pt-0.5">{children}</div> : null}
+    </div>
+  );
+}
+
+/**
+ * A named run of rows. Groups are the only place a separator is allowed —
+ * inside a group the rows sit directly on the panel surface, as in Codex.
+ */
+function InspectorGroup({ title, children }: { title: string; children: React.ReactNode }): JSX.Element {
+  return (
+    <section className="border-b border-subtle px-1.5 py-1 last:border-b-0">
+      <h2 className="ui-body flex h-8 items-center px-2 text-tertiary">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+/** Working-tree change counts, as parsed off a unified diff. */
+export interface InspectorChangeStats {
+  additions: number;
+  deletions: number;
+  files: number;
+}
+
+/**
+ * Count changed lines and files straight off unified diff text.
+ *
+ * The control plane sends no stats: `GET /v1/tasks/:id/diff` returns the raw
+ * diff and nothing else, so `+N −M` has to be derived here. Header lines
+ * ("--- a/x", "+++ b/x") always carry a trailing space, which is what
+ * separates them from a content line that happens to begin with a sigil.
+ */
+export function countDiffStats(diffs: readonly string[]): InspectorChangeStats {
+  let additions = 0;
+  let deletions = 0;
+  const files = new Set<string>();
+  for (const diff of diffs) {
+    for (const line of diff.split("\n")) {
+      if (line.startsWith("+++ ")) {
+        const path = line.slice(4).trim();
+        if (path && path !== "/dev/null") files.add(path.replace(/^b\//, ""));
+      } else if (line.startsWith("--- ")) {
+        // Old-side header. Recorded only when the new side is /dev/null
+        // (a deletion), which the "+++ " branch above cannot see.
+        continue;
+      } else if (line.startsWith("+")) {
+        additions += 1;
+      } else if (line.startsWith("-")) {
+        deletions += 1;
+      }
+    }
+    // A pure deletion names the file only on the old side, and some agents
+    // emit `diff --git` headers without a `+++` line at all.
+    for (const match of diff.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gm)) {
+      files.add(match[2] ?? match[1] ?? "");
+    }
+  }
+  files.delete("");
+  return { additions, deletions, files: files.size };
+}
+
+/** Where the change counts came from — the two sources disagree legitimately. */
+type ChangeSource = "working_tree" | "proposed";
+
+interface ChangeState {
+  taskId: string;
+  stats: InspectorChangeStats;
+  source: ChangeSource;
+}
+
+/**
+ * The task's changed-line counts.
+ *
+ * The working tree is authoritative — `GET /v1/tasks/:id/diff` is the only
+ * git-aware endpoint the control plane exposes — but it comes back empty for
+ * a task that proposed a patch without applying it, and it is unavailable
+ * when the workspace is not a repository. In both cases the patches the agent
+ * published on the event stream are the honest second source, and they are
+ * what the review pane shows too, so the row and the pane never disagree.
+ *
+ * The fetch is keyed on the task and its settled/running lifecycle rather
+ * than on the event tail: re-reading the working tree on every SSE frame
+ * would be one HTTP round trip per token.
+ */
+function useChangeStats(
+  taskId: string | null,
+  proposedDiffs: readonly string[],
+  lifecycleKey: string,
+): ChangeState | null {
+  const [workingTree, setWorkingTree] = useState<ChangeState | null>(null);
+
+  useEffect(() => {
+    if (!taskId) {
+      setWorkingTree(null);
+      return;
+    }
+    const controller = new AbortController();
+    void api.getTaskDiff(taskId, controller.signal)
+      .then((response) => {
+        if (controller.signal.aborted) return;
+        const stats = response.git_available ? countDiffStats([response.diff]) : { additions: 0, deletions: 0, files: 0 };
+        setWorkingTree({ taskId, stats, source: "working_tree" });
+      })
+      .catch(() => {
+        // A missing or unreadable diff is not an error worth a banner: the
+        // proposed-patch fallback below still answers "what changed?".
+        if (!controller.signal.aborted) setWorkingTree(null);
+      });
+    return () => controller.abort();
+  }, [taskId, lifecycleKey]);
+
+  const proposed = useMemo(() => {
+    if (!taskId || proposedDiffs.length === 0) return null;
+    const stats = countDiffStats(proposedDiffs);
+    if (stats.additions === 0 && stats.deletions === 0) return null;
+    return { taskId, stats, source: "proposed" as const };
+  }, [taskId, proposedDiffs]);
+
+  if (workingTree?.taskId === taskId && workingTree.stats.files > 0) return workingTree;
+  return proposed;
+}
 
 /**
  * Canonical ARP v2 inspector section. Renders only when the selected task
@@ -73,39 +323,39 @@ const TaskV2Section = memo(function TaskV2Section({ taskId }: { taskId: string }
       cancelled = true;
     };
   }, [requestVersion, taskId]);
+
   if (probe?.taskId !== taskId) {
-    return (
-      <InspectorSection title="Task record" icon={<BadgeCheck size={12} />} summary="Checking">
-        <p className="text-tertiary text-xs" >Checking canonical task state…</p>
-      </InspectorSection>
-    );
+    return <InspectorRow icon={<BadgeCheck size={ICON_SIZE} />} label="Task record" value="Checking…" />;
   }
   if (probe.status === "not_found") return null;
   if (probe.status === "error") {
     return (
-      <InspectorSection title="Task record" icon={<BadgeCheck size={12} />} summary="Unavailable" urgent>
-        <p className="text-xs text-secondary" role="alert">Canonical task state is temporarily unavailable.</p>
-        <details className="mt-1 text-xs text-tertiary">
-          <summary className="cursor-pointer select-none">Details</summary>
-          <p className="mt-1 break-words font-mono">{probe.error}</p>
-        </details>
+      <InspectorDisclosure
+        icon={<BadgeCheck size={ICON_SIZE} />}
+        label="Task record"
+        value="Unavailable"
+        tone="warning"
+        urgent
+      >
+        <p className="ui-meta text-secondary" role="alert">Canonical task state is temporarily unavailable.</p>
+        <p className="ui-meta mt-1 break-words font-mono">{probe.error}</p>
         <Button
-          type="button"
+          variant="bare"
           onClick={() => {
             setProbe(null);
             setRequestVersion((version) => version + 1);
           }}
-          className="mt-2 inline-flex items-center gap-1 rounded-md px-2 py-1 text-secondary hover:bg-hover hover:text-primary"
+          className="ui-meta mt-2 inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-secondary transition-colors hover:bg-hover hover:text-primary"
         >
-          <RefreshCw size={11} aria-hidden /> Retry task record
+          <RefreshCw size={12} aria-hidden /> Retry task record
         </Button>
-      </InspectorSection>
+      </InspectorDisclosure>
     );
   }
   return (
-    <InspectorSection title="Task record" icon={<BadgeCheck size={12} />} defaultOpen={false}>
+    <InspectorDisclosure icon={<BadgeCheck size={ICON_SIZE} />} label="Task record" value="Canonical">
       <TaskV2Panel taskId={taskId} />
-    </InspectorSection>
+    </InspectorDisclosure>
   );
 });
 
@@ -164,58 +414,50 @@ const SandboxSection = memo(function SandboxSection({ profileId }: { profileId: 
 
   if (!profileId) {
     return (
-      <InspectorSection title="Permissions" icon={<ShieldCheck size={12} />} summary="Unavailable" urgent>
-        <p className="text-tertiary text-xs" style={{ lineHeight: 1.45 }}>
+      <InspectorDisclosure icon={<ShieldCheck size={ICON_SIZE} />} label="Sandbox" value="Unavailable" tone="warning" urgent>
+        <p className="ui-meta text-secondary">
           Effective permission profile unavailable. No default-profile report was substituted.
         </p>
-      </InspectorSection>
+      </InspectorDisclosure>
     );
   }
   if (!resource || resource.profileId !== profileId || resource.status === "loading") {
-    return (
-      <InspectorSection title="Permissions" icon={<ShieldCheck size={12} />} summary="Checking">
-        <p className="text-tertiary text-xs" >
-          Checking profile <span className="font-mono">{profileId}</span>…
-        </p>
-      </InspectorSection>
-    );
+    return <InspectorRow icon={<ShieldCheck size={ICON_SIZE} />} label="Sandbox" value="Checking…" title={profileId} />;
   }
   if (resource.status === "error") {
     return (
-      <InspectorSection title="Permissions" icon={<ShieldCheck size={12} />} summary="Unavailable" urgent>
-        <p className="text-xs text-secondary" role="alert">Sandbox enforcement data is temporarily unavailable.</p>
-        <details className="mt-1 text-xs text-tertiary">
-          <summary className="cursor-pointer select-none">Details</summary>
-          <p className="mt-1 break-words font-mono">{resource.error}</p>
-        </details>
-        <p className="mt-1 text-tertiary text-xs" >
+      <InspectorDisclosure icon={<ShieldCheck size={ICON_SIZE} />} label="Sandbox" value="Unavailable" tone="warning" urgent>
+        <p className="ui-meta text-secondary" role="alert">Sandbox enforcement data is temporarily unavailable.</p>
+        <p className="ui-meta mt-1 break-words font-mono">{resource.error}</p>
+        <p className="ui-meta mt-1">
           No enforcement claim is shown for <span className="font-mono">{profileId}</span>.
         </p>
-        <Button type="button" onClick={refreshSandboxReport} className="mt-2 inline-flex items-center gap-1 rounded-md px-2 py-1 text-secondary hover:bg-hover hover:text-primary">
-          <RefreshCw size={11} aria-hidden /> Retry
+        <Button
+          variant="bare"
+          onClick={refreshSandboxReport}
+          className="ui-meta mt-2 inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-secondary transition-colors hover:bg-hover hover:text-primary"
+        >
+          <RefreshCw size={12} aria-hidden /> Retry
         </Button>
-      </InspectorSection>
+      </InspectorDisclosure>
     );
   }
   const report = resource.report;
   const degradedOrWorse = report.status !== "enforced";
   const issueCount = report.degraded.length + report.unsupported.length;
   return (
-    <InspectorSection
-      title="Permissions"
-      icon={<ShieldCheck size={12} />}
-      summary={degradedOrWorse ? "Needs attention" : "Enforced"}
+    <InspectorDisclosure
+      icon={<ShieldCheck size={ICON_SIZE} />}
+      label="Sandbox"
+      value={degradedOrWorse ? "Needs attention" : "Enforced"}
+      tone={degradedOrWorse ? "warning" : "default"}
       urgent={degradedOrWorse}
-      defaultOpen={false}
     >
       <div className="flex flex-col gap-2 text-xs">
         {resource.status === "stale" ? (
           <div role="alert" data-cockpit-state="stale" className="border-l-2 border-warning/55 px-2 py-1 text-warning">
             Showing the last confirmed enforcement snapshot.
-            <details className="mt-1 text-tertiary">
-              <summary className="cursor-pointer select-none">Details</summary>
-              <span className="mt-1 block break-words font-mono">{resource.error ?? "Refresh failed."}</span>
-            </details>
+            <span className="mt-1 block break-words font-mono">{resource.error ?? "Refresh failed."}</span>
           </div>
         ) : null}
         <p className="text-secondary">
@@ -225,28 +467,31 @@ const SandboxSection = memo(function SandboxSection({ profileId }: { profileId: 
         </p>
         <div className="flex items-center justify-between gap-2 text-tertiary">
           <span>Checked {new Date(resource.loadedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-          <Button type="button" onClick={refreshSandboxReport} disabled={resource.refreshing} className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-secondary hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-45" aria-label="Refresh sandbox snapshot">
+          <Button
+            variant="bare"
+            onClick={refreshSandboxReport}
+            disabled={resource.refreshing}
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-secondary transition-colors hover:bg-hover hover:text-primary disabled:cursor-not-allowed disabled:opacity-45"
+            aria-label="Refresh sandbox snapshot"
+          >
             <RefreshCw size={11} aria-hidden /> {resource.refreshing ? "Refreshing" : "Refresh"}
           </Button>
         </div>
-        <details className="border-t border-subtle pt-2 text-tertiary">
-          <summary className="cursor-pointer select-none text-secondary">Diagnostics</summary>
-          <div className="mt-2 flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <span>Backend</span>
-              <span className="truncate font-mono text-secondary" data-tooltip={report.backend_id}>{report.backend_id}</span>
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <span>Status</span>
-              <span className="font-mono text-secondary">{report.status}</span>
-            </div>
-            {report.degraded.length > 0 ? <ReportList label="Degraded controls" entries={report.degraded} /> : null}
-            {report.unsupported.length > 0 ? <ReportList label="Unsupported controls" entries={report.unsupported} /> : null}
-            {report.notes.map((note, i) => <p key={i} className="leading-relaxed">{note}</p>)}
+        <div className="flex flex-col gap-1.5 border-t border-subtle pt-2 text-tertiary">
+          <div className="flex items-center justify-between gap-2">
+            <span>Backend</span>
+            <span className="truncate font-mono text-secondary" title={report.backend_id}>{report.backend_id}</span>
           </div>
-        </details>
+          <div className="flex items-center justify-between gap-2">
+            <span>Profile</span>
+            <span className="truncate font-mono text-secondary" title={profileId}>{profileId}</span>
+          </div>
+          {report.degraded.length > 0 ? <ReportList label="Degraded controls" entries={report.degraded} /> : null}
+          {report.unsupported.length > 0 ? <ReportList label="Unsupported controls" entries={report.unsupported} /> : null}
+          {report.notes.map((note, i) => <p key={i} className="leading-relaxed">{note}</p>)}
+        </div>
       </div>
-    </InspectorSection>
+    </InspectorDisclosure>
   );
 });
 
@@ -256,7 +501,7 @@ function ReportList({ label, entries }: { label: string; entries: string[] }): J
       <div className="mb-1 font-medium text-secondary">{label}</div>
       <ul className="flex flex-col gap-0.5">
         {entries.map((entry) => (
-          <li key={entry} className="truncate font-mono text-secondary" data-tooltip={entry}>
+          <li key={entry} className="truncate font-mono text-secondary" title={entry}>
             {entry.replaceAll("_", " ")}
           </li>
         ))}
@@ -271,15 +516,11 @@ interface InspectorProps {
   onShowChanges?: () => void;
 }
 
-interface InspectorSectionProps {
-  title: string;
-  icon?: React.ReactNode;
-  summary?: string;
-  urgent?: boolean;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
+/**
+ * Plain-language names for the event stream's lifecycle frames. Anything not
+ * listed falls back to the raw event name with separators softened, so a new
+ * kernel event degrades to something readable rather than disappearing.
+ */
 function activityLabel(eventName: string): string {
   const labels: Record<string, string> = {
     "turn.started": "Turn started",
@@ -296,13 +537,34 @@ function activityLabel(eventName: string): string {
 }
 
 /**
+ * The tool a `tool.*` frame is about, when the payload names one. Used as the
+ * row's right-aligned value so the Activity list reads as "what ran", not as
+ * a column of event ids.
+ */
+function activityDetail(event: TerminusSseEvent): string | undefined {
+  if (!event.event.startsWith("tool.")) return undefined;
+  try {
+    const payload: unknown = JSON.parse(event.data);
+    if (typeof payload !== "object" || payload === null) return undefined;
+    const record = payload as Record<string, unknown>;
+    for (const key of ["tool", "tool_name", "name"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim().length > 0) return value.trim();
+    }
+  } catch {
+    // A frame we cannot parse still deserves its label; it just has no detail.
+  }
+  return undefined;
+}
+
+/**
  * The task's content-addressed artifacts.
  *
  * This list used to be the *fallback view of the Changes pane*: when the
  * working-tree diff came back empty, ⌘D opened onto a column of sha256 hashes
  * for a task that had really edited files. An index of what the kernel stored
- * is reference material, so it lives here, behind a collapsed section, and
- * Changes shows the diff.
+ * is reference material, so it lives here, in its own group, and Changes
+ * shows the diff.
  */
 const ArtifactsSection = memo(function ArtifactsSection({ taskId }: { taskId: string }): JSX.Element | null {
   const [state, setState] = useState<{
@@ -333,98 +595,49 @@ const ArtifactsSection = memo(function ArtifactsSection({ taskId }: { taskId: st
   if (state.taskId !== taskId) return null;
   if (state.error !== null) {
     return (
-      <InspectorSection title="Artifacts" icon={<Boxes size={12} />} summary="Unavailable" urgent defaultOpen={false}>
-        <p className="text-xs text-warning" role="status">{state.error}</p>
-      </InspectorSection>
+      <InspectorGroup title="Artifacts">
+        <p className="ui-meta px-2 pb-1 text-warning" role="status">{state.error}</p>
+      </InspectorGroup>
     );
   }
   const artifacts = state.page?.artifacts ?? [];
   if (state.page === null || artifacts.length === 0) return null;
 
   return (
-    <InspectorSection
-      title="Artifacts"
-      icon={<Boxes size={12} />}
-      summary={`${state.page.total}`}
-      defaultOpen={false}
-    >
-      <ul className="flex flex-col gap-1.5 text-xs" aria-label="Task artifacts">
+    <InspectorGroup title="Artifacts">
+      <ul aria-label="Task artifacts">
         {artifacts.map((artifact) => (
-          <li key={artifact.hash} className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate font-mono text-secondary" title={artifact.hash}>
-              {artifact.hash.replace(/^sha256:/, "").slice(0, 12)}…
-            </span>
-            <span className="shrink-0 truncate font-mono text-tertiary">{artifact.purpose}</span>
-            {artifact.size_bytes !== null ? (
-              <span className="shrink-0 font-mono text-tertiary tabular-nums">
-                {artifact.size_bytes.toLocaleString()} B
-              </span>
-            ) : null}
+          <li key={artifact.hash}>
+            <InspectorRow
+              icon={<Boxes size={ICON_SIZE} />}
+              label={artifact.purpose}
+              value={artifact.size_bytes !== null ? formatBytes(artifact.size_bytes) : undefined}
+              title={artifact.hash}
+            />
           </li>
         ))}
       </ul>
       {artifacts.length < state.page.total ? (
-        <p className="mt-2 text-xs text-tertiary">
-          Showing {artifacts.length} of {state.page.total}.
-        </p>
+        <p className="ui-meta px-2 pb-1">Showing {artifacts.length} of {state.page.total}.</p>
       ) : null}
-    </InspectorSection>
+    </InspectorGroup>
   );
 });
 
-function InspectorSection({
-  title,
-  icon,
-  summary,
-  urgent = false,
-  defaultOpen = false,
-  children,
-}: InspectorSectionProps): JSX.Element {
-  const [open, setOpen] = useState(defaultOpen);
-  const effectiveOpen = urgent || open;
-  return (
-    // Flat sections with hairline separators, like a native inspector. The
-    // bordered card stack read as a web dashboard. Urgent keeps a quiet
-    // tinted box so it stays a signal without shouting.
-    <div className={cn(
-      "px-0.5 pb-3 transition-colors",
-      urgent
-        ? "rounded-lg border border-warning/30 bg-warning/5 p-2.5"
-        : "border-b border-subtle last:border-b-0 last:pb-0",
-    )}>
-      <Button
-        variant="bare"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={effectiveOpen}
-        aria-label={`${title}${summary ? `, ${summary}` : ""}`}
-        className="flex w-full items-center justify-between"
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          {icon ? <span className={cn("text-tertiary shrink-0", urgent && "text-warning")}>{icon}</span> : null}
-          <span className="text-xs font-semibold text-primary truncate">{title}</span>
-        </div>
-        <div className="flex items-center gap-1.5 shrink-0">
-          {summary ? (
-            <span className={cn("rounded-md bg-subtle px-1.5 py-0.5 text-xs font-mono tabular-nums text-tertiary", urgent && "bg-warning/15 text-warning")}>
-              {summary}
-            </span>
-          ) : null}
-          {effectiveOpen ? <ChevronDown size={12} className="text-tertiary" /> : <ChevronRight size={12} className="text-tertiary" />}
-        </div>
-      </Button>
-      {effectiveOpen ? <div className="mt-2.5 pt-2 border-t border-subtle">{children}</div> : null}
-    </div>
-  );
+/** Byte counts in the value column, kept short enough not to wrap the row. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function NoSelection(): JSX.Element {
   return (
-    <div className="flex h-full flex-col items-center justify-center p-6 text-center text-tertiary">
-      <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-card border border-subtle text-secondary shadow-xs">
-        <Sparkles size={18} strokeWidth={1.7} />
-      </div>
-      <h3 className="mt-3 text-sm font-semibold text-primary">Task context</h3>
-      <p className="mt-1 text-xs text-secondary max-w-[200px]">Select a task to inspect runtime capabilities, subagents, and verification evidence.</p>
+    <div className="flex h-full flex-col items-center justify-center px-6 text-center">
+      <Sparkles size={20} strokeWidth={1.6} className="text-tertiary" aria-hidden />
+      <p className="ui-body mt-3 max-w-[200px] text-tertiary">
+        Select a task to see its environment and activity.
+      </p>
     </div>
   );
 }
@@ -437,215 +650,245 @@ function InspectorImpl({
   const events = useSelectedTaskEvents();
   const eventHistory = useSelectedTaskEventHistory();
   const approvalResource = useSelectedTaskApprovals();
-  const sessions = useTerminusStore((state) => state.sessions);
+  const sessionId = task?.session_id ?? null;
+  // Narrower than subscribing to `sessions`: the panel re-renders only when
+  // this session's object identity changes, not on every list refresh.
+  const session = useTerminusStore(
+    (state) => (sessionId ? state.sessions.find((entry) => entry.id === sessionId) ?? null : null),
+  );
   const eventDerivedStateComplete = eventHistory === null;
-  const [copiedId, setCopiedId] = useState(false);
-
-  // Derive a simple activity summary (last 5 events).
-  const recentEvents = useMemo(() => events.slice(-5).reverse(), [events]);
+  const [copied, setCopied] = useState<"path" | "id" | null>(null);
 
   const approvals = approvalResource.approvals;
-  const subagents = useMemo(
-    () => eventDerivedStateComplete ? deriveSubagentActivity(events) : [],
-    [eventDerivedStateComplete, events],
-  );
-  const verification = useMemo(
-    () => eventDerivedStateComplete ? deriveVerificationActivity(events) : [],
-    [eventDerivedStateComplete, events],
-  );
-  const hasPatchEvidence = useMemo(
-    () => eventDerivedStateComplete && extractUnifiedDiffs(events).length > 0,
-    [eventDerivedStateComplete, events],
-  );
-  const permissionProfileId = useMemo(
-    () => sessions.find((session) => session.id === task?.session_id)?.default_permission_profile?.trim() || null,
-    [sessions, task?.session_id],
-  );
 
-  const copyTaskId = async (): Promise<void> => {
-    if (!task?.id) return;
+  /*
+   * One pass over the event tail, not four.
+   *
+   * Each of these derivations used to be its own `useMemo` keyed on the
+   * `events` array, so a single SSE flush walked the tail four times — and any
+   * re-render that handed back a fresh array identity for unchanged content
+   * walked it four times for nothing. Length plus the last event id is what
+   * actually determines all four results (the tail is append-only), so the
+   * fingerprint is the honest dependency and `events` is deliberately not in
+   * the dependency list.
+   */
+  const eventFingerprint = `${events.length}:${events[events.length - 1]?.id ?? ""}:${eventDerivedStateComplete}`;
+  const derived = useMemo(() => {
+    const tail = [...events];
+    return {
+      subagents: eventDerivedStateComplete ? deriveSubagentActivity(tail) : [],
+      verification: eventDerivedStateComplete ? deriveVerificationActivity(tail) : [],
+      recentEvents: tail.slice(-5).reverse(),
+      proposedDiffs: eventDerivedStateComplete ? extractUnifiedDiffs(tail) : [],
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+  }, [eventFingerprint]);
+  const { subagents, verification, recentEvents } = derived;
+
+  // ACTIVE is the steady state, not "working" — see lib/turn-activity.
+  const statusKind = task ? displayLifecycle(task, events) : "idle";
+  const changes = useChangeStats(task?.id ?? null, derived.proposedDiffs, statusKind);
+
+  const permissionProfileId = session?.default_permission_profile?.trim() || null;
+  const workspacePath = projectUriToPath(session?.workspace_root_uri);
+
+  /** Copies `value`, then flags `field` so its row can confirm briefly. */
+  const copy = async (field: "path" | "id", value: string): Promise<void> => {
     try {
-      await navigator.clipboard.writeText(task.id);
-      setCopiedId(true);
-      setTimeout(() => setCopiedId(false), 2000);
-    } catch {}
+      await navigator.clipboard.writeText(value);
+      setCopied(field);
+      setTimeout(() => setCopied(null), 1_600);
+    } catch {
+      // Clipboard access can be denied; the row simply does not confirm.
+    }
   };
 
   if (!task) {
     return (
-      <div className={cn("h-full overflow-y-auto bg-transparent", className)}>
+      <div className={cn("h-full overflow-y-auto", className)}>
         <NoSelection />
       </div>
     );
   }
 
-  // ACTIVE is the steady state, not "working" — see lib/turn-activity.
-  const statusKind = displayLifecycle(task, events);
   const blockedByProvider = task.status === "BLOCKED"
     && task.terminal_reason?.reason === "provider_transport_unavailable";
+  const hasEnvironmentRows = changes !== null || workspacePath !== null;
 
   return (
-    <div className={cn("flex h-full flex-col gap-3 overflow-y-auto bg-transparent p-3.5", className)}>
-      {/* Top Quick Action Header & Pill Bar */}
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-semibold uppercase tracking-wider text-tertiary">Context</span>
-          <StatusIndicator
-            status={statusKind}
-            size={10}
-            label={blockedByProvider ? "Provider transport unavailable" : statusLabel(statusKind)}
-          />
-        </div>
-
-        {/* Floating Quick Action Pills */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
-          {hasPatchEvidence && onShowChanges ? (
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={onShowChanges}
-              aria-label="Open patch review"
-              className="h-7 rounded-lg border-default bg-card px-2.5 text-xs text-primary shadow-xs hover:border-strong hover:bg-hover inline-flex items-center gap-1.5"
-            >
-              <FileDiff size={12} className="text-info" aria-hidden />
-              <span>Review diffs</span>
-              <span className="h-1.5 w-1.5 rounded-full bg-success shrink-0" />
-            </Button>
-          ) : null}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={copyTaskId}
-            aria-label="Copy task ID"
-            className="h-7 rounded-lg border border-subtle bg-card/60 px-2.5 text-xs text-secondary hover:bg-hover hover:text-primary inline-flex items-center gap-1.5"
-          >
-            {copiedId ? <Check size={11} className="text-success" /> : <Copy size={11} />}
-            <span>{copiedId ? "Copied" : "Copy ID"}</span>
-          </Button>
-        </div>
-      </div>
-
+    <div className={cn("flex h-full flex-col overflow-y-auto pb-3", className)}>
       {eventHistory ? (
-        <div className="rounded-xl border border-warning/35 bg-warning/10 p-2.5 text-xs text-warning" role="status">
+        <p className="ui-meta border-b border-subtle px-3.5 py-2 text-warning" role="status">
           Authoritative event projection in progress.
-        </div>
+        </p>
       ) : null}
 
-      {/* Environment Section */}
+      {blockedByProvider ? (
+        <p className="ui-meta border-b border-subtle px-3.5 py-2 text-warning" role="status">
+          Provider transport unavailable.
+        </p>
+      ) : null}
+
       {/*
-        Every row here is read from the task or the session.
-
-        The previous version stated "Runtime: Local UDS" (a transport this
-        renderer cannot observe and does not choose), relabelled the permission
-        profile as "Full access", and defaulted the contract version to `v1`
-        and the risk class to "Standard" when the control plane had reported
-        neither. Four confident claims, none of them measurements.
+        Environment — the Codex card, minus the rows Terminus has no data or
+        endpoint for. `Changes` is the only one that can act, and it opens the
+        same review surface ⌘D does.
       */}
-      <InspectorSection title="Environment" icon={<GitBranch size={12} />} summary={statusLabel(statusKind)} defaultOpen>
-        <div className="flex flex-col gap-2 text-xs">
-          {permissionProfileId ? (
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-tertiary">Permission profile</span>
-              <span className="inline-flex items-center gap-1 truncate rounded border border-info/20 bg-info/10 px-1.5 py-0.5 font-mono text-xs font-medium text-info">
-                {permissionProfileId}
-              </span>
-            </div>
+      {hasEnvironmentRows ? (
+        <InspectorGroup title="Environment">
+          {changes !== null ? (
+            <InspectorRow
+              icon={<FileDiff size={ICON_SIZE} />}
+              label="Changes"
+              ariaLabel="Open patch review"
+              onClick={onShowChanges}
+              title={
+                changes.source === "working_tree"
+                  ? `${changes.stats.files} file${changes.stats.files === 1 ? "" : "s"} changed in the working tree`
+                  : `${changes.stats.files} file${changes.stats.files === 1 ? "" : "s"} in patches the agent proposed`
+              }
+              value={
+                <span className="tabular-nums">
+                  <span className="text-addition">+{changes.stats.additions.toLocaleString()}</span>
+                  {" "}
+                  <span className="text-deletion">−{changes.stats.deletions.toLocaleString()}</span>
+                </span>
+              }
+            />
           ) : null}
-          {/* Both are required fields the decoder rejects when absent, so
-              these are the control plane's values, not stand-ins for them. */}
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-tertiary">Risk class</span>
-            <span className="text-secondary">{task.risk_class}</span>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-tertiary">Contract</span>
-            <span className="font-mono text-secondary">v{task.active_contract_version}</span>
-          </div>
-        </div>
-      </InspectorSection>
+          {workspacePath ? (
+            <InspectorRow
+              icon={<Laptop size={ICON_SIZE} />}
+              label="Local"
+              value={copied === "path" ? "Copied" : deriveProjectTitle(workspacePath)}
+              ariaLabel="Copy workspace path"
+              onClick={() => void copy("path", workspacePath)}
+              title={workspacePath}
+            />
+          ) : null}
+        </InspectorGroup>
+      ) : null}
 
-      {/* Canonical Task Section */}
-      <TaskV2Section taskId={task.id} />
+      {/*
+        Context — what this task is running as. Model and effort come from the
+        session's defaults, which is what the control plane routes turns with
+        when a turn does not override them; both are optional on the wire, so
+        both rows disappear when unset rather than inventing a default.
 
-      {/* Sandbox Section */}
-      <SandboxSection profileId={permissionProfileId} />
+        Risk class and contract version are required fields the decoder
+        rejects when absent, so these are measurements, not stand-ins.
+      */}
+      <InspectorGroup title="Context">
+        {session?.default_model ? (
+          <InspectorRow
+            icon={<Cpu size={ICON_SIZE} />}
+            label="Model"
+            value={session.default_model}
+            title={session.default_model}
+          />
+        ) : null}
+        {session?.default_reasoning_effort ? (
+          <InspectorRow icon={<Gauge size={ICON_SIZE} />} label="Effort" value={session.default_reasoning_effort} />
+        ) : null}
+        {permissionProfileId ? (
+          <InspectorRow
+            icon={<ShieldAlert size={ICON_SIZE} />}
+            label="Access"
+            value={permissionProfileId}
+            title={permissionProfileId}
+          />
+        ) : null}
+        <InspectorRow icon={<Workflow size={ICON_SIZE} />} label="Risk" value={task.risk_class} />
+        <InspectorRow icon={<BadgeCheck size={ICON_SIZE} />} label="Contract" value={`v${task.active_contract_version}`} />
+        {/* The id is what a bug report needs and what nothing else on screen
+            shows in full, so the row hands over the whole thing. */}
+        <InspectorRow
+          icon={<Hash size={ICON_SIZE} />}
+          label="Task"
+          value={copied === "id" ? "Copied" : task.id.slice(-8)}
+          ariaLabel="Copy task ID"
+          onClick={() => void copy("id", task.id)}
+          title={task.id}
+        />
+        <SandboxSection profileId={permissionProfileId} />
+        <TaskV2Section taskId={task.id} />
+      </InspectorGroup>
 
-      {/* Artifacts — reference material, not the review surface. */}
+      {/* Activity — the recent run, plus the two derived lists worth keeping. */}
+      {recentEvents.length > 0 || subagents.length > 0 || verification.length > 0 ? (
+        <InspectorGroup title="Activity">
+          {subagents.length > 0 ? (
+            <InspectorDisclosure
+              icon={<UsersRound size={ICON_SIZE} />}
+              label="Subagents"
+              value={`${subagents.filter((item) => item.state === "working").length} working, ${subagents.filter((item) => item.state === "done").length} done`}
+            >
+              <ul className="flex flex-col gap-1.5">
+                {subagents.map((subagent) => (
+                  <li key={subagent.id} className="flex items-center gap-2">
+                    <StatusIndicator
+                      status={subagent.state === "working" ? "working" : subagent.state === "failed" ? "failed" : "done"}
+                      size={8}
+                    />
+                    <span className="ui-meta min-w-0 flex-1 truncate text-secondary">{subagent.role}</span>
+                  </li>
+                ))}
+              </ul>
+            </InspectorDisclosure>
+          ) : null}
+          {verification.length > 0 ? (
+            <InspectorDisclosure
+              icon={<Workflow size={ICON_SIZE} />}
+              label="Verification"
+              value={`${verification.filter((check) => check.state === "passed").length}/${verification.length}`}
+              tone={verification.some((check) => check.state === "failed") ? "warning" : "default"}
+              urgent={verification.some((check) => check.state === "failed")}
+            >
+              <ul className="flex flex-col gap-1.5">
+                {verification.slice(-5).reverse().map((check) => (
+                  <li key={check.id} className="flex items-start gap-2">
+                    <StatusIndicator
+                      status={check.state === "passed" ? "done" : check.state === "failed" ? "failed" : "working"}
+                      size={8}
+                    />
+                    <span className="ui-meta min-w-0 flex-1 text-secondary">{check.detail}</span>
+                  </li>
+                ))}
+              </ul>
+            </InspectorDisclosure>
+          ) : null}
+          <ul aria-label="Recent activity">
+            {recentEvents.map((ev: TerminusSseEvent, i) => (
+              <li key={ev.id ?? i}>
+                <InspectorRow
+                  icon={<Terminal size={ICON_SIZE} />}
+                  label={activityLabel(ev.event)}
+                  value={activityDetail(ev)}
+                />
+              </li>
+            ))}
+          </ul>
+        </InspectorGroup>
+      ) : null}
+
       <ArtifactsSection taskId={task.id} />
 
-      {/* Subagents Section */}
-      {subagents.length > 0 ? (
-        <InspectorSection
-          title="Subagents"
-          icon={<UsersRound size={12} />}
-          summary={`${subagents.filter((item) => item.state === "working").length} working, ${subagents.filter((item) => item.state === "done").length} done`}
-          defaultOpen={false}
-        >
-          <ul className="flex flex-col gap-2 text-xs">
-            {subagents.map((subagent) => (
-              <li key={subagent.id} className="flex items-start gap-2 rounded-lg bg-hover/40 p-2">
-                <StatusIndicator
-                  status={subagent.state === "working" ? "working" : subagent.state === "failed" ? "failed" : "done"}
-                  size={10}
-                />
-                <div className="min-w-0 flex-1">
-                  <span className="block truncate font-medium text-primary">{subagent.role}</span>
-                  <span className="block truncate font-mono text-xs text-tertiary">{subagent.worktreeId ?? subagent.id}</span>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </InspectorSection>
-      ) : null}
-
-      {/* Verification Section */}
-      {verification.length > 0 ? (
-        <InspectorSection
-          title="Verification"
-          icon={<Workflow size={12} />}
-          summary={`${verification.filter((check) => check.state === "passed").length}/${verification.length}`}
-          urgent={verification.some((check) => check.state === "failed")}
-          defaultOpen
-        >
-          <ul className="flex flex-col gap-1.5 text-xs">
-            {verification.slice(-5).reverse().map((check) => (
-              <li key={check.id} className="flex items-start gap-2 rounded bg-hover/30 px-2 py-1.5">
-                <StatusIndicator status={check.state === "passed" ? "done" : check.state === "failed" ? "failed" : "working"} size={10} />
-                <span className="min-w-0 flex-1 text-secondary">{check.detail}</span>
-              </li>
-            ))}
-          </ul>
-        </InspectorSection>
-      ) : null}
-
-      {/* Activity Section */}
-      {recentEvents.length > 0 ? (
-        <InspectorSection title="Activity" icon={<Workflow size={12} />} summary={`${recentEvents.length}`} defaultOpen={false}>
-          <ul className="flex flex-col gap-1.5 text-xs text-secondary">
-            {recentEvents.map((ev: TerminusSseEvent, i) => (
-              <li key={ev.id ?? i} className="flex items-center justify-between gap-2 rounded bg-hover/30 px-2 py-1">
-                <span className="truncate text-secondary">{activityLabel(ev.event)}</span>
-                <span className="font-mono text-xs text-tertiary shrink-0">{ev.id ? ev.id.slice(-6) : "ev"}</span>
-              </li>
-            ))}
-          </ul>
-        </InspectorSection>
-      ) : null}
-
-      {/* Approvals Section */}
+      {/* Approvals — the one group that is always open, because it blocks. */}
       {approvals.length > 0 ? (
-        <InspectorSection title="Approvals" icon={<ShieldAlert size={12} />} summary={`${approvals.length} waiting`} urgent defaultOpen>
-          <ul className="flex flex-col gap-1.5 text-xs">
+        <InspectorGroup title="Approvals">
+          <ul>
             {approvals.map((approval) => (
-              <li key={approval.id} className="rounded-lg bg-warning/10 border border-warning/20 p-2 text-secondary">
-                <span className="block font-medium text-primary truncate">{approval.action}</span>
-                <span className="text-warning text-xs">{approval.risk} risk{approval.reversibility ? `, ${approval.reversibility}` : ""}</span>
+              <li key={approval.id}>
+                <InspectorRow
+                  icon={<ShieldAlert size={ICON_SIZE} className="text-warning" />}
+                  label={approval.action}
+                  value={approval.risk}
+                  title={approval.reversibility ? `${approval.risk} risk, ${approval.reversibility}` : `${approval.risk} risk`}
+                />
               </li>
             ))}
           </ul>
-        </InspectorSection>
+        </InspectorGroup>
       ) : null}
     </div>
   );

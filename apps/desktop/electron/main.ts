@@ -42,7 +42,6 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   isAllowedRendererPermission,
-  normalizeSettingsCategory,
   normalizeWindowTitle,
   packagedRendererAssetPath,
   validateDirectoryPath,
@@ -100,7 +99,6 @@ app.setName("Terminus");
 app.setAppUserModelId(APP_USER_MODEL_ID);
 
 let mainWindow: BrowserWindow | null = null;
-let settingsWindow: BrowserWindow | null = null;
 let runtimeSupervisor: StandaloneRuntimeSupervisor | null = null;
 let runtimeShutdownStarted = false;
 let runtimeAcceptingRequests = false;
@@ -227,11 +225,9 @@ function registerProcessFailureHandlers(): void {
 function sealRendererRuntimeBoundary(): void {
   runtimeAcceptingRequests = false;
   terminusControlToken = "";
-  for (const window of [settingsWindow, mainWindow]) {
-    if (window && !window.isDestroyed()) {
-      window.hide();
-      window.destroy();
-    }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.hide();
+    mainWindow.destroy();
   }
 }
 
@@ -258,10 +254,9 @@ function registerAuthenticatedTransport(): void {
   const allowedOrigin = configuredOrigin(terminusApiBase);
   if (allowedOrigin === null) throw new Error("Terminus API base is invalid");
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
-    // Settings reads and writes provider configuration, so it needs the same
-    // control capability the main window has — and nothing else does.
-    const terminusWindow = details.webContentsId === mainWindow?.webContents.id
-      || details.webContentsId === settingsWindow?.webContents.id;
+    // Only the document window carries the control capability; settings live
+    // inside it now, so nothing else needs one.
+    const terminusWindow = details.webContentsId === mainWindow?.webContents.id;
     if (!terminusWindow) {
       callback({ requestHeaders: details.requestHeaders });
       return;
@@ -329,12 +324,9 @@ function registerContentSecurityPolicyHeaders(): void {
  * packaged `terminus://` protocol handler refuses any entry URL with a query
  * or a fragment — a rule worth keeping.
  */
-type RendererView = "main" | "settings";
-
 const RENDERER_VIEW_ARGUMENT = "--terminus-view=";
 const RENDERER_VIBRANCY_ARGUMENT = "--terminus-vibrancy=";
 const RENDERER_API_BASE_ARGUMENT = "--terminus-api-base=";
-const RENDERER_SETTINGS_CATEGORY_ARGUMENT = "--terminus-settings-category=";
 
 function rendererEntryUrl(): string {
   if (!isDev) return PACKAGED_RENDERER_ENTRY;
@@ -359,7 +351,7 @@ function isTrustedRendererUrl(value: string): boolean {
 }
 
 function isOwnedWindow(window: BrowserWindow): boolean {
-  return window === mainWindow || window === settingsWindow;
+  return window === mainWindow;
 }
 
 const ipcWindowRouter: WindowRouter<BrowserWindow, WebContents> = {
@@ -535,7 +527,9 @@ function refreshApplicationMenu(): void {
     issuesUrl: repositoryLinks.issuesUrl,
     actions: {
       sendCommand: sendDesktopCommand,
-      openSettings: (category) => openSettingsWindow(category),
+      // Settings are a sheet inside the document window, so the menu asks the
+      // renderer to open them rather than raising a second window.
+      openSettings: (category) => sendDesktopCommand(category === "shortcuts" ? "shortcut-reference" : "settings"),
       showMainWindow: () => { showMainWindow(); },
       openRecentProject: (path) => {
         noteRecentProject(path);
@@ -565,17 +559,16 @@ function refreshApplicationMenu(): void {
  * category in particular cannot be sent on `ready-to-show`, which fires
  * before React has mounted a listener.
  */
-function rendererPreferences(view: RendererView, settingsCategory?: string): Electron.WebPreferences {
+function rendererPreferences(): Electron.WebPreferences {
   return {
     preload: join(__dirname, "preload.js"),
     contextIsolation: true,
     nodeIntegration: false,
     sandbox: true,
     additionalArguments: [
-      `${RENDERER_VIEW_ARGUMENT}${view}`,
-      `${RENDERER_VIBRANCY_ARGUMENT}${vibrancyEnabled(view) ? "on" : "off"}`,
+      `${RENDERER_VIEW_ARGUMENT}main`,
+      `${RENDERER_VIBRANCY_ARGUMENT}${vibrancyEnabled() ? "on" : "off"}`,
       `${RENDERER_API_BASE_ARGUMENT}${terminusApiBase}`,
-      ...(settingsCategory === undefined ? [] : [`${RENDERER_SETTINGS_CATEGORY_ARGUMENT}${settingsCategory}`]),
     ],
   };
 }
@@ -589,16 +582,15 @@ function rendererPreferences(view: RendererView, settingsCategory?: string): Ele
  * transparent background colour would produce a see-through window, so those
  * platforms keep the opaque colour they had.
  */
-function vibrancyEnabled(view: RendererView): boolean {
-  // Preferences are an ordinary opaque window; only the document window
-  // paints its chrome for a vibrant material. And macOS's "Reduce
-  // transparency" is an accessibility request, not a preference to override.
-  if (view !== "main" || process.platform !== "darwin") return false;
+function vibrancyEnabled(): boolean {
+  // macOS's "Reduce transparency" is an accessibility request, not a
+  // preference to override.
+  if (process.platform !== "darwin") return false;
   return !nativeTheme.prefersReducedTransparency;
 }
 
-function macChrome(view: RendererView): Pick<Electron.BrowserWindowConstructorOptions, "vibrancy" | "visualEffectState" | "backgroundColor"> {
-  if (!vibrancyEnabled(view)) {
+function macChrome(): Pick<Electron.BrowserWindowConstructorOptions, "vibrancy" | "visualEffectState" | "backgroundColor"> {
+  if (!vibrancyEnabled()) {
     return { backgroundColor: nativeTheme.shouldUseDarkColors ? "#181817" : "#f5f5f2" };
   }
   return {
@@ -652,51 +644,6 @@ function hardenWebContents(window: BrowserWindow, label: string): void {
   });
 }
 
-/**
- * Open (or focus) the preferences window.
- *
- * Preferences used to be a full-window overlay inside the document window,
- * which meant they could not be left open beside the work they describe and
- * did not behave like anything else on the system: no ⌘W, no separate entry
- * in Window, no independent position.
- */
-function openSettingsWindow(category?: string): void {
-  if (settingsWindow && !settingsWindow.isDestroyed()) {
-    settingsWindow.show();
-    settingsWindow.focus();
-    // The window is already mounted, so a message is the only way in.
-    if (category) settingsWindow.webContents.send("terminus:settings-category", category);
-    return;
-  }
-  const window = new BrowserWindow({
-    width: 760,
-    height: 580,
-    minWidth: 620,
-    minHeight: 440,
-    title: "Terminus Settings",
-    titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 14, y: 14 },
-    ...macChrome("settings"),
-    show: false,
-    // Deliberately not a child window: a Preferences window on macOS is
-    // independent — it can be sent behind the document window and carries
-    // its own entry in Window. `parent` would pin it permanently on top.
-    webPreferences: rendererPreferences("settings", category),
-  });
-  settingsWindow = window;
-  hardenWebContents(window, "settings");
-  window.once("ready-to-show", () => {
-    if (window.isDestroyed()) return;
-    window.show();
-  });
-  window.once("closed", () => {
-    if (settingsWindow === window) settingsWindow = null;
-  });
-  void window.loadURL(rendererEntryUrl()).catch((error: unknown) => {
-    handleDesktopFatal("Terminus settings could not load", error);
-  });
-}
-
 function createMainWindow(): BrowserWindow {
   const { areas, primary } = displayWorkAreas();
   // SPEC §5: "The default window should open large and centered, occupying
@@ -712,9 +659,9 @@ function createMainWindow(): BrowserWindow {
     minHeight: 600,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 16, y: 18 },
-    ...macChrome("main"),
+    ...macChrome(),
     show: false,
-    webPreferences: rendererPreferences("main"),
+    webPreferences: rendererPreferences(),
   });
   mainWindow = window;
   mainRendererLoaded = false;
@@ -761,7 +708,13 @@ function createMainWindow(): BrowserWindow {
   void window.loadURL(rendererEntryUrl()).catch((error: unknown) => {
     handleDesktopFatal("Terminus renderer could not load", error);
   });
-  if (isDev && process.env.TERMINUS_DESKTOP_DEVTOOLS !== "0") {
+  // Opening DevTools attaches the inspector to the renderer for the whole
+  // session, which keeps V8 in a de-optimised, fully instrumented mode and
+  // makes every React commit noticeably slower — the cost lands on exactly the
+  // streaming-transcript path we care most about. It stays one keystroke away
+  // (View ▸ Toggle Developer Tools) and opts in with TERMINUS_DESKTOP_DEVTOOLS=1,
+  // rather than taxing every dev run by default.
+  if (isDev && process.env.TERMINUS_DESKTOP_DEVTOOLS === "1") {
     window.webContents.openDevTools({ mode: "detach" });
   }
   return window;
@@ -827,11 +780,6 @@ function registerIpc(): void {
       handleDeepLink(taskDeepLink(taskId));
     });
     notification.show();
-    return null;
-  });
-  ipcMain.handle("desktop:openSettings", (event, category: unknown) => {
-    senderWindow(event);
-    openSettingsWindow(normalizeSettingsCategory(category) ?? undefined);
     return null;
   });
   ipcMain.handle("desktop:setAttentionCount", (event, value: unknown) => {
@@ -1004,9 +952,7 @@ async function launchDesktop(): Promise<void> {
       themeSource: nativeTheme.themeSource,
       shouldUseDarkColors: nativeTheme.shouldUseDarkColors,
     };
-    for (const window of [mainWindow, settingsWindow]) {
-      if (window && !window.isDestroyed()) window.webContents.send("terminus:native-theme", payload);
-    }
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("terminus:native-theme", payload);
   });
 
   app.on("activate", () => {

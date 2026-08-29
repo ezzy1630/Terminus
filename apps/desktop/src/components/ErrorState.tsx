@@ -83,55 +83,39 @@ function ErrorStateImpl({
   compact = false,
   live = "assertive",
 }: ErrorStateProps): JSX.Element {
-  const glyphColor = severity === "warning" ? "var(--color-warning)" : "var(--color-error)";
-  const resolvedIcon = icon ?? <TriangleAlert size={15} strokeWidth={1.8} />;
+  const resolvedIcon = icon ?? <TriangleAlert size={14} strokeWidth={1.8} />;
   return (
     <div
       role={live === "polite" ? "status" : "alert"}
       aria-live={live}
       className={cn(
-        "error-state flex w-full flex-col",
-        compact ? "py-3" : "py-8",
+        "error-state flex w-full flex-col gap-2.5",
+        compact ? "px-3 py-3" : "px-5 py-6",
         className,
       )}
-      style={{ gap: compact ? 8 : 12, padding: compact ? "0 12px" : "0 20px" }}
     >
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-2.5">
         {resolvedIcon ? (
-          <div aria-hidden className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center" style={{ color: glyphColor }}>
+          <div
+            aria-hidden
+            className={cn(
+              "mt-px flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center",
+              severity === "warning" ? "text-warning" : "text-error",
+            )}
+          >
             {resolvedIcon}
           </div>
         ) : null}
-        <div className="flex min-w-0 flex-1 flex-col" style={{ gap: 4 }}>
-          <h2
-            className="text-primary text-md"
-            style={{ fontWeight: 600, lineHeight: 1.3 }}
-          >
-            {title}
-          </h2>
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <h2 className="ui-body font-semibold text-primary">{title}</h2>
           {description ? (
-            <p
-              className="text-secondary text-sm"
-              style={{ lineHeight: "var(--line-height-relaxed)" }}
-            >
-              {description}
-            </p>
+            <p className="ui-body leading-relaxed text-secondary">{description}</p>
           ) : null}
-          {detail ? (
-            <p
-              className="selectable font-mono text-tertiary text-xs"
-              style={{ marginTop: 2 }}
-            >
-              {detail}
-            </p>
-          ) : null}
+          {detail ? <p className="ui-code selectable text-tertiary">{detail}</p> : null}
         </div>
       </div>
       {(action || secondaryAction) ? (
-        <div
-          className="flex flex-wrap items-center gap-2"
-          style={{ marginTop: 2, paddingLeft: resolvedIcon ? 32 : 0 }}
-        >
+        <div className={cn("flex flex-wrap items-center gap-2", resolvedIcon && "pl-[28px]")}>
           {action ? (
             <Button
               type="button"
@@ -201,7 +185,7 @@ const PRESETS: Record<string, ErrorPreset> = {
   missingEditor: {
     title: "No external editor detected",
     description:
-      "Cursor or VS Code was not found. Install one, or set the path manually in Settings → Integrations.",
+      "Cursor or VS Code was not found in the usual locations. Install one to open files externally.",
     severity: "warning",
   },
   missingGit: {

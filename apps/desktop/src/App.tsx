@@ -21,10 +21,9 @@
  * task inspector and operator cockpit are split behind React.lazy boundaries.
  */
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, FolderClosed, MessageCircle, PanelLeft, PanelRight } from "lucide-react";
+import { ArrowLeft, ArrowRight, Ellipsis, FolderClosed, MessageCircle, PanelLeft, PanelRight } from "lucide-react";
 import { Layout } from "./components/Layout";
 import { ConnectionBanner } from "./components/ConnectionBanner";
-import { ProjectMenu } from "./components/ProjectMenu";
 import { projectUriToPath } from "./lib/projects";
 import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
 import { Sidebar } from "./components/Sidebar";
@@ -32,7 +31,6 @@ import { Composer } from "./components/Composer";
 import { NewTaskScreen } from "./components/NewTaskScreen";
 import { MissionBoardView } from "./components/MissionBoardView";
 import { EmptyState } from "./ui/EmptyState";
-import { TaskStatusPill } from "./components/StatusIndicator";
 import {
   useTerminusStore,
   useSelectedSessionTasks,
@@ -45,10 +43,11 @@ import {
 } from "./hooks/use-terminus";
 import { useThemeStore } from "./hooks/use-theme";
 import { useNativeAttention } from "./hooks/use-native-attention";
-import { displayLifecycleWith, taskRunIsActiveWith } from "./lib/turn-activity";
+import { useNavHistory, type NavLocation } from "./hooks/use-nav-history";
+import { taskRunIsActiveWith } from "./lib/turn-activity";
 import type { Theme } from "./types";
 import type { SidebarDestination } from "./components/Sidebar";
-import { SETTING_CATEGORIES, type SettingCategoryId } from "./components/Settings";
+import { isSettingCategoryId, type SettingCategoryId } from "./lib/settings-categories";
 
 /**
  * Resolve a requested settings category.
@@ -69,8 +68,7 @@ export function settingsCategoryFor(requested: string | undefined): SettingCateg
   if (!requested) return "appearance";
   const alias = SETTINGS_CATEGORY_ALIASES[requested];
   if (alias) return alias;
-  const known = SETTING_CATEGORIES.find((category) => category.id === requested);
-  return known ? known.id : "appearance";
+  return isSettingCategoryId(requested) ? requested : "appearance";
 }
 import type { TaskV2Snapshot } from "./types/v2";
 import { FIXED_SHORTCUTS, matchesShortcut, shortcutDisplay } from "./lib/shortcuts";
@@ -79,6 +77,7 @@ import { buildDefaultCommands } from "./lib/command-catalog";
 import { Button } from "./ui/Button";
 import { DialogSurface } from "./ui/Dialog";
 import { IconButton } from "./ui/IconButton";
+import { Menu, type MenuItem } from "./ui/Menu";
 import { Skeleton, Spinner } from "./ui/Status";
 import { Tabs } from "./ui/Tabs";
 import { TaskRequiredState } from "./components/Cockpit/CockpitPrimitives";
@@ -138,7 +137,7 @@ function SelectedTaskReviewPane({
   return (
     <ReviewPane
       key={taskId}
-      events={history ? [] : events}
+      events={events}
       eventHistoryIncomplete={history !== null}
       taskId={taskId}
       onClose={onClose}
@@ -237,12 +236,8 @@ export function App(): JSX.Element {
   const setDraft = useTerminusStore((s) => s.setDraft);
   const selectedTask = useSelectedTask();
   const selectedSessionTasks = useSelectedSessionTasks();
-  const selectedSession = useMemo(
-    () => sessions.find((session) => session.id === selectedSessionId) ?? null,
-    [selectedSessionId, sessions],
-  );
-  // The stored status says ACTIVE for as long as a task exists. What the title
-  // bar reports is what the run is actually doing.
+  // The stored status says ACTIVE for as long as a task exists. What the shell
+  // reports is what the run is actually doing.
   const selectedRunActivity = useSelectedTaskRunActivity();
   const selectedRunIsActive = taskRunIsActiveWith(selectedTask, selectedRunActivity);
 
@@ -333,6 +328,24 @@ export function App(): JSX.Element {
     selectTask(taskId);
   }, [selectTask]);
 
+  /**
+   * Replay a recorded position. This is the ordinary "go here" routine, which
+   * is why back and forward need no special cases: everything that navigates
+   * moves the same two pieces of state, and this puts them back.
+   */
+  const applyNavLocation = useCallback((target: NavLocation): void => {
+    setSelectedCanonicalTaskId(null);
+    setActiveDestination(target.destination);
+    setChangesOpen(false);
+    selectTask(target.taskId);
+  }, [selectTask]);
+
+  const navHistory = useNavHistory({
+    destination: activeDestination,
+    taskId: selectedTaskId,
+    apply: applyNavLocation,
+  });
+
   // Dock badge and native notifications for tasks that want a human.
   useNativeAttention(openTaskById);
   // Catch a run whose ending never reached this client.
@@ -342,17 +355,11 @@ export function App(): JSX.Element {
   useHealthMonitor();
 
   const openSettings = useCallback((category: SettingCategoryId = "appearance"): void => {
-    // Preferences belong in their own window on macOS. Fall back to the
-    // in-app overlay wherever there is no native shell to open one — the
-    // browser build and tests — and if the window refuses to open.
-    const openNativeSettings = window.terminusDesktop?.openSettings;
-    if (openNativeSettings) {
-      void openNativeSettings(category).catch(() => {
-        setSettingsCategory(category);
-        setOverlay("settings");
-      });
-      return;
-    }
+    // Always in-app. Settings used to prefer a second native window, which
+    // meant ⌘, threw the operator out of the task they were reading into a
+    // window with its own Dock entry and its own idea of which project was
+    // current. Every entry point — the menu bar's ⌘,, the sidebar gear, the
+    // palette — routes through here, so they all stay in one window.
     setSettingsCategory(category);
     setOverlay("settings");
   }, []);
@@ -615,6 +622,48 @@ export function App(): JSX.Element {
     [canStopRun, cycleTheme, goToNewTask, loadMoreTasks, openDestination, openProject, openSettings, openTaskWorkspace, selectSession, selectTask, selectedSessionId, selectedSessionTasks, selectedTask, selectedTaskId, selectedTaskPage?.nextCursor, sessions, sidebarVisible, stopTarget, stopTask, taskCommandsEnabled, toggleDensity, toggleInspector],
   );
 
+  /**
+   * The title bar's `···`. Codex puts the per-document actions here rather
+   * than spreading them across the bar, and every entry below is an action the
+   * app already performs — there is nothing here that only opens a dialog to
+   * say it is unavailable.
+   */
+  const taskOverflowItems = useMemo<MenuItem[]>(() => {
+    if (!selectedTask) return [];
+    const items: MenuItem[] = [
+      {
+        id: "task.copy-id",
+        label: "Copy task ID",
+        onSelect: () => { void navigator.clipboard?.writeText(selectedTask.id); },
+      },
+      {
+        id: "task.show-changes",
+        label: "Show changes",
+        shortcut: shortcutDisplay(FIXED_SHORTCUTS.showChanges),
+        onSelect: () => setChangesOpen(true),
+      },
+      {
+        id: "task.toggle-inspector",
+        label: inspectorVisible ? "Hide context panel" : "Show context panel",
+        shortcut: shortcutDisplay(FIXED_SHORTCUTS.toggleInspector),
+        onSelect: toggleInspector,
+      },
+    ];
+    // Offered only against a run that can actually be stopped. "Stop" on an
+    // idle task is a button whose only possible outcome is an error.
+    if (selectedRunIsActive) {
+      items.push({
+        id: "task.stop-run",
+        label: "Stop run",
+        shortcut: shortcutDisplay(FIXED_SHORTCUTS.stopRun),
+        separatorBefore: true,
+        danger: true,
+        onSelect: () => { void stopTask(selectedTask.id); },
+      });
+    }
+    return items;
+  }, [inspectorVisible, selectedRunIsActive, selectedTask, stopTask, toggleInspector]);
+
   const showNewTask = selectedTaskId === null && activeDestination === "new_task";
   const showNavigationSurface = selectedTaskId === null && activeDestination === "chat";
   const durableTaskId = selectedTask?.id ?? null;
@@ -654,12 +703,29 @@ export function App(): JSX.Element {
         center={activeDestination === "task_details" ? (
           <span className="ui-label text-secondary">Task</span>
         ) : activeDestination === "chat" && selectedTask ? (
-          <span className="flex min-w-0 max-w-2xl items-center gap-2.5 text-primary">
+          <span className="flex min-w-0 items-center gap-2 text-primary">
             <FolderClosed size={14} className="shrink-0 text-tertiary" aria-hidden />
             {/* Native document titles are 13px semibold; the 15px page title
-                made the bar read as a web page header. */}
+                made the bar read as a web page header. The run's state is not
+                repeated here — the sidebar row and the composer both show it,
+                and a third copy in the title bar was the one that never moved. */}
             <span className="truncate text-base font-semibold">{selectedTask.contract?.objective ?? selectedTask.id}</span>
-            <TaskStatusPill status={displayLifecycleWith(selectedTask, selectedRunActivity)} />
+            <Menu
+              label="Task actions"
+              align="start"
+              items={taskOverflowItems}
+              trigger={(
+                <IconButton
+                  label="Task actions"
+                  icon={<Ellipsis size={15} />}
+                  size="sm"
+                  // `.titlebar-center` is a pointer-transparent overlay so the
+                  // bar stays draggable across the title; the one control in it
+                  // opts back into hit testing, and out of the drag region.
+                  className="icon-button titlebar-no-drag pointer-events-auto h-6 w-6 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
+                />
+              )}
+            />
           </span>
         ) : undefined}
         sidebar={
@@ -671,7 +737,6 @@ export function App(): JSX.Element {
             }}
             onOpenAttentionCenter={() => setOverlay("attention")}
             onOpenProject={openProject}
-            taskActionsEnabled={selectedTask !== null}
           />
         }
         inspector={
@@ -761,6 +826,11 @@ export function App(): JSX.Element {
           </Suspense>
         }
         left={
+          /* Codex's cluster, in Codex's order: the panel toggle that owns the
+             column beneath it, then the shell's own back/forward. The project
+             name is no longer duplicated here — it is the sidebar's header,
+             directly below, and two switchers for one project was one too
+             many. */
           <>
             <IconButton
               onClick={() => setSidebarVisible((visible) => !visible)}
@@ -770,28 +840,22 @@ export function App(): JSX.Element {
               data-tooltip={sidebarVisible ? "Hide sidebar" : "Show sidebar"}
               className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary"
             />
-            {/* The space name is the sidebar's header. Without it the left
-                column's first content sat 32px below the right column's,
-                which is what made the two columns read as misaligned. */}
-            {selectedSession ? (
-              <ProjectMenu
-                onProjectSelected={() => {
-                  openDestination("new_task");
-                  selectTask(null);
-                }}
-                onOpenProject={openProject}
-                trigger={(
-                  <Button
-                    type="button"
-                    aria-label="Switch project"
-                    className="ui-label titlebar-no-drag flex min-w-0 max-w-48 items-center gap-1 truncate rounded px-1 py-0.5 text-secondary hover:bg-hover hover:text-primary"
-                  >
-                    <span className="min-w-0 truncate">{selectedSession.title}</span>
-                    <ChevronDown size={11} strokeWidth={2} className="shrink-0 text-tertiary" aria-hidden />
-                  </Button>
-                )}
-              />
-            ) : null}
+            <IconButton
+              onClick={navHistory.goBack}
+              disabled={!navHistory.canGoBack}
+              label="Back"
+              icon={<ArrowLeft size={14} />}
+              data-tooltip="Back"
+              className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-default disabled:opacity-30"
+            />
+            <IconButton
+              onClick={navHistory.goForward}
+              disabled={!navHistory.canGoForward}
+              label="Forward"
+              icon={<ArrowRight size={14} />}
+              data-tooltip="Forward"
+              className="icon-button rounded-md text-secondary hover:bg-hover hover:text-primary disabled:cursor-default disabled:opacity-30"
+            />
           </>
         }
         right={

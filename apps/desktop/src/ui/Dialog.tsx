@@ -55,17 +55,17 @@ export function Dialog({ open, onOpenChange, title, description, children, foote
       open={open}
       onOpenChange={onOpenChange}
       className={cn(
-        "dialog-panel fixed left-1/2 top-1/2 flex max-h-[calc(100%-32px)] w-[min(560px,calc(100%-32px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-default bg-elevated text-primary shadow-lg",
+        "dialog-panel fixed left-1/2 top-1/2 flex max-h-[calc(100%-32px)] w-[min(560px,calc(100%-32px))] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border border-subtle bg-elevated text-primary shadow-lg",
         className,
       )}
     >
-      <header className="px-4 pb-2 pt-4">
-        <DialogPrimitive.Title className="ui-section-title text-primary">{title}</DialogPrimitive.Title>
+      <header className="px-4 pb-3 pt-3.5">
+        <DialogPrimitive.Title className="ui-body font-semibold text-primary">{title}</DialogPrimitive.Title>
         {description ? (
-          <DialogPrimitive.Description className="ui-body mt-1 text-secondary">{description}</DialogPrimitive.Description>
+          <DialogPrimitive.Description className="ui-meta mt-1">{description}</DialogPrimitive.Description>
         ) : null}
       </header>
-      <div className="scrollable min-h-0 flex-1 overflow-auto px-4 py-2">{children}</div>
+      <div className="scrollable min-h-0 flex-1 overflow-auto px-4 pb-1">{children}</div>
       {footer ? <footer className="flex justify-end gap-2 border-t border-subtle px-4 py-3">{footer}</footer> : null}
     </DialogSurface>
   );

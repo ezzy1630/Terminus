@@ -49,6 +49,13 @@ export default defineConfig(({ command }) => ({
   build: {
     outDir: resolve(__dirname, "dist"),
     emptyOutDir: true,
+    // This bundle only ever runs in the Chromium we ship with, so there is no
+    // older engine to down-level for. Vite's default target assumes an unknown
+    // browser and transpiles modern syntax it does not have to: naming the
+    // engine keeps async/await, class fields and optional chaining native
+    // instead of shipping regenerator-shaped rewrites of the hot paths.
+    // Electron 43 is Chromium 150.
+    target: "chrome150",
     rollupOptions: {
       input: resolve(__dirname, "src/index.html"),
       output: {

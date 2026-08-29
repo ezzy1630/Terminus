@@ -1,18 +1,19 @@
 /**
  * Terminus Desktop — single conversation message.
  *
- * Per SPEC §9.2: "Use a document-style feed. User messages may use
- * restrained low-contrast rounded surfaces. Agent responses should
- * mostly appear as clean text directly on the canvas. Do not place
- * every assistant response in a large chat bubble."
+ * The transcript speaks Codex's language: an assistant reply is plain prose on
+ * the canvas — no bubble, no avatar, no card, no name label — and a user turn
+ * is a small right-aligned pill. The only thing separating one turn from the
+ * next is vertical rhythm, which is what makes a long conversation read as a
+ * document instead of a chat log.
  *
- * Per SPEC §9.2: "Support selection and copying without fighting
- * custom interactions." — messages render with `selectable` class so
- * the user can drag-select text.
+ * Per SPEC §9.2: "Support selection and copying without fighting custom
+ * interactions." — messages render with `selectable` so the reader can
+ * drag-select text, and every reply carries a real clipboard action.
  *
- * Per SPEC §9.1: prose stays in a comfortable reading column (handled
- * by the parent Conversation, which sets a max-width); the message
- * itself is just typography.
+ * Per SPEC §9.1: prose stays in a comfortable reading column (owned by the
+ * parent Conversation, which sets the max-width); the message itself is just
+ * typography.
  *
  * The renderer covers the markdown an agent actually writes: headings,
  * bullet and numbered lists, blockquotes, rules, fenced code blocks, and
@@ -21,15 +22,24 @@
  * is legible; the previous subset was paragraphs and code fences only, so
  * every list and heading in a response arrived as raw `#` and `-`.
  */
-import { memo, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { cn } from "../lib/cn";
+import { clockTimestamp } from "../lib/time";
 import type { ConversationMessage } from "../types";
 import { Button } from "../ui/Button";
 import { ContextMenu } from "../ui/Menu";
 
 interface MessageProps {
   message: ConversationMessage;
+  /**
+   * True for the newest turn in the feed.
+   *
+   * Its action row stays visible; every earlier reply reveals its own on
+   * hover. A transcript with a row of controls under every turn is a web
+   * dashboard — the affordance has to be there without being drawn.
+   */
+  isLast?: boolean;
 }
 
 interface ParsedSegment {
@@ -109,8 +119,13 @@ function renderInline(text: string, keyBase: string): JSX.Element[] {
     const key = `${keyBase}-${i}`;
     switch (t.kind) {
       case "code":
+        // Sized relative to the prose around it. A fixed 11–12px inline span
+        // inside 14px text sits visibly below the baseline of its own line.
         return (
-          <code key={key} className="rounded bg-hover px-1 py-0.5 font-mono text-primary text-xs">
+          <code
+            key={key}
+            className="rounded-[4px] bg-elevated px-1 py-px font-mono text-[0.92em] text-primary"
+          >
             {t.content}
           </code>
         );
@@ -222,10 +237,18 @@ function parseProseBlocks(text: string): ProseBlock[] {
   return blocks;
 }
 
+/**
+ * Headings inside a reply are small.
+ *
+ * They were the display and page-title scales — 20px and 15px semibold — which
+ * made an agent's `##` louder than the app's own screen titles and turned a
+ * routine answer into a landing page. A heading in a transcript only has to
+ * separate two paragraphs, so it steps down from the 14px prose rather than up.
+ */
 const HEADING_CLASS: Record<number, string> = {
-  1: "ui-display-title mb-2 mt-5 first:mt-0 text-primary",
-  2: "ui-page-title mb-1.5 mt-5 first:mt-0 text-primary",
-  3: "ui-section-title mb-1.5 mt-4 first:mt-0 text-primary",
+  1: "ui-page-title mb-1.5 mt-5 text-primary",
+  2: "ui-prose mb-1.5 mt-4 font-semibold text-primary",
+  3: "ui-body mb-1 mt-3.5 font-semibold text-secondary",
 };
 
 function renderProse(text: string, keyBase: string): JSX.Element[] {
@@ -286,9 +309,15 @@ function renderProse(text: string, keyBase: string): JSX.Element[] {
   });
 }
 
-function MessageImpl({ message }: MessageProps): JSX.Element {
+/** How long a "Copied" acknowledgement stays on screen. */
+const COPY_ACKNOWLEDGEMENT_MS = 1600;
+
+type CopyStatus = "copied" | "failed";
+
+function MessageImpl({ message, isLast = false }: MessageProps): JSX.Element {
   const segments = useMemo(() => parseSegments(message.content), [message.content]);
-  const [copyState, setCopyState] = useState<{ segment: number; status: "copied" | "failed" } | null>(null);
+  const [copyState, setCopyState] = useState<{ segment: number; status: CopyStatus } | null>(null);
+  const [replyCopyState, setReplyCopyState] = useState<CopyStatus | null>(null);
 
   const copyCode = async (content: string, segment: number): Promise<void> => {
     try {
@@ -297,27 +326,42 @@ function MessageImpl({ message }: MessageProps): JSX.Element {
     } catch {
       setCopyState({ segment, status: "failed" });
     }
-    window.setTimeout(() => setCopyState((current) => current?.segment === segment ? null : current), 1600);
+    window.setTimeout(
+      () => setCopyState((current) => current?.segment === segment ? null : current),
+      COPY_ACKNOWLEDGEMENT_MS,
+    );
   };
-  const contextItems = [{
+
+  /** Put the reply on the clipboard as its own source text, not as rendered DOM. */
+  const copyReply = useCallback(async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setReplyCopyState("copied");
+    } catch {
+      setReplyCopyState("failed");
+    }
+    window.setTimeout(() => setReplyCopyState(null), COPY_ACKNOWLEDGEMENT_MS);
+  }, [message.content]);
+
+  // Rebuilt only when the text changes. A fresh array on every render handed
+  // the menu a new `items` identity for every streamed delta.
+  const contextItems = useMemo(() => [{
     id: "copy-message",
     label: "Copy message",
     onSelect: () => void navigator.clipboard?.writeText(message.content),
-  }] as const;
+  }] as const, [message.content]);
 
   if (message.role === "user") {
-    // Restrained low-contrast rounded surface.
+    // A small right-aligned pill, like Codex's. The time it was sent is real
+    // information but not worth a line of its own, so it lives in the tooltip.
     return (
       <ContextMenu items={contextItems}>
-      <div className="selectable my-2.5 flex justify-end">
-        {/* A quiet wash, not a bordered card — the border+card treatment made
-            every user turn read as a heavy web chat bubble. */}
+      <div className="selectable mt-6 mb-0 flex justify-end">
         <div
-          className="max-w-[85%] rounded-xl bg-subtle px-3 py-2 text-primary"
+          className="max-w-[70%] rounded-2xl bg-elevated px-3.5 py-2 text-primary"
+          data-tooltip={clockTimestamp(message.createdAt)}
         >
-          <div
-            className="ui-prose whitespace-pre-wrap"
-          >
+          <div className="ui-prose whitespace-pre-wrap break-words">
             {message.content}
           </div>
         </div>
@@ -326,32 +370,39 @@ function MessageImpl({ message }: MessageProps): JSX.Element {
     );
   }
 
-  // Agent response — clean text directly on canvas.
+  // A reply that has settled and actually said something can be copied. A
+  // streaming reply has no final text yet, so it offers nothing.
+  const showActions = message.streaming !== true && message.content.length > 0;
+
+  // Agent response — plain prose directly on the canvas.
   return (
     <ContextMenu items={contextItems}>
-    <div className="selectable my-3.5">
+    <div className="selectable group/turn mt-3">
       {segments.map((seg, i) => {
         if (seg.kind === "code") {
+          const state = copyState?.segment === i ? copyState.status : null;
           return (
             <div
               key={`seg-${i}`}
-              className={cn(
-                "code-surface selectable group my-3 overflow-hidden rounded-md border border-subtle",
-              )}
+              className="code-surface selectable group/code my-3 overflow-hidden rounded-lg border border-subtle"
             >
-              <div className="code-toolbar flex h-7 items-center justify-between border-b border-subtle px-2.5">
-                <span className="font-mono text-tertiary text-xs" >
-                  {seg.lang || "code"}
-                </span>
+              {/* A hairline header, not a filled toolbar. The language is the
+                  only thing worth stating at rest; the copy control appears
+                  when the reader's pointer is actually on the block. */}
+              <div className="flex h-7 items-center justify-between border-b border-subtle px-2.5">
+                <span className="ui-code text-tertiary">{seg.lang || "code"}</span>
                 <Button
-                  variant="ghost"
-                  size="sm"
-                  className="code-copy flex h-7 items-center gap-1.5 rounded-md px-2 text-tertiary hover:bg-hover hover:text-primary"
+                  variant="bare"
                   onClick={() => void copyCode(seg.content, i)}
-                  aria-label={copyState?.segment === i && copyState.status === "copied" ? "Copied code" : copyState?.segment === i && copyState.status === "failed" ? "Copy failed" : "Copy code"}
+                  aria-label={state === "copied" ? "Copied code" : state === "failed" ? "Copy failed" : "Copy code"}
+                  data-tooltip={state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : "Copy code"}
+                  className={cn(
+                    "flex size-6 items-center justify-center rounded-md text-tertiary transition-opacity",
+                    "hover:bg-hover hover:text-secondary focus-visible:opacity-100",
+                    state === null ? "opacity-0 group-hover/code:opacity-100" : "opacity-100",
+                  )}
                 >
-                  {copyState?.segment === i && copyState.status === "copied" ? <Check size={13} /> : <Copy size={13} />}
-                  <span className="text-xs">{copyState?.segment === i ? (copyState.status === "copied" ? "Copied" : "Try again") : "Copy"}</span>
+                  {state === "copied" ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />}
                 </Button>
               </div>
               <pre className="overflow-x-auto rounded-none border-0 px-3 py-2.5 text-xs leading-5">
@@ -372,13 +423,46 @@ function MessageImpl({ message }: MessageProps): JSX.Element {
           aria-label="Response in progress"
         />
       ) : null}
-      {/* What actually produced this reply. Reported by the control plane on
-          `turn.profile_selected`; absent when it did not report one, never
-          filled in from the composer's current pick. */}
-      {message.model ? (
-        <p className="mt-1.5 font-mono text-xs text-tertiary" data-testid="message-model">
-          {message.model}
-        </p>
+
+      {/* Action row.
+
+          Copy is the only control here because it is the only one with
+          something behind it. Feedback (👍/👎) and branch-from-here are part of
+          Codex's row, but Terminus's control plane exposes neither a feedback
+          nor a fork endpoint — rendering them would be two buttons that
+          silently do nothing. */}
+      {showActions || message.model ? (
+        <div className="mt-1.5 flex h-6 items-center gap-2">
+          {showActions ? (
+            <Button
+              variant="bare"
+              onClick={() => void copyReply()}
+              aria-label={replyCopyState === "copied"
+                ? "Reply copied"
+                : replyCopyState === "failed" ? "Copy reply failed" : "Copy reply"}
+              data-tooltip={replyCopyState === "copied"
+                ? "Copied"
+                : replyCopyState === "failed" ? "Copy failed" : "Copy"}
+              className={cn(
+                "-ml-1 flex size-6 items-center justify-center rounded-md text-tertiary transition-opacity",
+                "hover:bg-hover hover:text-secondary focus-visible:opacity-100",
+                isLast || replyCopyState !== null
+                  ? "opacity-100"
+                  : "opacity-0 group-hover/turn:opacity-100",
+              )}
+            >
+              {replyCopyState === "copied" ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
+            </Button>
+          ) : null}
+          {/* What actually produced this reply. Reported by the control plane
+              on `turn.profile_selected`; absent when it did not report one,
+              never filled in from the composer's current pick. */}
+          {message.model ? (
+            <span className="ui-meta truncate" data-testid="message-model">
+              {message.model}
+            </span>
+          ) : null}
+        </div>
       ) : null}
     </div>
     </ContextMenu>

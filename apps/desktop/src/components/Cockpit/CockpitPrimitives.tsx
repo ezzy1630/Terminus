@@ -1,7 +1,6 @@
 import {
   AlertTriangle,
   DatabaseZap,
-  RefreshCw,
   ServerOff,
 } from "lucide-react";
 import {
@@ -12,7 +11,6 @@ import {
 } from "react";
 import { TerminusApiError } from "../../lib/api";
 import { Button } from "../../ui/Button";
-import { IconButton } from "../../ui/IconButton";
 import { EmptyState } from "../../ui/EmptyState";
 import { Badge, Skeleton } from "../../ui/Status";
 
@@ -135,58 +133,14 @@ export function useCockpitResource<T>(
   return { ...resource, retry };
 }
 
-export function CockpitPage({
-  title,
-  description,
-  selectedTaskId,
-  actions,
-  snapshot,
-  children,
-}: {
-  title: string;
-  description: string;
-  selectedTaskId?: string | null;
-  actions?: ReactNode;
-  snapshot?: Pick<CockpitResource<unknown>, "loadedAt" | "refreshing" | "retry">;
-  children: ReactNode;
-}): JSX.Element {
-  return (
-    <section className="flex h-full min-w-0 flex-col overflow-hidden bg-canvas text-primary" aria-labelledby="cockpit-page-title">
-      <header className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-subtle px-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <h1 id="cockpit-page-title" className="ui-page-title shrink-0 truncate">
-            {title}
-          </h1>
-          <p className="sr-only">
-            {description}
-          </p>
-          {selectedTaskId ? <span className="sr-only">Task {selectedTaskId}</span> : null}
-        </div>
-        {actions || snapshot ? (
-          <div className="flex flex-shrink-0 items-center gap-2">
-            {snapshot ? (
-              <IconButton
-                onClick={snapshot.retry}
-                disabled={snapshot.refreshing}
-                size="md"
-                icon={<RefreshCw size={13} aria-hidden />}
-                label="Refresh snapshot"
-                aria-busy={snapshot.refreshing || undefined}
-                data-tooltip={snapshot.refreshing
-                  ? "Refreshing snapshot"
-                  : snapshot.loadedAt
-                    ? `Snapshot ${new Date(snapshot.loadedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-                    : "Refresh snapshot"}
-              />
-            ) : null}
-            {actions}
-          </div>
-        ) : null}
-      </header>
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4 pt-2">{children}</div>
-    </section>
-  );
-}
+/*
+ * `CockpitPage`, `FeatureUnavailableState` and `DataSection` used to live
+ * here. None of them had a single call site anywhere in `src/` — not even the
+ * tests — and `CockpitPage` carried a whole refresh control with snapshot
+ * timestamps that never rendered. Dead scaffolding in a shared primitives
+ * module is worse than dead scaffolding in a leaf: it invites new callers to
+ * adopt chrome nobody has looked at. Deleted rather than left in place.
+ */
 
 function statePanel({
   state,
@@ -249,15 +203,6 @@ export function TaskRequiredState({ feature }: { feature: string }): JSX.Element
   });
 }
 
-export function FeatureUnavailableState({ feature, detail }: { feature: string; detail: string }): JSX.Element {
-  return statePanel({
-    state: "unavailable",
-    icon: <ServerOff size={18} />,
-    title: `${feature} unavailable`,
-    description: detail,
-  });
-}
-
 export function CockpitErrorState({ error, retry }: { error: Error; retry: () => void }): JSX.Element {
   const isOffline = error instanceof TerminusApiError && error.status === 0;
   const isUnavailable = error instanceof TerminusApiError && [404, 405, 501].includes(error.status);
@@ -300,16 +245,4 @@ export type SemanticTone = "neutral" | "info" | "success" | "warning" | "error";
 export function SemanticBadge({ children, tone = "neutral" }: { children: ReactNode; tone?: SemanticTone }): JSX.Element {
   const badgeTone = tone === "error" ? "danger" : tone;
   return <Badge tone={badgeTone}>{children}</Badge>;
-}
-
-export function DataSection({ title, detail, children }: { title: string; detail?: string; children: ReactNode }): JSX.Element {
-  return (
-    <section className="mt-3 first:mt-0">
-      <div className="mb-1.5 flex items-baseline justify-between gap-3">
-        <h2 className="ui-section-title text-primary">{title}</h2>
-        {detail ? <span className="ui-meta tabular-nums" >{detail}</span> : null}
-      </div>
-      {children}
-    </section>
-  );
 }

@@ -87,8 +87,8 @@ describe("Onboarding production flow", () => {
     const user = userEvent.setup();
     render(<Onboarding onComplete={vi.fn()} pickDirectory={async () => "/tmp/plain"} />);
 
-    await user.click(screen.getByRole("button", { name: "Browse" }));
-    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await user.click(screen.getByRole("button", { name: "Choose…" }));
+    await user.click(screen.getByRole("button", { name: "Open" }));
 
     await waitFor(() => expect(api.openWorkspace).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "local_directory" }),
@@ -108,8 +108,8 @@ describe("Onboarding production flow", () => {
     const user = userEvent.setup();
     render(<Onboarding onComplete={vi.fn()} pickDirectory={async () => "/tmp/plain"} />);
 
-    await user.click(screen.getByRole("button", { name: "Browse" }));
-    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await user.click(screen.getByRole("button", { name: "Choose…" }));
+    await user.click(screen.getByRole("button", { name: "Open" }));
 
     await waitFor(() => expect(api.openWorkspace).toHaveBeenCalledTimes(2));
     expect(vi.mocked(api.openWorkspace).mock.calls.map(([input]) => input.kind))
@@ -122,10 +122,10 @@ describe("Onboarding production flow", () => {
     const pickDirectory = vi.fn(async () => "/Volumes/Workspace/Terminus");
     render(<Onboarding onComplete={onComplete} pickDirectory={pickDirectory} />);
 
-    await user.click(screen.getByRole("button", { name: "Browse" }));
+    await user.click(screen.getByRole("button", { name: "Choose…" }));
     expect(await screen.findByDisplayValue("/Volumes/Workspace/Terminus")).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "First task prompt" }), "Audit the desktop UI.");
-    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await user.click(screen.getByRole("button", { name: "Open" }));
 
     await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
     expect(api.openWorkspace).toHaveBeenCalledWith({
@@ -160,7 +160,7 @@ describe("Onboarding production flow", () => {
     const user = userEvent.setup();
     const first = render(<Onboarding onComplete={() => {}} pickDirectory={async () => "/Volumes/Workspace/Terminus"} />);
 
-    await user.click(screen.getByRole("button", { name: "Browse" }));
+    await user.click(screen.getByRole("button", { name: "Choose…" }));
     await user.type(screen.getByRole("textbox", { name: "First task prompt" }), "Resume the exact operation.");
     first.unmount();
 
@@ -175,16 +175,16 @@ describe("Onboarding production flow", () => {
       <Onboarding onComplete={() => {}} pickDirectory={async () => "/Volumes/Workspace/Terminus"} />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Browse" }));
+    await user.click(screen.getByRole("button", { name: "Choose…" }));
     await user.type(screen.getByRole("textbox", { name: "First task prompt" }), "Resume the durable chain.");
-    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await user.click(screen.getByRole("button", { name: "Open" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("connection lost");
     const firstTurnKey = vi.mocked(api.startTurn).mock.calls[0]?.[1].idempotencyKey;
     first.unmount();
 
     const onComplete = vi.fn<(result: OnboardingResult) => void>();
     render(<Onboarding onComplete={onComplete} pickDirectory={async () => null} />);
-    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await user.click(screen.getByRole("button", { name: "Open" }));
     await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
 
     expect(api.openWorkspace).toHaveBeenCalledTimes(1);
@@ -205,9 +205,9 @@ describe("Onboarding production flow", () => {
       <Onboarding onComplete={onComplete} pickDirectory={async () => "/Volumes/Workspace/Terminus"} />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Browse" }));
+    await user.click(screen.getByRole("button", { name: "Choose…" }));
     await user.type(screen.getByRole("textbox", { name: "First task prompt" }), "Keep this correction draft.");
-    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await user.click(screen.getByRole("button", { name: "Open" }));
 
     expect(await screen.findByText(/project opened, but the first task did not/i)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Continue with created project" }));
@@ -227,8 +227,8 @@ describe("Onboarding production flow", () => {
     const onComplete = vi.fn<(result: OnboardingResult) => void>();
     render(<Onboarding mode="open-project" initialStep={2} onComplete={onComplete} pickDirectory={async () => path} />);
 
-    await user.click(screen.getByRole("button", { name: "Browse" }));
-    await user.click(screen.getByRole("button", { name: "Open project" }));
+    await user.click(screen.getByRole("button", { name: "Choose…" }));
+    await user.click(screen.getByRole("button", { name: "Open" }));
 
     await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
     expect(api.openWorkspace).toHaveBeenCalledWith({

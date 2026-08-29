@@ -377,7 +377,6 @@ describe("truthful operator cockpit", () => {
       <Sidebar
         activeDestination="chat"
         onNavigate={onNavigate}
-        taskActionsEnabled
       />,
     );
 
@@ -555,12 +554,11 @@ describe("truthful operator cockpit", () => {
     expect(commandA.defaultPrevented).toBe(false);
     expect(screen.queryByRole("dialog", { name: "Attention center" })).not.toBeInTheDocument();
 
-    const commands = buildDefaultCommands({
-      openAttentionCenter: vi.fn(),
-      openInterventions: vi.fn(),
-    });
+    const commands = buildDefaultCommands({ openAttentionCenter: vi.fn() });
     expect(commands.find((command) => command.id === "task.attention")?.hint).toBeUndefined();
-    expect(commands.find((command) => command.id === "task.intervene")?.hint).toBeUndefined();
+    // "Steer this task" had no action behind it in the app; it is gone rather
+    // than listed and silently dropped.
+    expect(commands.some((command) => command.id === "task.intervene")).toBe(false);
   });
 
   test("opens the project dialog without treating the sidebar click as a path", async () => {
@@ -649,7 +647,7 @@ describe("truthful operator cockpit", () => {
   });
 
   test("exposes no governance-view commands after the cockpit tabs were removed", () => {
-    const commands = buildDefaultCommands({ openAttentionCenter: vi.fn(), openInterventions: vi.fn() });
+    const commands = buildDefaultCommands({ openAttentionCenter: vi.fn() });
 
     for (const retired of [
       "cockpit.mission-ledger",

@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, FileDiff, PanelRightClose, Send } from "lucide-react";
+import { cn } from "../lib/cn";
 import { DiffViewer, parseUnifiedDiff, type DiffCommentAnchor, type DiffFile } from "./DiffViewer";
 import { EmptyState } from "../ui/EmptyState";
 import { ErrorState } from "./ErrorState";
@@ -42,6 +43,28 @@ interface ArtifactInventoryState {
 interface ReviewNote extends DiffComment {
   sourceId: string;
   sourceLabel: string;
+}
+
+/**
+ * Patches carried by one event, parsed once and cached on the event itself.
+ *
+ * The transcript tail is append-only and the store never mutates a frame once
+ * it has been appended, so an event's diffs can be derived exactly once. This
+ * used to run `extractUnifiedDiffs([event])` — a fresh one-element array per
+ * event — and `parseUnifiedDiff` over the entire tail on every render, which
+ * meant re-parsing every patch in the conversation on every streamed flush.
+ *
+ * A WeakMap keeps the cache exactly as alive as the events: when the store's
+ * LRU drops an old tail, the parsed diffs go with it.
+ */
+const EVENT_DIFF_CACHE = new WeakMap<TerminusSseEvent, readonly DiffFile[][]>();
+
+function diffsForEvent(event: TerminusSseEvent): readonly DiffFile[][] {
+  const cached = EVENT_DIFF_CACHE.get(event);
+  if (cached !== undefined) return cached;
+  const parsed = extractUnifiedDiffs([event]).map((diff) => parseUnifiedDiff(diff));
+  EVENT_DIFF_CACHE.set(event, parsed);
+  return parsed;
 }
 
 interface EventDiffSource {
@@ -293,18 +316,20 @@ function ReviewPaneImpl({
   const eventSources = useMemo<EventDiffSource[]>(() => {
     const sources: EventDiffSource[] = [];
     events.forEach((event, index) => {
-      const extracted = extractUnifiedDiffs([event]);
-      extracted.forEach((diff, diffIndex) => {
+      // `diffIndex` still counts over every extracted patch, including the
+      // ones that parse to nothing, so source ids stay stable across renders.
+      diffsForEvent(event).forEach((files, diffIndex) => {
+        if (files.length === 0) return;
         sources.push({
           id: eventDiffSourceId(event, index, diffIndex),
           label: event.id
             ? `event ${event.id} · patch ${diffIndex + 1}`
             : `unidentified event ${index + 1} · patch ${diffIndex + 1}`,
-          files: parseUnifiedDiff(diff),
+          files,
         });
       });
     });
-    return sources.filter((source) => source.files.length > 0);
+    return sources;
   }, [events]);
   const visibleEventSources = eventHistoryIncomplete ? [] : eventSources;
 
@@ -568,6 +593,27 @@ function ReviewPaneImpl({
     : browsingArtifacts
       ? []
       : activeEventSource?.files ?? [];
+  /*
+   * Changed-line totals for the header.
+   *
+   * The control plane sends no diff stats — `GET /v1/tasks/:id/diff` returns
+   * raw text — so they are counted off the parsed hunks the viewer is already
+   * holding. "12 changed files" answered a question nobody asks first.
+   */
+  const viewerStats = useMemo(() => {
+    let additions = 0;
+    let deletions = 0;
+    for (const file of viewerFiles) {
+      for (const hunk of file.hunks) {
+        for (const line of hunk.lines) {
+          if (line.kind === "add") additions += 1;
+          else if (line.kind === "del") deletions += 1;
+        }
+      }
+    }
+    return { additions, deletions, files: viewerFiles.length };
+  }, [viewerFiles]);
+
   const activeSource = openArtifact && selectedIsDiff
     ? {
         id: `artifact:${openArtifact.artifact.hash}`,
@@ -586,29 +632,38 @@ function ReviewPaneImpl({
 
   return (
     <section className="flex h-full min-w-0 flex-1 flex-col bg-diff" aria-label="Changes review">
+      {/* Title, the +/- totals, and the one control that closes the pane.
+          There is no Approve or Request-changes button because there is no
+          endpoint behind either: review decisions live entirely in this
+          client (notes in localStorage), so the only way a review reaches the
+          agent is the "Add to composer" action in the footer. */}
       <header className="ui-view-header">
         {openArtifact ? (
           <Button
-            type="button"
+            variant="bare"
             onClick={closeOpenArtifact}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:bg-hover hover:text-primary"
+            className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-secondary transition-colors hover:bg-hover hover:text-primary"
             aria-label="Back to changes overview"
             data-tooltip="Back to changes overview"
           >
             <ArrowLeft size={14} />
           </Button>
-        ) : (
-          <FileDiff size={15} className="text-secondary" />
-        )}
-        <span className="truncate text-primary text-sm" style={{ fontWeight: 600 }}>
-          {openArtifact ? openArtifact.artifact.hash.replace(/^sha256:/, "").slice(0, 16) + "…" : "Changes"}
+        ) : null}
+        <span className="ui-body min-w-0 truncate font-semibold text-primary">
+          {openArtifact ? `${openArtifact.artifact.hash.replace(/^sha256:/, "").slice(0, 16)}…` : "Changes"}
         </span>
         {openArtifact ? (
-          <span className="ml-auto flex-shrink-0 font-mono text-tertiary text-xs" >
+          <span className="ml-auto flex-shrink-0 font-mono text-tertiary text-xs">
             {openArtifact.artifact.purpose}
           </span>
+        ) : viewerStats.files > 0 ? (
+          <span className="flex-shrink-0 font-mono text-xs tabular-nums">
+            <span className="text-addition">+{viewerStats.additions.toLocaleString()}</span>
+            {" "}
+            <span className="text-deletion">&minus;{viewerStats.deletions.toLocaleString()}</span>
+          </span>
         ) : (
-          <span className="font-mono text-tertiary text-xs" >
+          <span className="flex-shrink-0 text-tertiary text-xs">
             {hasEvidence
               ? `${eventFileCount} changed ${eventFileCount === 1 ? "file" : "files"}`
               : workspaceDiff.loading
@@ -617,12 +672,14 @@ function ReviewPaneImpl({
           </span>
         )}
         <Button
-          type="button"
+          variant="bare"
           onClick={onClose}
-          className={openArtifact ? "" : "ml-auto"}
+          className={cn(
+            "flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-secondary transition-colors hover:bg-hover hover:text-primary",
+            openArtifact ? "ml-2" : "ml-auto",
+          )}
           aria-label="Close changes"
           data-tooltip="Close changes"
-          style={{ marginLeft: openArtifact ? 8 : undefined, flexShrink: 0 }}
         >
           <PanelRightClose size={15} />
         </Button>
@@ -801,15 +858,19 @@ function ReviewPaneImpl({
           </div>
         ) : (
           <div className="flex h-full min-h-0 flex-col">
-            {!openArtifact && activeEventSource ? (
-              <div className="flex flex-shrink-0 items-center justify-between border-b border-default bg-elevated px-3 py-2 text-xs" >
+            {/* The way out used to require `activeEventSource`, so a task
+                with no working tree and no patch events opened the artifact
+                list with no control that could leave it. The bar is now
+                unconditional; only its label depends on what it returns to. */}
+            {!openArtifact ? (
+              <div className="flex flex-shrink-0 items-center justify-between border-b border-subtle bg-elevated px-3 py-2 text-xs">
                 <span className="text-tertiary">Immutable task artifacts</span>
                 <Button
-                  type="button"
+                  variant="bare"
                   onClick={() => setBrowsingArtifacts(false)}
-                  className="rounded-sm px-2 py-1 text-primary hover:bg-hover"
+                  className="rounded-md px-2 py-1 text-secondary transition-colors hover:bg-hover hover:text-primary"
                 >
-                  Review event diff
+                  {activeEventSource ? "Review event diff" : "Back to changes"}
                 </Button>
               </div>
             ) : null}
@@ -831,7 +892,7 @@ function ReviewPaneImpl({
         />
       ) : null}
       {artifactPage && artifactPage.artifacts.length < artifactPage.total ? (
-        <div className="flex flex-shrink-0 items-center justify-between border-t border-default px-3 py-2 text-xs" >
+        <div className="flex flex-shrink-0 items-center justify-between border-t border-subtle px-3 py-2 text-xs" >
           <span className="font-mono text-tertiary">
             {artifactPage.artifacts.length} of {artifactPage.total} artifacts
           </span>
@@ -846,7 +907,7 @@ function ReviewPaneImpl({
         </div>
       ) : null}
       {reviewNotesState.taskId === (taskId ?? null) && reviewNotesState.error ? (
-        <div className="flex flex-shrink-0 items-center gap-2 border-t border-default px-3 py-2 text-danger text-xs" role="status" >
+        <div className="flex flex-shrink-0 items-center gap-2 border-t border-subtle px-3 py-2 text-danger text-xs" role="status" >
           <span>{reviewNotesState.error}</span>
           <Button
             type="button"
@@ -875,7 +936,7 @@ function ReviewPaneImpl({
         </div>
       ) : null}
       {visibleComments.length > 0 ? (
-        <footer className="flex flex-shrink-0 items-center gap-2 border-t border-default px-3 py-2 text-secondary text-xs" >
+        <footer className="flex flex-shrink-0 items-center gap-2 border-t border-subtle px-3 py-2 text-secondary text-xs" >
           <Send size={13} />
           <span>{visibleComments.length} {visibleComments.length === 1 ? "review note" : "review notes"} for {activeSource.label}.</span>
           <Button

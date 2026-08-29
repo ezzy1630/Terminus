@@ -11,16 +11,32 @@ export function Skeleton({ className, ...props }: HTMLAttributes<HTMLDivElement>
 
 export type BadgeTone = "neutral" | "success" | "warning" | "danger" | "info";
 
+/**
+ * Colour carries the meaning; the fill does not.
+ *
+ * Every tone used to paint a tinted box with a coloured border, so a pane with
+ * three status badges read as three coloured chips competing with the content.
+ * A hairline and coloured text says the same thing at a fraction of the weight.
+ */
 const badgeTone: Record<BadgeTone, string> = {
-  neutral: "border-default bg-subtle text-secondary",
-  success: "border-success/35 bg-success/10 text-success",
-  warning: "border-warning/35 bg-warning/10 text-warning",
-  danger: "border-error/35 bg-error/10 text-error",
-  info: "border-info/35 bg-info/10 text-info",
+  neutral: "text-secondary",
+  success: "text-success",
+  warning: "text-warning",
+  danger: "text-error",
+  info: "text-info",
 };
 
 export function Badge({ tone = "neutral", className, ...props }: HTMLAttributes<HTMLSpanElement> & { tone?: BadgeTone }): JSX.Element {
-  return <span className={cn("inline-flex h-5 items-center rounded border px-1.5 text-xs font-medium", badgeTone[tone], className)} {...props} />;
+  return (
+    <span
+      className={cn(
+        "inline-flex h-[17px] items-center rounded-sm border border-subtle px-1.5 text-xs font-medium",
+        badgeTone[tone],
+        className,
+      )}
+      {...props}
+    />
+  );
 }
 
 export function StatusDot({ tone = "neutral", label, className }: { tone?: BadgeTone; label: string; className?: string }): JSX.Element {

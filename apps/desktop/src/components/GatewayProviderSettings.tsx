@@ -1,5 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
-import { KeyRound } from "lucide-react";
+/**
+ * Terminus Desktop — OpenCode gateway provider.
+ *
+ * Drawn in the same System Settings language as the rest of the pane: a
+ * sentence-case group heading, then hairline-separated rows of label-left,
+ * control-right. Every control here round-trips through the control plane
+ * (`GET`/`PUT`/`DELETE /v1/gateway-provider-config`), so the status line
+ * reports what the server stores, not a local guess.
+ *
+ * One honesty note that outlives any restyle: "Connected" means a credential
+ * is stored, not that it works. There is no probe route, so the label says
+ * "Key stored" rather than claiming a verified connection.
+ */
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api, createIdempotencyKey } from "../lib/api";
 import { GATEWAY_PRIVACY_TERMS_VERSIONS } from "../types";
 import type {
@@ -7,7 +19,6 @@ import type {
   GatewayProtocol,
   GatewayProviderConfiguration,
 } from "../types";
-import { Badge } from "../ui/Status";
 import { Button } from "../ui/Button";
 import { Input } from "../ui/Input";
 import { Select } from "../ui/Select";
@@ -42,6 +53,39 @@ const EMPTY_DRAFT: GatewayDraft = {
   credentialConfigured: false,
   revision: 0,
 };
+
+/**
+ * The settings row shell, kept local on purpose.
+ *
+ * Settings.tsx renders this component, so importing its layout helpers back
+ * out of it would close an import cycle. The shape is three lines of markup;
+ * a cycle is not worth avoiding six duplicated ones.
+ */
+function Field({
+  controlId,
+  label,
+  description,
+  children,
+}: {
+  controlId?: string;
+  label: string;
+  description?: ReactNode;
+  children: ReactNode;
+}): JSX.Element {
+  return (
+    <div className="flex min-h-10 items-center gap-4 py-1.5">
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        {controlId ? (
+          <label htmlFor={controlId} className="ui-body text-primary">{label}</label>
+        ) : (
+          <span className="ui-body text-primary">{label}</span>
+        )}
+        {description ? <p className="ui-meta">{description}</p> : null}
+      </div>
+      <div className="flex flex-shrink-0 items-center gap-1.5">{children}</div>
+    </div>
+  );
+}
 
 export function GatewayProviderSettings(): JSX.Element {
   const [draft, setDraft] = useState<GatewayDraft>(EMPTY_DRAFT);
@@ -122,29 +166,25 @@ export function GatewayProviderSettings(): JSX.Element {
     }
   }, [draft.revision]);
 
-  return (
-    <section className="mb-4 border-t border-subtle pt-4" aria-label="OpenCode gateway configuration">
-      <div className="flex items-start gap-3">
-        <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center text-secondary">
-          <KeyRound size={14} aria-hidden />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="ui-section-title flex items-center gap-2 text-primary">
-            OpenCode Zen and Go
-            <Badge tone={draft.credentialConfigured ? "success" : "neutral"}>
-              {loading ? "Loading" : draft.credentialConfigured ? "Connected" : "Not connected"}
-            </Badge>
-          </div>
-          <p className="ui-meta mt-0.5">
-            Uses your OpenCode gateway account inside the Terminus runtime. OpenCode itself is not launched.
-          </p>
-        </div>
-      </div>
+  const termsCurrent = draft.privacyTermsAdmitted
+    && draft.privacyTermsVersion === GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment];
 
-      <div className="mt-3 grid gap-2.5">
-        <label className="ui-label grid gap-1 text-secondary">
-          Account
+  return (
+    <section className="mb-6" aria-label="OpenCode gateway configuration">
+      <h2 className="mb-1.5 text-sm text-tertiary">OpenCode gateway</h2>
+      <div className="divide-y divide-[var(--border-subtle)] border-y border-subtle">
+        <Field
+          label="OpenCode Zen and Go"
+          description="Uses your OpenCode gateway account inside the Terminus runtime. OpenCode itself is not launched."
+        >
+          <span className={draft.credentialConfigured ? "ui-body text-primary" : "ui-body text-tertiary"}>
+            {loading ? "Checking…" : draft.credentialConfigured ? "Key stored" : "Not connected"}
+          </span>
+        </Field>
+
+        <Field controlId="gateway-account" label="Account">
           <Select
+            id="gateway-account"
             label="OpenCode account"
             value={draft.deployment}
             options={[
@@ -161,11 +201,13 @@ export function GatewayProviderSettings(): JSX.Element {
               privacyTermsVersion: null,
             })}
           />
-        </label>
+        </Field>
+
         <ModelField draft={draft} inventory={inventory} onChange={setDraft} />
-        <label className="ui-label grid gap-1 text-secondary">
-          Wire protocol
+
+        <Field controlId="gateway-protocol" label="Wire protocol">
           <Select
+            id="gateway-protocol"
             label="OpenCode wire protocol"
             value={draft.protocol}
             options={[
@@ -175,91 +217,105 @@ export function GatewayProviderSettings(): JSX.Element {
             ]}
             onValueChange={(value) => setDraft({ ...draft, protocol: value as GatewayProtocol })}
           />
-        </label>
-        <label className="ui-label grid gap-1 text-secondary">
-          {draft.credentialConfigured ? "Replace OpenCode key" : "OpenCode key"}
+        </Field>
+
+        <Field
+          controlId="gateway-key"
+          label={draft.credentialConfigured ? "Replace key" : "OpenCode key"}
+          description={draft.credentialConfigured ? "Leave blank to keep the current key." : undefined}
+        >
           <Input
+            id="gateway-key"
             aria-label="OpenCode key"
             type="password"
             autoComplete="off"
             value={draft.credential}
-            placeholder={draft.credentialConfigured ? "Leave blank to keep the current key" : "Required"}
+            placeholder={draft.credentialConfigured ? "Unchanged" : "Required"}
             onChange={(event) => setDraft({ ...draft, credential: event.target.value })}
+            className="w-56 font-mono"
           />
-        </label>
-        <div className="flex items-start justify-between gap-4 border-y border-subtle py-2.5">
-          <div>
-            <div className="ui-label text-secondary">Allow Terminus tools</div>
-            <p className="ui-meta mt-0.5">The model uses Terminus read, patch, and bounded exec tools.</p>
-          </div>
+        </Field>
+
+        <Field
+          controlId="gateway-tools"
+          label="Allow Terminus tools"
+          description="The model uses Terminus read, patch, and bounded exec tools."
+        >
           <Switch
+            id="gateway-tools"
             checked={draft.toolsEnabled}
             onCheckedChange={(toolsEnabled) => setDraft({ ...draft, toolsEnabled })}
             label="Allow Terminus tools for OpenCode models"
           />
-        </div>
+        </Field>
+
         {/* Pricing is a fact about the model. Once discovery reports it, an
             operator switch here could only ever disagree with the provider and
             corrupt the routing ledger, so it becomes a read-out. */}
         {modelsFor(draft.deployment, inventory.models).some((model) => model.slug === draft.model) ? null : (
-          <div className="flex items-start justify-between gap-4 border-b border-subtle pb-2.5">
-            <div>
-              <div className="ui-label text-secondary">Free model</div>
-              <p className="ui-meta mt-0.5">Marks this exact model as zero-cost for routing records.</p>
-            </div>
+          <Field
+            controlId="gateway-free-model"
+            label="Free model"
+            description="Marks this exact model as zero-cost for routing records."
+          >
             <Switch
+              id="gateway-free-model"
               checked={draft.freeModel}
               onCheckedChange={(freeModel) => setDraft({ ...draft, freeModel })}
               label="OpenCode model is free"
             />
-          </div>
+          </Field>
         )}
-        <div className="border-b border-subtle pb-2.5">
-          <div>
-            <div className="ui-label text-secondary">Provider privacy terms</div>
-            <p className="ui-meta mt-0.5">
-              Admit the current {draft.deployment === "zen" ? "Zen" : "Go"} terms before repository code or tool results can leave Terminus.
-            </p>
-          </div>
-          <label className="mt-2 flex items-start gap-2 text-xs text-secondary">
-            <input
-              type="checkbox"
-              checked={draft.privacyTermsAdmitted && draft.privacyTermsVersion === GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment]}
-              onChange={(event) => {
-                const admitted = event.target.checked;
-                setDraft({
-                  ...draft,
-                  privacyTermsAdmitted: admitted,
-                  privacyTermsVersion: admitted ? GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment] : null,
-                  workspaceAccess: admitted ? draft.workspaceAccess : false,
-                });
-              }}
-            />
-            <span>I reviewed the current provider privacy and retention terms ({GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment]}).</span>
-          </label>
-        </div>
-        <div className="flex items-start justify-between gap-4 border-b border-subtle pb-2.5">
-          <div>
-            <div className="ui-label text-secondary">Allow workspace content</div>
-            <p className="ui-meta mt-0.5">Permits Terminus to send repository code and tool results to this provider.</p>
-          </div>
+
+        <Field
+          controlId="gateway-privacy-terms"
+          label="Provider privacy terms"
+          description={`Admit the current ${draft.deployment === "zen" ? "Zen" : "Go"} terms (${GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment]}) before repository code or tool results can leave Terminus.`}
+        >
+          <input
+            id="gateway-privacy-terms"
+            type="checkbox"
+            className="h-3.5 w-3.5 accent-[var(--accent)]"
+            aria-label="I reviewed the current provider privacy and retention terms"
+            checked={termsCurrent}
+            onChange={(event) => {
+              const admitted = event.target.checked;
+              setDraft({
+                ...draft,
+                privacyTermsAdmitted: admitted,
+                privacyTermsVersion: admitted ? GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment] : null,
+                workspaceAccess: admitted ? draft.workspaceAccess : false,
+              });
+            }}
+          />
+        </Field>
+
+        <Field
+          controlId="gateway-workspace-access"
+          label="Allow workspace content"
+          description="Permits Terminus to send repository code and tool results to this provider."
+        >
           <Switch
+            id="gateway-workspace-access"
             checked={draft.workspaceAccess}
-            disabled={!draft.privacyTermsAdmitted || draft.privacyTermsVersion !== GATEWAY_PRIVACY_TERMS_VERSIONS[draft.deployment]}
+            disabled={!termsCurrent}
             onCheckedChange={(workspaceAccess) => setDraft({ ...draft, workspaceAccess })}
             label="Allow OpenCode models to receive workspace content"
           />
-        </div>
-        {error ? <p className="text-error text-xs" role="alert">{error}</p> : null}
-        <div className="flex gap-2">
-          <Button onClick={() => void save()} disabled={loading || saving} variant="secondary" size="sm">
-            {saving ? "Saving…" : draft.credentialConfigured ? "Save OpenCode settings" : "Connect OpenCode"}
-          </Button>
-          {draft.credentialConfigured ? (
-            <Button onClick={() => void disconnect()} disabled={loading || saving} variant="ghost" size="sm">
-              Disconnect
+        </Field>
+
+        <div className="flex flex-col gap-2 py-2.5">
+          {error ? <p className="text-xs text-error" role="alert">{error}</p> : null}
+          <div className="flex gap-2">
+            <Button onClick={() => void save()} disabled={loading || saving} variant="secondary" size="sm">
+              {saving ? "Saving…" : draft.credentialConfigured ? "Save" : "Connect"}
             </Button>
-          ) : null}
+            {draft.credentialConfigured ? (
+              <Button onClick={() => void disconnect()} disabled={loading || saving} variant="ghost" size="sm">
+                Disconnect
+              </Button>
+            ) : null}
+          </div>
         </div>
       </div>
     </section>
@@ -315,20 +371,22 @@ function ModelField({
 
   if (available.length === 0) {
     return (
-      <label className="ui-label grid gap-1 text-secondary">
-        Model
+      <Field
+        controlId="gateway-model"
+        label="Model"
+        description={inventory.status === "loading"
+          ? "Checking which models this key can reach…"
+          : `${inventory.error ?? "No models were reported."} Enter the id manually.`}
+      >
         <Input
+          id="gateway-model"
           aria-label="OpenCode model"
           value={draft.model}
           placeholder="Model ID from OpenCode"
           onChange={(event) => onChange({ ...draft, model: event.target.value })}
+          className="w-56 font-mono"
         />
-        <p className="ui-meta">
-          {inventory.status === "loading"
-            ? "Checking which models this key can reach…"
-            : `${inventory.error ?? "No models were reported."} Enter the id manually.`}
-        </p>
-      </label>
+      </Field>
     );
   }
 
@@ -342,9 +400,22 @@ function ModelField({
   ];
 
   return (
-    <label className="ui-label grid gap-1 text-secondary">
-      Model
+    <Field
+      controlId="gateway-model"
+      label="Model"
+      description={draft.model === ""
+        ? `${available.length} model${available.length === 1 ? "" : "s"} reachable with this key.`
+        : selected === null
+        ? "This model was not in the gateway's list."
+        : [
+            selected.free ? "Free" : null,
+            formatContext(selected.contextTokens) ? `${formatContext(selected.contextTokens)} context` : null,
+            selected.reasoning ? "Reasoning" : null,
+            selected.toolCalling ? "Tools" : null,
+          ].filter(Boolean).join(" · ")}
+    >
       <Select
+        id="gateway-model"
         label="OpenCode model"
         value={draft.model}
         options={options}
@@ -359,19 +430,8 @@ function ModelField({
             toolsEnabled: picked === null ? draft.toolsEnabled : draft.toolsEnabled && picked.toolCalling === true,
           });
         }}
+        className="max-w-56"
       />
-      <p className="ui-meta">
-        {draft.model === ""
-          ? `${available.length} model${available.length === 1 ? "" : "s"} reachable with this key.`
-          : selected === null
-          ? "This model was not in the gateway's list."
-          : [
-              selected.free ? "Free" : null,
-              formatContext(selected.contextTokens) ? `${formatContext(selected.contextTokens)} context` : null,
-              selected.reasoning ? "Reasoning" : null,
-              selected.toolCalling ? "Tools" : null,
-            ].filter(Boolean).join(" · ")}
-      </p>
-    </label>
+    </Field>
   );
 }

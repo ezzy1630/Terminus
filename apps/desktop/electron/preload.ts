@@ -71,17 +71,8 @@ function parseLocalOrigin(value: string | undefined): { origin: string | null; e
  * the renderer has nothing to send requests to.
  */
 const API_BASE = parseLocalOrigin(launchArgument("--terminus-api-base="));
-const RENDERER_VIEW = launchArgument("--terminus-view=") === "settings" ? "settings" : "main";
 /** Whether this window is backed by a vibrant material the renderer may paint over. */
 const RENDERER_VIBRANCY = launchArgument("--terminus-vibrancy=") === "on";
-/**
- * Which settings category the window should open on.
- *
- * This cannot be delivered as a message on `ready-to-show`: that fires before
- * React has mounted a listener, which is why Help ▸ Keyboard shortcuts always
- * landed on Appearance. It is a launch argument, read synchronously at mount.
- */
-const SETTINGS_CATEGORY = launchArgument("--terminus-settings-category=") ?? null;
 
 type ThemeChoice = "system" | "light" | "dark";
 
@@ -113,16 +104,12 @@ contextBridge.exposeInMainWorld("terminusDesktop", {
   /** Why `apiBase` is null, for the renderer to surface rather than hide. */
   apiBaseError: API_BASE.error,
   isMac: process.platform === "darwin",
-  view: RENDERER_VIEW,
   vibrancy: RENDERER_VIBRANCY,
-  settingsCategory: SETTINGS_CATEGORY,
   // Native notification bridge (SPEC §5: "Use native notifications only when
   // the app is unfocused or a task requires attention"). `taskId` makes the
   // notification actionable: clicking it raises the window on that task.
   notify: (title: string, body: string, taskId?: string): Promise<unknown> =>
     ipcRenderer.invoke("notify", { title, body, taskId }),
-  openSettings: (category?: string): Promise<unknown> =>
-    ipcRenderer.invoke("desktop:openSettings", category),
   setAttentionCount: (count: number): Promise<unknown> =>
     ipcRenderer.invoke("desktop:setAttentionCount", count),
   /** Deep links, notification clicks, and File ▸ Open Recent all arrive here. */
@@ -132,8 +119,6 @@ contextBridge.exposeInMainWorld("terminusDesktop", {
     subscribe<NavigationTarget>("desktop:navigate", (target) => {
       if (target.kind === "task") callback(target.taskId);
     }),
-  onSettingsCategory: (callback: (category: string) => void): (() => void) =>
-    subscribe<string>("terminus:settings-category", callback),
   onNativeThemeChange: (callback: (state: NativeThemeState) => void): (() => void) =>
     subscribe<NativeThemeState>("terminus:native-theme", callback),
   /** Closes the window that asked, which for Preferences is Preferences. */

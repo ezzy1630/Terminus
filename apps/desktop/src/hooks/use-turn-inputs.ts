@@ -94,20 +94,26 @@ function failureReason(error: unknown): string {
  */
 export function useTurnInputs(events: readonly TerminusSseEvent[], taskId: string | null): TurnInputMap {
   const cacheVersion = useSyncExternalStore(subscribe, getVersion, getVersion);
+  // One scan of the log per change, not four: this ran unmemoised in the render
+  // body and again in the memo and in both effects below, so a hook the
+  // transcript mounts walked every retained event four times on every 50ms
+  // stream flush.
+  const references = useMemo(() => turnInputReferences(events), [events]);
   // Summary of which turns are in play. The fetch effect keys on this rather
   // than on `events`, so appending a stream delta mid-fetch cannot abort an
   // in-flight prompt request and strand it uncached.
-  const referenceKey = turnInputReferences(events)
-    .map((reference) => reference.eventId)
-    .join(",");
+  const referenceKey = useMemo(
+    () => references.map((reference) => reference.eventId).join(","),
+    [references],
+  );
 
   const resolved = useMemo<TurnInputMap>(() => {
     const next = new Map<string, TurnInputState>();
-    for (const reference of turnInputReferences(events)) {
+    for (const reference of references) {
       next.set(reference.eventId, cache.get(reference.hash) ?? { status: "loading" });
     }
     return next;
-  }, [events, cacheVersion]);
+  }, [references, cacheVersion]);
 
   // Incremented on a timer while a prompt is still unresolved, so a fetch that
   // timed out against a busy kernel is retried instead of stranded.
@@ -115,7 +121,7 @@ export function useTurnInputs(events: readonly TerminusSseEvent[], taskId: strin
 
   useEffect(() => {
     if (taskId === null) return;
-    const pending = turnInputReferences(events).filter((reference) => !cache.has(reference.hash));
+    const pending = references.filter((reference) => !cache.has(reference.hash));
     if (pending.length === 0) return;
     const outer = new AbortController();
     let timedOut = false;
@@ -165,7 +171,7 @@ export function useTurnInputs(events: readonly TerminusSseEvent[], taskId: strin
 
   useEffect(() => {
     if (taskId === null || attempt >= MAX_PROMPT_RETRIES) return;
-    const unresolved = turnInputReferences(events).some((reference) => !cache.has(reference.hash));
+    const unresolved = references.some((reference) => !cache.has(reference.hash));
     if (!unresolved) return;
     const timer = setTimeout(() => setAttempt((value) => value + 1), PROMPT_RETRY_DELAY_MS);
     return () => clearTimeout(timer);

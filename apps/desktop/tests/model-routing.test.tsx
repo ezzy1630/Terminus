@@ -7,7 +7,7 @@
  * silently changed it for all of them. The choice now belongs to the session
  * and travels with the turn.
  */
-import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -27,7 +27,19 @@ vi.mock("../src/lib/api", async () => {
       startTask: vi.fn(async () => ({ task_id: "task-1", status: "ACTIVE", event_cursor: "cursor-1", links: { events: "", task: "" } })),
       startTurn: vi.fn(async () => ({})),
       listTasks: vi.fn(async () => []),
-      updateSession: vi.fn(),
+      // The store writes the response back over the session it patched, so a
+      // mock that resolves to nothing would blank the project out from under
+      // the picker.
+      updateSession: vi.fn(async (id: string, patch: Record<string, unknown>) => ({
+        id,
+        workspace_id: "ws-1",
+        active_thread_id: "thread-1",
+        title: "Terminus",
+        status: "ACTIVE",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        ...patch,
+      })),
       listProviderModels: vi.fn(async () => ({
         providers: [{ id: "anthropic", label: "Anthropic", available: true }],
         models: [
@@ -155,6 +167,111 @@ describe("useModelSelection resolution", () => {
 
     rerender({ id: "session-2" });
     expect(result.current.selected?.id).toBe("sonnet");
+  });
+});
+
+/**
+ * The composer states its routing in one pill and changes it in one popover.
+ *
+ * Model and effort used to be two separate chips in the control row, each with
+ * its own menu, sitting beside a third chip for the context window and a
+ * fourth for spend. They are one decision — what this turn runs as — so they
+ * are now one control: `<model> <effort>`, opening a settings popover whose
+ * root states the current values and whose rows open the lists.
+ */
+describe("the turn-routing pill", () => {
+  function installStartOfWork(overrides: Partial<Session> = {}): void {
+    useTerminusStore.setState({
+      sessions: [session(overrides)],
+      selectedSessionId: "session-1",
+      selectedTaskId: "task-1",
+      taskById: { "task-1": task() },
+      tasksBySession: { "session-1": [task()] },
+      eventsByTask: {},
+      queuedSteerByTask: {},
+      draftsByTask: {},
+      sessionDraftsByTask: {},
+      healthReady: true,
+      healthStatus: "ready",
+    });
+  }
+
+  async function openPopover(user: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> {
+    await user.click(await screen.findByRole("button", { name: /^Change model and effort/ }));
+    return screen.getByRole("dialog", { name: "Turn settings" });
+  }
+
+  test("states both values without being opened", async () => {
+    installStartOfWork({ default_model: "claude-sonnet-4-6", default_reasoning_effort: "high" });
+    render(<Composer />);
+
+    const pill = await screen.findByRole("button", { name: /^Change model and effort/ });
+    expect(pill).toHaveTextContent("Sonnet");
+    expect(pill).toHaveTextContent("High");
+  });
+
+  test("the root pane states the current model and effort, and nothing else", async () => {
+    installStartOfWork({ default_model: "claude-sonnet-4-6", default_reasoning_effort: "high" });
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    const panel = await openPopover(user);
+    expect(within(panel).getByRole("button", { name: "Model: Sonnet. Change model" })).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Effort: High. Change effort" })).toBeInTheDocument();
+    // Terminus has no speed dial distinct from effort, so it does not draw a
+    // row for one, and no "Reset to default" either: every pick already writes
+    // the project default, so there is nothing a reset could restore.
+    expect(within(panel).queryByText("Speed")).not.toBeInTheDocument();
+    expect(within(panel).queryByText(/Reset to default/)).not.toBeInTheDocument();
+  });
+
+  test("the Model row opens the list, and the pick becomes the project default", async () => {
+    installStartOfWork({ default_model: "claude-sonnet-4-6" });
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    const panel = await openPopover(user);
+    await user.click(within(panel).getByRole("button", { name: "Model: Sonnet. Change model" }));
+    await user.click(await within(panel).findByRole("button", { name: "Haiku, Anthropic" }));
+
+    await waitFor(() => expect(api.updateSession).toHaveBeenCalledWith(
+      "session-1",
+      { default_model: "claude-haiku-4-6" },
+      expect.anything(),
+    ));
+    // Choosing closes the popover: the decision is made in one click, not two.
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Turn settings" })).not.toBeInTheDocument());
+    expect(await screen.findByRole("button", { name: /^Change model and effort · Haiku/ })).toBeInTheDocument();
+  });
+
+  test("the Effort row opens the list and returns to the root", async () => {
+    installStartOfWork({ default_model: "claude-sonnet-4-6", default_reasoning_effort: "medium" });
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    const panel = await openPopover(user);
+    await user.click(within(panel).getByRole("button", { name: "Effort: Medium. Change effort" }));
+    await user.click(await within(panel).findByRole("button", { name: /^Max/ }));
+
+    await waitFor(() => expect(api.updateSession).toHaveBeenCalledWith(
+      "session-1",
+      { default_reasoning_effort: "max" },
+      expect.anything(),
+    ));
+    expect(within(panel).getByRole("button", { name: "Effort: Max. Change effort" })).toBeInTheDocument();
+  });
+
+  test("offers no effort row for a model the provider says does not reason", async () => {
+    installStartOfWork({ default_model: "claude-haiku-4-6" });
+    const user = userEvent.setup();
+    render(<Composer />);
+
+    // An inert depth control on a non-reasoning model is a promise the runtime
+    // cannot keep, so the row is absent rather than disabled.
+    const pill = await screen.findByRole("button", { name: /^Change model and effort · Haiku$/ });
+    await user.click(pill);
+    const panel = screen.getByRole("dialog", { name: "Turn settings" });
+    expect(within(panel).queryByRole("button", { name: /^Effort: / })).not.toBeInTheDocument();
   });
 });
 

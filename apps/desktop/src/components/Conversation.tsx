@@ -33,10 +33,8 @@ import { Message } from "./Message";
 import { ActivityBlock } from "./ActivityBlock";
 import { ReasoningTrace } from "./ReasoningTrace";
 import { ApprovalCard } from "./ApprovalCard";
-import { EmptyState } from "../ui/EmptyState";
 import { ErrorState, errorPreset } from "./ErrorState";
-import { StatusIndicator } from "./StatusIndicator";
-import { ArrowDown, ShieldAlert, MessageCircle } from "lucide-react";
+import { ArrowDown, ShieldAlert } from "lucide-react";
 import { cn } from "../lib/cn";
 import { turnInputPlaceholder, type TurnInputMap } from "../lib/turn-input";
 import { useTurnInputs } from "../hooks/use-turn-inputs";
@@ -260,6 +258,59 @@ function appendToolEntry(group: PendingToolGroup, entry: ActivityEntry, at: stri
 }
 
 
+/** An event's payload, shaped once and remembered. */
+interface DecodedEventPayload {
+  /** The payload as a record, or null when it is not one (or would not parse). */
+  readonly record: Record<string, unknown> | null;
+  /** Size of the raw payload, for the oversize presentation guard. */
+  readonly characterCount: number;
+}
+
+/**
+ * Decoded payloads, keyed on the event object the store is holding.
+ *
+ * `decodeFeed` is a fold over the *entire* retained event log, and it re-runs
+ * every time a streamed delta lands — several times a second on a live turn.
+ * Every one of those runs used to `JSON.parse` every event in the log again, so
+ * the cost of rendering one new token scaled with the length of the whole
+ * conversation. The store appends to its array without rewriting the events
+ * already in it, so an event's parse result stays valid for as long as that
+ * object is reachable: a WeakMap keeps the cache exactly as long as the log
+ * itself and never needs invalidating. Entries are only ever read, never
+ * mutated, so sharing one parse across renders is safe.
+ */
+const payloadCache = new WeakMap<TerminusSseEvent, DecodedEventPayload>();
+
+function readEventPayload(ev: TerminusSseEvent): DecodedEventPayload {
+  const embedded = (ev as unknown as { payload?: unknown }).payload;
+  const hasEmbedded = typeof embedded === "object" && embedded !== null;
+  const rawData = typeof ev.data === "string"
+    ? ev.data
+    : hasEmbedded ? JSON.stringify(embedded) : "";
+  if (rawData.length > MAX_PRESENTATION_EVENT_CHARS) {
+    return { record: null, characterCount: rawData.length };
+  }
+  let payload: unknown;
+  try {
+    payload = hasEmbedded
+      ? embedded
+      : rawData.length > 0 ? JSON.parse(rawData) as unknown : null;
+  } catch {
+    // Unparseable payloads are dropped, exactly as before — but the failed
+    // parse is remembered so it is not attempted again on the next delta.
+    return { record: null, characterCount: rawData.length };
+  }
+  return { record: recordFrom(payload), characterCount: rawData.length };
+}
+
+function decodeEventPayload(ev: TerminusSseEvent): DecodedEventPayload {
+  const cached = payloadCache.get(ev);
+  if (cached !== undefined) return cached;
+  const decoded = readEventPayload(ev);
+  payloadCache.set(ev, decoded);
+  return decoded;
+}
+
 function artifactReference(p: Record<string, unknown>): string | null {
   const candidates = [p, recordFrom(p.result), recordFrom(p.output)];
   for (const candidate of candidates) {
@@ -463,29 +514,17 @@ export function decodeFeed(
 
   for (const ev of events) {
     if (!ev || typeof ev !== "object") continue;
-    const rawData = typeof ev.data === "string"
-      ? ev.data
-      : typeof (ev as unknown as { payload?: unknown }).payload === "object" && (ev as unknown as { payload?: unknown }).payload !== null
-        ? JSON.stringify((ev as unknown as { payload?: unknown }).payload)
-        : "";
-    if (rawData.length > MAX_PRESENTATION_EVENT_CHARS) {
+    const decoded = decodeEventPayload(ev);
+    if (decoded.characterCount > MAX_PRESENTATION_EVENT_CHARS) {
       addPresentationRejection(ev, {
         reason: "event_payload_too_large",
         sourceEvent: ev.event || "unknown",
-        characterCount: rawData.length,
+        characterCount: decoded.characterCount,
         limit: MAX_PRESENTATION_EVENT_CHARS,
       });
       continue;
     }
-    let payload: unknown;
-    try {
-      payload = typeof (ev as unknown as { payload?: unknown }).payload === "object" && (ev as unknown as { payload?: unknown }).payload !== null
-        ? (ev as unknown as { payload?: unknown }).payload
-        : rawData.length > 0 ? JSON.parse(rawData) as unknown : null;
-    } catch {
-      continue;
-    }
-    const p = recordFrom(payload);
+    const p = decoded.record;
     if (!p) continue;
     const rejection = presentationRejection(p);
     if (rejection) {
@@ -1091,7 +1130,7 @@ function computeMetric(entries: ActivityEntry[], title: string): string {
  * they were emitted, and activity blocks render below the agent
  * message that triggered them.
  */
-type FeedItem =
+export type FeedItem =
   | { kind: "message"; message: ConversationMessage }
   | { kind: "block"; block: ActivityBlockData }
   | { kind: "reasoning"; reasoning: ReasoningBlock };
@@ -1118,22 +1157,211 @@ function feedItemKey(item: FeedItem): string {
   return `block:${item.block.id}`;
 }
 
-function FeedItemView({ item, onRetry }: { item: FeedItem; onRetry?: (input: string) => void }): JSX.Element {
+// ────────────────────── Identity stability (streaming) ───────────────────────
+//
+// `decodeFeed` is a pure fold, so it hands back brand-new objects for every
+// message, block and trace on every run — and it runs on every streamed delta.
+// That made `React.memo` on the row components inert: their props were never
+// referentially equal twice, so appending one token to the last reply
+// re-rendered every settled turn above it, re-parsed their markdown, and
+// re-created their DOM elements.
+//
+// The comparisons below let the feed carry the previous render's object forward
+// whenever nothing about an item actually changed, which restores the memo
+// bail-out and reduces a delta to exactly one re-rendered row.
+
+function sameMessage(a: ConversationMessage, b: ConversationMessage): boolean {
+  return a.role === b.role
+    && a.streaming === b.streaming
+    && a.model === b.model
+    && a.createdAt === b.createdAt
+    && a.content === b.content;
+}
+
+function sameReasoning(a: ReasoningBlock, b: ReasoningBlock): boolean {
+  if (a.startedAt !== b.startedAt || a.endedAt !== b.endedAt || a.text !== b.text) return false;
+  if (a.phases.length !== b.phases.length) return false;
+  return a.phases.every((phase, index) => {
+    const other = b.phases[index];
+    return other !== undefined && phase.kind === other.kind && phase.at === other.at;
+  });
+}
+
+function sameActivityBlock(a: ActivityBlockData, b: ActivityBlockData): boolean {
+  if (a.title !== b.title
+    || a.metric !== b.metric
+    || a.status !== b.status
+    || a.retryInput !== b.retryInput
+    || a.entries.length !== b.entries.length) return false;
+  return a.entries.every((entry, index) => {
+    const other = b.entries[index];
+    return other !== undefined
+      && entry.tool === other.tool
+      && entry.phase === other.phase
+      && entry.outcome === other.outcome
+      && entry.at === other.at
+      && entry.summary === other.summary
+      && entry.detail === other.detail;
+  });
+}
+
+/**
+ * Identity is already established by the feed key, so ids are not compared.
+ *
+ * Exported for the same reason `decodeFeed` is: this is the load-bearing half
+ * of the streaming path. If it reports a changed row as unchanged the reader
+ * sees a stale turn; if it reports an unchanged row as changed every memo in
+ * the transcript is defeated and the whole feed re-renders per token.
+ */
+export function sameFeedItem(a: FeedItem, b: FeedItem): boolean {
+  if (a === b) return true;
+  if (a.kind === "message" && b.kind === "message") return sameMessage(a.message, b.message);
+  if (a.kind === "reasoning" && b.kind === "reasoning") return sameReasoning(a.reasoning, b.reasoning);
+  if (a.kind === "block" && b.kind === "block") return sameActivityBlock(a.block, b.block);
+  return false;
+}
+
+/**
+ * Is this item still being written?
+ *
+ * Only a live tail changes between deltas, so it is the only row that has to
+ * re-render while a reply streams.
+ */
+function isLiveFeedItem(item: FeedItem): boolean {
+  if (item.kind === "message") return item.message.streaming === true;
+  if (item.kind === "reasoning") return item.reasoning.endedAt === null;
+  return false;
+}
+
+const EMPTY_FEED_ITEMS: readonly FeedItem[] = [];
+
+interface StableFeed {
+  /** Every item, at identities carried forward wherever nothing changed. */
+  readonly items: readonly FeedItem[];
+  /** Everything above the live tail, held at a stable array identity. */
+  readonly settled: readonly FeedItem[];
+  /** The row still being written, when the feed has one. */
+  readonly tail: FeedItem | null;
+}
+
+function useStableFeed(items: readonly FeedItem[]): StableFeed {
+  const identities = useRef(new Map<string, FeedItem>());
+  const settledRef = useRef<readonly FeedItem[]>(EMPTY_FEED_ITEMS);
+
+  return useMemo<StableFeed>(() => {
+    const next = new Map<string, FeedItem>();
+    const stable = items.map((item) => {
+      const key = feedItemKey(item);
+      const previous = identities.current.get(key);
+      const kept = previous !== undefined && sameFeedItem(previous, item) ? previous : item;
+      next.set(key, kept);
+      return kept;
+    });
+    identities.current = next;
+
+    const last = stable.length > 0 ? stable[stable.length - 1] : undefined;
+    const tail = last !== undefined && isLiveFeedItem(last) ? last : null;
+    const settledCount = tail === null ? stable.length : stable.length - 1;
+
+    // The settled prefix keeps its array identity too. Slicing a fresh array on
+    // every delta would defeat the memo on the settled subtree, which is the
+    // entire reason for splitting the tail off in the first place.
+    const previousSettled = settledRef.current;
+    let settled: readonly FeedItem[] = previousSettled;
+    if (previousSettled.length !== settledCount) {
+      settled = stable.slice(0, settledCount);
+    } else {
+      for (let index = 0; index < settledCount; index += 1) {
+        if (previousSettled[index] !== stable[index]) {
+          settled = stable.slice(0, settledCount);
+          break;
+        }
+      }
+    }
+    settledRef.current = settled;
+
+    return { items: stable, settled, tail };
+    // Re-deriving on every decode is the point: the work here is what makes the
+    // *rendering* below cheap.
+  }, [items]);
+}
+
+function FeedItemView({
+  item,
+  onRetry,
+  isLast = false,
+  joinsAbove = false,
+  joinsBelow = false,
+}: {
+  item: FeedItem;
+  onRetry?: (input: string) => void;
+  isLast?: boolean;
+  joinsAbove?: boolean;
+  joinsBelow?: boolean;
+}): JSX.Element {
   if (item.kind === "reasoning") return <ReasoningTrace block={item.reasoning} />;
-  return item.kind === "message" ? (
-    <Message message={item.message} />
-  ) : (
-    <div style={{ maxWidth: "calc(var(--conversation-max-width) + 40px)" }}>
-      {/* A failure opens itself. Collapsed-by-default meant the one row that
-          explained why a turn stopped hid the explanation behind a click. */}
-      <ActivityBlock
-        block={item.block}
-        defaultExpanded={item.block.status === "failed"}
-        onRetry={onRetry}
-      />
-    </div>
+  if (item.kind === "message") return <Message message={item.message} isLast={isLast} />;
+  return (
+    /* A failure opens itself. Collapsed-by-default meant the one row that
+       explained why a turn stopped hid the explanation behind a click. */
+    <ActivityBlock
+      block={item.block}
+      defaultExpanded={item.block.status === "failed"}
+      onRetry={onRetry}
+      joinsAbove={joinsAbove}
+      joinsBelow={joinsBelow}
+    />
   );
 }
+
+/**
+ * Every turn above the live tail.
+ *
+ * Memoized on the stable identities above, so a streamed delta — which by
+ * construction changes only the tail — never re-enters this subtree. Without
+ * it React still walked and rebuilt one element per row for every token, which
+ * on a long transcript is the difference between a smooth stream and a
+ * stuttering one.
+ */
+const SettledFeed = memo(function SettledFeed({
+  items,
+  totalCount,
+  startIndex,
+  lastItemKey,
+  onRetry,
+}: {
+  items: readonly FeedItem[];
+  totalCount: number;
+  startIndex: number;
+  lastItemKey: string | null;
+  onRetry: (input: string) => void;
+}): JSX.Element {
+  return (
+    <>
+      {items.map((item, index) => {
+        const key = feedItemKey(item);
+        return (
+          <div
+            key={key}
+            role="listitem"
+            aria-posinset={startIndex + index + 1}
+            aria-setsize={totalCount}
+          >
+            <FeedItemView
+              item={item}
+              onRetry={onRetry}
+              isLast={key === lastItemKey}
+              // A run of tool calls shares one rail; the rows either side of it
+              // tell each block whether it has a neighbour to join.
+              joinsAbove={items[index - 1]?.kind === "block"}
+              joinsBelow={items[index + 1]?.kind === "block"}
+            />
+          </div>
+        );
+      })}
+    </>
+  );
+});
 
 const ACCESSIBLE_TRANSCRIPT_PAGE_SIZE = 100;
 
@@ -1217,7 +1445,7 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
   const approvals = approvalResource.approvals;
 
   // Build the flattened feed items list.
-  const items = useMemo<FeedItem[]>(() => {
+  const decodedItems = useMemo<FeedItem[]>(() => {
     const messages = new Map(decoded.messages.map((message) => [message.id, message]));
     const blocks = new Map(decoded.blocks.map((block) => [block.id, block]));
     const traces = new Map(decoded.reasoning.map((trace) => [trace.id, trace]));
@@ -1241,6 +1469,15 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
     }
     return out;
   }, [decoded]);
+  // Carry unchanged rows forward by identity and split the row still being
+  // written off the settled transcript above it. Everything downstream reads
+  // `items` from here, never the raw decode.
+  const feed = useStableFeed(decodedItems);
+  const items = feed.items;
+  const lastItemKey = useMemo(() => {
+    const last = items[items.length - 1];
+    return last ? feedItemKey(last) : null;
+  }, [items]);
   const growthKey = useMemo(() => lastItemGrowthKey(items), [items]);
 
   // Auto-scroll to bottom on new events, but only if the user is already
@@ -1280,8 +1517,14 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
     stickRef.current = true;
     setHasUnseenUpdates(false);
     lastGrowthKeyRef.current = growthKey;
-    if (items.length > 0) requestAnimationFrame(() => scrollToBottom());
-    else if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    if (items.length === 0) {
+      if (scrollRef.current) scrollRef.current.scrollTop = 0;
+      return;
+    }
+    // Cancelled on unmount and on a second task switch, so a frame queued for
+    // the task the reader just left cannot scroll the one they landed on.
+    const frame = window.requestAnimationFrame(() => scrollToBottom());
+    return () => window.cancelAnimationFrame(frame);
     // This reset is intentionally keyed only to task identity. New events
     // must preserve a reader's current stick/scroll decision.
   }, [task?.id]);
@@ -1349,14 +1592,14 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
   }, [items]);
 
   if (!task) {
+    // Same treatment as an empty conversation: one line, centred, quiet. An
+    // icon and a heading here competed with the sidebar the sentence is
+    // pointing at.
     return (
-      <div className={className} style={{ height: "100%" }}>
-        <EmptyState
-          icon={<MessageCircle size={17} strokeWidth={1.6} />}
-          title="No task selected"
-          description="Choose a task from the sidebar to review its conversation and activity."
-          compact
-        />
+      <div className={cn("grid h-full place-items-center", className)}>
+        <p className="ui-body px-6 text-center text-tertiary">
+          Choose a task from the sidebar to read its conversation.
+        </p>
       </div>
     );
   }
@@ -1418,7 +1661,7 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
                 setFullTranscript((current) => !current);
               }}
               aria-pressed={fullTranscript}
-              className="rounded-md px-2 py-1 text-xs text-tertiary hover:bg-hover hover:text-primary"
+              className="rounded-md px-2 py-1 text-xs text-tertiary hover:bg-hover hover:text-secondary"
               data-tooltip={fullTranscript
                 ? "Return to the high-performance windowed conversation"
                 : "Render every loaded conversation item for sequential assistive-technology navigation"}
@@ -1436,7 +1679,7 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
             so without a cursor it delivers only what happens next, and every
             stored event went unread. */}
         {task && transcript?.status === "error" ? (
-          <div className="mb-4 flex flex-wrap items-center gap-2 border-l-2 border-warning/55 px-3 py-1.5 text-xs text-secondary" role="status">
+          <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-subtle px-3 py-2 text-xs text-secondary" role="status">
             <span className="min-w-0 flex-1">
               Earlier messages could not be loaded. {transcript.error} Live updates are still connected.
             </span>
@@ -1464,7 +1707,11 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
 
         {eventHistory ? (
           <div
-            className="mb-4 border-l-2 border-warning/55 px-3 py-1.5 text-xs text-secondary"
+            /* The transcript's `aria-describedby` has always pointed here, but
+               nothing carried the id — so assistive technology was told to read
+               a description that did not exist. */
+            id="conversation-history-boundary"
+            className="mb-4 rounded-lg border border-subtle px-3 py-2 text-xs text-secondary"
             role="status"
           >
             <div className="flex items-start gap-2">
@@ -1507,25 +1754,25 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
             className="mb-4 rounded-md border border-subtle bg-elevated"
           />
         ) : null}
+        {/* Empty conversation.
+
+            One quiet centred line, and nothing else. A task that simply has not
+            said anything yet is not a state worth a headline, an illustration
+            and a paragraph — that treatment made "Ready when you are" the
+            loudest thing on the screen. The composer below is already the
+            obvious next move. */}
         {items.length === 0 && blockedByProvider ? (
-          <div className="mb-4 flex items-start gap-3 border-b border-subtle py-4" role="status">
-            <StatusIndicator status="needs_you" size={10} />
-            <div>
-              <p className="text-sm font-medium text-primary">Provider transport unavailable</p>
-              <p className="mt-1 text-sm text-secondary">Configure provider transport in the control plane, then send a follow-up to retry this task.</p>
-            </div>
-          </div>
+          <p className="ui-body px-6 text-center text-tertiary" role="status">
+            Provider transport is unavailable. Configure it in the control plane, then send a follow-up to retry this task.
+          </p>
         ) : items.length === 0 && transcript?.status === "loading" ? (
-          <div className="grid min-h-40 place-items-center text-center" role="status">
-            <p className="ui-body text-tertiary">Loading the conversation…</p>
-          </div>
+          <p className="ui-body px-6 text-center text-tertiary" role="status">
+            Loading the conversation…
+          </p>
         ) : items.length === 0 && emptyState ? (
-          <div className="grid min-h-40 place-items-center text-center">
-            <div className="max-w-sm">
-              <h2 className="ui-page-title text-primary">{emptyState.title}</h2>
-              <p className="ui-body mt-1 text-tertiary">{emptyState.description}</p>
-            </div>
-          </div>
+          <p className="ui-body px-6 text-center text-tertiary">
+            {emptyState.description}
+          </p>
         ) : null}
 
         {fullTranscript ? (
@@ -1557,16 +1804,16 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
               aria-describedby={eventHistory ? "conversation-history-boundary" : undefined}
               aria-busy={streamState === "connecting" || streamState === "reconnecting"}
             >
-              {transcriptItems.map((item, index) => (
-                <div
-                  key={feedItemKey(item)}
-                  role="listitem"
-                  aria-posinset={transcriptStart + index + 1}
-                  aria-setsize={items.length}
-                >
-                  <FeedItemView item={item} onRetry={retryTurn} />
-                </div>
-              ))}
+              {/* The sequential reading mode renders whatever page is open
+                  verbatim; it is an assistive-technology escape hatch, not the
+                  streaming path, so it does not split a tail off. */}
+              <SettledFeed
+                items={transcriptItems}
+                totalCount={items.length}
+                startIndex={transcriptStart}
+                lastItemKey={lastItemKey}
+                onRetry={retryTurn}
+              />
             </div>
           </div>
         ) : (
@@ -1581,16 +1828,20 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
             aria-busy={streamState === "connecting" || streamState === "reconnecting"}
             className="flex flex-col"
           >
-            {items.map((item, index) => (
-              <div
-                key={feedItemKey(item)}
-                role="listitem"
-                aria-posinset={index + 1}
-                aria-setsize={items.length}
-              >
-                <FeedItemView item={item} onRetry={retryTurn} />
+            <SettledFeed
+              items={feed.settled}
+              totalCount={items.length}
+              startIndex={0}
+              /* The newest *settled* turn keeps its action row on screen. While
+                 something is still streaming the tail owns that, not this. */
+              lastItemKey={feed.tail === null ? lastItemKey : null}
+              onRetry={retryTurn}
+            />
+            {feed.tail !== null ? (
+              <div role="listitem" aria-posinset={items.length} aria-setsize={items.length}>
+                <FeedItemView item={feed.tail} onRetry={retryTurn} isLast />
               </div>
-            ))}
+            ) : null}
           </div>
         )}
 
@@ -1700,18 +1951,16 @@ function PendingApprovalsBlock({
           ? `Approval required: ${approvals[0]?.action ?? ""}`
           : `${count} approvals required before the task can continue`}
       </div>
-      <div
-        className="flex items-center gap-2 rounded-t-md border border-b-0 px-3 py-1.5 text-xs"
-        style={{ borderColor: "color-mix(in srgb, var(--color-warning) 45%, var(--border-default))", background: "color-mix(in srgb, var(--color-warning) 9%, var(--bg-elevated))" }}
-      >
-        <ShieldAlert size={12} style={{ color: "var(--color-warning)" }} aria-hidden />
-        <span className="font-medium text-secondary" style={{ textTransform: "uppercase", letterSpacing: "0.04em" }}>
-          {countLabel}
-        </span>
-        <span className="ml-auto font-mono text-tertiary">awaiting decision</span>
+      {/* A label for the group, not a second alert around the cards. The
+          approval cards below already say what they are; a tinted bar with an
+          uppercase heading on top of them said it twice, louder. */}
+      <div className="flex items-center gap-2 px-0.5">
+        <ShieldAlert size={12} className="flex-none text-warning" aria-hidden />
+        <span className="ui-section-label">{countLabel}</span>
+        <span className="ui-meta ml-auto">Awaiting decision</span>
       </div>
       {freshness !== "ready" ? (
-        <p className="border-x border-default bg-elevated px-3 py-2 text-xs text-warning" role="status">
+        <p className="ui-meta px-0.5 text-warning" role="status">
           {freshness === "loading"
             ? "Reconciling approval state. Decisions are disabled until the control plane confirms this snapshot."
             : freshness === "stale"
@@ -1741,7 +1990,7 @@ function PendingApprovalsBlock({
         />
       ))}
       {page.nextCursor ? (
-        <div className="rounded-b-md border border-default bg-elevated px-3 py-2">
+        <div className="px-0.5">
           <Button
             type="button"
             onClick={onLoadMore}
@@ -1771,7 +2020,7 @@ function ApprovalReconciliationState({
       <div
         role="alert"
         data-testid="approval-reconciliation-state"
-        className="mt-4 flex items-center gap-2 rounded-md bg-warning/7 px-3 py-2 text-xs text-secondary"
+        className="mt-4 flex items-center gap-2 rounded-lg border border-subtle px-3 py-2 text-xs text-secondary"
       >
         <ShieldAlert size={13} className="flex-none text-warning" aria-hidden />
         <span className="min-w-0 flex-1 truncate">{error ?? "Approval state could not be refreshed."}</span>

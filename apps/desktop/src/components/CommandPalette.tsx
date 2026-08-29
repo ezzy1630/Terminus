@@ -33,6 +33,7 @@ import type { Command, CommandGroup } from "../lib/command-catalog";
 import { Button } from "../ui/Button";
 import { DialogSurface } from "../ui/Dialog";
 import { IconButton } from "../ui/IconButton";
+import { Kbd } from "../ui/Kbd";
 
 export { buildDefaultCommands } from "../lib/command-catalog";
 export type { Command, CommandGroup, DefaultCommandActions } from "../lib/command-catalog";
@@ -314,20 +315,14 @@ function CommandPaletteImpl({
       tabIndex={-1}
       overlayClassName="bg-black/35"
       className={cn(
-        "command-palette-shell fixed left-1/2 top-[14vh] flex max-h-[64vh] w-full -translate-x-1/2 flex-col overflow-hidden rounded-lg border bg-elevated shadow-lg",
+        "fixed left-1/2 top-[14vh] flex max-h-[64vh] w-full -translate-x-1/2 flex-col overflow-hidden rounded-md border border-subtle bg-[var(--bg-popover)] shadow-lg",
         className,
       )}
-      style={{
-        width: "min(512px, calc(100vw - 32px))",
-        borderColor: "var(--border-default)",
-      }}
+      style={{ width: "min(512px, calc(100vw - 32px))" }}
     >
         {/* Search input. */}
-        <div
-          className="flex items-center gap-2 border-b border-subtle px-3"
-          style={{ height: 36 }}
-        >
-          <Search size={14} className="text-tertiary" />
+        <div className="flex h-9 flex-none items-center gap-2 border-b border-subtle px-3">
+          <Search size={13} className="flex-none text-tertiary" aria-hidden />
           <input
             ref={inputRef}
             value={query}
@@ -358,21 +353,16 @@ function CommandPaletteImpl({
           ref={listRef}
           role="listbox"
           aria-label="Commands"
-          className="min-h-0 flex-1 overflow-y-auto py-1"
+          className="scrollable min-h-0 flex-1 overflow-y-auto p-1"
         >
           {grouped.length === 0 ? (
-            <div
-              className="ui-body px-4 py-6 text-center text-tertiary"
-
-            >
-              No commands match "{query}".
+            <div className="ui-body px-4 py-6 text-center text-tertiary">
+              No commands match “{query}”.
             </div>
           ) : (
             grouped.map(({ group, items }) => (
               <div key={group}>
-                <div className="ui-meta px-3 pb-0.5 pt-1.5">
-                  {group}
-                </div>
+                <div className="ui-meta px-2.5 pb-1 pt-2">{group}</div>
                 {items.map((r) => {
                   flatIdx++;
                   const idx = flatIdx;
@@ -392,25 +382,19 @@ function CommandPaletteImpl({
                       }}
                       onClick={() => invoke(r.command)}
                       className={cn(
-                        "ui-body mx-1 flex h-7 w-[calc(100%-8px)] items-center justify-start gap-2 rounded-md px-2.5 text-left",
+                        "flex h-8 w-full items-center justify-start gap-2 rounded-[6px] px-2.5 text-left text-base font-normal",
                         isSel ? "bg-selected text-primary" : "text-secondary hover:bg-hover",
                       )}
-
                     >
                       {r.command.icon ? (
                         <span className="flex-shrink-0 text-tertiary" aria-hidden>
                           {r.command.icon}
                         </span>
                       ) : null}
-                      <span className="min-w-0 flex-1 truncate text-primary">{r.command.label}</span>
-                      {r.command.hint ? (
-                        <kbd
-                          className="flex-shrink-0 font-mono text-tertiary text-xs"
-
-                        >
-                          {r.command.hint}
-                        </kbd>
-                      ) : null}
+                      <span className={cn("min-w-0 flex-1 truncate", isSel ? "text-primary" : "text-secondary")}>
+                        {r.command.label}
+                      </span>
+                      {r.command.hint ? <Kbd className="flex-shrink-0">{r.command.hint}</Kbd> : null}
                     </Button>
                   );
                 })}
