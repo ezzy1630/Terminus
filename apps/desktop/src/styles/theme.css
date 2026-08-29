@@ -144,29 +144,33 @@
   --z-select: 55;
   --z-toast: 60;
 
-  /* The working surface sits one perceptible step above the sidebar rail so
-     the content area reads as an elevated pane rather than a black void. */
-  --bg-canvas: #151619;
-  --bg-elevated: #1c1e22;
-  --bg-sidebar: #0e0f11;
-  --bg-inspector: #17191d;
-  --bg-terminal: #1b1b19;
-  --bg-diff: #101114;
-  --bg-composer: #1c1e23;
-  --bg-card: #191b1f;
-  --bg-hover: #22252b;
-  --bg-selected: #2b2f36;
-  --bg-subtle: #202329;
-  --bg-nav-hover: var(--bg-hover);
-  --bg-control-pressed: #32363e;
-  --bg-popover: #1d2025;
-  --text-primary: #f0f1f4;
-  --text-secondary: #b6bcc6;
-  --text-tertiary: #959ba6;
-  --text-placeholder: #979da8;
+  /* Near-black depth, tuned to the Codex desktop app. The working surface is
+     the deepest black; the sidebar rail sits one subtle step above it (Codex
+     paints chrome a hair lighter than the transcript, not darker). No blue in
+     the neutrals — the base is a true warm-neutral charcoal so the one accent
+     reads as the only colour in the room. */
+  --bg-canvas: #0d0d0f;
+  --bg-elevated: #171719;
+  --bg-sidebar: #141416;
+  --bg-inspector: #141416;
+  --bg-terminal: #161613;
+  --bg-diff: #0c0c0e;
+  --bg-composer: #1a1a1d;
+  --bg-card: #161618;
+  --bg-hover: #1c1c1f;
+  /* Selection is a neutral fill, like Codex — no accent wash, no bar. */
+  --bg-selected: #26262b;
+  --bg-subtle: #19191b;
+  --bg-nav-hover: #1a1a1c;
+  --bg-control-pressed: #2e2e33;
+  --bg-popover: #1e1e21;
+  --text-primary: #ededee;
+  --text-secondary: #a2a2a9;
+  --text-tertiary: #6f6f77;
+  --text-placeholder: #6f6f77;
   --text-inverse: #131417;
   --text-on-accent: #ffffff;
-  --text-code: #eef1f5;
+  --text-code: #eaeaec;
   /* Apple system blue. The old #79a6f6 was a pastel of it — lighter than
      anything macOS draws, so every accented control read as slightly washed
      out against the charcoal base. Contrast on --bg-canvas (#151619) is
@@ -180,13 +184,15 @@
   --accent-dim: color-mix(in srgb, var(--accent) 62%, var(--bg-canvas));
   --accent-wash: color-mix(in srgb, var(--accent) 12%, transparent);
   --text-accent: var(--accent);
-  --border-subtle: #24272c;
-  --border-default: #32363d;
-  --border-strong: #4a4f58;
-  --sidebar-separator: #232629;
+  --border-subtle: #202023;
+  --border-default: #2b2b2f;
+  --border-strong: #3c3c42;
+  --sidebar-separator: #1d1d20;
   --semantic-success: #57b96d;
   --semantic-error: #ee6a62;
-  --semantic-warning: #dda746;
+  /* Codex draws its "Full access" indicator in a warm caution-orange, not
+     amber. Semantic-only: reserved for access level and warnings. */
+  --semantic-warning: #e0913f;
   --semantic-info: #79a6f6;
   --semantic-addition: var(--semantic-success);
   --semantic-deletion: var(--semantic-error);
@@ -209,13 +215,14 @@
   /* The composer's focused border. Neutral on purpose — see the
      .composer-surface:focus-within note in globals.css. */
   --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 46%, var(--border-strong));
-  /* Shadows stay tight and close, macOS-style. Wide soft drops read as web
-     marketing chrome on a charcoal base. */
-  --elevation-sm: 0 1px 2px rgb(0 0 0 / 20%);
-  --elevation-md: 0 2px 8px rgb(0 0 0 / 26%);
-  --elevation-lg: 0 6px 20px rgb(0 0 0 / 34%);
-  --shadow-card: 0 1px 2px rgb(0 0 0 / 18%);
-  --shadow-card-hover: 0 2px 6px rgb(0 0 0 / 22%);
+  /* Shadows stay tight and close, macOS-style, but go deeper than before: on a
+     near-black base a light drop is invisible, so a lifted surface needs a
+     darker, slightly wider shadow to separate from the canvas. */
+  --elevation-sm: 0 1px 2px rgb(0 0 0 / 40%);
+  --elevation-md: 0 4px 14px rgb(0 0 0 / 46%);
+  --elevation-lg: 0 14px 38px rgb(0 0 0 / 58%);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 34%);
+  --shadow-card-hover: 0 3px 10px rgb(0 0 0 / 42%);
 }
 
 @media (prefers-color-scheme: light) {
