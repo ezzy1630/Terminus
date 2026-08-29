@@ -103,6 +103,22 @@ describe("terminal turn events re-read the task", () => {
     expect(useTerminusStore.getState().runActivityByTask["task-1"]).toBe("settled");
   });
 
+  test("an authoritative idle task list clears stale background activity", async () => {
+    useTerminusStore.setState({ runActivityByTask: { "task-1": "running" } });
+    vi.spyOn(api, "listTasks").mockResolvedValue({
+      tasks: [task({ active_turn: null })],
+      next_cursor: null,
+      total: 1,
+      truncation: { occurred: false, continuation: null },
+    });
+
+    await useTerminusStore.getState().refreshTasks("session-1");
+
+    const state = useTerminusStore.getState();
+    expect(state.taskById["task-1"]?.active_turn).toBeNull();
+    expect(state.runActivityByTask["task-1"]).toBe("settled");
+  });
+
   test("a settled turn schedules exactly one debounced refresh for its burst", async () => {
     vi.useFakeTimers();
     const refreshed = vi.spyOn(api, "getTask").mockResolvedValue(task({ active_turn: null }));

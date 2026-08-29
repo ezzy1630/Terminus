@@ -254,12 +254,11 @@ function mergeTasks(current: readonly Task[], incoming: readonly Task[]): Task[]
 }
 
 /**
- * Reconcile the compact run projection with a task detail response.
+ * Reconcile the compact run projection with an authoritative task snapshot.
  *
- * List responses may omit `active_turn`, so absence preserves the live event
- * projection. Detail responses use `null` deliberately; that is authoritative
- * evidence that an old `turn.started` event must no longer keep the task in
- * Priority.
+ * Older list responses may omit `active_turn`, so absence preserves the live
+ * event projection. A reported `null` deliberately means idle; it is evidence
+ * that an old `turn.started` event must no longer keep the task in Priority.
  */
 function reconcileRunActivity(
   current: Record<string, TurnActivity>,
@@ -1024,6 +1023,10 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         }
         const reconciled = visibleTasks.map((task) => reconcileTask(taskById[task.id], task));
         for (const task of reconciled) taskById[task.id] = task;
+        let runActivityByTask = omitTaskKeys(state.runActivityByTask, removedTaskIds);
+        for (const task of tasks) {
+          runActivityByTask = reconcileRunActivity(runActivityByTask, task);
+        }
         return {
           tasksBySession: { ...state.tasksBySession, [sessionId]: reconciled },
           taskById,
@@ -1034,6 +1037,7 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
           eventBytesByTask: omitTaskKeys(state.eventBytesByTask, removedTaskIds),
           eventLruTickByTask: omitTaskKeys(state.eventLruTickByTask, removedTaskIds),
           resumeCursorByTask: omitTaskKeys(state.resumeCursorByTask, removedTaskIds),
+          runActivityByTask,
           eventHistoryByTask: omitTaskKeys(state.eventHistoryByTask, removedTaskIds),
           approvalsByTask: omitTaskKeys(state.approvalsByTask, removedTaskIds),
           approvalFreshnessByTask: omitTaskKeys(state.approvalFreshnessByTask, removedTaskIds),
@@ -1105,9 +1109,14 @@ export const useTerminusStore = create<TerminusState>((set, get) => ({
         const tasks = mergeTasks(state.tasksBySession[sessionId] ?? [], res.tasks);
         const taskById = { ...state.taskById };
         for (const task of tasks) taskById[task.id] = reconcileTask(taskById[task.id], task);
+        let runActivityByTask = state.runActivityByTask;
+        for (const task of res.tasks) {
+          runActivityByTask = reconcileRunActivity(runActivityByTask, task);
+        }
         return {
           tasksBySession: { ...state.tasksBySession, [sessionId]: tasks },
           taskById,
+          runActivityByTask,
           taskPagesBySession: {
             ...state.taskPagesBySession,
             [sessionId]: {
