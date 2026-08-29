@@ -60,6 +60,7 @@ model Session {
   // Client-chosen defaults applied to turns that do not name their own (H7).
   defaultModel             String?   @map("default_model")
   defaultReasoningEffort   String?   @map("default_reasoning_effort")
+  defaultProviderAccountId String?   @map("default_provider_account_id")
   activeThreadId           String?   @map("active_thread_id")
   metadataJson             String    @default("{}") @map("metadata_json")
   createdAt                DateTime  @default(now()) @map("created_at")
@@ -205,6 +206,9 @@ model Turn {
   // Per-turn model selection (H7). Null means "use the configured provider".
   selectedModel           String?   @map("selected_model")
   selectedReasoningEffort String?   @map("selected_reasoning_effort") // low|medium|high|max
+  // Which connected provider account produced this turn. Null means the turn
+  // ran on the legacy direct/gateway/local chain.
+  selectedProviderAccountId String? @map("selected_provider_account_id")
 
   thread           Thread            @relation(fields: [threadId], references: [id])
   task             Task?             @relation(fields: [taskId], references: [id])
@@ -1057,6 +1061,55 @@ model ProviderModelDiscovery {
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   @@map("provider_model_discoveries")
+}
+
+// One usable credential Terminus can route a turn through: an entry from a
+// local tool's credential store, or the OpenCode Zen gateway migrated from the
+// singleton configuration row. `credentialUri` is an opaque kernel secret
+// capability URI; this row never holds key bytes, and `metadataJson` carries
+// only the non-secret identity the kernel reported.
+model ProviderAccount {
+  id             String    @id
+  source         String    @unique
+  displayName    String    @map("display_name")
+  vendorId       String    @map("vendor_id")
+  authKind       String    @map("auth_kind")
+  credentialUri  String    @default("") @map("credential_uri")
+  fingerprint    String    @default("")
+  baseUrl        String    @map("base_url")
+  host           String
+  protocol       String
+  connectorId    String    @map("connector_id")
+  renderProfile  String    @map("render_profile")
+  status         String
+  statusDetail   String    @default("") @map("status_detail")
+  billing        String
+  metadataJson   String    @default("{}") @map("metadata_json")
+  isDefault      Boolean   @default(false) @map("is_default")
+  discoveredAt   DateTime  @map("discovered_at")
+  lastVerifiedAt DateTime? @map("last_verified_at")
+  expiresAt      DateTime? @map("expires_at")
+  revision       Int       @default(1)
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  modelDiscovery ProviderAccountModelDiscovery?
+
+  @@map("provider_accounts")
+}
+
+// Last successful model discovery for one account. Survives a restart so a
+// turn is never denied for a cold in-process cache.
+model ProviderAccountModelDiscovery {
+  accountId  String   @id @map("account_id")
+  resultJson String   @map("result_json")
+  modelCount Int      @map("model_count")
+  observedAt String   @map("observed_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  account ProviderAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@map("provider_account_model_discoveries")
 }
 
 model SemanticEvent {
