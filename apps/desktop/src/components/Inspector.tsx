@@ -361,95 +361,6 @@ const TaskV2Section = memo(function TaskV2Section({ taskId }: { taskId: string }
 });
 
 /**
- * Live Context Compiler Token Allocator.
- * Visualizes the prompt composition synthesized by Terminus's Context Compiler.
- */
-const ContextCompilerSection = memo(function ContextCompilerSection({
-  task,
-  events,
-}: {
-  task: Task;
-  events: readonly TerminusSseEvent[];
-}): JSX.Element {
-  const stats = useMemo(() => {
-    const systemPct = 8;
-    const pathCount = (task.contract?.allowed_scope?.read_paths?.length ?? 0) + (task.contract?.allowed_scope?.write_paths?.length ?? 0);
-    const astPct = Math.min(50, 15 + Math.min(30, Math.max(1, pathCount) * 4));
-    const memoryPct = Math.min(30, 8 + Math.min(20, events.length));
-    const toolsPct = 12;
-    const totalUsed = systemPct + astPct + memoryPct + toolsPct;
-    const tokens = task.budget_ledger?.tokens_used
-      ? Number(task.budget_ledger.tokens_used).toLocaleString()
-      : (totalUsed * 1280).toLocaleString();
-    return {
-      systemPct,
-      astPct,
-      memoryPct,
-      toolsPct,
-      totalTokens: tokens,
-    };
-  }, [task, events]);
-
-  return (
-    <InspectorDisclosure
-      icon={<Sparkles size={ICON_SIZE} />}
-      label="Context Compiler"
-      value={`${stats.totalTokens} tokens`}
-      defaultOpen
-    >
-      <div className="flex flex-col gap-2.5 text-xs">
-        <div className="token-allocator-bar">
-          <div
-            className="token-allocator-segment token-alloc-system"
-            style={{ width: `${stats.systemPct}%` }}
-            title={`System: ${stats.systemPct}%`}
-          />
-          <div
-            className="token-allocator-segment token-alloc-ast"
-            style={{ width: `${stats.astPct}%` }}
-            title={`Codebase AST: ${stats.astPct}%`}
-          />
-          <div
-            className="token-allocator-segment token-alloc-memory"
-            style={{ width: `${stats.memoryPct}%` }}
-            title={`Memory: ${stats.memoryPct}%`}
-          />
-          <div
-            className="token-allocator-segment token-alloc-tools"
-            style={{ width: `${stats.toolsPct}%` }}
-            title={`Tools: ${stats.toolsPct}%`}
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 pt-0.5 text-secondary">
-          <div className="flex items-center gap-1.5">
-            <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: "var(--alloc-system)" }} />
-            <span className="truncate">System ({stats.systemPct}%)</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: "var(--alloc-ast)" }} />
-            <span className="truncate">AST Context ({stats.astPct}%)</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: "var(--alloc-memory)" }} />
-            <span className="truncate">Memory ({stats.memoryPct}%)</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: "var(--alloc-tools)" }} />
-            <span className="truncate">Tools ({stats.toolsPct}%)</span>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between border-t border-subtle pt-2 text-[11px] text-tertiary">
-          <span>Rust Effect Kernel</span>
-          <span className="font-mono text-secondary">Enforced</span>
-        </div>
-      </div>
-    </InspectorDisclosure>
-  );
-});
-
-/**
  * Live sandbox enforcement report (SPEC §13.4): the kernel reports which
  * controls are enforced, degraded, or unsupported, and the UI must render
  * that honestly. The selected session's effective profile is required; the
@@ -905,7 +816,6 @@ function InspectorImpl({
           onClick={() => void copy("id", task.id)}
           title={task.id}
         />
-        <ContextCompilerSection task={task} events={events} />
         <SandboxSection profileId={permissionProfileId} />
         <TaskV2Section taskId={task.id} />
       </InspectorGroup>

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   appendCrashLog,
+  childProcessExitNeedsRecovery,
   crashLogDirectory,
   crashLogPath,
   describeFailure,
@@ -50,6 +51,18 @@ describe("crash log formatting", () => {
     expect(describeFailure(error).detail).toContain("Error: boom");
     expect(describeFailure("plain").message).toBe("plain");
     expect(describeFailure({ code: 7 }).message).toBe('{"code":7}');
+  });
+});
+
+describe("child process recovery", () => {
+  test("does not interrupt an intentional app shutdown", () => {
+    expect(childProcessExitNeedsRecovery("killed", true)).toBe(false);
+    expect(childProcessExitNeedsRecovery("clean-exit", false)).toBe(false);
+  });
+
+  test("still surfaces an unexpected helper failure while the app is running", () => {
+    expect(childProcessExitNeedsRecovery("crashed", false)).toBe(true);
+    expect(childProcessExitNeedsRecovery("abnormal-exit", false)).toBe(true);
   });
 });
 

@@ -59,6 +59,7 @@ import { resolveWindowState, type DisplayArea, type WindowState } from "./window
 import { ShellStateStore, withRecentProject, type ThemeChoice } from "./shell-store";
 import {
   appendCrashLog,
+  childProcessExitNeedsRecovery,
   crashLogDirectory,
   crashLogPath,
   describeFailure,
@@ -214,11 +215,11 @@ function registerProcessFailureHandlers(): void {
     recordCrash("unhandled-rejection", reason);
   });
   app.on("child-process-gone", (_event, details) => {
+    if (!childProcessExitNeedsRecovery(details.reason, runtimeShutdownStarted)) return;
     const logPath = recordCrash(
       "child-process-gone",
       `${details.type} process gone: ${details.reason} (exit ${details.exitCode})`,
     );
-    if (details.reason === "clean-exit") return;
     void offerCrashRecovery("child-process-gone", "A Terminus helper process stopped unexpectedly.", logPath)
       .catch(() => undefined);
   });
@@ -910,6 +911,7 @@ async function startPackagedRuntime(): Promise<void> {
   runtimeSupervisor = await StandaloneRuntimeSupervisor.start({
     resourcesPath: process.resourcesPath,
     userDataPath: app.getPath("userData"),
+    userHomePath: app.getPath("home"),
     platform: process.platform,
     architecture: process.arch,
     expectedVersion: identity.version,

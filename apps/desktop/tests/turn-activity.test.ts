@@ -206,4 +206,8 @@ describe("provider streaming keeps a run alive", () => {
   it("treats a text delta as evidence that the turn is running", () => {
     expect(turnActivityFromEvents([event("turn.provider_text_delta")])).toBe("running");
   });
+
+  it("keeps the turn running while a truncated response continues", () => {
+    expect(turnActivityFromEvents([event("turn.output_truncated")])).toBe("running");
+  });
 });

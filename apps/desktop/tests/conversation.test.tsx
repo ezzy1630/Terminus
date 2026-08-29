@@ -117,6 +117,24 @@ describe("Conversation accessibility traversal", () => {
     expect(loadedItems).toHaveAttribute("aria-describedby", "conversation-history-boundary");
     expect(screen.getByText("Live history has a retention gap")).toBeInTheDocument();
   });
+
+  test("keeps provider reasoning visible when no phase event was retained", () => {
+    render(<Conversation events={[
+      event("reasoning-start", "turn.started", {
+        user_input: "Check the shell",
+        started_at: "2026-08-28T00:00:00.000Z",
+      }),
+      event("reasoning-done", "turn.completed", {
+        summary: "Done.",
+        reasoning: "Checked the packaged shell before changing it.",
+        at: "2026-08-28T00:00:01.000Z",
+      }),
+    ]} />);
+
+    const trace = screen.getByRole("button", { name: /Thought for 1\.0s/ });
+    fireEvent.click(trace);
+    expect(screen.getByText("Checked the packaged shell before changing it.")).toBeInTheDocument();
+  });
 });
 
 // ────────────────────────── Reasoning trace ──────────────────────────────────
@@ -452,6 +470,24 @@ describe("provider text streaming", () => {
     ], TASK_CREATED_AT);
 
     expect(blocks[0]).toMatchObject({ title: "Steering delivered", metric: "24 characters", status: "done" });
+  });
+
+  test("shows a bounded-output continuation without calling it a failure", () => {
+    const { blocks } = decodeFeed([
+      toolEvent("s1", "turn.started", { started_at: TASK_CREATED_AT }),
+      toolEvent("l1", "turn.output_truncated", {
+        reason: "truncated_tool_calls",
+        tool_calls_discarded: 2,
+        continuation: "queued",
+      }),
+    ], TASK_CREATED_AT);
+
+    expect(blocks[0]).toMatchObject({
+      title: "Output limit reached",
+      metric: "Continuing",
+      status: "working",
+    });
+    expect(blocks[0]?.entries[0]?.detail).toContain("2 tool calls were discarded before execution");
   });
 });
 

@@ -143,7 +143,7 @@ describe("CSS-first theme", () => {
     }
   });
 
-  test("limits continuous CSS animation to indeterminate progress marks", () => {
+  test("does not keep the renderer repainting continuous CSS animation", () => {
     // Narrowed from a blanket ban. A spinner that does not spin is not a
     // bounded transition, it is a broken affordance — .spinner set
     // border-top-color with no keyframes and rendered as a frozen ring, and
@@ -153,7 +153,7 @@ describe("CSS-first theme", () => {
     const continuous = new Set(
       [...globalsCss.matchAll(/animation:\s*([a-z-]+)[^;]*\binfinite\b/g)].map((match) => match[1]),
     );
-    expect(continuous).toEqual(new Set(["spin", "caret-blink", "shimmer", "pulse-dot"]));
+    expect(continuous).toEqual(new Set());
     expect(globalsCss).toContain('html[data-reduce-motion="true"] *');
   });
 });

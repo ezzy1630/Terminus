@@ -44,9 +44,10 @@ import {
   type TaskShelf,
 } from "../lib/attention";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
-import { taskTitle } from "../lib/task-lifecycle";
+import { lifecycleShortLabel, taskTitle } from "../lib/task-lifecycle";
 import { displayLifecycleWith } from "../lib/turn-activity";
 import { readCollapsedStripSections, writeCollapsedStripSections } from "../lib/sidebar-prefs";
+import { compactDuration } from "../lib/time";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
 import { Menu, type MenuItem } from "../ui/Menu";
@@ -60,7 +61,9 @@ interface QueueRow {
   readonly id: string;
   readonly title: string;
   readonly project: string | null;
+  readonly model: string | null;
   readonly lifecycle: TaskLifecycle;
+  readonly startedAt: string | null;
   readonly updatedAt: string;
   readonly unread: boolean;
   readonly needsYou: boolean;
@@ -124,7 +127,7 @@ function TaskQueueImpl({
   }, []);
 
   const shelves = useMemo(() => {
-    const projectNames = new Map(sessions.map((session) => [session.id, session.title]));
+    const sessionsById = new Map(sessions.map((session) => [session.id, session]));
     const grouped: Record<Exclude<TaskShelf, "settled">, QueueRow[]> = {
       needs_you: [],
       working: [],
@@ -137,11 +140,14 @@ function TaskQueueImpl({
         const reason = attentionReason({ lifecycle, domainTask: task });
         const shelf = taskShelf(lifecycle, reason);
         if (shelf === "settled") continue;
+        const session = sessionsById.get(task.session_id);
         grouped[shelf].push({
           id: task.id,
           title: taskTitle(task),
-          project: projectNames.get(task.session_id) ?? null,
+          project: session?.title ?? null,
+          model: session?.default_model ?? session?.default_model_profile ?? null,
           lifecycle,
+          startedAt: task.active_turn?.started_at ?? null,
           updatedAt,
           unread,
           needsYou: reason !== null,
@@ -471,6 +477,9 @@ const QueueRowItem = memo(function QueueRowItem({
     () => onMarkRead(row.id, row.updatedAt),
     [onMarkRead, row.id, row.updatedAt],
   );
+  const elapsed = row.startedAt ? compactDuration(row.startedAt, Date.now()) : null;
+  const detail = row.reason
+    ?? [lifecycleShortLabel(row.lifecycle), elapsed].filter(Boolean).join(" ");
   return (
     <TaskRow
       taskId={row.id}
@@ -481,6 +490,8 @@ const QueueRowItem = memo(function QueueRowItem({
       unread={row.unread}
       emphasis={emphasis}
       layout={stacked ? "stacked" : "inline"}
+      {...(stacked && detail ? { detail } : {})}
+      {...(stacked && row.model ? { context: row.model } : {})}
       // Flush, not nested. These rows were indented under their heading like
       // children of a project, which put the one list that must be read first
       // furthest from the eye's left-hand scan line.

@@ -49,6 +49,7 @@ describe("Inspector relevance", () => {
     // Context is the only group backed by fields the decoder requires, so it
     // is the only group a bare task can justify. Everything else stays out.
     expect(screen.getByRole("heading", { name: "Context" })).toBeInTheDocument();
+    expect(screen.queryByText("Context Compiler")).not.toBeInTheDocument();
     for (const name of ["Environment", "Activity", "Approvals"]) {
       expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
     }

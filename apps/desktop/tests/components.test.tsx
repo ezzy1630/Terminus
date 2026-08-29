@@ -2292,6 +2292,25 @@ describe("TaskRow — truncation + tooltip", () => {
     expect(row).toHaveAccessibleName(expect.stringContaining(LONG_TITLE));
   });
 
+  test("shows runtime context on a stacked priority row", () => {
+    render(
+      <TaskRow
+        title="Audit the provider gateway"
+        status="working"
+        layout="stacked"
+        meta="Terminus"
+        context="opencode/zen-free"
+        detail="Working 3m"
+        selected
+      />,
+    );
+
+    expect(screen.getByText("Terminus")).toBeInTheDocument();
+    expect(screen.getByText("opencode/zen-free")).toBeInTheDocument();
+    expect(screen.getByText("Working 3m")).toBeInTheDocument();
+    expect(screen.getByRole("button")).toHaveAccessibleName(expect.stringContaining("using opencode/zen-free"));
+  });
+
   test("names the queue row by what it wants, not by its lifecycle id", () => {
     // The rail has no width for a reason line, so the reason rides in the
     // accessible name and the tooltip. A screen reader that announced "status
@@ -2478,14 +2497,11 @@ describe("Sidebar — remembered shape", () => {
     )).toEqual(["session-1"]);
   });
 
-  test("opens on projects and exposes activity as a temporary sidebar projection", async () => {
-    const user = userEvent.setup();
+  test("restores the explicitly selected project hierarchy", () => {
+    openOnProjectsTree();
     render(<Sidebar />);
     expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Open activity" }));
-    expect(screen.getByRole("button", { name: "Close activity" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show activity" })).toHaveAttribute("aria-pressed", "false");
   });
 
   // The question is what the *list* holds, not what the workspace holds. Six
@@ -2518,6 +2534,7 @@ describe("Sidebar — remembered shape", () => {
   });
 
   test("leaves the project off a pinned row when there is only one project", () => {
+    openOnProjectsTree();
     const pinned = seedTask("task-pinned", "session-1", "Fix the auth race");
     useTerminusStore.setState({
       tasksBySession: { "session-1": [pinned] },

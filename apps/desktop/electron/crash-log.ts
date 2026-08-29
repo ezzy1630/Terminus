@@ -40,6 +40,18 @@ export function crashLogDirectory(userDataPath: string): string {
   return join(userDataPath, CRASH_LOG_DIRECTORY);
 }
 
+/**
+ * Electron also reports helper exits while the app is intentionally stopping
+ * its owned runtime. Those are shutdown mechanics, not crashes, and must not
+ * interrupt Quit with a recovery dialog.
+ */
+export function childProcessExitNeedsRecovery(
+  reason: string,
+  runtimeShutdownStarted: boolean,
+): boolean {
+  return !runtimeShutdownStarted && reason !== "clean-exit";
+}
+
 /** One entry, one line: newlines in the payload are escaped, not dropped. */
 export function formatCrashLogLine(entry: CrashLogEntry): string {
   const detail = entry.detail === undefined ? "" : ` | ${escapeLine(entry.detail)}`;

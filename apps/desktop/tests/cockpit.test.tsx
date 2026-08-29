@@ -589,6 +589,7 @@ describe("truthful operator cockpit", () => {
     // Exactly one, deliberately: the sidebar used to offer "Open project"
     // three times at once — the Spaces header, the empty state, and a docked
     // nav row.
+    await user.click(screen.getByRole("button", { name: "Show projects" }));
     await user.click(screen.getByRole("button", { name: "Open project" }));
 
     expect(await screen.findByRole("dialog", { name: "Open project" })).toBeInTheDocument();

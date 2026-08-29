@@ -812,6 +812,38 @@ export function decodeFeed(
         break;
       }
       /*
+       * The provider response hit its bounded output limit. The control plane
+       * already queued a continuation inside the same turn, so this is neither
+       * success nor failure: it is a visible handoff into the next iteration.
+       */
+      case "turn.output_truncated": {
+        const at = eventTimestamp(p, ev, taskCreatedAt);
+        flushGroup();
+        const discarded = typeof p.tool_calls_discarded === "number"
+          && Number.isFinite(p.tool_calls_discarded)
+          ? Math.max(0, Math.floor(p.tool_calls_discarded))
+          : 0;
+        const detail = discarded > 0
+          ? `${plural(discarded, "tool call", "tool calls")} were discarded before execution and will be re-issued.`
+          : "Terminus queued a continuation from the cutoff without repeating the completed text.";
+        const block: ActivityBlockData = {
+          id: `block-${ev.id}`,
+          title: "Output limit reached",
+          metric: "Continuing",
+          status: "working",
+          entries: [{
+            tool: "provider",
+            summary: "Continuing from the response cutoff.",
+            detail,
+            at,
+            phase: "authorized",
+          }],
+        };
+        blocks.push(block);
+        order.push({ kind: "block", id: block.id });
+        break;
+      }
+      /*
        * The provider's reply, streamed.
        *
        * This is the event the control plane actually emits
@@ -1485,10 +1517,14 @@ function ConversationImpl({ className, events: eventsProp, onNewTask }: Conversa
         if (message) out.push({ kind: "message", message });
       } else if (entry.kind === "reasoning") {
         const trace = traces.get(entry.id);
-        // A settled turn that reported no phases has nothing to show. Keeping
-        // the row would contribute an empty listitem to the collection counts
-        // and to aria-setsize while rendering nothing.
-        if (trace && (trace.endedAt === null || trace.phases.length > 0)) {
+        // Phase events and provider reasoning are independent. A provider may
+        // report a useful settled summary even when the retained event window
+        // contains no intermediate phase event, so either form is visible.
+        if (trace && (
+          trace.endedAt === null
+          || trace.phases.length > 0
+          || Boolean(trace.text?.trim())
+        )) {
           out.push({ kind: "reasoning", reasoning: trace });
         }
       } else {

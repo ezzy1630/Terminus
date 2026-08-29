@@ -77,11 +77,14 @@ export interface TaskRowProps {
    * rows whose position does not already answer that question.
    */
   meta?: string;
+  /** Recessive status or timing beside the title in a stacked activity row. */
+  detail?: string;
+  /** Secondary context beside the project, currently the exact selected model. */
+  context?: string;
   /**
-   * Why the task wants a human, when it does. Never rendered: at rail width
-   * there is no room for a title, a project and a reason. It rides in the
-   * tooltip and the spoken label, where it costs nothing and still means the
-   * rail can answer "why?" without opening the task.
+   * Why the task wants a human, when it does. Stacked priority rows may also
+   * expose its short label through `detail`; this field remains the semantic
+   * source for the tooltip and spoken label.
    */
   reason?: string;
   /** Indentation depth (0 = top-level, 1 = nested under a project). */
@@ -149,6 +152,8 @@ function TaskRowImpl({
   needsYou = false,
   unread = false,
   meta,
+  detail,
+  context,
   reason,
   depth = 0,
   pinned = false,
@@ -211,7 +216,9 @@ function TaskRowImpl({
     />
   ) : null;
 
-  const tooltip = [title, meta, reason].filter(Boolean).join(" — ");
+  const tooltip = [title, meta, context, detail, reason]
+    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
+    .join(" — ");
 
   return (
     <div
@@ -228,7 +235,13 @@ function TaskRowImpl({
         // the density: the difference has to survive both scales, and reusing
         // the nav row's height made these rows *shorter* than task rows in the
         // spacious one.
-        height: stacked ? 58 : shelved ? "calc(var(--row-height) + 2px)" : "var(--row-height)",
+        height: stacked && selected && context
+          ? 70
+          : stacked
+            ? 58
+            : shelved
+              ? "calc(var(--row-height) + 2px)"
+              : "var(--row-height)",
         // Nested tasks hang from the same text column as their project row.
         paddingLeft: stacked ? 10 : depth > 0 ? 20 : 6,
         paddingRight: stacked ? 10 : 6,
@@ -256,6 +269,8 @@ function TaskRowImpl({
         aria-label={[
           title,
           meta ? `in ${meta}` : null,
+          context ? `using ${context}` : null,
+          detail && detail !== reason ? detail : null,
           reason ?? (status ? `status ${lifecycleShortLabel(status)}` : null),
           unread ? "unread" : null,
           selected ? "selected" : null,
@@ -268,40 +283,45 @@ function TaskRowImpl({
             : "flex items-baseline gap-1.5 leading-none",
         )}
       >
-        <span
-          className={cn(
-            // `flex-auto`, not `flex-1`. `flex-1` is basis 0, which means the
-            // title never claims any width of its own — the project label took
-            // its content width first and the title lived on the remainder, so
-            // a long title and a long project name both came out truncated.
-            // With basis auto the two compete honestly, and the shrink factor
-            // below decides who gives.
-            "min-w-0 truncate ui-body",
-            stacked ? "w-full flex-none text-primary" : "flex-auto",
-            loud && "font-medium",
-          )}
-        >
-          {title}
-        </span>
-        {/* The title always wins.
-            `max-w` alone was not enough: flexbox shrinks both children in
-            proportion to their content, so a long title and a long project
-            name both ended up truncated — "Hyperparameter…" beside
-            "Learning …", two halves of nothing. An outsized `flex-shrink`
-            makes this label absorb effectively all of the shortfall, so it
-            gives up its own width, down to none at all, before the title
-            loses a character. */}
-        {meta ? (
-          <span
-            className={cn(
-              "ui-meta min-w-0 truncate",
-              stacked ? "w-full flex-none" : "max-w-[45%]",
-            )}
-            {...(!stacked ? { style: { flexShrink: 500 } } : {})}
-          >
-            {meta}
-          </span>
-        ) : null}
+        {stacked ? (
+          <>
+            <span className={cn("ui-body w-full min-w-0 flex-none truncate text-primary", loud && "font-medium")}>
+              {title}
+            </span>
+            {meta || detail ? (
+              <span className="flex w-full min-w-0 items-baseline gap-2">
+                {meta ? <span className="ui-meta min-w-0 flex-1 truncate">{meta}</span> : <span className="flex-1" />}
+                {detail ? (
+                  <span className="ui-meta max-w-[52%] shrink-0 truncate text-secondary">
+                    {detail}
+                  </span>
+                ) : null}
+              </span>
+            ) : null}
+            {selected && context ? (
+              <span className="ui-meta w-full min-w-0 flex-none truncate" data-tooltip={context}>
+                {context}
+              </span>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <span
+              className={cn("ui-body min-w-0 flex-auto truncate", loud && "font-medium")}
+            >
+              {title}
+            </span>
+            {/* The title wins: this label absorbs shortfall before the title. */}
+            {meta ? (
+              <span
+                className="ui-meta min-w-0 max-w-[45%] truncate"
+                style={{ flexShrink: 500 }}
+              >
+                {meta}
+              </span>
+            ) : null}
+          </>
+        )}
       </Button>
 
       {/* One 14px trailing slot, always present when the row has anything to

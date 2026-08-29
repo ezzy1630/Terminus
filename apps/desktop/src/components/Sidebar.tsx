@@ -75,8 +75,10 @@ import { useThemeStore } from "../hooks/use-theme";
 import {
   readCollapsedProjects,
   readExpandedProjects,
+  readSidebarGrouping,
   writeCollapsedProjects,
   writeExpandedProjects,
+  writeSidebarGrouping,
 } from "../lib/sidebar-prefs";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
@@ -191,10 +193,12 @@ function SidebarImpl({
     return names;
   }, [sessions]);
   // Activity is a projection over the same tasks, not a second navigation
-  // column. The bell swaps the body in place between the ordinary project
-  // hierarchy and the attention-first timeline, matching the current Codex
-  // desktop shell. It deliberately does not create or select a task.
-  const [activityVisible, setActivityVisible] = useState(false);
+  // column. It is the default because the rail opens to the work that changed,
+  // while the project tree remains one explicit toggle away. The choice is
+  // durable and changing it never creates or selects a task.
+  const [activityVisible, setActivityVisible] = useState(
+    () => readSidebarGrouping() === "recent",
+  );
   const [collapsedSessions, setCollapsedSessions] = useState<Set<string>>(readCollapsedProjects);
   const [expandedTaskLists, setExpandedTaskLists] = useState<Set<string>>(readExpandedProjects);
 
@@ -203,6 +207,9 @@ function SidebarImpl({
   // add a fifth that forgets.
   useEffect(() => { writeCollapsedProjects(collapsedSessions); }, [collapsedSessions]);
   useEffect(() => { writeExpandedProjects(expandedTaskLists); }, [expandedTaskLists]);
+  useEffect(() => {
+    writeSidebarGrouping(activityVisible ? "recent" : "project");
+  }, [activityVisible]);
   useEffect(() => {
     const showActivity = (): void => setActivityVisible(true);
     window.addEventListener(SHOW_ACTIVITY_EVENT, showActivity);
@@ -355,12 +362,14 @@ function SidebarImpl({
           className="h-7 w-7 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
         />
         <IconButton
-          label={activityVisible ? "Close activity" : "Open activity"}
-          icon={<Bell size={14} strokeWidth={1.7} aria-hidden />}
+          label={activityVisible ? "Show projects" : "Show activity"}
+          icon={activityVisible
+            ? <Folder size={14} strokeWidth={1.7} aria-hidden />
+            : <Bell size={14} strokeWidth={1.7} aria-hidden />}
           size="sm"
           aria-pressed={activityVisible}
           onClick={() => setActivityVisible((visible) => !visible)}
-          data-tooltip={activityVisible ? "Close activity" : "Activity"}
+          data-tooltip={activityVisible ? "Show projects" : "Show activity"}
           className={cn(
             "h-7 w-7 shrink-0 rounded-md hover:bg-hover hover:text-primary",
             activityVisible ? "bg-selected text-accent" : "text-tertiary",

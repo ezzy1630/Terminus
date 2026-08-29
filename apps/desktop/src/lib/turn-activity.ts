@@ -33,6 +33,7 @@ const TURN_RUNNING_EVENTS = new Set([
   "turn.repair_pending",
   "turn.profile_selected",
   "turn.steering_queued",
+  "turn.output_truncated",
   "turn.recovery_reconciled",
 ]);
 
@@ -161,6 +162,7 @@ export function displayLifecycleWith(
  * was.
  */
 export const IGNORED_TURN_EVENTS: Readonly<Record<string, string>> = {
+  "turn.observed_sources_seeded": "Internal stale-write protection restored observations from durable history. It changes no user-visible task state or transcript content.",
   "turn.recovery_reconciled": "Internal state repair after an interruption. The turn resumes from the phase it was already in, so the feed has nothing new to say.",
   "turn.verification_not_applicable": "A turn that mutated nothing has nothing to verify. Reporting the absence of a check nobody asked for is noise; the reply itself is the outcome.",
 };

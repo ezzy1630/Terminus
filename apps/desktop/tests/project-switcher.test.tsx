@@ -309,7 +309,7 @@ describe("inbox grouping", () => {
 });
 
 describe("the sidebar inbox", () => {
-  test("the activity bell swaps the body without changing the workspace destination", async () => {
+  test("opens on activity and swaps to projects without changing the workspace destination", async () => {
     const user = userEvent.setup();
     install([session("a", "Terminus")], "a");
     useTerminusStore.setState({
@@ -317,22 +317,25 @@ describe("the sidebar inbox", () => {
     });
     render(<Sidebar onOpenProject={() => undefined} />);
 
-    // The ordinary rail opens on the project tree.
+    // Priority and recency are the default orientation. Project hierarchy is
+    // still one explicit action away and the destination itself never moves.
     expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open activity" })).toHaveAttribute("aria-pressed", "false");
-
-    await user.click(screen.getByRole("button", { name: "Open activity" }));
-
-    // Same task, filed under its day. This is a sidebar projection, so the
-    // primary destinations remain available and no new task is created.
     expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
-    expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Close activity" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "New task" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show projects" })).toHaveAttribute("aria-pressed", "true");
 
-    await user.click(screen.getByRole("button", { name: "Close activity" }));
+    await user.click(screen.getByRole("button", { name: "Show projects" }));
+
+    // Same task, now filed under its project. This is a sidebar projection, so
+    // the primary destinations remain available and no new task is created.
     expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
+    expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show activity" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "New task" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("terminus-desktop.sidebar-view.v1")).toBe("project");
+
+    await user.click(screen.getByRole("button", { name: "Show activity" }));
+    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
+    expect(window.localStorage.getItem("terminus-desktop.sidebar-view.v1")).toBe("recent");
   });
 
   test("selecting an inbox row opens that task", async () => {
@@ -369,7 +372,6 @@ describe("the sidebar inbox", () => {
     });
     useTaskReadStore.setState({ seenAtByTask: {} });
     render(<Sidebar onOpenProject={() => undefined} />);
-    await user.click(screen.getByRole("button", { name: "Open activity" }));
 
     // Not in the queue: a task that succeeded is not blocked on anyone.
     expect(screen.queryByRole("button", { name: /Collapse Needs you/ })).not.toBeInTheDocument();

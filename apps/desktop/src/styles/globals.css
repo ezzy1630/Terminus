@@ -871,27 +871,9 @@ pre.text-primary { color: var(--text-code); }
 
 /* ────────────────────────── Progress marks ───────────────────────────── */
 
-/* These four keyframes back marks that were already styled to animate but
-   never did: the spinner rendered as a frozen broken ring, and .skeleton
-   carried overflow:hidden for a sweep that had no source. */
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes shimmer {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(100%); }
-}
-
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: .45; transform: scale(.82); }
-}
-
-@keyframes caret-blink {
-  0%, 45% { opacity: 1; }
-  55%, 100% { opacity: 0; }
-}
+/* Progress stays legible without permanent repaint loops. A coloured broken
+   ring, solid working dot, static caret, and quiet skeleton communicate state
+   while leaving high-refresh macOS displays idle when the transcript is. */
 
 .spinner {
   width: 12px;
@@ -899,7 +881,6 @@ pre.text-primary { color: var(--text-code); }
   border: 1.5px solid var(--border-default);
   border-top-color: var(--color-agent-working);
   border-radius: 50%;
-  animation: spin 720ms linear infinite;
 }
 
 /* Compact progress mark for sidebar status indicators. */
@@ -909,7 +890,6 @@ pre.text-primary { color: var(--text-code); }
   border: 1.5px solid color-mix(in srgb, var(--border-default) 50%, transparent);
   border-top-color: var(--color-agent-working);
   border-radius: 50%;
-  animation: spin 720ms linear infinite;
 }
 
 .streaming-caret {
@@ -917,7 +897,6 @@ pre.text-primary { color: var(--text-code); }
   height: 1em;
   background: var(--text-primary);
   border-radius: 1px;
-  animation: caret-blink 1s steps(1, end) infinite;
 }
 
 .skeleton {
@@ -928,16 +907,7 @@ pre.text-primary { color: var(--text-code); }
 }
 
 .skeleton::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in srgb, var(--text-tertiary) 14%, transparent),
-    transparent
-  );
-  animation: shimmer 1.4s var(--easing-default) infinite;
+  content: none;
 }
 
 /* ────────────────────────── Status Dots ──────────────────────────────── */
@@ -952,7 +922,6 @@ pre.text-primary { color: var(--text-code); }
 
 .status-dot-working {
   background: var(--color-agent-working);
-  animation: pulse-dot 1.6s var(--easing-default) infinite;
 }
 .status-dot-queued { background: var(--color-agent-queued); }
 .status-dot-waiting { background: var(--color-agent-waiting); }
@@ -1204,22 +1173,3 @@ html[data-vibrancy="on"] .model-picker-surface {
 }
 .diff-minimap-tick.add { background-color: var(--color-addition); opacity: 0.85; }
 .diff-minimap-tick.del { background-color: var(--color-deletion); opacity: 0.85; }
-
-/* ────────────────────────── Context Compiler Allocator Bar ─────────────── */
-.token-allocator-bar {
-  display: flex;
-  height: 6px;
-  width: 100%;
-  border-radius: 3px;
-  overflow: hidden;
-  background: var(--alloc-headroom);
-}
-
-.token-allocator-segment {
-  height: 100%;
-  transition: width var(--duration-fast) var(--easing-default);
-}
-.token-alloc-system { background-color: var(--alloc-system); }
-.token-alloc-ast { background-color: var(--alloc-ast); }
-.token-alloc-memory { background-color: var(--alloc-memory); }
-.token-alloc-tools { background-color: var(--alloc-tools); }
