@@ -22,6 +22,7 @@ import {
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type UIEvent as ReactUIEvent,
 } from "react";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
 import { useTerminusStore } from "../hooks/use-terminus";
@@ -44,6 +45,12 @@ import {
   type AttentionReason,
   type MissionBoardColumnId,
 } from "../lib/mission-board";
+import {
+  readMissionBoardPreferences,
+  writeMissionBoardPreferences,
+  type MissionBoardPreferences,
+  type MissionBoardStatusFilter,
+} from "../lib/mission-board-prefs";
 import type { BudgetTone } from "../lib/task-budget";
 import { lifecycleIsActive, lifecycleLabel, lifecycleTone, type TaskLifecycle } from "../lib/task-lifecycle";
 import { relativeTimestamp } from "../lib/time";
@@ -73,7 +80,6 @@ interface MissionBoardViewProps {
   onInspectTask: (taskId: string) => void;
 }
 
-type BoardViewMode = "board" | "list";
 type StreamState = "connecting" | "live" | "reconnecting";
 
 const BOARD_CURSOR_KEY = "terminus-desktop.v2-board-cursor.v1";
@@ -643,8 +649,9 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
   const reconnectTimerRef = useRef<number | null>(null);
   const generationRef = useRef(0);
 
-  const [viewMode, setViewMode] = useState<BoardViewMode>("board");
-  const [query, setQuery] = useState("");
+  const [initialPreferences] = useState(() => readMissionBoardPreferences(selectedSessionId));
+  const [viewMode, setViewMode] = useState(initialPreferences.viewMode);
+  const [query, setQuery] = useState(initialPreferences.query);
   /**
    * The board opens on the project the rail is pointing at.
    *
@@ -654,11 +661,11 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
    * one click away in the chip; it is just no longer the thing you get without
    * asking.
    */
-  const [spaceFilter, setSpaceFilter] = useState<string>(() => selectedSessionId ?? "all");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [attentionOnly, setAttentionOnly] = useState(false);
+  const [spaceFilter, setSpaceFilter] = useState(initialPreferences.spaceFilter);
+  const [statusFilter, setStatusFilter] = useState<MissionBoardStatusFilter>(initialPreferences.statusFilter);
+  const [attentionOnly, setAttentionOnly] = useState(initialPreferences.attentionOnly);
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
-  const [doneExpanded, setDoneExpanded] = useState(false);
+  const [doneExpanded, setDoneExpanded] = useState(initialPreferences.doneExpanded);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
   /**
@@ -679,9 +686,54 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
   const [streamState, setStreamState] = useState<StreamState>("connecting");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const scrollRootRef = useRef<HTMLDivElement | null>(null);
+  const scrollPositionRef = useRef({
+    left: initialPreferences.scrollLeft,
+    top: initialPreferences.scrollTop,
+  });
+  const scrollRestoredRef = useRef(false);
+  const preferencesRef = useRef<MissionBoardPreferences>(initialPreferences);
+  const registerScrollRoot = useCallback((element: HTMLDivElement | null): void => {
+    scrollRootRef.current = element;
+    if (element === null || scrollRestoredRef.current) return;
+    element.scrollLeft = initialPreferences.scrollLeft;
+    element.scrollTop = initialPreferences.scrollTop;
+    scrollRestoredRef.current = true;
+  }, [initialPreferences.scrollLeft, initialPreferences.scrollTop]);
+  const rememberScrollPosition = useCallback((event: ReactUIEvent<HTMLDivElement>): void => {
+    scrollPositionRef.current = {
+      left: event.currentTarget.scrollLeft,
+      top: event.currentTarget.scrollTop,
+    };
+  }, []);
   const registerCardRef = useCallback((taskId: string, element: HTMLElement | null): void => {
     if (element === null) cardRefs.current.delete(taskId);
     else cardRefs.current.set(taskId, element);
+  }, []);
+
+  useEffect(() => {
+    const preferences: MissionBoardPreferences = {
+      viewMode,
+      query,
+      spaceFilter,
+      statusFilter,
+      attentionOnly,
+      doneExpanded,
+      scrollLeft: scrollPositionRef.current.left,
+      scrollTop: scrollPositionRef.current.top,
+      selectedSessionId,
+    };
+    preferencesRef.current = preferences;
+    writeMissionBoardPreferences(preferences);
+  }, [attentionOnly, doneExpanded, query, selectedSessionId, spaceFilter, statusFilter, viewMode]);
+
+  useEffect(() => () => {
+    const root = scrollRootRef.current;
+    writeMissionBoardPreferences({
+      ...preferencesRef.current,
+      scrollLeft: root?.scrollLeft ?? scrollPositionRef.current.left,
+      scrollTop: root?.scrollTop ?? scrollPositionRef.current.top,
+    });
   }, []);
 
   useEffect(() => {
@@ -991,12 +1043,11 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     setAttentionOnly(false);
   }, []);
 
+  const previousSelectedSessionIdRef = useRef(selectedSessionId);
   useEffect(() => {
-    if (selectedSessionId === null) return;
-    // Only when the rail actually moves. Written as an effect rather than
-    // derived state so "All spaces" survives until the next deliberate project
-    // switch instead of snapping back on the next render.
-    setSpaceFilter(selectedSessionId);
+    if (previousSelectedSessionIdRef.current === selectedSessionId) return;
+    previousSelectedSessionIdRef.current = selectedSessionId;
+    if (selectedSessionId !== null) setSpaceFilter(selectedSessionId);
   }, [selectedSessionId]);
 
   useEffect(() => {
@@ -1270,7 +1321,11 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
       {resource.status === "stale" && resource.error ? <StaleDataBanner error={resource.error} retry={resource.retry} /> : null}
 
       <div className="flex min-h-0 flex-1">
-        <div className="mission-board-scroll min-w-0 flex-1 overflow-auto p-4">
+        <div
+          ref={registerScrollRoot}
+          onScroll={rememberScrollPosition}
+          className="mission-board-scroll min-w-0 flex-1 overflow-auto p-4"
+        >
           {visibleTasks.length === 0 ? (
             <div className="flex min-h-full items-center justify-center">
               <div className="max-w-sm text-center" role="status">

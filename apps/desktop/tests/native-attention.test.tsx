@@ -12,7 +12,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { useNativeAttention } from "../src/hooks/use-native-attention";
 import { useTerminusStore } from "../src/hooks/use-terminus";
+import * as apiV2Module from "../src/lib/api-v2";
+import type { ArpV2EventStream } from "../src/lib/api-v2";
 import type { Task, TaskDomainStatus } from "../src/types";
+import type { ArpV2EventEnvelope } from "../src/types/v2";
 
 function task(id: string, status: TaskDomainStatus, overrides: Partial<Task> = {}): Task {
   return {
@@ -61,20 +64,75 @@ function Probe({ onOpenTask }: { onOpenTask?: (taskId: string) => void }): JSX.E
   return <div />;
 }
 
+function inertStream(): ArpV2EventStream {
+  return {
+    readyState: 1,
+    lastEventId: null,
+    addEventListener: () => () => {},
+    close: vi.fn(),
+  };
+}
+
 beforeEach(() => {
   cleanup();
   install([]);
+  vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
   // The app is in the background: that is when these signals are for.
   vi.spyOn(document, "hasFocus").mockReturnValue(false);
 });
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   delete (window as { terminusDesktop?: unknown }).terminusDesktop;
 });
 
 describe("Dock badge", () => {
+  test("refreshes the workspace after a task event when no transcript is open", async () => {
+    vi.useFakeTimers();
+    const handlers = new Map<string, Set<(event?: ArpV2EventEnvelope) => void>>();
+    const stream: ArpV2EventStream = {
+      readyState: 1,
+      lastEventId: null,
+      addEventListener(type, handler) {
+        const listeners = handlers.get(type) ?? new Set();
+        listeners.add(handler as (event?: ArpV2EventEnvelope) => void);
+        handlers.set(type, listeners);
+        return () => listeners.delete(handler as (event?: ArpV2EventEnvelope) => void);
+      },
+      close: vi.fn(),
+    };
+    vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(stream);
+    const refreshAll = vi.spyOn(useTerminusStore.getState(), "refreshAll").mockResolvedValue();
+
+    const view = render(<Probe />);
+    const event: ArpV2EventEnvelope = {
+      eventId: "event-1",
+      eventType: "task.running",
+      schemaVersion: 2,
+      aggregateType: "task",
+      aggregateId: "task-1",
+      aggregateSequence: 1,
+      occurredAt: "2026-08-29T16:00:00.000Z",
+      actor: { kind: "system", id: "terminus-control" },
+      correlationId: "task-1",
+      causationId: null,
+      idempotencyKey: null,
+      payload: {},
+      artifactRefs: [],
+      traceId: null,
+    };
+    act(() => {
+      for (const handler of handlers.get("message") ?? []) handler(event);
+      vi.advanceTimersByTime(200);
+    });
+
+    expect(refreshAll).toHaveBeenCalledOnce();
+    view.unmount();
+    expect(stream.close).toHaveBeenCalledOnce();
+  });
+
   test("counts the tasks that want a human", () => {
     const bridge = installBridge();
     install([task("a", "NEEDS_USER_DECISION"), task("b", "ACTIVE"), task("c", "FAILED")]);

@@ -211,13 +211,15 @@ try {
     const application = await verifyPackagedApplication(architecture, commit, version, packageOutput);
     const launchable = process.arch === "arm64" || architecture === "x64";
     if (launchable) {
+      // Keep the launch profile under launchDesktopRuntime's short OS-temp
+      // root. PACKAGE_CACHE is long enough to overflow Darwin's 103-byte UDS
+      // path limit before the packaged runtime can bind kernel.sock.
       await launchDesktopRuntime({
         application,
         architecture,
         commit,
         version,
         buildKind: "local",
-        stateBase: join(PACKAGE_CACHE, "launch"),
       });
       launchedArchitectures.push(architecture);
     }

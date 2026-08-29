@@ -12,7 +12,6 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { extractFile } from "@electron/asar";
 import {
   decodeDesktopRuntimeManifest,
@@ -25,6 +24,8 @@ const HEALTH_STABILITY_MS = 4_500;
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 250;
 const MAX_RETAINED_LOG_BYTES = 8 * 1_024;
+const MAX_DARWIN_UDS_PATH_BYTES = 103;
+const DEFAULT_STATE_BASE = "/private/tmp";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 interface ProcessRow {
@@ -307,7 +308,11 @@ export async function launchDesktopRuntime(
     throw new Error("desktop launch requires exactly one local application or exact ZIP artifact");
   }
 
-  const stateBase = resolve(options.stateBase ?? tmpdir());
+  // Electron canonicalizes /var/folders to /private/var/folders. On a normal
+  // macOS account that turns an apparently valid 98-byte socket path into 106
+  // bytes, beyond sockaddr_un.sun_path. A private random child under the real
+  // short temp root keeps the profile isolated and the UDS representable.
+  const stateBase = resolve(options.stateBase ?? DEFAULT_STATE_BASE);
   await mkdir(stateBase, { recursive: true, mode: 0o700 });
   const state = await mkdtemp(join(stateBase, `terminus-${options.architecture}-`));
   const profile = join(state, "profile");
@@ -317,6 +322,9 @@ export async function launchDesktopRuntime(
   const runtimeLog = join(runtimeRoot, "runtime.log");
   const database = join(runtimeRoot, "control.db");
   const kernelSocket = join(runtimeRoot, "kernel.sock");
+  if (Buffer.byteLength(kernelSocket) > MAX_DARWIN_UDS_PATH_BYTES) {
+    throw new Error(`desktop launch kernel UDS path exceeds ${MAX_DARWIN_UDS_PATH_BYTES} bytes: ${kernelSocket}`);
+  }
   await mkdir(profile, { mode: 0o700 });
   await mkdir(home, { mode: 0o700 });
   let child: ChildProcess | null = null;

@@ -24,10 +24,77 @@ import { useEffect, useMemo, useRef } from "react";
 
 import { useTerminusStore } from "./use-terminus";
 import { useTaskReadStore } from "./use-task-read";
+import { subscribeEventsV2 } from "../lib/api-v2";
 import { attentionReason, countsTowardBadge, taskIsUnread } from "../lib/attention";
 import { lifecycleLabel, taskTitle } from "../lib/task-lifecycle";
 import { displayLifecycleWith, type TurnActivity } from "../lib/turn-activity";
 import type { Task } from "../types";
+
+const WORKSPACE_REFRESH_DELAY_MS = 200;
+const WORKSPACE_RECONNECT_BASE_MS = 500;
+const WORKSPACE_RECONNECT_MAX_MS = 30_000;
+
+/**
+ * Keep the portfolio current even when no task transcript is open.
+ *
+ * Transcript streams remain task-scoped because they carry high-volume turn
+ * detail. This lightweight V2 stream observes only task and question changes,
+ * then reconciles the bounded sidebar snapshot through the ordinary reads.
+ */
+export function useWorkspaceEventRefresh(): void {
+  useEffect(() => {
+    let disposed = false;
+    let reconnectAttempts = 0;
+    let cursor: string | null = null;
+    let refreshTimer: number | null = null;
+    let reconnectTimer: number | null = null;
+    let stream: ReturnType<typeof subscribeEventsV2> | null = null;
+
+    const scheduleRefresh = (): void => {
+      if (refreshTimer !== null) return;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        void useTerminusStore.getState().refreshAll();
+      }, WORKSPACE_REFRESH_DELAY_MS);
+    };
+
+    const connect = (): void => {
+      if (disposed) return;
+      stream = subscribeEventsV2({ cursor });
+      stream.addEventListener("open", () => {
+        reconnectAttempts = 0;
+      });
+      stream.addEventListener("message", (event) => {
+        cursor = event.eventId;
+        if (event.aggregateType === "task" || event.eventType.startsWith("question.")) {
+          scheduleRefresh();
+        }
+      });
+      stream.addEventListener("error", () => {
+        if (disposed || reconnectTimer !== null) return;
+        cursor = stream?.lastEventId ?? cursor;
+        stream?.close();
+        reconnectAttempts += 1;
+        const delay = Math.min(
+          WORKSPACE_RECONNECT_MAX_MS,
+          WORKSPACE_RECONNECT_BASE_MS * 2 ** Math.min(reconnectAttempts - 1, 6),
+        );
+        reconnectTimer = window.setTimeout(() => {
+          reconnectTimer = null;
+          connect();
+        }, delay);
+      });
+    };
+
+    connect();
+    return () => {
+      disposed = true;
+      stream?.close();
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+    };
+  }, []);
+}
 
 export interface AttentionItem {
   readonly id: string;
@@ -87,6 +154,7 @@ export function attentionItems(
 }
 
 export function useNativeAttention(onOpenTask: (taskId: string) => void): void {
+  useWorkspaceEventRefresh();
   const tasksBySession = useTerminusStore((state) => state.tasksBySession);
   const runActivityByTask = useTerminusStore((state) => state.runActivityByTask);
   const seenAtByTask = useTaskReadStore((state) => state.seenAtByTask);

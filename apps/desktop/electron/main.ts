@@ -103,6 +103,8 @@ let runtimeSupervisor: StandaloneRuntimeSupervisor | null = null;
 let runtimeShutdownStarted = false;
 let runtimeAcceptingRequests = false;
 let desktopFatalReported = false;
+let rendererAuthenticationObserved = false;
+let rendererEventStreamObserved = false;
 let shellState: ShellStateStore | null = null;
 let repositoryLinks: { documentationUrl: string | null; issuesUrl: string | null } = {
   documentationUrl: null,
@@ -270,6 +272,10 @@ function registerAuthenticatedTransport(): void {
       callback({ requestHeaders });
       return;
     }
+    if (!isDev && !rendererAuthenticationObserved) {
+      rendererAuthenticationObserved = true;
+      console.log("[terminus-desktop] authenticated header injected for renderer request");
+    }
     callback({
       requestHeaders: {
         ...requestHeaders,
@@ -277,6 +283,26 @@ function registerAuthenticatedTransport(): void {
       },
     });
   });
+  session.defaultSession.webRequest.onResponseStarted(
+    { urls: [`${allowedOrigin}/*`] },
+    (details) => {
+      if (
+        isDev
+        || rendererEventStreamObserved
+        || details.webContentsId !== mainWindow?.webContents.id
+        || details.statusCode !== 200
+      ) return;
+      let pathname: string;
+      try {
+        pathname = new URL(details.url).pathname;
+      } catch {
+        return;
+      }
+      if (pathname !== "/v1/events" && pathname !== "/v2/events") return;
+      rendererEventStreamObserved = true;
+      console.log("[terminus-desktop] renderer opened SSE connection");
+    },
+  );
 }
 
 // ────────────────────────── Content security policy ──────────────────────────
@@ -630,8 +656,10 @@ function hardenWebContents(window: BrowserWindow, label: string): void {
   window.webContents.on("will-navigate", (event, targetUrl) => {
     if (!isTrustedRendererUrl(targetUrl)) event.preventDefault();
   });
-  window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    console.log(`[terminus-desktop-renderer] [${level}] ${message} (${sourceId}:${line})`);
+  window.webContents.on("console-message", (details) => {
+    console.log(
+      `[terminus-desktop-renderer] [${details.level}] ${details.message} (${details.sourceId}:${details.lineNumber})`,
+    );
   });
   window.webContents.on("render-process-gone", (_event, details) => {
     const logPath = recordCrash(
@@ -676,6 +704,7 @@ function createMainWindow(): BrowserWindow {
     if (!window.isDestroyed()) window.show();
   });
   window.webContents.on("did-finish-load", () => {
+    if (!isDev) console.log("[terminus-desktop] packaged renderer loaded under CSP");
     flushPendingMainWindowMessages(window);
   });
   window.webContents.on("did-start-loading", () => {

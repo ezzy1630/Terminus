@@ -141,6 +141,7 @@ function inertStream(): ArpV2EventStream {
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  window.sessionStorage.clear();
   useTerminusStore.setState({ taskById: {}, runActivityByTask: {} });
   vi.restoreAllMocks();
 });
@@ -340,6 +341,36 @@ describe("mission board domain mapping", () => {
 });
 
 describe("MissionBoardView", () => {
+  test("restores its view, filters, and scroll position after navigation", async () => {
+    vi.spyOn(arpV2, "listTasks").mockResolvedValue([
+      task("task-ready", "READY", "Add token refresh"),
+      task("task-done", "COMPLETED", "Audit authentication"),
+    ]);
+    vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
+    vi.spyOn(apiV2Module, "subscribeEventsV2").mockReturnValue(inertStream());
+    const user = userEvent.setup();
+
+    const first = render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "List view" }));
+    await user.type(screen.getByRole("textbox", { name: "Search mission board" }), "Audit");
+    const firstScrollRoot = first.container.querySelector<HTMLElement>(".mission-board-scroll");
+    expect(firstScrollRoot).not.toBeNull();
+    if (firstScrollRoot !== null) {
+      firstScrollRoot.scrollLeft = 96;
+      firstScrollRoot.scrollTop = 144;
+      fireEvent.scroll(firstScrollRoot);
+    }
+    first.unmount();
+
+    const second = render(<MissionBoardView onOpenTask={() => {}} onInspectTask={() => {}} />);
+    expect(await screen.findByRole("button", { name: "List view" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("textbox", { name: "Search mission board" })).toHaveValue("Audit");
+    expect(screen.getByRole("table", { name: "Board tasks" })).toHaveTextContent("Audit authentication");
+    expect(screen.queryByText("Add token refresh")).not.toBeInTheDocument();
+    const secondScrollRoot = second.container.querySelector<HTMLElement>(".mission-board-scroll");
+    expect(secondScrollRoot).toMatchObject({ scrollLeft: 96, scrollTop: 144 });
+  });
+
   test("renders canonical tasks, attention, cancelled work, and one shared selection", async () => {
     const tasks = [
       task("task-ready", "READY", "Add token refresh"),
