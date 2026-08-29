@@ -78,8 +78,6 @@
   --radius-lg: 10px;
   --radius-xl: 12px;
 
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 :root {
@@ -233,6 +231,23 @@
   --elevation-lg: 0 14px 38px rgb(0 0 0 / 58%);
   --shadow-card: 0 1px 2px rgb(0 0 0 / 34%);
   --shadow-card-hover: 0 3px 10px rgb(0 0 0 / 42%);
+
+  /* Syntax Highlighting */
+  --syn-keyword: #c678dd;
+  --syn-type: #56b6c2;
+  --syn-string: #98c379;
+  --syn-comment: #717886;
+  --syn-number: #d19a66;
+  --syn-function: #61afef;
+  --syn-operator: #abb2bf;
+  --syn-punctuation: #8e8e96;
+
+  /* Context Compiler Token Allocation */
+  --alloc-system: #b072f7;
+  --alloc-ast: #388bfd;
+  --alloc-memory: #3fb950;
+  --alloc-tools: #d29922;
+  --alloc-headroom: #2b2b2f;
 }
 
 @media (prefers-color-scheme: light) {
@@ -328,6 +343,23 @@
   --elevation-lg: 0 8px 24px rgb(35 35 30 / 14%);
   --shadow-card: 0 1px 3px rgb(35 35 30 / 7%);
   --shadow-card-hover: 0 5px 16px rgb(35 35 30 / 12%);
+
+  /* Syntax Highlighting */
+  --syn-keyword: #a626a4;
+  --syn-type: #0184bc;
+  --syn-string: #50a14f;
+  --syn-comment: #9ca3af;
+  --syn-number: #986801;
+  --syn-function: #4078f2;
+  --syn-operator: #383a42;
+  --syn-punctuation: #5b6470;
+
+  /* Context Compiler Token Allocation */
+  --alloc-system: #8a3ffc;
+  --alloc-ast: #0043ce;
+  --alloc-memory: #198038;
+  --alloc-tools: #b28600;
+  --alloc-headroom: #e0e0e0;
 }
 
 [data-density="compact"] {

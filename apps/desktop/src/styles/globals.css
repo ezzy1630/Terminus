@@ -64,9 +64,15 @@ button {
   transition: border-color var(--duration-fast) var(--easing-default), box-shadow var(--duration-fast) var(--easing-default);
 }
 
+/* Rings are for the keyboard. The document is marked while the last
+   interaction was a key that moves focus (src/lib/keyboard-focus.ts); a
+   click never draws one, the way it never does in AppKit. */
 .ui-input:focus-visible {
-  border-color: var(--focus-border);
   outline: none;
+}
+
+[data-keyboard-nav] .ui-input:focus-visible {
+  border-color: var(--focus-border);
   box-shadow: var(--focus-ring);
 }
 
@@ -83,7 +89,11 @@ textarea::placeholder,
 }
 
 /* ────────────────────────── Scrollbars ────────────────────────────────── */
-/* Minimal macOS-style scrollbars */
+/* macOS overlay scroll bars: visible while the content is moving, gone
+   otherwise. The thumb used to be revealed by `*:hover`, so resting the
+   pointer anywhere over a pane drew a permanent bar down its edge — the single
+   most web-page-like thing left in the window. `installNativeScrollbars` sets
+   `data-scrolling` on whatever just scrolled; nothing else paints a thumb. */
 
 ::-webkit-scrollbar {
   width: 8px;
@@ -101,13 +111,25 @@ textarea::placeholder,
   background-clip: padding-box;
 }
 
-*:hover::-webkit-scrollbar-thumb,
-*:focus-within::-webkit-scrollbar-thumb {
+[data-scrolling]::-webkit-scrollbar-thumb {
   background-color: color-mix(in srgb, var(--text-tertiary) 54%, transparent);
 }
 
+/* Keeps the bar grabbable: the track is invisible, so without this the thumb
+   would have to be hit blind. */
 ::-webkit-scrollbar-thumb:hover {
   background-color: color-mix(in srgb, var(--text-secondary) 72%, transparent);
+}
+
+/* No bar at all. For the sidebar, where a scroll bar is 8px of a 256px column
+   and Finder's own source list does without one. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .scrollable {
@@ -143,6 +165,22 @@ textarea::placeholder,
   [role="tab"]
 ):focus-visible {
   outline: none;
+}
+
+[data-keyboard-nav] :is(
+  a,
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  [tabindex]:not([tabindex="-1"]),
+  [role="button"],
+  [role="menuitem"],
+  [role="option"],
+  [role="separator"],
+  [role="tab"]
+):focus-visible {
   box-shadow: var(--focus-ring);
 }
 }
@@ -210,22 +248,133 @@ textarea::placeholder,
   to { opacity: 0; }
 }
 
+/* Every panel wearing `.dialog-panel` is centred by Tailwind's
+   `-translate-x-1/2 -translate-y-1/2`, and in Tailwind v4 those compile to the
+   `translate` *property*, not to `transform`. The two compose. So restating
+   the centring inside these keyframes applied it twice: the panel animated
+   half its own width and height up and to the left of where it belonged, then
+   snapped into place the instant the animation ended — the sheet appearing
+   somewhere else first and jumping. The keyframes own the entrance offset
+   only; centring stays where the utility put it. */
 @keyframes dialog-in {
-  from { opacity: 0; transform: translate(-50%, calc(-50% + 8px)) scale(.99); }
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  from { opacity: 0; transform: translateY(8px) scale(.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 @keyframes dialog-out {
-  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  to { opacity: 0; transform: translate(-50%, calc(-50% + 4px)) scale(.99); }
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(4px) scale(.99); }
 }
 
 .dialog-panel[data-state="open"] {
-  animation: dialog-in var(--duration-normal) var(--easing-emphasized);
+  animation: dialog-in var(--duration-normal) var(--easing-emphasized) both;
 }
 
+/* `both` so the last frame holds until the node is actually removed. Without
+   it the panel snapped back to full opacity for one frame on the way out. */
 .dialog-panel[data-state="closed"] {
-  animation: dialog-out var(--duration-fast) var(--easing-default);
+  animation: dialog-out var(--duration-fast) var(--easing-default) both;
+}
+
+/* ── Task search ─────────────────────────────────────────────────────────
+   A sheet of frosted glass over the workspace, the way Spotlight sits over
+   the desktop: translucent, blurred behind, a hairline of light along the top
+   edge. It settles into place from a hair below with a long-tailed ease and
+   leaves faster than it arrived — the way out should never make you wait.
+   Centering is the `translate` property (Tailwind v4), so the keyframes own
+   `transform` outright and the two never fight. */
+.task-search {
+  /* A faint sheen down from the top edge is what makes glass read as glass
+     rather than as a grey rectangle at 84% opacity. */
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #fff 4%, transparent), transparent 40%),
+    color-mix(in srgb, var(--bg-popover) 82%, transparent);
+  -webkit-backdrop-filter: blur(56px) saturate(1.7);
+  backdrop-filter: blur(56px) saturate(1.7);
+  border: 1px solid color-mix(in srgb, var(--text-primary) 11%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent),
+    inset 0 0 0 0.5px color-mix(in srgb, #fff 3%, transparent),
+    0 0 0 0.5px color-mix(in srgb, #000 45%, transparent),
+    0 2px 6px color-mix(in srgb, #000 25%, transparent),
+    0 16px 32px -8px color-mix(in srgb, #000 50%, transparent),
+    0 40px 90px -16px color-mix(in srgb, #000 65%, transparent);
+  will-change: transform, opacity;
+  transform-origin: 50% 0;
+}
+
+.task-search-field {
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.task-search-footer {
+  background: color-mix(in srgb, var(--bg-canvas) 30%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-primary) 7%, transparent);
+}
+
+.task-search-row[aria-selected="true"] {
+  background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 5%, transparent);
+}
+
+.task-search input:focus-visible {
+  box-shadow: none;
+}
+
+:root[data-theme="light"] .task-search,
+.light .task-search {
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 80%, transparent),
+    0 0 0 0.5px color-mix(in srgb, #000 12%, transparent),
+    0 28px 64px -12px color-mix(in srgb, #000 22%, transparent),
+    0 8px 20px -8px color-mix(in srgb, #000 12%, transparent);
+}
+
+@keyframes task-search-in {
+  from { opacity: 0; transform: translateY(10px) scale(.965); }
+  60%  { opacity: 1; }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes task-search-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(4px) scale(.98); }
+}
+
+.task-search[data-state="open"] {
+  animation: task-search-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.task-search[data-state="closed"] {
+  animation: task-search-out 110ms var(--easing-default) both;
+}
+
+.task-search-overlay {
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+}
+
+.task-search-overlay[data-state="open"] {
+  animation: fade-in 200ms var(--easing-default) both;
+}
+
+.task-search-overlay[data-state="closed"] {
+  animation: fade-out 110ms var(--easing-default) both;
+}
+
+/* Rows light up as the pointer or arrow keys reach them; the wash is soft
+   and the change is a fade, not a flash. */
+.task-search-row {
+  transition: background-color 70ms var(--easing-default);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-search[data-state="open"],
+  .task-search[data-state="closed"],
+  .task-search-overlay[data-state="open"],
+  .task-search-overlay[data-state="closed"] {
+    animation-duration: 1ms;
+  }
 }
 
 @keyframes slide-up {
@@ -574,9 +723,14 @@ textarea::placeholder,
   font-weight: 500;
 }
 
+/* Secondary chrome text. 12px, not 11: the rail wrote its meta line at 12 and
+   the board wrote the same kind of label at 11, so a project name changed size
+   when the eye crossed the seam between two panes showing the same tasks. One
+   size wins, and the larger one wins because this is the label people actually
+   read — 11px survives only for code, shortcut keys, and counts. */
 .ui-meta {
-  font-size: var(--font-size-xs);
-  line-height: var(--line-height-xs);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-sm);
   font-weight: 400;
   color: var(--text-tertiary);
 }
@@ -627,6 +781,13 @@ textarea::placeholder,
 
 .ui-list-row {
   min-height: var(--row-height);
+}
+
+/* Board cards take their padding from the density scale like everything else.
+   The board was the one surface that ignored the setting, so compact mode
+   tightened the rail and the inspector and left the cards at spacious. */
+.board-card {
+  padding: var(--space-3);
 }
 
 /* Task rows — refined for Codex parity */
@@ -999,3 +1160,54 @@ html[data-vibrancy="on"] .model-picker-surface {
 .ui-button-primary:active:not(:disabled) {
   background-color: var(--accent-pressed);
 }
+
+/* ────────────────────────── Syntax Highlighting Tokens ──────────────────── */
+.syn-keyword { color: var(--syn-keyword); font-weight: 500; }
+.syn-type { color: var(--syn-type); }
+.syn-string { color: var(--syn-string); }
+.syn-comment { color: var(--syn-comment); font-style: italic; opacity: 0.85; }
+.syn-number { color: var(--syn-number); }
+.syn-function { color: var(--syn-function); }
+.syn-operator { color: var(--syn-operator); }
+.syn-punctuation { color: var(--syn-punctuation); }
+
+/* ────────────────────────── Diff Minimap ───────────────────────────────── */
+.diff-minimap {
+  position: relative;
+  width: 14px;
+  flex-shrink: 0;
+  background: var(--bg-canvas);
+  border-left: 1px solid var(--border-subtle);
+  user-select: none;
+  overflow: hidden;
+}
+
+.diff-minimap-tick {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  height: 2px;
+  border-radius: 1px;
+}
+.diff-minimap-tick.add { background-color: var(--color-addition); opacity: 0.85; }
+.diff-minimap-tick.del { background-color: var(--color-deletion); opacity: 0.85; }
+
+/* ────────────────────────── Context Compiler Allocator Bar ─────────────── */
+.token-allocator-bar {
+  display: flex;
+  height: 6px;
+  width: 100%;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--alloc-headroom);
+}
+
+.token-allocator-segment {
+  height: 100%;
+  transition: width var(--duration-fast) var(--easing-default);
+}
+.token-alloc-system { background-color: var(--alloc-system); }
+.token-alloc-ast { background-color: var(--alloc-ast); }
+.token-alloc-memory { background-color: var(--alloc-memory); }
+.token-alloc-tools { background-color: var(--alloc-tools); }
+

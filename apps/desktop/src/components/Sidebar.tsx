@@ -1,50 +1,64 @@
 /**
  * Terminus Desktop — Sidebar.
  *
- * The rail, top to bottom, is Codex's:
+ * The rail, top to bottom:
  *
- *   Terminus ⌄                      🔍  🔔   ← project switcher + global search
- *   ✎ New task                          ⊕
- *   ▤ Kanban
- *   ◉ Needs attention                    2
- *   Pinned
- *     Complete release readiness
- *   Projects                            + 🔍
- *     ▸ CoOps
- *     ▾ Terminus
- *         Clean git and rebuild app
- *         Show more
+ *   Terminus ⌄                      ⌕  ☰   ← project switcher, search, grouping
+ *   ✎ New task
+ *   ▤ Board
+ *   Needs you                          2   ← the queue: see TaskQueue
+ *   • Fix the auth race        Website  !
+ *     DB migration             Platform !
+ *   Working                            1
+ *   • Refactor cache layer    Terminus  ◌
+ *   Today                                  ← the body: finished work, by day,
+ *   • Rebuild the release bundle             or by project — one control, not
+ *     Bump the kernel protocol               two modes
+ *   Yesterday
+ *     Clean git and rebuild app
  *   ─────────────────────────────────────
  *   ◍ Terminus                        ⚙ ·
  *
- * Two things changed the character of this column. The first is that a task
- * row is now a title and nothing else (see SidebarItem) — the "Failed · 2h ago"
- * meta line and the leading status dot are gone, so the eye scans titles
- * instead of parsing three columns of chrome thirty times. The second is that
- * the destinations moved out of a bordered "primary action" card and into
- * plain 30px rows, which is why the rail no longer reads like a web dashboard
- * nav.
+ * The blue dot is unread. It is a mark rather than a section, because "nobody
+ * has looked at this" is orthogonal to "this is blocked" — a task that needs
+ * you is usually also unread, and hoisting unread work into its own heading
+ * next to the queue asked the reader to file such a task under one of two
+ * headings that were both true. So it appears wherever the row appears, in the
+ * queue and in the day groups alike, and reading a task clears it without
+ * moving the row anywhere.
+ *
+ * There used to be an `[ Inbox | Projects ]` segmented control here, and it
+ * swapped the entire body between two lists of the same tasks. That is a
+ * *display setting* wearing the costume of a navigation mode: nothing about
+ * the rail's job changes when you file the same rows by day instead of by
+ * repository. It is now one list with a grouping menu in the header, which is
+ * the shape every tool that has this problem converges on — and it gave the
+ * column a whole horizontal band back.
  *
  * Per SPEC §7.1: "Projects contain nested tasks. Do not expose worktrees or
  * branches as another permanent hierarchy level."
  * Per SPEC §7.2: selected state is visible without a bright saturated bg.
  *
+ * The rail is deliberately the quietest region in the window. Navigation is
+ * there to be found, not read — so its icons sit at tertiary, its section
+ * labels at 12px tertiary, and nothing in here competes with the transcript
+ * for attention it has not earned.
+ *
  * On re-render cost: task rows are memoized on primitive props and read their
  * own lifecycle out of the store by id. A streaming turn therefore re-renders
- * the one row it concerns, not the whole tree — which is the entire reason
- * `runActivityByTask` is not subscribed to at this level.
+ * the one row it concerns, not the whole tree. The queue is a separate
+ * component for the same reason — it genuinely needs every task's activity to
+ * count what is running, and keeping that subscription inside it stops the
+ * whole rail re-rendering on every token.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Bell,
   ChevronDown,
   ChevronRight,
-  CircleAlert,
-  CirclePlus,
   Columns3,
-  Ellipsis,
   Folder,
   FolderOpen,
+  ListFilter,
   Plus,
   Search,
   Settings,
@@ -54,15 +68,27 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "../lib/cn";
 import { useTerminusStore, usePinnedTasks } from "../hooks/use-terminus";
-import { lifecycleNeedsAttention, taskTitle } from "../lib/task-lifecycle";
+import { taskTitle } from "../lib/task-lifecycle";
 import { displayLifecycleWith } from "../lib/turn-activity";
 import type { TurnActivity } from "../lib/turn-activity";
 import { useThemeStore } from "../hooks/use-theme";
+import {
+  readCollapsedProjects,
+  readExpandedProjects,
+  readSidebarGrouping,
+  writeCollapsedProjects,
+  writeExpandedProjects,
+  writeSidebarGrouping,
+  type SidebarGrouping,
+} from "../lib/sidebar-prefs";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
 import { Menu, type MenuItem } from "../ui/Menu";
 import { Skeleton } from "../ui/Status";
-import { SidebarItem } from "./SidebarItem";
+import { TaskRow } from "./TaskRow";
+import { TaskQueue } from "./TaskQueue";
+import { useTaskReadStore } from "../hooks/use-task-read";
+import { attentionReason, spansMultipleProjects, taskIsUnread, taskShelf } from "../lib/attention";
 import { ProjectMenu, projectSubtitle } from "./ProjectMenu";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import type { Session, Task } from "../types";
@@ -70,7 +96,6 @@ import type { Session, Task } from "../types";
 interface SidebarProps {
   activeDestination?: SidebarDestination;
   onNavigate?: (destination: SidebarDestination) => void;
-  onOpenAttentionCenter?: () => void;
   onOpenProject?: () => void;
 }
 
@@ -82,30 +107,52 @@ export type SidebarDestination =
   | "task_details";
 
 /**
- * How many loaded tasks are asking for a human.
+ * How many loaded tasks in a project want a human, for the rollup dot.
  *
- * Deliberately a selector returning a number rather than a `useMemo` over two
- * subscribed maps: the count is what the row renders, so the sidebar should
- * re-render when the *count* changes, not every time any task's activity does.
+ * A collapsed project that is hiding an approval prompt is the one case where
+ * collapsing loses information rather than just space, so the row keeps a mark
+ * even when its children are folded away. Counts blocked work only — a folded
+ * project hiding three tasks that merely finished is not a warning.
  */
-function selectAttentionCount(state: {
-  tasksBySession: Record<string, Task[]>;
-  runActivityByTask: Record<string, TurnActivity>;
-}): number {
+function sessionAttentionCount(
+  tasks: readonly Task[],
+  runActivityByTask: Record<string, TurnActivity>,
+): number {
   let count = 0;
-  for (const tasks of Object.values(state.tasksBySession)) {
-    for (const task of tasks) {
-      const activity = state.runActivityByTask[task.id] ?? "unknown";
-      if (lifecycleNeedsAttention(displayLifecycleWith(task, activity))) count += 1;
-    }
+  for (const task of tasks) {
+    const lifecycle = displayLifecycleWith(task, runActivityByTask[task.id] ?? "unknown");
+    if (attentionReason({ lifecycle, domainTask: task }) !== null) count += 1;
   }
   return count;
+}
+
+/**
+ * Keep a task's row on screen when the rail moves it.
+ *
+ * Reading a finished task settles it out of the queue and into its day, which
+ * is correct and also means the row the operator was just looking at vanishes
+ * from under the cursor and reappears somewhere below the fold. The rail
+ * follows it: `block: "nearest"` scrolls the minimum distance that makes the
+ * row visible, so a row already on screen does not move at all.
+ *
+ * Keyed on the *shelf*, not on every render — otherwise a task streaming
+ * tokens would drag the sidebar around once per frame.
+ */
+function useKeepTaskInView(taskId: string | null, shelf: string | null): void {
+  useEffect(() => {
+    if (!taskId) return;
+    // After the re-render that moved it, and only if it is really mounted.
+    const frame = window.requestAnimationFrame(() => {
+      const row = document.querySelector(`[data-task-row="${CSS.escape(taskId)}"]`);
+      row?.scrollIntoView({ block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [shelf, taskId]);
 }
 
 function SidebarImpl({
   activeDestination = "new_task",
   onNavigate,
-  onOpenAttentionCenter,
   onOpenProject,
 }: SidebarProps): JSX.Element {
   const sessions = useTerminusStore((s) => s.sessions);
@@ -123,31 +170,61 @@ function SidebarImpl({
   const healthReady = useTerminusStore((s) => s.healthReady);
   const healthStatus = useTerminusStore((s) => s.healthStatus);
   const pinPersistenceError = useTerminusStore((s) => s.pinPersistenceError);
-  const attentionCount = useTerminusStore(selectAttentionCount);
+  const runActivityByTask = useTerminusStore((s) => s.runActivityByTask);
+  const seenAtByTask = useTaskReadStore((s) => s.seenAtByTask);
+  const markManyRead = useTaskReadStore((s) => s.markManyRead);
 
   const selectSession = useTerminusStore((s) => s.selectSession);
   const selectTask = useTerminusStore((s) => s.selectTask);
   const togglePin = useTerminusStore((s) => s.togglePin);
   const refreshSessions = useTerminusStore((s) => s.refreshSessions);
   const refreshAll = useTerminusStore((s) => s.refreshAll);
-  const refreshTasks = useTerminusStore((s) => s.refreshTasks);
   const loadMoreSessions = useTerminusStore((s) => s.loadMoreSessions);
   const loadMoreTasks = useTerminusStore((s) => s.loadMoreTasks);
   const refreshTask = useTerminusStore((s) => s.refreshTask);
+  const refreshVisibleSessionTasks = useTerminusStore((s) => s.refreshVisibleSessionTasks);
 
   const currentSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const pinnedTasks = usePinnedTasks();
+  const projectNameById = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const session of sessions) names.set(session.id, session.title);
+    return names;
+  }, [sessions]);
+  // One body, two ways of filing it. "Recent" answers "what happened"; "By
+  // project" answers "what is in this repository". Both show the same rows.
+  const [grouping, setGrouping] = useState<SidebarGrouping>(readSidebarGrouping);
+  const [collapsedSessions, setCollapsedSessions] = useState<Set<string>>(readCollapsedProjects);
+  const [expandedTaskLists, setExpandedTaskLists] = useState<Set<string>>(readExpandedProjects);
 
-  const [query, setQuery] = useState("");
-  const [searchOpen, setSearchOpen] = useState(false);
-  // The rail has two bodies. The tree answers "what is in this project"; the
-  // inbox answers "what happened, and what wants me" across all of them. The
-  // destinations above stay put in both, so the bell is a lens on the same
-  // column rather than a different screen.
-  const [inboxOpen, setInboxOpen] = useState(false);
-  const [collapsedSessions, setCollapsedSessions] = useState<Set<string>>(new Set());
-  const [expandedTaskLists, setExpandedTaskLists] = useState<Set<string>>(new Set());
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  // Written on change rather than at every toggle site: the collapsed set is
+  // moved from four places, and a persistence call at each is four chances to
+  // add a fifth that forgets.
+  useEffect(() => { writeSidebarGrouping(grouping); }, [grouping]);
+  useEffect(() => { writeCollapsedProjects(collapsedSessions); }, [collapsedSessions]);
+  useEffect(() => { writeExpandedProjects(expandedTaskLists); }, [expandedTaskLists]);
+
+  // A task can be opened from anywhere — the palette, a notification, the
+  // queue — and landing on a rail whose only sign of the open task is a folded
+  // project reads as the selection having failed.
+  const selectedTaskSessionId = selectedTaskId ? taskById[selectedTaskId]?.session_id ?? null : null;
+  const selectedTask = selectedTaskId ? taskById[selectedTaskId] : undefined;
+  const selectedShelf = selectedTask
+    ? (() => {
+        const lifecycle = displayLifecycleWith(selectedTask, runActivityByTask[selectedTask.id] ?? "unknown");
+        return taskShelf(lifecycle, attentionReason({ lifecycle, domainTask: selectedTask }));
+      })()
+    : null;
+  useKeepTaskInView(selectedTaskId, selectedShelf);
+  useEffect(() => {
+    if (!selectedTaskSessionId) return;
+    setCollapsedSessions((previous) => {
+      if (!previous.has(selectedTaskSessionId)) return previous;
+      const next = new Set(previous);
+      next.delete(selectedTaskSessionId);
+      return next;
+    });
+  }, [selectedTaskSessionId]);
 
   // The navigation callbacks below are handed to memoized rows, so they have to
   // keep a stable identity across the sidebar's own re-renders. `onNavigate` is
@@ -156,36 +233,23 @@ function SidebarImpl({
   const onNavigateRef = useRef(onNavigate);
   onNavigateRef.current = onNavigate;
 
-  const normalizedQuery = query.trim().toLowerCase();
-  const filteredSessions = useMemo<Array<{ session: Session; tasks: Task[]; searchIncomplete: boolean }>>(() => sessions.flatMap((session) => {
-    const tasks = tasksBySession[session.id] ?? [];
-    if (!normalizedQuery || session.title.toLowerCase().includes(normalizedQuery)) {
-      return [{ session, tasks, searchIncomplete: false }];
-    }
-    const matchingTasks = tasks.filter((task) =>
-      taskTitle(task).toLowerCase().includes(normalizedQuery) || task.id.toLowerCase().includes(normalizedQuery));
-    const freshness = taskListFreshnessBySession[session.id];
-    const searchIncomplete = freshness?.status !== "ready"
-      || Boolean(taskPagesBySession[session.id]?.nextCursor);
-    if (matchingTasks.length === 0 && !searchIncomplete) return [];
-    const selectedTask = tasks.find((task) => task.id === selectedTaskId);
-    return [{
-      session,
-      tasks: selectedTask && !matchingTasks.some((task) => task.id === selectedTask.id)
-        ? [...matchingTasks, selectedTask]
-        : matchingTasks,
-      searchIncomplete,
-    }];
-  }), [normalizedQuery, selectedTaskId, sessions, taskListFreshnessBySession, taskPagesBySession, tasksBySession]);
-  const visiblePinnedTasks = useMemo(() => !normalizedQuery
-    ? pinnedTasks
-    : pinnedTasks.filter((task) =>
-        taskTitle(task).toLowerCase().includes(normalizedQuery) || task.id.toLowerCase().includes(normalizedQuery)),
-  [normalizedQuery, pinnedTasks]);
-  const unresolvedPinnedTaskIds = useMemo(() => [...pinnedTaskIds].filter((taskId) => {
-    if (taskById[taskId]) return false;
-    return !normalizedQuery || taskId.toLowerCase().includes(normalizedQuery);
-  }), [normalizedQuery, pinnedTaskIds, taskById]);
+  const projectRows = useMemo<Array<{ session: Session; tasks: Task[] }>>(
+    () => sessions.map((session) => ({ session, tasks: tasksBySession[session.id] ?? [] })),
+    [sessions, tasksBySession],
+  );
+  const visiblePinnedTasks = pinnedTasks;
+  // Pins are the one list here that crosses projects — but only sometimes.
+  // Asked of the workspace ("are there several projects?") this was true for
+  // anyone with more than one repository open, so three pins from the same
+  // project each gave 40% of their width to the same word.
+  const showProjectMeta = useMemo(
+    () => spansMultipleProjects(visiblePinnedTasks.map((task) => task.session_id)),
+    [visiblePinnedTasks],
+  );
+  const unresolvedPinnedTaskIds = useMemo(
+    () => [...pinnedTaskIds].filter((taskId) => !taskById[taskId]),
+    [pinnedTaskIds, taskById],
+  );
 
   const toggleCollapsed = (sessionId: string): void => {
     setCollapsedSessions((prev) => {
@@ -208,9 +272,67 @@ function SidebarImpl({
     selectTask(taskId);
   }, [selectTask]);
 
-  const openCommandPalette = useCallback((): void => {
-    window.dispatchEvent(new Event("terminus:open-command-palette"));
+  /**
+   * The rail's one search control.
+   *
+   * It used to unfold a filter field inside the column that narrowed the tree
+   * in place. Search is now a surface over the workspace — recent tasks across
+   * every project, narrowed as you type — so the rail never moves under it.
+   * The palette keeps ⌘K and is reachable from inside the search.
+   */
+  const openTaskSearch = useCallback((): void => {
+    window.dispatchEvent(new Event("terminus:open-task-search"));
   }, []);
+
+  /**
+   * How the body is filed, and the housekeeping that belongs to the body
+   * rather than to any one group in it.
+   *
+   * Visible at rest as an icon in the header, not revealed on hover: the
+   * project tree is a primary way to navigate, and burying the only route to
+   * it behind a hover target is how the old unlabelled tab pair failed.
+   */
+  const unreadSettled = useMemo(() => {
+    const rows: Array<{ id: string; updatedAt: string }> = [];
+    for (const tasks of Object.values(tasksBySession)) {
+      for (const task of tasks) {
+        const updatedAt = task.updated_at || task.created_at;
+        if (taskIsUnread(updatedAt, seenAtByTask[task.id])) rows.push({ id: task.id, updatedAt });
+      }
+    }
+    return rows;
+  }, [seenAtByTask, tasksBySession]);
+
+  const groupingMenuItems = useMemo<MenuItem[]>(() => [
+    {
+      id: "group.recent",
+      label: "Recent",
+      detail: "By the day it happened",
+      selected: grouping === "recent",
+      onSelect: () => setGrouping("recent"),
+    },
+    {
+      id: "group.project",
+      label: "By project",
+      detail: "Nested under each repository",
+      selected: grouping === "project",
+      onSelect: () => setGrouping("project"),
+    },
+    {
+      // A list-level action, so it lives with the list-level control rather
+      // than on a section heading that happens to be near it.
+      id: "group.mark-all-read",
+      label: "Mark all as read",
+      separatorBefore: true,
+      disabled: unreadSettled.length === 0,
+      onSelect: () => markManyRead(unreadSettled),
+    },
+    {
+      id: "group.refresh",
+      label: "Refresh tasks",
+      onSelect: () => { void refreshVisibleSessionTasks(); },
+    },
+  ], [grouping, markManyRead, refreshVisibleSessionTasks, unreadSettled]);
 
   return (
     <div className="flex h-full flex-col">
@@ -224,6 +346,7 @@ function SidebarImpl({
               type="button"
               variant="bare"
               aria-label="Switch project"
+              title={currentSession?.title ?? "Terminus"}
               className="flex h-7 min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 text-left hover:bg-hover"
             >
               {/* The size is an inline style, not `text-title`: tailwind-merge
@@ -241,96 +364,72 @@ function SidebarImpl({
           )}
         />
         <IconButton
-          label="Search tasks and commands"
-          icon={<Search size={16} strokeWidth={1.7} aria-hidden />}
+          label="Search tasks"
+          icon={<Search size={14} strokeWidth={1.7} aria-hidden />}
           size="sm"
-          onClick={openCommandPalette}
-          data-tooltip="Search  ⌘K"
-          className="h-7 w-7 shrink-0 rounded-md text-secondary hover:bg-hover hover:text-primary"
+          onClick={openTaskSearch}
+          data-tooltip="Search tasks  ⌘K"
+          className="h-7 w-7 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
         />
-        <span className="relative shrink-0">
-          <IconButton
-            label="Notifications"
-            icon={<Bell size={16} strokeWidth={1.7} aria-hidden />}
-            size="sm"
-            onClick={() => setInboxOpen((open) => !open)}
-            aria-pressed={inboxOpen}
-            data-tooltip={inboxOpen
-              ? "Back to projects"
-              : attentionCount > 0 ? `Inbox — ${attentionCount} needing attention` : "Inbox"}
-            // The one place the accent earns its keep in this column: a tinted
-            // pill says the rail is showing something other than the tree.
-            className={cn(
-              "h-7 w-7 rounded-full",
-              inboxOpen
-                ? "bg-accent/15 text-accent hover:bg-accent/20"
-                : "text-secondary hover:bg-hover hover:text-primary",
-            )}
-          />
-          {/* A dot, not a number. The exact count already has a home on the
-              "Needs attention" row; up here the only question is whether to
-              look at all. It goes away once you are looking. */}
-          {attentionCount > 0 && !inboxOpen ? (
-            <span
-              className="pointer-events-none absolute right-1 top-1 block h-1.5 w-1.5 rounded-full bg-warning ring-2 ring-[var(--bg-sidebar)]"
-              aria-hidden
+        <Menu
+          label="Group tasks"
+          align="end"
+          items={groupingMenuItems}
+          trigger={(
+            <IconButton
+              label="Group tasks"
+              icon={<ListFilter size={14} strokeWidth={1.7} aria-hidden />}
+              size="sm"
+              data-tooltip={grouping === "recent" ? "Grouped by recent" : "Grouped by project"}
+              className="h-7 w-7 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
             />
-          ) : null}
-        </span>
+          )}
+        />
       </div>
 
       {/* ── Destinations ──────────────────────────────────────────────────── */}
       <nav className="flex flex-col px-2 pb-1" aria-label="Workspace navigation">
         <NavRow
-          icon={<SquarePen size={16} strokeWidth={1.6} aria-hidden />}
+          icon={<SquarePen size={14} strokeWidth={1.7} aria-hidden />}
           label="New task"
           active={activeDestination === "new_task"}
           onClick={onNewTask}
           tooltip="New task  ⌘N"
-          trailing={<CirclePlus size={15} strokeWidth={1.5} className="text-tertiary" aria-hidden />}
         />
         <NavRow
-          icon={<Columns3 size={16} strokeWidth={1.6} aria-hidden />}
-          label="Kanban"
+          icon={<Columns3 size={14} strokeWidth={1.7} aria-hidden />}
+          label="Board"
           active={activeDestination === "board"}
           onClick={() => onNavigateRef.current?.("board")}
+          tooltip="Board — every task, by stage"
         />
-        {/* Rendered only when there is something to attend to. A permanent row
-            reading "Needs attention 0" is an alarm that is always on.
-            It opens the inbox rather than a modal: the work is a list, and a
-            list belongs in the column that already shows lists. The modal is
-            still reachable from the Priority overflow and the palette. */}
-        {attentionCount > 0 ? (
-          <NavRow
-            icon={<CircleAlert size={16} strokeWidth={1.6} aria-hidden />}
-            label="Needs attention"
-            active={inboxOpen}
-            onClick={() => setInboxOpen(true)}
-            trailing={<span className="text-sm tabular-nums text-tertiary">{attentionCount}</span>}
-          />
-        ) : null}
       </nav>
 
-      {/* ── The tree ──────────────────────────────────────────────────────── */}
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2 pt-1">
-        {inboxOpen ? (
-          <InboxList
-            selectedTaskId={selectedTaskId}
-            onSelectTask={onSelectTask}
-            {...(onOpenAttentionCenter ? { onOpenAttentionCenter } : {})}
-          />
-        ) : (
-        <>
+      {/* ── The body ──────────────────────────────────────────────────────── */}
+      <div className="no-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2 pt-1">
+        {/* Above the body in both groupings, because "what wants me", "what is
+            running" and "what finished" are the same three questions however
+            the rows underneath are filed. Inside the scroll root, so a bad
+            afternoon with eight blocked tasks cannot push the list out of the
+            window. */}
+        <TaskQueue selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
+
         {visiblePinnedTasks.length > 0 || unresolvedPinnedTaskIds.length > 0 || pinPersistenceError ? (
           <SidebarSection label="Pinned">
             {visiblePinnedTasks.map((task) => (
-              <TaskRow
+              <SidebarTaskRow
                 key={`pin-${task.id}`}
                 taskId={task.id}
                 title={taskTitle(task)}
                 selected={task.id === selectedTaskId}
                 pinned
                 depth={0}
+                // Pins are the one list here that crosses projects, so it is
+                // the one list where a title alone cannot say which repository
+                // it belongs to.
+                {...(showProjectMeta
+                  ? { meta: projectNameById.get(task.session_id) ?? undefined }
+                  : {})}
                 onSelect={onSelectTask}
                 onTogglePin={togglePin}
               />
@@ -340,7 +439,7 @@ function SidebarImpl({
               const loading = freshness?.status === "loading";
               return (
                 <div key={`unresolved-pin-${taskId}`} className="flex flex-col">
-                  <SidebarItem
+                  <TaskRow
                     title={loading
                       ? `Loading pinned task ${taskId}`
                       : `Pinned task ${taskId} — unavailable`}
@@ -351,7 +450,7 @@ function SidebarImpl({
                     onTogglePin={() => togglePin(taskId)}
                   />
                   {freshness?.error ? (
-                    <span role="status" className="break-words px-2 pb-1 pl-8 text-sm text-warning">
+                    <span role="status" className="ui-meta break-words px-2 pb-1 pl-8 text-warning">
                       This task is unavailable. Select the pinned row to retry.
                     </span>
                   ) : null}
@@ -359,13 +458,16 @@ function SidebarImpl({
               );
             })}
             {pinPersistenceError ? (
-              <span role="alert" className="px-2 py-1 text-sm text-warning">
+              <span role="alert" className="ui-meta px-2 py-1 text-warning">
                 {pinPersistenceError}
               </span>
             ) : null}
           </SidebarSection>
         ) : null}
 
+        {grouping === "recent" && sessions.length > 0 ? (
+          <RecentList selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
+        ) : (
         <SidebarSection
           label="Projects"
           action={(
@@ -378,25 +480,6 @@ function SidebarImpl({
                 sessions.length === 0 && "opacity-100",
               )}
             >
-              <IconButton
-                label={searchOpen ? "Close task filter" : "Filter recent tasks"}
-                icon={<Search size={13} strokeWidth={1.7} aria-hidden />}
-                size="sm"
-                onClick={() => {
-                  if (searchOpen) {
-                    setSearchOpen(false);
-                    setQuery("");
-                    return;
-                  }
-                  setSearchOpen(true);
-                  window.requestAnimationFrame(() => searchInputRef.current?.focus());
-                }}
-                aria-pressed={searchOpen}
-                className={cn(
-                  "h-5 w-5 rounded-sm text-tertiary hover:bg-hover hover:text-primary",
-                  searchOpen && "bg-selected text-primary",
-                )}
-              />
               <ProjectMenu
                 align="end"
                 label="Add or switch project"
@@ -405,7 +488,7 @@ function SidebarImpl({
                 trigger={(
                   <IconButton
                     label="Add or switch project"
-                    icon={<Plus size={13} strokeWidth={1.7} aria-hidden />}
+                    icon={<Plus size={12} strokeWidth={1.7} aria-hidden />}
                     size="sm"
                     className="h-5 w-5 rounded-sm text-tertiary hover:bg-hover hover:text-primary"
                   />
@@ -414,26 +497,6 @@ function SidebarImpl({
             </span>
           )}
         >
-          {searchOpen ? (
-            <div className="relative px-1 pb-1">
-              <Search
-                size={12}
-                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-tertiary"
-                aria-hidden
-              />
-              <input
-                ref={searchInputRef}
-                type="text"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Filter tasks"
-                className="ui-input h-7 w-full rounded-md border border-subtle bg-card pl-7 pr-2 text-base text-primary placeholder:text-tertiary"
-                aria-label="Search tasks"
-                autoFocus
-              />
-            </div>
-          ) : null}
-
           {(loadingSessions || sessionsFreshness.status === "loading") && sessions.length === 0 ? (
             <div className="grid gap-2 px-2 py-2" role="status" aria-label="Loading projects">
               <Skeleton className="h-5 w-full" />
@@ -442,7 +505,7 @@ function SidebarImpl({
           ) : null}
 
           {sessions.length === 0 && sessionsFreshness.status === "error" && healthStatus !== "offline" ? (
-            <div className="flex flex-col items-start gap-2 px-2 py-3 text-sm text-error" role="alert">
+            <div className="ui-meta flex flex-col items-start gap-2 px-2 py-3 text-error" role="alert">
               <span>Projects could not be loaded.</span>
               <Button size="sm" onClick={() => void refreshSessions()}>
                 Retry projects
@@ -450,16 +513,32 @@ function SidebarImpl({
             </div>
           ) : null}
 
-          {filteredSessions.length === 0 && !loadingSessions && sessionsFreshness.status !== "error" ? (
-            <div className="flex flex-col items-start gap-2 px-2 py-3 text-sm text-tertiary">
-              <span>{query
-                ? sessionsPage.nextCursor
-                  ? "No matches in loaded projects. More projects are available."
-                  : "No matches in loaded projects."
-                : sessionsFreshness.status === "ready"
-                  ? "No projects yet."
-                  : "Projects have not loaded yet."}</span>
-              {!query && onOpenProject ? (
+          {/* A failed refresh with rows still on screen is the opposite
+              problem to a failed first load: nothing looks wrong, so the rail
+              quietly claims to be current while the counts above it are from
+              whenever the last good response arrived. One quiet line, no
+              alarm — the rows below it are real, just old. */}
+          {sessions.length > 0 && sessionsFreshness.status === "error" && healthStatus !== "offline" ? (
+            <div className="ui-meta flex items-center gap-1.5 px-2 pb-1" role="status">
+              <span className="min-w-0 truncate">Not up to date</span>
+              <Button
+                variant="bare"
+                type="button"
+                onClick={() => void refreshSessions()}
+                aria-label="Retry loading projects"
+                className="shrink-0 rounded-sm text-tertiary underline-offset-2 hover:text-primary hover:underline"
+              >
+                Retry
+              </Button>
+            </div>
+          ) : null}
+
+          {projectRows.length === 0 && !loadingSessions && sessionsFreshness.status !== "error" ? (
+            <div className="ui-meta flex flex-col items-start gap-2 px-2 py-3">
+              <span>{sessionsFreshness.status === "ready"
+                ? "No projects yet."
+                : "Projects have not loaded yet."}</span>
+              {onOpenProject ? (
                 <Button size="sm" onClick={() => onOpenProject()}>
                   <FolderOpen size={12} />
                   Open project
@@ -468,11 +547,17 @@ function SidebarImpl({
             </div>
           ) : null}
 
-          {filteredSessions.map(({ session, tasks, searchIncomplete }) => {
+          {projectRows.map(({ session, tasks }) => {
             const collapsed = collapsedSessions.has(session.id);
+            // Only computed for a collapsed row: an expanded project already
+            // shows its own marks, and a second one on the parent would just
+            // be the same fact twice.
+            const hiddenAttention = collapsed
+              ? sessionAttentionCount(tasks, runActivityByTask)
+              : 0;
             const taskPage = taskPagesBySession[session.id];
             const taskListFreshness = taskListFreshnessBySession[session.id];
-            const taskListExpanded = expandedTaskLists.has(session.id) || query.trim().length > 0;
+            const taskListExpanded = expandedTaskLists.has(session.id);
             const selectedTaskIndex = tasks.findIndex((task) => task.id === selectedTaskId);
             const visibleCount = sidebarVisibleTaskCount(tasks.length, selectedTaskIndex, taskListExpanded);
             const visibleTasks = collapsed ? [] : tasks.slice(0, visibleCount);
@@ -503,17 +588,17 @@ function SidebarImpl({
                            cursor: one glyph slot, so the row never shifts. */
                         <span className="relative flex h-4 w-4 items-center justify-center">
                           <span className="flex group-hover/project:opacity-0">
-                            {collapsed ? <Folder size={14} strokeWidth={1.6} /> : <FolderOpen size={14} strokeWidth={1.6} />}
+                            {collapsed ? <Folder size={14} strokeWidth={1.7} /> : <FolderOpen size={14} strokeWidth={1.7} />}
                           </span>
                           <span className="absolute flex opacity-0 group-hover/project:opacity-100">
-                            {collapsed ? <ChevronRight size={13} strokeWidth={2} /> : <ChevronDown size={13} strokeWidth={2} />}
+                            {collapsed ? <ChevronRight size={14} strokeWidth={1.7} /> : <ChevronDown size={14} strokeWidth={1.7} />}
                           </span>
                         </span>
                       )}
                     />
                   ) : (
                     <span className="flex h-5 w-5 shrink-0 items-center justify-center text-tertiary" aria-hidden>
-                      <Folder size={14} strokeWidth={1.6} />
+                      <Folder size={14} strokeWidth={1.7} />
                     </span>
                   )}
                   <Button
@@ -527,7 +612,7 @@ function SidebarImpl({
                         return next;
                       });
                     }}
-                    className="min-w-0 flex-1 truncate text-left text-base leading-none"
+                    className="ui-body min-w-0 flex-1 truncate text-left leading-none"
                     // Two projects can share a name; only the root tells them
                     // apart, so it is on the row rather than three clicks away.
                     data-tooltip={projectSubtitle(session) ?? session.title}
@@ -535,19 +620,17 @@ function SidebarImpl({
                   >
                     {session.title}
                   </Button>
+                  {/* Collapsing a project should cost space, not information.
+                      Without this, folding a project away also folds away the
+                      only sign that something inside it is waiting. */}
+                  {hiddenAttention > 0 ? (
+                    <span
+                      className="block h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
+                      role="img"
+                      aria-label={`${hiddenAttention} needing you in ${session.title}`}
+                    />
+                  ) : null}
                 </div>
-
-                {searchIncomplete && tasks.length === 0 ? (
-                  <p className="px-2 py-1 pl-[26px] text-sm text-tertiary">
-                    {taskPage?.nextCursor
-                      ? "No match in loaded tasks. Search the next page below."
-                      : taskListFreshness?.status === "loading"
-                        ? "Loading this project's tasks before completing the search."
-                        : taskListFreshness?.status === "error" || taskListFreshness?.status === "stale"
-                          ? "This project's task search is incomplete. Retry below."
-                          : "Load this project's tasks to complete the search."}
-                  </p>
-                ) : null}
 
                 {!collapsed && visibleTasks.length > 0 ? (
                   <>
@@ -570,7 +653,7 @@ function SidebarImpl({
                       >
                         Show more
                       </QuietRow>
-                    ) : taskListExpanded && tasks.length > COLLAPSED_TASK_LIMIT && !query.trim() ? (
+                    ) : taskListExpanded && tasks.length > COLLAPSED_TASK_LIMIT ? (
                       <QuietRow
                         onClick={() => setExpandedTaskLists((previous) => {
                           const next = new Set(previous);
@@ -585,6 +668,12 @@ function SidebarImpl({
                   </>
                 ) : null}
 
+                {!collapsed && taskListFreshness?.status === "error" && tasks.length === 0 ? (
+                  <span role="alert" className="ui-meta px-2 pl-[26px] text-error">
+                    Tasks could not be loaded.
+                  </span>
+                ) : null}
+
                 {!collapsed && taskPage?.nextCursor ? (
                   <div className="flex flex-col items-start">
                     <QuietRow
@@ -595,32 +684,7 @@ function SidebarImpl({
                       {taskPage.loadingMore ? "Loading…" : taskPage.error ? "Retry" : "Show more"}
                     </QuietRow>
                     {taskPage.error ? (
-                      <span role="alert" className="px-2 pl-[26px] text-sm text-error">More tasks could not be loaded.</span>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {!collapsed
-                && normalizedQuery
-                && searchIncomplete
-                && !taskPage?.nextCursor
-                && taskListFreshness?.status !== "ready" ? (
-                  <div className="flex flex-col items-start">
-                    <QuietRow
-                      onClick={() => void refreshTasks(session.id)}
-                      disabled={taskListFreshness?.status === "loading"}
-                      label={`${taskListFreshness?.status === "error" || taskListFreshness?.status === "stale" ? "Retry" : "Load"} tasks in ${session.title} to complete search`}
-                    >
-                      {taskListFreshness?.status === "loading"
-                        ? "Loading tasks…"
-                        : taskListFreshness?.status === "error" || taskListFreshness?.status === "stale"
-                          ? "Retry task search"
-                          : "Load tasks to search"}
-                    </QuietRow>
-                    {taskListFreshness?.error ? (
-                      <span role="alert" className="px-2 pl-[26px] text-sm text-error">
-                        This project's tasks could not be loaded.
-                      </span>
+                      <span role="alert" className="ui-meta px-2 pl-[26px] text-error">More tasks could not be loaded.</span>
                     ) : null}
                   </div>
                 ) : null}
@@ -638,12 +702,11 @@ function SidebarImpl({
                 {sessionsPage.loadingMore ? "Loading…" : sessionsPage.error ? "Retry" : "Show more"}
               </QuietRow>
               {sessionsPage.error ? (
-                <span role="alert" className="px-2 text-sm text-error">More projects could not be loaded.</span>
+                <span role="alert" className="ui-meta px-2 text-error">More projects could not be loaded.</span>
               ) : null}
             </div>
           ) : null}
         </SidebarSection>
-        </>
         )}
       </div>
 
@@ -658,14 +721,14 @@ function SidebarImpl({
         >
           <Terminal size={12} strokeWidth={1.8} />
         </span>
-        <span className="min-w-0 flex-1 truncate text-base text-secondary">Terminus</span>
+        <span className="ui-body min-w-0 flex-1 truncate text-secondary">Terminus</span>
         <IconButton
           label="Settings"
-          icon={<Settings size={15} strokeWidth={1.7} aria-hidden />}
+          icon={<Settings size={14} strokeWidth={1.7} aria-hidden />}
           size="sm"
           onClick={() => window.dispatchEvent(new CustomEvent("terminus:open-settings", { detail: { category: "appearance" } }))}
           data-tooltip="Settings  ⌘,"
-          className="h-6 w-6 shrink-0 rounded-md text-secondary hover:bg-hover hover:text-primary"
+          className="h-6 w-6 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
         />
         {/* One 6px dot instead of a word. It is a button in every state
             because a manual reconcile is useful whether or not the control
@@ -698,8 +761,11 @@ function SidebarImpl({
 // ────────────────────────────── Chrome pieces ───────────────────────────────
 
 /**
- * A destination row. 30px tall, 13px text, 16px icon — Codex's metrics, and
- * the thing that stops this column reading like a web dashboard nav.
+ * A destination row. 30px tall, 13px text, 14px icon.
+ *
+ * The icon sits at tertiary rather than secondary. Navigation should be
+ * findable, not read: the rail is the dimmest region in the window on purpose,
+ * so the transcript beside it is what the eye lands on.
  *
  * Styled explicitly rather than through the global `.sidebar-nav-item`: that
  * rule lives in the components layer, so `Button`'s own `h-7`/`text-sm` size
@@ -729,12 +795,12 @@ function NavRow({
       aria-current={active ? "page" : undefined}
       {...(tooltip ? { "data-tooltip": tooltip } : {})}
       className={cn(
-        "flex w-full items-center gap-2 rounded-md px-2 text-left text-base transition-colors",
+        "ui-body flex w-full items-center gap-2 rounded-md px-2 text-left transition-colors",
         active ? "bg-selected font-medium text-primary" : "text-secondary hover:bg-hover hover:text-primary",
       )}
       style={{ height: "var(--nav-row-height)" }}
     >
-      <span className="flex shrink-0 items-center text-secondary">{icon}</span>
+      <span className={cn("flex shrink-0 items-center", active ? "text-secondary" : "text-tertiary")}>{icon}</span>
       <span className="min-w-0 flex-1 truncate text-left">{label}</span>
       {trailing ? <span className="flex shrink-0 items-center">{trailing}</span> : null}
     </Button>
@@ -764,13 +830,19 @@ function QuietRow({
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
-      className="sidebar-show-more flex h-7 w-full items-center rounded-md pl-[26px] pr-2 text-left text-base text-tertiary hover:bg-hover hover:text-secondary disabled:cursor-not-allowed disabled:opacity-45"
+      className="sidebar-show-more ui-body flex h-7 w-full items-center rounded-md pl-[26px] pr-2 text-left text-tertiary hover:bg-hover hover:text-secondary disabled:cursor-not-allowed disabled:opacity-45"
     >
       {children}
     </Button>
   );
 }
 
+/**
+ * A group heading: 12px, tertiary, sentence case, 28px tall. One class, used
+ * by every group in the rail and metrically identical to the board's column
+ * headers — the two surfaces list the same tasks and should not disagree about
+ * what "a section starts here" looks like.
+ */
 function SidebarSection({
   label,
   action,
@@ -782,10 +854,8 @@ function SidebarSection({
 }): JSX.Element {
   return (
     <div className="group/section flex flex-col">
-      {/* Sentence case, tertiary, 12px. The uppercase micro-label this used to
-          be shouted a word nobody needs to read twice. */}
       <div className="flex h-7 items-center px-2">
-        <span className="min-w-0 flex-1 truncate text-sm text-tertiary">{label}</span>
+        <span className="ui-meta min-w-0 flex-1 truncate">{label}</span>
         {action ?? null}
       </div>
       {children}
@@ -793,7 +863,7 @@ function SidebarSection({
   );
 }
 
-// ────────────────────────── Inbox ───────────────────────────────────────────
+// ────────────────────────── Recent ──────────────────────────────────────────
 
 /** When the task last moved. `updated_at` is authoritative; creation is the
  *  fallback for a task the list route has not stamped yet. */
@@ -833,28 +903,28 @@ export interface InboxGroup {
 }
 
 /**
- * Flatten every loaded task into one time-ordered list.
+ * The settled work, by day.
  *
- * "Priority" is not a date — it is everything asking for a human, hoisted out
- * of the timeline so it cannot scroll away under a week of finished work. A
- * task appears in exactly one group: repeating a row under both Priority and
- * its date reads as a duplicate rather than as emphasis.
+ * This used to hoist a "Priority" group to the top of the same list. That
+ * group now lives in the queue, which is visible in both groupings — so
+ * keeping a copy here would print the same row twice in one column, which
+ * reads as a duplicate rather than as emphasis. What is left is what this list
+ * is actually for: a record of what happened and when.
+ *
+ * The predicate decides what has settled. Anything still blocked, still
+ * running, or still unread is the queue's, and is skipped here.
  */
-export function groupInboxTasks(
+export function groupSettledTasks(
   tasks: readonly Task[],
-  isPriority: (task: Task) => boolean,
+  isSettled: (task: Task) => boolean,
   now: Date,
 ): InboxGroup[] {
   const newestFirst = [...tasks].sort(
     (a, b) => new Date(taskActivityIso(b)).getTime() - new Date(taskActivityIso(a)).getTime(),
   );
-  const priority: Task[] = [];
   const byDay = new Map<number, Task[]>();
   for (const task of newestFirst) {
-    if (isPriority(task)) {
-      priority.push(task);
-      continue;
-    }
+    if (!isSettled(task)) continue;
     const when = new Date(taskActivityIso(task));
     const key = Number.isNaN(when.getTime()) ? Number.NEGATIVE_INFINITY : startOfDayMs(when);
     const bucket = byDay.get(key);
@@ -863,7 +933,6 @@ export function groupInboxTasks(
   }
 
   const groups: InboxGroup[] = [];
-  if (priority.length > 0) groups.push({ id: "priority", label: "Priority", tasks: priority });
   for (const [key, dayTasks] of [...byDay.entries()].sort((a, b) => b[0] - a[0])) {
     const first = dayTasks[0];
     if (!first) continue;
@@ -877,61 +946,66 @@ export function groupInboxTasks(
 }
 
 /**
- * One inbox row: the task, and the project it belongs to.
+ * One finished row: the task, the project it belongs to, and whether anyone
+ * has looked at it.
  *
- * The project line is what makes this list readable across repositories — a
- * flat list of objectives with no home is a list of sentences.
+ * Reading a task clears its mark on its own, so the row needs a way back —
+ * without one, a task glanced at by accident loses its dot with no undo. The
+ * trailing control is therefore a toggle: a tick while the row is unread, a
+ * dot once it is not.
  */
-const InboxRow = memo(function InboxRow({
+const RecentRow = memo(function RecentRow({
   taskId,
   title,
   projectName,
+  unread,
+  updatedAt,
   selected,
   onSelect,
+  onMarkRead,
+  onMarkUnread,
 }: {
   taskId: string;
   title: string;
   projectName: string | null;
+  unread: boolean;
+  updatedAt: string;
   selected: boolean;
   onSelect: (taskId: string) => void;
+  onMarkRead: (taskId: string, updatedAt: string) => void;
+  onMarkUnread: (taskId: string) => void;
 }): JSX.Element {
   const handleClick = useCallback(() => onSelect(taskId), [onSelect, taskId]);
+  const handleMarkRead = useCallback(() => onMarkRead(taskId, updatedAt), [onMarkRead, taskId, updatedAt]);
+  const handleMarkUnread = useCallback(() => onMarkUnread(taskId), [onMarkUnread, taskId]);
   return (
-    <Button
-      variant="bare"
-      type="button"
+    <TaskRow
+      taskId={taskId}
+      title={title}
+      selected={selected}
+      unread={unread}
+      depth={0}
+      {...(projectName ? { meta: projectName } : {})}
       onClick={handleClick}
-      aria-pressed={selected}
-      aria-label={projectName ? `${title}, in ${projectName}` : title}
-      className={cn(
-        "flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left transition-colors",
-        selected ? "bg-selected" : "hover:bg-hover",
-      )}
-    >
-      <span className="w-full min-w-0 truncate text-base text-primary">{title}</span>
-      {projectName ? (
-        <span className="flex w-full min-w-0 items-center gap-1 text-sm text-tertiary">
-          <Folder size={11} strokeWidth={1.7} className="shrink-0" aria-hidden />
-          <span className="min-w-0 truncate">{projectName}</span>
-        </span>
-      ) : null}
-    </Button>
+      onMarkRead={handleMarkRead}
+      onMarkUnread={handleMarkUnread}
+    />
   );
 });
 
-function InboxList({
+function RecentList({
   selectedTaskId,
   onSelectTask,
-  onOpenAttentionCenter,
 }: {
   selectedTaskId: string | null;
   onSelectTask: (taskId: string) => void;
-  onOpenAttentionCenter?: () => void;
 }): JSX.Element {
   const sessions = useTerminusStore((s) => s.sessions);
   const tasksBySession = useTerminusStore((s) => s.tasksBySession);
   const runActivityByTask = useTerminusStore((s) => s.runActivityByTask);
-  const refreshVisibleSessionTasks = useTerminusStore((s) => s.refreshVisibleSessionTasks);
+  const seenAtByTask = useTaskReadStore((s) => s.seenAtByTask);
+  const markRead = useTaskReadStore((s) => s.markRead);
+  const markUnread = useTaskReadStore((s) => s.markUnread);
 
   const projectNameById = useMemo(() => {
     const names = new Map<string, string>();
@@ -944,74 +1018,55 @@ function InboxList({
     // One `new Date()` for the whole pass: grouping against a clock that ticks
     // mid-loop can put two rows a millisecond apart on different days.
     const now = new Date();
-    return groupInboxTasks(
+    return groupSettledTasks(
       all,
-      (task) => lifecycleNeedsAttention(displayLifecycleWith(task, runActivityByTask[task.id] ?? "unknown")),
+      (task) => {
+        const lifecycle = displayLifecycleWith(task, runActivityByTask[task.id] ?? "unknown");
+        return taskShelf(lifecycle, attentionReason({ lifecycle, domainTask: task })) === "settled";
+      },
       now,
     );
-  }, [runActivityByTask, tasksBySession]);
-
-  const priorityMenuItems = useMemo<MenuItem[]>(() => {
-    const items: MenuItem[] = [];
-    if (onOpenAttentionCenter) {
-      items.push({
-        id: "inbox.attention-center",
-        label: "Open attention center",
-        onSelect: onOpenAttentionCenter,
-      });
-    }
-    items.push({
-      id: "inbox.refresh",
-      label: "Refresh tasks",
-      onSelect: () => { void refreshVisibleSessionTasks(); },
-    });
-    return items;
-  }, [onOpenAttentionCenter, refreshVisibleSessionTasks]);
+  }, [runActivityByTask, seenAtByTask, tasksBySession]);
 
   if (groups.length === 0) {
     return (
-      <p className="px-2 py-3 text-sm text-tertiary">
+      <p className="ui-meta px-2 py-3">
         Nothing here yet. Tasks appear as they are created and worked on.
       </p>
     );
   }
 
   return (
-    <div className="flex flex-col gap-2" aria-label="Inbox">
-      {groups.map((group) => (
-        <div key={group.id} className="flex flex-col">
-          <div className="flex h-7 items-center px-2">
-            <span className="min-w-0 flex-1 truncate text-sm text-tertiary">{group.label}</span>
-            {/* Only Priority carries actions: it is the only group that is a
-                queue rather than a record of when things happened. */}
-            {group.id === "priority" ? (
-              <Menu
-                label="Priority actions"
-                align="end"
-                items={priorityMenuItems}
-                trigger={(
-                  <IconButton
-                    label="Priority actions"
-                    icon={<Ellipsis size={13} strokeWidth={1.7} aria-hidden />}
-                    size="sm"
-                    className="h-5 w-5 rounded-sm text-tertiary hover:bg-hover hover:text-primary"
-                  />
-                )}
-              />
-            ) : null}
-          </div>
-          {group.tasks.map((task) => (
-            <InboxRow
-              key={`${group.id}-${task.id}`}
-              taskId={task.id}
-              title={taskTitle(task)}
-              projectName={projectNameById.get(task.session_id) ?? null}
-              selected={task.id === selectedTaskId}
-              onSelect={onSelectTask}
-            />
-          ))}
-        </div>
-      ))}
+    <div className="flex flex-col gap-2" aria-label="Recent tasks">
+      {groups.map((group) => {
+        // Hoisted off the row map: computing it per row is the same answer n
+        // times for a list whose whole point is that it can be long.
+        const showProjectMeta = spansMultipleProjects(group.tasks.map((task) => task.session_id));
+        return (
+          <SidebarSection key={group.id} label={group.label}>
+            {group.tasks.map((task) => {
+              const updatedAt = task.updated_at || task.created_at;
+              return (
+                <RecentRow
+                  key={`${group.id}-${task.id}`}
+                  taskId={task.id}
+                  title={taskTitle(task)}
+                  // Per day, not per list: a Tuesday spent in one repository
+                  // does not need that repository's name on every one of its
+                  // rows.
+                  projectName={showProjectMeta ? projectNameById.get(task.session_id) ?? null : null}
+                  unread={taskIsUnread(updatedAt, seenAtByTask[task.id])}
+                  updatedAt={updatedAt}
+                  selected={task.id === selectedTaskId}
+                  onSelect={onSelectTask}
+                  onMarkRead={markRead}
+                  onMarkUnread={markUnread}
+                />
+              );
+            })}
+          </SidebarSection>
+        );
+      })}
     </div>
   );
 }
@@ -1030,11 +1085,13 @@ export function sidebarVisibleTaskCount(
   return Math.min(taskCount, Math.max(COLLAPSED_TASK_LIMIT, selectedTaskIndex + 1));
 }
 
-interface TaskRowProps {
+interface SidebarTaskRowProps {
   taskId: string;
   title: string;
   selected: boolean;
   pinned?: boolean;
+  /** Project name, for rows whose position does not already say. */
+  meta?: string;
   depth: number;
   onSelect: (taskId: string) => void;
   onTogglePin: (taskId: string) => void;
@@ -1046,18 +1103,19 @@ interface TaskRowProps {
 }
 
 /**
- * One task, memoized on primitives.
+ * One task in the tree, memoized on primitives.
  *
- * The row reads its own lifecycle out of the store instead of receiving it,
- * which is what keeps a streaming turn from re-rendering the tree: the parent's
- * props for every other row are unchanged, so `memo` bails them out, and only
- * the subscribed row here re-runs.
+ * The row reads its own lifecycle, read-state and attention out of the store
+ * instead of receiving them, which is what keeps a streaming turn from
+ * re-rendering the tree: the parent's props for every other row are unchanged,
+ * so `memo` bails them out, and only the subscribed row here re-runs.
  */
-const TaskRow = memo(function TaskRow({
+const SidebarTaskRow = memo(function SidebarTaskRow({
   taskId,
   title,
   selected,
   pinned = false,
+  meta,
   depth,
   onSelect,
   onTogglePin,
@@ -1065,10 +1123,15 @@ const TaskRow = memo(function TaskRow({
   registerButton,
   onRowKeyDown,
   focusable,
-}: TaskRowProps): JSX.Element {
+}: SidebarTaskRowProps): JSX.Element {
   const task = useTerminusStore((s) => s.taskById[taskId]);
   const activity = useTerminusStore((s) => s.runActivityByTask[taskId] ?? "unknown");
+  const seenAt = useTaskReadStore((s) => s.seenAtByTask[taskId]);
   const status = displayLifecycleWith(task, activity);
+  const reason = task ? attentionReason({ lifecycle: status, domainTask: task }) : null;
+  const unread = task
+    ? taskIsUnread(task.updated_at || task.created_at, seenAt)
+    : false;
 
   const handleClick = useCallback(() => onSelect(taskId), [onSelect, taskId]);
   const handleTogglePin = useCallback(() => onTogglePin(taskId), [onTogglePin, taskId]);
@@ -1086,11 +1149,16 @@ const TaskRow = memo(function TaskRow({
   );
 
   return (
-    <SidebarItem
+    <TaskRow
+      taskId={taskId}
       title={title}
       status={status}
       selected={selected}
+      needsYou={reason !== null}
+      unread={unread}
       pinned={pinned}
+      {...(meta ? { meta } : {})}
+      {...(reason ? { reason: reason.label } : {})}
       depth={depth}
       onClick={handleClick}
       onTogglePin={handleTogglePin}
@@ -1200,7 +1268,7 @@ function SessionTaskList({
   }, []);
 
   const renderRow = (task: Task, index: number): JSX.Element => (
-    <TaskRow
+    <SidebarTaskRow
       taskId={task.id}
       title={taskTitle(task)}
       selected={task.id === selectedTaskId}

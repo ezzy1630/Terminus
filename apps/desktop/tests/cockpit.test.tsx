@@ -6,9 +6,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { App } from "../src/App";
 import { AgentsView } from "../src/components/AgentsView";
 import { CockpitEmptyState, CockpitErrorState } from "../src/components/Cockpit/CockpitPrimitives";
-import { AttentionCenterModal } from "../src/components/Cockpit/AttentionCenterModal";
+import { MaterialQuestionCard } from "../src/components/MaterialQuestionCard";
 import { StructuredInterventionModal } from "../src/components/Cockpit/StructuredInterventionModal";
 import { buildDefaultCommands } from "../src/lib/command-catalog";
+import { FIXED_SHORTCUTS, shortcutDisplay } from "../src/lib/shortcuts";
 import { Sidebar } from "../src/components/Sidebar";
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import { api, TerminusApiError } from "../src/lib/api";
@@ -89,6 +90,15 @@ const QUESTION: MaterialQuestionSnapshot = {
   resolvedAt: null,
 };
 
+/** A second pending question on the same task, for the stale-refresh case. */
+const FOLLOW_UP_QUESTION: MaterialQuestionSnapshot = {
+  ...QUESTION,
+  id: "question-2",
+  questionText: "Tag the release as latest?",
+  consequenceMatrix: { Tag: "Downstream installs move.", Skip: "Nothing moves." },
+  options: ["Tag", "Skip"],
+};
+
 const ASSESSMENT: AttentionAssessmentSnapshot = {
   taskId: "task-1",
   requiresAttention: true,
@@ -166,12 +176,17 @@ function resetStore(): void {
   });
 }
 
-function AttentionHarness(): JSX.Element {
+/**
+ * The attention center was a modal; answering a material question is now an
+ * inline section of the inspector. What is left to check here is that the
+ * dialogs that genuinely remain dialogs still behave like ones.
+ */
+function InterventionHarness(): JSX.Element {
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)}>Open attention center</button>
-      {open ? <AttentionCenterModal isOpen onClose={() => setOpen(false)} /> : null}
+      <button type="button" onClick={() => setOpen(true)}>Open structured intervention</button>
+      {open ? <StructuredInterventionModal isOpen onClose={() => setOpen(false)} selectedTaskId="task-1" /> : null}
     </>
   );
 }
@@ -330,9 +345,8 @@ describe("truthful operator cockpit", () => {
 
   test("keeps the last confirmed snapshot visibly stale when a same-scope refresh fails", async () => {
     vi.spyOn(arpV2, "listMaterialQuestions")
-      .mockResolvedValueOnce([QUESTION])
+      .mockResolvedValueOnce([QUESTION, FOLLOW_UP_QUESTION])
       .mockRejectedValueOnce(new TerminusApiError(500, "refresh failed", null));
-    vi.spyOn(arpV2, "assessTaskAttention").mockResolvedValue(ASSESSMENT);
     vi.spyOn(arpV2, "resolveMaterialQuestion").mockResolvedValue({
       success: true,
       question: { ...QUESTION, status: "ANSWERED", selectedOption: "Hold", resolvedAt: "2026-08-23T12:01:00.000Z" },
@@ -340,13 +354,16 @@ describe("truthful operator cockpit", () => {
     });
 
     const user = userEvent.setup();
-    render(<AttentionCenterModal isOpen onClose={() => {}} selectedTaskId="task-1" />);
+    render(<MaterialQuestionCard taskId="task-1" />);
     expect(await screen.findByText(QUESTION.questionText)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: `Choose Hold for ${QUESTION.questionText}` }));
 
-    expect(await screen.findByText(/Showing the last successful snapshot/)).toBeInTheDocument();
+    // The answered one is gone and the next one is up — but the refresh that
+    // should have confirmed both failed, so the card says the question it is
+    // showing may already have been decided elsewhere.
+    expect(await screen.findByText(FOLLOW_UP_QUESTION.questionText)).toBeInTheDocument();
     expect(screen.queryByText(QUESTION.questionText)).not.toBeInTheDocument();
-    expect(screen.getByText("Nothing needs attention")).toBeInTheDocument();
+    expect(screen.getByText(/Showing the last successful snapshot/)).toBeInTheDocument();
     expect(document.querySelector('[data-cockpit-state="stale"]')).toBeInTheDocument();
   });
 
@@ -354,17 +371,16 @@ describe("truthful operator cockpit", () => {
     vi.spyOn(arpV2, "listMaterialQuestions")
       .mockResolvedValueOnce([QUESTION])
       .mockRejectedValueOnce(new TerminusApiError(500, "new task failed", null));
-    vi.spyOn(arpV2, "assessTaskAttention")
-      .mockResolvedValueOnce(ASSESSMENT)
-      .mockRejectedValueOnce(new TerminusApiError(500, "new task failed", null));
 
-    const view = render(<AttentionCenterModal isOpen onClose={() => {}} selectedTaskId="task-1" />);
+    const view = render(<MaterialQuestionCard taskId="task-1" />);
     expect(await screen.findByText(QUESTION.questionText)).toBeInTheDocument();
-    view.rerender(<AttentionCenterModal isOpen onClose={() => {}} selectedTaskId="task-2" />);
+    view.rerender(<MaterialQuestionCard taskId="task-2" />);
 
+    // task-1's question must not be attributed to task-2 for even one frame,
+    // and a task whose questions could not be loaded is silent rather than
+    // borrowing the previous one.
     expect(screen.queryByText(QUESTION.questionText)).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "Loading material questions" })).toBeInTheDocument();
-    expect(await screen.findByText(/Could not load operator data|Couldn't load this view/)).toBeInTheDocument();
+    await waitFor(() => expect(arpV2.listMaterialQuestions).toHaveBeenCalledWith("task-2", expect.anything()));
     expect(screen.queryByText(QUESTION.questionText)).not.toBeInTheDocument();
     expect(document.querySelector('[data-cockpit-state="stale"]')).not.toBeInTheDocument();
   });
@@ -522,18 +538,16 @@ describe("truthful operator cockpit", () => {
   });
 
   test("cockpit dialogs trap focus, close on Escape, and restore their trigger", async () => {
-    vi.spyOn(arpV2, "listMaterialQuestions").mockResolvedValue([]);
     const user = userEvent.setup();
-    render(<AttentionHarness />);
+    render(<InterventionHarness />);
 
-    const trigger = screen.getByRole("button", { name: "Open attention center" });
+    const trigger = screen.getByRole("button", { name: "Open structured intervention" });
     await user.click(trigger);
-    const dialog = await screen.findByRole("dialog", { name: "Attention center" });
+    const dialog = await screen.findByRole("dialog", { name: "Structured intervention" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
-    await waitFor(() => expect(screen.getByRole("button", { name: "Close attention center" })).toHaveFocus());
 
     await user.keyboard("{Escape}");
-    expect(screen.queryByRole("dialog", { name: "Attention center" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Structured intervention" })).not.toBeInTheDocument();
     await waitFor(() => expect(trigger).toHaveFocus());
   });
 
@@ -552,10 +566,13 @@ describe("truthful operator cockpit", () => {
     });
     window.dispatchEvent(commandA);
     expect(commandA.defaultPrevented).toBe(false);
-    expect(screen.queryByRole("dialog", { name: "Attention center" })).not.toBeInTheDocument();
 
-    const commands = buildDefaultCommands({ openAttentionCenter: vi.fn() });
-    expect(commands.find((command) => command.id === "task.attention")?.hint).toBeUndefined();
+    // The queue command has a key now, and it is deliberately not ⌘A: Select
+    // All belongs to the platform, and the palette must not advertise a
+    // binding that never fires.
+    const commands = buildDefaultCommands({ focusQueue: vi.fn() });
+    expect(commands.find((command) => command.id === "task.attention")?.hint)
+      .toBe(shortcutDisplay(FIXED_SHORTCUTS.focusQueue));
     // "Steer this task" had no action behind it in the app; it is gone rather
     // than listed and silently dropped.
     expect(commands.some((command) => command.id === "task.intervene")).toBe(false);
@@ -586,10 +603,13 @@ describe("truthful operator cockpit", () => {
     render(<App />);
     await waitFor(() => expect(refreshAll).toHaveBeenCalled());
 
-    await user.click(screen.getByRole("button", { name: "Search tasks and commands" }));
+    // The palette is reached from the task search's quick actions rather
+    // than from a second magnifying glass beside the first.
+    await user.click(screen.getByRole("button", { name: "Search tasks" }));
+    await user.click(await screen.findByRole("option", { name: /Commands/ }));
 
     expect(await screen.findByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
-    expect(screen.getByText("Open mission board")).toBeInTheDocument();
+    expect(screen.getByText("Open board")).toBeInTheDocument();
     expect(screen.queryByText("Task overview")).not.toBeInTheDocument();
     expect(screen.queryByText("Task changes")).not.toBeInTheDocument();
     expect(screen.queryByText("Toggle inspector")).not.toBeInTheDocument();
@@ -647,7 +667,7 @@ describe("truthful operator cockpit", () => {
   });
 
   test("exposes no governance-view commands after the cockpit tabs were removed", () => {
-    const commands = buildDefaultCommands({ openAttentionCenter: vi.fn() });
+    const commands = buildDefaultCommands({ focusQueue: vi.fn() });
 
     for (const retired of [
       "cockpit.mission-ledger",

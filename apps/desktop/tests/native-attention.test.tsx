@@ -129,7 +129,10 @@ describe("notifications", () => {
     })]));
 
     expect(bridge.notify).toHaveBeenCalledOnce();
-    expect(bridge.notify).toHaveBeenCalledWith("Needs you", "Ship the parser fix", "a");
+    // The title is what the task wants, not what state it is in. "Needs you"
+    // on a lock screen makes someone switch windows to find out whether it was
+    // worth switching windows; "Waiting on your answer" does not.
+    expect(bridge.notify).toHaveBeenCalledWith("Waiting on your answer", "Ship the parser fix", "a");
   });
 
   test("says nothing about what was already waiting when the app opened", () => {

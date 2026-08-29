@@ -59,6 +59,7 @@ import { IconButton } from "../ui/IconButton";
 import { Select } from "../ui/Select";
 import { FIXED_SHORTCUTS, matchesShortcut } from "../lib/shortcuts";
 import { EmptyState } from "../ui/EmptyState";
+import { renderHighlightedLine } from "../lib/syntax-highlight";
 
 // ────────────────────────── Types ───────────────────────────────────────────
 
@@ -762,6 +763,18 @@ function DiffHeader({
   onFullDiffChange: (full: boolean) => void;
 }): JSX.Element {
   const path = file ? (file.displayPath ?? file.newPath) : "";
+  const fileStats = useMemo(() => {
+    if (!file) return { add: 0, del: 0 };
+    let add = 0;
+    let del = 0;
+    for (const hunk of file.hunks) {
+      for (const line of hunk.lines) {
+        if (line.kind === "add") add++;
+        else if (line.kind === "del") del++;
+      }
+    }
+    return { add, del };
+  }, [file]);
   const [pathCopyState, setPathCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const copyPath = (): void => {
     const clipboard = navigator.clipboard;
@@ -791,13 +804,20 @@ function DiffHeader({
           })}
         />
       ) : (
-        <span
-          className="selectable truncate font-mono text-primary text-xs"
-
-          data-tooltip={path}
-        >
-          {path || "No file selected"}
-        </span>
+        <div className="flex min-w-0 items-center gap-1.5 truncate">
+          <span
+            className="selectable truncate font-mono text-primary text-xs"
+            data-tooltip={path}
+          >
+            {path || "No file selected"}
+          </span>
+          {fileStats.add > 0 || fileStats.del > 0 ? (
+            <span className="inline-flex flex-shrink-0 items-center gap-1 font-mono text-[11px]">
+              {fileStats.add > 0 ? <span className="text-addition">+{fileStats.add}</span> : null}
+              {fileStats.del > 0 ? <span className="text-deletion">&minus;{fileStats.del}</span> : null}
+            </span>
+          ) : null}
+        </div>
       )}
       <div className="ml-auto flex flex-shrink-0 items-center gap-1">
         {/* Prev / next change. */}
@@ -1119,85 +1139,146 @@ function DiffBody({
           </Button>
         </div>
       ) : null}
-      <div
-        ref={scrollRef}
-        className="selectable min-h-0 flex-1 overflow-auto"
-        role="list"
-        aria-label={fullDiff
-          ? `All loaded diff rows for ${path} (${accessibleStart + 1}-${accessibleEnd} of ${rows.length})`
-          : `Windowed diff for ${path} (${rows.length} rows)`}
-      >
-      {fullDiff ? (
-        accessibleRows.map((row, index) => (
-          <div
-            key={`${row.kind}:${row.hunk.key}:${accessibleStart + index}`}
-            role="listitem"
-            aria-posinset={accessibleStart + index + 1}
-            aria-setsize={rows.length}
-            data-row-index={accessibleStart + index}
-          >
-            <DiffRowView
-              row={row}
-              path={path}
-              comments={comments}
-              commentDraft={commentDraft}
-              onLineClick={onLineClick}
-              onCommentDraftChange={onCommentDraftChange}
-              onSubmitComment={onSubmitComment}
-              onCancelComment={onCancelComment}
-              onAskAgentRevise={onAskAgentRevise}
-              focusIndex={focusIndex}
-              registerChangeLine={registerChangeLine}
-            />
-          </div>
-        ))
-      ) : (
+      <div className="flex min-h-0 flex-1">
         <div
-          style={{
-            height: virtualizer.getTotalSize(),
-            position: "relative",
-            width: "100%",
-          }}
+          ref={scrollRef}
+          className="selectable min-h-0 flex-1 overflow-auto"
+          role="list"
+          aria-label={fullDiff
+            ? `All loaded diff rows for ${path} (${accessibleStart + 1}-${accessibleEnd} of ${rows.length})`
+            : `Windowed diff for ${path} (${rows.length} rows)`}
         >
-          {virtualizer.getVirtualItems().map((vi) => {
-            const row = rows[vi.index];
-            if (!row) return null;
+        {fullDiff ? (
+          accessibleRows.map((row, index) => (
+            <div
+              key={`${row.kind}:${row.hunk.key}:${accessibleStart + index}`}
+              role="listitem"
+              aria-posinset={accessibleStart + index + 1}
+              aria-setsize={rows.length}
+              data-row-index={accessibleStart + index}
+            >
+              <DiffRowView
+                row={row}
+                path={path}
+                comments={comments}
+                commentDraft={commentDraft}
+                onLineClick={onLineClick}
+                onCommentDraftChange={onCommentDraftChange}
+                onSubmitComment={onSubmitComment}
+                onCancelComment={onCancelComment}
+                onAskAgentRevise={onAskAgentRevise}
+                focusIndex={focusIndex}
+                registerChangeLine={registerChangeLine}
+              />
+            </div>
+          ))
+        ) : (
+          <div
+            style={{
+              height: `${virtualizer.getTotalSize()}px`,
+              position: "relative",
+              width: "100%",
+            }}
+          >
+            {virtualizer.getVirtualItems().map((vi) => {
+              const row = rows[vi.index];
+              if (!row) return null;
+              return (
+                <div
+                  key={`${row.kind}:${row.hunk.key}:${vi.index}`}
+                  ref={virtualizer.measureElement}
+                  role="listitem"
+                  aria-posinset={vi.index + 1}
+                  aria-setsize={rows.length}
+                  data-index={vi.index}
+                  data-row-index={vi.index}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${vi.start}px)`,
+                  }}
+                >
+                  <DiffRowView
+                    row={row}
+                    path={path}
+                    comments={comments}
+                    commentDraft={commentDraft}
+                    onLineClick={onLineClick}
+                    onCommentDraftChange={onCommentDraftChange}
+                    onSubmitComment={onSubmitComment}
+                    onCancelComment={onCancelComment}
+                    onAskAgentRevise={onAskAgentRevise}
+                    focusIndex={focusIndex}
+                    registerChangeLine={registerChangeLine}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
+        </div>
+        {!fullDiff && rows.length > 10 ? (
+          <DiffMinimap
+            rows={rows}
+            onJumpToRow={(idx) => {
+              if (idx >= 0 && idx < rows.length) {
+                virtualizer.scrollToIndex(idx, { align: "center" });
+              }
+            }}
+          />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function DiffMinimap({
+  rows,
+  onJumpToRow,
+}: {
+  rows: DiffRow[];
+  onJumpToRow: (rowIndex: number) => void;
+}): JSX.Element | null {
+  if (rows.length === 0) return null;
+  return (
+    <div
+      className="diff-minimap"
+      onClick={(e) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const y = e.clientY - rect.top;
+        const ratio = Math.max(0, Math.min(1, y / rect.height));
+        const targetRow = Math.floor(ratio * rows.length);
+        onJumpToRow(targetRow);
+      }}
+      title="Diff Minimap (click to jump)"
+      role="presentation"
+    >
+      {rows.map((row, idx) => {
+        if (row.kind === "unified-line") {
+          if (row.line.kind === "add") {
+            const topPct = (idx / rows.length) * 100;
+            return <div key={idx} className="diff-minimap-tick add" style={{ top: `${topPct}%` }} />;
+          }
+          if (row.line.kind === "del") {
+            const topPct = (idx / rows.length) * 100;
+            return <div key={idx} className="diff-minimap-tick del" style={{ top: `${topPct}%` }} />;
+          }
+        } else if (row.kind === "split-row") {
+          if (row.right?.kind === "add" || row.left?.kind === "del") {
+            const topPct = (idx / rows.length) * 100;
             return (
               <div
-                key={`${row.kind}:${row.hunk.key}:${vi.index}`}
-                ref={virtualizer.measureElement}
-                role="listitem"
-                aria-posinset={vi.index + 1}
-                aria-setsize={rows.length}
-                data-index={vi.index}
-                data-row-index={vi.index}
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  width: "100%",
-                  transform: `translateY(${vi.start}px)`,
-                }}
-              >
-                <DiffRowView
-                  row={row}
-                  path={path}
-                  comments={comments}
-                  commentDraft={commentDraft}
-                  onLineClick={onLineClick}
-                  onCommentDraftChange={onCommentDraftChange}
-                  onSubmitComment={onSubmitComment}
-                  onCancelComment={onCancelComment}
-                  onAskAgentRevise={onAskAgentRevise}
-                  focusIndex={focusIndex}
-                  registerChangeLine={registerChangeLine}
-                />
-              </div>
+                key={idx}
+                className={cn("diff-minimap-tick", row.right?.kind === "add" ? "add" : "del")}
+                style={{ top: `${topPct}%` }}
+              />
             );
-          })}
-        </div>
-      )}
-      </div>
+          }
+        }
+        return null;
+      })}
     </div>
   );
 }
@@ -1231,19 +1312,29 @@ function DiffRowView({
 }): JSX.Element {
   if (row.kind === "hunk-header") {
     const hunk = row.hunk;
-    // A hairline and the coordinates, nothing else. The action row that used
-    // to sit on the right (Restore / Reject / Accept) required callbacks no
-    // caller supplies, so it never rendered; the right-click menu did render,
-    // permanently disabled.
     return (
       <div
-        className="diff-line diff-hunk-header flex items-center gap-2 border-b border-subtle text-xs"
+        className="diff-line diff-hunk-header flex items-center justify-between gap-2 border-b border-subtle text-xs"
         style={{ padding: "4px 12px" }}
         role="group"
         aria-label={`Hunk ${hunk.header}${hunk.group ? `, ${hunk.group}` : ""}`}
       >
-        <span className="text-tertiary">{hunk.header}</span>
-        {hunk.group ? <span className="text-tertiary">{hunk.group}</span> : null}
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-tertiary">{hunk.header}</span>
+          {hunk.group ? <span className="text-tertiary">{hunk.group}</span> : null}
+        </div>
+        {onAskAgentRevise ? (
+          <Button
+            type="button"
+            variant="bare"
+            onClick={() => onAskAgentRevise(path, hunk.newStart, hunk.newStart + Math.max(1, hunk.newCount))}
+            data-tooltip="Draft revision for this hunk"
+            className="flex h-5 items-center gap-1 rounded px-1.5 text-[11px] text-tertiary hover:bg-hover hover:text-primary"
+          >
+            <RefreshCw size={10} aria-hidden />
+            <span>Revise hunk</span>
+          </Button>
+        ) : null}
       </div>
     );
   }
@@ -1390,7 +1481,7 @@ function UnifiedLineView({
           className="flex-1 whitespace-pre select-text text-sm"
           style={{ padding: "0 8px" }}
         >
-          {line.text || " "}
+          {line.text ? renderHighlightedLine(line.text, line.key) : " "}
         </code>
         {/* Hover actions. */}
         {line.kind !== "hunk-header" && (line.newNo ?? line.oldNo) !== null ? (
@@ -1622,7 +1713,7 @@ function SplitSideView({
         ), "text-sm"].filter(Boolean).join(" ")}
         style={{ padding: "0 8px" }}
       >
-        {line ? line.text || " " : ""}
+        {line && line.text ? renderHighlightedLine(line.text, line.key) : " "}
       </code>
       {line && line.kind !== "hunk-header" ? (
         <div

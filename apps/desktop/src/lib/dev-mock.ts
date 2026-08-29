@@ -39,16 +39,145 @@ export function setupDevMock(): void {
   // lives here, behind `?mock=true`, precisely so no fabricated model list can
   // reach a real install: without a provider reporting models the composer
   // shows no picker at all.
+  // Every id below is obviously fake (`mock-…`) so a fixture can never be
+  // mistaken for a real discovery result in a screenshot or a bug report. The
+  // shapes are the wire's, not a convenient approximation: providers here are
+  // *connected accounts*, one group per credential.
   window.__terminusModelInventory = {
     providers: [
-      { id: "open_code_zen", label: "OpenCode Zen", mark: "OC" },
-      { id: "codex", label: "Codex", mark: "CX", available: false, unavailable_reason: "Connect a Codex adapter in Settings to route turns here." },
+      { id: "mock-account-zen", label: "OpenCode Zen", mark: "OZ", source: "zen", billing: "free" },
+      { id: "mock-account-chatgpt", label: "ChatGPT", mark: "CG", source: "codex-chatgpt", billing: "subscription", is_default: true },
+      { id: "mock-account-baseten", label: "Baseten", mark: "BA", source: "opencode:baseten", billing: "paid" },
+      {
+        id: "mock-account-cloudflare",
+        label: "Cloudflare Workers AI",
+        mark: "CW",
+        source: "opencode:cloudflare-workers-ai",
+        billing: "unknown",
+        available: false,
+        unavailable_reason: "This build has no transport for that provider's SDK yet.",
+      },
     ],
     models: [
-      { id: "nemotron-3-lightning", provider: "open_code_zen", label: "Nemotron 3 Lightning", slug: "nemotron-3-lightning", free: true, reasoning: false, context_tokens: 131_072, tool_calling: true },
-      { id: "ox-alpha", provider: "open_code_zen", label: "Ox Alpha", slug: "ox-alpha", free: true, reasoning: true, context_tokens: 256_000, tool_calling: true },
-      { id: "grok-code", provider: "open_code_zen", label: "Grok Code", slug: "grok-code", reasoning: true, context_tokens: 1_000_000, tool_calling: true },
-      { id: "gpt-5.6-sol", provider: "codex", label: "GPT-5.6-Sol", slug: "gpt-5.6-sol", reasoning: true, context_tokens: 400_000, tool_calling: true },
+      { id: "mock-nemotron-lightning", provider: "mock-account-zen", label: "Nemotron Lightning", slug: "mock-nemotron-lightning", free: true, reasoning: false, context_tokens: 131_072, tool_calling: true },
+      { id: "mock-ox-alpha", provider: "mock-account-zen", label: "Ox Alpha", slug: "mock-ox-alpha", free: true, reasoning: true, context_tokens: 256_000, tool_calling: true },
+      {
+        id: "mock-gpt-sol",
+        provider: "mock-account-chatgpt",
+        label: "GPT-Sol",
+        slug: "mock-gpt-sol",
+        reasoning: true,
+        context_tokens: 400_000,
+        tool_calling: true,
+        reasoning_efforts: ["low", "medium", "high", "xhigh"],
+        default_reasoning_effort: "medium",
+      },
+      {
+        id: "mock-gpt-sol-mini",
+        provider: "mock-account-chatgpt",
+        label: "GPT-Sol Mini",
+        slug: "mock-gpt-sol-mini",
+        reasoning: true,
+        context_tokens: 272_000,
+        tool_calling: true,
+        reasoning_efforts: ["minimal", "low", "medium"],
+        default_reasoning_effort: "low",
+      },
+      // Priced in USD micros per million tokens: 3_000_000 renders as $3/M.
+      { id: "mock-heron-70b", provider: "mock-account-baseten", label: "Heron 70B", slug: "mock-heron-70b", reasoning: true, context_tokens: 128_000, tool_calling: true, input_cost_micros: 3_000_000, output_cost_micros: 15_000_000 },
+      { id: "mock-heron-8b", provider: "mock-account-baseten", label: "Heron 8B", slug: "mock-heron-8b", reasoning: false, context_tokens: 128_000, tool_calling: true, input_cost_micros: 200_000, output_cost_micros: 600_000 },
+      { id: "mock-edge-small", provider: "mock-account-cloudflare", label: "Edge Small", slug: "mock-edge-small", reasoning: false, context_tokens: 32_768 },
+    ],
+  };
+
+  // The accounts behind those groups, as Settings and the first-launch notice
+  // read them. `supported: true` is the client-side flag meaning "this control
+  // plane answers the route at all".
+  const mockDiscoveredAt = new Date(Date.now() - 60_000 * 3).toISOString();
+  window.__terminusProviderAccounts = {
+    supported: true,
+    discovery: {
+      last_run_at: mockDiscoveredAt,
+      installed_tools: ["codex", "opencode"],
+      warnings: [],
+    },
+    accounts: [
+      {
+        id: "mock-account-chatgpt",
+        source: "codex-chatgpt",
+        display_name: "ChatGPT",
+        vendor_id: "openai",
+        auth_kind: "chatgpt",
+        status: "connected",
+        status_detail: "",
+        billing: "subscription",
+        host: "chatgpt.com",
+        protocol: "responses",
+        is_default: true,
+        model_count: 2,
+        metadata: { plan_type: "pro" },
+        discovered_at: mockDiscoveredAt,
+        last_verified_at: mockDiscoveredAt,
+        expires_at: new Date(Date.now() + 86_400_000 * 9).toISOString(),
+        revision: 1,
+      },
+      {
+        id: "mock-account-baseten",
+        source: "opencode:baseten",
+        display_name: "Baseten",
+        vendor_id: "baseten",
+        auth_kind: "api",
+        status: "connected",
+        status_detail: "",
+        billing: "paid",
+        host: "inference.baseten.co",
+        protocol: "chat_completions",
+        is_default: false,
+        model_count: 2,
+        metadata: {},
+        discovered_at: mockDiscoveredAt,
+        last_verified_at: mockDiscoveredAt,
+        expires_at: null,
+        revision: 1,
+      },
+      {
+        id: "mock-account-zen",
+        source: "zen",
+        display_name: "OpenCode Zen",
+        vendor_id: "opencode",
+        auth_kind: "anonymous",
+        status: "connected",
+        status_detail: "Free models only until a key is added.",
+        billing: "free",
+        host: "opencode.ai",
+        protocol: "chat_completions",
+        is_default: false,
+        model_count: 2,
+        metadata: {},
+        discovered_at: mockDiscoveredAt,
+        last_verified_at: null,
+        expires_at: null,
+        revision: 1,
+      },
+      {
+        id: "mock-account-cloudflare",
+        source: "opencode:cloudflare-workers-ai",
+        display_name: "Cloudflare Workers AI",
+        vendor_id: "cloudflare-workers-ai",
+        auth_kind: "api",
+        status: "unsupported",
+        status_detail: "This build has no transport for that provider's SDK yet.",
+        billing: "unknown",
+        host: "api.cloudflare.com",
+        protocol: "chat_completions",
+        is_default: false,
+        model_count: 1,
+        metadata: { account_id: "mock-cf-account" },
+        discovered_at: mockDiscoveredAt,
+        last_verified_at: null,
+        expires_at: null,
+        revision: 1,
+      },
     ],
   };
 
@@ -301,6 +430,63 @@ export function setupDevMock(): void {
     next_cursor: null,
     truncation: emptyTruncation,
   });
+  api.getTask = async (id: string) => {
+    const task = taskById[id];
+    if (!task) throw new Error("Task not found");
+    return task;
+  };
+  api.getTaskTranscript = async (id: string) => ({
+    task_id: id,
+    events: (useTerminusStore.getState().eventsByTask[id] ?? []) as any,
+    total: (useTerminusStore.getState().eventsByTask[id] ?? []).length,
+    next_cursor: null,
+    earlier_cursor: null,
+    truncation: emptyTruncation,
+  });
+  api.getTaskDiff = async (id: string) => ({
+    task_id: id,
+    workspace_id: "mock-ws",
+    git_available: true,
+    diff: `diff --git a/crates/terminus-kernel/src/socket.rs b/crates/terminus-kernel/src/socket.rs
+index 8a3f912..b4e8210 100644
+--- a/crates/terminus-kernel/src/socket.rs
++++ b/crates/terminus-kernel/src/socket.rs
+@@ -42,6 +42,12 @@ pub async fn bind_uds_listener(path: &Path) -> Result<UnixListener, KernelError>
++    // Enforce strict non-bypassable permission check on socket endpoint
++    if !security::is_kernel_broker_authorized(path) {
++        return Err(KernelError::UnauthorizedAccess);
++    }
++
+     let listener = UnixListener::bind(path)?;
+     Ok(listener)
+ }
+`,
+    diff_truncated: false,
+    untracked_files: [],
+    exit_code: 0,
+  });
+  api.listTaskArtifacts = async (id: string) => ({
+    task_id: id,
+    artifacts: [
+      {
+        hash: "sha256:8a3f912b4e8210",
+        purpose: "crates/terminus-kernel/src/socket.rs",
+        media_type: "text/x-diff",
+        size_bytes: 342,
+      },
+    ],
+    next_cursor: null,
+    total: 1,
+    truncation: emptyTruncation,
+  });
+  api.getSandboxReport = async () => ({
+    status: "enforced",
+    backend_id: "rust-effect-kernel",
+    enforced: ["filesystem_isolation", "uds_broker", "egress_filter", "proc_jail"],
+    degraded: [],
+    unsupported: [],
+    notes: ["All kernel security invariants enforced via non-bypassable broker."],
+  });
 
   // Intercept arpV2 calls for mock mode
   arpV2.listTasks = async () => tasks;
@@ -352,6 +538,7 @@ export function setupDevMock(): void {
     healthStatus: "ready",
     streamState: "connected",
     selectedSessionId: "session-1",
+    selectedTaskId: "task-101",
     taskById,
     tasksBySession: {
       "session-1": Object.values(taskById).filter((task) => task.session_id === "session-1"),
@@ -543,7 +730,7 @@ export function setupDevMock(): void {
           data: JSON.stringify({
             provider_call_id: "call-read-2",
             tool_id: "read",
-            arguments_excerpt: "apps/desktop/src/components/SidebarItem.tsx",
+            arguments_excerpt: "apps/desktop/src/components/TaskRow.tsx",
           }),
         },
       ],

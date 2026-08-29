@@ -2,7 +2,7 @@ import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-libr
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApprovalCard } from "../src/components/ApprovalCard";
-import { AttentionCenterModal } from "../src/components/Cockpit/AttentionCenterModal";
+import { MaterialQuestionCard } from "../src/components/MaterialQuestionCard";
 import { api, TerminusApiError } from "../src/lib/api";
 import { arpV2 } from "../src/lib/api-v2";
 import {
@@ -252,7 +252,7 @@ describe("ApprovalCard mutation reconciliation", () => {
   });
 });
 
-describe("AttentionCenter mutation reconciliation", () => {
+describe("Material question mutation reconciliation", () => {
   test("abandons a definitive success:false response so a changed choice can be submitted", async () => {
     const question: MaterialQuestionSnapshot = {
       id: "question-logical-mutation",
@@ -277,7 +277,7 @@ describe("AttentionCenter mutation reconciliation", () => {
       });
 
     const user = userEvent.setup();
-    render(<AttentionCenterModal isOpen onClose={() => {}} />);
+    render(<MaterialQuestionCard taskId="task-logical-mutation" />);
     await user.click(await screen.findByRole("button", { name: "Choose Publish for Publish the artifact?" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Publish is no longer available.");
 

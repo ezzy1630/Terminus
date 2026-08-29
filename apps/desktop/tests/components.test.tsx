@@ -16,7 +16,7 @@
  *      on Esc.
  *   6. Composer send-button mode switches (send / steer / stop) based on
  *      the selected task's status.
- *   7. SidebarItem truncates long titles and exposes the full text through
+ *   7. TaskRow truncates long titles and exposes the full text through
  *      the shared accessible tooltip layer.
  */
 import { describe, expect, test, vi, beforeEach } from "vitest";
@@ -32,11 +32,13 @@ import { CommandPalette, type Command } from "../src/components/CommandPalette";
 import { Composer } from "../src/components/Composer";
 import { NewTaskScreen } from "../src/components/NewTaskScreen";
 import { Sidebar } from "../src/components/Sidebar";
-import { SidebarItem } from "../src/components/SidebarItem";
+import { TaskSearch } from "../src/components/TaskSearch";
+import { TaskRow } from "../src/components/TaskRow";
 import { Message } from "../src/components/Message";
 import { ActivityBlock } from "../src/components/ActivityBlock";
 import { ConnectionBanner } from "../src/components/ConnectionBanner";
 import { sidebarVisibleTaskCount } from "../src/components/Sidebar";
+import { readSidebarVisible, writeSidebarVisible } from "../src/lib/sidebar-prefs";
 import { deriveRuntimeModelProfiles, useSettingsStore } from "../src/components/Settings";
 
 import { useTerminusStore } from "../src/hooks/use-terminus";
@@ -1453,14 +1455,28 @@ describe("NewTaskScreen — first turn lifecycle", () => {
   });
 });
 
+/**
+ * The rail opens on the inbox. Cases about the project tree ask for it through
+ * the stored view, so the setup stays out of the assertions.
+ */
+/** The rail groups by project. The stored value predates the rename and is
+ *  still honoured, which is the point of reading it here. */
+function openOnProjectsTree(): void {
+  window.localStorage.setItem("terminus-desktop.sidebar-view.v1", "projects");
+}
+
 describe("Sidebar — navigation destinations", () => {
+  beforeEach(() => {
+    openOnProjectsTree();
+  });
+
   test("keeps primary destinations available without showing empty attention chrome", async () => {
     const onNavigate = vi.fn();
     render(<Sidebar onNavigate={onNavigate} />);
 
     expect(screen.getByRole("button", { name: /^New (session|task)/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^(Kanban|Sessions)/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Needs attention" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^(Board|Kanban|Sessions)/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Needs you/ })).not.toBeInTheDocument();
     // "Agents" joins this list: it rendered a directory of departments,
     // operators and rooms that no route supplies.
     for (const unsupported of ["Agents", "Scheduled", "Plugins", "Pull requests", "Sites"]) {
@@ -1468,7 +1484,7 @@ describe("Sidebar — navigation destinations", () => {
     }
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /^(Kanban|Sessions)/ }));
+    await user.click(screen.getByRole("button", { name: /^(Board|Kanban|Sessions)/ }));
     expect(onNavigate).toHaveBeenCalledWith("board");
   });
 
@@ -1488,19 +1504,19 @@ describe("Sidebar — navigation destinations", () => {
     window.removeEventListener("terminus:open-settings", listener);
   });
 
-  test("opens global search from the primary row and keeps recent-task filtering separate", async () => {
-    const openPalette = vi.fn();
-    window.addEventListener("terminus:open-command-palette", openPalette);
+  // The magnifying glass used to unfold a filter field inside the rail that
+  // narrowed the tree in place. It now raises the task search over the
+  // workspace, and the rail underneath does not move.
+  test("the search control raises the task search instead of filtering in place", async () => {
+    const openSearch = vi.fn();
+    window.addEventListener("terminus:open-task-search", openSearch);
     render(<Sidebar />);
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Search tasks and commands" }));
-    expect(openPalette).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Search tasks" }));
+    expect(openSearch).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("textbox", { name: "Search tasks" })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Filter recent tasks" }));
-    expect(screen.getByRole("textbox", { name: "Search tasks" })).toBeInTheDocument();
-    window.removeEventListener("terminus:open-command-palette", openPalette);
+    window.removeEventListener("terminus:open-task-search", openSearch);
   });
 
   test("shows task matches without flooding results with every task in the project", async () => {
@@ -1544,14 +1560,21 @@ describe("Sidebar — navigation destinations", () => {
       pinnedTaskIds: new Set(),
     });
     const user = userEvent.setup();
-    render(<Sidebar />);
+    const onSelectTask = vi.fn();
+    render(<TaskSearch open onClose={() => {}} onSelectTask={onSelectTask} onNewTask={() => {}} onOpenProject={() => {}} onOpenBoard={() => {}} onOpenCommands={() => {}} />);
 
-    await user.click(screen.getByRole("button", { name: "Filter recent tasks" }));
-    await user.type(screen.getByRole("textbox", { name: "Search tasks" }), "needle");
-
+    // Idle, the list is a recency view of everything, with the current
+    // project's slots labelled the way ⌘1–9 will open them.
     expect(screen.getByText("Needle migration")).toBeInTheDocument();
-    expect(screen.getByText("Selected context")).toBeInTheDocument();
-    expect(screen.queryByText("Unrelated cleanup")).not.toBeInTheDocument();
+    expect(screen.getByText("⌘1")).toBeInTheDocument();
+
+    await user.type(screen.getByRole("combobox", { name: "Search tasks" }), "needle");
+    await waitFor(() => expect(screen.queryByText("Unrelated cleanup")).not.toBeInTheDocument());
+    expect(screen.getByText("Needle migration")).toBeInTheDocument();
+    expect(screen.queryByText("Selected context")).not.toBeInTheDocument();
+
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(onSelectTask).toHaveBeenCalledWith("task-needle"));
   });
 
   test("loads the next project page only when requested", async () => {
@@ -1672,14 +1695,13 @@ describe("Sidebar — navigation destinations", () => {
         [session.id]: { nextCursor: "next-search-page", total: 2, loadingMore: false, error: null },
       },
     });
-    render(<Sidebar />);
+    render(<TaskSearch open onClose={() => {}} onSelectTask={() => {}} onNewTask={() => {}} onOpenProject={() => {}} onOpenBoard={() => {}} onOpenCommands={() => {}} />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Filter recent tasks" }));
-    await userEvent.type(screen.getByRole("textbox", { name: "Search tasks" }), "needle");
+    await userEvent.type(screen.getByRole("combobox", { name: "Search tasks" }), "needle");
 
-    expect(screen.getByText("No match in loaded tasks. Search the next page below.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: `Load more tasks in ${session.title}` })).toBeInTheDocument();
-    expect(screen.queryByText("No matches in loaded projects.")).not.toBeInTheDocument();
+    // A miss in what is loaded offers the next page rather than "no match".
+    expect(await screen.findByRole("option", { name: `Load more tasks in ${session.title}` })).toBeInTheDocument();
+    expect(screen.queryByText(/No tasks match/)).not.toBeInTheDocument();
   });
 
   test("keeps an unrequested project's task catalog reachable during search", async () => {
@@ -1716,15 +1738,12 @@ describe("Sidebar — navigation destinations", () => {
       refreshTasks,
     });
     try {
-      render(<Sidebar />);
-      await userEvent.click(screen.getByRole("button", { name: "Filter recent tasks" }));
-      await userEvent.type(screen.getByRole("textbox", { name: "Search tasks" }), "needle");
+      render(<TaskSearch open onClose={() => {}} onSelectTask={() => {}} onNewTask={() => {}} onOpenProject={() => {}} onOpenBoard={() => {}} onOpenCommands={() => {}} />);
+      await userEvent.type(screen.getByRole("combobox", { name: "Search tasks" }), "needle");
 
-      expect(screen.getByText("Cold project")).toBeInTheDocument();
-      expect(screen.getByText("Load this project's tasks to complete the search.")).toBeInTheDocument();
-      await userEvent.click(screen.getByRole("button", { name: "Load tasks in Cold project to complete search" }));
+      await userEvent.click(await screen.findByRole("option", { name: "Load tasks in Cold project" }));
       expect(refreshTasks).toHaveBeenCalledWith(coldSession.id);
-      expect(screen.queryByText("No matches in loaded projects.")).not.toBeInTheDocument();
+      expect(screen.queryByText(/No tasks match/)).not.toBeInTheDocument();
     } finally {
       act(() => useTerminusStore.setState({ refreshTasks: originalRefreshTasks }));
     }
@@ -2216,8 +2235,7 @@ describe("Sidebar — navigation destinations", () => {
     try {
       const user = userEvent.setup();
       render(<Sidebar />);
-      await user.click(screen.getByRole("button", { name: "Filter recent tasks" }));
-      await user.type(screen.getByRole("textbox", { name: "Search tasks" }), "virtual");
+      await user.click(screen.getByRole("button", { name: /Show \d+ more tasks in Virtual project/ }));
 
       const first = screen.getByRole("button", { name: /Virtual task 1, status Ready/ });
       expect(first.closest("[role='listitem']")).toHaveAttribute("aria-posinset", "1");
@@ -2237,15 +2255,15 @@ describe("Sidebar — navigation destinations", () => {
   });
 });
 
-// ────────────────────────── 7. SidebarItem ──────────────────────────────────
+// ────────────────────────── 7. TaskRow ──────────────────────────────────────
 
-describe("SidebarItem — truncation + tooltip", () => {
+describe("TaskRow — truncation + tooltip", () => {
   const LONG_TITLE =
     "This is a very long task title that should be truncated because it goes well beyond the available sidebar width";
 
   test("keeps the title to one line, with the full text still reachable", () => {
     render(
-      <SidebarItem
+      <TaskRow
         title={LONG_TITLE}
         selected={false}
       />,
@@ -2265,7 +2283,7 @@ describe("SidebarItem — truncation + tooltip", () => {
 
   test("exposes the full title through the accessible row name", () => {
     render(
-      <SidebarItem
+      <TaskRow
         title={LONG_TITLE}
         selected={false}
       />,
@@ -2274,23 +2292,46 @@ describe("SidebarItem — truncation + tooltip", () => {
     expect(row).toHaveAccessibleName(expect.stringContaining(LONG_TITLE));
   });
 
-  test("renders in compact mode (rail icon-only) and still exposes the title", () => {
+  test("names the queue row by what it wants, not by its lifecycle id", () => {
+    // The rail has no width for a reason line, so the reason rides in the
+    // accessible name and the tooltip. A screen reader that announced "status
+    // needs_you" told the operator nothing they could act on.
     render(
-      <SidebarItem
-        title={LONG_TITLE}
-        selected
-        compact
+      <TaskRow
+        title="Fix the auth race"
+        status="needs_you"
+        emphasis="queue"
+        needsYou
+        reason="Approve or deny"
+        meta="Terminus"
+        selected={false}
       />,
     );
-    const button = screen.getByRole("button");
-    expect(button).toHaveAttribute("aria-label", LONG_TITLE);
-    expect(button).toHaveAttribute("aria-pressed", "true");
+    const row = screen.getByRole("button");
+    expect(row).toHaveAccessibleName(expect.stringContaining("Approve or deny"));
+    expect(row).toHaveAccessibleName(expect.stringContaining("in Terminus"));
+    expect(row).toHaveAttribute("data-tooltip", "Fix the auth race — Terminus — Approve or deny");
+  });
+
+  test("marks unread in its own colour, in its own gutter, not as a status", () => {
+    // Read-state is orthogonal to what the agent is doing, so it gets the
+    // accent dot and its own reserved slot rather than borrowing the amber,
+    // red and green that mean something else.
+    const { container, rerender } = render(
+      <TaskRow title="Settled task" status="done" selected={false} />,
+    );
+    expect(container.querySelector(".bg-accent")).toBeNull();
+    expect(screen.getByRole("button")).toHaveAccessibleName(expect.not.stringContaining("unread"));
+
+    rerender(<TaskRow title="Settled task" status="done" selected={false} unread />);
+    expect(container.querySelector(".bg-accent")).not.toBeNull();
+    expect(screen.getByRole("button")).toHaveAccessibleName(expect.stringContaining("unread"));
   });
 
   test("shows the pin/unpin button only on hover (and when pinned)", () => {
     const onTogglePin = vi.fn();
     const { rerender } = render(
-      <SidebarItem
+      <TaskRow
         title="Short title"
         selected={false}
         onTogglePin={onTogglePin}
@@ -2305,7 +2346,7 @@ describe("SidebarItem — truncation + tooltip", () => {
 
     // When pinned, the pin button is visible regardless of hover.
     rerender(
-      <SidebarItem
+      <TaskRow
         title="Short title"
         selected={false}
         pinned
@@ -2356,6 +2397,144 @@ describe("Sidebar — progressive task disclosure", () => {
 
   test("never claims more rows than the project contains", () => {
     expect(sidebarVisibleTaskCount(3, -1, false)).toBe(3);
+  });
+});
+
+// Collapsing three projects and hiding the rail are deliberate acts, and both
+// used to last exactly as long as the window did.
+describe("Sidebar — remembered shape", () => {
+  const now = new Date().toISOString();
+  const seedTask = (id: string, sessionId: string, objective: string): Task => ({
+    id,
+    session_id: sessionId,
+    thread_id: `thread-${id}`,
+    status: "ACTIVE",
+    phase: "EXECUTING",
+    active_contract_version: 1,
+    risk_class: "normal",
+    created_at: now,
+    updated_at: now,
+    completed_at: null,
+    terminal_reason: null,
+    contract: {
+      version: 1,
+      objective,
+      non_goals: [],
+      allowed_scope: { read_paths: [], write_paths: [], external_systems: [] },
+    },
+  });
+  const seedSession = (id: string, title: string) => ({
+    id,
+    workspace_id: `workspace-${id}`,
+    title,
+    status: "active" as const,
+    active_thread_id: null,
+    created_at: now,
+    updated_at: now,
+  });
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    const task = seedTask("task-a", "session-1", "Rebuild the index");
+    useTerminusStore.setState({
+      sessions: [seedSession("session-1", "Terminus")],
+      tasksBySession: { "session-1": [task] },
+      taskById: { [task.id]: task },
+      selectedSessionId: "session-1",
+      selectedTaskId: null,
+      pinnedTaskIds: new Set(),
+      healthReady: true,
+      healthStatus: "ready",
+    });
+  });
+
+  test("defaults to a visible rail and forgets nothing it was never told", () => {
+    expect(readSidebarVisible()).toBe(true);
+    writeSidebarVisible(false);
+    expect(readSidebarVisible()).toBe(false);
+  });
+
+  test("restores collapsed projects across a remount", () => {
+    openOnProjectsTree();
+    window.localStorage.setItem(
+      "terminus-desktop.sidebar-collapsed-projects.v1",
+      JSON.stringify(["session-1"]),
+    );
+    render(<Sidebar />);
+
+    expect(screen.getByRole("button", { name: "Expand Terminus" })).toBeInTheDocument();
+    expect(screen.queryByText("Rebuild the index")).not.toBeInTheDocument();
+  });
+
+  test("records a collapse so the next launch honours it", async () => {
+    const user = userEvent.setup();
+    openOnProjectsTree();
+    render(<Sidebar />);
+
+    await user.click(screen.getByRole("button", { name: "Collapse Terminus" }));
+
+    expect(JSON.parse(
+      window.localStorage.getItem("terminus-desktop.sidebar-collapsed-projects.v1") ?? "[]",
+    )).toEqual(["session-1"]);
+  });
+
+  test("opens grouped by recent, and reopens by project when that is where it was left", () => {
+    // Grouping replaced a two-tab mode switch, and it reads the same stored
+    // value — so an operator who chose the tree yesterday still has it.
+    render(<Sidebar />);
+    expect(screen.getByRole("button", { name: "Group tasks" }))
+      .toHaveAttribute("data-tooltip", "Grouped by recent");
+    // The tree's own section header, absent while the list is grouped by day.
+    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
+
+    cleanup();
+    openOnProjectsTree();
+    render(<Sidebar />);
+
+    expect(screen.getByRole("button", { name: "Group tasks" }))
+      .toHaveAttribute("data-tooltip", "Grouped by project");
+    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
+  });
+
+  // The question is what the *list* holds, not what the workspace holds. Six
+  // open projects buy the label nothing when every pin is from one of them,
+  // and in a 256px rail it costs the titles about 40% of their width.
+  test("labels pinned rows only once the pinned list spans two projects", () => {
+    openOnProjectsTree();
+    const race = seedTask("task-race", "session-2", "Fix the auth race");
+    const index = seedTask("task-index", "session-1", "Rebuild the index");
+    const setPins = (ids: readonly string[]) => useTerminusStore.setState({
+      sessions: [seedSession("session-1", "Terminus"), seedSession("session-2", "Website")],
+      tasksBySession: { "session-1": [index], "session-2": [race] },
+      taskById: { [race.id]: race, [index.id]: index },
+      pinnedTaskIds: new Set(ids),
+    });
+
+    setPins([race.id]);
+    render(<Sidebar />);
+    // One pin, so nothing to disambiguate: no project rides along, even though
+    // a second project is open right there in the tree below.
+    expect(screen.queryByRole("button", { name: /Fix the auth race, in Website/ })).not.toBeInTheDocument();
+
+    cleanup();
+    setPins([race.id, index.id]);
+    render(<Sidebar />);
+
+    // The row is one line; the project rides along as a recessive suffix, and
+    // the spoken label says which repository the race is in.
+    expect(screen.getByRole("button", { name: /Fix the auth race, in Website/ })).toBeInTheDocument();
+  });
+
+  test("leaves the project off a pinned row when there is only one project", () => {
+    const pinned = seedTask("task-pinned", "session-1", "Fix the auth race");
+    useTerminusStore.setState({
+      tasksBySession: { "session-1": [pinned] },
+      taskById: { [pinned.id]: pinned },
+      pinnedTaskIds: new Set([pinned.id]),
+    });
+    render(<Sidebar />);
+
+    expect(screen.queryByRole("button", { name: /in Terminus/ })).not.toBeInTheDocument();
   });
 });
 

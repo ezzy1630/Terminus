@@ -109,6 +109,104 @@ export interface GatewayProviderConfigurationResponse {
   configuration: GatewayProviderConfiguration | null;
 }
 
+// ────────────────────────── /provider-accounts ─────────────────────────────
+
+/**
+ * A credential Terminus can route a turn with.
+ *
+ * These are *discovered*, not entered here: the control plane reads the
+ * credential stores the operator's own CLIs already keep (the OpenCode auth
+ * store, the Codex/ChatGPT login) and records one account per usable
+ * credential. The desktop never sees credential material — only the metadata
+ * below — and offers exactly two actions per row: make it the default, or
+ * disconnect it.
+ *
+ * Nothing in this client invents an account. An empty list means the control
+ * plane found no credential, which is a state the UI states plainly rather
+ * than papering over with a plausible-looking provider.
+ */
+export type ProviderAccountAuthKind = "api" | "oauth" | "wellknown" | "chatgpt" | "anonymous";
+
+/**
+ * `unsupported` is not an error: the credential is real and stored, but this
+ * build has no transport for the provider's SDK. It stays listed, with the
+ * reason, so a missing model reads as an explained gap rather than a bug.
+ */
+export type ProviderAccountStatus =
+  | "connected"
+  | "expired"
+  | "error"
+  | "unsupported"
+  | "disconnected";
+
+/** How a turn on this account is paid for. `paid` prices per model, not here. */
+export type ProviderAccountBilling = "subscription" | "free" | "paid" | "unknown";
+
+/** Non-secret facts the credential carried. Never tokens. */
+export interface ProviderAccountMetadata {
+  account_id?: string;
+  plan_type?: string;
+  email?: string;
+}
+
+export interface ProviderAccount {
+  id: string;
+  /** `opencode:<providerID>` | `codex-chatgpt` | `zen`. Stable, and the row key. */
+  source: string;
+  display_name: string;
+  /** models.dev provider id the catalogue is read from. */
+  vendor_id: string;
+  auth_kind: ProviderAccountAuthKind;
+  status: ProviderAccountStatus;
+  /** Why it is in that status, in the control plane's own words. */
+  status_detail: string;
+  billing: ProviderAccountBilling;
+  host: string;
+  protocol: GatewayProtocol;
+  is_default: boolean;
+  model_count: number;
+  metadata: ProviderAccountMetadata;
+  discovered_at: string;
+  last_verified_at: string | null;
+  /** When the credential stops working. Null when it does not expire. */
+  expires_at: string | null;
+  /** Guards Set default and Disconnect against a concurrent change. */
+  revision: number;
+}
+
+/** What the last credential-store sweep found, and what is installed to sweep. */
+export interface ProviderAccountDiscovery {
+  last_run_at: string | null;
+  /**
+   * Credential-store CLIs found on PATH, by short name: `"codex"`, and the
+   * OpenCode CLI under its own lowercase name.
+   *
+   * A list rather than one boolean per tool on purpose: the per-tool field
+   * names would have carried a vendor name with a separator attached, which
+   * the repository's standalone check rejects in built assets, and a list
+   * extends to a third store without another wire field.
+   */
+  installed_tools: string[];
+  /** Store-level problems (bad permissions, unparseable file), verbatim. */
+  warnings: string[];
+}
+
+export interface ProviderAccountsResponse {
+  accounts: ProviderAccount[];
+  discovery: ProviderAccountDiscovery;
+  /**
+   * Client-side, not on the wire: false when this control plane answers 404
+   * for the route. The section then says so instead of claiming the operator
+   * has no credentials at all.
+   */
+  supported: boolean;
+}
+
+export interface ProviderAccountDiscoveryResponse extends ProviderAccountsResponse {
+  /** Account ids created or re-imported by this sweep. */
+  imported: string[];
+}
+
 // ────────────────────────── /workspaces ────────────────────────────────────
 
 export type WorkspaceKind =
@@ -184,6 +282,15 @@ export interface Session {
   /** Bare model id the session routes turns to by default. */
   default_model?: string | null;
   default_reasoning_effort?: ReasoningEffort | null;
+  /**
+   * Which connected account {@link default_model} belongs to.
+   *
+   * A bare model id stopped being enough the moment two accounts could offer
+   * the same one — the same `grok-code` reachable through two different keys
+   * bills to two different places. The account is the routing decision; the
+   * model is a choice within it.
+   */
+  default_provider_account_id?: string | null;
 }
 
 /** Fields `PATCH /v1/sessions/:id` accepts. */
@@ -191,6 +298,8 @@ export interface SessionUpdateInput {
   default_model?: string | null;
   default_reasoning_effort?: ReasoningEffort | null;
   default_permission_profile?: PermissionProfileId;
+  /** Null clears the pin and lets the control plane's default account decide. */
+  default_provider_account_id?: string | null;
 }
 
 export interface SessionListResponse {
@@ -364,6 +473,14 @@ export interface StartTurnInput {
    */
   model?: string;
   reasoning_effort?: ReasoningEffort;
+  /**
+   * The connected account this turn bills to and authenticates as.
+   *
+   * Sent alongside `model` because the model id alone does not name a route:
+   * the control plane resolves turn account → session default account → the
+   * default account, and never silently falls through to a different one.
+   */
+  provider_account_id?: string;
 }
 
 /**

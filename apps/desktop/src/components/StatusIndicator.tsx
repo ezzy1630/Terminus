@@ -1,6 +1,11 @@
 /**
  * Terminus Desktop — StatusIndicator.
  *
+ * The one place a task lifecycle becomes pixels. The sidebar row, the board
+ * card and the board's list mode each used to draw their own dot with their
+ * own colour map, so the same failed task was three different reds depending
+ * on which pane you were looking at.
+ *
  * Minimal semantic status representation, keyed on the one task vocabulary in
  * lib/task-lifecycle.ts. No large colorful badges:
  *
@@ -66,7 +71,10 @@ function StatusGlyph({
         className="spinner"
         role="img"
         aria-label={lifecycleLabel(status).toLowerCase()}
-        style={{ width: size, height: size }}
+        // The ring scales with the glyph. `.spinner` hard-codes a 1.5px border
+        // for its 12px default, which on the 8px mark a sidebar row asks for
+        // is a filled disc rather than a ring.
+        style={{ width: size, height: size, borderWidth: Math.max(1, Math.round(size / 8)) }}
       />
     );
   }
@@ -113,9 +121,7 @@ function StatusIndicatorImpl({ status, size = SIZE_DEFAULT, label, className }: 
     >
       <StatusGlyph status={status} size={size} />
       {label ? (
-        <span className="text-xs text-secondary text-xs" >
-          {label}
-        </span>
+        <span className="ui-meta text-secondary">{label}</span>
       ) : null}
     </span>
   );

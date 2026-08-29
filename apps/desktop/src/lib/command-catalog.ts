@@ -35,7 +35,7 @@ export interface DefaultCommandActions {
   readonly openSettings?: () => void;
   readonly viewShortcuts?: () => void;
   readonly openMissionBoard?: () => void;
-  readonly openAttentionCenter?: () => void;
+  readonly focusQueue?: () => void;
   /**
    * Every open project, so switching to one is a search away.
    *
@@ -69,10 +69,12 @@ export function buildDefaultCommands(actions: DefaultCommandActions): Command[] 
     commands.push({ id, label, group, hint, keywords, action, available: true });
   };
 
-  // "Needs attention" is the queue of work waiting on a human, so it leads.
-  push("task.attention", "Needs attention", "Task", undefined, actions.openAttentionCenter, ["material questions", "consequence matrix", "approval", "blocked", "waiting"]);
+  // The queue of work waiting on a human, so it leads. It goes to the rail's
+  // own list rather than opening a second copy of it in a modal: two places
+  // that answer "what needs me" is exactly one place too many.
+  push("task.attention", "Go to Needs you", "Task", shortcutDisplay(FIXED_SHORTCUTS.focusQueue), actions.focusQueue, ["needs attention", "queue", "approval", "blocked", "waiting", "unread"]);
   push("project.open", "Open project", "Navigation", shortcutDisplay(FIXED_SHORTCUTS.openProject), actions.openProject, ["workspace", "folder", "onboarding"]);
-  push("nav.mission-board", "Open mission board", "Navigation", undefined, actions.openMissionBoard, ["kanban", "tasks", "work", "status"]);
+  push("nav.mission-board", "Open board", "Navigation", undefined, actions.openMissionBoard, ["kanban", "mission board", "tasks", "work", "status"]);
   push("task.new", "New task", "Task", shortcutDisplay(FIXED_SHORTCUTS.newTask), actions.newTask, ["create task"]);
   push("task.stop", "Stop this run", "Task", shortcutDisplay(FIXED_SHORTCUTS.stopRun), actions.stopRun, ["cancel", "abort", "interrupt", "halt"]);
   push("changes.show", "Show changes", "Changes", shortcutDisplay(FIXED_SHORTCUTS.showChanges), actions.showChanges, ["diff review"]);

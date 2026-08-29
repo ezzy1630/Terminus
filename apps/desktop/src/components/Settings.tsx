@@ -30,7 +30,6 @@
  * events so a second Terminus window, if one is ever open, stays in step.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useDialogFocus } from "../hooks/use-dialog-focus";
 import { Keyboard, Palette, Search, Wand2, X, RotateCcw } from "lucide-react";
 import { create } from "zustand";
 import { cn } from "../lib/cn";
@@ -48,6 +47,7 @@ import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { DialogSurface } from "../ui/Dialog";
 import { GatewayProviderSettings } from "./GatewayProviderSettings";
+import { ProviderAccountSettings } from "./ProviderAccountSettings";
 
 // ────────────────────────── Setting model ───────────────────────────────────
 
@@ -179,7 +179,7 @@ const SHORTCUT_GROUPS: ReadonlyArray<{ scope: ShortcutScope; title: string }> = 
  * in so searching "command palette" reaches the reference that lists it.
  */
 const CATEGORY_KEYWORDS: Record<SettingCategoryId, string> = {
-  agents: "providers provider api key token gateway model models routing opencode zen go local command tools inference",
+  agents: "providers provider api key token gateway model models routing opencode zen go local command tools inference connected accounts account codex chatgpt sign in disconnect default credentials",
   appearance: "theme dark light density spacing font motion animation accessibility",
   shortcuts: `keyboard keys bindings hotkeys ${SETTINGS_SHORTCUTS.map((s) => s.label).join(" ")}`.toLowerCase(),
 };
@@ -392,10 +392,16 @@ export interface SettingsProps {
   onClose: () => void;
   /** Optional initial category to focus. */
   initialCategoryId?: SettingCategoryId;
+  /**
+   * Bumped by the host on every request to open Settings. Two consecutive
+   * requests for the same category are still two requests, and the second one
+   * has to put the pane back on that category.
+   */
+  categoryRequest?: number;
   className?: string;
 }
 
-function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsProps): JSX.Element {
+function SettingsImpl({ open, onClose, initialCategoryId, categoryRequest, className }: SettingsProps): JSX.Element {
   const [activeCat, setActiveCat] = useState<SettingCategoryId>(initialCategoryId ?? "appearance");
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -406,14 +412,25 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
   const [providerError, setProviderError] = useState<string | null>(null);
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerLoading, setProviderLoading] = useState(false);
-  const dialogRef = useDialogFocus<HTMLDivElement>(open, onClose);
+  // Three things used to reach for focus as this sheet appeared: Radix's own
+  // focus trap, `useDialogFocus`'s first-focusable pass on the next frame, and
+  // a `setTimeout` aimed at the search field. They landed in an order nothing
+  // guaranteed, so the caret hopped between controls while the panel was still
+  // animating. Radix owns the trap, the Escape key and focus restoration; this
+  // component says only where focus should *start*, in the one callback Radix
+  // provides for it.
+  const focusSearchOnOpen = useCallback((event: Event): void => {
+    event.preventDefault();
+    inputRef.current?.focus();
+  }, []);
 
-  // Focus search after the dialog has mounted. Theme and density rows subscribe
-  // directly to their canonical store; no cross-store synchronization occurs.
+  // A later request for a category has to move the pane even when the sheet is
+  // already open and the operator has clicked elsewhere in it — hence the
+  // nonce, rather than watching the category, which may not have changed.
   useEffect(() => {
     if (!open) return;
-    window.setTimeout(() => inputRef.current?.focus(), 0);
-  }, [open]);
+    setActiveCat(initialCategoryId ?? "appearance");
+  }, [categoryRequest, initialCategoryId, open]);
 
   useEffect(() => {
     if (!open || activeCat !== "agents") return;
@@ -503,8 +520,10 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
     }).filter((entry) => entry.keep).map((entry) => entry.category);
   }, [query]);
 
-  if (!open) return <></>;
-
+  // Deliberately no `if (!open) return`. Radix takes `open={false}` as the cue
+  // to play the sheet's exit and remove the portal afterwards; returning
+  // nothing here took the sheet off screen on a single frame instead, so
+  // Settings arrived with a rise and a fade and left like a dropped window.
   const activeCategory = filteredCategories.find((c) => c.id === activeCat) ?? filteredCategories[0] ?? null;
   // Grouped in declaration order so a group's rows stay adjacent.
   const groupedSettings: Array<{ title: string; rows: SettingDescriptor[] }> = [];
@@ -516,11 +535,11 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
 
   return (
     <DialogSurface
-      ref={dialogRef}
       open={open}
       onOpenChange={(nextOpen) => {
         if (!nextOpen) onClose();
       }}
+      onOpenAutoFocus={focusSearchOnOpen}
       accessibleTitle="Settings"
       overlayClassName="bg-black/40"
       className={cn(
@@ -623,6 +642,11 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
 
                 {activeCategory.id === "agents" ? (
                   <>
+                    {/* First, because it is where an account normally comes
+                        from: the forms below take a key by hand, which is the
+                        exception now that credentials are discovered. */}
+                    <ProviderAccountSettings />
+
                     <GatewayProviderSettings />
 
                     <SettingGroup title="Local command provider">
@@ -753,9 +777,12 @@ function SettingsImpl({ open, onClose, initialCategoryId, className }: SettingsP
                         <SettingGroup key={scope} title={title}>
                           {rows.map((shortcut) => (
                             <Row key={shortcut.id} label={shortcut.label}>
+                              {/* `title` here was a *browser* tooltip: white,
+                                  square, on the OS's own delay, in a window
+                                  that draws its own. */}
                               <output
                                 aria-label={`Shortcut for ${shortcut.label}`}
-                                title={shortcutSettingValue(shortcut)}
+                                data-tooltip={shortcutSettingValue(shortcut)}
                               >
                                 <Kbd>{shortcut.display}</Kbd>
                               </output>

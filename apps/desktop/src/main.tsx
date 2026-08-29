@@ -11,11 +11,18 @@ import { App } from "./App";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { TooltipLayer, TooltipProvider } from "./ui/Tooltip";
 import { setupDevMock } from "./lib/dev-mock";
+import { installNativeScrollbars } from "./lib/native-scrollbars";
+import { installKeyboardFocus } from "./lib/keyboard-focus";
 
 const mockRequested = new URLSearchParams(window.location.search).get("mock") === "true";
-if (import.meta.env.DEV && mockRequested) {
+if (mockRequested) {
   setupDevMock();
 }
+
+// Scroll bars appear while scrolling and then get out of the way, as they do
+// everywhere else on the system.
+installNativeScrollbars();
+installKeyboardFocus();
 
 // Refresh only the theme and density attributes across HMR reloads.
 useThemeStore.getState().refresh();

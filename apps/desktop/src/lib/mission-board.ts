@@ -12,9 +12,7 @@ import {
   boardColumnForLifecycle,
   lifecycleFromV2Status,
   lifecycleIsActive,
-  lifecycleIsTerminal,
   lifecycleLabel,
-  lifecycleNeedsAttention,
   type BoardColumnId,
   type TaskLifecycle,
 } from "./task-lifecycle";
@@ -22,11 +20,7 @@ import { primaryBudgetMetric, type BudgetTone } from "./task-budget";
 import { compactDuration } from "./time";
 import { displayLifecycleWith, type TurnActivity } from "./turn-activity";
 import type { Task } from "../types";
-import type {
-  MaterialQuestionSnapshot,
-  TaskV2Snapshot,
-  TaskV2Status,
-} from "../types/v2";
+import type { TaskV2Snapshot, TaskV2Status } from "../types/v2";
 
 export const MISSION_BOARD_COLUMNS = BOARD_COLUMNS;
 
@@ -74,14 +68,19 @@ export function boardColumnForTaskLifecycle(lifecycle: TaskLifecycle): MissionBo
  * be running — it usually is, that is why it stopped to ask — but the thing a
  * human owes is already on the table, and a board whose Needs you column is
  * not the complete list of what needs the human has given up the one job the
- * column exists to do. Terminal work is exempt: a stale question against a task
- * that already finished must not drag it back out of Done.
+ * column exists to do.
+ *
+ * `needsYou` is `attentionReason(...) !== null` and nothing else, so the
+ * column, the header count, the attention filter and the sidebar queue are the
+ * same predicate rather than four that agree by convention. Terminal work is
+ * exempt there rather than here: a stale question against a task that already
+ * finished must not drag it back out of Done.
  */
 export function boardColumnForTaskPlacement(
   lifecycle: TaskLifecycle,
-  hasPendingQuestion: boolean,
+  needsYou: boolean,
 ): MissionBoardPlacement {
-  if (hasPendingQuestion && !lifecycleIsTerminal(lifecycle)) return "needs_you";
+  if (needsYou) return "needs_you";
   return boardColumnForLifecycle(lifecycle);
 }
 
@@ -111,14 +110,6 @@ export function boardTransitionForDrop(
   return null;
 }
 
-export function taskNeedsAttention(
-  task: TaskV2Snapshot,
-  questions: readonly MaterialQuestionSnapshot[],
-): boolean {
-  return lifecycleNeedsAttention(lifecycleFromV2Status(task.status))
-    || questions.some((question) => question.taskId === task.id && question.status === "PENDING");
-}
-
 export function taskStatusLabel(status: TaskV2Status): string {
   return lifecycleLabel(lifecycleFromV2Status(status));
 }
@@ -126,132 +117,22 @@ export function taskStatusLabel(status: TaskV2Status): string {
 // ─────────────────────────── Why it needs you ──────────────────────────────
 
 /**
- * The distinct obligations a task can put on a human. They are separated
- * because the human response to each is different: an answer, a decision, a
- * budget, a read. Collapsing them — which is what a single "needs attention"
- * boolean does — leaves a column of identical dots that has to be opened one
- * card at a time to be triaged at all.
- */
-export type AttentionKind =
-  | "question"
-  | "approval"
-  | "policy"
-  | "budget"
-  | "failure"
-  | "blocked"
-  | "resource"
-  | "paused";
-
-export interface AttentionReason {
-  kind: AttentionKind;
-  /**
-   * Sort key inside the Needs you column; lower comes first. Ordered by how
-   * cheaply the human can discharge the obligation, so working the column from
-   * the top clears the most work per minute of attention.
-   */
-  rank: number;
-  /** What is owed, in the fewest words that stay true. */
-  label: string;
-  /** The specific thing, when the control plane named one. */
-  detail: string | null;
-}
-
-/**
- * Two tones, because there are two situations: something is broken, or
- * something is waiting on you. A board that paints both in the same red — which
- * is what a single attention dot does — makes a question you can answer in one
- * click look exactly like a task that has already burned its budget.
- */
-export function attentionTone(kind: AttentionKind): "error" | "warning" {
-  return kind === "failure" || kind === "policy" || kind === "budget" ? "error" : "warning";
-}
-
-/** A card has one line for this. Anything longer is clipped rather than wrapped. */
-const MAX_ATTENTION_DETAIL_CHARS = 96;
-
-/**
- * The short form of a `terminal_reason`.
+ * The board no longer owns an attention vocabulary. `lib/attention.ts` is the
+ * single definition every surface reads — the rail's queue, the Dock badge,
+ * the notifications and this column — so the number in the header and the
+ * number in the sidebar cannot describe two different sets of tasks.
  *
- * `terminalReasonText` in Conversation.tsx builds the full sentence for the
- * transcript and runs to 512 characters. This reads the same
- * `{ code, message, reason }` shape the control plane writes, keeps only the
- * most specific field, and clips it to a card width. Deliberately not a call
- * into the transcript helper: the board would then pull the whole conversation
- * module into its bundle to format one string.
+ * Re-exported rather than re-imported at each call site because the board
+ * already imports from here, and one module boundary is easier to keep honest
+ * than eleven import lines.
  */
-function failureDetail(reason: Record<string, unknown> | null | undefined): string | null {
-  if (!reason) return null;
-  const read = (key: string): string | null => {
-    const value = reason[key];
-    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-  };
-  const text = read("message") ?? read("reason") ?? read("code");
-  if (text === null) return null;
-  return text.length > MAX_ATTENTION_DETAIL_CHARS
-    ? `${text.slice(0, MAX_ATTENTION_DETAIL_CHARS - 1)}…`
-    : text;
-}
-
-/**
- * Why this task wants a human, or null when it does not.
- *
- * The stored domain status is consulted before the v2 status because it is the
- * finer vocabulary: `BUDGET_EXHAUSTED` and `POLICY_DENIED` are both projected
- * into a single v2 `FAILED`, and they are not the same instruction to a person
- * — one wants a budget, the other wants a decision.
- *
- * `review` returns null on purpose. The Review column header already says the
- * changes are ready to read, and a per-card chip repeating its own column is
- * the same restatement-in-a-second-alphabet the board removed elsewhere.
- */
-export function attentionReason(
-  task: TaskV2Snapshot,
-  lifecycle: TaskLifecycle,
-  domainTask: Task | undefined,
-  questions: readonly MaterialQuestionSnapshot[],
-): AttentionReason | null {
-  const question = questions.find(
-    (candidate) => candidate.taskId === task.id && candidate.status === "PENDING",
-  );
-  // Checked before the lifecycle gate: a question raised mid-run is still an
-  // obligation, and the task's lifecycle is "working" while it waits.
-  if (question && !lifecycleIsTerminal(lifecycle)) {
-    return { kind: "question", rank: 0, label: "Answer this", detail: question.questionText };
-  }
-  if (lifecycle === "review" || !lifecycleNeedsAttention(lifecycle)) return null;
-
-  switch (domainTask?.status) {
-    case "POLICY_DENIED":
-      return { kind: "policy", rank: 2, label: "Policy denied", detail: failureDetail(domainTask.terminal_reason) };
-    case "BUDGET_EXHAUSTED":
-      return { kind: "budget", rank: 3, label: "Out of budget", detail: failureDetail(domainTask.terminal_reason) };
-    case "FAILED_VERIFICATION":
-      return { kind: "failure", rank: 4, label: "Verification failed", detail: failureDetail(domainTask.terminal_reason) };
-    case "FAILED":
-      return { kind: "failure", rank: 4, label: "Failed", detail: failureDetail(domainTask.terminal_reason) };
-    default:
-      break;
-  }
-
-  switch (task.status) {
-    case "WAITING_USER":
-      return { kind: "question", rank: 0, label: "Waiting on your answer", detail: null };
-    case "WAITING_AUTH":
-      return { kind: "approval", rank: 1, label: "Approve or deny", detail: null };
-    case "FAILED":
-      return { kind: "failure", rank: 4, label: "Failed", detail: failureDetail(domainTask?.terminal_reason) };
-    case "BLOCKED":
-      return { kind: "blocked", rank: 5, label: "Blocked", detail: null };
-    case "WAITING_RESOURCE":
-      return { kind: "resource", rank: 6, label: "Waiting on a resource", detail: null };
-    case "PAUSED":
-      return { kind: "paused", rank: 7, label: "Paused", detail: null };
-    default:
-      // The lifecycle says a human is wanted and neither status says why. Say
-      // the lifecycle rather than inventing a reason.
-      return { kind: "blocked", rank: 5, label: lifecycleLabel(lifecycle), detail: null };
-  }
-}
+export {
+  attentionReason,
+  attentionTone,
+  pendingQuestionFor,
+  type AttentionKind,
+  type AttentionReason,
+} from "./attention";
 
 // ──────────────────────────── Card evidence ────────────────────────────────
 

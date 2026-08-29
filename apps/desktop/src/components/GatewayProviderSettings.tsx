@@ -24,7 +24,7 @@ import { Input } from "../ui/Input";
 import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { useModelInventory } from "../hooks/use-model-inventory";
-import { formatContext, type ModelOption } from "../lib/models";
+import { formatContext, type ModelInventory, type ModelOption } from "../lib/models";
 
 interface GatewayDraft {
   readonly deployment: GatewayDeployment;
@@ -252,7 +252,7 @@ export function GatewayProviderSettings(): JSX.Element {
         {/* Pricing is a fact about the model. Once discovery reports it, an
             operator switch here could only ever disagree with the provider and
             corrupt the routing ledger, so it becomes a read-out. */}
-        {modelsFor(draft.deployment, inventory.models).some((model) => model.slug === draft.model) ? null : (
+        {modelsFor(draft.deployment, inventory).some((model) => model.slug === draft.model) ? null : (
           <Field
             controlId="gateway-free-model"
             label="Free model"
@@ -338,13 +338,26 @@ function draftFromConfiguration(configuration: GatewayProviderConfiguration): Ga
   };
 }
 
-/** Models the inventory reported for this deployment's gateway. */
+/**
+ * Models the inventory reported for this deployment's gateway.
+ *
+ * Two spellings, because the inventory has two eras. Before connected accounts
+ * the gateway was a fixed provider id; now it is an account whose *source* is
+ * `zen`, with an opaque id. Matching on both keeps this form working against
+ * either control plane instead of silently falling back to a text field.
+ */
 function modelsFor(
   deployment: GatewayDeployment,
-  models: readonly ModelOption[],
+  inventory: ModelInventory,
 ): readonly ModelOption[] {
-  const providerId = deployment === "zen" ? "open_code_zen" : "open_code_go";
-  return models.filter((model) => model.provider === providerId);
+  const legacyId = deployment === "zen" ? "open_code_zen" : "open_code_go";
+  const accountIds = new Set(
+    inventory.providers
+      .filter((provider) => provider.id === legacyId || (deployment === "zen" && provider.source === "zen"))
+      .map((provider) => provider.id),
+  );
+  accountIds.add(legacyId);
+  return inventory.models.filter((model) => accountIds.has(model.provider));
 }
 
 /**
@@ -366,7 +379,7 @@ function ModelField({
   inventory: ReturnType<typeof useModelInventory>;
   onChange: (draft: GatewayDraft) => void;
 }): JSX.Element {
-  const available = modelsFor(draft.deployment, inventory.models);
+  const available = modelsFor(draft.deployment, inventory);
   const selected = available.find((model) => model.slug === draft.model) ?? null;
 
   if (available.length === 0) {

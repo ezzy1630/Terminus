@@ -5,8 +5,8 @@ import {
   ChevronDown,
   CircleDot,
   Columns3,
+  Ellipsis,
   List,
-  MoreHorizontal,
   Pause,
   RefreshCw,
   Search,
@@ -25,6 +25,7 @@ import {
 } from "react";
 import { isDefinitiveMutationFailure, useLogicalMutation } from "../hooks/use-logical-mutation";
 import { useTerminusStore } from "../hooks/use-terminus";
+import { useThemeStore } from "../hooks/use-theme";
 import { useDialogFocus } from "../hooks/use-dialog-focus";
 import { arpV2, subscribeEventsV2 } from "../lib/api-v2";
 import { cn } from "../lib/cn";
@@ -37,6 +38,7 @@ import {
   boardLifecycle,
   boardTransitionForDrop,
   directTaskActions,
+  pendingQuestionFor,
   taskEvidence,
   taskStatusLabel,
   type AttentionReason,
@@ -149,13 +151,6 @@ function useStableTasks(next: readonly TaskV2Snapshot[]): TaskV2Snapshot[] {
   return held.current;
 }
 
-function questionForTask(
-  taskId: string,
-  questions: readonly MaterialQuestionSnapshot[],
-): MaterialQuestionSnapshot | null {
-  return questions.find((question) => question.taskId === taskId && question.status === "PENDING") ?? null;
-}
-
 /**
  * The actions a task offers, in the one order they appear everywhere.
  *
@@ -203,7 +198,7 @@ function CardStatus({ lifecycle, needsAttention, label }: { lifecycle: TaskLifec
   return (
     <span
       className={cn(
-        "inline-flex h-4 items-center gap-1 text-xs font-medium",
+        "ui-meta inline-flex h-4 items-center gap-1 font-medium",
         tone === "success" && "text-success",
         tone === "error" && "text-error",
         tone === "warning" && "text-warning",
@@ -213,7 +208,7 @@ function CardStatus({ lifecycle, needsAttention, label }: { lifecycle: TaskLifec
         tone === "neutral" && "text-secondary",
       )}
     >
-      {needsAttention ? <CircleDot size={10} aria-hidden /> : lifecycle === "done" ? <Check size={10} aria-hidden /> : null}
+      {needsAttention ? <CircleDot size={12} aria-hidden /> : lifecycle === "done" ? <Check size={12} aria-hidden /> : null}
       {label ?? lifecycleLabel(lifecycle)}
     </span>
   );
@@ -351,7 +346,10 @@ const MissionBoardCard = memo(function MissionBoardCard({
         data-testid={`mission-board-card-${task.id}`}
         data-board-card={task.id}
         className={cn(
-          "group relative flex w-full select-none flex-col gap-2 rounded-lg border border-subtle bg-card p-3 transition-colors hover:border-default focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--border-strong)]",
+          // `board-card` carries the padding so density reaches this surface;
+          // the board used to ignore the setting entirely, so compact mode
+          // shrank the rail beside it and left the cards alone.
+          "board-card group relative flex w-full select-none flex-col gap-2 rounded-md border border-subtle bg-card transition-colors hover:border-default focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--border-strong)]",
           // Selection is a neutral fill, never a blue wash.
           selected && "border-default bg-selected",
           pending && "opacity-60",
@@ -388,11 +386,11 @@ const MissionBoardCard = memo(function MissionBoardCard({
               trigger={(
                 <IconButton
                   label={`Actions for ${task.contract.mission}`}
-                  icon={<MoreHorizontal size={13} aria-hidden />}
+                  icon={<Ellipsis size={12} strokeWidth={1.7} aria-hidden />}
                   size="sm"
                   disabled={pending}
                   tabIndex={focused ? 0 : -1}
-                  className="h-5 w-5 rounded text-tertiary opacity-0 hover:bg-hover hover:text-primary focus:opacity-100 group-hover:opacity-100"
+                  className="h-5 w-5 rounded-sm text-tertiary opacity-0 hover:bg-hover hover:text-primary focus:opacity-100 group-hover:opacity-100"
                 />
               )}
             />
@@ -404,7 +402,7 @@ const MissionBoardCard = memo(function MissionBoardCard({
             question, a denied policy and an exhausted budget are three
             different instructions and now read as three different things. */}
         {attentionLabel !== null ? (
-          <p className="min-w-0 text-xs leading-snug">
+          <p className="ui-meta min-w-0">
             <span className={cn("font-medium", attentionSeverity === "error" ? "text-error" : "text-warning")}>
               {attentionLabel}
             </span>
@@ -514,7 +512,7 @@ function BoardColumn({
       }}
       className={cn(
         "flex min-h-0 flex-col transition-colors",
-        acceptsDrop && "rounded-lg bg-hover",
+        acceptsDrop && "rounded-md bg-hover",
       )}
     >
       {/* Name and count, nothing else. The icons and coloured dots that used
@@ -522,7 +520,7 @@ function BoardColumn({
       <header className="mb-2 flex h-7 items-center gap-2">
         <h2
           id={`mission-board-column-title-${id}`}
-          className={cn("ui-body font-semibold", isAttentionColumn ? "text-warning" : "text-primary")}
+          className={cn("ui-label", isAttentionColumn ? "text-warning" : "text-primary")}
         >
           {label}
         </h2>
@@ -541,7 +539,7 @@ function BoardColumn({
           // target only appears while a card this column can accept is in
           // flight.
           acceptsDrop ? (
-            <div className="ui-meta flex min-h-20 items-center justify-center rounded-lg border border-dashed border-strong px-3 text-center">
+            <div className="ui-meta flex min-h-20 items-center justify-center rounded-md border border-dashed border-strong px-3 text-center">
               Move to {label}
             </div>
           ) : null
@@ -582,124 +580,6 @@ function BoardColumn({
   );
 }
 
-function TaskQuickView({
-  task,
-  lifecycle,
-  reason,
-  questions,
-  pending,
-  onClose,
-  onOpenTask,
-  onInspectTask,
-  onTransition,
-}: {
-  task: TaskV2Snapshot;
-  lifecycle: TaskLifecycle;
-  reason: AttentionReason | null;
-  questions: readonly MaterialQuestionSnapshot[];
-  pending: boolean;
-  onClose: () => void;
-  onOpenTask: () => void;
-  onInspectTask: () => void;
-  onTransition: (targetStatus: TaskV2Status, destructive: boolean) => void;
-}): JSX.Element {
-  const pendingQuestions = questions.filter((question) => question.taskId === task.id && question.status === "PENDING");
-  const actions = directTaskActions(task);
-
-  return (
-    <aside aria-label="Task quick view" className="panel-enter flex h-full w-[300px] flex-shrink-0 flex-col border-l border-subtle bg-inspector">
-      <header className="flex items-start gap-3 px-3 py-3">
-        <div className="min-w-0 flex-1">
-          <CardStatus lifecycle={lifecycle} needsAttention={reason !== null} />
-          <h2 className="ui-page-title mt-1.5 text-primary">{task.contract.mission}</h2>
-        </div>
-        <IconButton
-          label="Close task quick view"
-          icon={<X size={14} aria-hidden />}
-          onClick={onClose}
-          className="rounded-md text-tertiary hover:bg-hover hover:text-primary"
-        />
-      </header>
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-        {/* The obligation leads, in its own words. This used to appear only
-            when a material question existed, so a task that had exhausted its
-            budget or been denied by policy opened to an unexplained blank. */}
-        {reason !== null ? (
-          <section
-            className={cn(
-              "py-1 pl-2.5",
-              attentionTone(reason.kind) === "error" ? "border-l-2 border-error/55" : "border-l-2 border-warning/55",
-            )}
-            aria-labelledby="quick-view-attention-title"
-          >
-            <h3
-              id="quick-view-attention-title"
-              className={cn(
-                "ui-section-title flex items-center gap-1.5",
-                attentionTone(reason.kind) === "error" ? "text-error" : "text-warning",
-              )}
-            >
-              <CircleDot size={12} aria-hidden /> {reason.label}
-            </h3>
-            {pendingQuestions.length > 0
-              ? pendingQuestions.map((question) => (
-                  <p key={question.id} className="ui-body mt-1 text-primary">{question.questionText}</p>
-                ))
-              : reason.detail !== null
-                ? <p className="ui-body mt-1 text-primary">{reason.detail}</p>
-                : null}
-          </section>
-        ) : null}
-
-        {task.contract.acceptance.length > 0 ? (
-          <section className="mt-3 border-t border-subtle pt-3">
-            <h3 className="ui-section-title text-secondary">Acceptance</h3>
-            <div className="mt-1 divide-y divide-[var(--border-subtle)]">
-              {task.contract.acceptance.map((criterion) => (
-                <div key={criterion.claimId} className="py-2">
-                  <p className="ui-body text-primary">{criterion.statement}</p>
-                  <p className="ui-meta mt-0.5">{criterion.evidenceRequirement}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
-
-        <p aria-label="Task context" className="ui-meta mt-3 grid gap-0.5 border-t border-subtle pt-3">
-          <span className="truncate">{missionLabel(task.missionId)}</span>
-          <span className="capitalize">{task.contract.mode}</span>
-          <span>Updated {relativeTimestamp(task.updatedAt)}</span>
-        </p>
-      </div>
-
-      <footer className="border-t border-subtle p-2.5">
-        {actions.length > 0 ? (
-          <div className="mb-2 flex flex-wrap gap-1.5">
-            {actions.map((action) => (
-              <Button
-                key={action.targetStatus}
-                type="button"
-                disabled={pending}
-                onClick={() => onTransition(action.targetStatus, action.destructive === true)}
-                variant={action.destructive ? "ghost" : "secondary"}
-                size="sm"
-                className={cn(action.destructive && "text-error hover:text-error")}
-              >
-                {action.label}
-              </Button>
-            ))}
-          </div>
-        ) : null}
-        <div className="flex gap-1.5">
-          <Button type="button" variant="primary" size="md" onClick={onOpenTask} className="flex-1">Open task</Button>
-          <Button type="button" variant="ghost" size="md" onClick={onInspectTask}>Task details</Button>
-        </div>
-      </footer>
-    </aside>
-  );
-}
-
 function CancelTaskDialog({ task, pending, onCancel, onConfirm }: {
   task: TaskV2Snapshot;
   pending: boolean;
@@ -718,7 +598,7 @@ function CancelTaskDialog({ task, pending, onCancel, onConfirm }: {
       tabIndex={-1}
       className="dialog-panel fixed left-1/2 top-1/2 w-[min(360px,calc(100%-32px))] -translate-x-1/2 -translate-y-1/2 rounded-lg border border-default bg-elevated p-4 shadow-lg"
     >
-        <AlertTriangle size={17} className="text-error" aria-hidden />
+        <AlertTriangle size={16} className="text-error" aria-hidden />
         <h2 id="cancel-task-title" className="ui-page-title mt-3 text-primary">Cancel this task?</h2>
         <p className="ui-body mt-1.5 text-secondary">Terminus will stop new scheduling for "{task.contract.mission}". Its evidence and history stay available.</p>
         <div className="mt-4 flex justify-end gap-2">
@@ -732,6 +612,19 @@ function CancelTaskDialog({ task, pending, onCancel, onConfirm }: {
 export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardViewProps): JSX.Element {
   const sessions = useTerminusStore((state) => state.sessions);
   const cancelTask = useTerminusStore((state) => state.cancelTask);
+  const density = useThemeStore((state) => state.density);
+  /**
+   * One selection for the window.
+   *
+   * The board kept its own `useState`, so clicking a card highlighted nothing
+   * in the rail and opening a task from the rail left the board showing no
+   * selection at all — two panes listing the same tasks with two different
+   * ideas of which one you were looking at. Selecting here is now the same act
+   * as selecting there, which is also what lets the shared inspector open.
+   */
+  const selectedTaskId = useTerminusStore((state) => state.selectedTaskId);
+  const selectedSessionId = useTerminusStore((state) => state.selectedSessionId);
+  const selectTask = useTerminusStore((state) => state.selectTask);
   // The v2 snapshot cannot say whether a run is in flight; the v1 record and
   // its event tail can.
   const taskById = useTerminusStore((state) => state.taskById);
@@ -752,14 +645,35 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
 
   const [viewMode, setViewMode] = useState<BoardViewMode>("board");
   const [query, setQuery] = useState("");
-  const [spaceFilter, setSpaceFilter] = useState("all");
+  /**
+   * The board opens on the project the rail is pointing at.
+   *
+   * It used to open on every task in the workspace while the sidebar beside it
+   * was scoped to one repository, so the two panes disagreed about what "your
+   * work" meant the moment a second project was open. "All spaces" is still
+   * one click away in the chip; it is just no longer the thing you get without
+   * asking.
+   */
+  const [spaceFilter, setSpaceFilter] = useState<string>(() => selectedSessionId ?? "all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [attentionOnly, setAttentionOnly] = useState(false);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
   const [doneExpanded, setDoneExpanded] = useState(false);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
+  /**
+   * Where a dropped card should sit before the server has said so.
+   *
+   * Dropping used to leave the card exactly where it was for a network round
+   * trip *plus* a refetch — well past the ~100ms at which a direct
+   * manipulation stops feeling direct, and the one gesture on this surface
+   * most likely to be read as "nothing happened". The card moves on release
+   * and reconciles when the real snapshot arrives; `fromVersion` is what tells
+   * us it has arrived.
+   */
+  const [optimisticPlacement, setOptimisticPlacement] = useState<
+    Record<string, { status: TaskV2Status; fromVersion: number }>
+  >({});
   const [taskPendingCancel, setTaskPendingCancel] = useState<TaskV2Snapshot | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<StreamState>("connecting");
@@ -860,17 +774,46 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
   const reasons = useMemo(() => {
     const resolved = new Map<string, AttentionReason>();
     for (const task of tasks) {
-      const reason = attentionReason(task, lifecycleFor(task), taskById[task.id], questions);
+      const reason = attentionReason({
+        lifecycle: lifecycleFor(task),
+        domainTask: taskById[task.id],
+        v2Status: task.status,
+        question: pendingQuestionFor(task.id, questions),
+      });
       if (reason !== null) resolved.set(task.id, reason);
     }
     return resolved;
   }, [lifecycleFor, questions, taskById, tasks]);
   const attentionCount = reasons.size;
 
+  // A guess is only worth keeping until the truth lands. Any new version of
+  // the task — the accepted transition, or a rejection that left it where it
+  // was — retires it, so a failed move cannot strand a card in a column the
+  // control plane never put it in.
+  useEffect(() => {
+    setOptimisticPlacement((current) => {
+      const ids = Object.keys(current);
+      if (ids.length === 0) return current;
+      let changed = false;
+      const next = { ...current };
+      for (const id of ids) {
+        const task = tasks.find((candidate) => candidate.id === id);
+        if (task === undefined || task.version !== current[id]!.fromVersion) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [tasks]);
+
   const placementFor = useCallback(
-    (task: TaskV2Snapshot): MissionBoardColumnId =>
-      boardColumnForTaskPlacement(lifecycleFor(task), reasons.get(task.id)?.kind === "question"),
-    [lifecycleFor, reasons],
+    (task: TaskV2Snapshot): MissionBoardColumnId => {
+      const guess = optimisticPlacement[task.id];
+      if (guess !== undefined) return boardColumnForStatus(guess.status);
+      return boardColumnForTaskPlacement(lifecycleFor(task), reasons.has(task.id));
+    },
+    [lifecycleFor, optimisticPlacement, reasons],
   );
 
   const normalizedQuery = query.trim().toLowerCase();
@@ -966,6 +909,9 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     return null;
   }, [focusedTaskId, renderedTasks]);
 
+  /** Stable so the memoised cards keep their props between renders. */
+  const selectBoardTask = useCallback((taskId: string): void => selectTask(taskId), [selectTask]);
+
   const focusCard = useCallback((taskId: string): void => {
     setFocusedTaskId(taskId);
     cardRefs.current.get(taskId)?.focus();
@@ -982,7 +928,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     if (event.metaKey || event.ctrlKey || event.altKey) return;
 
     if (event.key === "Escape") {
-      setSelectedTaskId(null);
+      selectTask(null);
       return;
     }
 
@@ -1009,7 +955,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     }
     if (event.key === " ") {
       event.preventDefault();
-      setSelectedTaskId((current) => current === task.id ? null : task.id);
+      selectTask(selectedTaskId === task.id ? null : task.id);
       return;
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -1032,9 +978,8 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
         return;
       }
     }
-  }, [focusCard, onOpenTask, renderedTasks]);
+  }, [focusCard, onOpenTask, renderedTasks, selectTask, selectedTaskId]);
 
-  const selectedTask = visibleTasks.find((task) => task.id === selectedTaskId) ?? null;
   const draggingTask = tasks.find((task) => task.id === draggingTaskId) ?? null;
 
   const hasActiveFilters = spaceFilter !== "all" || statusFilter !== "all" || attentionOnly || query.length > 0;
@@ -1045,6 +990,14 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     setStatusFilter("all");
     setAttentionOnly(false);
   }, []);
+
+  useEffect(() => {
+    if (selectedSessionId === null) return;
+    // Only when the rail actually moves. Written as an effect rather than
+    // derived state so "All spaces" survives until the next deliberate project
+    // switch instead of snapping back on the next render.
+    setSpaceFilter(selectedSessionId);
+  }, [selectedSessionId]);
 
   useEffect(() => {
     if (message === null) return;
@@ -1063,6 +1016,10 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
     }
 
     setPendingTaskId(task.id);
+    setOptimisticPlacement((current) => ({
+      ...current,
+      [task.id]: { status: targetStatus, fromVersion: task.version },
+    }));
     try {
       const updated = await arpV2.transitionTask(task.id, targetStatus, { idempotencyKey }, task.version);
       mutation.settle(idempotencyKey);
@@ -1076,19 +1033,27 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
       }
       setMessage(`Moved ${task.contract.mission} to ${transitionOutcomeLabel(updated.status)}.`);
       if (targetStatus === "CANCELLED") {
-        setSelectedTaskId((current) => current === task.id ? null : current);
+        if (selectedTaskId === task.id) selectTask(null);
         setTaskPendingCancel(null);
       }
       resource.retry();
     } catch (error: unknown) {
       if (isDefinitiveMutationFailure(error)) mutation.abandon(idempotencyKey);
+      // The move did not happen, so the card goes back rather than waiting for
+      // a version bump that is never coming.
+      setOptimisticPlacement((current) => {
+        if (current[task.id] === undefined) return current;
+        const next = { ...current };
+        delete next[task.id];
+        return next;
+      });
       const detail = error instanceof Error ? error.message : "Task transition failed";
       setMessage(`Could not update ${task.contract.mission}. ${detail}`);
       resource.retry();
     } finally {
       setPendingTaskId(null);
     }
-  }, [cancelTask, mutation, resource]);
+  }, [cancelTask, mutation, resource, selectTask, selectedTaskId]);
 
   const chooseTransition = useCallback((task: TaskV2Snapshot, targetStatus: TaskV2Status, destructive: boolean): void => {
     if (destructive) {
@@ -1136,8 +1101,8 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
               decoration: it spent a permanent pixel telling the user the
               normal case. The stream only speaks up when it has degraded. */}
           <div className="flex items-center gap-2 shrink-0 pr-2 border-r border-subtle">
-            <h1 id="mission-board-title" aria-label="Kanban" className="ui-page-title text-primary">
-              Kanban
+            <h1 id="mission-board-title" className="ui-page-title text-primary">
+              Board
             </h1>
             {streamState !== "live" ? (
               <span className="ui-meta text-warning" role="status">
@@ -1167,7 +1132,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                 <Button
                   variant="bare"
                   className={cn(
-                    "flex h-6 items-center gap-1 rounded-md border px-2 text-xs font-normal transition-colors",
+                    "ui-meta flex h-7 items-center gap-1 rounded-md border px-2 transition-colors",
                     statusFilter !== "all"
                       ? "border-default bg-selected text-primary"
                       : "border-subtle text-secondary hover:bg-hover hover:text-primary",
@@ -1179,7 +1144,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                       ? `: ${MISSION_BOARD_COLUMNS.find((column) => column.id === statusFilter)?.label ?? statusFilter}`
                       : ""}
                   </span>
-                  <ChevronDown size={10} aria-hidden />
+                  <ChevronDown size={12} aria-hidden />
                 </Button>
               )}
             />
@@ -1200,7 +1165,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                 <Button
                   variant="bare"
                   className={cn(
-                    "flex h-6 items-center gap-1 rounded-md border px-2 text-xs font-normal transition-colors",
+                    "ui-meta flex h-7 items-center gap-1 rounded-md border px-2 transition-colors",
                     spaceFilter !== "all"
                       ? "border-default bg-selected text-primary"
                       : "border-subtle text-secondary hover:bg-hover hover:text-primary",
@@ -1214,7 +1179,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                       ? `: ${spaceOptions.find((option) => option.value === spaceFilter)?.label ?? spaceFilter}`
                       : ""}
                   </span>
-                  <ChevronDown size={10} aria-hidden />
+                  <ChevronDown size={12} aria-hidden />
                 </Button>
               )}
             />
@@ -1226,7 +1191,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                 variant="ghost"
                 size="sm"
                 onClick={clearAllFilters}
-                className="h-6 px-1.5 text-xs text-tertiary hover:text-primary"
+                className="ui-meta h-7 px-1.5 hover:text-primary"
               >
                 Clear
               </Button>
@@ -1237,13 +1202,13 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
         {/* Right: Search, [ Board | List ] View Toggle, Display, Attention, Refresh */}
         <div className="flex items-center gap-2 shrink-0">
           <label className="relative w-44 sm:w-52">
-            <Search size={13} aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-tertiary" />
+            <Search size={12} aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-tertiary" />
             <span className="sr-only">Search mission board</span>
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search tasks"
-              className="ui-input h-7 w-full rounded-md border border-subtle bg-card pl-8 pr-6 text-xs text-primary placeholder:text-tertiary transition-colors"
+              className="ui-input ui-body h-7 w-full rounded-md border border-subtle bg-card pl-8 pr-6 text-primary placeholder:text-tertiary transition-colors"
             />
             {query.length > 0 && (
               <Button
@@ -1264,7 +1229,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
               onClick={() => setViewMode("board")}
               aria-label="Board view"
               aria-pressed={viewMode === "board"}
-              className={cn("flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors", viewMode === "board" ? "bg-selected text-primary" : "text-secondary hover:text-primary")}
+              className={cn("ui-meta flex h-6 items-center gap-1.5 rounded-sm px-2 font-medium transition-colors", viewMode === "board" ? "bg-selected text-primary" : "text-secondary hover:text-primary")}
             >
               <Columns3 size={12} aria-hidden />
               <span>Board</span>
@@ -1274,7 +1239,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
               onClick={() => setViewMode("list")}
               aria-label="List view"
               aria-pressed={viewMode === "list"}
-              className={cn("flex h-6 items-center gap-1.5 rounded px-2 text-xs font-medium transition-colors", viewMode === "list" ? "bg-selected text-primary" : "text-secondary hover:text-primary")}
+              className={cn("ui-meta flex h-6 items-center gap-1.5 rounded-sm px-2 font-medium transition-colors", viewMode === "list" ? "bg-selected text-primary" : "text-secondary hover:text-primary")}
             >
               <List size={12} aria-hidden />
               <span>List</span>
@@ -1290,15 +1255,15 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
               onClick={() => setAttentionOnly((value) => !value)}
               aria-label={attentionOnly ? "Show all tasks" : `Show only the ${attentionCount} tasks that need you`}
               aria-pressed={attentionOnly}
-              className={cn("flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs font-medium transition-colors", attentionOnly ? "border-warning/30 bg-warning/15 text-warning" : "border-warning/25 text-warning hover:bg-warning/10")}
+              className={cn("ui-meta flex h-7 items-center gap-1.5 rounded-md border px-2 font-medium transition-colors", attentionOnly ? "border-warning/30 bg-warning/15 text-warning" : "border-warning/25 text-warning hover:bg-warning/10")}
             >
-              <CircleDot size={11} aria-hidden />
+              <CircleDot size={12} aria-hidden />
               <span>Needs you</span>
               <span className="tabular-nums">{attentionCount}</span>
             </Button>
           ) : null}
 
-          <IconButton label="Refresh mission board" icon={<RefreshCw size={12} aria-hidden />} onClick={resource.retry} disabled={resource.refreshing} size="md" className="h-7 w-7 rounded-md border border-subtle text-tertiary hover:bg-hover hover:text-primary disabled:opacity-50" />
+          <IconButton label="Refresh board" icon={<RefreshCw size={14} strokeWidth={1.7} aria-hidden />} onClick={resource.retry} disabled={resource.refreshing} size="md" className="h-7 w-7 rounded-md border border-subtle text-tertiary hover:bg-hover hover:text-primary disabled:opacity-50" />
         </div>
       </header>
 
@@ -1309,7 +1274,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
           {visibleTasks.length === 0 ? (
             <div className="flex min-h-full items-center justify-center">
               <div className="max-w-sm text-center" role="status">
-                <Columns3 size={20} className="mx-auto text-tertiary" aria-hidden />
+                <Columns3 size={18} strokeWidth={1.7} className="mx-auto text-tertiary" aria-hidden />
                 <h2 className="ui-section-title mt-3 text-primary">{tasks.length > 0 ? "No matching tasks" : "No tasks yet"}</h2>
                 <p className="ui-body mt-1.5 text-secondary">
                   {tasks.length > 0
@@ -1359,13 +1324,13 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                         variant="ghost"
                         size="sm"
                         onClick={() => setDoneExpanded((expanded) => !expanded)}
-                        className="justify-start px-1 text-xs text-tertiary hover:text-primary"
+                        className="ui-meta justify-start px-1 hover:text-primary"
                       >
                         {doneExpanded ? "Hide earlier work" : `${foldedDoneCount} earlier`}
                       </Button>
                     ) : null}
                     projectNameForTask={projectNameForTask}
-                    onSelectTask={setSelectedTaskId}
+                    onSelectTask={selectBoardTask}
                     onOpenTask={onOpenTask}
                     onInspectTask={onInspectTask}
                     onFocusCard={setFocusedTaskId}
@@ -1389,24 +1354,24 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                   <div
                     onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "move"; }}
                     onDrop={(event) => { event.preventDefault(); setDraggingTaskId(null); void requestTransition(draggingTask, "PAUSED"); }}
-                    className="flex h-7 min-w-20 items-center justify-center gap-1.5 rounded-md border border-dashed border-warning/40 px-2 text-xs font-medium text-warning"
+                    className="ui-meta flex h-7 min-w-20 items-center justify-center gap-1.5 rounded-md border border-dashed border-warning/40 px-2 font-medium text-warning"
                   >
-                    <Pause size={13} aria-hidden /> Pause
+                    <Pause size={12} aria-hidden /> Pause
                   </div>
                   <div
                     onDragOver={(event) => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "move"; }}
                     onDrop={(event) => { event.preventDefault(); setDraggingTaskId(null); setTaskPendingCancel(draggingTask); }}
-                    className="flex h-7 min-w-20 items-center justify-center gap-1.5 rounded-md border border-dashed border-error/40 px-2 text-xs font-medium text-error"
+                    className="ui-meta flex h-7 min-w-20 items-center justify-center gap-1.5 rounded-md border border-dashed border-error/40 px-2 font-medium text-error"
                   >
-                    <Archive size={13} aria-hidden /> Cancel
+                    <Archive size={12} aria-hidden /> Cancel
                   </div>
                 </div>
               ) : null}
 
             </>
           ) : (
-            <div role="table" aria-label="Mission board tasks" className="overflow-hidden rounded-lg border border-subtle bg-card">
-              <div role="row" className="mission-board-list-row grid gap-3 border-b border-subtle px-4 py-2 text-xs text-tertiary">
+            <div role="table" aria-label="Board tasks" className="overflow-hidden rounded-md border border-subtle bg-card">
+              <div role="row" className="ui-meta mission-board-list-row grid gap-3 border-b border-subtle px-4 py-2">
                 <span role="columnheader">Session / Task</span><span role="columnheader">State</span><span role="columnheader" className="mission-board-list-secondary">Space</span><span role="columnheader" className="mission-board-list-secondary">Updated</span>
               </div>
               <div role="rowgroup" className="divide-y divide-subtle">
@@ -1419,7 +1384,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                       task,
                       pending: pendingTaskId === task.id,
                       onOpen: onOpenTask,
-                      onSelect: setSelectedTaskId,
+                      onSelect: selectBoardTask,
                       onInspect: onInspectTask,
                       onTransition: chooseTransition,
                     })}
@@ -1430,11 +1395,11 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                       // The row claimed a selected state that nothing could set:
                       // in list mode the quick view was unreachable because only
                       // board cards called onSelectTask.
-                      onClick={() => setSelectedTaskId(task.id)}
+                      onClick={() => selectBoardTask(task.id)}
                       onDoubleClick={() => onOpenTask(task)}
-                      className={cn("mission-board-list-row grid min-h-10 w-full cursor-default select-none items-center gap-3 px-4 text-left text-xs transition-colors hover:bg-hover", selectedTaskId === task.id && "bg-selected")}
+                      className={cn("ui-body mission-board-list-row grid min-h-10 w-full cursor-default select-none items-center gap-3 px-4 text-left transition-colors hover:bg-hover", selectedTaskId === task.id && "bg-selected")}
                     >
-                      <span role="cell" className="min-w-0"><Button type="button" onClick={() => onOpenTask(task)} className="max-w-full justify-start truncate px-0 text-xs text-primary hover:bg-transparent">{task.contract.mission}</Button></span>
+                      <span role="cell" className="min-w-0"><Button type="button" onClick={() => onOpenTask(task)} className="ui-body max-w-full justify-start truncate px-0 text-primary hover:bg-transparent">{task.contract.mission}</Button></span>
                       <span role="cell">
                         <CardStatus
                           lifecycle={lifecycleFor(task)}
@@ -1442,8 +1407,8 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
                           {...(reasons.get(task.id) ? { label: reasons.get(task.id)!.label } : {})}
                         />
                       </span>
-                      <span role="cell" className="mission-board-list-secondary truncate text-secondary">{projectNameForTask(task)}</span>
-                      <span role="cell" className="mission-board-list-secondary text-tertiary">{relativeTimestamp(task.updatedAt)}</span>
+                      <span role="cell" className="ui-meta mission-board-list-secondary truncate">{projectNameForTask(task)}</span>
+                      <span role="cell" className="ui-meta mission-board-list-secondary">{relativeTimestamp(task.updatedAt)}</span>
                     </div>
                   </ContextMenu>
                 ))}
@@ -1451,24 +1416,10 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
             </div>
           )}
         </div>
-
-        {selectedTask ? (
-          <TaskQuickView
-            task={selectedTask}
-            lifecycle={lifecycleFor(selectedTask)}
-            reason={reasons.get(selectedTask.id) ?? null}
-            questions={questions}
-            pending={pendingTaskId === selectedTask.id}
-            onClose={() => setSelectedTaskId(null)}
-            onOpenTask={() => onOpenTask(selectedTask)}
-            onInspectTask={() => onInspectTask(selectedTask.id)}
-            onTransition={(targetStatus, destructive) => chooseTransition(selectedTask, targetStatus, destructive)}
-          />
-        ) : null}
       </div>
 
       {message ? (
-        <div className="pointer-events-none fixed bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-md border border-default bg-elevated px-3 py-1.5 text-xs text-primary shadow-md" role="status" aria-live="polite">
+        <div className="ui-body pointer-events-none fixed bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-md border border-default bg-elevated px-3 py-1.5 text-primary shadow-md" role="status" aria-live="polite">
           {message}
         </div>
       ) : null}

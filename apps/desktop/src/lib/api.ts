@@ -56,6 +56,11 @@ import type {
   GatewayProviderConfiguration,
   GatewayProviderConfigurationResponse,
   GatewayProviderConfigurationUpdate,
+  ProviderAccount,
+  ProviderAccountDiscovery,
+  ProviderAccountDiscoveryResponse,
+  ProviderAccountMetadata,
+  ProviderAccountsResponse,
   ProviderConfiguration,
   ProviderConfigurationResponse,
   ProviderConfigurationUpdate,
@@ -381,6 +386,9 @@ function decodeSession(value: unknown): Session {
     ...(session.default_reasoning_effort === undefined
       ? {}
       : { default_reasoning_effort: decodeOptionalEffort(session.default_reasoning_effort, "session.default_reasoning_effort") ?? null }),
+    ...(session.default_provider_account_id === undefined
+      ? {}
+      : { default_provider_account_id: responseNullableString(session.default_provider_account_id, "session.default_provider_account_id") }),
   };
 }
 
@@ -478,6 +486,76 @@ function decodeGatewayProviderConfigurationResponse(
     updated_at: responseTimestamp(row.updated_at, "gateway provider configuration.updated_at"),
   };
   return { configured: true, configuration };
+}
+
+const PROVIDER_ACCOUNT_AUTH_KINDS = ["api", "oauth", "wellknown", "chatgpt", "anonymous"] as const;
+const PROVIDER_ACCOUNT_STATUSES = ["connected", "expired", "error", "unsupported", "disconnected"] as const;
+const PROVIDER_ACCOUNT_BILLINGS = ["subscription", "free", "paid", "unknown"] as const;
+
+/**
+ * Non-secret metadata only.
+ *
+ * Decoded field by field rather than passed through, so a control plane that
+ * one day widened this object could not carry anything unexpected into the
+ * renderer — and so a stray token-shaped field would be dropped here rather
+ * than rendered in Settings.
+ */
+function decodeProviderAccountMetadata(value: unknown): ProviderAccountMetadata {
+  if (value === undefined || value === null) return {};
+  const metadata = responseObject(value, "provider account.metadata");
+  return {
+    ...(metadata.account_id === undefined ? {} : { account_id: responseString(metadata.account_id, "provider account.metadata.account_id", true) }),
+    ...(metadata.plan_type === undefined ? {} : { plan_type: responseString(metadata.plan_type, "provider account.metadata.plan_type", true) }),
+    ...(metadata.email === undefined ? {} : { email: responseString(metadata.email, "provider account.metadata.email", true) }),
+  };
+}
+
+function decodeProviderAccount(value: unknown): ProviderAccount {
+  const account = responseObject(value, "provider account");
+  return {
+    id: responseString(account.id, "provider account.id"),
+    source: responseString(account.source, "provider account.source"),
+    display_name: responseString(account.display_name, "provider account.display_name"),
+    vendor_id: responseString(account.vendor_id, "provider account.vendor_id", true),
+    auth_kind: responseEnum(account.auth_kind, PROVIDER_ACCOUNT_AUTH_KINDS, "provider account.auth_kind"),
+    status: responseEnum(account.status, PROVIDER_ACCOUNT_STATUSES, "provider account.status"),
+    status_detail: responseString(account.status_detail ?? "", "provider account.status_detail", true),
+    billing: responseEnum(account.billing, PROVIDER_ACCOUNT_BILLINGS, "provider account.billing"),
+    host: responseString(account.host, "provider account.host", true),
+    protocol: responseEnum(account.protocol, GATEWAY_PROTOCOLS, "provider account.protocol"),
+    is_default: responseBoolean(account.is_default, "provider account.is_default"),
+    model_count: responseNonNegativeInteger(account.model_count, "provider account.model_count"),
+    metadata: decodeProviderAccountMetadata(account.metadata),
+    discovered_at: responseTimestamp(account.discovered_at, "provider account.discovered_at"),
+    // Absent and null both mean "never", and a client that rejected the
+    // absent form would refuse every response from a control plane that
+    // simply omits empty fields.
+    last_verified_at: responseNullableTimestamp(account.last_verified_at ?? null, "provider account.last_verified_at"),
+    expires_at: responseNullableTimestamp(account.expires_at ?? null, "provider account.expires_at"),
+    revision: responseNonNegativeInteger(account.revision, "provider account.revision"),
+  };
+}
+
+function decodeProviderAccountDiscovery(value: unknown): ProviderAccountDiscovery {
+  const discovery = responseObject(value ?? {}, "provider account discovery");
+  return {
+    last_run_at: responseNullableTimestamp(discovery.last_run_at ?? null, "provider account discovery.last_run_at"),
+    installed_tools: responseStringArray(discovery.installed_tools ?? [], "provider account discovery.installed_tools"),
+    warnings: responseStringArray(discovery.warnings ?? [], "provider account discovery.warnings"),
+  };
+}
+
+function decodeProviderAccountsResponse(value: unknown, what: string): ProviderAccountsResponse {
+  const root = responseObject(value, what);
+  const accounts = root.accounts;
+  if (!Array.isArray(accounts)) {
+    throw new TerminusApiError(502, `${what}.accounts was not an array`, null);
+  }
+  return {
+    accounts: accounts.map(decodeProviderAccount),
+    discovery: decodeProviderAccountDiscovery(root.discovery),
+    supported: true,
+  };
 }
 
 /**
@@ -960,6 +1038,84 @@ export class TerminusApiClient {
       }
       throw error;
     }
+  }
+
+  // ─────────────────── /provider-accounts ───────────────────────────────
+
+  /**
+   * The credentials Terminus can currently route with.
+   *
+   * These are discovered from the operator's own credential stores, so the
+   * list is a *report*, never a configuration this client authored. As with
+   * the model inventory, a control plane that does not implement the route
+   * answers 404 and the caller renders "this build does not report connected
+   * accounts" instead of an empty list that reads like "you have none".
+   */
+  async listProviderAccounts(signal?: AbortSignal | null): Promise<ProviderAccountsResponse> {
+    try {
+      return decodeProviderAccountsResponse(
+        await this.request<unknown>("GET", "/v1/provider-accounts", { signal }),
+        "provider accounts",
+      );
+    } catch (error) {
+      if (error instanceof TerminusApiError && error.status === 404) {
+        return {
+          accounts: [],
+          discovery: { last_run_at: null, installed_tools: [], warnings: [] },
+          supported: false,
+        };
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Sweep the credential stores again.
+   *
+   * The control plane already does this at startup; this is the "I just signed
+   * in to Codex in another window" button. `imported` names the accounts the
+   * sweep created or re-imported, which is what the first-launch notice
+   * counts.
+   */
+  async discoverProviderAccounts(options: MutationRequestOptions): Promise<ProviderAccountDiscoveryResponse> {
+    const raw = await this.request<unknown>("POST", "/v1/provider-accounts/discover", { ...options });
+    const decoded = decodeProviderAccountsResponse(raw, "provider account discovery");
+    const root = responseObject(raw, "provider account discovery");
+    return {
+      ...decoded,
+      imported: responseStringArray(root.imported ?? [], "provider account discovery.imported"),
+    };
+  }
+
+  /**
+   * Forget an account and delete the credential it copied into the keyring.
+   *
+   * `expectedRevision` is not ceremony: discovery runs on its own schedule and
+   * can re-import an account between the render and the click, and deleting a
+   * credential the operator did not mean to delete is not recoverable from
+   * this app.
+   */
+  async disconnectProviderAccount(
+    accountId: string,
+    expectedRevision: number,
+    options: MutationRequestOptions,
+  ): Promise<void> {
+    await this.request<unknown>("DELETE", `/v1/provider-accounts/${encodeURIComponent(accountId)}`, {
+      body: { expected_revision: expectedRevision },
+      ...options,
+    });
+  }
+
+  /** Make this the account every turn uses when nothing more specific applies. */
+  async setDefaultProviderAccount(
+    accountId: string,
+    expectedRevision: number,
+    options: MutationRequestOptions,
+  ): Promise<void> {
+    await this.request<unknown>("PUT", `/v1/provider-accounts/${encodeURIComponent(accountId)}/default`, {
+      body: { expected_revision: expectedRevision },
+      ...options,
+    });
   }
 
   async getProviderConfiguration(signal?: AbortSignal | null): Promise<ProviderConfigurationResponse> {

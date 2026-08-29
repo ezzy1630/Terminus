@@ -297,8 +297,10 @@ function CommandPaletteImpl({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [dialogRef, flatRanked, open, selectedIndex, invoke]);
 
-  if (!open) return <></>;
-
+  // No early return on `!open`: that removed the sheet in one frame, so the
+  // palette appeared with an animation and vanished without one. Radix reads
+  // `open={false}` as "play the exit, then unmount the portal", and while it is
+  // closed it renders nothing into the tree either way.
   let flatIdx = -1;
 
   return (
@@ -315,7 +317,11 @@ function CommandPaletteImpl({
       tabIndex={-1}
       overlayClassName="bg-black/35"
       className={cn(
-        "fixed left-1/2 top-[14vh] flex max-h-[64vh] w-full -translate-x-1/2 flex-col overflow-hidden rounded-md border border-subtle bg-[var(--bg-popover)] shadow-lg",
+        // `dialog-panel` for the same rise-and-settle every other sheet gets.
+        // The palette used to snap into existence at full size while its
+        // backdrop faded, which read as a rendering glitch rather than a
+        // window opening.
+        "dialog-panel fixed left-1/2 top-[14vh] flex max-h-[64vh] w-full -translate-x-1/2 flex-col overflow-hidden rounded-md border border-subtle bg-[var(--bg-popover)] shadow-lg",
         className,
       )}
       style={{ width: "min(512px, calc(100vw - 32px))" }}

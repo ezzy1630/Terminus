@@ -16,6 +16,14 @@
  */
 import { useCallback, useMemo, useState } from "react";
 
+/**
+ * A provider entry's id.
+ *
+ * Once credentials became first-class this stopped being a vendor id and
+ * became a *connected account* id: the same vendor can be reachable through
+ * two accounts (a personal key and a work subscription) that bill to different
+ * places, so the account is what a turn routes to.
+ */
 export type ProviderId = string;
 
 export interface Provider {
@@ -28,6 +36,28 @@ export interface Provider {
   available: boolean;
   /** Why it is unavailable, shown in place of the model list. */
   unavailableReason?: string;
+  /**
+   * Where the credential came from — `opencode:<id>`, `codex-chatgpt`, `zen`.
+   * Used only to phrase the source in words an operator recognises.
+   */
+  source?: string;
+  /** How turns on this account are paid for, when the control plane says. */
+  billing?: ProviderBilling;
+  /** The account every turn falls back to. At most one is true. */
+  isDefault?: boolean;
+}
+
+export type ProviderBilling = "subscription" | "free" | "paid" | "unknown";
+
+/** The badge a group header carries, or null when billing says nothing useful. */
+export function billingBadge(provider: Provider): string | null {
+  switch (provider.billing) {
+    case "subscription": return "Subscription";
+    case "free": return "Free";
+    // `paid` is priced per model, not per account: a badge here would have to
+    // invent one figure for a list of models that each cost something else.
+    default: return null;
+  }
 }
 
 /**
@@ -64,6 +94,63 @@ export interface ModelOption {
   /** The model's context window in tokens. One value — models have one. */
   contextTokens: number;
   toolCalling?: boolean;
+  /**
+   * The reasoning depths this model actually accepts, in Terminus's own
+   * vocabulary. Empty means the provider named none, and the picker then
+   * offers all four rather than pretending to know better.
+   *
+   * Provider spellings are folded here rather than shown raw: `minimal` and
+   * `low` are both Low, `xhigh`/`ultra`/`max` are all Max. Two rows that mean
+   * the same depth are a choice the operator cannot make correctly.
+   */
+  efforts?: readonly Effort[];
+  /** What the provider runs this model at when nobody says. */
+  defaultEffort?: Effort;
+  /**
+   * Price in USD micros per million input/output tokens — 3_000_000 is $3/M.
+   * Absent means the provider did not price it, and no figure is shown.
+   */
+  inputCostMicros?: number;
+  outputCostMicros?: number;
+}
+
+/**
+ * Provider effort spellings → the four Terminus offers.
+ *
+ * The control plane clamps the value back to the provider's own set when it
+ * renders the request, so this mapping only has to be honest in one direction:
+ * every level offered here must correspond to something the model accepts.
+ */
+const EFFORT_ALIASES: Readonly<Record<string, Effort>> = {
+  minimal: "low",
+  none: "low",
+  low: "low",
+  medium: "medium",
+  default: "medium",
+  high: "high",
+  xhigh: "max",
+  ultra: "max",
+  max: "max",
+};
+
+export function normalizeEffort(value: string): Effort | null {
+  return EFFORT_ALIASES[value.trim().toLowerCase()] ?? null;
+}
+
+/** The depths a model offers, in Terminus's fixed order. Never empty. */
+export function effortsFor(model: ModelOption): readonly Effort[] {
+  const offered = model.efforts ?? [];
+  const kept = EFFORTS.filter((level) => offered.includes(level));
+  return kept.length > 0 ? kept : EFFORTS;
+}
+
+/** `3_000_000` → `$3/M`. Null when the provider named no price. */
+export function formatPricePerMillion(micros: number | undefined): string | null {
+  if (typeof micros !== "number" || !Number.isFinite(micros) || micros <= 0) return null;
+  const dollars = micros / 1_000_000;
+  if (dollars >= 10) return `$${Math.round(dollars)}/M`;
+  if (dollars >= 1) return `$${dollars.toFixed(dollars % 1 === 0 ? 0 : 1)}/M`;
+  return `$${dollars.toFixed(2)}/M`;
 }
 
 /** What a provider reported at a point in time. Empty until one does. */
@@ -100,9 +187,24 @@ function isEffort(value: unknown): value is Effort {
   return typeof value === "string" && (EFFORTS as readonly string[]).includes(value);
 }
 
-/** Depth applies only where the provider says the model reasons. */
+/**
+ * Depth applies only where the provider says the model reasons, and only at a
+ * level it accepts. A preference of Max carried onto a model whose deepest
+ * level is High resolves *down* to High rather than being sent as a value the
+ * provider would reject or silently reinterpret.
+ */
 export function effortFor(model: ModelOption, preferred: Effort): Effort | null {
-  return model.reasoning ? preferred : null;
+  if (!model.reasoning) return null;
+  const offered = effortsFor(model);
+  if (offered.includes(preferred)) return preferred;
+  const wanted = EFFORTS.indexOf(preferred);
+  let nearest = offered[0] ?? preferred;
+  for (const level of offered) {
+    if (Math.abs(EFFORTS.indexOf(level) - wanted) < Math.abs(EFFORTS.indexOf(nearest) - wanted)) {
+      nearest = level;
+    }
+  }
+  return nearest;
 }
 
 /** `128000` → `128K`, `1000000` → `1M`. Zero means the provider did not say. */
@@ -119,6 +221,12 @@ export function formatContext(tokens: number): string | null {
 export interface ModelSelection {
   /** Null whenever the inventory reports nothing. Callers must handle it. */
   selected: ModelOption | null;
+  /**
+   * The connected account the selected model belongs to, when the inventory
+   * reported one. The composer states it on the chip and sends it with the
+   * turn: a bare model id does not name a route.
+   */
+  account: Provider | null;
   select: (id: string) => void;
   favourites: readonly ModelOption[];
   isFavourite: (id: string) => boolean;
@@ -148,11 +256,17 @@ export interface ModelSelectionSession {
   readonly id: string;
   readonly default_model?: string | null;
   readonly default_reasoning_effort?: Effort | null;
+  /** Which connected account the stored model belongs to, when one is pinned. */
+  readonly default_provider_account_id?: string | null;
 }
 
 export type ModelSelectionWriter = (
   sessionId: string,
-  patch: { default_model?: string; default_reasoning_effort?: Effort },
+  patch: {
+    default_model?: string;
+    default_reasoning_effort?: Effort;
+    default_provider_account_id?: string;
+  },
 ) => Promise<unknown>;
 
 /**
@@ -188,12 +302,21 @@ export function useModelSelection(
 
   const sessionId = session?.id ?? null;
   const byId = useMemo(() => new Map(models.map((model) => [model.id, model])), [models]);
+  const accountById = useMemo(
+    () => new Map(inventory.providers.map((provider) => [provider.id, provider])),
+    [inventory.providers],
+  );
+  const sessionAccountId = session?.default_provider_account_id?.trim() ?? "";
   // The server's default is a bare model id, which may be either spelling.
+  // Two accounts can offer the same id, so the stored account decides between
+  // them; without one the first match stands, which is what a control plane
+  // that predates accounts will produce.
   const sessionModel = useMemo(() => {
     const wanted = session?.default_model?.trim();
     if (!wanted) return null;
-    return models.find((model) => model.id === wanted || model.slug === wanted) ?? null;
-  }, [models, session?.default_model]);
+    const named = models.filter((model) => model.id === wanted || model.slug === wanted);
+    return named.find((model) => model.provider === sessionAccountId) ?? named[0] ?? null;
+  }, [models, session?.default_model, sessionAccountId]);
 
   // A pick belongs to the session it was made in. Switching projects must not
   // carry one project's choice into another's turns.
@@ -204,10 +327,19 @@ export function useModelSelection(
     ?? models[0]
     ?? null;
 
+  // A model that names its own default depth is preferred over the session's
+  // carried-over preference *only* when the session never stated one; an
+  // operator who chose High meant it for the next model too.
   const preferredEffort: Effort = activePending?.effort
-    ?? (isEffort(session?.default_reasoning_effort) ? session.default_reasoning_effort : "medium");
+    ?? (isEffort(session?.default_reasoning_effort)
+      ? session.default_reasoning_effort
+      : selected?.defaultEffort ?? "medium");
 
-  const write = useCallback((patch: { default_model?: string; default_reasoning_effort?: Effort }): void => {
+  const write = useCallback((patch: {
+    default_model?: string;
+    default_reasoning_effort?: Effort;
+    default_provider_account_id?: string;
+  }): void => {
     if (!persist || sessionId === null) return;
     setPersisting(true);
     setPersistError(null);
@@ -223,6 +355,12 @@ export function useModelSelection(
       .finally(() => setPersisting(false));
   }, [persist, sessionId]);
 
+  /**
+   * One pick is one routing decision, so it is stored as one: the account the
+   * turn authenticates as, the model within it, and the depth that model will
+   * actually run at. Writing only the model id left the session pointing at a
+   * name two accounts could both answer to.
+   */
   const select = useCallback((id: string): void => {
     setPending((previous) => ({
       sessionId,
@@ -230,8 +368,17 @@ export function useModelSelection(
       effort: previous.sessionId === sessionId ? previous.effort : null,
     }));
     const model = byId.get(id);
-    if (model) write({ default_model: model.slug });
-  }, [byId, sessionId, write]);
+    if (!model) return;
+    const account = accountById.get(model.provider);
+    const depth = effortFor(model, preferredEffort);
+    write({
+      default_model: model.slug,
+      // Omitted rather than guessed when the inventory reported no account —
+      // a control plane that predates accounts must keep working.
+      ...(account ? { default_provider_account_id: account.id } : {}),
+      ...(depth ? { default_reasoning_effort: depth } : {}),
+    });
+  }, [accountById, byId, preferredEffort, sessionId, write]);
 
   const setEffort = useCallback((effort: Effort): void => {
     setPending((previous) => ({
@@ -261,6 +408,7 @@ export function useModelSelection(
 
   return {
     selected,
+    account: selected ? accountById.get(selected.provider) ?? null : null,
     select,
     favourites,
     isFavourite: useCallback((id: string) => favouriteIds.includes(id), [favouriteIds]),

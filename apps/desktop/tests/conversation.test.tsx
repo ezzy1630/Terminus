@@ -625,6 +625,70 @@ describe("final turn contract", () => {
     expect(block?.retryInput).toBe("add the migration");
   });
 
+  // The control plane settles one failure as two events in one atomic batch.
+  test("reports one failure once, not twice", () => {
+    const feed = decodeFeed(
+      [
+        event("1", "turn.started", { started_at: "2026-08-28T00:00:00.000Z" }),
+        event("2", "turn.failed", {
+          code: "PROVIDER_EXECUTION_FAILED",
+          category: "provider",
+          message: "OpenCode gateway returned HTTP 429: Rate limit exceeded.",
+          reason: "agent_loop_error",
+          retryable: false,
+        }),
+        // Same stop, task aggregate: "the task is still ACTIVE and steerable".
+        event("3", "task.turn_failed", {
+          status: "ACTIVE",
+          active_turn: null,
+          code: "PROVIDER_EXECUTION_FAILED",
+          message: "OpenCode gateway returned HTTP 429: Rate limit exceeded.",
+          reason: "agent_loop_error",
+        }),
+      ],
+      "2026-08-28T00:00:00.000Z",
+      new Map([["1", { status: "ready" as const, text: "test", truncated: false }]]),
+    );
+
+    expect(feed.blocks).toHaveLength(1);
+    // The surviving card is the turn-level one: only it carries `retryable`.
+    expect(feed.blocks[0]?.entries[0]?.detail).toContain("This error is not retryable.");
+    expect(feed.blocks[0]?.retryInput).toBe("test");
+  });
+
+  test("a blocked turn is reported by the turn, not again by the task", () => {
+    const feed = decodeFeed(
+      [
+        event("1", "turn.started", { started_at: "2026-08-28T00:00:00.000Z" }),
+        event("2", "turn.blocked", { code: "PROVIDER_BLOCKED", message: "The provider refused." }),
+        event("3", "task.blocked", { status: "BLOCKED", active_turn: null, reason: "provider_blocked" }),
+      ],
+      "2026-08-28T00:00:00.000Z",
+      new Map(),
+    );
+
+    expect(feed.blocks).toHaveLength(1);
+    expect(feed.blocks[0]?.title).toBe("Turn blocked");
+  });
+
+  // Each turn reports its own end; the guard is per turn, not per transcript.
+  test("de-duplication resets at the next turn", () => {
+    const feed = decodeFeed(
+      [
+        event("1", "turn.started", { started_at: "2026-08-28T00:00:00.000Z" }),
+        event("2", "turn.failed", { message: "first failure" }),
+        event("3", "task.turn_failed", { status: "ACTIVE", message: "first failure" }),
+        event("4", "turn.started", { started_at: "2026-08-28T00:01:00.000Z" }),
+        event("5", "turn.failed", { message: "second failure" }),
+        event("6", "task.turn_failed", { status: "ACTIVE", message: "second failure" }),
+      ],
+      "2026-08-28T00:00:00.000Z",
+      new Map(),
+    );
+
+    expect(feed.blocks).toHaveLength(2);
+  });
+
   test("names the model the runtime actually routed to", () => {
     const feed = decodeFeed(
       [

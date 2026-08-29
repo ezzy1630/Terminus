@@ -1,15 +1,34 @@
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
-import { type ReactElement, type ReactNode, useEffect, useId, useState } from "react";
+import { createContext, useContext, type ReactElement, type ReactNode, useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
+
+const HOVER_DELAY_MS = 450;
+/** How long after a tip closes its neighbours still open instantly. */
+const SKIP_DELAY_MS = 300;
+
+/** Set by the app-level provider so a `Tooltip` can tell it is already inside one. */
+const TooltipScope = createContext(false);
 
 export function TooltipProvider({ children }: { children: ReactNode }): JSX.Element {
   return (
-    <TooltipPrimitive.Provider delayDuration={450} skipDelayDuration={300}>
-      {children}
-    </TooltipPrimitive.Provider>
+    <TooltipScope.Provider value>
+      <TooltipPrimitive.Provider delayDuration={HOVER_DELAY_MS} skipDelayDuration={SKIP_DELAY_MS}>
+        {children}
+      </TooltipPrimitive.Provider>
+    </TooltipScope.Provider>
   );
 }
 
+/**
+ * One provider for the window is the point of the primitive: it is what makes
+ * a toolbar behave the way AppKit does, where the first tip costs a delay and
+ * sliding along the neighbouring buttons shows theirs at once. Each `Tooltip`
+ * used to mount a provider of its own, so every button was its own scope —
+ * every hover paid the full delay again and two tips could sit on screen
+ * together, because neither knew the other existed. The local provider now
+ * appears only when there is no surrounding one, which is the case in unit
+ * tests that render a single control.
+ */
 export function Tooltip({
   content,
   children,
@@ -19,20 +38,25 @@ export function Tooltip({
   children: ReactElement;
   side?: "top" | "right" | "bottom" | "left";
 }): JSX.Element {
-  return (
-    <TooltipPrimitive.Provider delayDuration={450} skipDelayDuration={300}>
-      <TooltipPrimitive.Root>
-        <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
-        <TooltipPrimitive.Portal>
-          <TooltipPrimitive.Content
-            side={side}
-            sideOffset={6}
-            className="ui-popover z-tooltip max-w-72 rounded-md border border-subtle px-2 py-[3px] text-xs text-secondary shadow-md"
-          >
-            {content}
-          </TooltipPrimitive.Content>
-        </TooltipPrimitive.Portal>
-      </TooltipPrimitive.Root>
+  const withinProvider = useContext(TooltipScope);
+  const tooltip = (
+    <TooltipPrimitive.Root>
+      <TooltipPrimitive.Trigger asChild>{children}</TooltipPrimitive.Trigger>
+      <TooltipPrimitive.Portal>
+        <TooltipPrimitive.Content
+          side={side}
+          sideOffset={6}
+          collisionPadding={8}
+          className="ui-popover z-tooltip max-w-72 rounded-md border border-subtle px-2 py-[3px] text-xs text-secondary shadow-md"
+        >
+          {content}
+        </TooltipPrimitive.Content>
+      </TooltipPrimitive.Portal>
+    </TooltipPrimitive.Root>
+  );
+  return withinProvider ? tooltip : (
+    <TooltipPrimitive.Provider delayDuration={HOVER_DELAY_MS} skipDelayDuration={SKIP_DELAY_MS}>
+      {tooltip}
     </TooltipPrimitive.Provider>
   );
 }

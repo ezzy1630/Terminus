@@ -140,6 +140,12 @@ interface ComposerProps {
 export interface TurnRouting {
   model?: string;
   reasoning_effort?: ReasoningEffort;
+  /**
+   * The connected account the turn authenticates and bills as. Sent with the
+   * model because a bare model id is not a route: two accounts can offer the
+   * same one, and the control plane must not choose between them silently.
+   */
+  provider_account_id?: string;
 }
 
 /**
@@ -387,7 +393,10 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   const turnRouting: TurnRouting = useMemo(() => ({
     ...(modelSelection.selected ? { model: modelSelection.selected.slug } : {}),
     ...(modelSelection.effort ? { reasoning_effort: modelSelection.effort } : {}),
-  }), [modelSelection.effort, modelSelection.selected]);
+    // Omitted against a control plane that reported no accounts, which then
+    // routes by its own defaults exactly as it did before they existed.
+    ...(modelSelection.account ? { provider_account_id: modelSelection.account.id } : {}),
+  }), [modelSelection.account, modelSelection.effort, modelSelection.selected]);
   // Effects that send later (a queued steer flushing, a Retry click) must use
   // the choice as it stands at that moment, not the one captured when they were
   // registered.

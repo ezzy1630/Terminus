@@ -40,7 +40,16 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Search, Star } from "lucide-react";
 import { cn } from "../lib/cn";
 import { Button } from "../ui/Button";
-import { EFFORTS, EFFORT_LABELS, type ModelOption, type ModelSelection, type Provider, type ProviderId } from "../lib/models";
+import {
+  EFFORT_LABELS,
+  billingBadge,
+  effortsFor,
+  formatPricePerMillion,
+  type ModelOption,
+  type ModelSelection,
+  type Provider,
+  type ProviderId,
+} from "../lib/models";
 
 type Filter = "all" | "favourites" | ProviderId;
 
@@ -140,6 +149,7 @@ function ModelPickerImpl({
 }: ModelPickerProps): JSX.Element {
   const {
     selected,
+    account: selectedAccount,
     select,
     effort,
     setEffort,
@@ -176,7 +186,16 @@ function ModelPickerImpl({
    */
   const groups = useMemo(() => {
     const visible = models.filter((model) => matches(model, providerById(model.provider).label, normalizedQuery));
-    const result: Array<{ id: string; title: string; note?: string; models: ModelOption[] }> = [];
+    const result: Array<{
+      id: string;
+      title: string;
+      note?: string;
+      /** Subscription / Free — how turns on this account are paid for. */
+      badge?: string;
+      /** The account every turn falls back to when nothing else applies. */
+      isDefault?: boolean;
+      models: ModelOption[];
+    }> = [];
 
     if (filter === "favourites" || filter === "all") {
       const starred = favourites.filter((model) => visible.includes(model));
@@ -184,14 +203,20 @@ function ModelPickerImpl({
     }
     if (filter === "favourites") return result;
 
+    // One group per connected account, in the order the control plane listed
+    // them. Two accounts on the same vendor are two groups, because they are
+    // two different bills and two different credentials.
     for (const provider of providers) {
       if (filter !== "all" && filter !== provider.id) continue;
       const grouped = visible.filter((model) => model.provider === provider.id);
       if (grouped.length === 0) continue;
+      const badge = billingBadge(provider);
       result.push({
         id: provider.id,
         title: provider.label,
         ...(provider.available ? {} : { note: provider.unavailableReason ?? "This provider is not reachable right now." }),
+        ...(badge ? { badge } : {}),
+        ...(provider.isDefault ? { isDefault: true } : {}),
         models: grouped,
       });
     }
@@ -223,14 +248,66 @@ function ModelPickerImpl({
     close();
   }, [close, providerById, select]);
 
+  /**
+   * Everything that means "this popover is no longer the surface in use".
+   *
+   * The listener used to be one bubble-phase `pointerdown` on `window`, which
+   * a control that opens something else can outrun: clicking a button that
+   * mounts a modal left this popover drawn, undimmed, over the modal's scrim.
+   * So: capture phase (nothing can stop it reaching us), both pointer and
+   * mouse events (an environment that synthesises only one still closes it),
+   * the window losing focus, and the app's own overlay-open events — a
+   * command palette or a settings dialog opening is the same statement as a
+   * click elsewhere.
+   */
   useEffect(() => {
     if (!open) return;
-    const onPointerDown = (event: PointerEvent): void => {
-      if (!rootRef.current?.contains(event.target as Node)) close();
+    const closeIfOutside = (event: Event): void => {
+      const target = event.target;
+      if (target instanceof Node && rootRef.current?.contains(target)) return;
+      close();
     };
-    window.addEventListener("pointerdown", onPointerDown);
-    return () => window.removeEventListener("pointerdown", onPointerDown);
+    const overlayEvents = [
+      "terminus:open-settings",
+      "terminus:open-command-palette",
+      "terminus:open-onboarding",
+    ] as const;
+    document.addEventListener("pointerdown", closeIfOutside, true);
+    document.addEventListener("mousedown", closeIfOutside, true);
+    window.addEventListener("blur", close);
+    for (const name of overlayEvents) window.addEventListener(name, close);
+    return () => {
+      document.removeEventListener("pointerdown", closeIfOutside, true);
+      document.removeEventListener("mousedown", closeIfOutside, true);
+      window.removeEventListener("blur", close);
+      for (const name of overlayEvents) window.removeEventListener(name, close);
+    };
   }, [close, open]);
+
+  /**
+   * Escape, wherever focus happens to be.
+   *
+   * Handled on the document in the capture phase rather than on this subtree,
+   * because focus can legitimately sit outside the popover while it is open
+   * (the trigger is a tooltip target, and a pointer-driven open never moves
+   * focus at all) — and Escape then reached an enclosing dialog first and
+   * closed *that* instead. Propagation stops here so the topmost surface is
+   * the one that closes.
+   */
+  useEffect(() => {
+    if (!open) return;
+    const onEscape = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      // Escape backs out one pane at a time, so a mis-click into the model
+      // list does not also throw away the popover.
+      if (pane === "root") close();
+      else setPane("root");
+    };
+    document.addEventListener("keydown", onEscape, true);
+    return () => document.removeEventListener("keydown", onEscape, true);
+  }, [close, open, pane]);
 
   // Search takes focus when the model pane opens, and only then — the root
   // pane has no field, and stealing focus from it would strand arrow keys.
@@ -251,14 +328,7 @@ function ModelPickerImpl({
   };
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      // Escape backs out one pane at a time, so a mis-click into the model
-      // list does not also throw away the popover.
-      if (pane === "root") close();
-      else setPane("root");
-      return;
-    }
+    // Escape is handled on the document, so that it works with focus anywhere.
     if (pane !== "model") return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
@@ -320,7 +390,7 @@ function ModelPickerImpl({
            which is how the root pane's own Model row names itself — two
            controls whose accessible names share a prefix make either of them
            unaddressable from the keyboard and from a test. */
-        aria-label={`Change model and effort · ${selected.label}${effortLabel ? `, ${effortLabel}` : ""}`}
+        aria-label={`Change model and effort · ${selected.label}${selectedAccount ? ` on ${selectedAccount.label}` : ""}${effortLabel ? `, ${effortLabel}` : ""}`}
         data-tooltip="Model and reasoning effort for this turn"
         onClick={(event) => {
           if (open) close();
@@ -332,8 +402,17 @@ function ModelPickerImpl({
           open && "bg-hover",
         )}
       >
+        {/* The account mark leads: with several accounts connected, "Grok
+            Code" alone does not say which credential the turn bills to, and
+            two accounts can offer the same model. */}
+        {selectedAccount ? <ProviderMark mark={selectedAccount.mark} /> : null}
         <span className="truncate font-medium text-primary">{selected.label}</span>
-        {effortLabel ? <span className="shrink-0 text-secondary">{effortLabel}</span> : null}
+        {effortLabel ? (
+          <>
+            <span aria-hidden className="shrink-0 text-tertiary">·</span>
+            <span className="shrink-0 text-secondary">{effortLabel}</span>
+          </>
+        ) : null}
         <ChevronDown size={12} strokeWidth={1.9} aria-hidden className="shrink-0 text-tertiary" />
       </Button>
 
@@ -362,7 +441,10 @@ function ModelPickerImpl({
             <>
               <PaneHeader title="Effort" onBack={() => setPane("root")} />
               <div className="p-1">
-                {EFFORTS.map((level) => (
+                {/* Exactly the depths this model accepts. Offering four when
+                    the provider named two is how an operator ends up asking
+                    for a level the request will be clamped out of anyway. */}
+                {effortsFor(selected).map((level) => (
                   <Button
                     key={level}
                     type="button"
@@ -436,7 +518,18 @@ function ModelPickerImpl({
                   </p>
                 ) : groups.map((group) => (
                   <section key={group.id} aria-label={group.title}>
-                    <h3 className="ui-section-label px-2.5 pb-1 pt-2">{group.title}</h3>
+                    {/* The account header carries what distinguishes one
+                        account from another: how its turns are paid for, and
+                        whether it is the one every project falls back to. */}
+                    <h3 className="flex items-center gap-1.5 px-2.5 pb-1 pt-2">
+                      <span className="ui-section-label min-w-0 truncate">{group.title}</span>
+                      {group.badge ? (
+                        <span className="ui-meta shrink-0 rounded border border-subtle px-1 text-tertiary">{group.badge}</span>
+                      ) : null}
+                      {group.isDefault ? (
+                        <span className="ui-meta shrink-0 text-tertiary">Default</span>
+                      ) : null}
+                    </h3>
                     {group.note ? (
                       <p className="px-2.5 pb-1.5 text-xs leading-snug text-tertiary">{group.note}</p>
                     ) : null}
@@ -473,12 +566,21 @@ function ModelPickerImpl({
                                 ) : null}
                               </span>
                               <span className="mt-0.5 block truncate text-xs text-tertiary">
-                                {model.note ?? providerById(model.provider).label}
+                                {[
+                                  model.note ?? providerById(model.provider).label,
+                                  // Price is a fact the provider stated, per
+                                  // million input tokens. Absent when it
+                                  // stated none — never estimated here.
+                                  model.free ? null : formatPricePerMillion(model.inputCostMicros),
+                                ].filter(Boolean).join(" · ")}
                               </span>
                             </span>
                           </Button>
 
-                          {model.id === selected.id ? (
+                          {/* Identity is (account, model): the same model id
+                              under two accounts is two different routes, and
+                              matching on the id alone ticked both. */}
+                          {model.id === selected.id && model.provider === selected.provider ? (
                             <Check size={13} strokeWidth={2} aria-label="Selected" className="shrink-0 text-primary" />
                           ) : slot >= 1 && slot <= 9 ? (
                             <span

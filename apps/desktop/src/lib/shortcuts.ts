@@ -24,6 +24,10 @@ export const FIXED_SHORTCUTS = {
   showChanges: { id: "show-changes", label: "Toggle changes", scope: "global", display: "⌘D", settingValue: "Cmd+D", key: "d", modifier: "primary" },
   toggleInspector: { id: "toggle-inspector", label: "Toggle inspector", scope: "global", display: "⌘]", settingValue: "Cmd+]", key: "]", modifier: "primary" },
   toggleSidebar: { id: "toggle-sidebar", label: "Toggle sidebar", scope: "global", display: "⌘\\", settingValue: "Cmd+\\", key: "\\", modifier: "primary" },
+  // The queue is the one list in the rail worth a dedicated key, and until now
+  // it had no keyboard route at all. ⌘J jumps to it; J and K then walk it, so
+  // the binding and the movement keys are the same letter.
+  focusQueue: { id: "focus-queue", label: "Go to Needs you", scope: "global", display: "⌘J", settingValue: "Cmd+J", key: "j", modifier: "primary" },
   taskSlot: { id: "task-slot", label: "Open task 1 through 9", scope: "global", display: "⌘1–9", settingValue: "Cmd+1–9", key: "1-9", modifier: "primary" },
   // Enter sends. This is what every other agent client does, and its absence
   // was the single most-reported thing about the composer: ⌘↵ was the only

@@ -8,14 +8,15 @@
  * one already open. Launching always dropped into `sessions[0]` regardless of
  * where the operator had been.
  */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { ProjectMenu } from "../src/components/ProjectMenu";
-import { Sidebar, groupInboxTasks, inboxDateLabel } from "../src/components/Sidebar";
+import { Sidebar, groupSettledTasks, inboxDateLabel } from "../src/components/Sidebar";
 import type { Task } from "../src/types";
 import { useTerminusStore } from "../src/hooks/use-terminus";
+import { useTaskReadStore } from "../src/hooks/use-task-read";
 import { api, TerminusApiError } from "../src/lib/api";
 import { buildDefaultCommands } from "../src/lib/command-catalog";
 import { noteRecentProject, projectUriToPath, readRecentProjects, sameProjectRoot } from "../src/lib/projects";
@@ -171,8 +172,19 @@ describe("the switcher menu", () => {
   });
 });
 
+/**
+ * The rail groups by day. A case about the project tree therefore has to ask
+ * for it — seeded through the stored preference rather than by opening the
+ * grouping menu, so the setup stays out of the assertions. The stored value
+ * predates the rename and is still honoured.
+ */
+function openOnProjectsTree(): void {
+  window.localStorage.setItem("terminus-desktop.sidebar-view.v1", "projects");
+}
+
 describe("the sidebar header", () => {
   test("names the current project and keeps the add control visible with no projects", async () => {
+    openOnProjectsTree();
     install([], null);
     render(<Sidebar onOpenProject={() => undefined} />);
 
@@ -180,6 +192,7 @@ describe("the sidebar header", () => {
     expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
 
     cleanup();
+    openOnProjectsTree();
     install([session("a", "Terminus", "file:///Volumes/Workspace/Terminus")], "a");
     render(<Sidebar onOpenProject={() => undefined} />);
     expect(screen.getByRole("button", { name: "Switch project" })).toHaveTextContent("Terminus");
@@ -250,45 +263,45 @@ describe("inbox grouping", () => {
     expect(inboxDateLabel(localAt(20, 9), now)).toMatch(/Aug/);
   });
 
-  test("hoists everything asking for a human above the timeline", () => {
+  // Unsettled work is the attention strip's, and the strip renders above this
+  // list in both views. Repeating it here would print the row twice in one
+  // column, which reads as a duplicate rather than as emphasis.
+  test("leaves unsettled work out of the timeline entirely", () => {
     const wants = task("t-wants", "Approve the migration", localAt(20, 9));
     const today = task("t-today", "Clean git", localAt(28, 9));
 
-    const groups = groupInboxTasks([today, wants], (t) => t.id === "t-wants", now);
+    const groups = groupSettledTasks([today, wants], (t: Task) => t.id !== "t-wants", now);
 
-    expect(groups[0]?.label).toBe("Priority");
-    expect(groups[0]?.tasks.map((t) => t.id)).toEqual(["t-wants"]);
-    // A week-old approval must not sort below today's finished work.
-    expect(groups[1]?.label).toBe("Today");
-    expect(groups[1]?.tasks.map((t) => t.id)).toEqual(["t-today"]);
+    expect(groups.map((group) => group.label)).toEqual(["Today"]);
+    expect(groups[0]?.tasks.map((t) => t.id)).toEqual(["t-today"]);
   });
 
   test("a task appears once, and days run newest first", () => {
-    const groups = groupInboxTasks(
+    const groups = groupSettledTasks(
       [
         task("t-old", "Older", localAt(20, 9)),
         task("t-today", "Today", localAt(28, 9)),
         task("t-yesterday", "Yesterday", localAt(27, 9)),
         task("t-needs", "Needs you", localAt(28, 10)),
       ],
-      (t) => t.id === "t-needs",
+      (t: Task) => t.id !== "t-needs",
       now,
     );
 
-    expect(groups.map((group) => group.label)).toEqual(["Priority", "Today", "Yesterday", expect.stringMatching(/Aug/)]);
+    expect(groups.map((group) => group.label)).toEqual(["Today", "Yesterday", expect.stringMatching(/Aug/)]);
     const seen = groups.flatMap((group) => group.tasks.map((t) => t.id));
     expect(new Set(seen).size).toBe(seen.length);
-    // The priority task is not repeated under its own date.
-    expect(groups[1]?.tasks.map((t) => t.id)).toEqual(["t-today"]);
+    // The unsettled task is not repeated under its own date either.
+    expect(groups[0]?.tasks.map((t) => t.id)).toEqual(["t-today"]);
   });
 
   test("orders within a day by most recent activity", () => {
-    const groups = groupInboxTasks(
+    const groups = groupSettledTasks(
       [
         task("t-early", "Early", localAt(28, 2)),
         task("t-late", "Late", localAt(28, 11)),
       ],
-      () => false,
+      () => true,
       now,
     );
     expect(groups[0]?.tasks.map((t) => t.id)).toEqual(["t-late", "t-early"]);
@@ -296,7 +309,7 @@ describe("inbox grouping", () => {
 });
 
 describe("the sidebar inbox", () => {
-  test("the bell swaps the tree for a time-grouped list and back", async () => {
+  test("the grouping control refiles one list rather than swapping two modes", async () => {
     const user = userEvent.setup();
     install([session("a", "Terminus")], "a");
     useTerminusStore.setState({
@@ -304,20 +317,23 @@ describe("the sidebar inbox", () => {
     });
     render(<Sidebar onOpenProject={() => undefined} />);
 
-    // Tree mode: the Projects section is the body.
-    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Notifications" }));
-
+    // The rail opens here: what happened, by day.
     expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
-    // The project is named on the row, because the inbox spans every project.
-    expect(screen.getByRole("button", { name: "Clean git and rebuild, in Terminus" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
-    // The destinations above stay put — the bell is a lens, not a screen.
+
+    await user.click(screen.getByRole("button", { name: "Group tasks" }));
+    await user.click(await screen.findByRole("menuitem", { name: /By project/ }));
+
+    // Same task, filed under its repository instead of its day.
+    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
+    expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
+    // The destinations above stay put — grouping changes the body, not the
+    // screen.
     expect(screen.getByRole("button", { name: "New task" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Notifications" }));
-    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Group tasks" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Recent/ }));
+    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
   });
 
   test("selecting an inbox row opens that task", async () => {
@@ -329,11 +345,42 @@ describe("the sidebar inbox", () => {
     });
     render(<Sidebar onNavigate={onNavigate} onOpenProject={() => undefined} />);
 
-    await user.click(screen.getByRole("button", { name: "Notifications" }));
-    await user.click(screen.getByRole("button", { name: /Clean git and rebuild/ }));
+    // Anchored: the row sits beside a "Mark … as read" control that names the
+    // same task, and an unanchored match hits both. The row's own name carries
+    // "unread" after the title, so it cannot be matched exactly either.
+    await user.click(screen.getByRole("button", { name: /^Clean git and rebuild/ }));
 
     expect(onNavigate).toHaveBeenCalledWith("chat");
     expect(useTerminusStore.getState().selectedTaskId).toBe("t-today");
+  });
+
+  // The example that started this: a finished task sat in the attention queue
+  // for good. It is not queue work at all — it is a report, so it lives under
+  // the day it finished wearing an unread mark. Reading clears the mark; the
+  // control beside it puts the mark back, because an automatic transition with
+  // no undo is a trap. Crucially, the row does not move either way: only
+  // *finishing* files a task, and only *state* decides which shelf it is on.
+  test("a finished task is marked unread in its day rather than hoisted into the queue", async () => {
+    const user = userEvent.setup();
+    install([session("a", "Terminus")], "a");
+    const finished = { ...task("t-done", "Ship the release", localAt(28, 9)), status: "COMPLETED" as const };
+    useTerminusStore.setState({
+      tasksBySession: { a: [finished] },
+      taskById: { "t-done": finished },
+    });
+    useTaskReadStore.setState({ seenAtByTask: {} });
+    render(<Sidebar onOpenProject={() => undefined} />);
+
+    // Not in the queue: a task that succeeded is not blocked on anyone.
+    expect(screen.queryByRole("button", { name: /Collapse Needs you/ })).not.toBeInTheDocument();
+    const row = () => screen.getByRole("button", { name: /^Ship the release/ });
+    expect(row()).toHaveAccessibleName(expect.stringContaining("unread"));
+
+    act(() => { useTaskReadStore.getState().markRead("t-done", finished.updated_at); });
+    expect(row()).toHaveAccessibleName(expect.not.stringContaining("unread"));
+
+    await user.click(screen.getByRole("button", { name: /Mark Ship the release unread/ }));
+    expect(row()).toHaveAccessibleName(expect.stringContaining("unread"));
   });
 });
 

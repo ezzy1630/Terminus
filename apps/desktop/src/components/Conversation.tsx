@@ -414,6 +414,21 @@ export function decodeFeed(
    * A failed turn offers to resend it; nothing else reads it.
    */
   let lastUserInput: string | null = null;
+  /**
+   * True once the turn in flight has already reported how it ended.
+   *
+   * One stop settles as two events in a single atomic batch: the turn
+   * aggregate gets `turn.failed` (or `turn.blocked` / `turn.needs_user_input`)
+   * and the task aggregate gets `task.turn_failed` (or `task.blocked`) saying
+   * the task itself is still steerable. Both describe the same stop, so
+   * rendering both stacked two near-identical "Turn failed" cards under every
+   * failed turn. The turn-level event wins — it is the one carrying
+   * `retryable` and the provider's own message — and the task-level echo is
+   * dropped. When the turn row was already terminal the control plane emits
+   * *only* the task-level event; that one still renders, which is why this is
+   * a de-duplication and not a filter on the event name.
+   */
+  let turnOutcomeRendered = false;
 
   const addMessage = (message: ConversationMessage): void => {
     messages.push(message);
@@ -570,6 +585,7 @@ export function decodeFeed(
           ? resolvedInput.text
           : null;
         pendingAgentMessage = { id: `agent-${ev.id}`, at };
+        turnOutcomeRendered = false;
         // The runtime states what it routed to. `turn.profile_selected` may
         // refine it later; until this landed the composer's choice and the
         // model that actually ran were unrelated facts.
@@ -671,6 +687,9 @@ export function decodeFeed(
           streamingMessageId = null;
         }
         pendingAgentMessage = null;
+        // The task-level echo of a stop this turn has already reported. The
+        // cleanup above is idempotent; the second card is not.
+        if (ev.event === "task.turn_failed" && turnOutcomeRendered) break;
         /*
          * Every non-completing end gets a row carrying what the control plane
          * actually said.
@@ -736,6 +755,7 @@ export function decodeFeed(
         };
         blocks.push(block);
         order.push({ kind: "block", id: block.id });
+        turnOutcomeRendered = true;
         break;
       }
       case "turn.response_validating": {
@@ -917,6 +937,14 @@ export function decodeFeed(
           if (message) message.streaming = false;
         }
         pendingAgentMessage = null;
+        // Paired with `turn.blocked` / `turn.needs_user_input` in one batch,
+        // and the poorer of the two: the task payload carries `message`, which
+        // this branch does not read, so it could only ever say "the runtime
+        // could not continue". Render it alone or not at all.
+        if (turnOutcomeRendered) {
+          streamingMessageId = null;
+          break;
+        }
         const reason = typeof p.reason === "string" ? p.reason : "runtime_blocked";
         const error = typeof p.error === "string"
           ? boundedText(p.error, "Runtime error detail", MAX_ACTIVITY_DETAIL_CHARS)
@@ -940,6 +968,7 @@ export function decodeFeed(
         };
         blocks.push(block);
         order.push({ kind: "block", id: block.id });
+        turnOutcomeRendered = true;
         streamingMessageId = null;
         break;
       }

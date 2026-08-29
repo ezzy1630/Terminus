@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { MissionBoardView } from "../src/components/MissionBoardView";
 import { buildDefaultCommands } from "../src/lib/command-catalog";
@@ -11,11 +11,32 @@ import {
   boardColumnForTaskPlacement,
   boardTransitionForDrop,
   directTaskActions,
+  pendingQuestionFor,
   taskEvidence,
-  taskNeedsAttention,
   taskStatusLabel,
 } from "../src/lib/mission-board";
+import type { TaskLifecycle } from "../src/lib/task-lifecycle";
 import { compactDuration } from "../src/lib/time";
+
+/**
+ * Exactly what MissionBoardView passes: the lifecycle it is already drawing,
+ * the v1 record when the store has it, the v2 status, and the one pending
+ * question. `attentionReason` takes a single input object now because the rail
+ * and the board hold different halves of that and must still get one answer.
+ */
+function reasonFor(
+  snapshot: TaskV2Snapshot,
+  lifecycle: TaskLifecycle,
+  domain?: Task,
+  questions: readonly MaterialQuestionSnapshot[] = [],
+): ReturnType<typeof attentionReason> {
+  return attentionReason({
+    lifecycle,
+    domainTask: domain,
+    v2Status: snapshot.status,
+    question: pendingQuestionFor(snapshot.id, questions),
+  });
+}
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import type { Task } from "../src/types";
 import * as apiV2Module from "../src/lib/api-v2";
@@ -34,6 +55,10 @@ import type {
  * "earlier" disclosure and make unrelated assertions depend on the clock.
  */
 const RECENT_ISO = new Date(Date.now() - 5 * 60_000).toISOString();
+
+beforeEach(() => {
+  useTerminusStore.setState({ selectedTaskId: null });
+});
 
 function task(id: string, status: TaskV2Status, mission: string, version = 1): TaskV2Snapshot {
   return {
@@ -126,7 +151,9 @@ describe("mission board domain mapping", () => {
     const command = buildDefaultCommands({ openMissionBoard })
       .find((candidate) => candidate.id === "nav.mission-board");
 
-    expect(command?.label).toBe("Open mission board");
+    // One name for one surface: the rail's row, the page heading and the
+    // palette entry all say "Board".
+    expect(command?.label).toBe("Open board");
     command?.action();
     expect(openMissionBoard).toHaveBeenCalledOnce();
   });
@@ -203,11 +230,11 @@ describe("mission board domain mapping", () => {
     // The whole point: ten cards under "Needs you" used to be ten identical
     // dots. Each of these is a different instruction to a person.
     const asking = task("task-asking", "RUNNING", "Running task");
-    expect(attentionReason(asking, "working", undefined, [question(asking.id)]))
+    expect(reasonFor(asking, "working", undefined, [question(asking.id)]))
       .toMatchObject({ kind: "question", label: "Answer this", detail: "Choose the compatibility behavior" });
-    expect(attentionReason(task("task-auth", "WAITING_AUTH", "Approval task"), "needs_you", undefined, []))
+    expect(reasonFor(task("task-auth", "WAITING_AUTH", "Approval task"), "needs_you"))
       .toMatchObject({ kind: "approval", label: "Approve or deny" });
-    expect(attentionReason(task("task-paused", "PAUSED", "Paused task"), "needs_you", undefined, []))
+    expect(reasonFor(task("task-paused", "PAUSED", "Paused task"), "needs_you"))
       .toMatchObject({ kind: "paused", label: "Paused" });
   });
 
@@ -216,21 +243,21 @@ describe("mission board domain mapping", () => {
     // v2 FAILED. Reading only the v2 status would tell a person "Failed" when
     // the actual instruction is "raise the budget" or "make a call".
     const denied = task("task-denied", "FAILED", "Denied task");
-    expect(attentionReason(denied, "failed", domainTask(denied.id, {
+    expect(reasonFor(denied, "failed", domainTask(denied.id, {
       status: "POLICY_DENIED",
       terminal_reason: { reason: "policy", message: "Writing outside the allowed scope." },
-    }), [])).toMatchObject({ kind: "policy", label: "Policy denied", detail: "Writing outside the allowed scope." });
+    }))).toMatchObject({ kind: "policy", label: "Policy denied", detail: "Writing outside the allowed scope." });
 
     const broke = task("task-budget", "FAILED", "Budget task");
-    expect(attentionReason(broke, "failed", domainTask(broke.id, { status: "BUDGET_EXHAUSTED" }), []))
+    expect(reasonFor(broke, "failed", domainTask(broke.id, { status: "BUDGET_EXHAUSTED" })))
       .toMatchObject({ kind: "budget", label: "Out of budget" });
   });
 
   test("does not restate a column inside its own cards", () => {
     // Review's header already says the changes are ready to read.
-    expect(attentionReason(task("task-partial", "PARTIAL", "Partial task"), "review", undefined, [])).toBeNull();
-    expect(attentionReason(task("task-running", "RUNNING", "Running task"), "working", undefined, [])).toBeNull();
-    expect(attentionReason(task("task-done", "COMPLETED", "Done task"), "done", undefined, [])).toBeNull();
+    expect(reasonFor(task("task-partial", "PARTIAL", "Partial task"), "review")).toBeNull();
+    expect(reasonFor(task("task-running", "RUNNING", "Running task"), "working")).toBeNull();
+    expect(reasonFor(task("task-done", "COMPLETED", "Done task"), "done")).toBeNull();
   });
 
   test("separates broken work from work that is merely waiting on someone", () => {
@@ -243,8 +270,8 @@ describe("mission board domain mapping", () => {
   });
 
   test("orders the attention column by what is cheapest to discharge", () => {
-    const rank = (status: TaskV2Status, lifecycle: Parameters<typeof attentionReason>[1]): number =>
-      attentionReason(task(`task-${status}`, status, status), lifecycle, undefined, [])?.rank ?? Number.MAX_SAFE_INTEGER;
+    const rank = (status: TaskV2Status, lifecycle: TaskLifecycle): number =>
+      reasonFor(task(`task-${status}`, status, status), lifecycle)?.rank ?? Number.MAX_SAFE_INTEGER;
     expect(rank("WAITING_USER", "needs_you")).toBeLessThan(rank("WAITING_AUTH", "needs_you"));
     expect(rank("WAITING_AUTH", "needs_you")).toBeLessThan(rank("FAILED", "failed"));
     expect(rank("FAILED", "failed")).toBeLessThan(rank("PAUSED", "needs_you"));
@@ -253,12 +280,21 @@ describe("mission board domain mapping", () => {
   test("pulls a running task with a pending question into the attention column", () => {
     // Otherwise the one column that exists to be the complete list of what
     // needs a human is not the complete list of what needs a human.
-    expect(boardColumnForTaskPlacement("working", true)).toBe("needs_you");
-    expect(boardColumnForTaskPlacement("working", false)).toBe("working");
-    // A stale question must not drag finished work back out of Done.
-    expect(boardColumnForTaskPlacement("done", true)).toBe("done");
-    expect(boardColumnForTaskPlacement("cancelled", true)).toBe("done");
-    expect(boardColumnForTaskPlacement("failed", true)).toBe("needs_you");
+    const place = (snapshot: TaskV2Snapshot, lifecycle: TaskLifecycle, questions: MaterialQuestionSnapshot[] = []) =>
+      boardColumnForTaskPlacement(lifecycle, reasonFor(snapshot, lifecycle, undefined, questions) !== null);
+
+    const running = task("task-running", "RUNNING", "Running task");
+    expect(place(running, "working", [question(running.id)])).toBe("needs_you");
+    expect(place(running, "working")).toBe("working");
+    // A stale question must not drag finished work back out of Done. The
+    // exemption lives in the predicate now, which is why placement can be the
+    // predicate's answer and nothing else.
+    const done = task("task-done", "COMPLETED", "Done task");
+    expect(place(done, "done", [question(done.id)])).toBe("done");
+    const cancelled = task("task-cancelled", "CANCELLED", "Cancelled task");
+    expect(place(cancelled, "cancelled", [question(cancelled.id)])).toBe("done");
+    const failed = task("task-failed", "FAILED", "Failed task");
+    expect(place(failed, "failed")).toBe("needs_you");
   });
 
   test("states elapsed time and spend only where the client was actually told them", () => {
@@ -287,18 +323,24 @@ describe("mission board domain mapping", () => {
   });
 
   test("treats material questions and actionable task states as attention", () => {
+    const needsHuman = (
+      snapshot: TaskV2Snapshot,
+      lifecycle: TaskLifecycle,
+      questions: MaterialQuestionSnapshot[] = [],
+    ): boolean => reasonFor(snapshot, lifecycle, undefined, questions) !== null;
+
     const running = task("task-running", "RUNNING", "Running task");
-    expect(taskNeedsAttention(running, [])).toBe(false);
-    expect(taskNeedsAttention(running, [question(running.id)])).toBe(true);
-    expect(taskNeedsAttention(task("task-auth", "WAITING_AUTH", "Approval task"), [])).toBe(true);
-    expect(taskNeedsAttention(task("task-resource", "WAITING_RESOURCE", "Resource task"), [])).toBe(true);
-    expect(taskNeedsAttention(task("task-failed", "FAILED", "Failed task"), [])).toBe(true);
-    expect(taskNeedsAttention(task("task-done", "COMPLETED", "Done task"), [])).toBe(false);
+    expect(needsHuman(running, "working")).toBe(false);
+    expect(needsHuman(running, "working", [question(running.id)])).toBe(true);
+    expect(needsHuman(task("task-auth", "WAITING_AUTH", "Approval task"), "needs_you")).toBe(true);
+    expect(needsHuman(task("task-resource", "WAITING_RESOURCE", "Resource task"), "needs_you")).toBe(true);
+    expect(needsHuman(task("task-failed", "FAILED", "Failed task"), "failed")).toBe(true);
+    expect(needsHuman(task("task-done", "COMPLETED", "Done task"), "done")).toBe(false);
   });
 });
 
 describe("MissionBoardView", () => {
-  test("renders canonical tasks, attention, cancelled work, and a persistent quick view", async () => {
+  test("renders canonical tasks, attention, cancelled work, and one shared selection", async () => {
     const tasks = [
       task("task-ready", "READY", "Add token refresh"),
       task("task-running", "RUNNING", "Repair OAuth callback"),
@@ -313,7 +355,7 @@ describe("MissionBoardView", () => {
 
     render(<MissionBoardView onOpenTask={onOpenTask} onInspectTask={onInspectTask} />);
 
-    expect(await screen.findByRole("heading", { name: /^(Kanban|Sessions)/ })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Board" })).toBeInTheDocument();
     expect(screen.getByText("Add token refresh")).toBeInTheDocument();
     expect(screen.getByText("Repair OAuth callback")).toBeInTheDocument();
     expect(screen.getByText("Audit authentication")).toBeInTheDocument();
@@ -322,7 +364,7 @@ describe("MissionBoardView", () => {
 
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "List view" }));
-    expect(screen.getByRole("table", { name: "Mission board tasks" })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: "Board tasks" })).toBeInTheDocument();
     const runningRow = screen.getByRole("row", { name: /Repair OAuth callback/ });
     expect(runningRow.tagName).toBe("DIV");
     expect(runningRow).toContainElement(screen.getByRole("button", { name: "Repair OAuth callback" }));
@@ -336,14 +378,19 @@ describe("MissionBoardView", () => {
     const taskButton = screen.getByRole("button", { name: "Open Repair OAuth callback" });
     await user.click(taskButton);
     expect(onOpenTask).toHaveBeenCalledWith(expect.objectContaining({ id: "task-running" }));
+    // Previewing selects, in the store. The board used to hold its own
+    // `selectedTaskId`, so a card selected here highlighted nothing in the
+    // rail and the shared inspector could not open — two panes listing the
+    // same tasks with two ideas of which one you were looking at. There is no
+    // second detail panel on this surface any more; the app's one inspector
+    // renders for whatever is selected, from wherever it was selected.
     await user.click(screen.getByRole("button", { name: "Actions for Repair OAuth callback" }));
     await user.click(screen.getByRole("menuitem", { name: "Quick preview" }));
-    const quickView = screen.getByRole("complementary", { name: "Task quick view" });
-    expect(quickView).toHaveTextContent("Choose the compatibility behavior");
-    expect(quickView).toHaveTextContent("Updated");
-    expect(quickView).not.toHaveTextContent("Contract");
-    expect(quickView).not.toHaveTextContent("Record");
-    await user.click(screen.getByRole("button", { name: "Task details" }));
+    expect(useTerminusStore.getState().selectedTaskId).toBe("task-running");
+    expect(screen.queryByRole("complementary", { name: "Task quick view" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Actions for Repair OAuth callback" }));
+    await user.click(screen.getByRole("menuitem", { name: "View details" }));
     expect(onInspectTask).toHaveBeenCalledWith("task-running");
     expect(screen.queryByRole("button", { name: "New task" })).not.toBeInTheDocument();
   });
@@ -475,7 +522,7 @@ describe("MissionBoardView", () => {
     expect(onOpenTask).toHaveBeenCalledWith(expect.objectContaining({ id: "task-c" }));
 
     fireEvent.keyDown(done, { key: " " });
-    expect(screen.getByRole("complementary", { name: "Task quick view" })).toBeInTheDocument();
+    expect(useTerminusStore.getState().selectedTaskId).toBe("task-c");
   });
 
   test("gives the mouse every route the keyboard has", async () => {
@@ -491,7 +538,7 @@ describe("MissionBoardView", () => {
     // Clicking the body previews, the same as Space. The card body used to be
     // dead space: only the title and the overflow trigger did anything.
     await user.click(card);
-    expect(screen.getByRole("complementary", { name: "Task quick view" })).toBeInTheDocument();
+    expect(useTerminusStore.getState().selectedTaskId).toBe("task-mouse");
     expect(onOpenTask).not.toHaveBeenCalled();
     // And it takes keyboard focus, so the arrows work from wherever the mouse
     // left off rather than from wherever Tab last was.
@@ -516,7 +563,9 @@ describe("MissionBoardView", () => {
     // it previews on click.
     await user.click(screen.getByRole("button", { name: "Open Add token refresh" }));
     expect(onOpenTask).toHaveBeenCalledWith(expect.objectContaining({ id: "task-controls" }));
-    expect(screen.queryByRole("complementary", { name: "Task quick view" })).not.toBeInTheDocument();
+    // Opening is not previewing: the title must not also leave the card
+    // selected behind the conversation it just navigated to.
+    expect(useTerminusStore.getState().selectedTaskId).toBeNull();
   });
 
   test("offers the card actions on right click as well as from the overflow trigger", async () => {

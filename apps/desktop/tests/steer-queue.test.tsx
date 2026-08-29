@@ -206,6 +206,9 @@ describe("steering while a run is in flight", () => {
         user_input: "now do the other thing",
         model: "claude-sonnet-4-6",
         reasoning_effort: "medium",
+        // The account travels with the model: a bare id does not name a route
+        // once more than one credential can answer to it.
+        provider_account_id: "anthropic",
       },
       { idempotencyKey: expect.stringMatching(/^composer-turn\.task-1:/) },
     ));

@@ -24,9 +24,13 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { ArrowLeft, ArrowRight, Ellipsis, FolderClosed, MessageCircle, PanelLeft, PanelRight } from "lucide-react";
 import { Layout } from "./components/Layout";
 import { ConnectionBanner } from "./components/ConnectionBanner";
+import { ProviderAccountsNotice } from "./components/ProviderAccountsNotice";
 import { projectUriToPath } from "./lib/projects";
+import { readSidebarVisible, writeSidebarVisible } from "./lib/sidebar-prefs";
+import { useMarkSelectedTaskRead } from "./hooks/use-task-read";
 import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
 import { Sidebar } from "./components/Sidebar";
+import { FOCUS_QUEUE_EVENT } from "./components/TaskQueue";
 import { Composer } from "./components/Composer";
 import { NewTaskScreen } from "./components/NewTaskScreen";
 import { MissionBoardView } from "./components/MissionBoardView";
@@ -82,45 +86,88 @@ import { Skeleton, Spinner } from "./ui/Status";
 import { Tabs } from "./ui/Tabs";
 import { TaskRequiredState } from "./components/Cockpit/CockpitPrimitives";
 
+/**
+ * Feature chunks, named rather than inlined into `lazy()` so they can also be
+ * *warmed*.
+ *
+ * Splitting these out keeps SPEC §25.1 — the shell paints before the feature
+ * bundles load — but the rule only ever meant "not before first paint". Left
+ * to load on demand, every first click paid for a fetch in front of the
+ * operator: a sheet mounted twice (the Suspense fallback, then the real panel
+ * at a different size, each with its own entrance), a tab that showed the word
+ * "Loading" before it showed anything, an inspector that arrived a beat after
+ * the task did. None of that is network latency — these files are on the local
+ * disk, a few milliseconds away — so it bought nothing and read as a slow app.
+ *
+ * They are all pulled in on the frame after the shell paints instead. First
+ * paint is still unblocked; everything after it is already in memory.
+ */
+const importTaskSearch = () => import("./components/TaskSearch");
+const importCommandPalette = () => import("./components/CommandPalette");
+const importSettings = () => import("./components/Settings");
+const importOnboarding = () => import("./components/Onboarding");
+const importReviewPane = () => import("./components/ReviewPane");
+const importConversation = () => import("./components/Conversation");
+const importInspector = () => import("./components/Inspector");
+const importAgentsView = () => import("./components/AgentsView");
+
+const FEATURE_CHUNKS = [
+  // The surfaces behind the sidebar and the task tabs come first: they are
+  // what the operator reaches for before anything else.
+  importConversation,
+  importInspector,
+  importTaskSearch,
+  importCommandPalette,
+  importSettings,
+  importReviewPane,
+  importAgentsView,
+  importOnboarding,
+];
+
+/** Fetch every feature chunk. A failure here is not an error: the Suspense
+ *  boundary still loads the chunk on demand, just more slowly. */
+function warmFeatureChunks(): void {
+  for (const load of FEATURE_CHUNKS) void load().catch(() => { /* the boundary retries */ });
+}
+
+const TaskSearch = lazy(async () => {
+  const searchModule = await importTaskSearch();
+  return { default: searchModule.TaskSearch };
+});
 const CommandPalette = lazy(async () => {
-  const paletteModule = await import("./components/CommandPalette");
+  const paletteModule = await importCommandPalette();
   return { default: paletteModule.CommandPalette };
 });
 
 const Settings = lazy(async () => {
-  const settingsModule = await import("./components/Settings");
+  const settingsModule = await importSettings();
   return { default: settingsModule.Settings };
 });
 
 const Onboarding = lazy(async () => {
-  const onboardingModule = await import("./components/Onboarding");
+  const onboardingModule = await importOnboarding();
   return { default: onboardingModule.Onboarding };
 });
 
 const ReviewPane = lazy(async () => {
-  const reviewModule = await import("./components/ReviewPane");
+  const reviewModule = await importReviewPane();
   return { default: reviewModule.ReviewPane };
 });
 
 const Conversation = lazy(async () => {
-  const conversationModule = await import("./components/Conversation");
+  const conversationModule = await importConversation();
   return { default: conversationModule.Conversation };
 });
 
 const Inspector = lazy(async () => {
-  const inspectorModule = await import("./components/Inspector");
+  const inspectorModule = await importInspector();
   return { default: inspectorModule.Inspector };
 });
 
 
 const AgentsView = lazy(async () => {
-  const agentsModule = await import("./components/AgentsView");
+  const agentsModule = await importAgentsView();
   return { default: agentsModule.AgentsView };
-});
-
-const AttentionCenterModal = lazy(async () => {
-  const cockpitModule = await import("./components/Cockpit/AttentionCenterModal");
-  return { default: cockpitModule.AttentionCenterModal };
 });
 
 function SelectedTaskReviewPane({
@@ -152,18 +199,97 @@ import {
   type TaskWorkspaceTab,
 } from "./lib/session-view";
 
+/**
+ * Which surfaces show the task-context dock.
+ *
+ * The board used to carry its own 300px `TaskQuickView` — a second detail
+ * panel, four pixels narrower than this one, with its own layout and its own
+ * subset of the facts. Selecting a task now shows the same inspector in the
+ * same place whichever surface you selected it from, which is most of what
+ * makes two panes feel like one window.
+ */
+const SURFACES_WITH_INSPECTOR = new Set<SidebarDestination>(["chat", "board"]);
+
 const ONBOARDING_KEY = "terminus-desktop.onboarding.completed.v1";
 const INSPECTOR_VISIBILITY_KEY = "terminus-desktop.inspector-visible.";
-type AppOverlay = "palette" | "settings" | "onboarding" | "attention" | null;
+type AppOverlay = "palette" | "search" | "settings" | "onboarding" | null;
 // Session-first tabs live in lib/session-view.
 const parseTaskWorkspaceTab = parseTaskWorkspaceTabValue;
+
+/** Matches `--duration-fast`, which drives the `dialog-out` keyframes. */
+const OVERLAY_EXIT_MS = 140;
+
+/**
+ * Keep a dismissed overlay in the tree long enough to animate out.
+ *
+ * Overlays are rendered conditionally, so clearing `overlay` used to remove
+ * the Radix dialog in the same commit: every sheet rose and faded in, then
+ * disappeared on a single frame. This returns the overlay that should still be
+ * *mounted*, which for the length of the close animation is the one that was
+ * just dismissed — rendered with `open={false}`, which is the signal Radix
+ * needs to play its exit before unmounting itself.
+ */
+function useOverlayPresence(overlay: AppOverlay): AppOverlay {
+  const [previous, setPrevious] = useState<AppOverlay>(overlay);
+  const [exiting, setExiting] = useState<AppOverlay>(null);
+
+  // Adjusted during render, the way React documents for state derived from a
+  // changing input: the dismissed overlay has to appear in *this* render's
+  // output. Deferring it to an effect would drop the sheet for one commit and
+  // bring it back, which is a flicker rather than an exit.
+  if (previous !== overlay) {
+    setPrevious(overlay);
+    setExiting(overlay === null ? previous : null);
+  }
+
+  useEffect(() => {
+    if (exiting === null) return;
+    const timer = window.setTimeout(() => setExiting(null), OVERLAY_EXIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [exiting]);
+
+  return overlay ?? exiting;
+}
 
 function readInspectorVisibility(taskId: string): boolean {
   try { return window.localStorage.getItem(`${INSPECTOR_VISIBILITY_KEY}${taskId}`) === "true"; }
   catch { return false; }
 }
 
+/** Long enough that a warm chunk never shows this, short enough that a cold
+ *  one does not look like a dropped click. */
+const FALLBACK_DELAY_MS = 160;
+
+/**
+ * True once a wait has lasted long enough to be worth admitting to.
+ *
+ * A Suspense fallback drawn the instant a boundary suspends is what put a
+ * small panel on screen for two frames before the real dialog replaced it, and
+ * what flashed the word "Loading" across a pane that was about to render. A
+ * warmed chunk resolves in single-digit milliseconds; below this threshold the
+ * honest report is silence, because nobody waited.
+ */
+function useSlowEnoughToSay(): boolean {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSlow(true), FALLBACK_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
+  return slow;
+}
+
+/** A pane-filling wait, shown only if the wait is real. */
+function SurfaceLoadingFallback({ label, className }: { label: string; className?: string }): JSX.Element {
+  if (!useSlowEnoughToSay()) return <></>;
+  return (
+    <div className={`flex h-full items-center justify-center text-sm text-tertiary ${className ?? ""}`} role="status">
+      {label}
+    </div>
+  );
+}
+
 function ModalLoadingFallback({ label, onClose }: { label: string; onClose: () => void }): JSX.Element {
+  if (!useSlowEnoughToSay()) return <></>;
   return (
     <DialogSurface
         open
@@ -248,17 +374,49 @@ export function App(): JSX.Element {
   const previousOverlayRef = useRef<AppOverlay>(null);
   const [onboardingInitialStep, setOnboardingInitialStep] = useState<1 | 2>(() => shouldShowOnboarding() ? 1 : 2);
   const [onboardingProjectPath, setOnboardingProjectPath] = useState<string | undefined>();
-  const [settingsCategory, setSettingsCategory] = useState<SettingCategoryId>("appearance");
-  const [activeDestination, setActiveDestination] = useState<SidebarDestination>("new_task");
+  // The counter, not the category, is what tells Settings a *fresh* request
+  // arrived: ⌘, twice in a row asks for Appearance both times, and the second
+  // ask still has to move the pane there if the operator has since clicked
+  // into Shortcuts.
+  const [settingsRequest, setSettingsRequest] = useState<{ category: SettingCategoryId; nonce: number }>(
+    { category: "appearance", nonce: 0 },
+  );
+  const settingsCategory = settingsRequest.category;
+  const mountedOverlay = useOverlayPresence(overlay);
+  const [activeDestination, setActiveDestination] = useState<SidebarDestination>(() =>
+    useTerminusStore.getState().selectedTaskId ? "chat" : "new_task",
+  );
   const [selectedCanonicalTaskId, setSelectedCanonicalTaskId] = useState<string | null>(null);
   const [taskWorkspaceTab, setTaskWorkspaceTab] = useState<TaskWorkspaceTab>("session");
 
   const [changesOpen, setChangesOpen] = useState(false);
   const [inspectorVisibilityByTask, setInspectorVisibilityByTask] = useState<Record<string, boolean>>({});
-  const [sidebarVisible, setSidebarVisible] = useState(true);
+  // Hiding the rail is a deliberate act — usually to give a diff the width —
+  // and it did not survive a relaunch, so the next launch undid it.
+  const [sidebarVisible, setSidebarVisible] = useState(readSidebarVisible);
   const inspectorVisible = selectedTaskId === null
     ? false
     : inspectorVisibilityByTask[selectedTaskId] ?? readInspectorVisibility(selectedTaskId);
+
+  useEffect(() => {
+    if (selectedTaskId && activeDestination === "new_task") {
+      setActiveDestination("chat");
+    }
+  }, [selectedTaskId, activeDestination]);
+
+  // Three separate places toggle the rail — the title-bar button, the
+  // shortcut, and the command palette — so this is written on the value
+  // rather than at each of them.
+  useEffect(() => { writeSidebarVisible(sidebarVisible); }, [sidebarVisible]);
+
+  // The frame after the shell paints, not on idle: idle can be seconds away on
+  // a busy stream, and the whole point is that the operator never waits for a
+  // chunk. By the time the window has finished appearing, every surface behind
+  // a lazy boundary is already resident.
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(warmFeatureChunks);
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
   useLayoutEffect(() => {
     const previous = previousOverlayRef.current;
@@ -346,6 +504,9 @@ export function App(): JSX.Element {
     apply: applyNavLocation,
   });
 
+  // Opening a task is what marks it read, which is what lets a finished task
+  // settle out of the queue instead of sitting in it forever.
+  useMarkSelectedTaskRead(selectedTaskId, selectedTask?.updated_at ?? null);
   // Dock badge and native notifications for tasks that want a human.
   useNativeAttention(openTaskById);
   // Catch a run whose ending never reached this client.
@@ -360,7 +521,7 @@ export function App(): JSX.Element {
     // window with its own Dock entry and its own idea of which project was
     // current. Every entry point — the menu bar's ⌘,, the sidebar gear, the
     // palette — routes through here, so they all stay in one window.
-    setSettingsCategory(category);
+    setSettingsRequest((current) => ({ category, nonce: current.nonce + 1 }));
     setOverlay("settings");
   }, []);
 
@@ -527,6 +688,13 @@ export function App(): JSX.Element {
       } else if (matchesShortcut(e, FIXED_SHORTCUTS.toggleSidebar)) {
         e.preventDefault();
         setSidebarVisible((visible) => !visible);
+      } else if (matchesShortcut(e, FIXED_SHORTCUTS.focusQueue)) {
+        e.preventDefault();
+        // Showing the rail first: the shortcut means "take me to the queue",
+        // and a focus call into a hidden column is a keypress that does
+        // nothing and says nothing.
+        setSidebarVisible(true);
+        window.dispatchEvent(new Event(FOCUS_QUEUE_EVENT));
       } else if (matchesShortcut(e, FIXED_SHORTCUTS.taskSlot)) {
         const task = selectedSessionTasks[Number(e.key) - 1];
         if (task) {
@@ -550,6 +718,8 @@ export function App(): JSX.Element {
     };
     const openOnboarding = (): void => openProject();
     const openCommandPalette = (): void => setOverlay("palette");
+    const openTaskSearch = (): void => setOverlay((current) => current === "search" ? null : current === null ? "search" : current);
+    window.addEventListener("terminus:open-task-search", openTaskSearch);
     window.addEventListener("terminus:open-settings", onOpenSettings);
     window.addEventListener("terminus:open-onboarding", openOnboarding);
     window.addEventListener("terminus:open-command-palette", openCommandPalette);
@@ -557,6 +727,7 @@ export function App(): JSX.Element {
       window.removeEventListener("terminus:open-settings", onOpenSettings);
       window.removeEventListener("terminus:open-onboarding", openOnboarding);
       window.removeEventListener("terminus:open-command-palette", openCommandPalette);
+      window.removeEventListener("terminus:open-task-search", openTaskSearch);
     };
   }, [openProject, openSettings]);
 
@@ -585,7 +756,7 @@ export function App(): JSX.Element {
         switchDensity: () => toggleDensity(),
         openSettings,
         openMissionBoard: () => openDestination("board"),
-        openAttentionCenter: () => setOverlay("attention"),
+        focusQueue: () => window.dispatchEvent(new Event(FOCUS_QUEUE_EVENT)),
         viewShortcuts: () => openSettings("shortcuts"),
         projects: sessions.map((session) => ({
           id: session.id,
@@ -696,9 +867,17 @@ export function App(): JSX.Element {
   return (
     <>
       <Layout
-        banner={<ConnectionBanner />}
+        banner={(
+          <>
+            {/* A connection problem outranks an announcement, so it is drawn
+                first; both are hairline strips that render nothing when they
+                have nothing to say. */}
+            <ConnectionBanner />
+            <ProviderAccountsNotice />
+          </>
+        )}
         sidebarVisible={sidebarVisible}
-        inspectorVisible={activeDestination === "chat" && inspectorVisible && durableTaskId !== null && !changesOpen}
+        inspectorVisible={SURFACES_WITH_INSPECTOR.has(activeDestination) && inspectorVisible && durableTaskId !== null && !changesOpen}
         backgroundInert={overlay !== null}
         center={activeDestination === "task_details" ? (
           <span className="ui-label text-secondary">Task</span>
@@ -735,12 +914,11 @@ export function App(): JSX.Element {
               openDestination(destination);
               if (destination === "new_task") selectTask(null);
             }}
-            onOpenAttentionCenter={() => setOverlay("attention")}
             onOpenProject={openProject}
           />
         }
         inspector={
-          activeDestination === "chat" && durableTaskId ? (
+          SURFACES_WITH_INSPECTOR.has(activeDestination) && durableTaskId ? (
             <Suspense fallback={null}>
               <Inspector
                 onShowChanges={() => setChangesOpen(true)}
@@ -749,7 +927,7 @@ export function App(): JSX.Element {
           ) : null
         }
         main={
-          <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-tertiary">Loading</div>}>
+          <Suspense fallback={<SurfaceLoadingFallback label="Loading" />}>
             {showNewTask ? (
               <NewTaskScreen onOpenProject={openProject} />
             ) : activeDestination === "board" ? (
@@ -805,7 +983,7 @@ export function App(): JSX.Element {
                     <Composer />
                   </div>
                 </div>}
-                review={<Suspense fallback={<div className="flex h-full items-center justify-center bg-diff text-tertiary text-sm" >Loading review</div>}>
+                review={<Suspense fallback={<SurfaceLoadingFallback label="Loading review" className="bg-diff" />}>
                   <SelectedTaskReviewPane
                     taskId={durableTaskId}
                     onClose={() => setChangesOpen(false)}
@@ -860,7 +1038,7 @@ export function App(): JSX.Element {
         }
         right={
           <>
-            {activeDestination === "chat" ? (
+            {SURFACES_WITH_INSPECTOR.has(activeDestination) ? (
               <IconButton
                 onClick={toggleInspector}
                 disabled={!selectedTask}
@@ -874,18 +1052,39 @@ export function App(): JSX.Element {
           </>
         }
       />
-      {overlay === "palette" ? (
-        <Suspense fallback={<ModalLoadingFallback label="command palette" onClose={() => setOverlay(null)} />}>
-          <CommandPalette open onClose={() => setOverlay(null)} commands={commands} />
+      {mountedOverlay === "search" ? (
+        <Suspense fallback={<ModalLoadingFallback label="task search" onClose={() => setOverlay(null)} />}>
+          <TaskSearch
+            open={overlay === "search"}
+            onClose={() => setOverlay(null)}
+            onSelectTask={(taskId) => {
+              selectTask(taskId);
+              openDestination("chat");
+              setChangesOpen(false);
+            }}
+            onNewTask={goToNewTask}
+            onOpenProject={() => openProject()}
+            onOpenBoard={() => openDestination("board")}
+            onOpenCommands={() => setOverlay("palette")}
+          />
         </Suspense>
       ) : null}
-      {overlay === "settings" ? (
+      {mountedOverlay === "palette" ? (
+        <Suspense fallback={<ModalLoadingFallback label="command palette" onClose={() => setOverlay(null)} />}>
+          <CommandPalette open={overlay === "palette"} onClose={() => setOverlay(null)} commands={commands} />
+        </Suspense>
+      ) : null}
+      {mountedOverlay === "settings" ? (
         <Suspense fallback={<ModalLoadingFallback label="settings" onClose={() => setOverlay(null)} />}>
+          {/* No `key`. Keying on the category tore the whole sheet down and
+              rebuilt it whenever a second entry point asked for a different
+              page — ⌘/ while Settings was already open replayed the entrance
+              animation from scratch. The pane moves; the sheet stays put. */}
           <Settings
-            key={settingsCategory}
-            open
+            open={overlay === "settings"}
             onClose={() => setOverlay(null)}
             initialCategoryId={settingsCategory}
+            categoryRequest={settingsRequest.nonce}
           />
         </Suspense>
       ) : null}
@@ -898,20 +1097,6 @@ export function App(): JSX.Element {
             initialStep={onboardingInitialStep}
             initialProjectPath={onboardingProjectPath}
             mode={onboardingInitialStep === 1 ? "first-run" : "open-project"}
-          />
-        </Suspense>
-      ) : null}
-      {overlay === "attention" ? (
-        <Suspense fallback={<ModalLoadingFallback label="attention center" onClose={() => setOverlay(null)} />}>
-          <AttentionCenterModal
-            isOpen
-            onClose={() => setOverlay(null)}
-            selectedTaskId={durableTaskId}
-            onOpenTask={(taskId) => {
-              setOverlay(null);
-              selectTask(taskId);
-              openDestination("chat");
-            }}
           />
         </Suspense>
       ) : null}
