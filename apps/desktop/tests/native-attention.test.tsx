@@ -46,6 +46,49 @@ interface Bridge {
   deliverOpenTask?: (taskId: string) => void;
 }
 
+function event(overrides: Partial<ArpV2EventEnvelope> = {}): ArpV2EventEnvelope {
+  return {
+    eventId: "event-1",
+    eventType: "task.running",
+    schemaVersion: 2,
+    aggregateType: "task",
+    aggregateId: "task-1",
+    aggregateSequence: 1,
+    occurredAt: "2026-08-29T16:00:00.000Z",
+    actor: { kind: "system", id: "terminus-control" },
+    correlationId: "task-1",
+    causationId: null,
+    idempotencyKey: null,
+    payload: {},
+    artifactRefs: [],
+    traceId: null,
+    ...overrides,
+  };
+}
+
+function controlledStream(): {
+  stream: ArpV2EventStream;
+  emit: (event: ArpV2EventEnvelope) => void;
+} {
+  const handlers = new Map<string, Set<(event?: ArpV2EventEnvelope) => void>>();
+  return {
+    stream: {
+      readyState: 1,
+      lastEventId: null,
+      addEventListener(type, handler) {
+        const listeners = handlers.get(type) ?? new Set();
+        listeners.add(handler as (event?: ArpV2EventEnvelope) => void);
+        handlers.set(type, listeners);
+        return () => listeners.delete(handler as (event?: ArpV2EventEnvelope) => void);
+      },
+      close: vi.fn(),
+    },
+    emit(nextEvent) {
+      for (const handler of handlers.get("message") ?? []) handler(nextEvent);
+    },
+  };
+}
+
 function installBridge(): Bridge {
   const bridge: Bridge = {
     notify: vi.fn(async () => undefined),
@@ -89,48 +132,109 @@ afterEach(() => {
 });
 
 describe("Dock badge", () => {
-  test("refreshes the workspace after a task event when no transcript is open", async () => {
+  test("refreshes the affected task after a task event when no transcript is open", () => {
     vi.useFakeTimers();
-    const handlers = new Map<string, Set<(event?: ArpV2EventEnvelope) => void>>();
-    const stream: ArpV2EventStream = {
-      readyState: 1,
-      lastEventId: null,
-      addEventListener(type, handler) {
-        const listeners = handlers.get(type) ?? new Set();
-        listeners.add(handler as (event?: ArpV2EventEnvelope) => void);
-        handlers.set(type, listeners);
-        return () => listeners.delete(handler as (event?: ArpV2EventEnvelope) => void);
-      },
-      close: vi.fn(),
-    };
+    const { stream, emit } = controlledStream();
     vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(stream);
-    const refreshAll = vi.spyOn(useTerminusStore.getState(), "refreshAll").mockResolvedValue();
+    const refreshTask = vi.spyOn(useTerminusStore.getState(), "refreshTask").mockResolvedValue();
 
     const view = render(<Probe />);
-    const event: ArpV2EventEnvelope = {
-      eventId: "event-1",
-      eventType: "task.running",
-      schemaVersion: 2,
-      aggregateType: "task",
-      aggregateId: "task-1",
-      aggregateSequence: 1,
-      occurredAt: "2026-08-29T16:00:00.000Z",
-      actor: { kind: "system", id: "terminus-control" },
-      correlationId: "task-1",
-      causationId: null,
-      idempotencyKey: null,
-      payload: {},
-      artifactRefs: [],
-      traceId: null,
-    };
     act(() => {
-      for (const handler of handlers.get("message") ?? []) handler(event);
+      emit(event());
       vi.advanceTimersByTime(200);
     });
 
-    expect(refreshAll).toHaveBeenCalledOnce();
+    expect(refreshTask).toHaveBeenCalledOnce();
+    expect(refreshTask).toHaveBeenCalledWith("task-1");
     view.unmount();
     expect(stream.close).toHaveBeenCalledOnce();
+  });
+
+  test("refreshes a background task when its turn starts", () => {
+    vi.useFakeTimers();
+    const { stream, emit } = controlledStream();
+    vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(stream);
+    const refreshTask = vi.spyOn(useTerminusStore.getState(), "refreshTask").mockResolvedValue();
+    render(<Probe />);
+
+    act(() => {
+      emit(event({
+        eventType: "turn.started",
+        aggregateType: "turn",
+        aggregateId: "turn-1",
+        correlationId: "task-background",
+      }));
+      vi.advanceTimersByTime(200);
+    });
+
+    expect(refreshTask).toHaveBeenCalledOnce();
+    expect(refreshTask).toHaveBeenCalledWith("task-background");
+  });
+
+  test("coalesces task and terminal turn events into one detail refresh", () => {
+    vi.useFakeTimers();
+    const { stream, emit } = controlledStream();
+    vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(stream);
+    const refreshTask = vi.spyOn(useTerminusStore.getState(), "refreshTask").mockResolvedValue();
+    render(<Probe />);
+
+    act(() => {
+      emit(event({
+        eventId: "event-completed",
+        eventType: "turn.completed",
+        aggregateType: "turn",
+        aggregateId: "turn-1",
+        correlationId: "task-1",
+      }));
+      emit(event({ eventId: "event-task", eventType: "task.completed" }));
+      vi.advanceTimersByTime(200);
+    });
+
+    expect(refreshTask).toHaveBeenCalledOnce();
+    expect(refreshTask).toHaveBeenCalledWith("task-1");
+  });
+
+  test("ignores high-volume provider deltas", () => {
+    vi.useFakeTimers();
+    const { stream, emit } = controlledStream();
+    vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(stream);
+    const refreshTask = vi.spyOn(useTerminusStore.getState(), "refreshTask").mockResolvedValue();
+    const refreshAll = vi.spyOn(useTerminusStore.getState(), "refreshAll").mockResolvedValue();
+    render(<Probe />);
+
+    act(() => {
+      emit(event({
+        eventType: "turn.provider_text_delta",
+        aggregateType: "turn",
+        aggregateId: "turn-1",
+      }));
+      vi.advanceTimersByTime(200);
+    });
+
+    expect(refreshTask).not.toHaveBeenCalled();
+    expect(refreshAll).not.toHaveBeenCalled();
+  });
+
+  test("falls back to a full refresh when a lifecycle event has no task id", () => {
+    vi.useFakeTimers();
+    const { stream, emit } = controlledStream();
+    vi.mocked(apiV2Module.subscribeEventsV2).mockReturnValue(stream);
+    const refreshTask = vi.spyOn(useTerminusStore.getState(), "refreshTask").mockResolvedValue();
+    const refreshAll = vi.spyOn(useTerminusStore.getState(), "refreshAll").mockResolvedValue();
+    render(<Probe />);
+
+    act(() => {
+      emit(event({
+        eventType: "turn.failed",
+        aggregateType: "turn",
+        aggregateId: "turn-1",
+        correlationId: null,
+      }));
+      vi.advanceTimersByTime(200);
+    });
+
+    expect(refreshTask).not.toHaveBeenCalled();
+    expect(refreshAll).toHaveBeenCalledOnce();
   });
 
   test("counts the tasks that want a human", () => {

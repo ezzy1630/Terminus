@@ -29,17 +29,59 @@ import { attentionReason, countsTowardBadge, taskIsUnread } from "../lib/attenti
 import { lifecycleLabel, taskTitle } from "../lib/task-lifecycle";
 import { displayLifecycleWith, type TurnActivity } from "../lib/turn-activity";
 import type { Task } from "../types";
+import type { ArpV2EventEnvelope } from "../types/v2";
 
 const WORKSPACE_REFRESH_DELAY_MS = 200;
 const WORKSPACE_RECONNECT_BASE_MS = 500;
 const WORKSPACE_RECONNECT_MAX_MS = 30_000;
 
+/** Turn boundaries that can change whether a task belongs in Priority. */
+const WORKSPACE_TURN_ACTIVITY_EVENTS = new Set([
+  "turn.started",
+  "turn.completed",
+  "turn.aborted",
+  "turn.failed",
+  "turn.interrupted",
+  "turn.superseded",
+  "turn.blocked",
+  "turn.needs_user_input",
+  "turn.budget_exhausted",
+  "turn.policy_denied",
+  "turn.recovery_failed",
+  "turn.recovery_interrupted",
+  "turn.recovery_reconciled",
+]);
+
+/**
+ * Resolve the task whose sidebar projection may have changed.
+ *
+ * Task events identify it directly. Turn and question events identify their
+ * own aggregate, so their task is carried in `correlationId` instead.
+ */
+export function workspaceTaskIdForEvent(event: ArpV2EventEnvelope): string | null {
+  if (event.aggregateType === "task") return event.aggregateId || null;
+  if (
+    (event.aggregateType === "turn" && WORKSPACE_TURN_ACTIVITY_EVENTS.has(event.eventType))
+    || event.eventType.startsWith("question.")
+  ) {
+    return event.correlationId || null;
+  }
+  return null;
+}
+
+function eventNeedsWorkspaceRefresh(event: ArpV2EventEnvelope): boolean {
+  return event.aggregateType === "task"
+    || (event.aggregateType === "turn" && WORKSPACE_TURN_ACTIVITY_EVENTS.has(event.eventType))
+    || event.eventType.startsWith("question.");
+}
+
 /**
  * Keep the portfolio current even when no task transcript is open.
  *
  * Transcript streams remain task-scoped because they carry high-volume turn
- * detail. This lightweight V2 stream observes only task and question changes,
- * then reconciles the bounded sidebar snapshot through the ordinary reads.
+ * detail. This lightweight V2 stream observes only task, turn-lifecycle and
+ * question boundaries, then reconciles the affected task through the ordinary
+ * detail read. Provider deltas and tool events never trigger sidebar traffic.
  */
 export function useWorkspaceEventRefresh(): void {
   useEffect(() => {
@@ -49,12 +91,25 @@ export function useWorkspaceEventRefresh(): void {
     let refreshTimer: number | null = null;
     let reconnectTimer: number | null = null;
     let stream: ReturnType<typeof subscribeEventsV2> | null = null;
+    const pendingTaskIds = new Set<string>();
+    let needsFullRefresh = false;
 
-    const scheduleRefresh = (): void => {
+    const scheduleRefresh = (event: ArpV2EventEnvelope): void => {
+      const taskId = workspaceTaskIdForEvent(event);
+      if (taskId === null) needsFullRefresh = true;
+      else pendingTaskIds.add(taskId);
       if (refreshTimer !== null) return;
       refreshTimer = window.setTimeout(() => {
         refreshTimer = null;
-        void useTerminusStore.getState().refreshAll();
+        const taskIds = [...pendingTaskIds];
+        pendingTaskIds.clear();
+        if (needsFullRefresh) {
+          needsFullRefresh = false;
+          void useTerminusStore.getState().refreshAll();
+          return;
+        }
+        const { refreshTask } = useTerminusStore.getState();
+        void Promise.all(taskIds.map((taskId) => refreshTask(taskId)));
       }, WORKSPACE_REFRESH_DELAY_MS);
     };
 
@@ -66,9 +121,7 @@ export function useWorkspaceEventRefresh(): void {
       });
       stream.addEventListener("message", (event) => {
         cursor = event.eventId;
-        if (event.aggregateType === "task" || event.eventType.startsWith("question.")) {
-          scheduleRefresh();
-        }
+        if (eventNeedsWorkspaceRefresh(event)) scheduleRefresh(event);
       });
       stream.addEventListener("error", () => {
         if (disposed || reconnectTimer !== null) return;
