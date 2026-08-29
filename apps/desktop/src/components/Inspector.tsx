@@ -383,9 +383,14 @@ function InspectorSection({
   const [open, setOpen] = useState(defaultOpen);
   const effectiveOpen = urgent || open;
   return (
+    // Flat sections with hairline separators, like a native inspector. The
+    // bordered card stack read as a web dashboard. Urgent keeps a quiet
+    // tinted box so it stays a signal without shouting.
     <div className={cn(
-      "rounded-xl border bg-card/60 p-3 shadow-xs transition-all",
-      urgent ? "border-warning/40 bg-warning/5" : "border-subtle/80 hover:border-default",
+      "px-0.5 pb-3 transition-colors",
+      urgent
+        ? "rounded-lg border border-warning/30 bg-warning/5 p-2.5"
+        : "border-b border-subtle last:border-b-0 last:pb-0",
     )}>
       <Button
         variant="bare"
@@ -407,7 +412,7 @@ function InspectorSection({
           {effectiveOpen ? <ChevronDown size={12} className="text-tertiary" /> : <ChevronRight size={12} className="text-tertiary" />}
         </div>
       </Button>
-      {effectiveOpen ? <div className="mt-2.5 pt-2 border-t border-subtle/50">{children}</div> : null}
+      {effectiveOpen ? <div className="mt-2.5 pt-2 border-t border-subtle">{children}</div> : null}
     </div>
   );
 }
@@ -415,7 +420,7 @@ function InspectorSection({
 function NoSelection(): JSX.Element {
   return (
     <div className="flex h-full flex-col items-center justify-center p-6 text-center text-tertiary">
-      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-card border border-subtle text-secondary shadow-xs">
+      <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-card border border-subtle text-secondary shadow-xs">
         <Sparkles size={18} strokeWidth={1.7} />
       </div>
       <h3 className="mt-3 text-sm font-semibold text-primary">Task context</h3>
@@ -514,7 +519,7 @@ function InspectorImpl({
             size="sm"
             onClick={copyTaskId}
             aria-label="Copy task ID"
-            className="h-7 rounded-lg border border-subtle/80 bg-card/60 px-2.5 text-xs text-secondary hover:bg-hover hover:text-primary inline-flex items-center gap-1.5"
+            className="h-7 rounded-lg border border-subtle bg-card/60 px-2.5 text-xs text-secondary hover:bg-hover hover:text-primary inline-flex items-center gap-1.5"
           >
             {copiedId ? <Check size={11} className="text-success" /> : <Copy size={11} />}
             <span>{copiedId ? "Copied" : "Copy ID"}</span>
@@ -580,7 +585,7 @@ function InspectorImpl({
         >
           <ul className="flex flex-col gap-2 text-xs">
             {subagents.map((subagent) => (
-              <li key={subagent.id} className="flex items-start gap-2 rounded-lg bg-subtle/40 p-2">
+              <li key={subagent.id} className="flex items-start gap-2 rounded-lg bg-hover/40 p-2">
                 <StatusIndicator
                   status={subagent.state === "working" ? "working" : subagent.state === "failed" ? "failed" : "done"}
                   size={10}
@@ -606,7 +611,7 @@ function InspectorImpl({
         >
           <ul className="flex flex-col gap-1.5 text-xs">
             {verification.slice(-5).reverse().map((check) => (
-              <li key={check.id} className="flex items-start gap-2 rounded bg-subtle/30 px-2 py-1.5">
+              <li key={check.id} className="flex items-start gap-2 rounded bg-hover/30 px-2 py-1.5">
                 <StatusIndicator status={check.state === "passed" ? "done" : check.state === "failed" ? "failed" : "working"} size={10} />
                 <span className="min-w-0 flex-1 text-secondary">{check.detail}</span>
               </li>
@@ -620,7 +625,7 @@ function InspectorImpl({
         <InspectorSection title="Activity" icon={<Workflow size={12} />} summary={`${recentEvents.length}`} defaultOpen={false}>
           <ul className="flex flex-col gap-1.5 text-xs text-secondary">
             {recentEvents.map((ev: TerminusSseEvent, i) => (
-              <li key={ev.id ?? i} className="flex items-center justify-between gap-2 rounded bg-subtle/30 px-2 py-1">
+              <li key={ev.id ?? i} className="flex items-center justify-between gap-2 rounded bg-hover/30 px-2 py-1">
                 <span className="truncate text-secondary">{activityLabel(ev.event)}</span>
                 <span className="font-mono text-xs text-tertiary shrink-0">{ev.id ? ev.id.slice(-6) : "ev"}</span>
               </li>

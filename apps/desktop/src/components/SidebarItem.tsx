@@ -174,7 +174,7 @@ function SidebarItemImpl({
             almost always another half-sentence: it doubled the row height
             without making adjacent tasks distinguishable any faster than the
             first six words already do. */}
-        <span className="w-full min-w-0 truncate text-left text-sm font-medium leading-snug text-primary">
+        <span className="w-full min-w-0 truncate text-left text-base font-medium leading-snug text-primary">
           {title}
         </span>
 

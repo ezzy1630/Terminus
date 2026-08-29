@@ -656,7 +656,9 @@ export function App(): JSX.Element {
         ) : activeDestination === "chat" && selectedTask ? (
           <span className="flex min-w-0 max-w-2xl items-center gap-2.5 text-primary">
             <FolderClosed size={14} className="shrink-0 text-tertiary" aria-hidden />
-            <span className="ui-page-title truncate">{selectedTask.contract?.objective ?? selectedTask.id}</span>
+            {/* Native document titles are 13px semibold; the 15px page title
+                made the bar read as a web page header. */}
+            <span className="truncate text-base font-semibold">{selectedTask.contract?.objective ?? selectedTask.id}</span>
             <TaskStatusPill status={displayLifecycleWith(selectedTask, selectedRunActivity)} />
           </span>
         ) : undefined}

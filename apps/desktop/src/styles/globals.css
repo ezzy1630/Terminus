@@ -18,6 +18,13 @@
   padding: 0;
 }
 
+/* Tailwind v4 defaults uncoloured borders and divides to currentColor, which
+   drew text-coloured rules wherever a border utility carried no colour (or a
+   colour class failed to resolve). Native chrome wants hairlines by default. */
+*, ::before, ::after {
+  border-color: var(--border-subtle);
+}
+
 html, body, #root {
   height: 100%;
   width: 100%;
@@ -160,7 +167,9 @@ textarea::placeholder,
 .titlebar-shell {
   position: relative;
   background: var(--bg-canvas);
-  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--border-subtle) 45%, transparent);
+  /* A real hairline, like NSToolbar's bottom separator. At 45% opacity the
+     bar dissolved into the canvas and the chrome had no bottom edge. */
+  box-shadow: inset 0 -1px 0 var(--border-subtle);
 }
 
 .titlebar-shell::before {
@@ -917,6 +926,9 @@ html[data-vibrancy="on"] {
 @utility bg-strong { background-color: var(--border-strong); }
 @utility bg-primary { background-color: var(--action-primary); }
 @utility border-subtle { border-color: var(--border-subtle); }
+@utility divide-subtle {
+  & > :not([hidden]) ~ :not([hidden]) { border-color: var(--border-subtle); }
+}
 @utility border-default { border-color: var(--border-default); }
 @utility border-strong { border-color: var(--border-strong); }
 @utility border-primary { border-color: var(--action-primary); }

@@ -61,10 +61,12 @@
   --shadow-md: var(--elevation-md);
   --shadow-lg: var(--elevation-lg);
 
+  /* Crisp native radii. 12px is the ceiling — anything rounder reads as a
+     web card, not an AppKit surface. */
   --radius-sm: 6px;
   --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
 
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
@@ -75,22 +77,25 @@
 
   --font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
   --font-family-mono: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+  /* Native macOS scale: 13px body, 12px secondary, 11px labels, 15px titles,
+     one large title capped at 20–22px. Line-heights stay snug (≈1.35–1.5) so
+     chrome reads dense like an AppKit window, not airy like a web page. */
   --font-size-xs: 11px;
   --font-size-sm: 12px;
   --font-size-base: 13px;
   --font-size-md: 14px;
   --font-size-body: 14px;
   --font-size-title: 15px;
-  --font-size-display: 22px;
-  --font-size-display-large: 30px;
-  --line-height-xs: 16px;
-  --line-height-sm: 18px;
-  --line-height-base: 20px;
-  --line-height-md: 22px;
-  --line-height-body: 22px;
-  --line-height-title: 22px;
-  --line-height-display: 28px;
-  --line-height-display-large: 36px;
+  --font-size-display: 20px;
+  --font-size-display-large: 22px;
+  --line-height-xs: 15px;
+  --line-height-sm: 16px;
+  --line-height-base: 18px;
+  --line-height-md: 20px;
+  --line-height-body: 21px;
+  --line-height-title: 20px;
+  --line-height-display: 26px;
+  --line-height-display-large: 28px;
   --tracking-tight: -0.015em;
   --line-height-tight: 1.25;
   --line-height-normal: 1.5;
@@ -115,7 +120,9 @@
   --diff-nav-width: 232px;
   --diff-nav-min-width: 184px;
   --composer-max-height: 280px;
-  --content-width: 780px;
+  /* Comfortable reading column. 780px let transcript lines run wide enough to
+     read as a web page; 720px matches the Codex/Devin measure. */
+  --content-width: 720px;
   --conversation-max-width: var(--content-width);
   --start-max-width: var(--content-width);
   --container-conversation: var(--conversation-max-width);
@@ -137,9 +144,11 @@
   --z-select: 55;
   --z-toast: 60;
 
-  --bg-canvas: #131417;
-  --bg-elevated: #1a1c20;
-  --bg-sidebar: #0d0e10;
+  /* The working surface sits one perceptible step above the sidebar rail so
+     the content area reads as an elevated pane rather than a black void. */
+  --bg-canvas: #151619;
+  --bg-elevated: #1c1e22;
+  --bg-sidebar: #0e0f11;
   --bg-inspector: #17191d;
   --bg-terminal: #1b1b19;
   --bg-diff: #101114;
@@ -160,8 +169,8 @@
   --text-code: #eef1f5;
   /* Apple system blue. The old #79a6f6 was a pastel of it — lighter than
      anything macOS draws, so every accented control read as slightly washed
-     out against the charcoal base. Contrast on --bg-canvas (#131417) is
-     5.05:1, and 5.29:1 on the darker sidebar, so accent-coloured text clears
+     out against the charcoal base. Contrast on --bg-canvas (#151619) is
+     4.97:1, and 5.26:1 on the darker sidebar, so accent-coloured text clears
      WCAG AA at body size. */
   --accent: #0A84FF;
   /* Pointer and press states, derived so a future accent change carries. */
@@ -200,9 +209,11 @@
   /* The composer's focused border. Neutral on purpose — see the
      .composer-surface:focus-within note in globals.css. */
   --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 46%, var(--border-strong));
+  /* Shadows stay tight and close, macOS-style. Wide soft drops read as web
+     marketing chrome on a charcoal base. */
   --elevation-sm: 0 1px 2px rgb(0 0 0 / 20%);
-  --elevation-md: 0 4px 12px rgb(0 0 0 / 24%);
-  --elevation-lg: 0 12px 32px rgb(0 0 0 / 38%);
+  --elevation-md: 0 2px 8px rgb(0 0 0 / 26%);
+  --elevation-lg: 0 6px 20px rgb(0 0 0 / 34%);
   --shadow-card: 0 1px 2px rgb(0 0 0 / 18%);
   --shadow-card-hover: 0 2px 6px rgb(0 0 0 / 22%);
 }
@@ -246,8 +257,8 @@
     --focus-color: var(--accent);
   --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 40%, var(--border-strong));
     --elevation-sm: 0 1px 2px rgb(35 35 30 / 7%);
-    --elevation-md: 0 8px 24px rgb(35 35 30 / 11%);
-    --elevation-lg: 0 20px 52px rgb(35 35 30 / 16%);
+    --elevation-md: 0 3px 10px rgb(35 35 30 / 10%);
+    --elevation-lg: 0 8px 24px rgb(35 35 30 / 14%);
     --shadow-card: 0 1px 3px rgb(35 35 30 / 7%);
     --shadow-card-hover: 0 5px 16px rgb(35 35 30 / 12%);
   }
@@ -296,8 +307,8 @@
   --focus-color: var(--accent);
   --composer-focus-border: color-mix(in srgb, var(--text-tertiary) 40%, var(--border-strong));
   --elevation-sm: 0 1px 2px rgb(35 35 30 / 7%);
-  --elevation-md: 0 8px 24px rgb(35 35 30 / 11%);
-  --elevation-lg: 0 20px 52px rgb(35 35 30 / 16%);
+  --elevation-md: 0 3px 10px rgb(35 35 30 / 10%);
+  --elevation-lg: 0 8px 24px rgb(35 35 30 / 14%);
   --shadow-card: 0 1px 3px rgb(35 35 30 / 7%);
   --shadow-card-hover: 0 5px 16px rgb(35 35 30 / 12%);
 }
@@ -316,7 +327,7 @@
   --sidebar-width-compact: 216px;
   --inspector-width: 272px;
   --composer-max-height: 224px;
-  --content-width: 720px;
+  --content-width: 680px;
   --row-height: 28px;
   --nav-row-height: 28px;
 }

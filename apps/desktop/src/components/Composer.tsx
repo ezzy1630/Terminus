@@ -859,7 +859,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
                   aria-label="Stop"
                   data-tooltip={stopping ? "Stopping…" : "Stop this run · ⌘."}
                   variant="secondary"
-                  className="stop-control flex h-8 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-error"
+                  className="stop-control flex h-7 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-error"
                 >
                   <Square size={11} strokeWidth={2.5} fill="currentColor" aria-hidden />
                   {stopping ? "Stopping…" : "Stop"}
@@ -872,7 +872,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
                 aria-label={sendButtonContent.label}
                 data-tooltip={sendTitle}
                 variant={sendDisabled ? "ghost" : "primary"}
-                className="send-control flex h-8 w-8 items-center justify-center rounded-lg px-0 text-xs font-medium"
+                className="send-control flex h-7 w-7 items-center justify-center rounded-full px-0 text-xs font-medium"
               >
                 {sendButtonContent.icon}
                 <span className="sr-only">{sendButtonContent.label}</span>

@@ -342,11 +342,14 @@ function LayoutImpl({
               <div
                 data-testid="inspector-dock"
                 data-layout="docked"
-                className="h-full shrink-0 p-3 pl-1 bg-transparent flex flex-col justify-start"
+                className="flex h-full shrink-0 flex-col"
                 style={{ width: fittedDocks.inspectorWidth }}
               >
+                {/* A docked native inspector: flat surface, hairline seam.
+                    The floating rounded glass card read as web chrome. */}
                 <aside
-                  className="inspector-card flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-default/70 bg-card/85 backdrop-blur-xl shadow-xl"
+                  className="inspector-card flex h-full min-h-0 flex-col overflow-hidden border-l"
+                  style={{ borderColor: "var(--sidebar-separator)" }}
                 >
                   {inspector}
                 </aside>

@@ -136,7 +136,7 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
           <h1 id="new-task-heading" className="ui-display-title mb-1.5 text-center text-primary">
             What do you want to work on?
           </h1>
-          <p className="mb-6 text-center text-[13px] text-tertiary">
+          <p className="mb-5 text-center text-base text-tertiary">
             Terminus runs the task, shows its work, and stops for approval before anything risky.
           </p>
           <Composer

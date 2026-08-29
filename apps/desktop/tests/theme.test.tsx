@@ -66,7 +66,7 @@ beforeEach(resetStore);
 describe("CSS-first theme", () => {
   test("defines complete default tokens without renderer JavaScript", () => {
     expect(themeCss).toContain(":root {");
-    expect(themeCss).toContain("--bg-canvas: #131417");
+    expect(themeCss).toContain("--bg-canvas: #151619");
     expect(themeCss).toContain("--text-primary: #f0f1f4");
     expect(themeCss).toContain("--font-size-base: 13px");
     expect(themeCss).toContain("--duration-normal: 180ms");
@@ -101,15 +101,15 @@ describe("CSS-first theme", () => {
       "--font-size-md: 14px",
       "--font-size-body: 14px",
       "--font-size-title: 15px",
-      "--font-size-display: 22px",
-      "--font-size-display-large: 30px",
+      "--font-size-display: 20px",
+      "--font-size-display-large: 22px",
       "--control-sm: 24px",
       "--control-md: 28px",
       "--control-lg: 32px",
       "--radius-sm: 6px",
       "--radius-md: 8px",
-      "--radius-lg: 12px",
-      "--radius-xl: 16px",
+      "--radius-lg: 10px",
+      "--radius-xl: 12px",
       "--duration-fast: 120ms",
       "--duration-normal: 180ms",
       "--duration-slow: 260ms",

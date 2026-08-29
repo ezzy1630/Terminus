@@ -199,14 +199,18 @@ function MissionBoardCard({
       onDragEnd={onDragEnd}
       data-testid={`mission-board-card-${task.id}`}
       className={cn(
-        "group relative flex min-h-[104px] w-full flex-col gap-2 rounded-xl border border-default/75 bg-card/75 p-3 shadow-xs transition-all hover:border-strong hover:bg-card hover:shadow-md",
+        // `border-default/75` never resolved — border-default is a custom
+        // utility, not a theme colour, so the card border fell back to
+        // currentColor and drew brighter than any hairline in the app.
+        "group relative flex min-h-[104px] w-full flex-col gap-2 rounded-xl border border-default bg-card/75 p-3 shadow-xs transition-all hover:border-strong hover:bg-card hover:shadow-md",
         selected && "border-default ring-1 ring-default bg-selected/40",
         pending && "opacity-60",
       )}
     >
       {/* Top row: Space badge + Blue active indicator dot + Menu */}
       <div className="flex h-5 items-center justify-between gap-1.5">
-        <span className="ui-code max-w-[70%] truncate text-tertiary">
+        {/* A project name is prose, not code — mono here was a web tell. */}
+        <span className="ui-meta max-w-[70%] truncate">
           {spaceName}
         </span>
         <div className="flex items-center gap-1.5 shrink-0">
@@ -216,10 +220,8 @@ function MissionBoardCard({
               data-tooltip={attention ? "Needs attention" : isRunning ? "Running" : "Waiting for review"}
               aria-label={attention ? "Needs attention" : isRunning ? "Running" : "Waiting for review"}
             >
-              <span className={cn(
-                "animate-ping absolute inline-flex h-full w-full rounded-full opacity-75",
-                attention ? "bg-warning" : "bg-info",
-              )} />
+              {/* A still dot. Ten pinging halos made the board read as an
+                  alarm panel rather than a status overview. */}
               <span className={cn(
                 "relative inline-flex rounded-full h-2 w-2",
                 attention ? "bg-warning" : "bg-info",
@@ -250,13 +252,13 @@ function MissionBoardCard({
         aria-label={`Open ${task.contract.mission}`}
         className="flex min-w-0 items-start"
       >
-        <span className="ui-body block line-clamp-2 font-medium text-xs leading-snug text-primary transition-colors group-hover:text-accent">
+        <span className="block line-clamp-2 text-base font-medium leading-snug text-primary transition-colors group-hover:text-accent">
           {task.contract.mission}
         </span>
       </Button>
 
       {/* Bottom row: Status phrase, timing, and git/PR indicators */}
-      <div className="mt-auto flex h-5 items-center justify-between gap-1.5 border-t border-subtle/40 pt-1.5 text-xs">
+      <div className="mt-auto flex h-5 items-center justify-between gap-1.5 border-t border-subtle pt-1.5 text-xs">
         <div className="flex min-w-0 items-center gap-1.5 text-secondary truncate">
           {isRunning ? (
             <span className="flex items-center gap-1 text-info font-medium text-xs">
@@ -363,7 +365,7 @@ function BoardColumn({
               Move to {label}
             </div>
           ) : (
-            <p className="px-0.5 py-1 text-xs text-tertiary/70">{description}</p>
+            <p className="px-0.5 py-1 text-xs text-tertiary">{description}</p>
           )
         ) : tasks.map((task) => (
           <MissionBoardCard
@@ -972,7 +974,7 @@ export function MissionBoardView({ onOpenTask, onInspectTask }: MissionBoardView
             </>
           ) : (
             <div role="table" aria-label="Mission board tasks" className="overflow-hidden rounded-lg border border-default bg-card">
-              <div role="row" className="mission-board-list-row grid gap-3 bg-subtle/50 px-4 py-2 text-xs font-medium text-tertiary border-b border-subtle">
+              <div role="row" className="mission-board-list-row grid gap-3 bg-hover/40 px-4 py-2 text-xs font-medium text-tertiary border-b border-subtle">
                 <span role="columnheader">Session / Task</span><span role="columnheader">State</span><span role="columnheader" className="mission-board-list-secondary">Space</span><span role="columnheader" className="mission-board-list-secondary">Updated</span>
               </div>
               <div role="rowgroup" className="divide-y divide-subtle">

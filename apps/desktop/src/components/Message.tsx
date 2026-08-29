@@ -310,8 +310,10 @@ function MessageImpl({ message }: MessageProps): JSX.Element {
     return (
       <ContextMenu items={contextItems}>
       <div className="selectable my-2.5 flex justify-end">
+        {/* A quiet wash, not a bordered card — the border+card treatment made
+            every user turn read as a heavy web chat bubble. */}
         <div
-          className="max-w-[80%] rounded-lg border border-subtle bg-card px-3.5 py-2.5 text-primary"
+          className="max-w-[85%] rounded-xl bg-subtle px-3 py-2 text-primary"
         >
           <div
             className="ui-prose whitespace-pre-wrap"

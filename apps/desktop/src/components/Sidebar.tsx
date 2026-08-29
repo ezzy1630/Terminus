@@ -223,11 +223,13 @@ function SidebarImpl({
             <span className="truncate text-left">Search</span>
             <span className="ml-auto text-xs text-tertiary">⌘K</span>
           </Button>
+          {/* The count is the signal; a fully amber row read as a permanent
+              alarm in an otherwise quiet source list. */}
           {attentionCount > 0 ? (
-            <Button type="button" onClick={onOpenAttentionCenter} className="sidebar-nav-item w-full justify-start text-left text-warning font-medium">
-              <BellRing size={15} strokeWidth={1.7} className="shrink-0" />
+            <Button type="button" onClick={onOpenAttentionCenter} className="sidebar-nav-item w-full justify-start text-left">
+              <BellRing size={15} strokeWidth={1.7} className="shrink-0 text-warning" />
               <span className="truncate text-left">Needs attention</span>
-              <span className="ml-auto min-w-4 rounded-full bg-warning/15 px-1.5 py-0.2 text-right text-xs tabular-nums text-warning">{attentionCount}</span>
+              <span className="ml-auto min-w-4 rounded-full bg-warning/12 px-1.5 text-right text-xs tabular-nums text-warning">{attentionCount}</span>
             </Button>
           ) : null}
         </nav>
