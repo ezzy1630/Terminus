@@ -13,6 +13,7 @@ import {
   renderResponsesRequest,
   decodeOpenAiResponsesStream,
   decodeOpenAiChatStream,
+  schemaSatisfiesStrictMode,
 } from "./index.js";
 
 const DEFAULT_PROVIDER_CAPS: ProviderCapabilitySnapshot = {
@@ -79,7 +80,13 @@ const DUMMY_TOOL: ProviderToolSchema = {
   id: "search",
   version: "1.0.0",
   summary: "Search workspace",
-  inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  // Strict-shaped on purpose: every property required, no open extension.
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: { query: { type: "string" } },
+    required: ["query"],
+  },
   resultSchema: { type: "object", properties: { results: { type: "array" } } },
   sideEffectClass: "READ_ONLY",
   requiredCapabilities: [],
@@ -88,6 +95,25 @@ const DUMMY_TOOL: ProviderToolSchema = {
   maximumArtifactBytes: 1048576,
   defaultTimeoutMs: 5000,
   policyTags: [],
+};
+
+/**
+ * The shape that broke a live Codex turn: a builtin tool whose optional
+ * parameters carry defaults, so `required` cannot list every property.
+ */
+const OPTIONAL_PARAM_TOOL: ProviderToolSchema = {
+  ...DUMMY_TOOL,
+  id: "read",
+  summary: "Read a bounded projection of one file",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["path"],
+    properties: {
+      path: { type: "string" },
+      max_bytes: { type: "integer", minimum: 1, maximum: 30 * 1_024, default: 28 * 1_024 },
+    },
+  },
 };
 
 function mkFragment(id: string, kind: string, text: string): ContextFragment {
@@ -150,6 +176,7 @@ describe("OpenAI Responses Connector", () => {
     expect(tools).toHaveLength(1);
     expect(tools[0]!.type).toBe("function");
     expect(tools[0]!.name).toBe("search");
+    // The fixture schema satisfies strict mode, so the claim is made.
     expect(tools[0]!.strict).toBe(true);
 
     const inputItems = body.input as Array<{ role: string; content: string }>;
@@ -158,6 +185,40 @@ describe("OpenAI Responses Connector", () => {
     expect(inputItems[0]!.content).toBe("System instructions.");
     expect(inputItems[1]!.role).toBe("user");
     expect(inputItems[1]!.content).toBe("Search for main.rs");
+  });
+
+  /**
+   * The native Responses path had the same leak as the ChatGPT Codex profile:
+   * `renderMessages` stamps `cache_control` on the first cached block, and the
+   * Responses API answers `Unknown parameter: 'input[N].cache_control'`.
+   */
+  test("never sends the chat prompt-cache marker on a Responses body", async () => {
+    const input: CanonicalRenderInput = {
+      provider: DEFAULT_PROVIDER_CAPS,
+      model: DEFAULT_MODEL_CAPS,
+      manifestId: "01934567-89ab-7000-8000-cdef01234567" as Uuid7,
+      fragments: [
+        mkFragment("f1", "authority", "System instructions."),
+        mkFragment("f2", "user_attachment", "Search for main.rs"),
+      ],
+      toolSchemas: [DUMMY_TOOL],
+      cachePlan: { stablePrefixHash: `sha256:${"0".repeat(64)}` as ContentHash, breakpoints: [0] },
+      continuationId: null,
+      outputProfile: "terse",
+      reasoningReserveTokens: 500n as TokenCount,
+      outputReserveTokens: 4096n as TokenCount,
+      hardInputLimit: 100000n as TokenCount,
+      signal: null,
+    };
+
+    const chat = await new OpenAiRenderer().render(input);
+    // The chat dialect still carries the marker: that is where it belongs.
+    expect(JSON.stringify(chat.body)).toContain("cache_control");
+
+    const rendered = await renderResponsesRequest(input);
+    expect(JSON.stringify(rendered.body)).not.toContain("cache_control");
+    const items = (rendered.body as Record<string, unknown>).input as Array<Record<string, unknown>>;
+    expect(items[0]).toEqual({ role: "developer", content: "System instructions." });
   });
 
   test("streams and decodes Responses API SSE frames", async () => {
@@ -235,5 +296,93 @@ describe("OpenAI Responses Connector", () => {
         timeToFirstTokenMs: null,
       },
     });
+  });
+
+  test("never claims strict function calling for a schema with an optional parameter", async () => {
+    // Live 400 on 2026-08-29: "Invalid schema for function 'read': …
+    // 'required' is required to be supplied and to be an array including
+    // every key in properties. Missing 'max_bytes'." Strict is a claim about
+    // the schema, and this schema does not meet it.
+    expect(schemaSatisfiesStrictMode(OPTIONAL_PARAM_TOOL.inputSchema)).toBe(false);
+
+    const input: CanonicalRenderInput = {
+      provider: DEFAULT_PROVIDER_CAPS,
+      model: DEFAULT_MODEL_CAPS,
+      manifestId: "01934567-89ab-7000-8000-cdef01234567" as Uuid7,
+      fragments: [mkFragment("f1", "authority", "System instructions.")],
+      toolSchemas: [OPTIONAL_PARAM_TOOL],
+      cachePlan: { stablePrefixHash: `sha256:${"0".repeat(64)}` as ContentHash, breakpoints: [] },
+      continuationId: null,
+      outputProfile: "terse",
+      reasoningReserveTokens: 500n as TokenCount,
+      outputReserveTokens: 4096n as TokenCount,
+      hardInputLimit: 100000n as TokenCount,
+      signal: null,
+    };
+
+    const rendered = await renderResponsesRequest(input);
+    const tools = (rendered.body as Record<string, unknown>).tools as Array<{
+      name: string;
+      strict: boolean;
+      parameters: Record<string, unknown>;
+    }>;
+
+    expect(tools).toHaveLength(1);
+    expect(tools[0]!.name).toBe("read");
+    expect(tools[0]!.strict).toBe(false);
+    // Non-strict means the schema travels as written: the optional parameter
+    // keeps its bounds and its default rather than being forced into
+    // `required` and made nullable.
+    expect(tools[0]!.parameters).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["path"],
+      properties: {
+        path: { type: "string" },
+        max_bytes: { type: "integer", minimum: 1, maximum: 30 * 1_024, default: 28 * 1_024 },
+      },
+    });
+  });
+
+  test("recognises the schema shapes strict mode actually accepts", () => {
+    expect(
+      schemaSatisfiesStrictMode({
+        type: "object",
+        additionalProperties: false,
+        required: ["a"],
+        properties: { a: { type: "string" } },
+      }),
+    ).toBe(true);
+    // An open object accepts keys the model was never told about.
+    expect(
+      schemaSatisfiesStrictMode({ type: "object", required: ["a"], properties: { a: { type: "string" } } }),
+    ).toBe(false);
+    // A nested object has to hold the line too.
+    expect(
+      schemaSatisfiesStrictMode({
+        type: "object",
+        additionalProperties: false,
+        required: ["a"],
+        properties: { a: { type: "object", properties: { b: { type: "string" } }, required: [] } },
+      }),
+    ).toBe(false);
+    // `default` is not a strict-mode keyword anywhere in the tree.
+    expect(
+      schemaSatisfiesStrictMode({
+        type: "object",
+        additionalProperties: false,
+        required: ["a"],
+        properties: { a: { type: "string", default: "x" } },
+      }),
+    ).toBe(false);
+    // A nullable optional-by-convention property is strict-shaped.
+    expect(
+      schemaSatisfiesStrictMode({
+        type: "object",
+        additionalProperties: false,
+        required: ["a"],
+        properties: { a: { type: ["string", "null"] } },
+      }),
+    ).toBe(true);
   });
 });

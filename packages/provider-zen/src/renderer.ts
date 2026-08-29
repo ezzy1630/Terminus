@@ -1,5 +1,10 @@
 import { AnthropicRenderer } from "@terminus/provider-anthropic";
-import { OpenAiRenderer } from "@terminus/provider-openai";
+import {
+  OpenAiRenderer,
+  sanitizeResponsesBody,
+  toResponsesInputItems,
+  type OpenAiChatMessage,
+} from "@terminus/provider-openai";
 import type {
   CanonicalRenderInput,
   ReasoningEffort,
@@ -22,7 +27,7 @@ export interface GatewayRendererOptions {
 }
 
 export class GatewayRenderer implements ProviderRenderer {
-  readonly providerId: GatewayModel["providerId"];
+  readonly providerId: string;
   readonly version = "1.0.0";
 
   private readonly models: ReadonlyMap<string, GatewayModel>;
@@ -33,7 +38,7 @@ export class GatewayRenderer implements ProviderRenderer {
     const first = models[0];
     if (first === undefined) throw new Error("gateway renderer requires at least one admitted model");
     if (models.some((model) => model.providerId !== first.providerId)) {
-      throw new Error("one gateway renderer cannot mix Zen and Go accounts");
+      throw new Error("one gateway renderer cannot mix models from different accounts");
     }
     this.providerId = first.providerId;
     this.models = new Map(models.map((model) => [model.id, model]));
@@ -111,7 +116,13 @@ export class GatewayRenderer implements ProviderRenderer {
 }
 
 function toResponsesBody(body: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
-  const messages = Array.isArray(body.messages) ? body.messages : [];
+  // Chat Completions and Responses are different shapes, not the same shape
+  // with different names: a tool result is a `function_call_output` item and
+  // the prompt-cache marker `cache_control` does not exist here at all. The
+  // shared rewrite in `@terminus/provider-openai` owns that translation.
+  const messages = Array.isArray(body.messages)
+    ? toResponsesInputItems(body.messages as readonly OpenAiChatMessage[])
+    : [];
   const tools = Array.isArray(body.tools)
     ? body.tools.map((rawTool) => {
         const tool = asRecord(rawTool);
@@ -125,7 +136,7 @@ function toResponsesBody(body: Readonly<Record<string, unknown>>): Readonly<Reco
         };
       })
     : [];
-  return {
+  return sanitizeResponsesBody({
     model: body.model,
     input: messages,
     stream: true,
@@ -136,7 +147,7 @@ function toResponsesBody(body: Readonly<Record<string, unknown>>): Readonly<Reco
       : {}),
     ...(body.previous_response_id !== undefined ? { previous_response_id: body.previous_response_id } : {}),
     ...(body.store !== undefined ? { store: body.store } : {}),
-  };
+  });
 }
 
 function toChatCompletionsBody(body: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {

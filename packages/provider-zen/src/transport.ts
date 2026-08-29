@@ -33,7 +33,21 @@ interface TransportInput {
   readonly credentialBindingId: string;
   readonly models: readonly GatewayModel[];
   readonly client: CredentialBoundGatewayClient;
+  /**
+   * Extra request headers a connected provider account's connector admits
+   * (e.g. the ChatGPT account id and originator the Codex endpoint expects).
+   * They never carry credential material — the bearer is injected inside the
+   * kernel from `credentialBindingId`. Reserved header names are rejected so
+   * an account cannot smuggle in its own `authorization`.
+   */
+  readonly extraHeaders?: Readonly<Record<string, string>> | undefined;
 }
+
+/**
+ * Headers the kernel connector owns. A caller-supplied value here would either
+ * be dropped by the connector or, worse, override the brokered credential.
+ */
+const RESERVED_HEADERS = new Set(["authorization", "content-type", "accept", "host", "content-length"]);
 
 const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_EVENT_BYTES = 1024 * 1024;
@@ -42,6 +56,7 @@ export class GatewayTransport implements ProviderTransport {
   private readonly credentialBindingId: string;
   private readonly models: ReadonlyMap<string, GatewayModel>;
   private readonly client: CredentialBoundGatewayClient;
+  private readonly extraHeaders: Readonly<Record<string, string>>;
 
   constructor(input: TransportInput) {
     if (input.credentialBindingId !== "" && !input.credentialBindingId.startsWith("secret://")) {
@@ -50,6 +65,16 @@ export class GatewayTransport implements ProviderTransport {
     this.credentialBindingId = input.credentialBindingId;
     this.models = new Map(input.models.map((model) => [model.id, model]));
     this.client = input.client;
+    const extra: Record<string, string> = {};
+    for (const [name, value] of Object.entries(input.extraHeaders ?? {})) {
+      const lower = name.toLowerCase();
+      if (RESERVED_HEADERS.has(lower)) {
+        throw new Error(`header ${lower} is owned by the kernel connector and may not be supplied`);
+      }
+      if (/[\0\r\n]/.test(value)) throw new Error(`header ${lower} contains a control delimiter`);
+      extra[lower] = value;
+    }
+    this.extraHeaders = extra;
   }
 
   async *stream(
@@ -73,6 +98,7 @@ export class GatewayTransport implements ProviderTransport {
         accept: "text/event-stream",
         "content-type": "application/json",
         ...(model.protocol === "messages" ? { "anthropic-version": "2023-06-01" } : {}),
+        ...this.extraHeaders,
       },
       body: serialized,
       credentialBindingId: this.credentialBindingId,
@@ -248,6 +274,31 @@ async function* normalizeResponses(
     }
     if (type === "response.output_text.delta" && typeof value.delta === "string") {
       yield { kind: "text", text: value.delta };
+      continue;
+    }
+    // Reasoning summaries. The Responses API streams them as their own event
+    // family; without these the summary text a user paid for is discarded.
+    if (
+      (type === "response.reasoning_summary_text.delta"
+        || type === "response.reasoning_text.delta"
+        || type === "response.reasoning.delta")
+      && typeof value.delta === "string"
+    ) {
+      yield { kind: "text", reasoning: value.delta };
+      continue;
+    }
+    if (type === "response.reasoning_summary_text.done" || type === "response.reasoning_summary_part.added") {
+      // Terminal/structural markers for a summary whose text already streamed.
+      continue;
+    }
+    if (type === "response.incomplete") {
+      const response = optionalRecord(value.response);
+      const details = optionalRecord(response.incomplete_details);
+      yield {
+        kind: "error",
+        errorCode: "RESPONSE_INCOMPLETE",
+        errorMessage: `response ended incomplete: ${stringOrEmpty(details.reason) || "no reason reported"}`,
+      };
       continue;
     }
     if (type === "response.output_item.added") {

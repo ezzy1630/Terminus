@@ -104,7 +104,7 @@ function mkFragment(id: string, kind: string, text: string, confidentiality: Con
 function mkToolSchema(id: string): ProviderToolSchema {
   return {
     id, version: "1.0.0", summary: `Tool: ${id}`,
-    inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    inputSchema: { type: "object", additionalProperties: false, properties: { query: { type: "string" } }, required: ["query"] },
     resultSchema: { type: "object", properties: { result: { type: "string" } } },
     sideEffectClass: "READ", requiredCapabilities: [], trustLevel: "builtin",
     maximumModelResultBytes: 4096, maximumArtifactBytes: 1048576, defaultTimeoutMs: 30000, policyTags: [],
@@ -177,11 +177,31 @@ describe("Provider conformance: role ordering (§38.6)", () => {
 // ───────────────────── 2. Tool schemas ───────────────────────────────────────
 
 describe("Provider conformance: tool schemas (§38.7)", () => {
-  test("OpenAI: strict mode for builtins", async () => {
+  test("OpenAI: strict mode where the schema earns it", async () => {
     const renderer = new OpenAiRenderer();
     const r = await renderer.render(mkRenderInput(openAiCapabilitySnapshot(), mkModelSnapshot("openai","gpt-4o",openAiCapabilitySnapshot()), [], { toolSchemas: [mkToolSchema("search")] }));
     const tools = (r.body as Record<string,unknown>)["tools"] as ReadonlyArray<{readonly function:{readonly strict:boolean}}>;
     expect(tools[0]!.function.strict).toBe(true);
+  });
+
+  test("OpenAI: no strict claim for a schema with an optional parameter", async () => {
+    // OpenAI rejects `strict: true` unless `required` lists every property.
+    // Trust level cannot make that true, so it does not decide the flag.
+    const optional = mkToolSchema("read");
+    const renderer = new OpenAiRenderer();
+    const r = await renderer.render(mkRenderInput(openAiCapabilitySnapshot(), mkModelSnapshot("openai","gpt-4o",openAiCapabilitySnapshot()), [], {
+      toolSchemas: [{
+        ...optional,
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["path"],
+          properties: { path: { type: "string" }, max_bytes: { type: "integer", minimum: 1 } },
+        },
+      }],
+    }));
+    const tools = (r.body as Record<string,unknown>)["tools"] as ReadonlyArray<{readonly function:{readonly strict:boolean}}>;
+    expect(tools[0]!.function.strict).toBe(false);
   });
 
   test("Anthropic: renders input_schema", async () => {

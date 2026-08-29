@@ -32,11 +32,20 @@ export interface ModelsDevCatalog {
   readonly providers: ReadonlyMap<string, CatalogProvider>;
 }
 
+/** The two gateway deployments Terminus ships a first-party binding for. */
+export type ZenProviderId = "open_code_zen" | "open_code_go";
+
 export interface GatewayModel {
   readonly id: string;
   readonly name: string;
   readonly deployment: GatewayDeployment;
-  readonly providerId: "open_code_zen" | "open_code_go";
+  /**
+   * Owning provider. Zen/Go discovery only ever produces `ZenProviderId`, but
+   * the renderer and transport in this package are also reused by connected
+   * provider accounts, whose owner is the account id. Callers that need the
+   * gateway identity compare against `ZenProviderId` explicitly.
+   */
+  readonly providerId: string;
   readonly baseUrl: string;
   readonly protocol: GatewayProtocol;
   readonly free: boolean;
@@ -67,7 +76,7 @@ const PROVIDER_KEYS: Readonly<Record<GatewayDeployment, string>> = {
   go: "opencode-go",
 };
 
-const PROVIDER_IDS: Readonly<Record<GatewayDeployment, GatewayModel["providerId"]>> = {
+const PROVIDER_IDS: Readonly<Record<GatewayDeployment, ZenProviderId>> = {
   zen: "open_code_zen",
   go: "open_code_go",
 };
@@ -220,7 +229,14 @@ export function discoverGatewayModels(input: {
   };
 }
 
-function protocolForPackage(packageName: string): GatewayProtocol | null {
+/**
+ * The wire protocol an OpenCode/models.dev SDK package implies.
+ *
+ * Fails closed: an SDK Terminus has no transport for returns null rather than
+ * being guessed into the nearest protocol. Exported because connected provider
+ * accounts resolve their protocol from the same models.dev `npm` field.
+ */
+export function protocolForPackage(packageName: string): GatewayProtocol | null {
   switch (packageName) {
     case "@ai-sdk/openai-compatible":
       return "chat_completions";

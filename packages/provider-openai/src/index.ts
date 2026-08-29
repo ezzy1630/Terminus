@@ -89,6 +89,8 @@ export interface OpenAiResponsesInputItem {
   readonly content?: string | undefined;
   readonly type?: "message" | "function_call" | "function_call_output" | undefined;
   readonly call_id?: string | undefined;
+  readonly name?: string | undefined;
+  readonly arguments?: string | undefined;
   readonly output?: string | undefined;
 }
 
@@ -357,6 +359,84 @@ function fragmentRole(kind: string): OpenAiChatMessage["role"] {
   }
 }
 
+/**
+ * Keywords OpenAI's strict function schemas reject or ignore.
+ *
+ * `default` is the one that bites us: our builtin schemas use it to document
+ * an optional parameter's fallback, which is exactly the shape strict mode
+ * forbids. The combinators are listed because strict mode understands only
+ * `anyOf`, and an unsupported keyword fails the whole request rather than the
+ * field it appears on.
+ */
+const NON_STRICT_SCHEMA_KEYWORDS: readonly string[] = [
+  "default",
+  "allOf",
+  "oneOf",
+  "not",
+  "if",
+  "then",
+  "else",
+  "patternProperties",
+  "dependentSchemas",
+  "dependentRequired",
+  "unevaluatedProperties",
+  "unevaluatedItems",
+  "propertyNames",
+  "contains",
+  "minProperties",
+  "maxProperties",
+];
+
+/**
+ * Answer whether a JSON Schema already satisfies OpenAI strict function calling.
+ *
+ * `strict` is a claim about the schema, not a compliment to its author. The
+ * endpoint rejects the request outright — `'required' is required to be
+ * supplied and to be an array including every key in properties` — when the
+ * claim is false, so it is only ever set where it is already true. Our builtin
+ * tools deliberately carry optional parameters with defaults (`read` has
+ * `max_bytes`), so most of them render as ordinary, non-strict function
+ * schemas. Rendering a conformant schema as non-strict costs a guarantee;
+ * rendering a non-conformant one as strict costs the turn.
+ */
+export function schemaSatisfiesStrictMode(schema: unknown): boolean {
+  if (!isPlainObject(schema)) return false;
+  for (const keyword of NON_STRICT_SCHEMA_KEYWORDS) {
+    if (keyword in schema) return false;
+  }
+  if (Array.isArray(schema.anyOf)) {
+    if (!schema.anyOf.every((branch) => schemaSatisfiesStrictMode(branch))) return false;
+  }
+  if (isPlainObject(schema.$defs)) {
+    if (!Object.values(schema.$defs).every((def) => schemaSatisfiesStrictMode(def))) return false;
+  }
+  if ("items" in schema) {
+    // Tuple validation is not part of strict mode.
+    if (Array.isArray(schema.items)) return false;
+    if (!schemaSatisfiesStrictMode(schema.items)) return false;
+  }
+  const properties = schema.properties;
+  const declaresObject = schema.type === "object" || properties !== undefined;
+  if (!declaresObject) return true;
+  if (!isPlainObject(properties)) return false;
+  if (schema.additionalProperties !== false) return false;
+  const required = schema.required;
+  if (!Array.isArray(required)) return false;
+  const names = Object.keys(properties);
+  const declared = new Set(required.filter((name): name is string => typeof name === "string"));
+  if (declared.size !== required.length) return false;
+  if (declared.size !== names.length) return false;
+  for (const name of names) {
+    if (!declared.has(name)) return false;
+    if (!schemaSatisfiesStrictMode(properties[name])) return false;
+  }
+  return true;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function renderTools(schemas: readonly ProviderToolSchema[]): readonly OpenAiToolSchema[] {
   return schemas.map((s) => ({
     type: "function" as const,
@@ -364,7 +444,7 @@ function renderTools(schemas: readonly ProviderToolSchema[]): readonly OpenAiToo
       name: s.id,
       description: s.summary,
       parameters: s.inputSchema,
-      strict: s.trustLevel === "builtin",
+      strict: schemaSatisfiesStrictMode(s.inputSchema),
     },
   }));
 }
@@ -428,6 +508,91 @@ export function renderRequest(input: CanonicalRenderInput): Promise<RenderedProv
   return renderer.render(input);
 }
 
+/**
+ * Keys that exist only in the Chat Completions dialect.
+ *
+ * `cache_control` is the prompt-cache marker `renderMessages` stamps on the
+ * first cached user block. Chat Completions ignores an unknown key; the
+ * Responses API rejects the whole request with
+ * `Unknown parameter: 'input[4].cache_control'` — observed live against the
+ * ChatGPT Codex endpoint on 2026-08-29. The other three are structural: a
+ * Responses item names its tool call with `call_id`/`name`/`arguments`, not
+ * with a `tool_calls` array or a `tool` role.
+ */
+const CHAT_ONLY_ITEM_KEYS = ["cache_control", "tool_calls", "tool_call_id", "name"] as const;
+
+/**
+ * Drop `cache_control` anywhere it appears, however deeply nested.
+ *
+ * The top-level rewrite below already produces clean items, but a content part
+ * or a tool parameter schema can carry the marker too, and one stray key fails
+ * the entire request rather than the field.
+ */
+function withoutCacheControl(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutCacheControl);
+  if (typeof value !== "object" || value === null) return value;
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "cache_control") continue;
+    cleaned[key] = withoutCacheControl(nested);
+  }
+  return cleaned;
+}
+
+/** Strip every Chat-Completions-only key from a Responses request body. */
+export function sanitizeResponsesBody(
+  body: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  return withoutCacheControl(body) as Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Rewrite Chat Completions messages as Responses input items.
+ *
+ * The two dialects are not the same shape wearing different names: a tool
+ * result is a `function_call_output` item rather than a `tool` role, and an
+ * assistant tool call is its own `function_call` item rather than a field on
+ * the assistant message. Passing the chat array through unchanged — which is
+ * what this did — sent the endpoint keys it rejects.
+ */
+export function toResponsesInputItems(
+  messages: readonly OpenAiChatMessage[],
+): readonly OpenAiResponsesInputItem[] {
+  const items: OpenAiResponsesInputItem[] = [];
+  for (const message of messages) {
+    if (message.role === "tool" && typeof message.tool_call_id === "string" && message.tool_call_id !== "") {
+      items.push({
+        type: "function_call_output",
+        call_id: message.tool_call_id,
+        output: message.content,
+      });
+      continue;
+    }
+    const toolCalls = message.tool_calls ?? [];
+    if (toolCalls.length > 0) {
+      if (message.content !== "") {
+        items.push({ role: "assistant", content: message.content });
+      }
+      for (const call of toolCalls) {
+        items.push({
+          type: "function_call",
+          call_id: call.id,
+          name: call.function.name,
+          arguments: call.function.arguments,
+        });
+      }
+      continue;
+    }
+    // `tool` without a call id has nothing to attach to; the Responses API has
+    // no such role, so it is carried as an ordinary user turn.
+    items.push({
+      role: message.role === "tool" ? "user" : message.role,
+      content: message.content,
+    });
+  }
+  return items;
+}
+
 /** Render a native OpenAI Responses API request body. */
 export async function renderResponsesRequest(
   input: CanonicalRenderInput,
@@ -438,7 +603,7 @@ export async function renderResponsesRequest(
   const body = rendered.body as unknown as OpenAiRequestBody;
   const responsesBody: OpenAiResponsesRequestBody = {
     model: body.model,
-    input: body.messages as unknown as readonly OpenAiResponsesInputItem[],
+    input: toResponsesInputItems(body.messages),
     stream: true,
     ...(body.tools && body.tools.length > 0
       ? {
@@ -460,7 +625,7 @@ export async function renderResponsesRequest(
   };
   return {
     ...rendered,
-    body: responsesBody as unknown as Readonly<Record<string, unknown>>,
+    body: sanitizeResponsesBody(responsesBody as unknown as Readonly<Record<string, unknown>>),
   };
 }
 
@@ -468,4 +633,5 @@ export type { ProviderRenderer, ProviderResponseChunk };
 
 export * from "./model_profiles.js";
 export * from "./stream.js";
+export * from "./chatgpt_codex.js";
 

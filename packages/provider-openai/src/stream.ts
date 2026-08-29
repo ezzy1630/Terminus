@@ -93,8 +93,32 @@ export async function* decodeOpenAiResponsesStream(
       yield { kind: "text", text: value.delta };
       continue;
     }
-    if ((type === "response.reasoning_text.delta" || type === "response.reasoning.delta") && typeof value.delta === "string") {
+    if (
+      (type === "response.reasoning_text.delta"
+        || type === "response.reasoning.delta"
+        // Reasoning *summaries* stream under their own event family. Without
+        // this the summary a subscription model emits is silently discarded.
+        || type === "response.reasoning_summary_text.delta")
+      && typeof value.delta === "string"
+    ) {
       yield { kind: "text", reasoning: value.delta };
+      continue;
+    }
+    if (type === "response.reasoning_summary_text.done" || type === "response.reasoning_summary_part.added") {
+      // Structural markers for a summary whose text already streamed.
+      continue;
+    }
+    // A response the provider ended early (token cap, filtered content). It is
+    // not `response.completed`, so without this the stream would look
+    // truncated with no reason attached.
+    if (type === "response.incomplete") {
+      const response = optionalRecord(value.response);
+      const details = optionalRecord(response.incomplete_details);
+      yield {
+        kind: "error",
+        errorCode: "RESPONSE_INCOMPLETE",
+        errorMessage: `response ended incomplete: ${stringOrEmpty(details.reason) || "no reason reported"}`,
+      };
       continue;
     }
     if (type === "response.output_item.added") {
