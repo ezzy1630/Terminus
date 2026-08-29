@@ -939,6 +939,9 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   // it disabled the composer during exactly the runs the user most wants to
   // steer — and it made this client, not the control plane, the one refusing.
   // The request goes out; if it fails, the real HTTP error is what is shown.
+  // Discovery can be stale while the stored route is still healthy. Keep the
+  // exact selected slug on the request and let the control plane report the
+  // real routing result instead of silently choosing a replacement here.
   const sendDisabled = sending || draft.trim().length === 0 || taskTerminal;
   // Filled while a send is in flight as well as while one is possible, so the
   // circle does not blink from accent to ghost for the duration of the request.
@@ -1016,15 +1019,17 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
           {/* No model, no turn. The picker used to hide itself when the
               inventory was empty, so the composer looked ready and the send
               failed at the control plane instead. */}
-          {modelInventory.status !== "loading" && modelInventory.models.length === 0 ? (
+          {modelInventory.status !== "loading" && !modelSelection.selectedAvailable ? (
             <div
               role="status"
               aria-live="polite"
-              data-tooltip={modelInventory.error ?? "No connected provider currently reports an available model."}
-              className="mx-2.5 mb-1 flex min-h-8 items-center gap-2 rounded-md bg-elevated px-2.5 text-xs text-secondary"
+              className="mx-3 mb-1 flex min-h-7 items-center gap-2 border-t border-subtle pt-1.5 text-xs text-secondary"
             >
-              <ShieldAlert size={13} className="shrink-0 text-warning" aria-hidden />
-              <span className="min-w-0 flex-1 truncate">Model not available</span>
+              <span className="min-w-0 flex-1 truncate">
+                {modelSelection.selected
+                  ? `${modelSelection.selected.label} is unavailable`
+                  : "No model available"}
+              </span>
               <Button
                 type="button"
                 variant="bare"
@@ -1033,13 +1038,12 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
                   new CustomEvent("terminus:open-settings", { detail: { category: "agents" } }),
                 )}
               >
-                Models
+                Set up models
               </Button>
               <Button
                 type="button"
                 variant="bare"
                 aria-label="Check models again"
-                data-tooltip="Check models again"
                 className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
                 onClick={() => modelInventory.refresh()}
               >

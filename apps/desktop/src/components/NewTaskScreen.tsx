@@ -9,10 +9,9 @@
  *   - No dashboard, no statistics, no wall of recent activity
  *
  * The composer is docked at the bottom of the window rather than sitting under
- * the heading, and the heading group centres in the space left above it. A
- * centred composer reads as a floating widget on a wide screen; a docked one
- * reads as the base of the surface, and it lands in the same place the chat
- * view's composer will be, so starting a task does not move the input.
+ * the heading. The prompt sits in the lower part of the remaining surface so
+ * the two read as one start action while the composer still lands in the same
+ * place as the chat view after the first turn starts.
  *
  * No starter chips. Four generic prompts ("Explain this codebase",
  * "Find a bug", …) occupied the space under the composer on every launch and
@@ -40,48 +39,6 @@ import type { Session } from "../types";
 interface NewTaskScreenProps {
   className?: string;
   onOpenProject?: () => void;
-}
-
-/**
- * The empty state's one piece of ornament: a terminal prompt inside a
- * squircle.
- *
- * Drawn rather than imported so it can be a single hairline weight at 56px —
- * an icon-set glyph scaled up here goes chunky, and this is the only large
- * element on the screen. The outline is a circle whose Bézier handles are
- * pushed out to 0.72 of the radius, which flattens the sides into a squircle
- * without the hard tangent breaks of a rounded rectangle.
- */
-function TerminalGlyph(): JSX.Element {
-  return (
-    <svg
-      width="56"
-      height="56"
-      viewBox="0 0 56 56"
-      fill="none"
-      aria-hidden
-      className="mb-7 text-tertiary"
-    >
-      <path
-        d="M28 4C45.28 4 52 10.72 52 28C52 45.28 45.28 52 28 52C10.72 52 4 45.28 4 28C4 10.72 10.72 4 28 4Z"
-        stroke="currentColor"
-        strokeWidth="1.5"
-      />
-      <path
-        d="M21 23.5L26 28L21 32.5"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M29 33H35"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
 }
 
 function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JSX.Element {
@@ -180,11 +137,9 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
 
   return (
     <div className={cn("flex h-full w-full flex-col overflow-hidden bg-canvas", className)}>
-      {/* The heading group centres in whatever is left above the composer,
-          which puts it near the optical centre of the window at any height and
-          leaves no dead band anywhere. */}
-      <main className="scrollable flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-8 py-10">
-        <TerminalGlyph />
+      {/* Keep the prompt close enough to the docked composer that the empty
+          surface reads as one action, not a heading and a floating widget. */}
+      <main className="scrollable flex min-h-0 flex-1 flex-col items-center justify-end overflow-y-auto px-8 pb-8 pt-6">
         <h1
           id="new-task-heading"
           /* Named explicitly because the project name inside it is a menu
@@ -194,7 +149,7 @@ function NewTaskScreenImpl({ className, onOpenProject }: NewTaskScreenProps): JS
              otherwise announce as "What should we build in Switch project?".
              The label is character-for-character the visible sentence. */
           {...(projectName === null ? {} : { "aria-label": `What should we build in ${projectName}?` })}
-          className="max-w-[36ch] text-balance text-center text-[27px] font-semibold leading-[34px] tracking-[-0.02em] text-primary"
+          className="ui-display-title max-w-[36ch] text-balance text-center text-primary"
         >
           {projectName === null ? "What should we build?" : (
             <>

@@ -129,6 +129,22 @@ describe("useModelSelection resolution", () => {
     expect(result.current.selected).toBeNull();
   });
 
+  test("preserves an unavailable project model instead of silently replacing it", () => {
+    const { result } = renderHook(() => useModelSelection(
+      inventory([model({ id: "haiku", slug: "claude-haiku-4-6" })]),
+      {
+        id: "session-1",
+        default_model: "opencode/zen-free",
+        default_reasoning_effort: "high",
+        default_provider_account_id: "opencode-zen",
+      },
+    ));
+
+    expect(result.current.selected?.slug).toBe("opencode/zen-free");
+    expect(result.current.selectedAvailable).toBe(false);
+    expect(result.current.effort).toBe("high");
+  });
+
   test("writes the project default when a model is picked", async () => {
     const persist = vi.fn(async () => undefined);
     const { result } = renderHook(() => useModelSelection(
@@ -195,6 +211,20 @@ describe("useModelSelection resolution", () => {
 
     expect(result.current.selected?.id).toBe("b");
     expect(result.current.account?.id).toBe("acct-b");
+  });
+
+  test("does not move a pinned route to another account with the same model slug", () => {
+    const accounts = [account({ id: "acct-a", label: "Account A" })];
+    const models = [model({ id: "a", provider: "acct-a", slug: "shared-model" })];
+    const { result } = renderHook(() => useModelSelection(
+      inventory(models, accounts),
+      { id: "session-1", default_model: "shared-model", default_provider_account_id: "missing-account" },
+    ));
+
+    expect(result.current.selected?.slug).toBe("shared-model");
+    expect(result.current.selected?.provider).toBe("missing-account");
+    expect(result.current.selectedAvailable).toBe(false);
+    expect(result.current.account).toBeNull();
   });
 
   test("offers only the depths the model reported, and clamps a deeper preference down", () => {

@@ -140,12 +140,13 @@ describe("the inspector's environment section", () => {
 });
 
 describe("the composer with no models", () => {
-  test("says the turn cannot be routed instead of hiding the picker", async () => {
-    install();
+  test("keeps the selected model visible with one quiet recovery row", async () => {
+    install({ sessions: [session({ default_model: "opencode/zen-free" })] });
     render(<Composer />);
 
-    expect(await screen.findByText("Model not available")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Models" })).toBeInTheDocument();
+    expect(await screen.findByText("opencode/zen-free is unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Change model and effort.*opencode\/zen-free/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set up models" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Check models again" })).toBeInTheDocument();
   });
 });

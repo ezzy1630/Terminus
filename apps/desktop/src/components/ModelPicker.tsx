@@ -14,9 +14,9 @@
  * instead of one.
  *
  * Everything listed is reported by a provider at runtime — Terminus ships no
- * model list. When nothing is reported the pill does not render at all, and
- * the composer shows the inventory error instead, because a plausible list the
- * runtime cannot route to is worse than an empty one.
+ * model list. When discovery is empty, a project with no stored choice has no
+ * pill. A stored choice remains visible as unavailable until the operator
+ * retries discovery or explicitly changes it.
  *
  * Two departures from the usual provider-switcher shape, both kept from the
  * previous design:
@@ -149,6 +149,7 @@ function ModelPickerImpl({
 }: ModelPickerProps): JSX.Element {
   const {
     selected,
+    selectedAvailable,
     account: selectedAccount,
     select,
     effort,
@@ -354,8 +355,8 @@ function ModelPickerImpl({
     }
   };
 
-  // With no model reported there is nothing to pick between, so the composer
-  // shows no control at all rather than a menu onto an empty list.
+  // With neither a stored model nor an inventory model there is no truthful
+  // choice to show. A stored but unavailable model remains selected above.
   if (!selected) return <></>;
 
   const filters: Array<{ id: Filter; label: string }> = [
@@ -390,7 +391,7 @@ function ModelPickerImpl({
            which is how the root pane's own Model row names itself — two
            controls whose accessible names share a prefix make either of them
            unaddressable from the keyboard and from a test. */
-        aria-label={`Change model and effort · ${selected.label}${selectedAccount ? ` on ${selectedAccount.label}` : ""}${effortLabel ? `, ${effortLabel}` : ""}`}
+        aria-label={`Change model and effort · ${selected.label}${selectedAccount ? ` on ${selectedAccount.label}` : ""}${effortLabel ? `, ${effortLabel}` : ""}${selectedAvailable ? "" : ", unavailable"}`}
         data-tooltip="Model and reasoning effort for this turn"
         onClick={(event) => {
           if (open) close();
@@ -405,7 +406,7 @@ function ModelPickerImpl({
         {/* The account mark leads: with several accounts connected, "Grok
             Code" alone does not say which credential the turn bills to, and
             two accounts can offer the same model. */}
-        {selectedAccount ? <ProviderMark mark={selectedAccount.mark} /> : null}
+        {selectedAvailable && selectedAccount ? <ProviderMark mark={selectedAccount.mark} /> : null}
         <span className="truncate font-medium text-primary">{selected.label}</span>
         {effortLabel ? (
           <>
@@ -427,7 +428,11 @@ function ModelPickerImpl({
         >
           {pane === "root" ? (
             <div className="p-1">
-              <SettingRow label="Model" value={selected.label} onOpen={() => setPane("model")} />
+              <SettingRow
+                label="Model"
+                value={selectedAvailable ? selected.label : `${selected.label} (Unavailable)`}
+                onOpen={() => setPane("model")}
+              />
               {/* Depth is offered only where the provider says the model
                   reasons. An inert row on a non-reasoning model is a promise
                   the runtime cannot keep. */}
@@ -514,7 +519,9 @@ function ModelPickerImpl({
               <div className="scrollable max-h-64 min-h-24 overflow-y-auto p-1">
                 {rows.length === 0 ? (
                   <p className="px-2 py-6 text-center text-xs text-tertiary">
-                    No model matches “{query.trim()}”.
+                    {query.trim().length > 0
+                      ? `No model matches “${query.trim()}”.`
+                      : "No models are currently available."}
                   </p>
                 ) : groups.map((group) => (
                   <section key={group.id} aria-label={group.title}>

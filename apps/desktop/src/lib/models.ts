@@ -8,8 +8,10 @@
  * runtime cannot route to.
  *
  * The inventory therefore arrives from {@link useModelInventory}, and every
- * consumer is written for the empty case: when no provider reports models, the
- * composer shows no picker rather than a plausible-looking one.
+ * consumer is written for the empty case. A project with no stored choice has
+ * no picker when providers report nothing. A project that already names a
+ * model keeps that exact choice visible and marks it unavailable until the
+ * provider returns or the operator changes it.
  *
  * `ProviderId` is an open string for the same reason — providers are
  * discovered, not enumerated at build time.
@@ -219,8 +221,10 @@ export function formatContext(tokens: number): string | null {
 }
 
 export interface ModelSelection {
-  /** Null whenever the inventory reports nothing. Callers must handle it. */
+  /** Null only when neither the project nor the inventory names a model. */
   selected: ModelOption | null;
+  /** False when the selected project model is absent or its account is down. */
+  selectedAvailable: boolean;
   /**
    * The connected account the selected model belongs to, when the inventory
    * reported one. The composer states it on the chip and sends it with the
@@ -275,9 +279,9 @@ export type ModelSelectionWriter = (
  *
  * Resolution order: what the operator picked in this window for this session,
  * then the session's stored default, then the first model the inventory
- * reports. Nothing here is remembered in localStorage — a stored id survives
- * the provider dropping the model, and the composer would then point at
- * something no adapter can route to. The session is the durable store.
+ * reports. A stored default is never replaced merely because discovery is
+ * temporarily empty. The exact slug stays selected and becomes explicitly
+ * unavailable so retrying or changing it remains the operator's decision.
  */
 export function useModelSelection(
   inventory: ModelInventory,
@@ -315,8 +319,27 @@ export function useModelSelection(
     const wanted = session?.default_model?.trim();
     if (!wanted) return null;
     const named = models.filter((model) => model.id === wanted || model.slug === wanted);
-    return named.find((model) => model.provider === sessionAccountId) ?? named[0] ?? null;
+    if (sessionAccountId) {
+      return named.find((model) => model.provider === sessionAccountId) ?? null;
+    }
+    return named[0] ?? null;
   }, [models, session?.default_model, sessionAccountId]);
+  const unavailableSessionModel = useMemo<ModelOption | null>(() => {
+    const wanted = session?.default_model?.trim();
+    if (!wanted || sessionModel) return null;
+    const storedEffort = isEffort(session?.default_reasoning_effort)
+      ? session.default_reasoning_effort
+      : null;
+    return {
+      id: `unavailable:${sessionId ?? "project"}:${sessionAccountId}:${wanted}`,
+      provider: sessionAccountId || "unavailable",
+      label: wanted,
+      slug: wanted,
+      reasoning: storedEffort !== null,
+      contextTokens: 0,
+      ...(storedEffort ? { efforts: [storedEffort], defaultEffort: storedEffort } : {}),
+    };
+  }, [session?.default_model, session?.default_reasoning_effort, sessionAccountId, sessionId, sessionModel]);
 
   // A pick belongs to the session it was made in. Switching projects must not
   // carry one project's choice into another's turns.
@@ -324,8 +347,13 @@ export function useModelSelection(
 
   const selected = (activePending?.modelId ? byId.get(activePending.modelId) : undefined)
     ?? sessionModel
+    ?? unavailableSessionModel
     ?? models[0]
     ?? null;
+  const selectedAccount = selected ? accountById.get(selected.provider) ?? null : null;
+  const selectedAvailable = selected !== null
+    && models.includes(selected)
+    && (selectedAccount?.available ?? true);
 
   // A model that names its own default depth is preferred over the session's
   // carried-over preference *only* when the session never stated one; an
@@ -408,7 +436,8 @@ export function useModelSelection(
 
   return {
     selected,
-    account: selected ? accountById.get(selected.provider) ?? null : null,
+    selectedAvailable,
+    account: selectedAccount,
     select,
     favourites,
     isFavourite: useCallback((id: string) => favouriteIds.includes(id), [favouriteIds]),

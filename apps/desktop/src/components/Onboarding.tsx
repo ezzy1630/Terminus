@@ -25,7 +25,6 @@ import {
   Folder,
   FolderOpen,
   TriangleAlert,
-  X,
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { api, TerminusApiError } from "../lib/api";
@@ -43,7 +42,6 @@ import { useTerminusStore } from "../hooks/use-terminus";
 import { useThemeStore } from "../hooks/use-theme";
 import type { Session, WorkspaceKind, WorkspaceSnapshot } from "../types";
 import { Button } from "../ui/Button";
-import { IconButton } from "../ui/IconButton";
 import { Input, Textarea } from "../ui/Input";
 import { DialogSurface } from "../ui/Dialog";
 
@@ -480,7 +478,7 @@ function OnboardingImpl({
       onOpenChange={(nextOpen) => {
         if (!nextOpen) skip();
       }}
-      accessibleTitle={projectOnly ? "Open project" : "Welcome to Terminus"}
+      accessibleTitle={projectOnly ? "Open project" : "Open your first project"}
       overlayClassName={projectOnly ? "bg-black/40" : "bg-canvas"}
       className={cn(
         projectOnly
@@ -489,42 +487,31 @@ function OnboardingImpl({
         className,
       )}
     >
-      {!projectOnly ? (
-        <div className="titlebar-drag flex h-11 flex-shrink-0 items-center justify-end px-4" style={{ paddingLeft: 80 }}>
-          <IconButton
-            onClick={skip}
-            disabled={creating}
-            className="titlebar-no-drag"
-            label={creating ? "Workspace creation in progress" : "Skip onboarding"}
-            icon={<X size={12} />}
-          />
-        </div>
-      ) : (
-        <IconButton
-          onClick={skip}
-          disabled={creating}
-          className="absolute right-3 top-3"
-          label={creating ? "Workspace creation in progress" : "Cancel opening project"}
-          icon={<X size={12} />}
-        />
-      )}
-      <div className={cn("scrollable flex min-h-0 flex-1 items-center justify-center px-4", projectOnly ? "py-4" : "py-8")}>
-        <div className={cn("w-full", projectOnly ? "max-w-none p-4" : "max-w-[420px] p-4")}>
-          <header className="mb-4">
+      {!projectOnly ? <div className="titlebar-drag h-11 flex-shrink-0" /> : null}
+      <div className={cn(
+        "scrollable flex min-h-0 flex-1 justify-center overflow-y-auto px-5",
+        projectOnly ? "items-center py-5" : "items-start pb-10 pt-[clamp(72px,16vh,180px)]",
+      )}>
+        <div className={cn("w-full", projectOnly ? "max-w-none p-4" : "max-w-[480px] px-4 py-2")}>
+          <header className="mb-6">
             <h1 className="ui-page-title text-primary">
               {projectOnly ? "Open a project" : "Open your first project"}
             </h1>
-            <p className="ui-meta mt-1">
+            <p className="ui-body mt-1.5 text-secondary">
               {projectOnly
                 ? "Choose a local folder to open in its own workspace."
-                : "Choose a local folder. You can describe the first task now or later."}
+                : "Choose a project and optionally describe the first task."}
             </p>
           </header>
 
+          <label htmlFor="onboarding-project-path" className="ui-body mb-2 block font-medium text-primary">
+            Project
+          </label>
           <div className="flex gap-2">
             <div className="relative min-w-0 flex-1">
               <Folder className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-tertiary" size={13} aria-hidden />
               <Input
+                id="onboarding-project-path"
                 value={projectPath}
                 onChange={(event) => changeProjectPath(event.target.value)}
                 readOnly={Boolean(pickDirectory)}
@@ -533,13 +520,13 @@ function OnboardingImpl({
                 aria-invalid={showsPathError}
                 aria-describedby={showsPathError ? "onboarding-path-error" : undefined}
                 invalid={showsPathError}
-                className="h-7 pl-7 font-mono"
+                className="h-8 pl-7 font-mono"
                 autoFocus
               />
             </div>
             {pickDirectory ? (
-              <Button variant="secondary" onClick={() => void onPick()}>
-                <FolderOpen size={13} aria-hidden /> Choose…
+              <Button size="lg" variant="secondary" onClick={() => void onPick()}>
+                <FolderOpen size={13} aria-hidden /> Browse
               </Button>
             ) : null}
           </div>
@@ -550,8 +537,8 @@ function OnboardingImpl({
           ) : null}
 
           {!projectOnly ? (
-            <section className="mt-4" aria-labelledby="setup-task-heading">
-              <h2 id="setup-task-heading" className="ui-body mb-1.5 text-primary">
+            <section className="mt-6" aria-labelledby="setup-task-heading">
+              <h2 id="setup-task-heading" className="ui-body mb-2 font-medium text-primary">
                 First task <span className="ui-meta">optional</span>
               </h2>
               <Textarea
@@ -559,7 +546,7 @@ function OnboardingImpl({
                 onChange={(event) => changeInitialPrompt(event.target.value)}
                 placeholder="Describe the result you want"
                 aria-label="First task prompt"
-                rows={3}
+                rows={4}
               />
             </section>
           ) : null}
@@ -587,17 +574,18 @@ function OnboardingImpl({
             <p className="ui-meta mt-3" role="status">{draftStorageError}</p>
           ) : null}
 
-          <footer className="mt-5 flex items-center justify-end gap-2 border-t border-subtle pt-3">
-            <Button variant="ghost" onClick={skip} disabled={creating}>
+          <footer className="mt-6 flex items-center justify-between gap-3">
+            <Button size="lg" variant="ghost" onClick={skip} disabled={creating}>
               {projectOnly ? "Cancel" : "Not now"}
             </Button>
             <Button
+              size="lg"
               variant="primary"
               onClick={() => void (projectOnly ? openSelectedProject() : finish())}
               disabled={!canOpen}
               aria-busy={creating || undefined}
             >
-              {creating ? "Opening…" : "Open"}
+              {creating ? "Opening project…" : "Open project"}
             </Button>
           </footer>
         </div>
