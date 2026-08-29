@@ -6,6 +6,7 @@ import {
   VERBATIM_REPETITION_MIN_CHARS,
 } from "./coding-turn-engine.js";
 import { PolicyDeniedError } from "@terminus/domain";
+import type { EngineToolSettlement } from "./coding-turn-engine.js";
 import type { ProviderToolCallChunk } from "@terminus/provider-core";
 import type { OperationObservation } from "./loop-contracts.js";
 import type { OperationEffectMetadata } from "./turn-budget.js";
@@ -23,6 +24,8 @@ interface HarnessOptions {
   readonly sideEffectClassOf?: (toolName: string) => string;
   readonly effectMetadataOf?: (call: ProviderToolCallChunk) => OperationEffectMetadata;
   readonly failOnCallIds?: readonly string[];
+  /** Scripted settlements by call id; a settled error is an observation, not a stop. */
+  readonly settleAs?: Readonly<Record<string, EngineToolSettlement>>;
   readonly afterToolsSettled?: () => Promise<void>;
   readonly onOperationObserved?: (observation: OperationObservation) => void | Promise<void>;
   readonly omitCompletionSignal?: boolean;
@@ -97,6 +100,7 @@ async function runHarness(options: HarnessOptions) {
       const error = settleErrors.get(call.toolCallId);
       if (error !== undefined) throw error;
       trace.push(`settle:${call.toolName}:${call.toolCallId}`);
+      return options.settleAs?.[call.toolCallId];
     },
     ...(options.afterToolsSettled === undefined ? {} : { afterToolsSettled: options.afterToolsSettled }),
     ...(options.onOperationObserved === undefined ? {} : { onOperationObserved: options.onOperationObserved }),
@@ -134,6 +138,23 @@ describe("CodingTurnEngine", () => {
       kind: "assistant_message",
       text: "I need more information before claiming completion.",
     });
+  });
+
+  test("a call settled as an error result is an observation, not a stop", async () => {
+    // A malformed call is settled as an error result the model reads (see
+    // InvalidToolCallError in agent-tools). The loop must carry on: the next
+    // call still settles, and the model gets another response to correct it.
+    const { stop, trace } = await runHarness({
+      responses: [
+        { calls: [toolCall("bad", "exec"), toolCall("ok", "read")] },
+        { text: "recovered with corrected arguments" },
+      ],
+      settleAs: { bad: { status: "error", errorCode: "TOOL_RESULT_ERROR", errorClass: "error" } },
+    });
+    expect(trace).toContain("settle:exec:bad");
+    expect(trace).toContain("settle:read:ok");
+    expect(trace).toContain("begin:2");
+    expect(stop.kind).toBe("completion_proposal");
   });
 
   test("multi-call responses are all settled before the next compile", async () => {

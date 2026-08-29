@@ -122,10 +122,21 @@ export const standaloneExecInputSchema = z.object({
    * background_id; await completion (and fetch output tails) via exec_poll.
    */
   background: z.boolean().default(false),
-}).strict().refine(
-  (value) => (value.program !== undefined) !== (value.shell !== undefined),
-  "provide either program+args (argv mode) or shell (shell mode), not both",
-);
+}).strict().superRefine((value, ctx) => {
+  // The message is written for the model, not the operator: this is the one
+  // validation a weaker model trips constantly, and the turn survives only if
+  // the correction is obvious from the error alone.
+  const argv = value.program !== undefined;
+  const shell = value.shell !== undefined;
+  if (argv === shell) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: argv
+        ? "provide either program+args (argv mode) or shell {dialect, script} (shell mode), not both — you provided both; keep exactly one"
+        : "provide either program+args (argv mode) or shell {dialect, script} (shell mode) — you provided neither",
+    });
+  }
+});
 
 export const standaloneWebFetchInputSchema = z.object({
   url: z.string().min(1).max(2_048).refine(
@@ -518,38 +529,97 @@ export function selectStandaloneToolSchemas(input: {
   );
 }
 
+/** Longest tool name echoed back into durable records and events. */
+const MAX_ECHOED_TOOL_NAME_CHARS = 64;
+
+/**
+ * A tool call the model got wrong: an unknown tool name, or arguments that
+ * fail the tool's schema.
+ *
+ * This is the model's mistake, and the model can fix it — so it is not a
+ * turn failure. It is settled as an error *result* for that call, persisted
+ * and shown to the model, and the loop continues so the model can retry with
+ * corrected arguments. Every competitive harness does this; before it, one
+ * `exec` call carrying both `program` and `shell` ended the whole
+ * conversation as a "not retryable" failure.
+ *
+ * The turn-level stops — tools disabled, cycle budget exhausted, repeated
+ * call id, cancellation, real policy denials — are deliberately not this
+ * class and keep terminating the turn.
+ */
+export class InvalidToolCallError extends Error {
+  /** The tool name as the provider sent it, bounded for echoing. */
+  readonly toolName: string;
+  readonly providerCallId: string;
+  /** What the model should read to correct the call. */
+  readonly modelMessage: string;
+
+  constructor(input: { readonly toolName: string; readonly providerCallId: string; readonly modelMessage: string }) {
+    super(input.modelMessage);
+    this.name = "InvalidToolCallError";
+    this.toolName = boundedToolName(input.toolName);
+    this.providerCallId = input.providerCallId;
+    this.modelMessage = input.modelMessage;
+  }
+}
+
+/** A provider-supplied name is untrusted input; keep what we echo short and printable. */
+export function boundedToolName(toolName: string): string {
+  const printable = toolName.replace(/[\0\r\n]/g, "");
+  // Transcripts require a non-empty name; an empty one is still "a tool the
+  // provider named", just unusably.
+  if (printable.length === 0) return "unknown";
+  const codePoints = Array.from(printable);
+  return codePoints.length <= MAX_ECHOED_TOOL_NAME_CHARS
+    ? printable
+    : `${codePoints.slice(0, MAX_ECHOED_TOOL_NAME_CHARS - 1).join("")}…`;
+}
+
+const STANDALONE_TOOL_IDS_FOR_MODEL = [...STANDALONE_ALWAYS_ON_TOOL_IDS, ...STANDALONE_DISCOVERABLE_TOOL_IDS] as const;
+
 export function parseStandaloneToolCall(call: ProviderToolCallChunk): ParsedStandaloneToolCall {
   if (call.toolCallId.length === 0 || call.toolCallId.length > 255 || /[\0\r\n]/.test(call.toolCallId)) {
+    // A malformed call id is a transport fault, not a model mistake: there is
+    // no id to key a corrective result to.
     throw new Error("provider tool call id is invalid");
   }
   switch (call.toolName) {
     case "read":
-      return { providerCallId: call.toolCallId, toolId: "read", toolVersion: "standalone-v1", arguments: parseArguments("read", standaloneReadInputSchema, call.arguments) };
+      return { providerCallId: call.toolCallId, toolId: "read", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneReadInputSchema) };
     case "patch":
-      return { providerCallId: call.toolCallId, toolId: "patch", toolVersion: "standalone-v1", arguments: parseArguments("patch", standalonePatchInputSchema, call.arguments) };
+      return { providerCallId: call.toolCallId, toolId: "patch", toolVersion: "standalone-v1", arguments: parseArguments(call, standalonePatchInputSchema) };
     case "exec":
-      return { providerCallId: call.toolCallId, toolId: "exec", toolVersion: "standalone-v1", arguments: parseArguments("exec", standaloneExecInputSchema, call.arguments) };
+      return { providerCallId: call.toolCallId, toolId: "exec", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneExecInputSchema) };
     case "exec_poll":
-      return { providerCallId: call.toolCallId, toolId: "exec_poll", toolVersion: "standalone-v1", arguments: parseArguments("exec_poll", standaloneExecPollInputSchema, call.arguments) };
+      return { providerCallId: call.toolCallId, toolId: "exec_poll", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneExecPollInputSchema) };
     case "web_fetch":
-      return { providerCallId: call.toolCallId, toolId: "web_fetch", toolVersion: "standalone-v1", arguments: parseArguments("web_fetch", standaloneWebFetchInputSchema, call.arguments) };
+      return { providerCallId: call.toolCallId, toolId: "web_fetch", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneWebFetchInputSchema) };
     case "grep":
-      return { providerCallId: call.toolCallId, toolId: "grep", toolVersion: "standalone-v1", arguments: parseArguments("grep", standaloneGrepInputSchema, call.arguments) };
+      return { providerCallId: call.toolCallId, toolId: "grep", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneGrepInputSchema) };
     case "glob":
-      return { providerCallId: call.toolCallId, toolId: "glob", toolVersion: "standalone-v1", arguments: parseArguments("glob", standaloneGlobInputSchema, call.arguments) };
+      return { providerCallId: call.toolCallId, toolId: "glob", toolVersion: "standalone-v1", arguments: parseArguments(call, standaloneGlobInputSchema) };
     default:
-      throw new Error(`provider requested unknown standalone tool '${call.toolName}'`);
+      throw new InvalidToolCallError({
+        toolName: call.toolName,
+        providerCallId: call.toolCallId,
+        modelMessage: `provider requested unknown standalone tool '${boundedToolName(call.toolName)}'. Available tools: ${STANDALONE_TOOL_IDS_FOR_MODEL.join(", ")}.`,
+      });
   }
 }
 
-function parseArguments<T>(
-  toolId: string,
-  schema: { readonly safeParse: (value: unknown) => { readonly success: true; readonly data: T } | { readonly success: false; readonly error: { readonly issues: readonly { readonly message: string }[] } } },
-  value: unknown,
-): T {
-  const parsed = schema.safeParse(value);
+function parseArguments<T>(call: ProviderToolCallChunk, schema: z.ZodType<T>): T {
+  const parsed = schema.safeParse(call.arguments);
   if (!parsed.success) {
-    throw new Error(`${toolId} arguments are invalid: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`);
+    // Name the offending field where zod knows it, so "Required" on its own
+    // never reaches the model.
+    const issues = parsed.error.issues.map((issue) =>
+      issue.path.length > 0 ? `${issue.path.map(String).join(".")}: ${issue.message}` : issue.message,
+    );
+    throw new InvalidToolCallError({
+      toolName: call.toolName,
+      providerCallId: call.toolCallId,
+      modelMessage: `${call.toolName} arguments are invalid: ${issues.join("; ")}. The call was not run; correct the arguments and call again.`,
+    });
   }
   return parsed.data;
 }
@@ -632,7 +702,20 @@ export function duplicateOperationDenial(input: {
   ].join("");
 }
 
-export function providerToolCallTranscript(call: ParsedStandaloneToolCall): ProviderToolCallTranscript {
+/**
+ * What identifies a provider call in its transcripts. A parsed call has this;
+ * so does a rejected one, whose `toolId` is the name the provider sent — the
+ * model must see its own name echoed back or it cannot match the result to
+ * the call.
+ */
+export interface ProviderCallIdentity {
+  readonly providerCallId: string;
+  readonly toolId: string;
+}
+
+export function providerToolCallTranscript(
+  call: ProviderCallIdentity & { readonly arguments: Readonly<Record<string, unknown>> },
+): ProviderToolCallTranscript {
   return {
     protocol: "terminus.tool-call.v1",
     provider_call_id: call.providerCallId,
@@ -642,7 +725,7 @@ export function providerToolCallTranscript(call: ParsedStandaloneToolCall): Prov
 }
 
 export function providerToolResultTranscript(
-  call: ParsedStandaloneToolCall,
+  call: ProviderCallIdentity,
   result: Readonly<Record<string, unknown>>,
 ): ProviderToolResultTranscript {
   return {

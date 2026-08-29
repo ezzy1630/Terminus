@@ -8,6 +8,7 @@ import {
   executeStandaloneTool,
   normalizedToolOperationHash,
   pageLines,
+  InvalidToolCallError,
   parseStandaloneToolCall,
   projectModelVisibleResult,
   providerToolCallTranscript,
@@ -95,6 +96,43 @@ describe("standalone provider tools", () => {
       }),
     ).toThrow(/invalid/);
     expect(() => parseStandaloneToolCall({ toolCallId: "e", toolName: "exec", arguments: {} })).toThrow(/either program\+args/);
+  });
+
+  test("a call the model got wrong is an InvalidToolCallError the loop settles as a result", () => {
+    // One exec carrying both modes used to end the whole turn as "not
+    // retryable". It is the model's mistake, so it must come back as a
+    // typed, correctable error keyed to the provider call.
+    const both = (): void => {
+      parseStandaloneToolCall({
+        toolCallId: "c",
+        toolName: "exec",
+        arguments: { program: "rg", shell: { dialect: "sh", script: "ls" } },
+      });
+    };
+    expect(both).toThrow(InvalidToolCallError);
+    try {
+      both();
+    } catch (error: unknown) {
+      if (!(error instanceof InvalidToolCallError)) throw error;
+      expect(error.toolName).toBe("exec");
+      expect(error.providerCallId).toBe("c");
+      expect(error.modelMessage).toMatch(/you provided both; keep exactly one/);
+      expect(error.modelMessage).toMatch(/correct the arguments and call again/);
+    }
+    expect(() => parseStandaloneToolCall({ toolCallId: "e", toolName: "exec", arguments: {} }))
+      .toThrow(/you provided neither/);
+    // Field names travel with the issue so "Required" never arrives alone.
+    expect(() => parseStandaloneToolCall({ toolCallId: "r", toolName: "read", arguments: {} }))
+      .toThrow(/path: /);
+    // Unknown tools are the model's mistake too; the message names the alternatives.
+    const unknown = (): void => { parseStandaloneToolCall({ toolCallId: "x", toolName: "search", arguments: {} }); };
+    expect(unknown).toThrow(InvalidToolCallError);
+    expect(unknown).toThrow(/Available tools: read, patch, exec/);
+    // A malformed call id is a transport fault, not a model mistake: there is
+    // no id to key a corrective result to.
+    const badId = (): void => { parseStandaloneToolCall({ toolCallId: "", toolName: "read", arguments: { path: "a" } }); };
+    expect(badId).toThrow(/call id is invalid/);
+    expect(badId).not.toThrow(InvalidToolCallError);
   });
 
   test("patch accepts a single edit and a multi-edit batch, never both missing", () => {

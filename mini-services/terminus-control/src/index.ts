@@ -118,6 +118,7 @@ import {
   effectLedgerIdempotencyKey,
   executeStandaloneTool,
   normalizedToolOperationHash,
+  InvalidToolCallError,
   parseStandaloneToolCall,
   projectModelVisibleResult,
   providerToolCallTranscript,
@@ -129,6 +130,7 @@ import {
   toolEffectMetadata,
   ToolAbortedError,
   type ParsedStandaloneToolCall,
+  type ProviderCallIdentity,
 } from "./agent-tools.js";
 import { errorResult, type ToolResult } from "@terminus/aci";
 import {
@@ -12391,6 +12393,8 @@ interface StandaloneToolSettlementInput {
     readonly objectiveStep?: string | null | undefined;
   }) | undefined;
   readonly signal?: AbortSignal | null;
+  /** The loop already rejected this call; settle the correction, run nothing. */
+  readonly rejection?: InvalidToolCallError | undefined;
 }
 
 interface StandaloneOperationMetadata {
@@ -12427,11 +12431,107 @@ function standaloneOperationContext(
   };
 }
 
+/**
+ * Settle a call the model got wrong without running anything.
+ *
+ * The call still gets a durable tool_call row, a `tool.proposed` event, and a
+ * persisted error result keyed to the provider call id: the model-visible
+ * transcript must carry a result for every call the provider emitted, or the
+ * next request is refused for an unmatched tool call. The result's summary is
+ * the correction. The loop continues, and the model retries — which is what
+ * every competitive harness does with a malformed call. Before this path
+ * existed the parse error propagated out of the turn and one `exec` carrying
+ * both `program` and `shell` ended the conversation as "not retryable".
+ */
+async function settleRejectedProviderToolCall(
+  input: StandaloneToolSettlementInput,
+  rejection: InvalidToolCallError,
+): Promise<EngineToolSettlement> {
+  const chunk = input.callChunk;
+  // The model must see its own tool name echoed back, or it cannot match the
+  // result to the call it made.
+  const identity: ProviderCallIdentity = { providerCallId: chunk.toolCallId, toolId: rejection.toolName };
+  const workspaceRevision = await readStandaloneWorkspaceRevision(input);
+  const operationContext = standaloneOperationContext(input);
+  const toolCallId = uuid();
+  const argumentsArtifact = await input.artifactClient.ingest(
+    new TextEncoder().encode(canonicalJson(chunk.arguments)),
+    { mediaType: "application/json", custom: { purpose: "tool-arguments", toolCallId } },
+  );
+  const callTranscriptArtifact = await input.artifactClient.ingest(
+    new TextEncoder().encode(canonicalJson(providerToolCallTranscript({ ...identity, arguments: chunk.arguments }))),
+    { mediaType: "application/json", custom: { purpose: "tool-call-transcript", toolCallId } },
+  );
+  await input.artifactClient.link(argumentsArtifact.hash, "tool_call", toolCallId, "arguments");
+  await input.artifactClient.link(callTranscriptArtifact.hash, "tool_call", toolCallId, "provider-transcript");
+  // Hashed over the raw call: a call that never parsed has no normalized
+  // operation, and nothing dedupes against it.
+  const operationHash = computeContentHash(canonicalJson({
+    task_id: input.taskId,
+    contract_version: input.contractVersion,
+    rejected_tool: identity.toolId,
+    arguments: chunk.arguments,
+  }));
+  await mutateAgentState(() => emit({
+    eventType: "tool.proposed",
+    aggregateType: "tool_call",
+    aggregateId: toolCallId,
+    correlationId: input.taskId,
+    payload: {
+      turn_id: input.turnId,
+      provider_attempt_id: input.providerAttemptId,
+      provider_call_id: identity.providerCallId,
+      tool_id: identity.toolId,
+      tool_version: "standalone-v1",
+      arguments_excerpt: "invalid tool call",
+      normalized_operation_hash: operationHash,
+    },
+    artifactRefs: [argumentsArtifact.uri, callTranscriptArtifact.uri],
+  }, async (tx) => {
+    await tx.toolCall.create({
+      data: {
+        id: toolCallId,
+        turnId: input.turnId,
+        providerAttemptId: input.providerAttemptId,
+        toolId: identity.toolId,
+        toolVersion: "standalone-v1",
+        argumentsArtifact: argumentsArtifact.uri,
+        normalizedOperationHash: operationHash,
+        state: "PROPOSED",
+      },
+    });
+  }));
+  const result = errorResult(rejection.modelMessage, {
+    toolCallId,
+    traceId: input.turnId,
+    status: "error",
+    summary: rejection.modelMessage,
+  });
+  return persistSettledToolResult({
+    input,
+    call: identity,
+    toolCallId,
+    callTranscriptArtifactUri: callTranscriptArtifact.uri,
+    sideEffectId: null,
+    result,
+    workspaceRevisionBefore: workspaceRevision,
+    workspaceRevisionAfter: workspaceRevision,
+    ...operationContext,
+  });
+}
+
 async function settleStandaloneProviderTool(
   input: StandaloneToolSettlementInput,
 ): Promise<EngineToolSettlement> {
   if (input.signal?.aborted === true) throw new ToolAbortedError();
-  const call = parseStandaloneToolCall(input.callChunk);
+  if (input.rejection !== undefined) return settleRejectedProviderToolCall(input, input.rejection);
+  let call: ParsedStandaloneToolCall;
+  try {
+    call = parseStandaloneToolCall(input.callChunk);
+  } catch (error: unknown) {
+    if (error instanceof InvalidToolCallError) return settleRejectedProviderToolCall(input, error);
+    throw error;
+  }
   const workspaceRevisionBefore = await readStandaloneWorkspaceRevision(input);
   const operationContext = standaloneOperationContext(input);
   const toolCallId = uuid();
@@ -12789,7 +12889,8 @@ function toolArgumentsExcerpt(call: ParsedStandaloneToolCall): string {
 
 async function persistSettledToolResult(input: {
   readonly input: StandaloneToolSettlementInput;
-  readonly call: ParsedStandaloneToolCall;
+  /** A parsed call, or the identity of a rejected one. */
+  readonly call: ProviderCallIdentity;
   readonly toolCallId: string;
   readonly callTranscriptArtifactUri: string;
   readonly sideEffectId: string | null;
@@ -13390,6 +13491,7 @@ async function agentLoop(turnId: string): Promise<void> {
         contractVersion: toolInput.contractVersion,
         contractHash: toolInput.contractHash,
         artifactClient: toolInput.artifactClient,
+        rejection: toolInput.rejection,
         observedSources,
         workspaceRevision: operationWorkspaceRevision,
         operationContext: () => ({
@@ -14719,11 +14821,26 @@ async function agentLoop(turnId: string): Promise<void> {
         if (!toolsEnabled) {
           throw new ToolPolicyDeniedError("Provider emitted a tool call while standalone tools were disabled");
         }
-        const parsedCall = parseStandaloneToolCall(call);
-        if (!declaredToolIds.has(parsedCall.toolId)) {
-          throw new ToolPolicyDeniedError(
-            `Provider emitted '${parsedCall.toolId}', which is outside the terminus-minimal tool set`,
-          );
+        // A call the model got wrong is settled as an error result it can
+        // read, not thrown out of the turn (see InvalidToolCallError). Only
+        // the verdict is reached here; the settlement path persists it.
+        let parsedCall: ParsedStandaloneToolCall | null = null;
+        let rejection: InvalidToolCallError | null = null;
+        try {
+          parsedCall = parseStandaloneToolCall(call);
+        } catch (error: unknown) {
+          if (!(error instanceof InvalidToolCallError)) throw error;
+          rejection = error;
+        }
+        if (parsedCall !== null && !declaredToolIds.has(parsedCall.toolId)) {
+          // A real tool that is not offered this turn (web_fetch before it is
+          // activated). Also the model's to fix: say what it may call instead.
+          rejection = new InvalidToolCallError({
+            toolName: call.toolName,
+            providerCallId: call.toolCallId,
+            modelMessage: `'${parsedCall.toolId}' is not available in this turn. Available tools: ${[...declaredToolIds].join(", ")}.`,
+          });
+          parsedCall = null;
         }
         if (!toolSettlementEnteredFor.has(attemptId)) {
           toolSettlementEnteredFor.add(attemptId);
@@ -14753,10 +14870,12 @@ async function agentLoop(turnId: string): Promise<void> {
           contractVersion: contractRow.version,
           contractHash: contractRow.contentHash,
           artifactClient,
+          ...(rejection === null ? {} : { rejection }),
         });
         const settlement = settlementByProviderCallId.get(call.toolCallId);
         if (
-          !isReadOnlyToolCall(parsedCall)
+          parsedCall !== null
+          && !isReadOnlyToolCall(parsedCall)
           && (settlement?.status === "success" || settlement?.status === "partial")
         ) {
           turnMayHaveChangedWorkspace = true;

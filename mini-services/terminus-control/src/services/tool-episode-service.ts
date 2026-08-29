@@ -1,7 +1,7 @@
 import type { ContentHash, Episode } from "@terminus/domain";
 import type { ArtifactClient } from "@terminus/artifact-client";
 import type { ProviderToolCallChunk } from "@terminus/provider-core";
-import { DEFAULT_MAX_TOOL_CYCLES } from "../agent-tools.js";
+import { DEFAULT_MAX_TOOL_CYCLES, type InvalidToolCallError } from "../agent-tools.js";
 
 export class ToolPolicyDeniedError extends Error {
   constructor(message: string) {
@@ -46,6 +46,12 @@ export interface ToolEpisodeSettlementInput {
   readonly contractVersion: number;
   readonly contractHash: string;
   readonly artifactClient: ArtifactClient;
+  /**
+   * Set when the loop already knows the call cannot run as sent — bad
+   * arguments, or a tool not offered this turn. The settlement records an
+   * error result the model can read instead of dispatching anything.
+   */
+  readonly rejection?: InvalidToolCallError | undefined;
 }
 
 export interface ToolEpisodeDependencies {
