@@ -131,7 +131,18 @@ import {
   ToolAbortedError,
   type ParsedStandaloneToolCall,
   type ProviderCallIdentity,
+  type StandaloneToolEffectMetadata,
 } from "./agent-tools.js";
+import {
+  DEFAULT_PERMISSION_PROFILE,
+  PERMISSION_PROFILES,
+  approvalActionFor,
+  approvalReasonFor,
+  approvalRequiredFor,
+  isPermissionProfile,
+  normalizePermissionProfile,
+  type PermissionProfile,
+} from "./permission-profiles.js";
 import { errorResult, type ToolResult } from "@terminus/aci";
 import {
   CapabilityOperationProto,
@@ -465,6 +476,8 @@ import {
   canonicalApprovalBinding,
   TrustedReceiptReferenceWire,
   V2_ENDPOINTS,
+  type ApprovalBindingV1,
+  type ApprovalDisplay,
   type ApprovalOperationV1 as ApprovalOperationRecord,
 } from "@terminus/public-api";
 import {
@@ -2073,10 +2086,13 @@ function approvalWire(approval: PrismaApproval): Record<string, unknown> {
     display: operation?.display ?? null,
     status: approval.status,
     decision: approval.decision,
-    // The standalone control plane can persist a denial. Allow decisions must
-    // first be minted by the kernel-backed approval coordinator so the DB and
-    // effect boundary cannot disagree about authorization.
-    supported_decisions: ["deny_once"],
+    // A tool call parked on this approval (permission-profile gate) can be
+    // released or refused. Approvals with nothing parked on them can only be
+    // refused: an allow with no effect behind it would claim an authorization
+    // nothing used.
+    supported_decisions: approval.toolCallId === null
+      ? ["deny_once"]
+      : ["allow_once", "allow_for_task", "deny_once"],
     risk: riskClass,
     scope: approvalScope(approval),
     use_limit: approval.useLimit,
@@ -4500,7 +4516,9 @@ const routes: Route[] = [
           title: body.title,
           status: "active",
           defaultModelProfile: body.default_model_profile ?? "implementer",
-          defaultPermissionProfile: body.default_permission_profile ?? "secure-local-default",
+          defaultPermissionProfile: isPermissionProfile(body.default_permission_profile)
+            ? body.default_permission_profile
+            : DEFAULT_PERMISSION_PROFILE,
         },
       });
       await tx.thread.create({
@@ -4552,8 +4570,28 @@ const routes: Route[] = [
     const body = await jsonBody(req) as {
       default_model?: unknown;
       default_reasoning_effort?: unknown;
+      default_permission_profile?: unknown;
     };
-    const data: { defaultModel?: string | null; defaultReasoningEffort?: string | null } = {};
+    const data: {
+      defaultModel?: string | null;
+      defaultReasoningEffort?: string | null;
+      defaultPermissionProfile?: PermissionProfile;
+    } = {};
+    // The permission level is the one session default that changes what the
+    // agent may do without asking, so it accepts only the three named levels.
+    if ("default_permission_profile" in body) {
+      if (!isPermissionProfile(body.default_permission_profile)) {
+        return sendError(
+          res,
+          400,
+          "SESSION_DEFAULT_PERMISSION_PROFILE_INVALID",
+          `default_permission_profile must be one of ${PERMISSION_PROFILES.join(", ")}`,
+          "validation",
+          { supplied: body.default_permission_profile, accepted: [...PERMISSION_PROFILES] },
+        );
+      }
+      data.defaultPermissionProfile = body.default_permission_profile;
+    }
     if ("default_model" in body) {
       if (body.default_model === null) {
         data.defaultModel = null;
@@ -4596,7 +4634,7 @@ const routes: Route[] = [
         res,
         400,
         "SESSION_UPDATE_EMPTY",
-        "supply default_model and/or default_reasoning_effort",
+        "supply default_model, default_reasoning_effort, and/or default_permission_profile",
         "validation",
       );
     }
@@ -6543,20 +6581,19 @@ const routes: Route[] = [
       );
     }
     const operationHash = body.operation_hash;
-    if (canonical.startsWith("allow") || canonical === "deny_and_add_task_rule" || canonical === "stop_task") {
+    if (canonical === "deny_and_add_task_rule" || canonical === "stop_task") {
       return sendError(
         res,
         503,
         "APPROVAL_DECISION_COORDINATOR_UNAVAILABLE",
-        canonical.startsWith("allow")
-          ? `${canonical} requires the kernel-backed approval coordinator`
-          : canonical === "stop_task"
-            ? "stop_task requires the kernel-backed task cancellation coordinator"
-            : "deny_and_add_task_rule requires the task policy-rule coordinator",
+        canonical === "stop_task"
+          ? "stop_task requires the kernel-backed task cancellation coordinator"
+          : "deny_and_add_task_rule requires the task policy-rule coordinator",
         "external_dependency",
         { decision: canonical },
       );
     }
+    const allowing = canonical === "allow_once" || canonical === "allow_for_action" || canonical === "allow_for_task";
     const approvalId = String(params.id);
     const current = await db.approval.findUnique({ where: { id: approvalId } });
     if (!current) return sendError(res, 404, "APPROVAL_NOT_FOUND", "approval not found", "not_found");
@@ -6592,7 +6629,20 @@ const routes: Route[] = [
     if (current.useCount >= current.useLimit) {
       return sendError(res, 409, "APPROVAL_USE_LIMIT_EXHAUSTED", "approval use limit is exhausted", "conflict");
     }
-    const status = "denied";
+    // An allow is honoured only for a tool call parked on this approval
+    // (see awaitToolApproval). Anything else has no effect to release, and
+    // recording "allowed" for it would claim an authorization nothing used.
+    if (allowing && current.toolCallId === null) {
+      return sendError(
+        res,
+        503,
+        "APPROVAL_DECISION_COORDINATOR_UNAVAILABLE",
+        `${canonical} requires the kernel-backed approval coordinator`,
+        "external_dependency",
+        { decision: canonical },
+      );
+    }
+    const status = allowing ? "allowed" : "denied";
     const conflictMessage = `approval ${approvalId} changed before atomic resolution`;
     try {
     await emit({
@@ -6617,10 +6667,26 @@ const routes: Route[] = [
           useCount: { lt: current.useLimit },
           OR: [{ expiresAt: null }, { expiresAt: { gt: resolvedAt } }],
         },
-        data: { status, decision: canonical, resolvedAt, resolvedBy: SERVER_PRINCIPAL, rationale: body.rationale ?? null },
+        data: {
+          status,
+          decision: canonical,
+          resolvedAt,
+          resolvedBy: SERVER_PRINCIPAL,
+          rationale: body.rationale ?? null,
+          ...(allowing ? { useCount: { increment: 1 } } : {}),
+        },
       });
       if (update.count !== 1) throw new Error(conflictMessage);
     });
+    // Wake the parked tool call. After a restart there is nothing waiting —
+    // the tool call was cancelled and the approval expired at boot — so a
+    // stale decision simply records itself.
+    settleToolApprovalWaiter(
+      approvalId,
+      allowing
+        ? { kind: "allowed", decision: canonical as "allow_once" | "allow_for_action" | "allow_for_task" }
+        : { kind: "denied" },
+    );
     } catch (error: unknown) {
       if (error instanceof Error && error.message === conflictMessage) {
         return sendError(
@@ -12431,6 +12497,218 @@ function standaloneOperationContext(
   };
 }
 
+// ────────────────────────── Permission profile gate ────────────────────────
+
+/** How long a tool call waits for a decision before it is treated as refused. */
+const TOOL_APPROVAL_TIMEOUT_MS = 15 * 60_000;
+
+type ToolApprovalVerdict =
+  | { readonly kind: "allowed"; readonly decision: "allow_once" | "allow_for_action" | "allow_for_task" }
+  | { readonly kind: "denied" }
+  | { readonly kind: "expired" }
+  | { readonly kind: "aborted" };
+
+/**
+ * Tool calls parked on a pending approval, by approval id. The resolve route
+ * settles the waiter; nothing else does. A process restart empties this map,
+ * which is why startup recovery expires every pending tool-call approval —
+ * there is no longer anything to wake.
+ */
+const toolApprovalWaiters = new Map<string, (verdict: ToolApprovalVerdict) => void>();
+
+/**
+ * "Allow for this task": tools the user has waved through for the rest of
+ * the task. In-process on purpose — the grant is a convenience for one
+ * sitting, and a restart asking again is the safe failure.
+ */
+const taskApprovalGrants = new Map<string, Set<string>>();
+
+function taskGrantsWithoutApproval(taskId: string, toolId: string): boolean {
+  return taskApprovalGrants.get(taskId)?.has(toolId) ?? false;
+}
+
+function grantToolForTask(taskId: string, toolId: string): void {
+  const grants = taskApprovalGrants.get(taskId) ?? new Set<string>();
+  grants.add(toolId);
+  taskApprovalGrants.set(taskId, grants);
+}
+
+/** Wake a parked tool call. Returns false when nothing is waiting on this approval. */
+function settleToolApprovalWaiter(approvalId: string, verdict: ToolApprovalVerdict): boolean {
+  const waiter = toolApprovalWaiters.get(approvalId);
+  if (waiter === undefined) return false;
+  waiter(verdict);
+  return true;
+}
+
+async function sessionPermissionProfile(sessionId: string): Promise<PermissionProfile> {
+  const row = await db.session.findUnique({
+    where: { id: sessionId },
+    select: { defaultPermissionProfile: true },
+  });
+  return normalizePermissionProfile(row?.defaultPermissionProfile);
+}
+
+async function expireToolApproval(approvalId: string, taskId: string, toolCallId: string): Promise<void> {
+  const expiredAt = new Date();
+  await mutateAgentState(() => emit({
+    eventType: "approval.expired",
+    aggregateType: "approval",
+    aggregateId: approvalId,
+    correlationId: taskId,
+    payload: { approval_id: approvalId, task_id: taskId, tool_call_id: toolCallId, expired_at: expiredAt.toISOString() },
+  }, async (tx) => {
+    await tx.approval.updateMany({ where: { id: approvalId, status: "pending" }, data: { status: "expired" } });
+  }));
+}
+
+async function revokeToolApproval(approvalId: string, taskId: string, toolCallId: string): Promise<void> {
+  const revokedAt = new Date();
+  // Emitted as a resolution so clients refresh their pending list; the status
+  // says what actually happened.
+  await mutateAgentState(() => emit({
+    eventType: "approval.resolved",
+    aggregateType: "approval",
+    aggregateId: approvalId,
+    correlationId: taskId,
+    payload: {
+      approval_id: approvalId,
+      task_id: taskId,
+      tool_call_id: toolCallId,
+      decision: null,
+      status: "revoked",
+      reason: "turn stopped while waiting for approval",
+      resolved_at: revokedAt.toISOString(),
+    },
+  }, async (tx) => {
+    await tx.approval.updateMany({ where: { id: approvalId, status: "pending" }, data: { status: "revoked", resolvedAt: revokedAt } });
+    await tx.toolCall.updateMany({
+      where: { id: toolCallId, state: "APPROVAL_PENDING" },
+      data: {
+        state: "CANCELLED",
+        settledAt: revokedAt,
+        resultStatus: "cancelled",
+        errorJson: JSON.stringify({ reason: "turn_stopped_while_awaiting_approval" }),
+      },
+    });
+  }));
+}
+
+/**
+ * Park a tool call on the user's decision.
+ *
+ * Records the approval the way the policy broker would — a hashed binding
+ * the client must echo back, plus display copy — flags the tool call as
+ * APPROVAL_PENDING, announces it, and then waits. The turn stays open the
+ * whole time, so the answer lands in the same conversation rather than in a
+ * task the user has to reopen. Stopping the turn revokes the request; the
+ * timeout expires it.
+ */
+async function awaitToolApproval(args: {
+  readonly input: StandaloneToolSettlementInput;
+  readonly call: ParsedStandaloneToolCall;
+  readonly toolCallId: string;
+  readonly effect: StandaloneToolEffectMetadata;
+  readonly permissionProfile: PermissionProfile;
+  readonly argumentsArtifactUri: string;
+}): Promise<ToolApprovalVerdict> {
+  const { input, call, toolCallId, effect, permissionProfile } = args;
+  const approvalId = uuid();
+  const requestedAt = new Date();
+  const expiresAt = new Date(requestedAt.getTime() + TOOL_APPROVAL_TIMEOUT_MS);
+  const exactAction = approvalActionFor(call);
+  const binding: ApprovalBindingV1 = {
+    version: 1,
+    task_id: input.taskId,
+    task_contract_version: input.contractVersion,
+    user_intent_ref: input.turnId,
+    policy_version: "secure-local-default:v1",
+    effect_kind: effect.effectType,
+    exact_action: exactAction,
+    resources: [effect.resourceUri],
+    destinations: call.toolId === "web_fetch" ? [effect.resourceUri] : [],
+    source_versions: {},
+    secret_scope: [],
+    risk: {
+      class: call.toolId === "web_fetch" ? "high" : "normal",
+      effects: [effect.effectType],
+    },
+    taint: { influenced_by_untrusted_content: false, warning: null },
+    expires_at: expiresAt.toISOString(),
+    use_limit: 1,
+  };
+  const display: ApprovalDisplay = {
+    summary: exactAction,
+    exact_action: exactAction,
+    reason: approvalReasonFor(permissionProfile, call),
+    reversibility: effect.reversibility,
+    environment: "Local workspace",
+  };
+  const operation: ApprovalOperationRecord = { binding, display };
+  const operationHash = computeContentHash(canonicalApprovalBinding(binding));
+  await mutateAgentState(() => emit({
+    eventType: "approval.requested",
+    aggregateType: "approval",
+    aggregateId: approvalId,
+    correlationId: input.taskId,
+    payload: {
+      approval_id: approvalId,
+      task_id: input.taskId,
+      turn_id: input.turnId,
+      tool_call_id: toolCallId,
+      tool_id: call.toolId,
+      operation_hash: operationHash,
+      summary: exactAction,
+      reason: display.reason,
+      permission_profile: permissionProfile,
+      expires_at: expiresAt.toISOString(),
+    },
+    artifactRefs: [args.argumentsArtifactUri],
+  }, async (tx) => {
+    await tx.approval.create({
+      data: {
+        id: approvalId,
+        taskId: input.taskId,
+        toolCallId,
+        operationHash,
+        operationJson: canonicalJson(operation),
+        scopeJson: JSON.stringify({ resources: binding.resources, destinations: binding.destinations }),
+        riskJson: JSON.stringify({ class: binding.risk.class, effects: binding.risk.effects }),
+        status: "pending",
+        useLimit: 1,
+        expiresAt,
+        requestedAt,
+      },
+    });
+    await tx.toolCall.update({ where: { id: toolCallId }, data: { state: "APPROVAL_PENDING", approvalId } });
+  }));
+  return new Promise<ToolApprovalVerdict>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onAbort = (): void => {
+      void revokeToolApproval(approvalId, input.taskId, toolCallId)
+        .catch(() => undefined)
+        .finally(() => finish({ kind: "aborted" }));
+    };
+    const finish = (verdict: ToolApprovalVerdict): void => {
+      if (settled) return;
+      settled = true;
+      toolApprovalWaiters.delete(approvalId);
+      if (timer !== null) clearTimeout(timer);
+      input.signal?.removeEventListener("abort", onAbort);
+      resolve(verdict);
+    };
+    toolApprovalWaiters.set(approvalId, finish);
+    timer = setTimeout(() => {
+      void expireToolApproval(approvalId, input.taskId, toolCallId)
+        .catch(() => undefined)
+        .finally(() => finish({ kind: "expired" }));
+    }, TOOL_APPROVAL_TIMEOUT_MS);
+    if (input.signal?.aborted) onAbort();
+    else input.signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /**
  * Settle a call the model got wrong without running anything.
  *
@@ -12684,6 +12962,62 @@ async function settleStandaloneProviderTool(
       workspaceRevisionAfter: workspaceRevisionBefore,
       ...operationContext,
     });
+  }
+
+  // The session's permission level, enforced here and nowhere else. It sits
+  // after the contract-scope check on purpose: a call the contract refuses
+  // is refused, not put to the user as a question.
+  const permissionProfile = await sessionPermissionProfile(input.sessionId);
+  if (approvalRequiredFor(permissionProfile, call) && !taskGrantsWithoutApproval(input.taskId, call.toolId)) {
+    const verdict = await awaitToolApproval({
+      input,
+      call,
+      toolCallId,
+      effect,
+      permissionProfile,
+      argumentsArtifactUri: argumentsArtifact.uri,
+    });
+    if (verdict.kind === "aborted") throw new ToolAbortedError();
+    if (verdict.kind === "allowed") {
+      if (verdict.decision === "allow_for_task") grantToolForTask(input.taskId, call.toolId);
+    } else {
+      // Refused by the user, or by their absence. The model is told which,
+      // and told not to try the same thing again.
+      const explanation = verdict.kind === "denied"
+        ? `The user denied this ${call.toolId} call. Do not retry it; continue without it or ask the user how to proceed.`
+        : `The approval request for this ${call.toolId} call expired before the user decided. Do not retry it; ask the user how to proceed.`;
+      const deniedPolicyDecisionId = await denyStandaloneTool({
+        input,
+        call,
+        toolCallId,
+        argumentsArtifactUri: argumentsArtifact.uri,
+        effectType: effect.effectType,
+        ruleId: verdict.kind === "denied" ? "permission-profile.user-denied" : "permission-profile.approval-expired",
+        explanation,
+      });
+      const deniedResult = {
+        ...errorResult(explanation, {
+          toolCallId,
+          traceId: input.turnId,
+          status: "denied",
+          summary: verdict.kind === "denied"
+            ? `The user denied ${call.toolId}`
+            : `Approval for ${call.toolId} expired`,
+        }),
+        policyDecisionId: deniedPolicyDecisionId,
+      };
+      return persistSettledToolResult({
+        input,
+        call,
+        toolCallId,
+        callTranscriptArtifactUri: callTranscriptArtifact.uri,
+        sideEffectId: null,
+        result: deniedResult,
+        workspaceRevisionBefore,
+        workspaceRevisionAfter: workspaceRevisionBefore,
+        ...operationContext,
+      });
+    }
   }
 
   const policyDecisionId = uuid();
@@ -16992,6 +17326,13 @@ async function recoverActiveAgentTurns(): Promise<number> {
             resultStatus: "cancelled",
             errorJson: JSON.stringify({ reason: "process_restart_before_effect_start" }),
           },
+        });
+        // A tool call parked on an approval was waiting on an in-process
+        // waiter that died with the old process. The call is cancelled above;
+        // the approval must not stay "pending" in every client's inbox.
+        await tx.approval.updateMany({
+          where: { status: "pending", toolCall: { is: { turnId: turn.id } } },
+          data: { status: "expired" },
         });
         await tx.sideEffect.updateMany({
           where: {
