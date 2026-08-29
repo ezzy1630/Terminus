@@ -130,7 +130,7 @@ function parseManifest(path: string): PackageManifest {
 function* walkFiles(directory: string): Generator<string> {
   if (!existsSync(directory)) return;
   for (const entry of readdirSync(directory)) {
-    if (entry === "node_modules" || entry === "dist" || entry === ".next" || entry === "release") continue;
+    if (entry === "node_modules" || entry === "dist" || entry === ".next" || entry === "release" || entry === "target" || entry === ".git") continue;
     const path = join(directory, entry);
     try {
       const stat = lstatSync(path);

@@ -42,6 +42,9 @@ use protocol::network_service_server::{NetworkService as NetworkServiceRpc, Netw
 use protocol::patch_service_server::{PatchService as PatchServiceRpc, PatchServiceServer};
 use protocol::policy_service_server::{PolicyService as PolicyServiceRpc, PolicyServiceServer};
 use protocol::process_service_server::{ProcessService as ProcessServiceRpc, ProcessServiceServer};
+use protocol::provider_account_service_server::{
+    ProviderAccountService as ProviderAccountServiceRpc, ProviderAccountServiceServer,
+};
 use protocol::sandbox_service_server::{SandboxService as SandboxServiceRpc, SandboxServiceServer};
 use protocol::secret_service_server::{SecretService as SecretServiceRpc, SecretServiceServer};
 use protocol::workspace_service_server::{
@@ -1414,6 +1417,90 @@ impl SecretServiceRpc for GrpcKernel {
             capability_uri: request.capability_uri,
             stored: false,
         }))
+    }
+}
+
+/// Wire form of a discovered credential. Identity and a non-reversible
+/// fingerprint only: secret bytes never cross this boundary.
+fn local_provider_credential(
+    credential: terminus_kernel::LocalProviderCredential,
+) -> protocol::LocalProviderCredentialMessage {
+    protocol::LocalProviderCredentialMessage {
+        source: credential.source,
+        auth_kind: credential.auth_kind.as_str().to_string(),
+        fingerprint: credential.fingerprint,
+        metadata_json: credential.metadata.to_json(),
+        expires_at_unix: credential.expires_at_unix,
+        store: credential.store.as_str().to_string(),
+    }
+}
+
+#[tonic::async_trait]
+impl ProviderAccountServiceRpc for GrpcKernel {
+    /// Read the local credential stores. Requires a `Secret`-class capability
+    /// scoped to `secret://provider-account/discover`; a capability failure is
+    /// `PERMISSION_DENIED`, a missing context is `INVALID_ARGUMENT`.
+    async fn discover_local(
+        &self,
+        request: Request<protocol::DiscoverLocalProviderCredentialsRequest>,
+    ) -> Result<Response<protocol::DiscoverLocalProviderCredentialsResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        let discovery = self
+            .kernel
+            .provider_accounts
+            .discover_local(&ctx)
+            .map_err(status)?;
+        Ok(Response::new(
+            protocol::DiscoverLocalProviderCredentialsResponse {
+                credentials: discovery
+                    .credentials
+                    .into_iter()
+                    .map(local_provider_credential)
+                    .collect(),
+                warnings: discovery.warnings,
+                codex_installed: discovery.codex_installed,
+                opencode_installed: discovery.opencode_installed,
+            },
+        ))
+    }
+
+    /// Move one discovered credential into the OS keyring. Requires a
+    /// `Secret`-class capability scoped to exactly `capability_uri` plus an
+    /// idempotency key, as `SecretService::store` does. A destination outside
+    /// `secret://provider-account/<uuid-v7>` and a missing idempotency key are
+    /// `INVALID_ARGUMENT`; an unknown source is `NOT_FOUND`; a capability or
+    /// keyring refusal is `PERMISSION_DENIED`.
+    async fn import_local(
+        &self,
+        request: Request<protocol::ImportLocalProviderCredentialRequest>,
+    ) -> Result<Response<protocol::ImportLocalProviderCredentialResponse>, Status> {
+        let request = request.into_inner();
+        let ctx = request
+            .context
+            .map(context)
+            .ok_or_else(|| Status::invalid_argument("context is required"))?;
+        if request.source.is_empty() {
+            return Err(Status::invalid_argument("source is required"));
+        }
+        if request.capability_uri.is_empty() {
+            return Err(Status::invalid_argument("capability_uri is required"));
+        }
+        let imported = self
+            .kernel
+            .provider_accounts
+            .import_local(&ctx, &request.source, &request.capability_uri)
+            .map_err(status)?;
+        Ok(Response::new(
+            protocol::ImportLocalProviderCredentialResponse {
+                capability_uri: imported.capability_uri,
+                stored: imported.stored,
+                credential: Some(local_provider_credential(imported.credential)),
+            },
+        ))
     }
 }
 
@@ -3251,6 +3338,11 @@ pub async fn serve_grpc(
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
         )
         .add_service(
+            ProviderAccountServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
             NetworkServiceServer::new(service.clone())
                 .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
@@ -3390,6 +3482,11 @@ pub async fn serve_grpc_mtls(
         )
         .add_service(
             SecretServiceServer::new(service.clone())
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
+                .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
+        )
+        .add_service(
+            ProviderAccountServiceServer::new(service.clone())
                 .max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_GRPC_MESSAGE_BYTES),
         )

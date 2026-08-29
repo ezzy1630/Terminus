@@ -34,6 +34,9 @@ compatibility and emits this note so `codegen-check` can detect drift.
 | `0020_loop_evidence_budget.sql` |
 | `0021_repair_attempts_datetime_bigint.sql` |
 | `0022_turn_model_selection.sql` |
+| `0023_evidence_verifier_result_skipped.sql` |
+| `0024_session_permission_levels.sql` |
+| `0025_provider_accounts.sql` |
 
 If a future Rust crate adopts SQLx, replace this script with
 `cargo sqlx prepare --workspace --check` and emit the resulting

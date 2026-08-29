@@ -73,6 +73,15 @@ const CHATGPT_CODEX_REQUEST_HEADERS: &[&str] = &[
     "user-agent",
 ];
 
+/// Request headers the caller may set on the OpenCode gateway.
+///
+/// The Zen gateway serves its anonymous free tier only to clients whose
+/// `user-agent` names OpenCode; under the broker's default agent every
+/// anonymous dispatch came back `429 FreeUsageLimitError`. As with
+/// `chatgpt-codex`, the wire identity is the caller's decision, so the header
+/// is admitted rather than injected here.
+const OPENCODE_GATEWAY_REQUEST_HEADERS: &[&str] = &["user-agent"];
+
 /// OAuth token calls are small and synchronous; they get a tight bound.
 const OAUTH_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 const OAUTH_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -112,13 +121,15 @@ pub fn default_connector_registry() -> Vec<(&'static str, ConnectorDescriptor)> 
             "opencode-gateway",
             ConnectorDescriptor::new(AuthStyle::Bearer)
                 .with_timeouts(ConnectorTimeouts::total(GATEWAY_TIMEOUT))
-                .with_hosts(gateway_hosts.clone()),
+                .with_hosts(gateway_hosts.clone())
+                .with_allowed_request_headers(OPENCODE_GATEWAY_REQUEST_HEADERS.iter().copied()),
         ),
         (
             "opencode-gateway-anonymous",
             ConnectorDescriptor::new(AuthStyle::None)
                 .with_timeouts(ConnectorTimeouts::total(GATEWAY_TIMEOUT))
-                .with_hosts(gateway_hosts),
+                .with_hosts(gateway_hosts)
+                .with_allowed_request_headers(OPENCODE_GATEWAY_REQUEST_HEADERS.iter().copied()),
         ),
         (
             "openai-responses",
@@ -341,6 +352,27 @@ mod tests {
             [CHATGPT_HOST.to_string()],
             "token endpoints belong to the openai-oauth connector"
         );
+    }
+
+    #[test]
+    fn opencode_gateway_lets_the_caller_state_its_user_agent() {
+        // The Zen gateway gates its anonymous free tier on this header; under
+        // the broker default every anonymous dispatch is 429.
+        for id in ["opencode-gateway", "opencode-gateway-anonymous"] {
+            let gateway = descriptor_for(id);
+            assert!(
+                gateway
+                    .allowed_request_headers
+                    .iter()
+                    .any(|header| header == "user-agent"),
+                "caller must be able to set user-agent on {id}"
+            );
+            assert!(
+                gateway.static_headers.is_empty(),
+                "{id} must not inject identity headers, found {:?}",
+                gateway.static_headers
+            );
+        }
     }
 
     #[test]

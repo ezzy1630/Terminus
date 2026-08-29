@@ -1,0 +1,718 @@
+//! Local credential discovery and import (design §4, spec "Kernel contract").
+//!
+//! Proven here:
+//! 1. the OpenCode entry union decodes by kind, keeps the store's own
+//!    `metadata` object, and drops entries that do not decode without losing
+//!    the rest of the file;
+//! 2. a store that is group/world readable, oversized, or malformed produces
+//!    a warning and no credentials — the read fails closed;
+//! 3. a Codex ChatGPT login yields expiry, account id, plan type, and email
+//!    from the JWT payload without any signature being trusted;
+//! 4. absent stores are silent, not an error;
+//! 5. `import_local` writes through the `provider-account` keyring namespace
+//!    and refuses any other destination;
+//! 6. both calls require a `Secret`-class capability.
+//!
+//! Every fixture credential in this file is obviously fake and is never a
+//! real key. The stores are temp directories: no test reads the developer's
+//! real auth stores, and nothing is written to the login keychain.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(test)]
+
+use sha2::Digest;
+use std::path::Path;
+use tempfile::{tempdir, TempDir};
+use terminus_authz::{OperationClass, Scope, TokenBinder};
+use terminus_kernel::{
+    KernelHandle, LocalAuthKind, LocalCredentialRoots, LocalCredentialStore, DISCOVER_LOCAL_SCOPE,
+};
+use terminus_kernel_protocol::RequestContext;
+
+const ACCOUNT_URI: &str = "secret://provider-account/0192f3a1-4b2c-7def-8a1b-2c3d4e5f6a7b";
+const CEREBRAS_FIXTURE_KEY: &str = "fixture-not-a-real-key-cerebras";
+const CLOUDFLARE_FIXTURE_KEY: &str = "fixture-not-a-real-key-cloudflare";
+
+// ---------- harness ----------
+
+struct Fixture {
+    _data_dir: TempDir,
+    _stores: TempDir,
+    kernel: KernelHandle,
+    opencode_store: std::path::PathBuf,
+    codex_store: std::path::PathBuf,
+}
+
+/// A kernel whose credential stores are temp directories and whose `PATH`
+/// probe sees an empty directory, so the developer's real `codex`/`opencode`
+/// installs never change a test outcome.
+fn fixture() -> Fixture {
+    let data_dir = tempdir().unwrap();
+    let stores = tempdir().unwrap();
+    let opencode_dir = stores.path().join("opencode-data");
+    let codex_dir = stores.path().join("codex-home");
+    let empty_path = stores.path().join("empty-bin");
+    for dir in [&opencode_dir, &codex_dir, &empty_path] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let kernel = KernelHandle::new(data_dir.path().to_path_buf())
+        .unwrap()
+        .with_local_credential_roots(
+            LocalCredentialRoots::empty()
+                .with_opencode_dir(&opencode_dir)
+                .with_codex_dir(&codex_dir)
+                .with_path_override(empty_path.as_os_str()),
+        );
+    Fixture {
+        _data_dir: data_dir,
+        _stores: stores,
+        kernel,
+        opencode_store: opencode_dir.join("auth.json"),
+        codex_store: codex_dir.join("auth.json"),
+    }
+}
+
+fn binder() -> TokenBinder {
+    TokenBinder {
+        principal: "account-principal".to_string(),
+        session_id: "account-session".to_string(),
+        task_id: "account-task".to_string(),
+        workspace_id: "account-ws".to_string(),
+        kernel_instance_id: String::new(),
+    }
+}
+
+fn ctx(token: &str) -> RequestContext {
+    let mut ctx = RequestContext::new("provider-account-request");
+    ctx.capability_token = token.to_string();
+    ctx.idempotency_key = "provider-account-idempotency".to_string();
+    ctx.task_id = "account-task".to_string();
+    ctx.actor_id = "account-principal".to_string();
+    ctx.session_id = "account-session".to_string();
+    ctx.workspace_id = "account-ws".to_string();
+    ctx
+}
+
+/// Mint a capability with the given operation classes scoped to one secret
+/// URI. Mirrors `provider_account_connectors.rs`.
+fn token_for(kernel: &KernelHandle, classes: Vec<OperationClass>, uri: &str) -> String {
+    kernel
+        .token_issuer
+        .mint(
+            binder(),
+            classes,
+            Scope {
+                workspace_paths: Vec::new(),
+                network_destinations: Vec::new(),
+                secret_capabilities: vec![uri.to_string()],
+            },
+            None,
+            "provider-account-discovery".to_string(),
+        )
+        .unwrap()
+        .encode()
+        .unwrap()
+}
+
+fn discover_token(kernel: &KernelHandle) -> String {
+    token_for(kernel, vec![OperationClass::Secret], DISCOVER_LOCAL_SCOPE)
+}
+
+fn write_store(path: &Path, contents: &str) {
+    std::fs::write(path, contents).unwrap();
+    set_owner_only(path);
+}
+
+fn set_owner_only(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Base64url without padding — used only to build synthetic JWTs here.
+fn base64url(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = chunk.get(1).copied().map_or(0, u32::from);
+        let b2 = chunk.get(2).copied().map_or(0, u32::from);
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        let indices = [
+            (triple >> 18) & 0x3F,
+            (triple >> 12) & 0x3F,
+            (triple >> 6) & 0x3F,
+            triple & 0x3F,
+        ];
+        for (position, index) in indices.iter().enumerate() {
+            if position <= chunk.len() {
+                out.push(char::from(ALPHABET[*index as usize]));
+            }
+        }
+    }
+    out
+}
+
+/// A synthetic, unsigned JWT: header, the given payload, and an empty
+/// signature. Nothing in the kernel verifies the signature — it only reads
+/// non-secret claims out of a token it already holds.
+fn unsigned_jwt(payload: &serde_json::Value) -> String {
+    let header = base64url(br#"{"alg":"none","typ":"JWT"}"#);
+    let body = base64url(payload.to_string().as_bytes());
+    format!("{header}.{body}.")
+}
+
+fn fingerprint_of(secret: &str) -> String {
+    hex::encode(sha2::Sha256::digest(secret.as_bytes()))
+        .chars()
+        .take(12)
+        .collect()
+}
+
+// ---------- OpenCode auth store ----------
+
+#[test]
+fn opencode_entries_decode_by_kind_and_keep_provider_metadata() {
+    let fixture = fixture();
+    write_store(
+        &fixture.opencode_store,
+        &serde_json::json!({
+            "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY },
+            "cloudflare-workers-ai": {
+                "type": "api",
+                "key": CLOUDFLARE_FIXTURE_KEY,
+                "metadata": { "accountId": "fixture-cloudflare-account" }
+            },
+            "fixture-wellknown": {
+                "type": "wellknown",
+                "key": "fixture-wellknown-name",
+                "token": "fixture-not-a-real-wellknown-token"
+            },
+            "fixture-oauth": {
+                "type": "oauth",
+                "refresh": "fixture-not-a-real-refresh-token",
+                "access": "fixture-not-a-real-access-token",
+                "expires": 1_893_456_000_000_u64
+            }
+        })
+        .to_string(),
+    );
+
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert!(
+        discovery.warnings.is_empty(),
+        "an owner-only well-formed store produces no warnings: {:?}",
+        discovery.warnings
+    );
+    let sources: Vec<&str> = discovery
+        .credentials
+        .iter()
+        .map(|c| c.source.as_str())
+        .collect();
+    assert_eq!(
+        sources,
+        vec![
+            "opencode:cerebras",
+            "opencode:cloudflare-workers-ai",
+            "opencode:fixture-oauth",
+            "opencode:fixture-wellknown",
+        ],
+        "sources are colon-form and deterministically ordered"
+    );
+
+    let cerebras = &discovery.credentials[0];
+    assert_eq!(cerebras.auth_kind, LocalAuthKind::Api);
+    assert_eq!(cerebras.store, LocalCredentialStore::OpencodeAuthStore);
+    assert_eq!(cerebras.expires_at_unix, 0);
+    assert_eq!(cerebras.fingerprint, fingerprint_of(CEREBRAS_FIXTURE_KEY));
+    assert_eq!(cerebras.fingerprint.len(), 12);
+    assert_eq!(cerebras.metadata.to_json(), "{}");
+
+    let cloudflare = &discovery.credentials[1];
+    assert_eq!(
+        cloudflare.metadata.provider_metadata,
+        Some(serde_json::json!({ "accountId": "fixture-cloudflare-account" })),
+        "the store's own metadata object is carried through verbatim"
+    );
+    assert_eq!(
+        cloudflare.fingerprint,
+        fingerprint_of(CLOUDFLARE_FIXTURE_KEY)
+    );
+    assert_ne!(cloudflare.fingerprint, cerebras.fingerprint);
+
+    let oauth = &discovery.credentials[2];
+    assert_eq!(oauth.auth_kind, LocalAuthKind::Oauth);
+    assert_eq!(
+        oauth.expires_at_unix, 1_893_456_000,
+        "oauth expiry is milliseconds in the store and seconds on the wire"
+    );
+
+    let wellknown = &discovery.credentials[3];
+    assert_eq!(wellknown.auth_kind, LocalAuthKind::Wellknown);
+    assert_eq!(
+        wellknown.fingerprint,
+        fingerprint_of("fixture-not-a-real-wellknown-token"),
+        "a wellknown entry's credential is its token, not its key"
+    );
+}
+
+#[test]
+fn undecodable_opencode_entries_are_dropped_and_the_rest_survive() {
+    let fixture = fixture();
+    write_store(
+        &fixture.opencode_store,
+        &serde_json::json!({
+            "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY },
+            "missing-key": { "type": "api" },
+            "wrong-type": { "type": "totally-unknown", "key": "fixture" },
+            "oauth-without-expiry": {
+                "type": "oauth",
+                "refresh": "fixture-refresh",
+                "access": "fixture-access"
+            },
+            "not-an-object": 42,
+            "../../escape": { "type": "api", "key": "fixture" }
+        })
+        .to_string(),
+    );
+
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    let sources: Vec<&str> = discovery
+        .credentials
+        .iter()
+        .map(|c| c.source.as_str())
+        .collect();
+    assert_eq!(
+        sources,
+        vec!["opencode:cerebras"],
+        "every undecodable entry is dropped and the decodable one is kept"
+    );
+    assert!(
+        discovery.warnings.is_empty(),
+        "dropping an entry is not a store-level warning: {:?}",
+        discovery.warnings
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_group_readable_store_is_skipped_with_a_warning() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = fixture();
+    std::fs::write(
+        &fixture.opencode_store,
+        serde_json::json!({ "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY } })
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &fixture.opencode_store,
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert!(
+        discovery.credentials.is_empty(),
+        "a permissive store yields no credentials"
+    );
+    assert_eq!(discovery.warnings.len(), 1);
+    let warning = &discovery.warnings[0];
+    assert!(
+        warning.starts_with("opencode-auth-store: "),
+        "warnings are labelled by store: {warning}"
+    );
+    assert!(warning.contains("0644"), "unexpected warning: {warning}");
+    assert!(
+        !warning.contains(fixture.opencode_store.to_string_lossy().as_ref()),
+        "a warning must never carry the store path: {warning}"
+    );
+}
+
+#[test]
+fn an_oversized_store_is_refused_with_a_warning() {
+    let fixture = fixture();
+    let padding = "p".repeat(70 * 1_024);
+    write_store(
+        &fixture.opencode_store,
+        &serde_json::json!({
+            "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY, "note": padding }
+        })
+        .to_string(),
+    );
+
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert!(discovery.credentials.is_empty());
+    assert_eq!(discovery.warnings.len(), 1);
+    assert!(
+        discovery.warnings[0].contains("64 KiB"),
+        "unexpected warning: {}",
+        discovery.warnings[0]
+    );
+}
+
+#[test]
+fn a_malformed_store_is_refused_without_echoing_its_contents() {
+    let fixture = fixture();
+    write_store(&fixture.opencode_store, "{ this is not json ");
+
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert!(discovery.credentials.is_empty());
+    assert_eq!(
+        discovery.warnings,
+        vec!["opencode-auth-store: contains malformed JSON".to_string()]
+    );
+}
+
+// ---------- Codex auth store ----------
+
+#[test]
+fn a_codex_chatgpt_login_decodes_the_jwt_payload() {
+    let fixture = fixture();
+    let access_token = unsigned_jwt(&serde_json::json!({
+        "exp": 2_000_000_000_u64,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "fixture-claim-account",
+            "chatgpt_plan_type": "fixture-plan"
+        }
+    }));
+    let id_token = unsigned_jwt(&serde_json::json!({ "email": "fixture@example.invalid" }));
+    write_store(
+        &fixture.codex_store,
+        &serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": id_token,
+                "access_token": access_token,
+                "refresh_token": "fixture-not-a-real-refresh-token",
+                "account_id": "fixture-tokens-account"
+            },
+            "last_refresh": "2026-08-28T00:00:00Z"
+        })
+        .to_string(),
+    );
+
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert!(
+        discovery.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        discovery.warnings
+    );
+    assert_eq!(discovery.credentials.len(), 1);
+    let credential = &discovery.credentials[0];
+    assert_eq!(credential.source, "codex-chatgpt");
+    assert_eq!(credential.auth_kind, LocalAuthKind::Chatgpt);
+    assert_eq!(credential.store, LocalCredentialStore::CodexAuthStore);
+    assert_eq!(credential.expires_at_unix, 2_000_000_000);
+    assert_eq!(
+        credential.metadata.account_id.as_deref(),
+        Some("fixture-tokens-account"),
+        "tokens.account_id wins over the JWT claim"
+    );
+    assert_eq!(
+        credential.metadata.plan_type.as_deref(),
+        Some("fixture-plan")
+    );
+    assert_eq!(
+        credential.metadata.email.as_deref(),
+        Some("fixture@example.invalid")
+    );
+    assert_eq!(credential.fingerprint, fingerprint_of(&access_token));
+    // The wire encoding carries identity only.
+    let metadata_json = credential.metadata.to_json();
+    assert!(!metadata_json.contains(&access_token));
+    assert!(!metadata_json.contains("refresh"));
+}
+
+#[test]
+fn a_codex_api_key_login_is_reported_rather_than_imported() {
+    let fixture = fixture();
+    write_store(
+        &fixture.codex_store,
+        &serde_json::json!({
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": "fixture-not-a-real-openai-key"
+        })
+        .to_string(),
+    );
+
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert!(discovery.credentials.is_empty());
+    assert_eq!(discovery.warnings.len(), 1);
+    assert!(
+        discovery.warnings[0].starts_with("codex-auth-store: "),
+        "unexpected warning: {}",
+        discovery.warnings[0]
+    );
+    assert!(
+        !discovery.warnings[0].contains("fixture-not-a-real-openai-key"),
+        "a warning must never carry credential material"
+    );
+}
+
+#[test]
+fn an_expired_chatgpt_token_is_reported_with_its_expiry() {
+    let fixture = fixture();
+    let access_token = unsigned_jwt(&serde_json::json!({ "exp": 1_000_000_000_u64 }));
+    write_store(
+        &fixture.codex_store,
+        &serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": { "access_token": access_token }
+        })
+        .to_string(),
+    );
+
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert_eq!(discovery.credentials.len(), 1);
+    assert_eq!(discovery.credentials[0].expires_at_unix, 1_000_000_000);
+    assert!(
+        discovery.warnings.is_empty(),
+        "v1 does not refresh: an expired token is reported, not an error"
+    );
+}
+
+// ---------- absent stores ----------
+
+#[test]
+fn missing_stores_produce_an_empty_discovery_without_warnings() {
+    let fixture = fixture();
+    let discovery = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&discover_token(&fixture.kernel)))
+        .expect("discovery succeeds");
+
+    assert!(discovery.credentials.is_empty());
+    assert!(
+        discovery.warnings.is_empty(),
+        "an absent store is not a warning: {:?}",
+        discovery.warnings
+    );
+    assert!(!discovery.codex_installed);
+    assert!(!discovery.opencode_installed);
+}
+
+// ---------- import ----------
+
+/// Swap the OS keychain for an in-memory store under the SAME
+/// `provider-account` namespace. Writing fixture credentials into the
+/// developer's login keychain is not what these tests exercise.
+fn stub_provider_account_keyring(
+    kernel: &KernelHandle,
+) -> std::sync::Arc<terminus_secrets::SecretBroker> {
+    let provider = std::sync::Arc::new(terminus_secrets::InMemoryProvider::new());
+    kernel
+        .secrets
+        .broker()
+        .register_writable_provider("provider-account", provider);
+    std::sync::Arc::clone(kernel.secrets.broker())
+}
+
+#[test]
+fn import_local_moves_the_credential_into_the_provider_account_namespace() {
+    let fixture = fixture();
+    let broker = stub_provider_account_keyring(&fixture.kernel);
+    write_store(
+        &fixture.opencode_store,
+        &serde_json::json!({ "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY } })
+            .to_string(),
+    );
+
+    let token = token_for(&fixture.kernel, vec![OperationClass::Secret], ACCOUNT_URI);
+    let imported = fixture
+        .kernel
+        .provider_accounts
+        .import_local(&ctx(&token), "opencode:cerebras", ACCOUNT_URI)
+        .expect("import succeeds");
+
+    assert!(imported.stored);
+    assert_eq!(imported.capability_uri, ACCOUNT_URI);
+    assert_eq!(imported.credential.source, "opencode:cerebras");
+    assert_eq!(
+        imported.credential.fingerprint,
+        fingerprint_of(CEREBRAS_FIXTURE_KEY)
+    );
+
+    let handle = broker
+        .request(ACCOUNT_URI, "provider-account-test")
+        .expect("the credential is resolvable under the account URI");
+    // `SecretHandle` never exposes its bytes; the digest proves the exact
+    // fixture landed in the namespace.
+    assert_eq!(
+        handle.digest(),
+        hex::encode(sha2::Sha256::digest(CEREBRAS_FIXTURE_KEY.as_bytes())),
+        "the credential is stored byte-for-byte"
+    );
+    assert_eq!(handle.metadata.uri, ACCOUNT_URI);
+}
+
+#[test]
+fn import_local_reports_an_unknown_source() {
+    let fixture = fixture();
+    stub_provider_account_keyring(&fixture.kernel);
+    let token = token_for(&fixture.kernel, vec![OperationClass::Secret], ACCOUNT_URI);
+    let denied = fixture
+        .kernel
+        .provider_accounts
+        .import_local(&ctx(&token), "opencode:absent", ACCOUNT_URI)
+        .expect_err("an unknown source cannot be imported");
+    assert_eq!(
+        denied.code_name(),
+        "NOT_FOUND",
+        "unexpected error: {denied}"
+    );
+}
+
+#[test]
+fn import_local_refuses_a_non_uuid_v7_or_foreign_namespace_uri() {
+    let fixture = fixture();
+    stub_provider_account_keyring(&fixture.kernel);
+    write_store(
+        &fixture.opencode_store,
+        &serde_json::json!({ "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY } })
+            .to_string(),
+    );
+
+    for uri in [
+        "secret://provider-account/not-a-uuid",
+        // A v4 UUID: right shape, wrong version nibble.
+        "secret://provider-account/0192f3a1-4b2c-4def-8a1b-2c3d4e5f6a7b",
+        // The legacy gateway namespace: refused even though the presented
+        // capability is scoped to it and the broker would accept the write.
+        "secret://opencode/zen",
+    ] {
+        let token = token_for(&fixture.kernel, vec![OperationClass::Secret], uri);
+        let denied = fixture
+            .kernel
+            .provider_accounts
+            .import_local(&ctx(&token), "opencode:cerebras", uri)
+            .expect_err("only secret://provider-account/<uuid-v7> is admitted");
+        assert_eq!(
+            denied.code_name(),
+            "INVALID_REQUEST",
+            "unexpected error for {uri}: {denied}"
+        );
+    }
+}
+
+#[test]
+fn import_local_requires_an_idempotency_key() {
+    let fixture = fixture();
+    stub_provider_account_keyring(&fixture.kernel);
+    write_store(
+        &fixture.opencode_store,
+        &serde_json::json!({ "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY } })
+            .to_string(),
+    );
+    let token = token_for(&fixture.kernel, vec![OperationClass::Secret], ACCOUNT_URI);
+    let mut request = ctx(&token);
+    request.idempotency_key = String::new();
+    let denied = fixture
+        .kernel
+        .provider_accounts
+        .import_local(&request, "opencode:cerebras", ACCOUNT_URI)
+        .expect_err("a mutating import requires an idempotency key");
+    assert_eq!(denied.code_name(), "INVALID_REQUEST");
+}
+
+// ---------- capability enforcement ----------
+
+#[test]
+fn discovery_and_import_require_a_secret_class_capability() {
+    let fixture = fixture();
+    stub_provider_account_keyring(&fixture.kernel);
+    write_store(
+        &fixture.opencode_store,
+        &serde_json::json!({ "cerebras": { "type": "api", "key": CEREBRAS_FIXTURE_KEY } })
+            .to_string(),
+    );
+
+    // A Network-class capability with the right scope is still refused.
+    let network_only = token_for(
+        &fixture.kernel,
+        vec![OperationClass::Network],
+        DISCOVER_LOCAL_SCOPE,
+    );
+    let denied = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&ctx(&network_only))
+        .expect_err("discovery requires OperationClass::Secret");
+    assert_eq!(denied.code_name(), "PERMISSION_DENIED");
+
+    let network_import = token_for(&fixture.kernel, vec![OperationClass::Network], ACCOUNT_URI);
+    let denied = fixture
+        .kernel
+        .provider_accounts
+        .import_local(&ctx(&network_import), "opencode:cerebras", ACCOUNT_URI)
+        .expect_err("import requires OperationClass::Secret");
+    assert_eq!(denied.code_name(), "PERMISSION_DENIED");
+
+    // A Secret capability scoped to a different URI cannot import this one.
+    let wrong_scope = token_for(
+        &fixture.kernel,
+        vec![OperationClass::Secret],
+        "secret://provider-account/0192f3a1-4b2c-7def-8a1b-000000000000",
+    );
+    let denied = fixture
+        .kernel
+        .provider_accounts
+        .import_local(&ctx(&wrong_scope), "opencode:cerebras", ACCOUNT_URI)
+        .expect_err("the capability must be scoped to exactly the destination URI");
+    assert_eq!(denied.code_name(), "PERMISSION_DENIED");
+
+    // And an empty token is refused outright.
+    let mut anonymous = ctx("");
+    anonymous.capability_token = String::new();
+    let denied = fixture
+        .kernel
+        .provider_accounts
+        .discover_local(&anonymous)
+        .expect_err("a caller with no capability token is refused");
+    assert_eq!(denied.code_name(), "CAPABILITY_TOKEN_INVALID");
+}

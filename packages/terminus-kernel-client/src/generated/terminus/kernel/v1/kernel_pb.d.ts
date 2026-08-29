@@ -2534,6 +2534,176 @@ export declare type SecretMutationResponse = Message<"terminus.kernel.v1.SecretM
 export declare const SecretMutationResponseSchema: GenMessage<SecretMutationResponse>;
 
 /**
+ * A credential found in a local tool's store. Never carries secret bytes.
+ *
+ * @generated from message terminus.kernel.v1.LocalProviderCredentialMessage
+ */
+export declare type LocalProviderCredentialMessage = Message<"terminus.kernel.v1.LocalProviderCredentialMessage"> & {
+  /**
+   * Stable source id: "opencode:<providerID>" (an OpenCode auth-store entry)
+   * or "codex-chatgpt" (a ChatGPT login held by the Codex CLI).
+   *
+   * @generated from field: string source = 1;
+   */
+  source: string;
+
+  /**
+   * "api" | "oauth" | "wellknown" | "chatgpt".
+   *
+   * @generated from field: string auth_kind = 2;
+   */
+  authKind: string;
+
+  /**
+   * First 12 hex characters of SHA-256 over the secret bytes, so a rotated
+   * key is noticed without the key ever being seen.
+   *
+   * @generated from field: string fingerprint = 3;
+   */
+  fingerprint: string;
+
+  /**
+   * Non-secret metadata as canonical JSON. Keys: "account_id", "plan_type",
+   * "email" (chatgpt), and "provider_metadata" (the store's own metadata
+   * object, e.g. a Cloudflare account id). Absent keys are omitted.
+   *
+   * @generated from field: string metadata_json = 4;
+   */
+  metadataJson: string;
+
+  /**
+   * Unix seconds at which the credential expires; 0 when it does not.
+   *
+   * @generated from field: uint64 expires_at_unix = 5;
+   */
+  expiresAtUnix: bigint;
+
+  /**
+   * Which store it was read from: "opencode-auth-store" | "codex-auth-store".
+   * A label, never a filesystem path.
+   *
+   * @generated from field: string store = 6;
+   */
+  store: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.LocalProviderCredentialMessage.
+ * Use `create(LocalProviderCredentialMessageSchema)` to create a new message.
+ */
+export declare const LocalProviderCredentialMessageSchema: GenMessage<LocalProviderCredentialMessage>;
+
+/**
+ * @generated from message terminus.kernel.v1.DiscoverLocalProviderCredentialsRequest
+ */
+export declare type DiscoverLocalProviderCredentialsRequest = Message<"terminus.kernel.v1.DiscoverLocalProviderCredentialsRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.DiscoverLocalProviderCredentialsRequest.
+ * Use `create(DiscoverLocalProviderCredentialsRequestSchema)` to create a new message.
+ */
+export declare const DiscoverLocalProviderCredentialsRequestSchema: GenMessage<DiscoverLocalProviderCredentialsRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.DiscoverLocalProviderCredentialsResponse
+ */
+export declare type DiscoverLocalProviderCredentialsResponse = Message<"terminus.kernel.v1.DiscoverLocalProviderCredentialsResponse"> & {
+  /**
+   * @generated from field: repeated terminus.kernel.v1.LocalProviderCredentialMessage credentials = 1;
+   */
+  credentials: LocalProviderCredentialMessage[];
+
+  /**
+   * Stores that exist but could not be used, as "<store>: <reason>"
+   * (unreadable, malformed, too permissive). Surfaced, never silently dropped.
+   *
+   * @generated from field: repeated string warnings = 2;
+   */
+  warnings: string[];
+
+  /**
+   * PATH lookups, so the client can say "install/sign in" precisely.
+   *
+   * @generated from field: bool codex_installed = 3;
+   */
+  codexInstalled: boolean;
+
+  /**
+   * @generated from field: bool opencode_installed = 4;
+   */
+  opencodeInstalled: boolean;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.DiscoverLocalProviderCredentialsResponse.
+ * Use `create(DiscoverLocalProviderCredentialsResponseSchema)` to create a new message.
+ */
+export declare const DiscoverLocalProviderCredentialsResponseSchema: GenMessage<DiscoverLocalProviderCredentialsResponse>;
+
+/**
+ * @generated from message terminus.kernel.v1.ImportLocalProviderCredentialRequest
+ */
+export declare type ImportLocalProviderCredentialRequest = Message<"terminus.kernel.v1.ImportLocalProviderCredentialRequest"> & {
+  /**
+   * @generated from field: terminus.kernel.v1.RequestContext context = 1;
+   */
+  context?: RequestContext | undefined;
+
+  /**
+   * Source id from discovery.
+   *
+   * @generated from field: string source = 2;
+   */
+  source: string;
+
+  /**
+   * Destination minted by the control plane:
+   * secret://provider-account/<uuid-v7>. Requires a Secret-class capability
+   * scoped to exactly this URI, as SecretService.Store does.
+   *
+   * @generated from field: string capability_uri = 3;
+   */
+  capabilityUri: string;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ImportLocalProviderCredentialRequest.
+ * Use `create(ImportLocalProviderCredentialRequestSchema)` to create a new message.
+ */
+export declare const ImportLocalProviderCredentialRequestSchema: GenMessage<ImportLocalProviderCredentialRequest>;
+
+/**
+ * @generated from message terminus.kernel.v1.ImportLocalProviderCredentialResponse
+ */
+export declare type ImportLocalProviderCredentialResponse = Message<"terminus.kernel.v1.ImportLocalProviderCredentialResponse"> & {
+  /**
+   * @generated from field: string capability_uri = 1;
+   */
+  capabilityUri: string;
+
+  /**
+   * @generated from field: bool stored = 2;
+   */
+  stored: boolean;
+
+  /**
+   * @generated from field: terminus.kernel.v1.LocalProviderCredentialMessage credential = 3;
+   */
+  credential?: LocalProviderCredentialMessage | undefined;
+};
+
+/**
+ * Describes the message terminus.kernel.v1.ImportLocalProviderCredentialResponse.
+ * Use `create(ImportLocalProviderCredentialResponseSchema)` to create a new message.
+ */
+export declare const ImportLocalProviderCredentialResponseSchema: GenMessage<ImportLocalProviderCredentialResponse>;
+
+/**
  * @generated from message terminus.kernel.v1.EgressRequest
  */
 export declare type EgressRequest = Message<"terminus.kernel.v1.EgressRequest"> & {
@@ -3898,6 +4068,28 @@ export declare const SecretService: GenService<{
     methodKind: "unary";
     input: typeof DeleteSecretRequestSchema;
     output: typeof SecretMutationResponseSchema;
+  },
+}>;
+
+/**
+ * @generated from service terminus.kernel.v1.ProviderAccountService
+ */
+export declare const ProviderAccountService: GenService<{
+  /**
+   * @generated from rpc terminus.kernel.v1.ProviderAccountService.DiscoverLocal
+   */
+  discoverLocal: {
+    methodKind: "unary";
+    input: typeof DiscoverLocalProviderCredentialsRequestSchema;
+    output: typeof DiscoverLocalProviderCredentialsResponseSchema;
+  },
+  /**
+   * @generated from rpc terminus.kernel.v1.ProviderAccountService.ImportLocal
+   */
+  importLocal: {
+    methodKind: "unary";
+    input: typeof ImportLocalProviderCredentialRequestSchema;
+    output: typeof ImportLocalProviderCredentialResponseSchema;
   },
 }>;
 

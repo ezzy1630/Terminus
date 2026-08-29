@@ -692,6 +692,73 @@ service SecretService {
 }
 
 // =============================================================================
+// Provider account service — credentials already on this machine
+// =============================================================================
+//
+// Terminus's own loop drives every model; other local tools are only a place
+// credentials already live. The kernel reads those stores and moves a
+// credential straight into the OS keyring under
+// `secret://provider-account/<uuid-v7>`. Secret bytes never cross this
+// boundary: discovery returns identity and a non-reversible fingerprint, and
+// import returns the capability URI it stored under.
+
+// A credential found in a local tool's store. Never carries secret bytes.
+message LocalProviderCredentialMessage {
+  // Stable source id: "opencode:<providerID>" (an OpenCode auth-store entry)
+  // or "codex-chatgpt" (a ChatGPT login held by the Codex CLI).
+  string source = 1;
+  // "api" | "oauth" | "wellknown" | "chatgpt".
+  string auth_kind = 2;
+  // First 12 hex characters of SHA-256 over the secret bytes, so a rotated
+  // key is noticed without the key ever being seen.
+  string fingerprint = 3;
+  // Non-secret metadata as canonical JSON. Keys: "account_id", "plan_type",
+  // "email" (chatgpt), and "provider_metadata" (the store's own metadata
+  // object, e.g. a Cloudflare account id). Absent keys are omitted.
+  string metadata_json = 4;
+  // Unix seconds at which the credential expires; 0 when it does not.
+  uint64 expires_at_unix = 5;
+  // Which store it was read from: "opencode-auth-store" | "codex-auth-store".
+  // A label, never a filesystem path.
+  string store = 6;
+}
+
+message DiscoverLocalProviderCredentialsRequest {
+  RequestContext context = 1;
+}
+
+message DiscoverLocalProviderCredentialsResponse {
+  repeated LocalProviderCredentialMessage credentials = 1;
+  // Stores that exist but could not be used, as "<store>: <reason>"
+  // (unreadable, malformed, too permissive). Surfaced, never silently dropped.
+  repeated string warnings = 2;
+  // PATH lookups, so the client can say "install/sign in" precisely.
+  bool codex_installed = 3;
+  bool opencode_installed = 4;
+}
+
+message ImportLocalProviderCredentialRequest {
+  RequestContext context = 1;
+  // Source id from discovery.
+  string source = 2;
+  // Destination minted by the control plane:
+  // secret://provider-account/<uuid-v7>. Requires a Secret-class capability
+  // scoped to exactly this URI, as SecretService.Store does.
+  string capability_uri = 3;
+}
+
+message ImportLocalProviderCredentialResponse {
+  string capability_uri = 1;
+  bool stored = 2;
+  LocalProviderCredentialMessage credential = 3;
+}
+
+service ProviderAccountService {
+  rpc DiscoverLocal(DiscoverLocalProviderCredentialsRequest) returns (DiscoverLocalProviderCredentialsResponse);
+  rpc ImportLocal(ImportLocalProviderCredentialRequest) returns (ImportLocalProviderCredentialResponse);
+}
+
+// =============================================================================
 // Network egress service (SPEC §13.3, §31.1, ADR-0015)
 // =============================================================================
 

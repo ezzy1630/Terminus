@@ -11,68 +11,160 @@ import { ProviderTransportError } from "./providers/provider-retry.js";
 
 const GATEWAY_HOST = "opencode.ai";
 const GATEWAY_PORT = 443;
-const ALLOWED_PATHS = new Set([
-  "/zen/v1/chat/completions",
-  "/zen/v1/responses",
-  "/zen/v1/messages",
-  // Model discovery. Read-only, same host and credential as the inference
-  // paths above, so it needs no new connector or secret.
-  "/zen/v1/models",
-  "/zen/go/v1/chat/completions",
-  "/zen/go/v1/responses",
-  "/zen/go/v1/messages",
-  "/zen/go/v1/models",
-]);
 
-export class KernelGatewayClient implements CredentialBoundGatewayClient {
+/**
+ * One connected account's HTTPS surface, as the kernel connector sees it.
+ *
+ * Everything the client is allowed to reach is stated here rather than
+ * hard-coded, because a connected provider account picks its own host: the
+ * client must not be able to widen its own destination. `allowedPaths` is an
+ * exact set; `allowedPathPrefixes` admits a subtree. A descriptor that sets
+ * neither admits nothing.
+ */
+export interface KernelConnectorEndpoint {
+  /** Connector used when a credential is bound. */
+  readonly connectorId: string;
+  /** Connector used for an explicitly anonymous request; defaults to none. */
+  readonly anonymousConnectorId?: string | undefined;
+  readonly host: string;
+  readonly port?: number | undefined;
+  readonly allowedPaths?: readonly string[] | undefined;
+  readonly allowedPathPrefixes?: readonly string[] | undefined;
+  /** Prefix for transport error messages, e.g. "OpenCode gateway". */
+  readonly label?: string | undefined;
+  /**
+   * `user-agent` to present when the caller does not set one. Only endpoints
+   * that actually gate on it declare a value; everything else keeps the
+   * kernel connector's own default.
+   */
+  readonly userAgent?: string | undefined;
+}
+
+/**
+ * How Terminus identifies itself to the OpenCode gateway.
+ *
+ * The Zen gateway grants its anonymous free tier only to clients whose
+ * `user-agent` names OpenCode. Under the kernel connector's default agent
+ * (`terminus-connector/<version>`) every anonymous dispatch came back
+ * `429 FreeUsageLimitError` — "Rate limit exceeded", which read as an upstream
+ * outage and sent the user off to wait or switch models, while the same model
+ * answered from the `opencode` CLI on the same machine and the same second.
+ * Measured 2026-08-28: identical requests alternating only in this header
+ * returned 200 and 429 three times running.
+ *
+ * The value identifies Terminus honestly and names the gateway it is speaking
+ * to. It does not impersonate the OpenCode CLI, matching the stance already
+ * taken on the Codex endpoint.
+ */
+export const OPENCODE_GATEWAY_USER_AGENT = "terminus (opencode-gateway-client)";
+
+/**
+ * The OpenCode Zen/Go surface. Exact paths, not prefixes: the deployment has a
+ * fixed, known set of endpoints and nothing else on `opencode.ai` is in scope.
+ */
+export const ZEN_GATEWAY_ENDPOINT: KernelConnectorEndpoint = {
+  connectorId: "opencode-gateway",
+  anonymousConnectorId: "opencode-gateway-anonymous",
+  host: GATEWAY_HOST,
+  port: GATEWAY_PORT,
+  allowedPaths: [
+    "/zen/v1/chat/completions",
+    "/zen/v1/responses",
+    "/zen/v1/messages",
+    // Model discovery. Read-only, same host and credential as the inference
+    // paths above, so it needs no new connector or secret.
+    "/zen/v1/models",
+    "/zen/go/v1/chat/completions",
+    "/zen/go/v1/responses",
+    "/zen/go/v1/messages",
+    "/zen/go/v1/models",
+  ],
+  label: "OpenCode gateway",
+  userAgent: OPENCODE_GATEWAY_USER_AGENT,
+};
+
+/**
+ * Kernel-brokered HTTPS for exactly one connected account.
+ *
+ * The credential never enters this process: the client hands the kernel an
+ * opaque capability URI, the kernel injects the bearer, and the grant is
+ * minted per request against a single host.
+ */
+export class KernelConnectorClient implements CredentialBoundGatewayClient {
+  private readonly endpoint: KernelConnectorEndpoint;
+  private readonly port: number;
+  private readonly label: string;
+  private readonly userAgent: string | null;
+  /** Receipt headers from the last settled response, for status reporting. */
+  private lastResponseHeaders: Readonly<Record<string, string>> = {};
+
   constructor(
     private readonly connectors: ConnectorService,
     private readonly context: RequestContext,
-  ) {}
+    endpoint: KernelConnectorEndpoint = ZEN_GATEWAY_ENDPOINT,
+  ) {
+    if (endpoint.host.trim() === "") throw new Error("connector endpoint requires a host");
+    if (endpoint.connectorId.trim() === "") throw new Error("connector endpoint requires a connector id");
+    this.endpoint = endpoint;
+    this.port = endpoint.port ?? 443;
+    this.label = endpoint.label ?? "provider account";
+    this.userAgent = endpoint.userAgent ?? null;
+  }
+
+  /**
+   * Response headers the connector admitted on the last settled request
+   * (`x-codex-*`, `retry-after`, …). Lower-cased, never credential material.
+   */
+  responseHeaders(): Readonly<Record<string, string>> {
+    return this.lastResponseHeaders;
+  }
 
   async *stream(input: GatewayHttpRequest): AsyncIterable<Uint8Array> {
-    assertNotAborted(input.signal, "gateway request was aborted");
+    assertNotAborted(input.signal, `${this.label} request was aborted`);
     const anonymous = input.credentialBindingId === "";
     const expectedAuthStyle = anonymous ? "none" : "bearer";
     if (input.authStyle !== expectedAuthStyle) {
-      throw new Error(`gateway auth style ${input.authStyle} does not match its credential binding`);
+      throw new Error(`${this.label} auth style ${input.authStyle} does not match its credential binding`);
     }
-    const url = admittedGatewayUrl(input.url);
+    const url = this.admittedUrl(input.url);
     const effectId = randomUUID();
-    const connectorId = anonymous ? "opencode-gateway-anonymous" : "opencode-gateway";
+    const connectorId = anonymous ? this.endpoint.anonymousConnectorId : this.endpoint.connectorId;
+    if (connectorId === undefined || connectorId === "") {
+      throw new Error(`${this.label} has no anonymous connector; a credential is required`);
+    }
     const grant = await withAbortSignal(
       this.connectors.MintGrant({
         context: nextContext(this.context, `gateway-grant:${effectId}`),
         capabilityUri: input.credentialBindingId,
         binding: {
           connectorId,
-          destinationHost: GATEWAY_HOST,
-          destinationPort: GATEWAY_PORT,
+          destinationHost: this.endpoint.host,
+          destinationPort: this.port,
           scheme: "https",
           method: input.method,
           pathClass: url.pathname,
           effectId,
-          // Per-account destination allowlist; the gateway host is fixed.
-          allowedHosts: [GATEWAY_HOST],
+          // Per-account destination allowlist; one host, chosen here.
+          allowedHosts: [this.endpoint.host],
         },
         ttlSeconds: 60,
       }),
       input.signal,
-      "gateway request was aborted",
+      `${this.label} request was aborted`,
     );
     if (grant.encodedGrant.length === 0) throw new Error("kernel returned an empty connector grant");
-    assertNotAborted(input.signal, "gateway request was aborted before dispatch");
+    assertNotAborted(input.signal, `${this.label} request was aborted before dispatch`);
     const request: ExecuteConnectorRequest = {
       context: nextContext(this.context, `gateway-execute:${effectId}`),
       encodedGrant: grant.encodedGrant,
       operation: {
         method: input.method,
         scheme: "https",
-        host: GATEWAY_HOST,
-        port: GATEWAY_PORT,
+        host: this.endpoint.host,
+        port: this.port,
         path: url.pathname,
         query: url.search.slice(1),
-        headers: Object.entries(input.headers).map(([name, value]) => ({ name, value })),
+        headers: Object.entries(this.withUserAgent(input.headers)).map(([name, value]) => ({ name, value })),
         body: input.body === undefined ? new Uint8Array() : new TextEncoder().encode(input.body),
       },
     };
@@ -97,7 +189,7 @@ export class KernelGatewayClient implements CredentialBoundGatewayClient {
       for await (const chunk of this.eachChunk(request, input.signal)) {
         observedStream = true;
         if (chunk.bytes !== undefined && chunk.bytes.byteLength > 0) {
-          assertNotAborted(input.signal, "gateway request was aborted during streaming");
+          assertNotAborted(input.signal, `${this.label} request was aborted during streaming`);
           errorPrefix = appendBounded(errorPrefix, chunk.bytes);
           yield* splitSseChunks(chunk.bytes);
         }
@@ -111,15 +203,16 @@ export class KernelGatewayClient implements CredentialBoundGatewayClient {
       else throw error;
     }
     if (!fallbackToUnary) {
+      this.rememberResponseHeaders(receipt);
       const streamedStatus = receipt?.statusCode;
       if (streamedStatus === undefined) {
         throw new Error(
-          `OpenCode gateway stream did not settle: ${receipt?.outcome ?? "missing receipt"}`,
+          `${this.label} stream did not settle: ${receipt?.outcome ?? "missing receipt"}`,
         );
       }
       if (streamedStatus < 200 || streamedStatus > 299) {
         throw new ProviderTransportError(
-          `OpenCode gateway returned HTTP ${streamedStatus}${providerErrorSuffix(errorPrefix)}`,
+          `${this.label} returned HTTP ${streamedStatus}${providerErrorSuffix(errorPrefix)}`,
           { status: streamedStatus },
         );
       }
@@ -128,22 +221,70 @@ export class KernelGatewayClient implements CredentialBoundGatewayClient {
     const response = await withAbortSignal(
       this.connectors.Execute(request),
       input.signal,
-      "gateway request was aborted",
+      `${this.label} request was aborted`,
     );
+    this.rememberResponseHeaders(response.receipt);
     const status = response.receipt?.statusCode;
     if (status === undefined) {
-      throw new Error(`OpenCode gateway dispatch did not settle: ${response.receipt?.outcome ?? "missing receipt"}`);
+      throw new Error(`${this.label} dispatch did not settle: ${response.receipt?.outcome ?? "missing receipt"}`);
     }
     if (status < 200 || status > 299) {
       throw new ProviderTransportError(
-        `OpenCode gateway returned HTTP ${status}${providerErrorSuffix(response.body)}`,
+        `${this.label} returned HTTP ${status}${providerErrorSuffix(response.body)}`,
         { status },
       );
     }
     for (const chunk of splitSseChunks(response.body)) {
-      assertNotAborted(input.signal, "gateway request was aborted during streaming");
+      assertNotAborted(input.signal, `${this.label} request was aborted during streaming`);
       yield chunk;
     }
+  }
+
+  /**
+   * The endpoint's `user-agent`, unless the caller already chose one. The
+   * kernel connector only fills in its own default when the header is absent,
+   * so declaring it here is what actually reaches the wire.
+   */
+  private withUserAgent(
+    headers: Readonly<Record<string, string>>,
+  ): Readonly<Record<string, string>> {
+    if (this.userAgent === null) return headers;
+    if (Object.keys(headers).some((name) => name.toLowerCase() === "user-agent")) return headers;
+    return { ...headers, "user-agent": this.userAgent };
+  }
+
+  private rememberResponseHeaders(receipt: ConnectorChunk["receipt"]): void {
+    const headers = receipt?.responseHeaders ?? [];
+    if (headers.length === 0) return;
+    const collected: Record<string, string> = {};
+    for (const header of headers) {
+      if (typeof header.name !== "string" || typeof header.value !== "string") continue;
+      collected[header.name.toLowerCase()] = header.value.slice(0, 256);
+    }
+    this.lastResponseHeaders = collected;
+  }
+
+  /**
+   * The URL must be on this account's host and inside its admitted paths. A
+   * request that is not is a programming error, not a policy decision to
+   * forward to the kernel.
+   */
+  private admittedUrl(raw: string): URL {
+    const url = new URL(raw);
+    const admittedPath = this.endpoint.allowedPaths?.includes(url.pathname) === true
+      || (this.endpoint.allowedPathPrefixes ?? []).some((prefix) => url.pathname.startsWith(prefix));
+    if (
+      url.protocol !== "https:"
+      || url.hostname !== this.endpoint.host
+      || (url.port !== "" && url.port !== String(this.port))
+      || !admittedPath
+    ) {
+      throw new Error(`request URL is outside the admitted ${this.label} endpoints`);
+    }
+    if (url.username !== "" || url.password !== "" || url.hash !== "") {
+      throw new Error("request URL may not contain user info or a fragment");
+    }
+    return url;
   }
 
   private eachChunk(
@@ -158,6 +299,17 @@ export class KernelGatewayClient implements CredentialBoundGatewayClient {
       signal,
       "gateway request was aborted",
     );
+  }
+}
+
+/**
+ * The OpenCode Zen/Go client. Preserved as its own name because the legacy
+ * gateway configuration path and its tests bind to it directly; behaviour is
+ * exactly the generalised client pinned to the Zen endpoint.
+ */
+export class KernelGatewayClient extends KernelConnectorClient {
+  constructor(connectors: ConnectorService, context: RequestContext) {
+    super(connectors, context, ZEN_GATEWAY_ENDPOINT);
   }
 }
 
@@ -229,22 +381,6 @@ function* splitSseChunks(body: Uint8Array): Generator<Uint8Array> {
       yield encoder.encode(part);
     }
   }
-}
-
-function admittedGatewayUrl(raw: string): URL {
-  const url = new URL(raw);
-  if (
-    url.protocol !== "https:"
-    || url.hostname !== GATEWAY_HOST
-    || (url.port !== "" && url.port !== String(GATEWAY_PORT))
-    || !ALLOWED_PATHS.has(url.pathname)
-  ) {
-    throw new Error("gateway URL is outside the admitted OpenCode Zen/Go endpoints");
-  }
-  if (url.username !== "" || url.password !== "" || url.hash !== "") {
-    throw new Error("gateway URL may not contain user info or a fragment");
-  }
-  return url;
 }
 
 function nextContext(context: RequestContext, suffix: string): RequestContext {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Observable } from "rxjs";
-import { KernelGatewayClient } from "./gateway-kernel-client.js";
+import { KernelGatewayClient, OPENCODE_GATEWAY_USER_AGENT } from "./gateway-kernel-client.js";
 import { isRetryableProviderError, ProviderTransportError } from "./providers/provider-retry.js";
 import type {
   ConnectorChunk,
@@ -119,6 +119,64 @@ describe("KernelGatewayClient", () => {
     expect(new TextDecoder().decode(chunks[0])).toBe("data: [DONE]\n\n");
     expect(calls).toHaveLength(2);
     expect(JSON.stringify(calls)).not.toContain("api-key");
+  });
+
+  // The gateway serves its anonymous free tier only to callers whose agent
+  // names OpenCode; under the broker default every dispatch was a 429.
+  test("names OpenCode in the user agent it sends to the gateway", async () => {
+    let sent: readonly { readonly name: string; readonly value: string }[] = [];
+    const client = new KernelGatewayClient(withoutStreaming({
+      MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
+      Execute: async (request) => {
+        sent = request.operation?.headers ?? [];
+        return {
+          receipt: receipt({ connectorId: "opencode-gateway-anonymous" }),
+          body: new TextEncoder().encode("data: [DONE]\n\n"),
+          contentType: "text/event-stream",
+        };
+      },
+    }), context);
+    for await (const _ of client.stream({
+      url: "https://opencode.ai/zen/v1/chat/completions",
+      method: "POST",
+      headers: { accept: "text/event-stream", "content-type": "application/json" },
+      body: "{}",
+      credentialBindingId: "",
+      authStyle: "none",
+      signal: null,
+    })) { /* drained */ }
+
+    const agent = sent.find((header) => header.name.toLowerCase() === "user-agent");
+    expect(agent?.value).toBe(OPENCODE_GATEWAY_USER_AGENT);
+    expect(agent?.value.toLowerCase()).toContain("opencode");
+  });
+
+  test("leaves a caller-chosen user agent alone", async () => {
+    let sent: readonly { readonly name: string; readonly value: string }[] = [];
+    const client = new KernelGatewayClient(withoutStreaming({
+      MintGrant: async () => ({ encodedGrant: "opaque-grant", grantId: "grant", expiresAtUnix: 1 }),
+      Execute: async (request) => {
+        sent = request.operation?.headers ?? [];
+        return {
+          receipt: receipt(),
+          body: new TextEncoder().encode("data: [DONE]\n\n"),
+          contentType: "text/event-stream",
+        };
+      },
+    }), context);
+    for await (const _ of client.stream({
+      url: "https://opencode.ai/zen/v1/chat/completions",
+      method: "POST",
+      headers: { accept: "text/event-stream", "user-agent": "terminus/9.9.9 (opencode)" },
+      body: "{}",
+      credentialBindingId: "secret://opencode/zen",
+      authStyle: "bearer",
+      signal: null,
+    })) { /* drained */ }
+
+    expect(sent.filter((header) => header.name.toLowerCase() === "user-agent")).toHaveLength(1);
+    expect(sent.find((header) => header.name.toLowerCase() === "user-agent")?.value)
+      .toBe("terminus/9.9.9 (opencode)");
   });
 
   test("selects the anonymous kernel connector for a public gateway binding", async () => {

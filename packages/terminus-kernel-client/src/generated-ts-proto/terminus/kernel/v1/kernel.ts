@@ -712,6 +712,71 @@ export interface SecretMutationResponse {
   stored: boolean;
 }
 
+/** A credential found in a local tool's store. Never carries secret bytes. */
+export interface LocalProviderCredentialMessage {
+  /**
+   * Stable source id: "opencode:<providerID>" (an OpenCode auth-store entry)
+   * or "codex-chatgpt" (a ChatGPT login held by the Codex CLI).
+   */
+  source: string;
+  /** "api" | "oauth" | "wellknown" | "chatgpt". */
+  authKind: string;
+  /**
+   * First 12 hex characters of SHA-256 over the secret bytes, so a rotated
+   * key is noticed without the key ever being seen.
+   */
+  fingerprint: string;
+  /**
+   * Non-secret metadata as canonical JSON. Keys: "account_id", "plan_type",
+   * "email" (chatgpt), and "provider_metadata" (the store's own metadata
+   * object, e.g. a Cloudflare account id). Absent keys are omitted.
+   */
+  metadataJson: string;
+  /** Unix seconds at which the credential expires; 0 when it does not. */
+  expiresAtUnix: number;
+  /**
+   * Which store it was read from: "opencode-auth-store" | "codex-auth-store".
+   * A label, never a filesystem path.
+   */
+  store: string;
+}
+
+export interface DiscoverLocalProviderCredentialsRequest {
+  context: RequestContext | undefined;
+}
+
+export interface DiscoverLocalProviderCredentialsResponse {
+  credentials: LocalProviderCredentialMessage[];
+  /**
+   * Stores that exist but could not be used, as "<store>: <reason>"
+   * (unreadable, malformed, too permissive). Surfaced, never silently dropped.
+   */
+  warnings: string[];
+  /** PATH lookups, so the client can say "install/sign in" precisely. */
+  codexInstalled: boolean;
+  opencodeInstalled: boolean;
+}
+
+export interface ImportLocalProviderCredentialRequest {
+  context:
+    | RequestContext
+    | undefined;
+  /** Source id from discovery. */
+  source: string;
+  /**
+   * Destination minted by the control plane:
+   * secret://provider-account/<uuid-v7>. Requires a Secret-class capability
+   * scoped to exactly this URI, as SecretService.Store does.
+   */
+  capabilityUri: string;
+}
+
+export interface ImportLocalProviderCredentialResponse {
+  capabilityUri: string;
+  stored: boolean;
+  credential: LocalProviderCredentialMessage | undefined;
+}
+
 export interface EgressRequest {
   context:
     | RequestContext
@@ -7369,6 +7434,404 @@ export const SecretMutationResponse: MessageFns<SecretMutationResponse> = {
   },
 };
 
+function createBaseLocalProviderCredentialMessage(): LocalProviderCredentialMessage {
+  return { source: "", authKind: "", fingerprint: "", metadataJson: "", expiresAtUnix: 0, store: "" };
+}
+
+export const LocalProviderCredentialMessage: MessageFns<LocalProviderCredentialMessage> = {
+  encode(message: LocalProviderCredentialMessage, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.source !== "") {
+      writer.uint32(10).string(message.source);
+    }
+    if (message.authKind !== "") {
+      writer.uint32(18).string(message.authKind);
+    }
+    if (message.fingerprint !== "") {
+      writer.uint32(26).string(message.fingerprint);
+    }
+    if (message.metadataJson !== "") {
+      writer.uint32(34).string(message.metadataJson);
+    }
+    if (message.expiresAtUnix !== 0) {
+      writer.uint32(40).uint64(message.expiresAtUnix);
+    }
+    if (message.store !== "") {
+      writer.uint32(50).string(message.store);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): LocalProviderCredentialMessage {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseLocalProviderCredentialMessage();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.source = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.authKind = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.fingerprint = reader.string();
+          continue;
+        }
+        case 4: {
+          if (tag !== 34) {
+            break;
+          }
+
+          message.metadataJson = reader.string();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.expiresAtUnix = longToNumber(reader.uint64());
+          continue;
+        }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.store = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<LocalProviderCredentialMessage>, I>>(base?: I): LocalProviderCredentialMessage {
+    return LocalProviderCredentialMessage.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<LocalProviderCredentialMessage>, I>>(
+    object: I,
+  ): LocalProviderCredentialMessage {
+    const message = createBaseLocalProviderCredentialMessage();
+    message.source = object.source ?? "";
+    message.authKind = object.authKind ?? "";
+    message.fingerprint = object.fingerprint ?? "";
+    message.metadataJson = object.metadataJson ?? "";
+    message.expiresAtUnix = object.expiresAtUnix ?? 0;
+    message.store = object.store ?? "";
+    return message;
+  },
+};
+
+function createBaseDiscoverLocalProviderCredentialsRequest(): DiscoverLocalProviderCredentialsRequest {
+  return { context: undefined };
+}
+
+export const DiscoverLocalProviderCredentialsRequest: MessageFns<DiscoverLocalProviderCredentialsRequest> = {
+  encode(message: DiscoverLocalProviderCredentialsRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DiscoverLocalProviderCredentialsRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDiscoverLocalProviderCredentialsRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DiscoverLocalProviderCredentialsRequest>, I>>(
+    base?: I,
+  ): DiscoverLocalProviderCredentialsRequest {
+    return DiscoverLocalProviderCredentialsRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DiscoverLocalProviderCredentialsRequest>, I>>(
+    object: I,
+  ): DiscoverLocalProviderCredentialsRequest {
+    const message = createBaseDiscoverLocalProviderCredentialsRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseDiscoverLocalProviderCredentialsResponse(): DiscoverLocalProviderCredentialsResponse {
+  return { credentials: [], warnings: [], codexInstalled: false, opencodeInstalled: false };
+}
+
+export const DiscoverLocalProviderCredentialsResponse: MessageFns<DiscoverLocalProviderCredentialsResponse> = {
+  encode(message: DiscoverLocalProviderCredentialsResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.credentials) {
+      LocalProviderCredentialMessage.encode(v!, writer.uint32(10).fork()).join();
+    }
+    for (const v of message.warnings) {
+      writer.uint32(18).string(v!);
+    }
+    if (message.codexInstalled !== false) {
+      writer.uint32(24).bool(message.codexInstalled);
+    }
+    if (message.opencodeInstalled !== false) {
+      writer.uint32(32).bool(message.opencodeInstalled);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DiscoverLocalProviderCredentialsResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDiscoverLocalProviderCredentialsResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.credentials.push(LocalProviderCredentialMessage.decode(reader, reader.uint32()));
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.warnings.push(reader.string());
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.codexInstalled = reader.bool();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.opencodeInstalled = reader.bool();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<DiscoverLocalProviderCredentialsResponse>, I>>(
+    base?: I,
+  ): DiscoverLocalProviderCredentialsResponse {
+    return DiscoverLocalProviderCredentialsResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DiscoverLocalProviderCredentialsResponse>, I>>(
+    object: I,
+  ): DiscoverLocalProviderCredentialsResponse {
+    const message = createBaseDiscoverLocalProviderCredentialsResponse();
+    message.credentials = object.credentials?.map((e) => LocalProviderCredentialMessage.fromPartial(e)) || [];
+    message.warnings = object.warnings?.map((e) => e) || [];
+    message.codexInstalled = object.codexInstalled ?? false;
+    message.opencodeInstalled = object.opencodeInstalled ?? false;
+    return message;
+  },
+};
+
+function createBaseImportLocalProviderCredentialRequest(): ImportLocalProviderCredentialRequest {
+  return { context: undefined, source: "", capabilityUri: "" };
+}
+
+export const ImportLocalProviderCredentialRequest: MessageFns<ImportLocalProviderCredentialRequest> = {
+  encode(message: ImportLocalProviderCredentialRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.context !== undefined) {
+      RequestContext.encode(message.context, writer.uint32(10).fork()).join();
+    }
+    if (message.source !== "") {
+      writer.uint32(18).string(message.source);
+    }
+    if (message.capabilityUri !== "") {
+      writer.uint32(26).string(message.capabilityUri);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ImportLocalProviderCredentialRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseImportLocalProviderCredentialRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.context = RequestContext.decode(reader, reader.uint32());
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.source = reader.string();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.capabilityUri = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ImportLocalProviderCredentialRequest>, I>>(
+    base?: I,
+  ): ImportLocalProviderCredentialRequest {
+    return ImportLocalProviderCredentialRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ImportLocalProviderCredentialRequest>, I>>(
+    object: I,
+  ): ImportLocalProviderCredentialRequest {
+    const message = createBaseImportLocalProviderCredentialRequest();
+    message.context = (object.context !== undefined && object.context !== null)
+      ? RequestContext.fromPartial(object.context)
+      : undefined;
+    message.source = object.source ?? "";
+    message.capabilityUri = object.capabilityUri ?? "";
+    return message;
+  },
+};
+
+function createBaseImportLocalProviderCredentialResponse(): ImportLocalProviderCredentialResponse {
+  return { capabilityUri: "", stored: false, credential: undefined };
+}
+
+export const ImportLocalProviderCredentialResponse: MessageFns<ImportLocalProviderCredentialResponse> = {
+  encode(message: ImportLocalProviderCredentialResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.capabilityUri !== "") {
+      writer.uint32(10).string(message.capabilityUri);
+    }
+    if (message.stored !== false) {
+      writer.uint32(16).bool(message.stored);
+    }
+    if (message.credential !== undefined) {
+      LocalProviderCredentialMessage.encode(message.credential, writer.uint32(26).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ImportLocalProviderCredentialResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseImportLocalProviderCredentialResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.capabilityUri = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.stored = reader.bool();
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.credential = LocalProviderCredentialMessage.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  create<I extends Exact<DeepPartial<ImportLocalProviderCredentialResponse>, I>>(
+    base?: I,
+  ): ImportLocalProviderCredentialResponse {
+    return ImportLocalProviderCredentialResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ImportLocalProviderCredentialResponse>, I>>(
+    object: I,
+  ): ImportLocalProviderCredentialResponse {
+    const message = createBaseImportLocalProviderCredentialResponse();
+    message.capabilityUri = object.capabilityUri ?? "";
+    message.stored = object.stored ?? false;
+    message.credential = (object.credential !== undefined && object.credential !== null)
+      ? LocalProviderCredentialMessage.fromPartial(object.credential)
+      : undefined;
+    return message;
+  },
+};
+
 function createBaseEgressRequest(): EgressRequest {
   return { context: undefined, destination: "", method: "" };
 }
@@ -10205,6 +10668,34 @@ export class SecretServiceClientImpl implements SecretService {
     const data = DeleteSecretRequest.encode(request).finish();
     const promise = this.rpc.request(this.service, "Delete", data);
     return promise.then((data) => SecretMutationResponse.decode(new BinaryReader(data)));
+  }
+}
+
+export interface ProviderAccountService {
+  DiscoverLocal(request: DiscoverLocalProviderCredentialsRequest): Promise<DiscoverLocalProviderCredentialsResponse>;
+  ImportLocal(request: ImportLocalProviderCredentialRequest): Promise<ImportLocalProviderCredentialResponse>;
+}
+
+export const ProviderAccountServiceServiceName = "terminus.kernel.v1.ProviderAccountService";
+export class ProviderAccountServiceClientImpl implements ProviderAccountService {
+  private readonly rpc: Rpc;
+  private readonly service: string;
+  constructor(rpc: Rpc, opts?: { service?: string }) {
+    this.service = opts?.service || ProviderAccountServiceServiceName;
+    this.rpc = rpc;
+    this.DiscoverLocal = this.DiscoverLocal.bind(this);
+    this.ImportLocal = this.ImportLocal.bind(this);
+  }
+  DiscoverLocal(request: DiscoverLocalProviderCredentialsRequest): Promise<DiscoverLocalProviderCredentialsResponse> {
+    const data = DiscoverLocalProviderCredentialsRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "DiscoverLocal", data);
+    return promise.then((data) => DiscoverLocalProviderCredentialsResponse.decode(new BinaryReader(data)));
+  }
+
+  ImportLocal(request: ImportLocalProviderCredentialRequest): Promise<ImportLocalProviderCredentialResponse> {
+    const data = ImportLocalProviderCredentialRequest.encode(request).finish();
+    const promise = this.rpc.request(this.service, "ImportLocal", data);
+    return promise.then((data) => ImportLocalProviderCredentialResponse.decode(new BinaryReader(data)));
   }
 }
 

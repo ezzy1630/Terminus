@@ -71,6 +71,10 @@ pub struct KernelHandle {
     pub sandboxes: SandboxService,
     pub policies: PolicyService,
     pub secrets: SecretService,
+    /// Connected provider accounts: credentials that already live on this
+    /// machine (the OpenCode auth store, the Codex CLI ChatGPT login) read
+    /// into the `provider-account` keyring namespace.
+    pub provider_accounts: crate::provider_accounts::ProviderAccountService,
     /// L7 connector broker service (ADR-0035). Credentialed external
     /// operations execute here; raw credentials never cross the API.
     pub connectors: ConnectorService,
@@ -269,6 +273,10 @@ impl KernelHandle {
             sandboxes: SandboxService::new(sandbox_manager),
             policies: PolicyService::new(policy_engine),
             secrets: SecretService::new(Arc::clone(&secret_broker), Arc::clone(&token_issuer)),
+            provider_accounts: crate::provider_accounts::ProviderAccountService::new(
+                Arc::clone(&secret_broker),
+                Arc::clone(&token_issuer),
+            ),
             connectors: {
                 // ADR-0035: grants are signed with an independent ephemeral
                 // key (never the capability-token key) so compromise of one
@@ -315,6 +323,18 @@ impl KernelHandle {
             token_issuer,
             approvals,
         })
+    }
+
+    /// Point local credential discovery at explicit store roots. Tests use
+    /// temp directories instead of mutating `HOME`/`XDG_DATA_HOME`/`CODEX_HOME`
+    /// for the whole process.
+    #[must_use]
+    pub fn with_local_credential_roots(
+        mut self,
+        roots: crate::provider_accounts::LocalCredentialRoots,
+    ) -> Self {
+        self.provider_accounts = self.provider_accounts.with_roots(roots);
+        self
     }
 
     pub fn token_revoker(&self) -> Arc<TokenRevoker> {
@@ -607,8 +627,9 @@ impl KernelInfoService {
             "services": [
                 "KernelInfoService", "WorkspaceService", "FileService", "PatchService",
                 "ProcessService", "JobService", "SandboxService", "PolicyService",
-                "SecretService", "NetworkService", "CodeIntelligenceService",
-                "ExtensionRuntimeService", "ArtifactIngestService",
+                "SecretService", "ProviderAccountService", "NetworkService",
+                "CodeIntelligenceService", "ExtensionRuntimeService",
+                "ArtifactIngestService",
             ],
         })
     }

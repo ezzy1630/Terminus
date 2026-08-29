@@ -14,6 +14,7 @@ mod approvals;
 pub mod connectors;
 mod error;
 mod ledger;
+pub mod provider_accounts;
 mod services;
 
 pub use approvals::{
@@ -27,6 +28,11 @@ pub use connectors::{
 pub use error::KernelAssemblyError;
 pub use ledger::{
     KernelAuthorizationInstance, KernelEffectLedger, KernelEffectRecord, KernelEffectState,
+};
+pub use provider_accounts::{
+    ImportedLocalCredential, LocalAuthKind, LocalCredentialDiscovery, LocalCredentialMetadata,
+    LocalCredentialRoots, LocalCredentialStore, LocalProviderCredential, ProviderAccountService,
+    DISCOVER_LOCAL_SCOPE,
 };
 pub use services::{
     apply_default_deadline, remaining_budget, resolve_deadline_unix_ms, validate_capability_for_op,

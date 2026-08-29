@@ -23,6 +23,7 @@ import {
   PatchServiceClientImpl,
   PolicyServiceClientImpl,
   ProcessServiceClientImpl,
+  ProviderAccountServiceClientImpl,
   SandboxServiceClientImpl,
   SecretServiceClientImpl,
   WorkspaceServiceClientImpl,
@@ -125,6 +126,7 @@ export interface KernelUdsClients {
   sandbox: SandboxServiceClientImpl;
   policies: PolicyServiceClientImpl;
   secrets: SecretServiceClientImpl;
+  providerAccounts: ProviderAccountServiceClientImpl;
   network: NetworkServiceClientImpl;
   connectors: ConnectorServiceClientImpl;
   codeIntel: CodeIntelligenceServiceClientImpl;
@@ -148,6 +150,7 @@ export function createKernelUdsClients(
     sandbox: new SandboxServiceClientImpl(rpc),
     policies: new PolicyServiceClientImpl(rpc),
     secrets: new SecretServiceClientImpl(rpc),
+    providerAccounts: new ProviderAccountServiceClientImpl(rpc),
     network: new NetworkServiceClientImpl(rpc),
     connectors: new ConnectorServiceClientImpl(rpc),
     codeIntel: new CodeIntelligenceServiceClientImpl(rpc),

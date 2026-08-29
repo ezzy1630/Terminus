@@ -971,6 +971,85 @@ pub struct SecretMutationResponse {
     pub stored: bool,
 }
 // =============================================================================
+// Provider account service — credentials already on this machine
+// =============================================================================
+//
+// Terminus's own loop drives every model; other local tools are only a place
+// credentials already live. The kernel reads those stores and moves a
+// credential straight into the OS keyring under
+// `secret://provider-account/<uuid-v7>`. Secret bytes never cross this
+// boundary: discovery returns identity and a non-reversible fingerprint, and
+// import returns the capability URI it stored under.
+
+/// A credential found in a local tool's store. Never carries secret bytes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalProviderCredentialMessage {
+    /// Stable source id: "opencode:<providerID>" (an OpenCode auth-store entry)
+    /// or "codex-chatgpt" (a ChatGPT login held by the Codex CLI).
+    #[prost(string, tag="1")]
+    pub source: ::prost::alloc::string::String,
+    /// "api" | "oauth" | "wellknown" | "chatgpt".
+    #[prost(string, tag="2")]
+    pub auth_kind: ::prost::alloc::string::String,
+    /// First 12 hex characters of SHA-256 over the secret bytes, so a rotated
+    /// key is noticed without the key ever being seen.
+    #[prost(string, tag="3")]
+    pub fingerprint: ::prost::alloc::string::String,
+    /// Non-secret metadata as canonical JSON. Keys: "account_id", "plan_type",
+    /// "email" (chatgpt), and "provider_metadata" (the store's own metadata
+    /// object, e.g. a Cloudflare account id). Absent keys are omitted.
+    #[prost(string, tag="4")]
+    pub metadata_json: ::prost::alloc::string::String,
+    /// Unix seconds at which the credential expires; 0 when it does not.
+    #[prost(uint64, tag="5")]
+    pub expires_at_unix: u64,
+    /// Which store it was read from: "opencode-auth-store" | "codex-auth-store".
+    /// A label, never a filesystem path.
+    #[prost(string, tag="6")]
+    pub store: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DiscoverLocalProviderCredentialsRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiscoverLocalProviderCredentialsResponse {
+    #[prost(message, repeated, tag="1")]
+    pub credentials: ::prost::alloc::vec::Vec<LocalProviderCredentialMessage>,
+    /// Stores that exist but could not be used, as "<store>: <reason>"
+    /// (unreadable, malformed, too permissive). Surfaced, never silently dropped.
+    #[prost(string, repeated, tag="2")]
+    pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// PATH lookups, so the client can say "install/sign in" precisely.
+    #[prost(bool, tag="3")]
+    pub codex_installed: bool,
+    #[prost(bool, tag="4")]
+    pub opencode_installed: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ImportLocalProviderCredentialRequest {
+    #[prost(message, optional, tag="1")]
+    pub context: ::core::option::Option<RequestContext>,
+    /// Source id from discovery.
+    #[prost(string, tag="2")]
+    pub source: ::prost::alloc::string::String,
+    /// Destination minted by the control plane:
+    /// secret://provider-account/<uuid-v7>. Requires a Secret-class capability
+    /// scoped to exactly this URI, as SecretService.Store does.
+    #[prost(string, tag="3")]
+    pub capability_uri: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ImportLocalProviderCredentialResponse {
+    #[prost(string, tag="1")]
+    pub capability_uri: ::prost::alloc::string::String,
+    #[prost(bool, tag="2")]
+    pub stored: bool,
+    #[prost(message, optional, tag="3")]
+    pub credential: ::core::option::Option<LocalProviderCredentialMessage>,
+}
+// =============================================================================
 // Network egress service (SPEC §13.3, §31.1, ADR-0015)
 // =============================================================================
 
