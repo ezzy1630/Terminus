@@ -2478,27 +2478,19 @@ describe("Sidebar — remembered shape", () => {
     )).toEqual(["session-1"]);
   });
 
-  test("opens grouped by recent, and reopens by project when that is where it was left", () => {
-    // Grouping replaced a two-tab mode switch, and it reads the same stored
-    // value — so an operator who chose the tree yesterday still has it.
+  test("opens on projects and exposes activity as a temporary sidebar projection", async () => {
+    const user = userEvent.setup();
     render(<Sidebar />);
-    expect(screen.getByRole("button", { name: "Group tasks" }))
-      .toHaveAttribute("data-tooltip", "Grouped by recent");
-    // The tree's own section header, absent while the list is grouped by day.
-    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
-
-    cleanup();
-    openOnProjectsTree();
-    render(<Sidebar />);
-
-    expect(screen.getByRole("button", { name: "Group tasks" }))
-      .toHaveAttribute("data-tooltip", "Grouped by project");
     expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Open activity" }));
+    expect(screen.getByRole("button", { name: "Close activity" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
   });
 
   // The question is what the *list* holds, not what the workspace holds. Six
   // open projects buy the label nothing when every pin is from one of them,
-  // and in a 256px rail it costs the titles about 40% of their width.
+  // and in a compact rail it costs the titles about 40% of their width.
   test("labels pinned rows only once the pinned list spans two projects", () => {
     openOnProjectsTree();
     const race = seedTask("task-race", "session-2", "Fix the auth race");

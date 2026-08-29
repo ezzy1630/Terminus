@@ -61,6 +61,8 @@ export interface TaskRowProps {
   title: string;
   /** Lifecycle. Rows that are not tasks (a bare project) omit it. */
   status?: TaskLifecycle;
+  /** Activity uses a title plus project line; project trees stay one-line. */
+  layout?: "inline" | "stacked";
   selected: boolean;
   emphasis?: TaskRowEmphasis;
   /**
@@ -141,6 +143,7 @@ function TaskRowImpl({
   taskId,
   title,
   status,
+  layout = "inline",
   selected,
   emphasis = "normal",
   needsYou = false,
@@ -167,6 +170,7 @@ function TaskRowImpl({
   // which is what lets the eye read the whole column as one list.
   const shelved = emphasis !== "normal";
   const loud = emphasis === "queue";
+  const stacked = layout === "stacked";
 
   const trailingAction: ReactNode = onTogglePin ? (
     <Button
@@ -215,7 +219,7 @@ function TaskRowImpl({
       {...(taskId ? { "data-task-row": taskId } : {})}
       className={cn(
         "sidebar-task-row group relative flex cursor-default items-center rounded-md transition-colors",
-        shelved ? "gap-1" : "gap-1.5",
+        stacked ? "gap-2" : shelved ? "gap-1" : "gap-1.5",
         selected ? "bg-selected text-primary" : "text-secondary hover:bg-hover hover:text-primary",
         loud && !selected && "text-primary",
       )}
@@ -224,17 +228,19 @@ function TaskRowImpl({
         // the density: the difference has to survive both scales, and reusing
         // the nav row's height made these rows *shorter* than task rows in the
         // spacious one.
-        height: shelved ? "calc(var(--row-height) + 2px)" : "var(--row-height)",
+        height: stacked ? 58 : shelved ? "calc(var(--row-height) + 2px)" : "var(--row-height)",
         // Nested tasks hang from the same text column as their project row.
-        paddingLeft: depth > 0 ? 20 : 6,
-        paddingRight: 6,
+        paddingLeft: stacked ? 10 : depth > 0 ? 20 : 6,
+        paddingRight: stacked ? 10 : 6,
       }}
     >
       {/* The unread gutter. Reserved on every row, in every list, so reading
           one thing does not shift the thirty titles underneath it sideways. */}
-      <span className="flex h-1.5 w-1.5 shrink-0 items-center justify-center">
-        {unread ? <UnreadDot /> : null}
-      </span>
+      {stacked ? null : (
+        <span className="flex h-1.5 w-1.5 shrink-0 items-center justify-center">
+          {unread ? <UnreadDot /> : null}
+        </span>
+      )}
       <Button
         ref={primaryButtonRef}
         variant="bare"
@@ -255,7 +261,12 @@ function TaskRowImpl({
           selected ? "selected" : null,
           pinned ? "pinned" : null,
         ].filter(Boolean).join(", ")}
-        className="flex min-w-0 flex-1 items-baseline gap-1.5 text-left leading-none"
+        className={cn(
+          "min-w-0 flex-1 text-left",
+          stacked
+            ? "flex h-full flex-col items-start justify-center gap-0.5 leading-tight"
+            : "flex items-baseline gap-1.5 leading-none",
+        )}
       >
         <span
           className={cn(
@@ -265,7 +276,8 @@ function TaskRowImpl({
             // a long title and a long project name both came out truncated.
             // With basis auto the two compete honestly, and the shrink factor
             // below decides who gives.
-            "min-w-0 flex-auto truncate ui-body",
+            "min-w-0 truncate ui-body",
+            stacked ? "w-full flex-none text-primary" : "flex-auto",
             loud && "font-medium",
           )}
         >
@@ -281,8 +293,11 @@ function TaskRowImpl({
             loses a character. */}
         {meta ? (
           <span
-            className="ui-meta min-w-0 max-w-[45%] truncate"
-            style={{ flexShrink: 500 }}
+            className={cn(
+              "ui-meta min-w-0 truncate",
+              stacked ? "w-full flex-none" : "max-w-[45%]",
+            )}
+            {...(!stacked ? { style: { flexShrink: 500 } } : {})}
           >
             {meta}
           </span>

@@ -53,12 +53,12 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Bell,
   ChevronDown,
   ChevronRight,
   Columns3,
   Folder,
   FolderOpen,
-  ListFilter,
   Plus,
   Search,
   Settings,
@@ -75,11 +75,8 @@ import { useThemeStore } from "../hooks/use-theme";
 import {
   readCollapsedProjects,
   readExpandedProjects,
-  readSidebarGrouping,
   writeCollapsedProjects,
   writeExpandedProjects,
-  writeSidebarGrouping,
-  type SidebarGrouping,
 } from "../lib/sidebar-prefs";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
@@ -105,6 +102,9 @@ export type SidebarDestination =
   | "board"
   | "agents"
   | "task_details";
+
+/** Opens the Activity projection without creating or selecting work. */
+export const SHOW_ACTIVITY_EVENT = "terminus:show-activity";
 
 /**
  * How many loaded tasks in a project want a human, for the rollup dot.
@@ -184,25 +184,30 @@ function SidebarImpl({
   const refreshTask = useTerminusStore((s) => s.refreshTask);
   const refreshVisibleSessionTasks = useTerminusStore((s) => s.refreshVisibleSessionTasks);
 
-  const currentSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const pinnedTasks = usePinnedTasks();
   const projectNameById = useMemo(() => {
     const names = new Map<string, string>();
     for (const session of sessions) names.set(session.id, session.title);
     return names;
   }, [sessions]);
-  // One body, two ways of filing it. "Recent" answers "what happened"; "By
-  // project" answers "what is in this repository". Both show the same rows.
-  const [grouping, setGrouping] = useState<SidebarGrouping>(readSidebarGrouping);
+  // Activity is a projection over the same tasks, not a second navigation
+  // column. The bell swaps the body in place between the ordinary project
+  // hierarchy and the attention-first timeline, matching the current Codex
+  // desktop shell. It deliberately does not create or select a task.
+  const [activityVisible, setActivityVisible] = useState(false);
   const [collapsedSessions, setCollapsedSessions] = useState<Set<string>>(readCollapsedProjects);
   const [expandedTaskLists, setExpandedTaskLists] = useState<Set<string>>(readExpandedProjects);
 
   // Written on change rather than at every toggle site: the collapsed set is
   // moved from four places, and a persistence call at each is four chances to
   // add a fifth that forgets.
-  useEffect(() => { writeSidebarGrouping(grouping); }, [grouping]);
   useEffect(() => { writeCollapsedProjects(collapsedSessions); }, [collapsedSessions]);
   useEffect(() => { writeExpandedProjects(expandedTaskLists); }, [expandedTaskLists]);
+  useEffect(() => {
+    const showActivity = (): void => setActivityVisible(true);
+    window.addEventListener(SHOW_ACTIVITY_EVENT, showActivity);
+    return () => window.removeEventListener(SHOW_ACTIVITY_EVENT, showActivity);
+  }, []);
 
   // A task can be opened from anywhere — the palette, a notification, the
   // queue — and landing on a rail whose only sign of the open task is a folded
@@ -231,7 +236,9 @@ function SidebarImpl({
   // an inline arrow at the call site and changes on every parent render, so it
   // is read through a ref rather than closed over.
   const onNavigateRef = useRef(onNavigate);
-  onNavigateRef.current = onNavigate;
+  useEffect(() => {
+    onNavigateRef.current = onNavigate;
+  }, [onNavigate]);
 
   const projectRows = useMemo<Array<{ session: Session; tasks: Task[] }>>(
     () => sessions.map((session) => ({ session, tasks: tasksBySession[session.id] ?? [] })),
@@ -303,36 +310,19 @@ function SidebarImpl({
     return rows;
   }, [seenAtByTask, tasksBySession]);
 
-  const groupingMenuItems = useMemo<MenuItem[]>(() => [
+  const activityMenuItems = useMemo<MenuItem[]>(() => [
     {
-      id: "group.recent",
-      label: "Recent",
-      detail: "By the day it happened",
-      selected: grouping === "recent",
-      onSelect: () => setGrouping("recent"),
-    },
-    {
-      id: "group.project",
-      label: "By project",
-      detail: "Nested under each repository",
-      selected: grouping === "project",
-      onSelect: () => setGrouping("project"),
-    },
-    {
-      // A list-level action, so it lives with the list-level control rather
-      // than on a section heading that happens to be near it.
-      id: "group.mark-all-read",
+      id: "activity.mark-all-read",
       label: "Mark all as read",
-      separatorBefore: true,
       disabled: unreadSettled.length === 0,
       onSelect: () => markManyRead(unreadSettled),
     },
     {
-      id: "group.refresh",
-      label: "Refresh tasks",
+      id: "activity.refresh",
+      label: "Refresh activity",
       onSelect: () => { void refreshVisibleSessionTasks(); },
     },
-  ], [grouping, markManyRead, refreshVisibleSessionTasks, unreadSettled]);
+  ], [markManyRead, refreshVisibleSessionTasks, unreadSettled]);
 
   return (
     <div className="flex h-full flex-col">
@@ -346,18 +336,11 @@ function SidebarImpl({
               type="button"
               variant="bare"
               aria-label="Switch project"
-              title={currentSession?.title ?? "Terminus"}
+              data-tooltip="Switch project"
               className="flex h-7 min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 text-left hover:bg-hover"
             >
-              {/* The size is an inline style, not `text-title`: tailwind-merge
-                  reads any `text-*` whose suffix is not a known size as a
-                  colour, so `text-title` and `text-primary` looked like two
-                  colours and the size was silently dropped from the class. */}
-              <span
-                className="min-w-0 truncate font-semibold text-primary"
-                style={{ fontSize: "var(--font-size-title)" }}
-              >
-                {currentSession?.title ?? "Terminus"}
+              <span className="ui-page-title min-w-0 truncate text-primary">
+                Terminus
               </span>
               <ChevronDown size={12} strokeWidth={2} className="shrink-0 text-tertiary" aria-hidden />
             </Button>
@@ -371,18 +354,16 @@ function SidebarImpl({
           data-tooltip="Search tasks  ⌘K"
           className="h-7 w-7 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
         />
-        <Menu
-          label="Group tasks"
-          align="end"
-          items={groupingMenuItems}
-          trigger={(
-            <IconButton
-              label="Group tasks"
-              icon={<ListFilter size={14} strokeWidth={1.7} aria-hidden />}
-              size="sm"
-              data-tooltip={grouping === "recent" ? "Grouped by recent" : "Grouped by project"}
-              className="h-7 w-7 shrink-0 rounded-md text-tertiary hover:bg-hover hover:text-primary"
-            />
+        <IconButton
+          label={activityVisible ? "Close activity" : "Open activity"}
+          icon={<Bell size={14} strokeWidth={1.7} aria-hidden />}
+          size="sm"
+          aria-pressed={activityVisible}
+          onClick={() => setActivityVisible((visible) => !visible)}
+          data-tooltip={activityVisible ? "Close activity" : "Activity"}
+          className={cn(
+            "h-7 w-7 shrink-0 rounded-md hover:bg-hover hover:text-primary",
+            activityVisible ? "bg-selected text-accent" : "text-tertiary",
           )}
         />
       </div>
@@ -407,15 +388,22 @@ function SidebarImpl({
 
       {/* ── The body ──────────────────────────────────────────────────────── */}
       <div className="no-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2 pt-1">
-        {/* Above the body in both groupings, because "what wants me", "what is
-            running" and "what finished" are the same three questions however
-            the rows underneath are filed. Inside the scroll root, so a bad
-            afternoon with eight blocked tasks cannot push the list out of the
-            window. */}
-        <TaskQueue selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
-
-        {visiblePinnedTasks.length > 0 || unresolvedPinnedTaskIds.length > 0 || pinPersistenceError ? (
-          <SidebarSection label="Pinned">
+        {/* Activity and projects occupy the same column. Activity stays inside
+            this scroll root so a busy day cannot displace the shell itself. */}
+        {activityVisible ? (
+          <>
+            <TaskQueue
+              presentation="priority"
+              selectedTaskId={selectedTaskId}
+              onSelectTask={onSelectTask}
+              menuItems={activityMenuItems}
+            />
+            <RecentList selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} stacked />
+          </>
+        ) : (
+          <>
+            {visiblePinnedTasks.length > 0 || unresolvedPinnedTaskIds.length > 0 || pinPersistenceError ? (
+              <SidebarSection label="Pinned">
             {visiblePinnedTasks.map((task) => (
               <SidebarTaskRow
                 key={`pin-${task.id}`}
@@ -462,15 +450,12 @@ function SidebarImpl({
                 {pinPersistenceError}
               </span>
             ) : null}
-          </SidebarSection>
-        ) : null}
+              </SidebarSection>
+            ) : null}
 
-        {grouping === "recent" && sessions.length > 0 ? (
-          <RecentList selectedTaskId={selectedTaskId} onSelectTask={onSelectTask} />
-        ) : (
-        <SidebarSection
-          label="Projects"
-          action={(
+            <SidebarSection
+              label="Projects"
+              action={(
             /* Revealed on hover, except when there are no projects at all —
                hiding "add a project" precisely when the list is empty is
                exactly backwards, which is how it used to behave. */
@@ -495,8 +480,8 @@ function SidebarImpl({
                 )}
               />
             </span>
-          )}
-        >
+              )}
+            >
           {(loadingSessions || sessionsFreshness.status === "loading") && sessions.length === 0 ? (
             <div className="grid gap-2 px-2 py-2" role="status" aria-label="Loading projects">
               <Skeleton className="h-5 w-full" />
@@ -706,7 +691,8 @@ function SidebarImpl({
               ) : null}
             </div>
           ) : null}
-        </SidebarSection>
+            </SidebarSection>
+          </>
         )}
       </div>
 
@@ -961,6 +947,7 @@ const RecentRow = memo(function RecentRow({
   unread,
   updatedAt,
   selected,
+  stacked,
   onSelect,
   onMarkRead,
   onMarkUnread,
@@ -971,6 +958,7 @@ const RecentRow = memo(function RecentRow({
   unread: boolean;
   updatedAt: string;
   selected: boolean;
+  stacked: boolean;
   onSelect: (taskId: string) => void;
   onMarkRead: (taskId: string, updatedAt: string) => void;
   onMarkUnread: (taskId: string) => void;
@@ -984,6 +972,7 @@ const RecentRow = memo(function RecentRow({
       title={title}
       selected={selected}
       unread={unread}
+      layout={stacked ? "stacked" : "inline"}
       depth={0}
       {...(projectName ? { meta: projectName } : {})}
       onClick={handleClick}
@@ -996,9 +985,11 @@ const RecentRow = memo(function RecentRow({
 function RecentList({
   selectedTaskId,
   onSelectTask,
+  stacked = false,
 }: {
   selectedTaskId: string | null;
   onSelectTask: (taskId: string) => void;
+  stacked?: boolean;
 }): JSX.Element {
   const sessions = useTerminusStore((s) => s.sessions);
   const tasksBySession = useTerminusStore((s) => s.tasksBySession);
@@ -1041,7 +1032,7 @@ function RecentList({
       {groups.map((group) => {
         // Hoisted off the row map: computing it per row is the same answer n
         // times for a list whose whole point is that it can be long.
-        const showProjectMeta = spansMultipleProjects(group.tasks.map((task) => task.session_id));
+        const showProjectMeta = stacked || spansMultipleProjects(group.tasks.map((task) => task.session_id));
         return (
           <SidebarSection key={group.id} label={group.label}>
             {group.tasks.map((task) => {
@@ -1058,6 +1049,7 @@ function RecentList({
                   unread={taskIsUnread(updatedAt, seenAtByTask[task.id])}
                   updatedAt={updatedAt}
                   selected={task.id === selectedTaskId}
+                  stacked={stacked}
                   onSelect={onSelectTask}
                   onMarkRead={markRead}
                   onMarkUnread={markUnread}

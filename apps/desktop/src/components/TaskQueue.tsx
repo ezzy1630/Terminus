@@ -77,6 +77,7 @@ interface QueueRow {
  * a summary; the count in the header is always the true total.
  */
 const PREVIEW_ROWS = 5;
+const PRIORITY_PREVIEW_ROWS = 8;
 
 const SHELVES: ReadonlyArray<{
   readonly id: Exclude<TaskShelf, "settled">;
@@ -90,9 +91,18 @@ const SHELVES: ReadonlyArray<{
 interface TaskQueueProps {
   selectedTaskId: string | null;
   onSelectTask: (taskId: string) => void;
+  /** Activity mode merges the two urgent shelves into Codex's one Priority list. */
+  presentation?: "shelves" | "priority";
+  /** List-level actions owned by the Activity header. */
+  menuItems?: readonly MenuItem[];
 }
 
-function TaskQueueImpl({ selectedTaskId, onSelectTask }: TaskQueueProps): JSX.Element | null {
+function TaskQueueImpl({
+  selectedTaskId,
+  onSelectTask,
+  presentation = "shelves",
+  menuItems = [],
+}: TaskQueueProps): JSX.Element | null {
   const sessions = useTerminusStore((s) => s.sessions);
   const tasksBySession = useTerminusStore((s) => s.tasksBySession);
   const runActivityByTask = useTerminusStore((s) => s.runActivityByTask);
@@ -160,6 +170,11 @@ function TaskQueueImpl({ selectedTaskId, onSelectTask }: TaskQueueProps): JSX.El
    */
   const visibleRows = useMemo(() => {
     const rows: Array<{ row: QueueRow; shelf: Exclude<TaskShelf, "settled"> }> = [];
+    if (presentation === "priority") {
+      for (const row of shelves.needs_you) rows.push({ row, shelf: "needs_you" });
+      for (const row of shelves.working) rows.push({ row, shelf: "working" });
+      return expanded.has("priority") ? rows : rows.slice(0, PRIORITY_PREVIEW_ROWS);
+    }
     for (const shelf of SHELVES) {
       if (collapsed.has(shelf.id)) continue;
       const all = shelves[shelf.id];
@@ -167,7 +182,7 @@ function TaskQueueImpl({ selectedTaskId, onSelectTask }: TaskQueueProps): JSX.El
       for (const row of shown) rows.push({ row, shelf: shelf.id });
     }
     return rows;
-  }, [collapsed, expanded, shelves]);
+  }, [collapsed, expanded, presentation, shelves]);
 
   // Roving focus. One tab stop for the whole queue; arrows move within it, so
   // Tab does not have to walk thirty rows to reach the body underneath.
@@ -242,6 +257,61 @@ function TaskQueueImpl({ selectedTaskId, onSelectTask }: TaskQueueProps): JSX.El
   // chrome. A permanent "Needs you 0" is an alarm that is always on, which is
   // an alarm nobody hears.
   if (shelves.needs_you.length + shelves.working.length === 0) return null;
+
+  if (presentation === "priority") {
+    const priorityCount = shelves.needs_you.length + shelves.working.length;
+    const hiddenPriorityCount = priorityCount - visibleRows.length;
+    return (
+      <div className="group/priority flex flex-col" aria-label="Priority tasks">
+        <div className="flex h-8 items-center px-2">
+          <span className="sidebar-section-label min-w-0 flex-1 truncate">Priority</span>
+          {menuItems.length > 0 ? (
+            <Menu
+              label="Activity actions"
+              align="end"
+              items={[...menuItems]}
+              trigger={(
+                <IconButton
+                  label="Activity actions"
+                  icon={<Ellipsis size={14} strokeWidth={1.7} aria-hidden />}
+                  size="sm"
+                  className="h-6 w-6 rounded-md text-tertiary hover:bg-hover hover:text-primary"
+                />
+              )}
+            />
+          ) : null}
+        </div>
+        {visibleRows.map(({ row, shelf }) => (
+          <QueueRowItem
+            key={`priority-${row.id}`}
+            row={row}
+            emphasis={shelf === "needs_you" ? "queue" : "active"}
+            showProjectMeta
+            stacked
+            selected={row.id === selectedTaskId}
+            tabbable={row.id === tabbableTaskId}
+            onSelectTask={onSelectTask}
+            onMarkRead={markRead}
+            registerRow={registerRow}
+            onRowKeyDown={onRowKeyDown}
+          />
+        ))}
+        {hiddenPriorityCount > 0 || expanded.has("priority") ? (
+          <Button
+            type="button"
+            variant="bare"
+            onClick={() => toggleExpanded("priority")}
+            aria-label={hiddenPriorityCount > 0
+              ? `Show ${hiddenPriorityCount} more priority tasks`
+              : "Show fewer priority tasks"}
+            className="sidebar-show-more ui-body flex h-7 w-full items-center rounded-md pl-3 pr-2 text-left text-tertiary hover:bg-hover hover:text-secondary"
+          >
+            {hiddenPriorityCount > 0 ? "Show more" : "Show less"}
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-1" aria-label="Task queue">
@@ -369,6 +439,7 @@ const QueueRowItem = memo(function QueueRowItem({
   row,
   emphasis,
   showProjectMeta,
+  stacked = false,
   selected,
   tabbable,
   onSelectTask,
@@ -379,6 +450,7 @@ const QueueRowItem = memo(function QueueRowItem({
   row: QueueRow;
   emphasis: TaskRowEmphasis;
   showProjectMeta: boolean;
+  stacked?: boolean;
   selected: boolean;
   tabbable: boolean;
   onSelectTask: (taskId: string) => void;
@@ -408,6 +480,7 @@ const QueueRowItem = memo(function QueueRowItem({
       needsYou={row.needsYou}
       unread={row.unread}
       emphasis={emphasis}
+      layout={stacked ? "stacked" : "inline"}
       // Flush, not nested. These rows were indented under their heading like
       // children of a project, which put the one list that must be read first
       // furthest from the eye's left-hand scan line.

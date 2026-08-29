@@ -1,22 +1,22 @@
 /**
- * Steering while the agent is working, and the spend readout.
+ * Steering while the agent is working, queueing follow-ups, and spend.
  *
  * Typing during a run first failed with a raw `TASK_TURN_ALREADY_ACTIVE`, then
- * was held in a local queue and posted as a *new* turn once the run ended —
- * which is not steering: the model finished the wrong work and only then read
- * the correction. `POST /v1/turns/:id/steer` delivers it into the running turn.
- * The queue survives only as the fallback for a turn that settled mid-click.
+ * is now an explicit choice: Return/button queues a follow-up; Command+Return
+ * uses `POST /v1/turns/:id/steer` to deliver a correction into the live turn.
+ * A failed steer only falls back to the queue when the turn settled mid-send.
  *
  * The same surface gained a cost/context readout. Both numbers were already on
  * the wire in `budget_ledger`; the app displayed neither.
  */
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { Composer } from "../src/components/Composer";
 import { useTerminusStore } from "../src/hooks/use-terminus";
 import { api, TerminusApiError } from "../src/lib/api";
+import { currentShortcutPlatform } from "../src/lib/shortcuts";
 import type { Task, TaskBudgetLedger, TerminusSseEvent } from "../src/types";
 
 vi.mock("../src/lib/api", async () => {
@@ -96,6 +96,14 @@ afterEach(() => {
 
 const RUNNING_TURN = { id: "turn-1", sequence: 1, state: "PROVIDER_RUNNING", started_at: null } as const;
 
+function steerNow(): void {
+  const primary = currentShortcutPlatform() === "mac" ? { metaKey: true } : { ctrlKey: true };
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Message composer" }), {
+    key: "Enter",
+    ...primary,
+  });
+}
+
 describe("steering a live turn", () => {
   test("delivers the correction into the run instead of queueing it", async () => {
     install(task({ active_turn: { ...RUNNING_TURN } }), [event("turn.started")]);
@@ -103,7 +111,7 @@ describe("steering a live turn", () => {
     render(<Composer />);
 
     await user.type(screen.getByRole("textbox", { name: "Message composer" }), "actually use fetch");
-    await user.click(screen.getByRole("button", { name: /^Steer/ }));
+    steerNow();
 
     await waitFor(() => expect(api.steerTurn).toHaveBeenCalledWith(
       "turn-1",
@@ -129,7 +137,7 @@ describe("steering a live turn", () => {
     render(<Composer />);
 
     await user.type(screen.getByRole("textbox", { name: "Message composer" }), "too late");
-    await user.click(screen.getByRole("button", { name: /^Steer/ }));
+    steerNow();
 
     await waitFor(() => expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBe("too late"));
   });
@@ -146,7 +154,7 @@ describe("steering a live turn", () => {
     render(<Composer />);
 
     await user.type(screen.getByRole("textbox", { name: "Message composer" }), "use the other adapter");
-    await user.click(screen.getByRole("button", { name: /^Steer/ }));
+    steerNow();
 
     expect(await screen.findByRole("alert")).toHaveTextContent("kernel artifact ingest failed");
     expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBeUndefined();

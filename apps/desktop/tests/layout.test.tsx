@@ -232,9 +232,9 @@ describe("Layout — sidebar responsive collapse", () => {
     renderLayout();
     const aside = document.querySelector("aside");
     expect(aside).not.toBeNull();
-    expect(aside!.getAttribute("style") ?? "").toContain("width: 256px");
-    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveAttribute("aria-valuenow", "256");
-    expect(titlebarSidebarWidth()).toBe("256px");
+    expect(aside!.getAttribute("style") ?? "").toContain("width: 272px");
+    expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveAttribute("aria-valuenow", "272");
+    expect(titlebarSidebarWidth()).toBe("272px");
   });
 
   test("sidebar does not become a rail at a narrow desktop width", () => {
@@ -242,9 +242,9 @@ describe("Layout — sidebar responsive collapse", () => {
     renderLayout();
     const aside = document.querySelector("aside");
     expect(aside).not.toBeNull();
-    expect(aside!.getAttribute("style") ?? "").toContain("width: 256px");
-    expect(titlebarSidebarWidth()).toBe("256px");
-    fireEvent.keyDown(screen.getByRole("separator", { name: "Resize sidebar" }), { key: "ArrowRight" });
+    expect(aside!.getAttribute("style") ?? "").toContain("width: 272px");
+    expect(titlebarSidebarWidth()).toBe("272px");
+    fireEvent.keyDown(screen.getByRole("separator", { name: "Resize sidebar" }), { key: "ArrowLeft" });
     expect(screen.getByRole("separator", { name: "Resize sidebar" })).toHaveAttribute("aria-valuenow", "264");
   });
 });
@@ -256,8 +256,8 @@ describe("Layout — docked inspector", () => {
     setViewport(1200, 900);
     renderLayout();
     expect(screen.getByTestId("inspector-dock")).toHaveAttribute("data-layout", "docked");
-    expect(screen.getByTestId("inspector-dock")).toHaveStyle({ width: "280px" });
-    expect(screen.getByRole("separator", { name: "Resize inspector" })).toHaveAttribute("aria-valuenow", "280");
+    expect(screen.getByTestId("inspector-dock")).toHaveStyle({ width: "320px" });
+    expect(screen.getByRole("separator", { name: "Resize inspector" })).toHaveAttribute("aria-valuenow", "320");
   });
 
   test("inspector supports keyboard resizing without an overlay", () => {
@@ -265,13 +265,13 @@ describe("Layout — docked inspector", () => {
     renderLayout();
     const separator = screen.getByRole("separator", { name: "Resize inspector" });
     fireEvent.keyDown(separator, { key: "ArrowLeft" });
-    expect(separator).toHaveAttribute("aria-valuenow", "288");
+    expect(separator).toHaveAttribute("aria-valuenow", "328");
     expect(screen.getByTestId("inspector-dock")).toHaveAttribute("data-layout", "docked");
   });
 
   test("reserves the main working surface when both stored docks are maximal", () => {
-    window.localStorage.setItem("terminus-desktop.sidebar-width.v2", "320");
-    window.localStorage.setItem("terminus-desktop.inspector-width.v1", "520");
+    window.localStorage.setItem("terminus-desktop.sidebar-width.v5", "360");
+    window.localStorage.setItem("terminus-desktop.inspector-width.v3", "420");
     setViewport(900, 900);
     renderLayout();
 

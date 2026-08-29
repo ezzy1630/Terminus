@@ -309,7 +309,7 @@ describe("inbox grouping", () => {
 });
 
 describe("the sidebar inbox", () => {
-  test("the grouping control refiles one list rather than swapping two modes", async () => {
+  test("the activity bell swaps the body without changing the workspace destination", async () => {
     const user = userEvent.setup();
     install([session("a", "Terminus")], "a");
     useTerminusStore.setState({
@@ -317,23 +317,22 @@ describe("the sidebar inbox", () => {
     });
     render(<Sidebar onOpenProject={() => undefined} />);
 
-    // The rail opens here: what happened, by day.
+    // The ordinary rail opens on the project tree.
     expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Group tasks" }));
-    await user.click(await screen.findByRole("menuitem", { name: /By project/ }));
-
-    // Same task, filed under its repository instead of its day.
     expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open activity" })).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(screen.getByRole("button", { name: "Open activity" }));
+
+    // Same task, filed under its day. This is a sidebar projection, so the
+    // primary destinations remain available and no new task is created.
+    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
     expect(screen.getByText("Clean git and rebuild")).toBeInTheDocument();
-    // The destinations above stay put — grouping changes the body, not the
-    // screen.
+    expect(screen.getByRole("button", { name: "Close activity" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "New task" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Group tasks" }));
-    await user.click(await screen.findByRole("menuitem", { name: /Recent/ }));
-    expect(screen.queryByRole("button", { name: "Add or switch project" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Close activity" }));
+    expect(screen.getByRole("button", { name: "Add or switch project" })).toBeInTheDocument();
   });
 
   test("selecting an inbox row opens that task", async () => {
@@ -370,6 +369,7 @@ describe("the sidebar inbox", () => {
     });
     useTaskReadStore.setState({ seenAtByTask: {} });
     render(<Sidebar onOpenProject={() => undefined} />);
+    await user.click(screen.getByRole("button", { name: "Open activity" }));
 
     // Not in the queue: a task that succeeded is not blocked on anyone.
     expect(screen.queryByRole("button", { name: /Collapse Needs you/ })).not.toBeInTheDocument();

@@ -158,7 +158,7 @@ describe("Composer key handling", () => {
     await waitFor(() => expect(api.startTurn).toHaveBeenCalledTimes(1));
   });
 
-  test("Enter during a run steers instead of opening a second turn", async () => {
+  test("Enter during a run queues instead of interrupting or opening a second turn", async () => {
     install(
       task({ active_turn: { id: "turn-1", sequence: 1, state: "PROVIDER_RUNNING", started_at: null } }),
       [{ id: "1", event: "turn.started", data: "{}" }],
@@ -169,9 +169,29 @@ describe("Composer key handling", () => {
     await user.type(composer(), "use fetch instead");
     fireEvent.keyDown(composer(), { key: "Enter" });
 
-    // The control plane refuses a second concurrent turn, so a steer must never
-    // become a `POST /v1/turns`.
     await waitFor(() => expect(composer()).toHaveValue(""));
+    expect(api.startTurn).not.toHaveBeenCalled();
+    expect(api.steerTurn).not.toHaveBeenCalled();
+    expect(useTerminusStore.getState().queuedSteerByTask["task-1"]).toBe("use fetch instead");
+  });
+
+  test("Command+Enter during a run steers immediately", async () => {
+    install(
+      task({ active_turn: { id: "turn-1", sequence: 1, state: "PROVIDER_RUNNING", started_at: null } }),
+      [{ id: "1", event: "turn.started", data: "{}" }],
+    );
+    const user = userEvent.setup();
+    render(<Composer />);
+    const primary = currentShortcutPlatform() === "mac" ? { metaKey: true } : { ctrlKey: true };
+
+    await user.type(composer(), "use fetch now");
+    fireEvent.keyDown(composer(), { key: "Enter", ...primary });
+
+    await waitFor(() => expect(api.steerTurn).toHaveBeenCalledWith(
+      "turn-1",
+      { message: "use fetch now" },
+      expect.anything(),
+    ));
     expect(api.startTurn).not.toHaveBeenCalled();
   });
 });

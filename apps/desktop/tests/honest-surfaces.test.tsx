@@ -145,7 +145,8 @@ describe("the composer with no models", () => {
     render(<Composer />);
 
     expect(await screen.findByText("Model not available")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open model settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Models" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check models again" })).toBeInTheDocument();
   });
 });
 

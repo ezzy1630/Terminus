@@ -52,12 +52,12 @@ interface LayoutProps {
 
 const TITLEBAR_HEIGHT = 40;
 const TRAFFIC_LIGHTS_PAD = 80;
-const SIDEBAR_DEFAULT_WIDTH = 256;
-const SIDEBAR_MIN_WIDTH = 184;
-const SIDEBAR_MAX_WIDTH = 320;
-const INSPECTOR_DEFAULT_WIDTH = 280;
-const INSPECTOR_MIN_WIDTH = 232;
-const INSPECTOR_MAX_WIDTH = 380;
+const SIDEBAR_DEFAULT_WIDTH = 276;
+const SIDEBAR_MIN_WIDTH = 220;
+const SIDEBAR_MAX_WIDTH = 360;
+const INSPECTOR_DEFAULT_WIDTH = 320;
+const INSPECTOR_MIN_WIDTH = 260;
+const INSPECTOR_MAX_WIDTH = 420;
 const MIN_MAIN_WIDTH = 360;
 const RESIZE_HANDLE_WIDTH = 4;
 // The task-centered shell uses a narrower range than the retired cockpit.
@@ -65,8 +65,8 @@ const RESIZE_HANDLE_WIDTH = 4;
 // the new workspace open at the wrong density.
 // v4: the default moved 224 → 256 so two-line task titles fit. A stored v3
 // width would otherwise pin existing installs to the old, too-narrow rail.
-const SIDEBAR_WIDTH_KEY = "terminus-desktop.sidebar-width.v4";
-const INSPECTOR_WIDTH_KEY = "terminus-desktop.inspector-width.v2";
+const SIDEBAR_WIDTH_KEY = "terminus-desktop.sidebar-width.v5";
+const INSPECTOR_WIDTH_KEY = "terminus-desktop.inspector-width.v3";
 interface TitleBarProps {
   center?: ReactNode;
   right?: ReactNode;
@@ -342,14 +342,16 @@ function LayoutImpl({
               <div
                 data-testid="inspector-dock"
                 data-layout="docked"
-                className="flex h-full shrink-0 flex-col"
+                className="inspector-dock flex h-full shrink-0 flex-col"
                 style={{ width: fittedDocks.inspectorWidth }}
               >
-                {/* A docked native inspector: flat surface, hairline seam.
-                    The floating rounded glass card read as web chrome. */}
+                {/* One contextual surface, inset from the transcript. It is
+                    still a docked region: resizing and persistence belong to
+                    the shell, while the rounded outer edge makes the optional
+                    context legible as one thing rather than another app rail. */}
                 <aside
-                  className="inspector-card flex h-full min-h-0 flex-col overflow-hidden border-l"
-                  style={{ borderColor: "var(--sidebar-separator)" }}
+                  className="inspector-card flex h-full min-h-0 flex-col overflow-hidden border"
+                  style={{ borderColor: "var(--border-subtle)" }}
                 >
                   {inspector}
                 </aside>

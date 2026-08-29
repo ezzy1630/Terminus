@@ -122,9 +122,9 @@
   --control-sm: 24px;
   --control-md: 28px;
   --control-lg: 32px;
-  --sidebar-width: 256px;
-  --sidebar-width-compact: 224px;
-  --inspector-width: 280px;
+  --sidebar-width: 276px;
+  --sidebar-width-compact: 240px;
+  --inspector-width: 320px;
   --diff-nav-width: 232px;
   --diff-nav-min-width: 184px;
   --composer-max-height: 280px;

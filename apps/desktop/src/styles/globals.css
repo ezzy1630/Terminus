@@ -532,9 +532,9 @@ textarea::placeholder,
   right: 0;
   bottom: 100%;
   left: 0;
-  height: 24px;
+  height: 16px;
   pointer-events: none;
-  background: linear-gradient(to top, var(--bg-canvas), transparent);
+  background: var(--bg-canvas);
 }
 
 .composer-control,
@@ -801,10 +801,23 @@ textarea::placeholder,
 .sidebar-task-row:active { transform: scale(.992); }
 .sidebar-show-more { transition: color var(--duration-fast) var(--easing-default), background var(--duration-fast) var(--easing-default); }
 
+.sidebar-section-label {
+  color: var(--text-tertiary);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
 /* ────────────────────────── Inspector ────────────────────────────────── */
+
+.inspector-dock {
+  padding: 12px 12px 12px 0;
+}
 
 .inspector-card {
   background: var(--bg-inspector);
+  border-radius: 18px;
+  box-shadow: var(--elevation-sm);
 }
 
 .inspector-section { transition: background var(--duration-fast) var(--easing-default); }
@@ -1210,4 +1223,3 @@ html[data-vibrancy="on"] .model-picker-surface {
 .token-alloc-ast { background-color: var(--alloc-ast); }
 .token-alloc-memory { background-color: var(--alloc-memory); }
 .token-alloc-tools { background-color: var(--alloc-tools); }
-

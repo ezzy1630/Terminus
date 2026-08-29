@@ -44,6 +44,7 @@ import {
   Clock3,
   FolderOpen,
   Plus,
+  RefreshCw,
   ShieldAlert,
   Square,
   X,
@@ -75,7 +76,6 @@ import {
   permissionProfileLabel,
   resolvePermissionProfile,
 } from "../lib/permission-profiles";
-import { ErrorState, errorPreset } from "./ErrorState";
 import { ModelPicker } from "./ModelPicker";
 import { ProjectMenu } from "./ProjectMenu";
 import { useModelSelection, type ModelSelectionWriter } from "../lib/models";
@@ -699,7 +699,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
     }
   }, [queueSteer, refreshTask]);
 
-  const onSubmit = async (_mode: Extract<ComposerSendMode, "send" | "steer">): Promise<void> => {
+  const onSubmit = async (mode: Extract<ComposerSendMode, "send" | "steer" | "queue">): Promise<void> => {
     setError(null);
 
     const text = draft.trim();
@@ -726,11 +726,16 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
         clearCurrentDraft();
         return;
       }
-      // Steering a live turn is a request, not a queue. `POST /v1/turns` would
-      // be refused with TASK_TURN_ALREADY_ACTIVE, but the steer route appends a
-      // model-visible episode the running turn reads at its next stop boundary,
-      // so the correction lands during the work rather than after it.
+      // During a live run, ordinary Return queues a follow-up. Cmd/Ctrl+Return
+      // explicitly steers the active turn. The distinction is user intent,
+      // not timing: a task becoming active between keydown and this branch
+      // must not silently turn a queued follow-up into an interruption.
       const activeTurn = task.active_turn ?? null;
+      if (runIsActive && mode === "queue") {
+        queueSteer(task.id, text);
+        clearCurrentDraft();
+        return;
+      }
       if (activeTurn && runIsActive) {
         const outcome = await deliverSteer(task, activeTurn.id, text);
         if (!outcome.ok) {
@@ -861,9 +866,9 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   /*
    * Composer keys.
    *
-   *   ↵          send (or steer)
+   *   ↵          send, or queue behind a running turn
    *   ⇧↵         newline
-   *   ⌘↵ / ⌃↵    send (or steer) — kept for muscle memory
+   *   ⌘↵ / ⌃↵    steer the running turn (send when idle)
    *
    * The IME guard comes first and covers both spellings. While a Japanese,
    * Chinese or Korean input method has an active composition, Return commits
@@ -873,24 +878,26 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
    */
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
-    if (matchesShortcut(e, FIXED_SHORTCUTS.sendPlain) || matchesShortcut(e, FIXED_SHORTCUTS.send)) {
+    if (matchesShortcut(e, FIXED_SHORTCUTS.sendPlain)) {
       e.preventDefault();
-      void onSubmit(sendMode === "steer" ? "steer" : "send");
+      void onSubmit(runIsActive ? "queue" : "send");
+      return;
+    }
+    if (matchesShortcut(e, FIXED_SHORTCUTS.send)) {
+      e.preventDefault();
+      void onSubmit(runIsActive ? "steer" : "send");
     }
   };
 
   // Send button content varies by mode. While a run is in flight the button
   // says what will actually happen — the message reaches the running turn when
   // this client knows which turn that is, and is held when it does not.
-  const sendButtonContent: { icon: JSX.Element; label: string; mode: Extract<ComposerSendMode, "send" | "steer"> } = (() => {
+  const sendButtonContent: { icon: JSX.Element; label: string; mode: Extract<ComposerSendMode, "send" | "steer" | "queue"> } = (() => {
     if (!task && onCreateTask) {
       return { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Create task", mode: "send" };
     }
-    if (runIsActive && task?.active_turn) {
-      return { icon: <ArrowUp size={15} strokeWidth={2} />, label: "Steer", mode: "steer" };
-    }
     if (runIsActive) {
-      return { icon: <Clock3 size={14} strokeWidth={2} />, label: "Queue for the current run", mode: "steer" };
+      return { icon: <Clock3 size={14} strokeWidth={2} />, label: "Queue for the current run", mode: "queue" };
     }
     switch (sendMode) {
       case "steer":
@@ -939,7 +946,7 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
   const sendTitle = taskTerminal
     ? "Task is terminal; create a new task to continue"
     : runIsActive
-      ? "Steer the current run · ↵"
+      ? "Queue after this run · ↵ · Steer now with ⌘↵"
       : `${sendButtonContent.label} · ↵`;
 
   return (
@@ -1010,20 +1017,35 @@ function ComposerImpl({ className, onCreateTask, onChangeProject }: ComposerProp
               inventory was empty, so the composer looked ready and the send
               failed at the control plane instead. */}
           {modelInventory.status !== "loading" && modelInventory.models.length === 0 ? (
-            <ErrorState
-              {...errorPreset("missingModel")}
-              {...(modelInventory.error ? { detail: modelInventory.error } : {})}
-              action={{
-                label: "Open model settings",
-                onClick: () => window.dispatchEvent(
+            <div
+              role="status"
+              aria-live="polite"
+              data-tooltip={modelInventory.error ?? "No connected provider currently reports an available model."}
+              className="mx-2.5 mb-1 flex min-h-8 items-center gap-2 rounded-md bg-elevated px-2.5 text-xs text-secondary"
+            >
+              <ShieldAlert size={13} className="shrink-0 text-warning" aria-hidden />
+              <span className="min-w-0 flex-1 truncate">Model not available</span>
+              <Button
+                type="button"
+                variant="bare"
+                className="h-6 shrink-0 rounded-md px-1.5 text-secondary hover:bg-hover hover:text-primary"
+                onClick={() => window.dispatchEvent(
                   new CustomEvent("terminus:open-settings", { detail: { category: "agents" } }),
-                ),
-              }}
-              secondaryAction={{ label: "Check again", onClick: () => modelInventory.refresh() }}
-              live="polite"
-              compact
-              className="mx-2.5 mb-1 rounded-md border border-subtle bg-elevated"
-            />
+                )}
+              >
+                Models
+              </Button>
+              <Button
+                type="button"
+                variant="bare"
+                aria-label="Check models again"
+                data-tooltip="Check models again"
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-tertiary hover:bg-hover hover:text-primary"
+                onClick={() => modelInventory.refresh()}
+              >
+                <RefreshCw size={12} aria-hidden />
+              </Button>
+            </div>
           ) : null}
 
           {/* Control row — always visible. Reserved height so metadata

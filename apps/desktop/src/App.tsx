@@ -29,7 +29,7 @@ import { projectUriToPath } from "./lib/projects";
 import { readSidebarVisible, writeSidebarVisible } from "./lib/sidebar-prefs";
 import { useMarkSelectedTaskRead } from "./hooks/use-task-read";
 import { ResizableReviewLayout } from "./components/ResizableReviewLayout";
-import { Sidebar } from "./components/Sidebar";
+import { SHOW_ACTIVITY_EVENT, Sidebar } from "./components/Sidebar";
 import { FOCUS_QUEUE_EVENT } from "./components/TaskQueue";
 import { Composer } from "./components/Composer";
 import { NewTaskScreen } from "./components/NewTaskScreen";
@@ -694,7 +694,8 @@ export function App(): JSX.Element {
         // and a focus call into a hidden column is a keypress that does
         // nothing and says nothing.
         setSidebarVisible(true);
-        window.dispatchEvent(new Event(FOCUS_QUEUE_EVENT));
+        window.dispatchEvent(new Event(SHOW_ACTIVITY_EVENT));
+        window.requestAnimationFrame(() => window.dispatchEvent(new Event(FOCUS_QUEUE_EVENT)));
       } else if (matchesShortcut(e, FIXED_SHORTCUTS.taskSlot)) {
         const task = selectedSessionTasks[Number(e.key) - 1];
         if (task) {
@@ -756,7 +757,11 @@ export function App(): JSX.Element {
         switchDensity: () => toggleDensity(),
         openSettings,
         openMissionBoard: () => openDestination("board"),
-        focusQueue: () => window.dispatchEvent(new Event(FOCUS_QUEUE_EVENT)),
+        focusQueue: () => {
+          setSidebarVisible(true);
+          window.dispatchEvent(new Event(SHOW_ACTIVITY_EVENT));
+          window.requestAnimationFrame(() => window.dispatchEvent(new Event(FOCUS_QUEUE_EVENT)));
+        },
         viewShortcuts: () => openSettings("shortcuts"),
         projects: sessions.map((session) => ({
           id: session.id,
