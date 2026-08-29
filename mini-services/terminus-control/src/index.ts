@@ -73,6 +73,7 @@ import {
   configuredGatewayModel,
   configuredGatewayProviderSnapshot,
   gatewayCredentialBindingId,
+  currentGatewayPrivacyTermsVersion,
   gatewayModelKey,
   gatewayProviderConfigurationWire,
   gatewayProviderConfigurationDeleteSchema,
@@ -99,6 +100,7 @@ import {
   cachedProviderModels,
   describeConfiguredModel,
   discoverProviderModels,
+  fetchModelsDevRaw,
   lastProviderModels,
   parseProviderModelsResult,
   providerModelsResultJson,
@@ -107,7 +109,44 @@ import {
   restoreProviderModels,
   type ProviderModelsResult,
 } from "./provider-models.js";
-import { KernelGatewayClient } from "./gateway-kernel-client.js";
+import {
+  CODEX_HOST,
+  CODEX_PATH_PREFIX,
+  ZEN_SOURCE,
+  ZEN_VENDOR_ID,
+  chooseDefaultAccount,
+  discoverAndConnectLocalAccounts,
+  mapGatewayConfiguration,
+  parseProviderAccountMetadata,
+  providerAccountCapabilityScope,
+  providerAccountProviderId,
+  providerAccountSecretUri,
+  providerAccountWire,
+  resolveTurnProvider,
+  uuidV7,
+  zenAccountCredentialUri,
+  type LocalCredentialDiscovery,
+  type ProviderAccountRecord,
+  type ProviderAccountUpsert,
+  type ProviderRenderProfile,
+  type TurnProviderResolution,
+} from "./provider-accounts.js";
+import {
+  discoverAccountModels,
+  parseProviderAccountModels,
+  providerAccountCapabilitySnapshot,
+  providerAccountModelsJson,
+  providerAccountModelsWire,
+  toGatewayModel,
+  type ProviderAccountModel,
+  type ProviderAccountModelsResult,
+} from "./provider-account-models.js";
+import {
+  KernelConnectorClient,
+  KernelGatewayClient,
+  ZEN_GATEWAY_ENDPOINT,
+  type KernelConnectorEndpoint,
+} from "./gateway-kernel-client.js";
 import {
   MAX_TOOL_MODEL_RESULT_BYTES,
   STANDALONE_TOOL_SCHEMAS,
@@ -120,6 +159,7 @@ import {
   normalizedToolOperationHash,
   InvalidToolCallError,
   parseStandaloneToolCall,
+  relativizeStandaloneCallPaths,
   projectModelVisibleResult,
   providerToolCallTranscript,
   providerToolResultTranscript,
@@ -305,7 +345,11 @@ import {
 } from "@terminus/provider-zen";
 import { ANTHROPIC_MODEL_PROFILES } from "@terminus/provider-anthropic";
 import { GOOGLE_MODEL_PROFILES } from "@terminus/provider-google";
-import { OPENAI_MODEL_PROFILES } from "@terminus/provider-openai";
+import {
+  ChatGptCodexRenderer,
+  OPENAI_MODEL_PROFILES,
+  type ChatGptCodexModelProfile,
+} from "@terminus/provider-openai";
 import { ContextStateBuilder } from "./agent/context-state-builder.js";
 import {
   CodingTurnEngine,
@@ -504,6 +548,7 @@ import {
   type ProviderAttemptResponseInput,
   type ProviderAttemptStartInput,
   type ProviderExecutionInput,
+  type ProviderGatewayConfig,
   type TaskProjectionContractRow,
   type TaskProjectionTaskRow,
   type TurnRow,
@@ -3732,6 +3777,9 @@ const turnCoordinator = new TurnCoordinator<Prisma.TransactionClient>({
         initiatingActor: true,
         startedAt: true,
         completedAt: true,
+        selectedModel: true,
+        selectedReasoningEffort: true,
+        selectedProviderAccountId: true,
       },
     });
     return turn as TurnRow | null;
@@ -3778,6 +3826,7 @@ const turnCoordinator = new TurnCoordinator<Prisma.TransactionClient>({
           initiatingInputArtifact: input.inputArtifactUri,
           selectedModel: input.selectedModel ?? null,
           selectedReasoningEffort: input.selectedReasoningEffort ?? null,
+          selectedProviderAccountId: input.selectedProviderAccountId ?? null,
         },
       });
     },
@@ -4556,6 +4605,7 @@ const routes: Route[] = [
       default_permission_profile: s.defaultPermissionProfile,
       default_model: s.defaultModel,
       default_reasoning_effort: s.defaultReasoningEffort,
+      default_provider_account_id: s.defaultProviderAccountId,
       active_thread_id: s.activeThreadId,
       created_at: s.createdAt.toISOString(), updated_at: s.updatedAt.toISOString(),
     });
@@ -4571,11 +4621,13 @@ const routes: Route[] = [
       default_model?: unknown;
       default_reasoning_effort?: unknown;
       default_permission_profile?: unknown;
+      default_provider_account_id?: unknown;
     };
     const data: {
       defaultModel?: string | null;
       defaultReasoningEffort?: string | null;
       defaultPermissionProfile?: PermissionProfile;
+      defaultProviderAccountId?: string | null;
     } = {};
     // The permission level is the one session default that changes what the
     // agent may do without asking, so it accepts only the three named levels.
@@ -4629,42 +4681,105 @@ const routes: Route[] = [
         data.defaultReasoningEffort = effort;
       }
     }
+    // The routing account a session pins its model to. Null clears it and
+    // returns the session to the installation default.
+    if ("default_provider_account_id" in body) {
+      if (body.default_provider_account_id === null) {
+        data.defaultProviderAccountId = null;
+      } else if (
+        typeof body.default_provider_account_id === "string"
+        && body.default_provider_account_id.trim().length > 0
+        && body.default_provider_account_id.length <= 128
+      ) {
+        data.defaultProviderAccountId = body.default_provider_account_id.trim();
+      } else {
+        return sendError(
+          res,
+          400,
+          "SESSION_DEFAULT_PROVIDER_ACCOUNT_INVALID",
+          "default_provider_account_id must be null or a provider account id of 1..128 characters",
+          "validation",
+        );
+      }
+    }
     if (Object.keys(data).length === 0) {
       return sendError(
         res,
         400,
         "SESSION_UPDATE_EMPTY",
-        "supply default_model, default_reasoning_effort, and/or default_permission_profile",
+        "supply default_model, default_reasoning_effort, default_provider_account_id, and/or default_permission_profile",
         "validation",
       );
     }
     // A named default must be admitted now, so the failure surfaces where the
-    // user chose it rather than on the next turn.
+    // user chose it rather than on the next turn. Which catalogue admits it
+    // depends on which account the session will route to after this patch.
+    // Only routing fields trigger admission. Changing the permission level must
+    // not fail because some *other* default has since gone stale.
+    const routingPatched = data.defaultModel !== undefined
+      || data.defaultProviderAccountId !== undefined;
+    const patchedSession = routingPatched
+      ? await db.session.findUnique({
+          where: { id: String(params.id) },
+          select: { defaultProviderAccountId: true },
+        })
+      : null;
+    const effectiveAccountId = data.defaultProviderAccountId === undefined
+      ? patchedSession?.defaultProviderAccountId ?? null
+      : data.defaultProviderAccountId;
+    const patchResolution = routingPatched
+      ? resolveTurnProvider({
+          requestedAccountId: effectiveAccountId,
+          accounts: await listProviderAccountRecords(),
+          hasModel: typeof data.defaultModel === "string",
+        })
+      : { kind: "legacy" as const };
+    if (patchResolution.kind === "error") {
+      return sendProviderAccountResolutionError(res, patchResolution);
+    }
     if (typeof data.defaultModel === "string") {
-      const gatewayRow = await db.gatewayProviderConfiguration.findUnique({
-        where: { id: GATEWAY_PROVIDER_CONFIGURATION_ID },
-      });
-      const credential = gatewayRow === null ? null : gatewayDiscoveryCredential(gatewayRow);
-      const admitted = credential === null
-        ? null
-        : await admittedGatewayModelRecord(credential, data.defaultModel);
-      if (admitted === null) {
-        return sendError(
-          res,
-          409,
-          "MODEL_NOT_ADMITTED",
-          `model '${data.defaultModel}' has no admitted discovery record for this gateway account`,
-          "conflict",
-          {
-            requested_model: data.defaultModel,
-            ...(credential === null
-              ? { discovered_models: [] }
-              : {
-                  deployment: credential.deployment,
-                  discovered_models: await admittedGatewayModelIds(credential),
-                }),
-          },
-        );
+      if (patchResolution.kind === "account") {
+        const admitted = await admittedProviderAccountModel(patchResolution.account, data.defaultModel);
+        if (admitted === null) {
+          return sendError(
+            res,
+            409,
+            "MODEL_NOT_ADMITTED",
+            `model '${data.defaultModel}' has no admitted discovery record for account '${patchResolution.account.displayName}'`,
+            "conflict",
+            {
+              requested_model: data.defaultModel,
+              provider_account_id: patchResolution.account.id,
+              discovered_models: await admittedProviderAccountModelIds(patchResolution.account),
+            },
+          );
+        }
+      } else {
+        const gatewayRow = await db.gatewayProviderConfiguration.findUnique({
+          where: { id: GATEWAY_PROVIDER_CONFIGURATION_ID },
+        });
+        const credential = gatewayRow === null ? null : gatewayDiscoveryCredential(gatewayRow);
+        const admitted = credential === null
+          ? null
+          : await admittedGatewayModelRecord(credential, data.defaultModel);
+        if (admitted === null) {
+          return sendError(
+            res,
+            409,
+            "MODEL_NOT_ADMITTED",
+            `model '${data.defaultModel}' has no admitted discovery record for this gateway account`,
+            "conflict",
+            {
+              requested_model: data.defaultModel,
+              ...(credential === null
+                ? { discovered_models: [] }
+                : {
+                    deployment: credential.deployment,
+                    discovered_models: await admittedGatewayModelIds(credential),
+                  }),
+            },
+          );
+        }
       }
     }
     const updated = await writerTransaction(async (tx) => {
@@ -4693,6 +4808,7 @@ const routes: Route[] = [
       default_permission_profile: updated.defaultPermissionProfile,
       default_model: updated.defaultModel,
       default_reasoning_effort: updated.defaultReasoningEffort,
+      default_provider_account_id: updated.defaultProviderAccountId,
       active_thread_id: updated.activeThreadId,
       created_at: updated.createdAt.toISOString(),
       updated_at: updated.updatedAt.toISOString(),
@@ -4804,6 +4920,7 @@ const routes: Route[] = [
         default_permission_profile: s.defaultPermissionProfile,
         default_model: s.defaultModel,
         default_reasoning_effort: s.defaultReasoningEffort,
+        default_provider_account_id: s.defaultProviderAccountId,
         active_thread_id: s.activeThreadId,
         created_at: s.createdAt.toISOString(), updated_at: s.updatedAt.toISOString(),
       })),
@@ -5982,6 +6099,7 @@ const routes: Route[] = [
       user_input: string;
       model?: unknown;
       reasoning_effort?: unknown;
+      provider_account_id?: unknown;
     };
     if (
       typeof body.thread_id !== "string"
@@ -6009,6 +6127,27 @@ const routes: Route[] = [
       );
     }
     const requestedTurnModel = typeof body.model === "string" ? body.model.trim() : null;
+    // Which connected account this turn runs on. Optional: a turn that names
+    // none keeps the session default, then the installation default, then the
+    // legacy chain.
+    if (
+      body.provider_account_id !== undefined
+      && body.provider_account_id !== null
+      && (typeof body.provider_account_id !== "string"
+        || body.provider_account_id.trim().length === 0
+        || body.provider_account_id.length > 128)
+    ) {
+      return sendError(
+        res,
+        400,
+        "TURN_PROVIDER_ACCOUNT_INVALID",
+        "provider_account_id must be a non-empty account id of at most 128 characters",
+        "validation",
+      );
+    }
+    const requestedProviderAccountId = typeof body.provider_account_id === "string"
+      ? body.provider_account_id.trim()
+      : null;
     let requestedReasoningEffort: ReasoningEffort | null = null;
     if (body.reasoning_effort !== undefined && body.reasoning_effort !== null) {
       requestedReasoningEffort = parseReasoningEffort(body.reasoning_effort);
@@ -6069,12 +6208,62 @@ const routes: Route[] = [
     // of models the account can actually use.
     const sessionDefaults = await db.session.findUnique({
       where: { id: inputTask.sessionId },
-      select: { defaultModel: true, defaultReasoningEffort: true },
+      select: {
+        defaultModel: true,
+        defaultReasoningEffort: true,
+        defaultProviderAccountId: true,
+      },
     });
     const effectiveTurnModel = requestedTurnModel ?? sessionDefaults?.defaultModel ?? null;
     const effectiveReasoningEffort = requestedReasoningEffort
       ?? parseReasoningEffort(sessionDefaults?.defaultReasoningEffort);
-    if (effectiveTurnModel !== null) {
+    // Resolve the account before the turn exists, so a client that named an
+    // account that is gone or unusable learns it here rather than inside the
+    // loop — and so the chosen account is recorded on the turn row and cannot
+    // change under it mid-turn.
+    const turnResolution = resolveTurnProvider({
+      requestedAccountId: requestedProviderAccountId,
+      sessionDefaultAccountId: sessionDefaults?.defaultProviderAccountId ?? null,
+      accounts: await listProviderAccountRecords(),
+      hasModel: effectiveTurnModel !== null,
+    });
+    if (turnResolution.kind === "error") {
+      return sendProviderAccountResolutionError(res, turnResolution);
+    }
+    const selectedProviderAccountId = turnResolution.kind === "account"
+      ? turnResolution.account.id
+      : null;
+    if (turnResolution.kind === "account") {
+      if (effectiveTurnModel === null) {
+        return sendError(
+          res,
+          409,
+          "MODEL_NOT_ADMITTED",
+          `account '${turnResolution.account.displayName}' was selected without a model`,
+          "conflict",
+          {
+            requested_model: null,
+            provider_account_id: turnResolution.account.id,
+            discovered_models: await admittedProviderAccountModelIds(turnResolution.account),
+          },
+        );
+      }
+      const admitted = await admittedProviderAccountModel(turnResolution.account, effectiveTurnModel);
+      if (admitted === null) {
+        return sendError(
+          res,
+          409,
+          "MODEL_NOT_ADMITTED",
+          `model '${effectiveTurnModel}' has no admitted discovery record for account '${turnResolution.account.displayName}'`,
+          "conflict",
+          {
+            requested_model: effectiveTurnModel,
+            provider_account_id: turnResolution.account.id,
+            discovered_models: await admittedProviderAccountModelIds(turnResolution.account),
+          },
+        );
+      }
+    } else if (effectiveTurnModel !== null) {
       const gatewayRow = await db.gatewayProviderConfiguration.findUnique({
         where: { id: GATEWAY_PROVIDER_CONFIGURATION_ID },
       });
@@ -6149,6 +6338,7 @@ const routes: Route[] = [
         initiatingActor: SERVER_PRINCIPAL,
         selectedModel: effectiveTurnModel,
         selectedReasoningEffort: effectiveReasoningEffort,
+        selectedProviderAccountId,
       });
       turn = admitted.turn;
     } catch (error: unknown) {
@@ -6208,6 +6398,9 @@ const routes: Route[] = [
       completed_at: turn.completedAt?.toISOString() ?? null,
       model: effectiveTurnModel,
       reasoning_effort: effectiveReasoningEffort,
+      // Where this turn will run, resolved at admission. Null means the legacy
+      // direct/gateway/local chain.
+      selected_provider_account_id: turn.selectedProviderAccountId,
     });
   }),
   route("GET", "/v1/turns/:id", async (_req, res, params) => {
@@ -6221,6 +6414,7 @@ const routes: Route[] = [
       completed_at: turn.completedAt?.toISOString() ?? null,
       model: turn.selectedModel,
       reasoning_effort: turn.selectedReasoningEffort,
+      selected_provider_account_id: turn.selectedProviderAccountId,
       terminal_error: turn.terminalErrorJson === null
         ? null
         : safeParse<unknown>(turn.terminalErrorJson, null),
@@ -6253,6 +6447,9 @@ const routes: Route[] = [
       initiating_actor: updated.initiatingActor,
       started_at: updated.startedAt?.toISOString() ?? null,
       completed_at: updated.completedAt?.toISOString() ?? null,
+      model: updated.selectedModel,
+      reasoning_effort: updated.selectedReasoningEffort,
+      selected_provider_account_id: updated.selectedProviderAccountId,
     });
   }),
   // Mid-turn steering: queue a durable user message on an active turn without
@@ -7378,6 +7575,13 @@ const routes: Route[] = [
    * The reason travels in `error` either way so it can be surfaced.
    */
   route("GET", "/v1/provider-models", async (_req, res) => {
+    // Multi-account inventory. Every model row belongs to exactly one
+    // connected account, and `provider` is that account's id, so a picker
+    // groups on the same identifier a turn later sends back as
+    // `provider_account_id`. An installation with no accounts at all falls
+    // through to the legacy single-gateway answer below.
+    const inventory = await providerAccountInventory();
+    if (inventory !== null) return sendJson(res, 200, inventory);
     const row = await db.gatewayProviderConfiguration.findUnique({
       where: { id: GATEWAY_PROVIDER_CONFIGURATION_ID },
     });
@@ -7515,6 +7719,129 @@ const routes: Route[] = [
       return sendError(res, 409, "GATEWAY_PROVIDER_CONFIGURATION_CONFLICT", "gateway configuration changed; reload before disconnecting", "conflict");
     }
     sendJson(res, 200, { configured: false, configuration: null });
+  }),
+
+  // ── Connected provider accounts ───────────────────────────────────────
+  //
+  // One row per usable credential this machine holds. The credential itself
+  // never appears here: an account carries an opaque kernel capability URI and
+  // the non-secret identity the kernel reported.
+  route("GET", "/v1/provider-accounts", async (_req, res) => {
+    sendJson(res, 200, await providerAccountsResponse());
+  }),
+  route("POST", "/v1/provider-accounts/discover", async (_req, res) => {
+    try {
+      const result = await runProviderAccountDiscovery();
+      sendJson(res, 200, {
+        ...await providerAccountsResponse(),
+        imported: [...result.imported],
+      });
+    } catch (error: unknown) {
+      sendError(
+        res,
+        503,
+        "PROVIDER_ACCOUNT_DISCOVERY_UNAVAILABLE",
+        error instanceof Error ? error.message : "local credential discovery failed",
+        "external_dependency",
+      );
+    }
+  }),
+  /**
+   * Disconnect. The keyring secret goes first: a row without its secret is a
+   * visible broken account, a secret without its row is unreachable material
+   * nobody will ever clean up.
+   */
+  route("DELETE", "/v1/provider-accounts/:id", async (req, res, params) => {
+    const parsed = providerAccountRevisionSchema.safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "PROVIDER_ACCOUNT_INPUT_INVALID", "expected_revision is required", "validation");
+    }
+    const accountId = String(params.id);
+    const account = await db.providerAccount.findUnique({ where: { id: accountId } });
+    if (account === null) {
+      return sendError(res, 404, "PROVIDER_ACCOUNT_NOT_FOUND", "provider account not found", "not_found");
+    }
+    if (account.revision !== parsed.data.expected_revision) {
+      return sendError(
+        res,
+        409,
+        "PROVIDER_ACCOUNT_CONFLICT",
+        "provider account changed; reload it before disconnecting",
+        "conflict",
+        { expected_revision: parsed.data.expected_revision, actual_revision: account.revision },
+      );
+    }
+    // Only secrets this feature minted are deleted. `secret://opencode/*`
+    // belongs to the legacy gateway configuration, which owns its own
+    // lifecycle; removing it here would break that route's contract.
+    if (account.credentialUri.startsWith(providerAccountSecretUri(""))) {
+      const deleted = await requireKernelUds().secrets.Delete({
+        context: {
+          ...await kernelMaintenanceContext(),
+          idempotencyKey: `provider-account-secret-delete:${account.id}:${account.revision}`,
+        },
+        capabilityUri: account.credentialUri,
+      });
+      if (deleted.stored || deleted.capabilityUri !== account.credentialUri) {
+        return sendError(
+          res,
+          502,
+          "PROVIDER_ACCOUNT_SECRET_DELETE_FAILED",
+          "the kernel did not confirm credential deletion; the account was kept",
+          "external_dependency",
+        );
+      }
+    }
+    await writerTransaction(async (tx) => {
+      // A session pointing at a deleted account would fail every later turn
+      // with "account not found" and no way to clear it from the UI.
+      await tx.session.updateMany({
+        where: { defaultProviderAccountId: account.id },
+        data: { defaultProviderAccountId: null },
+      });
+      await tx.providerAccountModelDiscovery.deleteMany({ where: { accountId: account.id } });
+      await tx.providerAccount.deleteMany({ where: { id: account.id, revision: account.revision } });
+    });
+    providerAccountModelCache.delete(account.id);
+    if (account.isDefault) {
+      const remaining = await listProviderAccountRecords();
+      const next = chooseDefaultAccount(remaining);
+      if (next !== null) await setDefaultProviderAccountRow(next.id);
+    }
+    sendJson(res, 200, await providerAccountsResponse());
+  }),
+  route("PUT", "/v1/provider-accounts/:id/default", async (req, res, params) => {
+    const parsed = providerAccountRevisionSchema.safeParse(await jsonBody(req));
+    if (!parsed.success) {
+      return sendError(res, 400, "PROVIDER_ACCOUNT_INPUT_INVALID", "expected_revision is required", "validation");
+    }
+    const accountId = String(params.id);
+    const account = await db.providerAccount.findUnique({ where: { id: accountId } });
+    if (account === null) {
+      return sendError(res, 404, "PROVIDER_ACCOUNT_NOT_FOUND", "provider account not found", "not_found");
+    }
+    if (account.revision !== parsed.data.expected_revision) {
+      return sendError(
+        res,
+        409,
+        "PROVIDER_ACCOUNT_CONFLICT",
+        "provider account changed; reload it before setting the default",
+        "conflict",
+        { expected_revision: parsed.data.expected_revision, actual_revision: account.revision },
+      );
+    }
+    if (account.status !== "connected") {
+      return sendError(
+        res,
+        409,
+        "PROVIDER_ACCOUNT_UNAVAILABLE",
+        `provider account '${account.displayName}' is ${account.status} and cannot be the default`,
+        "conflict",
+        { provider_account_id: account.id, status: account.status, status_detail: account.statusDetail },
+      );
+    }
+    await setDefaultProviderAccountRow(account.id);
+    sendJson(res, 200, await providerAccountsResponse());
   }),
 
   // ────────────────────────── /policies (SPEC §32.1 resource group) ─────
@@ -10810,15 +11137,19 @@ function unconfiguredProviderSnapshot(observedAt: Rfc3339Timestamp): ProviderCap
 /** Execute the configured local provider exclusively through kernel Job RPC. */
 async function executeGatewayProviderRequest(
   rendered: RenderedProviderRequest,
-  gateway: { readonly model: GatewayModel; readonly secretUri: string },
+  gateway: ProviderGatewayConfig,
   context: RequestContext,
   signal: AbortSignal | null | undefined,
   onChunk?: ProviderExecutionInput["onChunk"],
 ): Promise<ProviderResponse> {
+  const client = gateway.endpoint === undefined
+    ? new KernelGatewayClient(requireKernelUds().connectors, context)
+    : new KernelConnectorClient(requireKernelUds().connectors, context, gateway.endpoint);
   const transport = new GatewayTransport({
     credentialBindingId: gateway.secretUri,
     models: [gateway.model],
-    client: new KernelGatewayClient(requireKernelUds().connectors, context),
+    client,
+    ...(gateway.extraHeaders === undefined ? {} : { extraHeaders: gateway.extraHeaders }),
   });
   const chunks: ProviderResponseChunk[] = [];
   const dispatchedAt = Date.now();
@@ -10829,6 +11160,9 @@ async function executeGatewayProviderRequest(
     }
     chunks.push(chunk);
     await onChunk?.(chunk);
+  }
+  if (gateway.accountId !== undefined) {
+    recordProviderAccountUsageHeaders(gateway.accountId, client.responseHeaders());
   }
   const providerError = chunks.find((chunk) => chunk.kind === "error");
   if (providerError?.kind === "error") {
@@ -12303,6 +12637,615 @@ async function warmProviderModelDiscovery(): Promise<void> {
   }
 }
 
+// ───────────────── Connected provider accounts ──────────────────────────────
+//
+// Routing used to be a fixed chain: vendor-direct environment configuration,
+// else the singleton gateway row, else a local command. A machine that already
+// held a ChatGPT login and an OpenCode auth store could reach exactly one of
+// them. Each usable credential is now a `provider_accounts` row, and a turn
+// names the account it runs on.
+//
+// Nothing here ever sees credential material. The kernel reports identity, a
+// fingerprint, and non-secret metadata; it imports the bytes straight into the
+// OS keyring under `secret://provider-account/<uuid-v7>`, and every request
+// hands the connector that opaque URI.
+
+/** What the last discovery run observed, for `GET /v1/provider-accounts`. */
+let lastProviderAccountDiscovery: {
+  readonly lastRunAt: string;
+  readonly codexInstalled: boolean;
+  readonly opencodeInstalled: boolean;
+  readonly warnings: readonly string[];
+} | null = null;
+
+async function listProviderAccountRecords(): Promise<readonly ProviderAccountRecord[]> {
+  return db.providerAccount.findMany({ orderBy: [{ displayName: "asc" }, { source: "asc" }] });
+}
+
+/**
+ * Create the account for a source, or update the one that exists.
+ *
+ * `revision` moves only when something actually changed, so a discovery run
+ * that finds nothing new does not invalidate every client's optimistic
+ * concurrency token. `isDefault` is never touched here: it is a user decision.
+ */
+async function upsertProviderAccountRecord(input: ProviderAccountUpsert): Promise<ProviderAccountRecord> {
+  const columns = {
+    displayName: input.displayName,
+    vendorId: input.vendorId,
+    authKind: input.authKind,
+    credentialUri: input.credentialUri,
+    fingerprint: input.fingerprint,
+    baseUrl: input.baseUrl,
+    host: input.host,
+    protocol: input.protocol,
+    connectorId: input.connectorId,
+    renderProfile: input.renderProfile,
+    status: input.status,
+    statusDetail: input.statusDetail,
+    billing: input.billing,
+    metadataJson: input.metadataJson,
+    expiresAt: input.expiresAt,
+  };
+  return writerTransaction(async (tx) => {
+    const current = await tx.providerAccount.findUnique({ where: { source: input.source } });
+    if (current === null) {
+      return tx.providerAccount.create({
+        data: {
+          id: input.id,
+          source: input.source,
+          ...columns,
+          discoveredAt: input.discoveredAt,
+          isDefault: false,
+          revision: 1,
+        },
+      });
+    }
+    const unchanged = (Object.keys(columns) as (keyof typeof columns)[]).every((key) => {
+      const next = columns[key];
+      const previous = current[key];
+      if (next instanceof Date || previous instanceof Date) {
+        return (next instanceof Date ? next.getTime() : null) === (previous instanceof Date ? previous.getTime() : null);
+      }
+      return next === previous;
+    });
+    if (unchanged) return current;
+    return tx.providerAccount.update({
+      where: { id: current.id },
+      data: { ...columns, revision: { increment: 1 } },
+    });
+  });
+}
+
+/**
+ * Exactly one default. The partial unique index enforces it, so the previous
+ * default is cleared before the new one is set rather than in one statement.
+ */
+async function setDefaultProviderAccountRow(accountId: string): Promise<void> {
+  await writerTransaction(async (tx) => {
+    await tx.providerAccount.updateMany({
+      where: { isDefault: true, NOT: { id: accountId } },
+      data: { isDefault: false },
+    });
+    await tx.providerAccount.updateMany({ where: { id: accountId }, data: { isDefault: true } });
+  });
+}
+
+/** The legacy gateway row as this module reads it, or null when unconfigured. */
+async function readGatewayConfigurationSnapshot(): Promise<{
+  readonly deployment: string;
+  readonly protocol: string;
+  readonly credentialConfigured: boolean;
+  readonly freeModel: boolean;
+  readonly secretUri: string;
+} | null> {
+  const row = await db.gatewayProviderConfiguration.findUnique({
+    where: { id: GATEWAY_PROVIDER_CONFIGURATION_ID },
+  });
+  if (row === null) return null;
+  return {
+    deployment: row.deployment,
+    protocol: row.protocol,
+    credentialConfigured: row.credentialConfigured,
+    freeModel: row.freeModel,
+    secretUri: row.secretUri,
+  };
+}
+
+/**
+ * Ask the kernel what credentials this machine holds and reconcile the rows.
+ *
+ * Auto-connect is silent by product decision (2026-08-28): nothing leaves the
+ * keyring, nothing is sent anywhere the user's own CLI would not already send
+ * it, and Settings offers one-click Disconnect.
+ */
+async function runProviderAccountDiscovery(): Promise<{
+  readonly accounts: readonly ProviderAccountRecord[];
+  readonly imported: readonly string[];
+  readonly warnings: readonly string[];
+  readonly codexInstalled: boolean;
+  readonly opencodeInstalled: boolean;
+  readonly lastRunAt: string;
+}> {
+  const result = await discoverAndConnectLocalAccounts({
+    discoverLocal: async (): Promise<LocalCredentialDiscovery> => {
+      const response = await requireKernelUds().providerAccounts.DiscoverLocal({
+        context: {
+          ...await kernelMaintenanceContext(),
+          idempotencyKey: `provider-account-discover:${Date.now()}`,
+        },
+      });
+      return {
+        credentials: response.credentials.map((credential) => ({
+          source: credential.source,
+          authKind: credential.authKind,
+          fingerprint: credential.fingerprint,
+          metadataJson: credential.metadataJson,
+          expiresAtUnix: Number(credential.expiresAtUnix),
+          store: credential.store,
+        })),
+        warnings: response.warnings,
+        codexInstalled: response.codexInstalled,
+        opencodeInstalled: response.opencodeInstalled,
+      };
+    },
+    importLocal: async ({ source, capabilityUri, fingerprint }) => {
+      const response = await requireKernelUds().providerAccounts.ImportLocal({
+        // The kernel requires an idempotency key. Keying it on the credential
+        // fingerprint as well as the destination means a rotated key is a new
+        // operation rather than a replay of the import that stored the old one.
+        context: {
+          ...await kernelMaintenanceContext(),
+          idempotencyKey: `provider-account-import:${capabilityUri}:${fingerprint}`,
+        },
+        source,
+        capabilityUri,
+      });
+      return { capabilityUri: response.capabilityUri, stored: response.stored };
+    },
+    listAccounts: listProviderAccountRecords,
+    upsertAccount: upsertProviderAccountRecord,
+    setDefaultAccount: setDefaultProviderAccountRow,
+    readGatewayConfiguration: readGatewayConfigurationSnapshot,
+    fetchCatalog: () => fetchModelsDevRaw(),
+    newAccountId: () => uuidV7(),
+    warn: (message) => console.warn(`[terminus-control] ${message}`),
+  });
+  lastProviderAccountDiscovery = {
+    lastRunAt: result.lastRunAt,
+    codexInstalled: result.codexInstalled,
+    opencodeInstalled: result.opencodeInstalled,
+    warnings: result.warnings,
+  };
+  return result;
+}
+
+/**
+ * The exact HTTPS surface one account may reach.
+ *
+ * Derived from the account's own base URL, so a connected account can never
+ * widen its destination past the path prefix it was discovered with.
+ */
+function providerAccountEndpoint(account: ProviderAccountRecord): KernelConnectorEndpoint {
+  const profile = account.renderProfile as ProviderRenderProfile;
+  if (profile === "zen_gateway") return ZEN_GATEWAY_ENDPOINT;
+  if (profile === "chatgpt_codex") {
+    return {
+      connectorId: "chatgpt-codex",
+      host: CODEX_HOST,
+      port: 443,
+      allowedPathPrefixes: [CODEX_PATH_PREFIX],
+      label: account.displayName,
+    };
+  }
+  const base = new URL(account.baseUrl);
+  const prefix = base.pathname === "/" ? "/" : `${base.pathname.replace(/\/+$/, "")}/`;
+  return {
+    connectorId: account.connectorId,
+    host: account.host,
+    port: base.port === "" ? 443 : Number(base.port),
+    allowedPathPrefixes: [prefix],
+    label: account.displayName,
+  };
+}
+
+/**
+ * Non-credential headers the account's connector admits.
+ *
+ * The Codex endpoint identifies the caller honestly: `originator: terminus`
+ * and a Terminus user agent, never an impersonated Codex CLI.
+ */
+function providerAccountRequestHeaders(
+  account: ProviderAccountRecord,
+  sessionId: string | null,
+): Readonly<Record<string, string>> {
+  if ((account.renderProfile as ProviderRenderProfile) !== "chatgpt_codex") return {};
+  const metadata = parseProviderAccountMetadata(account.metadataJson);
+  return {
+    originator: "terminus",
+    "user-agent": `terminus/${CONTROL_BUILD_VERSION}`,
+    ...(metadata.account_id === undefined ? {} : { "chatgpt-account-id": metadata.account_id }),
+    ...(sessionId === null || sessionId === "" ? {} : { "session-id": sessionId }),
+  };
+}
+
+function providerAccountClient(
+  account: ProviderAccountRecord,
+  context: RequestContext,
+): KernelConnectorClient {
+  return new KernelConnectorClient(
+    requireKernelUds().connectors,
+    context,
+    providerAccountEndpoint(account),
+  );
+}
+
+// ── Per-account model discovery ─────────────────────────────────────────────
+
+/** Freshest discovery per account. Warmed at startup, refreshed on demand. */
+const providerAccountModelCache = new Map<string, ProviderAccountModelsResult>();
+/** One on-demand discovery per account+model per process, so a turn cannot loop. */
+const providerAccountDiscoveryAttempted = new Set<string>();
+
+async function loadPersistedProviderAccountModels(
+  accountId: string,
+): Promise<ProviderAccountModelsResult | null> {
+  const row = await db.providerAccountModelDiscovery.findUnique({ where: { accountId } });
+  if (row === null) return null;
+  const parsed = parseProviderAccountModels(row.resultJson);
+  if (parsed === null) {
+    console.warn(`[terminus-control] persisted model discovery for account ${accountId} is unreadable; ignoring it`);
+    return null;
+  }
+  providerAccountModelCache.set(accountId, parsed);
+  return parsed;
+}
+
+async function discoverAndPersistProviderAccountModels(
+  account: ProviderAccountRecord,
+  signal?: AbortSignal | null,
+): Promise<ProviderAccountModelsResult> {
+  const context = await kernelBrokerContext();
+  const result = await discoverAccountModels({
+    account,
+    client: providerAccountClient(account, context),
+    observedAt: now(),
+    catalog: (await fetchModelsDevRaw()).catalog,
+    headers: providerAccountRequestHeaders(account, null),
+    ...(signal === undefined || signal === null ? {} : { signal }),
+    discoverZen: async () => {
+      const row = await db.gatewayProviderConfiguration.findUnique({
+        where: { id: GATEWAY_PROVIDER_CONFIGURATION_ID },
+      });
+      const credential = row === null ? null : gatewayDiscoveryCredential(row);
+      if (credential === null) throw new Error("the OpenCode gateway has no usable credential");
+      const discovered = await discoverAndPersistProviderModels(credential, signal);
+      return { models: discovered.models, rejected: discovered.rejected };
+    },
+  });
+  providerAccountModelCache.set(account.id, result);
+  const resultJson = providerAccountModelsJson(result);
+  await writerTransaction(async (tx) => {
+    await tx.providerAccountModelDiscovery.upsert({
+      where: { accountId: account.id },
+      create: {
+        accountId: account.id,
+        resultJson,
+        modelCount: result.models.length,
+        observedAt: result.observedAt,
+      },
+      update: { resultJson, modelCount: result.models.length, observedAt: result.observedAt },
+    });
+    // The probe is the only thing that proves the account answers. A failure
+    // records why without demoting an account that still routes.
+    if (result.reachable === true) {
+      await tx.providerAccount.updateMany({
+        where: { id: account.id },
+        data: { lastVerifiedAt: new Date(), statusDetail: "" },
+      });
+    } else if (result.reachable === false && account.status === "connected") {
+      await tx.providerAccount.updateMany({
+        where: { id: account.id, status: "connected" },
+        data: { statusDetail: result.reachabilityDetail },
+      });
+    }
+  });
+  return result;
+}
+
+/** Memory → durable row, without triggering discovery. */
+async function knownProviderAccountModels(
+  accountId: string,
+): Promise<ProviderAccountModelsResult | null> {
+  return providerAccountModelCache.get(accountId) ?? await loadPersistedProviderAccountModels(accountId);
+}
+
+/**
+ * The admitted record for one model on one account: memory, durable row, then
+ * a single bounded live discovery. Null only when the model is genuinely not
+ * admitted for this account.
+ */
+async function admittedProviderAccountModel(
+  account: ProviderAccountRecord,
+  modelId: string,
+  signal?: AbortSignal | null,
+): Promise<ProviderAccountModel | null> {
+  const known = await knownProviderAccountModels(account.id);
+  const found = known?.models.find((model) => model.id === modelId) ?? null;
+  if (found !== null) return found;
+  const attemptKey = `${account.id}:${modelId}`;
+  if (providerAccountDiscoveryAttempted.has(attemptKey)) return null;
+  providerAccountDiscoveryAttempted.add(attemptKey);
+  try {
+    const discovered = await discoverAndPersistProviderAccountModels(account, signal);
+    return discovered.models.find((model) => model.id === modelId) ?? null;
+  } catch (error: unknown) {
+    console.warn(
+      `[terminus-control] on-demand model discovery for account ${account.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
+/** The model ids this account may currently use, for a denial's details. */
+async function admittedProviderAccountModelIds(
+  account: ProviderAccountRecord,
+): Promise<readonly string[]> {
+  const known = await knownProviderAccountModels(account.id);
+  return (known?.models ?? []).map((model) => model.id).sort();
+}
+
+async function providerAccountModelCounts(
+  accounts: readonly ProviderAccountRecord[],
+): Promise<ReadonlyMap<string, number>> {
+  if (accounts.length === 0) return new Map();
+  const rows = await db.providerAccountModelDiscovery.findMany({
+    where: { accountId: { in: accounts.map((account) => account.id) } },
+    select: { accountId: true, modelCount: true },
+  });
+  const counts = new Map<string, number>(rows.map((row) => [row.accountId, row.modelCount]));
+  for (const account of accounts) {
+    const cached = providerAccountModelCache.get(account.id);
+    if (cached !== undefined) counts.set(account.id, cached.models.length);
+  }
+  return counts;
+}
+
+/**
+ * Warm every connected account after startup recovery.
+ *
+ * Bounded and parallel: eight accounts each doing a bounded catalogue call
+ * must not add eight timeouts to the readiness path. Failures are logged, not
+ * fatal — a durable record from a previous run still routes.
+ */
+async function warmProviderAccountDiscovery(): Promise<void> {
+  let discovered: Awaited<ReturnType<typeof runProviderAccountDiscovery>>;
+  try {
+    discovered = await runProviderAccountDiscovery();
+  } catch (error: unknown) {
+    console.warn(
+      `[terminus-control] provider account auto-connect failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return;
+  }
+  console.log(
+    `[terminus-control] connected provider accounts: ${discovered.accounts.length} known, ${discovered.imported.length} imported or refreshed`,
+  );
+  for (const warning of discovered.warnings) {
+    console.warn(`[terminus-control] provider account discovery: ${warning}`);
+  }
+  const connected = discovered.accounts.filter((account) => account.status === "connected");
+  for (const account of connected) {
+    const persisted = await loadPersistedProviderAccountModels(account.id);
+    if (persisted !== null) {
+      console.log(
+        `[terminus-control] restored ${persisted.models.length} model(s) for ${account.displayName} observed at ${persisted.observedAt}`,
+      );
+    }
+  }
+  const warmed = await Promise.race([
+    Promise.allSettled(connected.map((account) => discoverAndPersistProviderAccountModels(account))),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), PROVIDER_ACCOUNT_WARM_BUDGET_MS)),
+  ]);
+  if (warmed === null) {
+    console.warn(
+      `[terminus-control] provider account model warm-up exceeded ${PROVIDER_ACCOUNT_WARM_BUDGET_MS}ms; durable records still route`,
+    );
+    return;
+  }
+  for (const [index, outcome] of warmed.entries()) {
+    const account = connected[index];
+    if (account === undefined) continue;
+    if (outcome.status === "rejected") {
+      console.warn(
+        `[terminus-control] model discovery for ${account.displayName} failed: ${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`,
+      );
+    } else {
+      console.log(
+        `[terminus-control] warmed ${outcome.value.models.length} model(s) for ${account.displayName}`,
+      );
+    }
+  }
+}
+
+const PROVIDER_ACCOUNT_WARM_BUDGET_MS = 20_000;
+
+/** Typed 409 for an account a client named that cannot run this turn. */
+function sendProviderAccountResolutionError(
+  res: ServerResponse,
+  resolution: Extract<TurnProviderResolution, { readonly kind: "error" }>,
+): void {
+  if (resolution.code === "PROVIDER_ACCOUNT_NOT_FOUND") {
+    sendError(
+      res,
+      409,
+      "PROVIDER_ACCOUNT_NOT_FOUND",
+      `provider account '${resolution.accountId}' does not exist`,
+      "conflict",
+      { provider_account_id: resolution.accountId },
+    );
+    return;
+  }
+  sendError(
+    res,
+    409,
+    "PROVIDER_ACCOUNT_UNAVAILABLE",
+    `provider account '${resolution.accountId}' is ${resolution.status} and cannot run a turn`,
+    "conflict",
+    {
+      provider_account_id: resolution.accountId,
+      status: resolution.status,
+      status_detail: resolution.statusDetail,
+    },
+  );
+}
+
+/**
+ * The renderer for one account model.
+ *
+ * ChatGPT Codex needs its own profile: the endpoint rejects four fields an
+ * ordinary Responses request carries, requires `store: false`, and advertises
+ * per-model reasoning levels richer than Terminus's four. Everything else
+ * reuses `GatewayRenderer`, which already delegates by protocol.
+ */
+function providerAccountRenderer(
+  routing: {
+    readonly account: ProviderAccountRecord;
+    readonly model: ProviderAccountModel;
+    readonly providerId: string;
+    readonly gatewayModel: GatewayModel;
+  },
+  reasoningEffort: ReasoningEffort | null,
+  promptCacheKey: string,
+): ChatGptCodexRenderer | GatewayRenderer {
+  if ((routing.account.renderProfile as ProviderRenderProfile) === "chatgpt_codex") {
+    const profile: ChatGptCodexModelProfile = {
+      slug: routing.model.id,
+      reasoningLevels: [...routing.model.reasoningEfforts],
+      defaultReasoningLevel: routing.model.defaultReasoningEffort,
+      supportsParallelToolCalls: routing.model.supportsParallelToolCalls,
+      supportsReasoningSummaries: routing.model.supportsReasoningSummaries,
+    };
+    return new ChatGptCodexRenderer(routing.providerId, {
+      reasoningEffort,
+      promptCacheKey,
+      profile,
+    });
+  }
+  return new GatewayRenderer([routing.gatewayModel], { reasoningEffort });
+}
+
+/**
+ * Surface an account's rate-limit receipt on the account itself.
+ *
+ * A subscription account has no per-token price, so the only honest usage
+ * signal is the provider's own quota window. Best effort: a failure here must
+ * never fail a turn, and the account's revision does not move — this is
+ * observation, not configuration.
+ */
+function recordProviderAccountUsageHeaders(
+  accountId: string,
+  headers: Readonly<Record<string, string>>,
+): void {
+  const usedPercent = headers["x-codex-primary-used-percent"];
+  const resetAfterSeconds = headers["x-codex-primary-reset-after-seconds"];
+  if (usedPercent === undefined && resetAfterSeconds === undefined) return;
+  const parts: string[] = [];
+  if (usedPercent !== undefined) parts.push(`${usedPercent}% of the plan window used`);
+  if (resetAfterSeconds !== undefined) {
+    const seconds = Number(resetAfterSeconds);
+    parts.push(
+      Number.isFinite(seconds) && seconds > 0
+        ? `resets in ${Math.max(1, Math.round(seconds / 60))} min`
+        : `resets in ${resetAfterSeconds}s`,
+    );
+  }
+  const detail = parts.join(", ");
+  void writerTransaction((tx) => tx.providerAccount.updateMany({
+    where: { id: accountId, status: "connected" },
+    data: { statusDetail: detail },
+  })).catch((error: unknown) => {
+    console.warn(
+      `[terminus-control] recording provider account usage failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
+}
+
+const providerAccountRevisionSchema = z.object({
+  expected_revision: z.number().int().nonnegative(),
+}).strict();
+
+/**
+ * The account list plus what the last discovery run observed.
+ *
+ * Which local tools are installed travels as `installed_tools: ["codex", ...]`
+ * rather than one boolean per tool: `tools/standalone-check.ts` rejects a
+ * shipped desktop identifier that puts a separator next to the harness name,
+ * and a list of names carries the same fact without one.
+ */
+async function providerAccountsResponse(): Promise<{
+  accounts: unknown[];
+  discovery: {
+    last_run_at: string | null;
+    installed_tools: string[];
+    warnings: string[];
+  };
+}> {
+  const accounts = await listProviderAccountRecords();
+  const counts = await providerAccountModelCounts(accounts);
+  const installedTools: string[] = [];
+  if (lastProviderAccountDiscovery?.codexInstalled === true) installedTools.push("codex");
+  if (lastProviderAccountDiscovery?.opencodeInstalled === true) installedTools.push(ZEN_VENDOR_ID);
+  return {
+    accounts: accounts.map((account) => providerAccountWire(account, counts.get(account.id) ?? 0)),
+    discovery: {
+      last_run_at: lastProviderAccountDiscovery?.lastRunAt ?? null,
+      installed_tools: installedTools,
+      warnings: [...(lastProviderAccountDiscovery?.warnings ?? [])],
+    },
+  };
+}
+
+/**
+ * The multi-account inventory.
+ *
+ * Returns null when no account exists at all, so `GET /v1/provider-models`
+ * falls back to the legacy single-gateway answer for an installation that has
+ * never run discovery.
+ */
+async function providerAccountInventory(): Promise<ReturnType<typeof providerAccountModelsWire> | null> {
+  const accounts = await listProviderAccountRecords();
+  if (accounts.length === 0) return null;
+  const entries: { readonly account: ProviderAccountRecord; readonly result: ProviderAccountModelsResult | null }[] = [];
+  const failures: string[] = [];
+  for (const account of accounts) {
+    let result = await knownProviderAccountModels(account.id);
+    if (result === null && account.status === "connected") {
+      try {
+        result = await discoverAndPersistProviderAccountModels(account);
+      } catch (error: unknown) {
+        failures.push(
+          `${account.displayName}: ${error instanceof Error ? error.message : "model discovery failed"}`,
+        );
+      }
+    }
+    entries.push({ account, result });
+  }
+  const wire = providerAccountModelsWire(entries, null);
+  if (wire.models.length > 0) {
+    return failures.length === 0 ? wire : { ...wire, error: failures.join("; ") };
+  }
+  // A stale answer beats no answer, and an empty one needs a reason a client
+  // can show instead of an unexplained blank picker.
+  const reason = failures.length > 0
+    ? failures.join("; ")
+    : accounts.some((account) => account.status === "connected")
+      ? "No connected provider account has reported any models yet."
+      : "No provider account is connected.";
+  return { ...wire, error: reason };
+}
+
+
 const verificationCoordinator = new VerificationCoordinator<Prisma.TransactionClient>({
   readTask: async (taskId) => db.task.findUnique({ where: { id: taskId }, select: { status: true } }),
   appendEvent: async (event, mutation): Promise<void> => {
@@ -12798,6 +13741,39 @@ async function settleRejectedProviderToolCall(
   });
 }
 
+/**
+ * Every spelling of a workspace root a model might have been handed.
+ *
+ * `canonicalRoot` and the `file://` root differ wherever the path crosses a
+ * symlink — `/tmp` against `/private/tmp` on macOS — and the model quotes back
+ * whichever one its context showed it. Roots do not move, so this is read once
+ * per workspace per process.
+ */
+const workspaceRootPathCache = new Map<string, readonly string[]>();
+
+async function workspaceRootPaths(workspaceId: string): Promise<readonly string[]> {
+  const cached = workspaceRootPathCache.get(workspaceId);
+  if (cached !== undefined) return cached;
+  const row = await db.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { rootUri: true, canonicalRoot: true },
+  });
+  const roots: string[] = [];
+  if (row !== null) {
+    if (row.canonicalRoot.length > 0) roots.push(row.canonicalRoot);
+    try {
+      const parsed = new URL(row.rootUri);
+      if (parsed.protocol === "file:") roots.push(fileURLToPath(parsed));
+    } catch {
+      // A root that is not a URL contributes no spelling; the canonical root
+      // above is still authoritative.
+    }
+  }
+  const unique = [...new Set(roots)];
+  workspaceRootPathCache.set(workspaceId, unique);
+  return unique;
+}
+
 async function settleStandaloneProviderTool(
   input: StandaloneToolSettlementInput,
 ): Promise<EngineToolSettlement> {
@@ -12805,7 +13781,12 @@ async function settleStandaloneProviderTool(
   if (input.rejection !== undefined) return settleRejectedProviderToolCall(input, input.rejection);
   let call: ParsedStandaloneToolCall;
   try {
-    call = parseStandaloneToolCall(input.callChunk);
+    // Rewritten before the arguments artifact and the operation hash below, so
+    // the recorded call is the one that actually ran.
+    call = relativizeStandaloneCallPaths(
+      parseStandaloneToolCall(input.callChunk),
+      await workspaceRootPaths(input.workspaceId),
+    );
   } catch (error: unknown) {
     if (error instanceof InvalidToolCallError) return settleRejectedProviderToolCall(input, error);
     throw error;
@@ -13606,6 +14587,76 @@ async function agentLoop(turnId: string): Promise<void> {
     const gatewayProviderConfiguration = await db.gatewayProviderConfiguration.findUnique({
       where: { id: GATEWAY_PROVIDER_CONFIGURATION_ID },
     });
+    // The connected provider account, pinned on the turn row at admission so
+    // it cannot change under a turn that is already running. An account that
+    // has since been disconnected, expired, or lost the model fails the turn:
+    // running the user's prompt against a different provider than the one they
+    // picked is the one outcome that must never happen silently.
+    const selectedProviderAccount = turn.selectedProviderAccountId === null
+      ? null
+      : await db.providerAccount.findUnique({ where: { id: turn.selectedProviderAccountId } });
+    if (turn.selectedProviderAccountId !== null && selectedProviderAccount === null) {
+      throw new Error(
+        `provider account ${turn.selectedProviderAccountId} was disconnected before this turn ran`,
+      );
+    }
+    if (selectedProviderAccount !== null && selectedProviderAccount.status !== "connected") {
+      throw new Error(
+        `provider account ${selectedProviderAccount.displayName} is ${selectedProviderAccount.status}${selectedProviderAccount.statusDetail === "" ? "" : `: ${selectedProviderAccount.statusDetail}`}`,
+      );
+    }
+    const selectedAccountModel = selectedProviderAccount === null || turn.selectedModel === null
+      ? null
+      : await admittedProviderAccountModel(
+          selectedProviderAccount,
+          turn.selectedModel,
+          abortController.signal,
+        );
+    if (selectedProviderAccount !== null && selectedAccountModel === null) {
+      throw new Error(
+        `model ${turn.selectedModel ?? "(none)"} is not admitted for provider account ${selectedProviderAccount.displayName}`,
+      );
+    }
+    const accountRouting = selectedProviderAccount === null || selectedAccountModel === null
+      ? null
+      : (() => {
+          const providerId = providerAccountProviderId(selectedProviderAccount);
+          const observedAt = now();
+          // The shared free gateway carries an explicit privacy admission; a
+          // credential the user already uses with that vendor from their own
+          // CLI does not (product decision 2026-08-28).
+          const workspaceAccess = selectedProviderAccount.source !== ZEN_SOURCE
+            || (gatewayProviderConfiguration?.workspaceAccess === true
+              && gatewayProviderConfiguration.privacyTermsAdmitted
+              && gatewayProviderConfiguration.privacyTermsVersion
+                === currentGatewayPrivacyTermsVersion(
+                  gatewayProviderConfiguration.deployment === "go" ? "go" : "zen",
+                ));
+          return {
+            account: selectedProviderAccount,
+            model: selectedAccountModel,
+            providerId,
+            gatewayModel: toGatewayModel({
+              account: selectedProviderAccount,
+              model: selectedAccountModel,
+              providerId,
+              observedAt,
+            }),
+            snapshot: providerAccountCapabilitySnapshot({
+              account: selectedProviderAccount,
+              model: selectedAccountModel,
+              providerId,
+              observedAt,
+              workspaceAccess,
+            }),
+            endpoint: providerAccountEndpoint(selectedProviderAccount),
+            extraHeaders: providerAccountRequestHeaders(
+              selectedProviderAccount,
+              turn.thread.sessionId,
+            ),
+            scope: providerAccountCapabilityScope(selectedProviderAccount),
+          };
+        })();
     const localProviderCommand = providerConfiguration === null
       ? parseLocalProviderCommand(process.env.TERMINUS_LOCAL_PROVIDER_COMMAND_JSON)
       : providerConfigurationCommand(providerConfiguration);
@@ -13645,32 +14696,42 @@ async function agentLoop(turnId: string): Promise<void> {
     // configuration > OpenCode gateway > local NDJSON command. The direct
     // configuration references a kernel secret capability URI only; key
     // material never appears in configuration or logs.
-    const directConfiguration = parseDirectProviderConfiguration(process.env[DIRECT_PROVIDER_CONFIGURATION_ENV]);
+    const directConfiguration = accountRouting !== null
+      ? null
+      : parseDirectProviderConfiguration(process.env[DIRECT_PROVIDER_CONFIGURATION_ENV]);
     const directObservedAt = now();
     // H7: a turn may name its own admitted model; H4: resolve the discovery
     // record through memory, the durable row, and finally one bounded on-demand
     // discovery, instead of failing the turn for a cold in-process cache.
-    const gatewayCredential = gatewayProviderConfiguration === null
+    const gatewayCredential = accountRouting !== null || gatewayProviderConfiguration === null
       ? null
       : gatewayDiscoveryCredential(gatewayProviderConfiguration);
     const requestedModelId = turn.selectedModel ?? gatewayProviderConfiguration?.model ?? null;
-    const discoveredGatewayRecord = directConfiguration !== null
+    const discoveredGatewayRecord = accountRouting !== null
+      || directConfiguration !== null
       || gatewayProviderConfiguration === null
       || gatewayCredential === null
       || requestedModelId === null
       ? null
       : await admittedGatewayModelRecord(gatewayCredential, requestedModelId, abortController.signal);
-    const gatewayModel = directConfiguration !== null || gatewayProviderConfiguration === null
-      ? null
-      : configuredGatewayModel(
-          turn.selectedModel === null
-            ? gatewayProviderConfiguration
-            : { ...gatewayProviderConfiguration, model: turn.selectedModel },
-          now(),
-          discoveredGatewayRecord,
-        );
+    // An account-routed turn reuses the gateway transport: `GatewayTransport`
+    // and `GatewayRenderer` already take a base URL and protocol per model, so
+    // a connected account needs no second chat-completions transport.
+    const gatewayModel = accountRouting !== null
+      ? accountRouting.gatewayModel
+      : directConfiguration !== null || gatewayProviderConfiguration === null
+        ? null
+        : configuredGatewayModel(
+            turn.selectedModel === null
+              ? gatewayProviderConfiguration
+              : { ...gatewayProviderConfiguration, model: turn.selectedModel },
+            now(),
+            discoveredGatewayRecord,
+          );
     const turnReasoningEffort = parseReasoningEffort(turn.selectedReasoningEffort);
-    const selectedProvider = directConfiguration !== null
+    const selectedProvider = accountRouting !== null
+      ? accountRouting.snapshot
+      : directConfiguration !== null
       ? configuredDirectProviderSnapshot(directConfiguration, directObservedAt)
       : gatewayModel === null
         ? localProvider
@@ -13681,7 +14742,14 @@ async function agentLoop(turnId: string): Promise<void> {
             gatewayProviderConfiguration?.privacyTermsAdmitted ?? false,
             gatewayProviderConfiguration?.privacyTermsVersion ?? null,
           );
-    const selectedModel: ModelCapabilitySnapshot = directConfiguration !== null
+    const selectedModel: ModelCapabilitySnapshot = accountRouting !== null
+      ? {
+          modelKey: accountRouting.model.id as ModelKey,
+          providerId: accountRouting.providerId,
+          snapshot: selectedProvider,
+          observedAt: selectedProvider.observedAt,
+        }
+      : directConfiguration !== null
       ? {
           modelKey: directModelKey(directConfiguration),
           providerId: directProviderId(directConfiguration.vendor),
@@ -13696,22 +14764,43 @@ async function agentLoop(turnId: string): Promise<void> {
             snapshot: selectedProvider,
             observedAt: selectedProvider.observedAt,
           };
-    const gatewayBindingId: string = gatewayModel === null
-      ? ""
-      : gatewayCredentialBindingId(
-          gatewayModel,
-          gatewayProviderConfiguration?.credentialConfigured === true,
-        );
-    const selectedRenderer = directConfiguration !== null
+    const gatewayBindingId: string = accountRouting !== null
+      ? accountRouting.account.credentialUri
+      : gatewayModel === null
+        ? ""
+        : gatewayCredentialBindingId(
+            gatewayModel,
+            gatewayProviderConfiguration?.credentialConfigured === true,
+          );
+    const selectedRenderer = accountRouting !== null
+      ? providerAccountRenderer(accountRouting, turnReasoningEffort, turn.threadId)
+      : directConfiguration !== null
       ? createDirectRenderer(directConfiguration, { reasoningEffort: turnReasoningEffort })
       : gatewayModel === null
         ? new LocalRenderer()
         : new GatewayRenderer([gatewayModel], { reasoningEffort: turnReasoningEffort });
-    const toolsEnabled = directConfiguration !== null
+    const toolsEnabled = accountRouting !== null
+      ? accountRouting.model.toolCalling
+      : directConfiguration !== null
       ? selectedProvider.context.toolCalling
       : gatewayModel === null
         ? (localProviderCommand?.toolsEnabled ?? false)
         : gatewayModel.toolCalling;
+    // The dispatch target for this turn. An account carries its own connector
+    // and the non-credential headers that endpoint requires.
+    const providerGatewayConfig: ProviderGatewayConfig | null = gatewayModel === null
+      ? null
+      : {
+          model: gatewayModel,
+          secretUri: gatewayBindingId,
+          ...(accountRouting === null
+            ? {}
+            : {
+                endpoint: accountRouting.endpoint,
+                extraHeaders: accountRouting.extraHeaders,
+                accountId: accountRouting.account.id,
+              }),
+        };
     const requestedToolCapabilities = [...new Set(
       (process.env.TERMINUS_ACTIVE_TOOL_CAPABILITIES ?? "")
         .split(",")
@@ -13737,8 +14826,13 @@ async function agentLoop(turnId: string): Promise<void> {
       providerId: selectedProvider.providerId,
       modelKey: String(selectedModel.modelKey),
       configuration: {
-        transport: directConfiguration !== null ? "direct" : gatewayModel === null ? "local" : "gateway",
-        provider_revision: gatewayProviderConfiguration?.revision ?? providerConfiguration?.revision ?? 0,
+        transport: accountRouting !== null
+          ? "provider_account"
+          : directConfiguration !== null ? "direct" : gatewayModel === null ? "local" : "gateway",
+        provider_revision: accountRouting?.account.revision
+          ?? gatewayProviderConfiguration?.revision
+          ?? providerConfiguration?.revision
+          ?? 0,
         tools_enabled: toolsEnabled,
         tool_schema_hash: computeContentHash(canonicalJson(activeToolSchemas)),
         context_compatibility_key: selectedProvider.continuation.compatibilityKey,
@@ -14274,12 +15368,18 @@ async function agentLoop(turnId: string): Promise<void> {
             ...contract.allowedScope.writePaths,
           ])
         : [],
-      networkDestinations: directConfiguration !== null
+      // One host and at most one secret: an account can reach only the
+      // destination it was discovered with.
+      networkDestinations: accountRouting !== null
+        ? [...accountRouting.scope.networkDestinations]
+        : directConfiguration !== null
         ? [...directNetworkDestinations()]
         : gatewayModel === null
           ? []
           : ["opencode.ai:443"],
-      secretCapabilities: directConfiguration !== null
+      secretCapabilities: accountRouting !== null
+        ? [...accountRouting.scope.secretCapabilities]
+        : directConfiguration !== null
         ? [directConfiguration.secretUri]
         : gatewayModel === null
           ? []
@@ -14592,9 +15692,7 @@ async function agentLoop(turnId: string): Promise<void> {
         const response = await providerSessionService.execute({
           rendered,
           command: localProviderCommand,
-          gateway: gatewayModel === null
-            ? null
-            : { model: gatewayModel, secretUri: gatewayBindingId },
+          gateway: providerGatewayConfig,
           direct: directConfiguration === null
             ? null
             : { vendor: directConfiguration.vendor },
@@ -14716,9 +15814,7 @@ async function agentLoop(turnId: string): Promise<void> {
               const response = await providerSessionService.execute({
                 rendered,
                 command: localProviderCommand,
-                gateway: gatewayModel === null
-                  ? null
-                  : { model: gatewayModel, secretUri: gatewayBindingId },
+                gateway: providerGatewayConfig,
                 direct: directConfiguration === null
                   ? null
                   : { vendor: directConfiguration.vendor },
@@ -14969,9 +16065,7 @@ async function agentLoop(turnId: string): Promise<void> {
               providerSessionService.execute({
                 rendered: compiled.rendered,
                 command: localProviderCommand,
-                gateway: gatewayModel === null
-                  ? null
-                  : { model: gatewayModel, secretUri: gatewayBindingId },
+                gateway: providerGatewayConfig,
                 direct: directConfiguration === null
                   ? null
                   : { vendor: directConfiguration.vendor },
@@ -15011,14 +16105,23 @@ async function agentLoop(turnId: string): Promise<void> {
         }
         const projected = await selectedRenderer.projectResponse(response);
         const usage = selectedRenderer.extractUsage(response);
-        const freeModelContract = gatewayModel !== null
-          && gatewayModel.deployment === "zen"
-          && gatewayModel.free
-          && gatewayProviderConfiguration?.credentialConfigured !== true
-          && selectedProvider.economics.inputMicrosPerMillion === 0n
-          && selectedProvider.economics.cachedInputMicrosPerMillion === 0n
-          && selectedProvider.economics.outputMicrosPerMillion === 0n;
-        const costSource = directConfiguration !== null || gatewayModel !== null
+        // A subscription or free-tier account has no per-token price at all,
+        // so a computed zero must be labelled as the contract it came from.
+        // Reporting it as `admitted_economics` would let a reader mistake "no
+        // price exists" for "we measured zero spend".
+        const accountFreeContract = accountRouting !== null
+          && (accountRouting.account.billing === "subscription"
+            || accountRouting.account.billing === "free");
+        const freeModelContract = accountRouting !== null
+          ? accountFreeContract
+          : gatewayModel !== null
+            && gatewayModel.deployment === "zen"
+            && gatewayModel.free
+            && gatewayProviderConfiguration?.credentialConfigured !== true
+            && selectedProvider.economics.inputMicrosPerMillion === 0n
+            && selectedProvider.economics.cachedInputMicrosPerMillion === 0n
+            && selectedProvider.economics.outputMicrosPerMillion === 0n;
+        const costSource = accountRouting !== null || directConfiguration !== null || gatewayModel !== null
           ? freeModelContract ? "free_model_contract" as const : "admitted_economics" as const
           : "unavailable" as const;
         const cost = costSource === "unavailable"
@@ -18153,6 +19256,11 @@ async function runStartupRecovery(): Promise<void> {
     // not denied for a cold cache. Failures are logged, not fatal: the durable
     // record from a previous run still routes.
     await warmProviderModelDiscovery();
+    // Connected provider accounts: reconcile what this machine holds, then
+    // warm each account's model list. Runs after migrations and after the
+    // kernel is reachable, because both the import and the catalogue calls go
+    // through it. Failures are logged, never fatal.
+    await warmProviderAccountDiscovery();
     const orphanedActiveTasks = await reconcileOrphanedActiveTasks();
     if (orphanedActiveTasks > 0) {
       console.log(`[terminus-control] returned ${orphanedActiveTasks} task(s) with no live turn to ACTIVE`);

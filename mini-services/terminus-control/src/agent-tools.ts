@@ -107,7 +107,32 @@ export const standaloneShellInputSchema = z.object({
   script: z.string().min(1).max(64 * 1_024),
 }).strict();
 
-export const standaloneExecInputSchema = z.object({
+/**
+ * A full argv in `args` with no `program`, which is how most harnesses spell
+ * an exec call (`command: ["ls", "-la"]`).
+ *
+ * A model trained on that shape writes `args: ["ls", "-la"]` here, is told it
+ * "provided neither", and — having no idea which half is missing — writes the
+ * same call again. Observed 2026-08-28: big-pickle spelled all four of its
+ * exec calls this way, exhausted the tool-cycle budget, and the task died
+ * without running a single command.
+ *
+ * `args[0]` *is* the program in argv mode, so hoisting it changes no execution
+ * semantics: there is still no shell, and the policy engine sees the same
+ * program it would have seen spelled the long way. A call that already names a
+ * `program`, or that is in shell mode, is left exactly as written.
+ */
+export function hoistArgvProgram(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const call = value as Record<string, unknown>;
+  if (call.program !== undefined || call.shell !== undefined) return value;
+  if (!Array.isArray(call.args) || call.args.length === 0) return value;
+  const [program, ...rest] = call.args;
+  if (typeof program !== "string" || program.length === 0) return value;
+  return { ...call, program, args: rest };
+}
+
+export const standaloneExecInputSchema = z.preprocess(hoistArgvProgram, z.object({
   program: z.string().max(4_096).refine(
     (program) => !/[\0\r\n]/.test(program) && !program.includes(";") && !program.includes("\\"),
     "program must be an executable path or name, not a shell expression",
@@ -136,7 +161,7 @@ export const standaloneExecInputSchema = z.object({
         : "provide either program+args (argv mode) or shell {dialect, script} (shell mode) — you provided neither",
     });
   }
-});
+}));
 
 export const standaloneWebFetchInputSchema = z.object({
   url: z.string().min(1).max(2_048).refine(
@@ -226,6 +251,90 @@ export type StandalonePatchInput = z.infer<typeof standalonePatchInputSchema>;
 export type StandaloneExecInput = z.infer<typeof standaloneExecInputSchema>;
 export type StandaloneGrepInput = z.infer<typeof standaloneGrepInputSchema>;
 export type StandaloneGlobInput = z.infer<typeof standaloneGlobInputSchema>;
+
+/**
+ * The workspace-relative form of a model-supplied path.
+ *
+ * The kernel's SafePath refuses absolute paths outright — workspace-relative
+ * is the whole point of the boundary — but the model is told the workspace's
+ * absolute location and reasonably writes `cwd: "/tmp/scratch-repo"`. The
+ * kernel then rejected the call with INVALID_ARGUMENT, which the settlement
+ * path reads as *lost certainty* and ends the turn, so one absolute path cost
+ * the whole run. Rewriting a path that is genuinely inside the workspace costs
+ * nothing and denies nothing: the same bytes reach the same SafePath.
+ *
+ * `roots` carries every spelling of the root the model might have been shown —
+ * the `file://` root and the canonical root differ under `/tmp` on macOS, and
+ * matching only one of them would reject half the calls.
+ *
+ * Returns `outsideWorkspace` for an absolute path under no root. That is a
+ * real denial and stays one; the caller turns it into a correctable tool
+ * error rather than passing it to the kernel to die as an ambiguous
+ * settlement.
+ */
+export function relativizeWorkspacePath(
+  path: string,
+  roots: readonly string[],
+): { readonly path: string } | { readonly outsideWorkspace: true } {
+  if (!path.startsWith("/")) return { path };
+  const target = collapseSlashes(path);
+  for (const root of roots) {
+    const base = collapseSlashes(root).replace(/\/+$/, "");
+    if (base === "" || base === "/") continue;
+    if (target === base) return { path: "." };
+    if (target.startsWith(`${base}/`)) {
+      const relative = target.slice(base.length + 1);
+      return { path: relative === "" ? "." : relative };
+    }
+  }
+  return { outsideWorkspace: true };
+}
+
+function collapseSlashes(value: string): string {
+  return value.replace(/\/{2,}/g, "/");
+}
+
+/** The path-bearing argument of each tool, or null where it has none. */
+function pathFieldFor(toolId: string): "path" | "cwd" | null {
+  switch (toolId) {
+    case "read":
+    case "patch":
+    case "grep":
+    case "glob":
+      return "path";
+    case "exec":
+      return "cwd";
+    default:
+      return null;
+  }
+}
+
+/**
+ * The same call with its path rewritten workspace-relative.
+ *
+ * Applied before the arguments artifact and the operation hash are written, so
+ * the recorded call is the one that actually ran and two spellings of the same
+ * directory dedupe against each other.
+ */
+export function relativizeStandaloneCallPaths(
+  call: ParsedStandaloneToolCall,
+  roots: readonly string[],
+): ParsedStandaloneToolCall {
+  const field = pathFieldFor(call.toolId);
+  if (field === null || roots.length === 0) return call;
+  const args = call.arguments as Record<string, unknown>;
+  const current = args[field];
+  if (typeof current !== "string" || !current.startsWith("/")) return call;
+  const resolved = relativizeWorkspacePath(current, roots);
+  if ("outsideWorkspace" in resolved) {
+    throw new InvalidToolCallError({
+      toolName: call.toolId,
+      providerCallId: call.providerCallId,
+      modelMessage: `${call.toolId} ${field} '${current}' is outside the workspace. Paths are workspace-relative — pass a path under the workspace root, or '.' for the root itself. The call was not run; correct the arguments and call again.`,
+    });
+  }
+  return { ...call, arguments: { ...args, [field]: resolved.path } } as ParsedStandaloneToolCall;
+}
 
 export type ParsedStandaloneToolCall =
   | { readonly providerCallId: string; readonly toolId: "read"; readonly toolVersion: "standalone-v1"; readonly arguments: StandaloneReadInput }

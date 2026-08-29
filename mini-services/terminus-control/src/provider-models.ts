@@ -73,6 +73,21 @@ let catalogCache: {
   readonly expiresAt: number;
 } | null = null;
 
+/**
+ * The undecoded catalogue document.
+ *
+ * `parseModelsDevCatalog` decodes the two OpenCode gateway providers and
+ * asserts their base URLs, which is exactly right for gateway discovery and
+ * useless for a connected provider account: the account may be any of the 200+
+ * providers the document lists. Connected accounts therefore read the raw
+ * document and decode the one provider they care about.
+ */
+let rawCatalogCache: {
+  readonly raw: unknown;
+  readonly offline: boolean;
+  readonly expiresAt: number;
+} | null = null;
+
 // ─────────────── Durable discovery (H4) ────────────────
 //
 // The in-memory cache above is warmed only by a live discovery. A restarted
@@ -163,6 +178,7 @@ export function rememberProviderModels(result: ProviderModelsResult, now: number
 export function resetProviderModelsCache(): void {
   cache = null;
   catalogCache = null;
+  rawCatalogCache = null;
 }
 
 /**
@@ -227,6 +243,50 @@ export interface FetchModelsDevCatalogOptions {
 }
 
 /**
+ * Fetch the Models.dev document without decoding it.
+ *
+ * `offline` reports which source answered, so a caller that cannot find its
+ * provider can say "the catalogue was unreachable" instead of "your provider
+ * does not exist" — the committed snapshot holds five providers, not the
+ * catalogue's two hundred.
+ */
+export async function fetchModelsDevRaw(
+  options?: FetchModelsDevCatalogOptions,
+): Promise<{ readonly catalog: unknown; readonly offline: boolean }> {
+  const now = Date.now();
+  if (rawCatalogCache !== null && rawCatalogCache.expiresAt > now && !options?.forceOffline) {
+    return { catalog: rawCatalogCache.raw, offline: rawCatalogCache.offline };
+  }
+  if (options?.forceOffline !== true) {
+    const fetchImpl = options?.fetchFn ?? globalThis.fetch;
+    if (typeof fetchImpl === "function") {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), options?.timeoutMs ?? 3_000);
+        if (options?.signal) {
+          options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+        }
+        const response = await fetchImpl(MODELS_DEV_URL, {
+          headers: { accept: "application/json" },
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        if (response.ok) {
+          const raw: unknown = await response.json();
+          rawCatalogCache = { raw, offline: false, expiresAt: now + CATALOG_CACHE_TTL_MS };
+          return { catalog: raw, offline: false };
+        }
+      } catch {
+        // Fall back seamlessly to the offline catalog snapshot.
+      }
+    }
+  }
+  const raw = getOfflineCatalogSnapshotJson();
+  rawCatalogCache = { raw, offline: true, expiresAt: now + CATALOG_CACHE_TTL_MS };
+  return { catalog: raw, offline: true };
+}
+
+/**
  * Fetch the Models.dev catalogue.
  *
  * Checks in-memory cache, attempts network fetch with timeout, and falls back
@@ -240,37 +300,17 @@ export async function fetchModelsDevCatalog(
   if (catalogCache !== null && catalogCache.expiresAt > now && !options?.forceOffline) {
     return catalogCache.catalog;
   }
-
-  if (options?.forceOffline === true) {
-    const offlineCatalog = parseModelsDevCatalog(getOfflineCatalogSnapshotJson());
-    catalogCache = { catalog: offlineCatalog, expiresAt: now + CATALOG_CACHE_TTL_MS };
-    return offlineCatalog;
-  }
-
-  const fetchImpl = options?.fetchFn ?? globalThis.fetch;
-  if (typeof fetchImpl === "function") {
+  const { catalog: raw, offline } = await fetchModelsDevRaw(options);
+  if (!offline) {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), options?.timeoutMs ?? 3_000);
-      if (options?.signal) {
-        options.signal.addEventListener("abort", () => controller.abort(), { once: true });
-      }
-      const response = await fetchImpl(MODELS_DEV_URL, {
-        headers: { accept: "application/json" },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      if (response.ok) {
-        const raw = await response.json();
-        const parsed = parseModelsDevCatalog(raw);
-        catalogCache = { catalog: parsed, expiresAt: now + CATALOG_CACHE_TTL_MS };
-        return parsed;
-      }
+      const parsed = parseModelsDevCatalog(raw);
+      catalogCache = { catalog: parsed, expiresAt: now + CATALOG_CACHE_TTL_MS };
+      return parsed;
     } catch {
-      // Fall back seamlessly to offline catalog snapshot
+      // A live document Terminus cannot decode is no better than no document:
+      // fall back to the snapshot rather than failing discovery outright.
     }
   }
-
   const offlineCatalog = parseModelsDevCatalog(getOfflineCatalogSnapshotJson());
   catalogCache = { catalog: offlineCatalog, expiresAt: now + CATALOG_CACHE_TTL_MS };
   return offlineCatalog;
@@ -333,6 +373,11 @@ export function providerModelsWire(result: ProviderModelsResult | null, error: s
       label: result.deployment === "zen" ? "OpenCode Zen" : "OpenCode Go",
       mark: "OC",
       available: true,
+      // Account facts, so a client decodes one provider shape whether or not
+      // this installation has run connected-account discovery yet.
+      source: "zen",
+      billing: result.models.every((model) => model.free) ? "free" : "paid",
+      is_default: true,
     }],
     models: result.models.map(modelWire),
     rejected: result.rejected.map((entry) => ({ model_id: entry.modelId, reason: entry.reason })),
@@ -356,5 +401,12 @@ function modelWire(model: GatewayModel): Record<string, unknown> {
     image_input: model.imageInput,
     input_micros_per_million: model.inputMicrosPerMillion,
     output_micros_per_million: model.outputMicrosPerMillion,
+    // USD micros per million tokens, under the names the composer reads.
+    input_cost_micros: model.inputMicrosPerMillion,
+    output_cost_micros: model.outputMicrosPerMillion,
+    // The gateway reports whether a model reasons, not which budgets it
+    // accepts, so there are no levels to advertise here.
+    reasoning_efforts: [],
+    default_reasoning_effort: "",
   };
 }

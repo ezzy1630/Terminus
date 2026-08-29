@@ -10,6 +10,8 @@ import {
   pageLines,
   InvalidToolCallError,
   parseStandaloneToolCall,
+  relativizeWorkspacePath,
+  relativizeStandaloneCallPaths,
   projectModelVisibleResult,
   providerToolCallTranscript,
   renderNumbered,
@@ -69,6 +71,116 @@ describe("standalone provider tools", () => {
     expect(providerToolCallTranscript(call).provider_call_id).toBe("provider-call-1");
     expect(() => parseStandaloneToolCall({ toolCallId: "x", toolName: "search", arguments: {} })).toThrow(/unknown standalone tool/);
     expect(() => parseStandaloneToolCall({ toolCallId: "x", toolName: "exec", arguments: { program: "sh; exit" } })).toThrow(/invalid/);
+  });
+
+  // Observed from big-pickle: every exec call arrived as a bare argv array,
+  // was rejected as "you provided neither", and was rewritten identically
+  // until the tool budget died.
+  test("accepts a full argv in args with no separate program", () => {
+    const call = parseStandaloneToolCall({
+      toolCallId: "argv",
+      toolName: "exec",
+      arguments: { args: ["which", "node", "bun"], cwd: "/tmp/scratch" },
+    });
+    if (call.toolId !== "exec") throw new Error("expected exec");
+    expect(call.arguments.program).toBe("which");
+    expect(call.arguments.args).toEqual(["node", "bun"]);
+    expect(call.arguments.cwd).toBe("/tmp/scratch");
+
+    const single = parseStandaloneToolCall({
+      toolCallId: "argv1",
+      toolName: "exec",
+      arguments: { args: ["ls"] },
+    });
+    if (single.toolId !== "exec") throw new Error("expected exec");
+    expect(single.arguments.program).toBe("ls");
+    expect(single.arguments.args).toEqual([]);
+  });
+
+  test("leaves an explicit program and shell mode untouched", () => {
+    const explicit = parseStandaloneToolCall({
+      toolCallId: "explicit",
+      toolName: "exec",
+      arguments: { program: "rg", args: ["--files"] },
+    });
+    if (explicit.toolId !== "exec") throw new Error("expected exec");
+    expect(explicit.arguments.program).toBe("rg");
+    expect(explicit.arguments.args).toEqual(["--files"]);
+
+    // Shell mode with a stray args array must still be shell mode, not a
+    // silently hoisted argv call.
+    const shell = parseStandaloneToolCall({
+      toolCallId: "shell",
+      toolName: "exec",
+      arguments: { shell: { dialect: "bash", script: "ls | wc -l" }, args: ["ignored"] },
+    });
+    if (shell.toolId !== "exec") throw new Error("expected exec");
+    expect(shell.arguments.program).toBeUndefined();
+    expect(shell.arguments.args).toEqual(["ignored"]);
+
+    // An empty call still names both modes rather than hoisting nothing.
+    expect(() => parseStandaloneToolCall({ toolCallId: "empty", toolName: "exec", arguments: { args: [] } }))
+      .toThrow(/either program\+args/);
+  });
+
+  // The model is shown the workspace's absolute location and quotes it back;
+  // the kernel's SafePath only accepts workspace-relative paths, and the
+  // rejection used to surface as lost settlement certainty and end the turn.
+  test("rewrites an absolute workspace path as workspace-relative", () => {
+    const roots = ["/private/tmp/scratch", "/tmp/scratch"];
+    expect(relativizeWorkspacePath("/tmp/scratch", roots)).toEqual({ path: "." });
+    expect(relativizeWorkspacePath("/tmp/scratch/", roots)).toEqual({ path: "." });
+    expect(relativizeWorkspacePath("/private/tmp/scratch/src/a.ts", roots)).toEqual({ path: "src/a.ts" });
+    expect(relativizeWorkspacePath("/tmp//scratch//src/a.ts", roots)).toEqual({ path: "src/a.ts" });
+    // Already relative: untouched, including the default.
+    expect(relativizeWorkspacePath(".", roots)).toEqual({ path: "." });
+    expect(relativizeWorkspacePath("src/a.ts", roots)).toEqual({ path: "src/a.ts" });
+    // A sibling directory that merely shares a prefix is not inside the root.
+    expect(relativizeWorkspacePath("/tmp/scratch-other/a.ts", roots)).toEqual({ outsideWorkspace: true });
+    expect(relativizeWorkspacePath("/etc/passwd", roots)).toEqual({ outsideWorkspace: true });
+  });
+
+  test("relativizes the path each tool carries and denies the ones outside", () => {
+    const roots = ["/tmp/scratch"];
+    const exec = relativizeStandaloneCallPaths(
+      parseStandaloneToolCall({
+        toolCallId: "x",
+        toolName: "exec",
+        arguments: { args: ["ls", "-la"], cwd: "/tmp/scratch" },
+      }),
+      roots,
+    );
+    if (exec.toolId !== "exec") throw new Error("expected exec");
+    expect(exec.arguments.cwd).toBe(".");
+    expect(exec.arguments.program).toBe("ls");
+
+    const read = relativizeStandaloneCallPaths(
+      parseStandaloneToolCall({
+        toolCallId: "y",
+        toolName: "read",
+        arguments: { path: "/tmp/scratch/README.md" },
+      }),
+      roots,
+    );
+    if (read.toolId !== "read") throw new Error("expected read");
+    expect(read.arguments.path).toBe("README.md");
+
+    // Outside the workspace stays a denial, but a correctable one the model
+    // can act on rather than an ambiguous settlement that ends the turn.
+    expect(() =>
+      relativizeStandaloneCallPaths(
+        parseStandaloneToolCall({ toolCallId: "z", toolName: "read", arguments: { path: "/etc/passwd" } }),
+        roots,
+      ),
+    ).toThrow(/outside the workspace/);
+
+    // With no known root, nothing is rewritten and nothing is denied.
+    const untouched = relativizeStandaloneCallPaths(
+      parseStandaloneToolCall({ toolCallId: "w", toolName: "read", arguments: { path: "/tmp/scratch/a.ts" } }),
+      [],
+    );
+    if (untouched.toolId !== "read") throw new Error("expected read");
+    expect(untouched.arguments.path).toBe("/tmp/scratch/a.ts");
   });
 
   test("exec requires exactly one of argv or shell mode", () => {

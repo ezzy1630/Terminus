@@ -33,6 +33,10 @@ export interface TurnRow {
   readonly initiatingActor: string;
   readonly startedAt: Date | null;
   readonly completedAt: Date | null;
+  /** Routing recorded at admission, so a client can see where a turn ran. */
+  readonly selectedModel: string | null;
+  readonly selectedReasoningEffort: string | null;
+  readonly selectedProviderAccountId: string | null;
 }
 
 export interface TurnAdmissionInput {
@@ -50,6 +54,12 @@ export interface TurnAdmissionInput {
    */
   readonly selectedModel?: string | null | undefined;
   readonly selectedReasoningEffort?: string | null | undefined;
+  /**
+   * The connected provider account this turn runs on, resolved at admission.
+   * Recorded on the turn row so the account cannot change under a turn that is
+   * already running. Null means the legacy direct/gateway/local chain.
+   */
+  readonly selectedProviderAccountId?: string | null | undefined;
 }
 
 export interface TurnCoordinatorTransaction {
@@ -128,6 +138,9 @@ export class TurnCoordinator<TTransaction> {
           ...(input.selectedReasoningEffort === undefined || input.selectedReasoningEffort === null
             ? {}
             : { reasoning_effort: input.selectedReasoningEffort }),
+          ...(input.selectedProviderAccountId === undefined || input.selectedProviderAccountId === null
+            ? {}
+            : { provider_account_id: input.selectedProviderAccountId }),
         },
         artifactRefs: [input.inputArtifactUri],
       },

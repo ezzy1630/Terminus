@@ -18,6 +18,26 @@ export class ProviderExecutionUnavailableError extends Error {
 export interface ProviderGatewayConfig {
   readonly model: GatewayModel;
   readonly secretUri: string;
+  /**
+   * Connector/host/paths for a connected provider account. Absent means the
+   * OpenCode Zen/Go gateway, whose endpoint is fixed.
+   */
+  readonly endpoint?: {
+    readonly connectorId: string;
+    readonly anonymousConnectorId?: string | undefined;
+    readonly host: string;
+    readonly port?: number | undefined;
+    readonly allowedPaths?: readonly string[] | undefined;
+    readonly allowedPathPrefixes?: readonly string[] | undefined;
+    readonly label?: string | undefined;
+  } | undefined;
+  /**
+   * Non-credential headers the account's connector admits (the ChatGPT
+   * account id, originator, session id). The bearer is injected in the kernel.
+   */
+  readonly extraHeaders?: Readonly<Record<string, string>> | undefined;
+  /** The connected account, so its rate-limit receipt can be recorded. */
+  readonly accountId?: string | undefined;
 }
 
 /** Vendor-direct dispatch target resolved by the caller (ADR-0039 §10). */
